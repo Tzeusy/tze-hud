@@ -6,6 +6,14 @@
 
 ---
 
+## Review Changelog
+
+| Round | Date | Reviewer | Focus | Changes |
+|-------|------|----------|-------|---------|
+| 1 | 2026-03-22 | rig-5vq.23 | Doctrinal alignment deep-dive | DR table: added DR-I3/I4 (input_to_scene_commit, input_to_next_present) from validation.md §3; added DR-I11 (headless testability). §6.1a: new headless testability section. §7.1: fixed `interaction_id` comment (now consistent with RFC 0001 §2.4 "forwarded in events"). §7.3/§9.1: added `interaction_id` field to PointerDownEvent, PointerUpEvent, ClickEvent, DoubleClickEvent. §9.1: removed `HitRegionConfig` (replaced with canonical `HitRegionNode` reference to RFC 0001 §9). §11.2: scroll deferral reframed as requiring pre-implementation resolution (local-first scroll is a doctrine commitment). RFC 0001 §2.4 and §9: unified `HitRegionNode` to include all input-model fields with cross-reference to RFC 0004. |
+
+---
+
 ## Summary
 
 This RFC defines the interaction model for tze_hud: how OS-level input events travel from hardware into the runtime, are routed to the correct agent, and produce local visual feedback before any agent roundtrip. It covers the focus model, pointer capture, gesture arbitration, IME composition, accessibility hooks, the local feedback contract, hit-region node primitives, event dispatch protocol, and the protobuf schema for all input messages.
@@ -29,14 +37,17 @@ Without a defined interaction model, every agent implements ad-hoc input handlin
 
 | ID | Requirement | Source |
 |----|-------------|--------|
-| DR-I1 | input_to_local_ack p99 < 4ms | validation.md §3 |
+| DR-I1 | input_to_local_ack p99 < 4ms | validation.md §3, v1.md §V1 must prove |
 | DR-I2 | Hit-test latency < 100μs for 50 tiles | RFC 0001 §5.1 |
-| DR-I3 | Event dispatch to agent < 2ms from hit-test | this RFC |
-| DR-I4 | Gesture recognition < 1ms from final touch event | this RFC |
-| DR-I5 | IME composition window update < 1 frame (16.6ms) | this RFC |
-| DR-I6 | Accessibility tree sync < 100ms after scene change | this RFC |
-| DR-I7 | Keyboard-only navigation for all interactions | presence.md |
-| DR-I8 | Platform a11y API support (UIAutomation, NSAccessibility, AT-SPI) | presence.md |
+| DR-I3 | input_to_scene_commit p99 < 50ms (local agents) | validation.md §3, v1.md §V1 must prove |
+| DR-I4 | input_to_next_present p99 < 33ms | validation.md §3, v1.md §V1 must prove |
+| DR-I5 | Event dispatch to agent < 2ms from hit-test | this RFC |
+| DR-I6 | Gesture recognition < 1ms from final touch event | this RFC |
+| DR-I7 | IME composition window update < 1 frame (16.6ms) | this RFC |
+| DR-I8 | Accessibility tree sync < 100ms after scene change | this RFC |
+| DR-I9 | Keyboard-only navigation for all interactions | presence.md |
+| DR-I10 | Platform a11y API support (UIAutomation, NSAccessibility, AT-SPI) | presence.md |
+| DR-I11 | All input behavior testable headlessly (no display server required) | validation.md DR-V2, DR-V5 |
 
 ---
 
@@ -555,6 +566,16 @@ The human must never feel like they are "clicking through a cloud roundtrip." Vi
 
 This is not a performance optimization — it is a correctness requirement. Any interaction model where local feedback waits for agent response is wrong by definition.
 
+### 6.1a Headless Testability (DR-I11)
+
+All input behavior defined in this RFC must be exercisable without a display server or physical GPU. This is a hard requirement (validation.md DR-V2, DR-V5):
+
+- The hit-test pipeline (§7.2) operates on pure Rust data structures — no GPU or winit required.
+- `HitRegionLocalState` updates (pressed/hovered/focused) must be assertable from Layer 0 tests with injected input events.
+- The gesture recognizer state machines (§3.4) must accept synthetic event streams with injectable timestamps.
+- The a11y tree (§5.2) must expose a programmatic query API for headless verification (see §11.5 for the open question on module boundary).
+- The test scene registry includes `input_highlight` (local feedback state validation) and `chatty_dashboard_touch` (input responsiveness under coalescing load). Both must pass in headless CI on mesa llvmpipe, WARP, and Metal.
+
 ### 6.2 Latency Budgets
 
 From validation.md §3:
@@ -652,7 +673,7 @@ Timeline:
 pub struct HitRegionNode {
     // Inherited from RFC 0001:
     pub bounds: Rect,               // Relative to tile origin
-    pub interaction_id: String,     // Agent-defined; used by agent to correlate events (not forwarded in proto messages; agents correlate by SceneId)
+    pub interaction_id: String,     // Agent-defined; forwarded in events so agents can correlate without maintaining a SceneId→semantic mapping (see RFC 0001 §2.4)
     pub accepts_focus: bool,        // Whether keyboard focus can land here
     pub accepts_pointer: bool,      // Whether pointer events are captured here
 
@@ -718,6 +739,7 @@ message PointerDownEvent {
   float  display_y        = 8;
   Modifiers modifiers     = 9;
   int64  timestamp_us     = 10;  // hardware timestamp (microseconds)
+  string interaction_id   = 11;  // Agent-defined (from HitRegionNode); forwarded for semantic correlation
 }
 
 message PointerUpEvent {
@@ -731,6 +753,7 @@ message PointerUpEvent {
   float  display_y      = 8;
   Modifiers modifiers   = 9;
   int64  timestamp_us   = 10;
+  string interaction_id = 11;  // Agent-defined; forwarded for semantic correlation
 }
 
 message PointerMoveEvent {
@@ -774,6 +797,7 @@ message ClickEvent {
   float  y              = 6;
   Modifiers modifiers   = 7;
   int64  timestamp_us   = 8;
+  string interaction_id = 9;   // Agent-defined; forwarded for semantic correlation
 }
 
 message DoubleClickEvent {
@@ -785,6 +809,7 @@ message DoubleClickEvent {
   float  y              = 6;
   Modifiers modifiers   = 7;
   int64  timestamp_us   = 8;
+  string interaction_id = 9;   // Agent-defined; forwarded for semantic correlation
 }
 
 message ContextMenuEvent {
@@ -1062,6 +1087,7 @@ message PointerDownEvent {
   PointerButton button = 4;
   float x = 5; float y = 6; float display_x = 7; float display_y = 8;
   Modifiers modifiers = 9; int64 timestamp_us = 10;
+  string interaction_id = 11;  // Forwarded from HitRegionNode for agent correlation
 }
 
 message PointerUpEvent {
@@ -1069,6 +1095,7 @@ message PointerUpEvent {
   PointerButton button = 4;
   float x = 5; float y = 6; float display_x = 7; float display_y = 8;
   Modifiers modifiers = 9; int64 timestamp_us = 10;
+  string interaction_id = 11;  // Forwarded from HitRegionNode for agent correlation
 }
 
 message PointerMoveEvent {
@@ -1092,12 +1119,14 @@ message ClickEvent {
   string tile_id = 1; string node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_us = 8;
+  string interaction_id = 9;   // Forwarded from HitRegionNode for agent correlation
 }
 
 message DoubleClickEvent {
   string tile_id = 1; string node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_us = 8;
+  string interaction_id = 9;   // Forwarded from HitRegionNode for agent correlation
 }
 
 message ContextMenuEvent {
@@ -1249,20 +1278,27 @@ message EventBatch {
 }
 
 // ─── HitRegion configuration ──────────────────────────────────────────────
-
-message HitRegionConfig {
-  Rect   bounds          = 1;
-  string interaction_id  = 2;
-  bool   accepts_focus   = 3;
-  bool   accepts_pointer = 4;
-  bool   auto_capture    = 5;
-  bool   release_on_up   = 6;
-  CursorStyle cursor_style = 7;
-  string tooltip         = 8;
-  EventMaskConfig event_mask = 9;
-  AccessibilityConfig accessibility = 10;
-  LocalStyleConfig local_style = 11;
-}
+// NOTE: This RFC extends the HitRegionNode message defined in RFC 0001 §9.
+// The unified wire message is HitRegionNode (RFC 0001); fields 5–11 below
+// are added by this RFC. Do NOT use a separate HitRegionConfig message —
+// implementations use the single merged HitRegionNode with all 11 fields.
+// See RFC 0001 §2.4 and §9 for the base definition.
+//
+// (Reproduced here for readability; the canonical definition is RFC 0001 §9)
+//
+// message HitRegionNode {           // from RFC 0001 §9
+//   Rect   bounds          = 1;
+//   string interaction_id  = 2;    // Forwarded in events for agent correlation
+//   bool   accepts_focus   = 3;
+//   bool   accepts_pointer = 4;
+//   bool   auto_capture    = 5;    // Added by this RFC
+//   bool   release_on_up   = 6;
+//   CursorStyle cursor_style = 7;
+//   string tooltip         = 8;
+//   EventMaskConfig event_mask = 9;
+//   AccessibilityConfig accessibility = 10;
+//   LocalStyleConfig local_style = 11;
+// }
 
 message EventMaskConfig {
   bool pointer_move    = 1;
@@ -1519,7 +1555,11 @@ V1 does not specify drag-and-drop between tiles or agents. The `DragGesture` eve
 
 ### 11.2 Scroll Events
 
-Scroll (mouse wheel, touchpad momentum) is not specified in this RFC. It is a common interaction pattern that warrants dedicated treatment — scroll position as local state, momentum physics, snap points. It should be added as a separate section before implementation begins or addressed in a follow-up RFC.
+Scroll (mouse wheel, touchpad two-finger swipe, touchpad momentum) is not fully specified in this RFC, but it is **not optional**: failure.md §"What the user always sees" lists "screen responsive to touch/input within 4ms" as an invariant, and presence.md §Interaction establishes local-first scroll feedback as a core commitment.
+
+**Scope decision:** Scroll position update and visual scroll feedback are local-only operations (no agent roundtrip) and therefore fall under the local feedback contract (§6). They must be added before implementation begins. The open questions are the mechanics: snap points, momentum physics, scroll boundary behavior (rubber-band vs hard stop), and whether scroll offset is exposed to agents as a scene mutation or inferred from content height.
+
+**Action required before implementation:** Add §6.x Scroll Feedback to this RFC defining: scroll offset as compositor-managed local state per tile, `ScrollEvent` proto message, momentum model (OS-provided vs runtime-implemented), and agent notification semantics (agent learns the current scroll offset via an event, but does not drive it).
 
 ### 11.3 Gamepad / Controller Input
 
