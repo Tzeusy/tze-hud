@@ -367,18 +367,19 @@ impl SceneGraph {
 
     /// Delete a sync group. All member tiles are automatically released.
     pub fn delete_sync_group(&mut self, group_id: SceneId) -> Result<(), ValidationError> {
-        if !self.sync_groups.contains_key(&group_id) {
-            return Err(ValidationError::SyncGroupNotFound { id: group_id });
-        }
-        // Release all member tiles from the group
-        for tile in self.tiles.values_mut() {
-            if tile.sync_group == Some(group_id) {
-                tile.sync_group = None;
+        if let Some(group) = self.sync_groups.remove(&group_id) {
+            // Release only the tiles that are members of this group.
+            // Iterating the member set is O(k) where k = member count, not O(n tiles).
+            for tile_id in group.members {
+                if let Some(tile) = self.tiles.get_mut(&tile_id) {
+                    tile.sync_group = None;
+                }
             }
+            self.version += 1;
+            Ok(())
+        } else {
+            Err(ValidationError::SyncGroupNotFound { id: group_id })
         }
-        self.sync_groups.remove(&group_id);
-        self.version += 1;
-        Ok(())
     }
 
     /// Add a tile to a sync group.
