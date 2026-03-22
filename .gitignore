@@ -8,3 +8,9 @@
 
 # Worktrees
 .worktrees/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+.beads/issues.jsonl
+.beads/backup
