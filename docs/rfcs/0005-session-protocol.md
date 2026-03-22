@@ -18,6 +18,7 @@
 | 4 | 2026-03-22 | rig-5xu | Dedicated ack message for SubscriptionChange | §5.3 updated: `SubscriptionChange` added to the sequence-correlated non-batch message list alongside `LeaseRequest` and `CapabilityRequest`; explicit note that `MutationResult` is never used to ack non-mutation messages. Completes the `SubscriptionChangeResult` work introduced in Round 2. |
 | 5 | 2026-03-22 | rig-6c2 | Doctrinal alignment — guest MCP surface | Restricted §8.3 guest tool set to zone-centric operations (`publish_to_zone`, `list_zones`, restricted `list_scene`); gated tile management tools (`create_tab`, `create_tile`, `set_content`, `dismiss`) behind `resident_mcp` capability; added `CAPABILITY_REQUIRED` error semantics for gated tools; updated §8.1 purpose to state v1 guest surface restriction; added post-v1 promoted guest pattern note. |
 | 6 | 2026-03-22 | rig-77n | Clock-domain naming fix | Renamed all timestamp fields to encode clock domain explicitly: `_wall_us` suffix for wall-clock (UTC), `_mono_us` suffix for monotonic. Affected fields: `SessionMessage.timestamp_wall_us`, `SessionInit.agent_timestamp_wall_us`, `SessionEstablished.compositor_timestamp_wall_us`, `HeartbeatPing.client_timestamp_mono_us`, `HeartbeatPong.client_timestamp_mono_us` + `server_timestamp_wall_us`, `TimingHints.present_at_wall_us` + `expires_at_wall_us`. Added §2.4 "Clock Domains" subsection with field inventory and RFC 0003 cross-reference. Previous §2.4 renumbered §2.5. |
+| 7 | 2026-03-22 | rig-de2 | ID type alignment with RFC 0001 SceneId | `MutationBatch.batch_id` and `MutationBatch.lease_id` changed from `string` to `SceneId`; `MutationResult.batch_id` and `MutationResult.created_ids` changed from `string`/`repeated string` to `SceneId`/`repeated SceneId`; updated §3.3, §5.2, §9 (proto), §9.1 (import graph), §11; added ID type convention note distinguishing scene-object IDs (use `SceneId`) from session-level identifiers (`agent_id`, `session_token`, `namespace` remain `string`). |
 
 ---
 
@@ -385,21 +386,23 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 
 ```protobuf
 message MutationBatch {
-  string         batch_id   = 1;  // UUIDv7 — used for deduplication (§5.2)
-  string         lease_id   = 2;  // Lease under which mutations execute
+  SceneId        batch_id   = 1;  // UUIDv7 SceneId — used for deduplication (§5.2)
+  SceneId        lease_id   = 2;  // Lease under which mutations execute (scene object ID)
   repeated MutationProto mutations = 3;  // Ordered; applied atomically (RFC 0001 §4)
   TimingHints    timing     = 4;  // Optional present_at / expires_at (RFC 0003)
 }
 
 message MutationResult {
-  string         batch_id      = 1;
-  bool           accepted      = 2;
-  repeated string created_ids  = 3;  // UUIDv7 SceneIds (RFC 0001 §1.1) assigned to CreateTile/CreateNode mutations
-  RuntimeError   error         = 4;  // Populated if accepted = false
+  SceneId              batch_id     = 1;
+  bool                 accepted     = 2;
+  repeated SceneId     created_ids  = 3;  // SceneIds (RFC 0001 §1.1) assigned to CreateTile/CreateNode mutations
+  RuntimeError         error        = 4;  // Populated if accepted = false
 }
 ```
 
-Mutations map directly to RFC 0001 §4 scene operations. The `batch_id` is used for at-least-once deduplication (§5.2).
+Mutations map directly to RFC 0001 §4 scene operations. The `batch_id` is used for at-least-once deduplication (§5.2). `SceneId` is imported from `scene.proto` (RFC 0001 §7.1) — it encodes a 16-byte little-endian UUIDv7.
+
+**ID type convention:** Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (binary UUIDv7) because they refer to scene objects governed by the Scene Contract. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` because they are opaque or human-assigned identifiers that are not scene objects and do not participate in the scene graph identity model.
 
 ### 3.4 DegradationNotice
 
@@ -524,7 +527,7 @@ The runtime picks the highest version within `[min, max]` that it supports and r
 
 ### 5.2 Batch Idempotency
 
-Every `MutationBatch` carries a `batch_id` (UUIDv7). The runtime maintains a **per-session** deduplication window (not global — cross-session deduplication is neither required nor beneficial since UUIDv7 batch IDs are globally unique):
+Every `MutationBatch` carries a `batch_id` (`SceneId` — 16-byte UUIDv7). The runtime maintains a **per-session** deduplication window (not global — cross-session deduplication is neither required nor beneficial since UUIDv7 batch IDs are globally unique):
 
 - **Window size:** 1000 unique `batch_id` values per session, or 60 seconds, whichever expires first.
 - **Behavior on duplicate:** The runtime returns the original `MutationResult` without re-applying the mutations. This is transparent to the agent — retransmit produces the same result as the original send.
@@ -972,18 +975,24 @@ message TimingHints {
   // treat this definition as the intended final form; RFC 0003 §7.1 should be updated to match.
 }
 
+// ID type convention: scene-object IDs (batch_id, lease_id, created_ids) use
+// SceneId (RFC 0001 §7.1: 16-byte little-endian UUIDv7 message) because they
+// refer to scene objects governed by the Scene Contract. Session-level
+// identifiers (agent_id, session_token, namespace) remain `string` because
+// they are opaque or human-assigned identifiers that are not scene objects.
+
 message MutationBatch {
-  string         batch_id   = 1;   // UUIDv7; deduplication key
-  string         lease_id   = 2;
+  SceneId        batch_id   = 1;   // UUIDv7 SceneId; deduplication key (§5.2)
+  SceneId        lease_id   = 2;   // Scene-object ID of the governing lease
   repeated MutationProto mutations = 3;
   TimingHints    timing     = 4;
 }
 
 message MutationResult {
-  string         batch_id     = 1;
-  bool           accepted     = 2;
-  repeated string created_ids = 3;  // UUIDv7 strings; type SceneId per RFC 0001 §1.1
-  RuntimeError   error        = 4;
+  SceneId              batch_id     = 1;
+  bool                 accepted     = 2;
+  repeated SceneId     created_ids  = 3;  // SceneIds assigned to CreateTile/CreateNode (RFC 0001 §1.1)
+  RuntimeError         error        = 4;
 }
 
 // ─── Zone publish (client → server) ──────────────────────────────────────────
@@ -1141,9 +1150,10 @@ service SessionService {
 ```
 session.proto
   ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages
-  ├── imports scene_service.proto
-  │     └── defines: MutationProto, ZoneContent, SceneEvent, InputEvent,
+  ├── imports scene.proto (RFC 0001)
+  │     └── defines: SceneId, MutationProto, ZoneContent, SceneEvent, InputEvent,
   │                  LeaseRequest, LeaseResponse
+  │     (SceneId is used for batch_id, lease_id, and created_ids in MutationBatch/MutationResult)
   └── imports timing.proto (RFC 0003)
         └── defines: ClockSyncRequest, ClockSyncResponse, TimingHints, MessageClass,
                      DeliveryPolicy, TimestampedPayload
@@ -1183,7 +1193,7 @@ The session protocol exposes the following configurable parameters in the runtim
 
 | RFC | Relationship |
 |-----|-------------|
-| RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene topology events reference `SceneId` types from RFC 0001. |
+| RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (RFC 0001 §7.1) — a typed protobuf message encoding a 16-byte little-endian UUIDv7. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` as they are not scene objects. |
 | RFC 0002 (Runtime Kernel) | The session service is a component of the runtime kernel. Lease lifecycle (grace period, revocation) is governed by RFC 0002. |
 | RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_wall_us` and `SessionEstablished.compositor_timestamp_wall_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. Clock-domain naming in this RFC follows the `_wall_us`/`_mono_us` convention (§2.4); see RFC 0003 §1.1 for the canonical clock domain definitions. |
 | RFC 0004 (Input Model) | `InputEvent` messages delivered over the session stream follow the routing and dispatch rules of RFC 0004. |
