@@ -261,6 +261,34 @@ This round documents the pipeline design direction and the migration path from t
 
 ---
 
+### Round 7 — Layered Config Composition Design Note (rig-l2y)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-l2y
+**Doctrine files reviewed:** architecture.md §"Configuration model"
+
+#### Finding: RFC lacked any acknowledgement of layered config composition need
+
+The ChatGPT 5.4 Pro review of RFC 0006 identified: "Add layered config composition: base + site override + device override + secret indirection (keep validation deterministic)." The RFC had no section addressing this, deferring the question implicitly with no documented rationale.
+
+**[P3 DESIGN NOTE → ADDED]** Added §1.4 (Layered Config Composition — Post-V1 Design Note) with:
+
+1. **Motivation** — Fleet deployment scenario explaining why per-device config duplication is a maintenance hazard.
+2. **Design** — `includes` field at the config root; concrete TOML examples for fleet-base and device-overlay files.
+3. **Merge semantics table** — Scalar: overlay wins; Array (`[[tabs]]`): overlay replaces entirely; Table (`[agents.registered]`): overlay adds/replaces by key; Absent section: base retained.
+4. **Load sequence extension** — Extended §11.2 steps 1-7 with an `includes` resolution step inserted before schema validation; depth limit of 2 levels.
+5. **Validation on merged result** — Explicitly states that validation runs on the final merged config, satisfying the "keep validation deterministic" requirement from the review.
+6. **Secret indirection** — Documents that the existing PSK env-var pattern (§6.2) is the canonical secret indirection mechanism for all sensitive fields; no new secret mechanism is added by layered composition.
+7. **Post-V1 error codes** — Four new codes (`CONFIG_INCLUDES_NOT_FOUND`, `CONFIG_INCLUDES_DEPTH_EXCEEDED`, `CONFIG_INCLUDES_CYCLE`, `CONFIG_INCLUDES_PARSE_ERROR`) documented as post-v1 additions to `ConfigErrorCode`, not present in the v1 enum.
+8. **Open Question 7** — Documents the unresolved design questions (single vs. multiple base files, array-append escape hatch, depth limit) for the implementation RFC.
+
+**V1 position stated explicitly:** The section opens with a callout box marking the entire feature as deferred to post-v1. Architecture.md §"Configuration model" states "File-based. Stored as files on disk. No database required." — layered composition (multiple files are still files on disk) is compatible with this doctrine.
+
+**No doctrinal regressions. Round 7 complete.**
+
+---
+
 ## Summary
 
 This RFC defines the configuration system for tze_hud: the file format, schema, display profile definitions, zone geometry policies, tab and layout configuration, agent registration, and privacy/degradation policies. Configuration is the primary mechanism for declaring scenes, zones, and policies in v1 before dynamic orchestration exists, so it is a first-class, schema-validated, LLM-readable surface.
@@ -359,6 +387,112 @@ profile = "full-display"
 [[tabs]]
 name = "default"
 ```
+
+### 1.4 Layered Config Composition (Post-V1 Design Note)
+
+> **V1 position:** Layered config composition is **deferred to post-v1**. V1 uses the single-file model described in §1.3. This section documents the intended post-v1 design so that the schema and load sequence can be forward-compatible.
+
+#### Motivation
+
+Real deployments need shared base config. A fleet of wall displays might share zone type registrations, agent identities, degradation policies, and capability grants, but differ per-device in display profile parameters, quiet hours schedules, and tab layouts. With single-file config, all shared settings must be duplicated across every device's config file — a maintenance hazard.
+
+A layered composition model addresses this: a base config file holds fleet-wide settings; device-specific overlay files add or override only the fields that differ.
+
+#### Design
+
+An optional top-level `includes` field specifies a base config file to load first. The current file is then overlaid on top:
+
+```toml
+# /etc/tze_hud/fleet-base.toml
+# Shared across all displays in the office fleet.
+
+[runtime]
+profile = "full-display"
+log_level = "info"
+
+[[tabs]]
+name = "main"
+default_tab = true
+
+[agents]
+# ... shared agent registrations ...
+
+[degradation]
+# ... shared degradation ladder ...
+```
+
+```toml
+# /home/tze_hud/display-east-wall.toml
+# Device-specific overlay.
+
+includes = "/etc/tze_hud/fleet-base.toml"  # Resolved relative to this file if relative path.
+
+[runtime]
+# Override: this display runs at 60fps.
+profile = "full-display"
+
+[display_profile]
+target_fps = 60
+
+[privacy]
+quiet_hours_start = "22:00"
+quiet_hours_end = "08:00"
+```
+
+#### Merge Semantics
+
+Per-section merge with simple, type-specific rules (no recursive deep merge beyond what is described below):
+
+| Field type | Merge rule |
+|------------|-----------|
+| **Scalar fields** (strings, numbers, booleans) | Overlay wins. If the overlay omits a scalar, the base value is used. |
+| **Array fields** (`[[tabs]]`, schedule entries) | Overlay **replaces entirely**. No append-merge. If the overlay defines `[[tabs]]`, the base `[[tabs]]` array is discarded. |
+| **Table fields** (`[agents.registered]`) | Overlay adds or replaces by key. Keys present in the base but absent from the overlay are retained. Keys present in both use the overlay value. |
+| **Absent section** | Base section is used as-is if the overlay file contains no such section. |
+
+Array-replace semantics are intentional: append-merge of ordered structures (tabs, ladder steps) produces unpredictable ordering that is difficult to reason about or debug. If a fleet operator wants to extend the base tab list, they must redeclare all tabs in the device overlay. This is verbose but deterministic.
+
+#### Load Sequence Extension
+
+The post-v1 load sequence extends §11.2 with an `includes` resolution step:
+
+1. CLI / environment variable resolution to config file path
+2. File read (overlay file)
+3. TOML parse of overlay file
+4. If `includes` is present: recursively load the base file (file read (base file) + TOML parse; depth limit: **2 levels** to limit complexity; cycles detected separately via `CONFIG_INCLUDES_CYCLE`)
+5. Merge base and overlay using the section-level merge semantics above (**overlay values take precedence**)
+6. Schema validation on the **merged result** (not on individual layers in isolation)
+7. Profile resolution (built-in lookup or extension merge)
+8. Defaults injection for missing optional fields
+9. Delivery of `Config` struct to runtime
+
+**Validation on merged result** is critical: it ensures that required fields (e.g., at least one `[[tabs]]` entry) can be satisfied by the base layer, and that cross-field validation rules (e.g., `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE`) operate on the final combined config. Individual layers in isolation may be structurally incomplete; only the merged result must be valid.
+
+**Depth limit:** Includes chains are limited to 2 levels (one overlay → one base). Transitive chains beyond this limit are rejected with `CONFIG_INCLUDES_DEPTH_EXCEEDED`. This is intentional — deeper layering dramatically increases the complexity of merge debugging and operator mental models. Fleet operators needing deeper layering should use external config templating (e.g., Ansible, Nix, Helm) to generate device configs from a shared template.
+
+#### Secret Indirection
+
+The PSK env-var pattern in §6.2 already provides the canonical secret indirection mechanism for all sensitive fields:
+
+```toml
+[agents.registered.doorbell_agent]
+auth_psk_env = "DOORBELL_AGENT_PSK"  # Name of env var holding the PSK.
+```
+
+Post-v1 layered composition does not change this pattern. Secrets remain in environment variables, not in overlay files. There is no plan to support Vault, key files, or other external secret providers in the config format itself — those are deployment concerns handled outside the tze_hud config surface.
+
+#### Post-V1 Error Codes
+
+When layered composition is implemented, the following error codes will be added to the validation table (§Summary of Validation Error Codes):
+
+| Code | Trigger |
+|------|---------|
+| `CONFIG_INCLUDES_NOT_FOUND` | The file named in `includes` does not exist or is not readable |
+| `CONFIG_INCLUDES_DEPTH_EXCEEDED` | The includes chain exceeds 2 levels |
+| `CONFIG_INCLUDES_CYCLE` | A base file includes back to the overlay (or itself) |
+| `CONFIG_INCLUDES_PARSE_ERROR` | The base file has a TOML syntax error (line/column included) |
+
+These codes are not present in the v1 `ConfigErrorCode` enum. They will be added when the feature is implemented.
 
 ---
 
@@ -1845,6 +1979,8 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 6. **Viewer identification pipeline promotion.** §7.1 documents the `[[privacy.viewer_detectors]]` pipeline syntax as a post-v1 design note. Two open questions remain for the promotion milestone:
    - **When?** The pipeline syntax should be promoted to a first-class schema field as soon as any deployment needs more than one detector. It should not wait for a major version bump. The proposed trigger: when a second detector type ships a plugin implementation, the pipeline config is promoted from "design note" to "supported" in the same release.
    - **Plugin contract.** The `ViewerIdentitySource` trait needs a dedicated RFC (or an appendix to an existing privacy/security RFC) that specifies the plugin interface: confidence score semantics, async evaluation contract, error handling when a detector is unavailable, and how the runtime surfaces detector health in telemetry. Without a stable plugin contract, third-party detector implementations cannot be guaranteed interoperable with the pipeline runtime. Consider whether this belongs in a dedicated RFC 0011 (Viewer Identity Plugin Contract) or as a §7 extension in this RFC.
+
+7. **Layered config composition implementation scope.** §1.4 documents the intended post-v1 layered composition model (`includes` field, section-level merge, validation on merged result). The key open questions for the implementation RFC are: (a) Should `includes` support multiple base files (e.g., `includes = ["/etc/fleet-base.toml", "/etc/site-overrides.toml"]`) or exactly one? Multiple bases require a defined merge order among bases. (b) Should the array-replace semantics for `[[tabs]]` have an escape hatch — e.g., a `tabs_append = [...]` key — for deployments that want to add fleet-wide emergency tabs on top of device-specific tabs? (c) Should the depth limit be 2 (one overlay → one base) or 3 (one device → one site → one fleet)? Higher limits increase operational flexibility but also increase the surface for subtle merge bugs.
 
 ---
 
