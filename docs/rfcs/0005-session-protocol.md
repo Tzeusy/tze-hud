@@ -790,6 +790,7 @@ message SessionInit {
   // Fields 9–10 are reserved. Resume uses SessionResume (§6.2), never SessionInit.
   reserved 9, 10;
   reserved "resume_session_token", "resume_last_seen_server_seq";
+  uint64 agent_timestamp_us = 11;  // Agent UTC µs since epoch (RFC 0003 §1.3 clock sync)
 }
 
 message SessionEstablished {
@@ -801,6 +802,8 @@ message SessionEstablished {
   uint64  server_sequence                = 6;
   repeated SubscriptionCategory active_subscriptions = 7;
   repeated SubscriptionCategory denied_subscriptions = 8;
+  uint64 compositor_wallclock_us = 9;   // Compositor UTC wall clock at handshake time (µs since epoch)
+  int64  estimated_skew_us       = 10;  // Initial skew estimate: agent_ts - compositor_ts (signed)
 }
 
 message SessionClose {
