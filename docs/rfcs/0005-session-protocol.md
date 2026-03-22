@@ -14,6 +14,7 @@
 |-------|------|----------|-------|---------|
 | 1 | 2026-03-22 | rig-5vq.27 | Doctrinal alignment deep-dive | `heartbeat_interval_ms` default 10000→5000; split `max_concurrent_sessions` into resident/guest; added `MtlsCredential`; split `InputEvent` traffic class row; added `active_subscriptions`/`denied_subscriptions` to `SessionEstablished`; replaced `SceneEvent` DELTA_COMPLETE sentinel with `StateDeltaComplete {}` message. |
 | 2 | 2026-03-22 | rig-5vq.28 | Technical architecture scrutiny | Removed dead resume fields from `SessionInit` (reserved 9–10); completed state machine (Handshaking→Closed, Resuming→Closed paths); added `heartbeat_missed_threshold = 3` config param (3× not 2×); per-session dedup window; `SubscriptionChangeResult` replaces `MutationResult` for subscription acks; `ZonePublishResult` for durable zone acks; `RuntimeError.ErrorCode` typed enum; `CapabilityRequest` rejection semantics; v1 implementation note in §6.4; `InputMessage` variant filter rule in §7.1; embodied presence Q in §12. |
+| 3 | 2026-03-22 | rig-upg | Telemetry gap fix | Defined `TelemetryFrame` message (§9) with compositor performance fields; added `telemetry_frame = 41` to `SessionMessage` oneof; added `TELEMETRY_FRAMES = 7` to `SubscriptionCategory` enum (§7.1, §7.3, §9 proto); added `TelemetryFrame` row to §3.2 server→client table; updated §2.1 to reference `TelemetryFrame`; updated §9.2 field allocation note. |
 
 ---
 
@@ -256,7 +257,7 @@ The error model follows the architecture.md §"Error model" contract: code, huma
 
 ### 2.1 Stream Topology
 
-Each resident agent holds exactly one primary bidirectional gRPC stream of type `stream SessionMessage / stream SessionMessage`. All scene mutations, event subscriptions, lease management, heartbeats, and telemetry are multiplexed over this single stream.
+Each resident agent holds exactly one primary bidirectional gRPC stream of type `stream SessionMessage / stream SessionMessage`. All scene mutations, event subscriptions, lease management, heartbeats, and telemetry (via `TelemetryFrame` — see §3.2 and §9) are multiplexed over this single stream.
 
 Embodied agents (post-v1) may additionally open a media signaling stream for WebRTC negotiation. That stream is separate from the session stream and is out of scope for v1.
 
@@ -345,6 +346,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `CapabilityNotice` | Transactional | Mid-session capability grant or revocation |
 | `SubscriptionChangeResult` | Transactional | Ack/nack for a `SubscriptionChange`; echoes full active subscription set |
 | `ZonePublishResult` | Transactional | Ack/nack for a durable-zone `ZonePublish`; not sent for ephemeral zones |
+| `TelemetryFrame` | State-stream | Runtime performance and health telemetry sample; delivered only to sessions subscribed to `telemetry_frames` (§7.1) |
 
 ### 3.3 MutationBatch
 
@@ -605,6 +607,7 @@ Agents declare which event categories they want to receive. Receiving events for
 | `degradation_notices` | Runtime degradation level changes | *(always subscribed)* |
 | `lease_changes` | Lease granted/renewed/revoked/expired for agent's leases | *(always subscribed)* |
 | `zone_events` | Zone occupancy changes in zones the agent has publish access to | `zone_publish:<zone>` |
+| `telemetry_frames` | Runtime performance and health telemetry samples (`TelemetryFrame` messages; see §9) | `read_telemetry` |
 
 `degradation_notices` and `lease_changes` are delivered unconditionally to all active sessions — they are not filterable because agents must react to them.
 
@@ -634,6 +637,7 @@ enum SubscriptionCategory {
   DEGRADATION_NOTICES               = 4;
   LEASE_CHANGES                     = 5;
   ZONE_EVENTS                       = 6;
+  TELEMETRY_FRAMES                  = 7;  // Runtime performance/health telemetry; requires read_telemetry capability
 }
 ```
 
@@ -774,6 +778,7 @@ enum SubscriptionCategory {
   DEGRADATION_NOTICES               = 4;
   LEASE_CHANGES                     = 5;
   ZONE_EVENTS                       = 6;
+  TELEMETRY_FRAMES                  = 7;  // Runtime performance/health telemetry; requires read_telemetry capability
 }
 
 // ─── Handshake ───────────────────────────────────────────────────────────────
@@ -999,6 +1004,25 @@ message DegradationNotice {
   }
 }
 
+// ─── Telemetry (server → client) ─────────────────────────────────────────────
+// Emitted by the runtime to subscribed agents at a runtime-configured interval.
+// Requires the `read_telemetry` capability; delivered only to sessions that
+// have subscribed to TELEMETRY_FRAMES (§7.1).
+// Traffic class: State-stream (coalesced under backpressure; latest-wins).
+
+message TelemetryFrame {
+  uint64 sample_timestamp_us     = 1;  // Wall-clock (µs since epoch) at which the sample was taken
+  uint32 compositor_frame_rate   = 2;  // Compositor render loop rate (frames per second)
+  uint32 compositor_frame_budget_us = 3;  // Budget per frame (µs); typically 1 000 000 / target_fps
+  uint32 compositor_frame_time_us  = 4;  // Actual last-frame render time (µs); >budget = frame drop
+  uint32 active_sessions         = 5;  // Number of currently active resident + embodied sessions
+  uint32 active_leases           = 6;  // Number of currently held surface leases
+  uint64 heap_used_bytes         = 7;  // Runtime process heap usage (bytes); 0 if unavailable
+  uint32 gpu_utilization_pct     = 8;  // GPU utilization 0–100; 255 = unavailable
+  // Additional vendor/platform-specific counters may be added in future minor versions.
+  // Agents must ignore unknown fields per protobuf forward-compatibility rules.
+}
+
 // ─── Envelope ────────────────────────────────────────────────────────────────
 
 message SessionMessage {
@@ -1033,7 +1057,8 @@ message SessionMessage {
     StateDeltaComplete      state_delta_complete     = 38;  // Sentinel: end of resume delta burst (§6.4)
     SubscriptionChangeResult subscription_change_result = 39;  // Ack for SubscriptionChange (§7.3)
     ZonePublishResult       zone_publish_result      = 40;  // Ack for durable ZonePublish (§3.1)
-    // Fields 41–49 reserved for future server→client messages.
+    TelemetryFrame          telemetry_frame          = 41;  // Runtime perf/health sample; TELEMETRY_FRAMES subscribers only (§7.1)
+    // Fields 42–49 reserved for future server→client messages.
     // Fields 50–99 reserved for future use.
   }
 }
@@ -1080,7 +1105,7 @@ session.proto
 
 Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
 
-Currently allocated server→client fields: 30–38 (original), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`). Fields 41–49 are available for future server→client additions.
+Currently allocated server→client fields: 30–38 (original), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`). Fields 42–49 are available for future server→client additions.
 
 ---
 
