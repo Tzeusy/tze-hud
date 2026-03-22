@@ -487,7 +487,9 @@ An agent submits mutations as an atomic batch:
 ```rust
 pub struct MutationBatch {
     pub batch_id: SceneId,          // Agent-assigned; used in error responses
-    pub agent_namespace: String,
+    // agent_namespace is NOT carried in the batch; it is derived from the
+    // authenticated session context by the runtime.  See security.md §'Authentication'
+    // and §'Capability scopes'.  Clients must never supply their own identity per-message.
     pub mutations: Vec<SceneMutation>,
     pub present_at_us: Option<u64>, // Apply in one frame at or after this time (μs, UTC; RFC 0003 §3.1)
     pub sequence_hint: Option<u64>, // Agent's local sequence number; for ordering hints
@@ -590,7 +592,7 @@ Agent submits MutationBatch
 
 ```
 mutation targets tile T
-  → T.namespace == batch.agent_namespace        (agent owns tile)
+  → T.namespace == session.agent_namespace      (agent owns tile; namespace from authenticated session, not batch payload)
   → lease_registry.get(T.lease_id).is_valid()  (lease not expired or revoked)
   → lease has WRITE_SCENE capability
 ```
@@ -1215,7 +1217,11 @@ message SceneMutation {
 
 message MutationBatch {
   SceneId            batch_id         = 1;
-  string             agent_namespace  = 2;
+  // Field 2 (agent_namespace) is reserved; the server derives the agent namespace
+  // from the authenticated session context and must never trust a client-supplied
+  // identity field.  See security.md §'Authentication' and §'Capability scopes'.
+  reserved 2;
+  reserved "agent_namespace";
   repeated SceneMutation mutations    = 3;
   uint64             present_at_us    = 4;  // UTC μs; 0 = immediate (RFC 0003 §3.1)
   uint64             sequence_hint    = 5;  // 0 = no hint
