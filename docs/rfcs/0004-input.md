@@ -14,6 +14,7 @@
 | 2 | 2026-03-22 | rig-5vq.24 | Technical architecture scrutiny | §10.3: fixed gesture threshold diagram (5px → 10px, consistent with §3.4 state machine). §8.3: corrected `SessionEnvelope` → `SessionMessage` (aligns with RFC 0005 §2.2 naming). §8.3.1 (new): documented agent-to-runtime input control request transport gap; specifies required RFC 0005 `SessionMessage` payload field additions for FocusRequest, CaptureRequest, CaptureReleaseRequest, SetImePositionRequest. §4.5 (new, renamed §4.5+): added IME active-composition-on-focus-loss behavior spec (cancel before FocusLost, ordering guarantee, capture-theft case). §1.4/§9.1: added `AGENT_DISCONNECTED = 6` to `FocusLostReason`. §7.3/§9.1: added `device_id` field to `ContextMenuEvent`. §9.1: added `interaction_id` field to `GestureEvent`. §8.5: resolved transactional-event drop contradiction (transactional events never dropped; only non-transactional dropped beyond hard cap). §8.3.1 follow-up (rig-k0d): clarified that CaptureReleaseRequest uses async CaptureReleasedEvent confirmation and SetImePositionRequest is fire-and-forget; removed misleading "runtime responds with corresponding response" blanket claim. §8.5 follow-up (rig-k0d): fixed contradictory "without bound, up to a hard cap" phrasing (now: "grows as needed to accommodate transactional events, which are never dropped"). |
 | 3 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification | §9.1 (input.proto): added `import "scene.proto"`; replaced all `string tile_id` and `string node_id` with `SceneId tile_id` / `SceneId node_id` across all proto messages (FocusRequest, FocusGainedEvent, FocusLostEvent, CaptureRequest, CaptureReleaseRequest, CaptureReleasedEvent, SetImePositionRequest, and all pointer/keyboard/gesture/IME event types). Non-scene identifiers (`session_id`, `device_id`, `interaction_id`) remain `string` — they are not scene-object addresses. Inline narrative proto snippets in §1.2, §1.4, §2.3, §4.3, §4.4 also updated to match. |
 | 4 | 2026-03-22 | rig-5vq.25 | Cross-RFC consistency and integration | §4.6 (second): renumbered duplicate `§4.6` to `§4.7 Input Method Support`. §8.3: corrected Note — RFC 0005 field 34 carries type `InputEvent` (from `scene_service.proto`), not `InputEnvelope`; specified that RFC 0005 must rename field 34 type to `EventBatch`; noted RFC 0005 §7.1 uses `InputMessage` (also needs alignment to `EventBatch`). §12: corrected RFC 0003 label from "Lease Model" → "Timing Model"; added RFC 0005 (Session Protocol) and RFC 0008 (Lease & Resource Governance) dependency entries with section references. §1.4: updated `FocusGainedEvent`/`FocusLostEvent` narrative snippet to use nested enum syntax matching §9.1 (removed standalone `FocusSource`/`FocusLostReason` enums). §2.3: updated `CaptureReleasedEvent` narrative snippet to use nested `enum Reason` matching §9.1 (removed standalone `CaptureReleaseReason` enum). All input event `timestamp_us` fields renamed to `timestamp_hw_us` to follow RFC 0003/RFC 0005 clock-domain naming convention; added clock-domain annotation ("OS hardware event timestamp, monotonic domain"); `batch_ts_us` in `EventBatch` annotated as wall-clock domain. |
+| 5 | 2026-03-22 | rig-5vq.26 | Final hardening and quantitative verification | §3.2: added ContextMenu dispatch note clarifying it is dispatched as `ContextMenuEvent` (not `GestureEvent`) and does not run through the recognizer pipeline. §3.3: added DoubleTap and Swipe recognizer boxes to pipeline diagram; added ContextMenu preprocessor note. §3.4: expanded recognizer state machines to cover all 6 gesture types (added DoubleTap, Swipe, Pinch machines alongside Tap, LongPress, Drag); added Swipe velocity threshold (≥ 400 px/s, duration < 300ms) and Swipe/Drag disambiguation rule. §3.5: removed `ContextMenu` from gesture conflict priority list (it is not a competing gesture); replaced with `Swipe` at position 3; added note explaining ContextMenu dispatch path. §3.6: rewrote to remove non-existent `GestureBeganEvent` / `GestureCancelledEvent` references; narrative now correctly describes phased gestures using `GestureEvent { phase = BEGAN/CHANGED/ENDED/CANCELLED }` and point gestures as terminal single events; added implementation note. |
 
 ---
 
@@ -265,6 +266,8 @@ Gestures are recognized from raw touch and pointer events by the runtime's gestu
 | `Swipe` | 1-finger quick flick | Not supported | Directional fast swipe |
 | `ContextMenu` | Long press or 2-finger tap | Right click | Context menu request |
 
+> **ContextMenu dispatch note:** `ContextMenu` is listed here for completeness but is **not** dispatched as a `GestureEvent`. It is dispatched as a standalone `ContextMenuEvent` (see `InputEnvelope` field 8 in §9.1). It does not run through the gesture recognizer pipeline and does not appear in the conflict resolution priority list in §3.5. On touch: the LongPress recognizer's RECOGNIZED result triggers a `ContextMenuEvent` directly (rather than a `GestureEvent { long_press }`). On pointer: a right-click is mapped to `ContextMenuEvent` by the event preprocessor, bypassing recognizer arbitration entirely.
+
 ### 3.3 Gesture Recognizer Pipeline
 
 Raw events pass through a pipeline of candidate recognizers running in parallel. Each recognizer tracks a state machine over the event stream. When a recognizer reaches a terminal state (recognized or failed), it signals the arbiter.
@@ -278,39 +281,96 @@ OS events (touch/pointer)
   │  • Attach timestamps                            │
   │  • Assign device_id                             │
   │  • Filter OS-level gestures (system swipe etc.) │
+  │  • Right-click → ContextMenuEvent (direct)      │
   └────────────────────┬────────────────────────────┘
                        │
                        ▼  (fan-out to all recognizers)
-  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
-  │    Tap    │  │  LongPress│  │   Drag    │  │   Pinch   │
-  │Recognizer │  │Recognizer │  │Recognizer │  │Recognizer │
-  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘
-        │              │              │              │
-        └──────────────┴──────────────┴──────────────┘
-                                │
-                                ▼
-                        ┌───────────────┐
-                        │   Arbiter     │
-                        │ (picks winner)│
-                        └───────┬───────┘
-                                │
-                      ┌─────────┴─────────┐
-                      │                   │
-                 Winner event         Cancel events
-                 → owning agent       → losers
+  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
+  │    Tap    │  │ DoubleTap │  │  LongPress│  │   Drag    │  │   Pinch   │  │   Swipe   │
+  │Recognizer │  │Recognizer │  │Recognizer │  │Recognizer │  │Recognizer │  │Recognizer │
+  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘
+        │              │              │              │              │              │
+        │              │       (RECOGNIZED→          │              │              │
+        │              │        ContextMenuEvent      │              │              │
+        │              │        on touch only)        │              │              │
+        └──────────────┴──────────────┴──────────────┴──────────────┴──────────────┘
+                                                │
+                                                ▼
+                                        ┌───────────────┐
+                                        │   Arbiter     │
+                                        │ (picks winner)│
+                                        └───────┬───────┘
+                                                │
+                                      ┌─────────┴─────────┐
+                                      │                   │
+                                 Winner event         Cancel events
+                                 → owning agent       → losers
 ```
+
+> **ContextMenu is not a recognizer output:** On touch platforms, when LongPress reaches RECOGNIZED state, the arbiter emits a `ContextMenuEvent` (§7.3) instead of a `GestureEvent { long_press }`. On pointer platforms, right-click produces a `ContextMenuEvent` directly from the preprocessor, bypassing the recognizer pipeline.
 
 ### 3.4 Recognizer State Machines
 
-Each recognizer tracks state. Example: the Tap recognizer.
+Each recognizer tracks state. Example state machines for the full recognizer set:
 
 ```
 Tap recognizer:
+  Threshold: pointer_up within 150ms of pointer_down, ≤ 10px total movement.
 
-IDLE ──pointer_down──► POSSIBLE ──pointer_up (< 150ms, < 10px moved)──► RECOGNIZED
-                           │
-                           ├── pointer_up (> 150ms) ──► FAILED
-                           └── pointer_moved (> 10px) ──► FAILED
+  IDLE ──pointer_down──► POSSIBLE ──pointer_up (< 150ms, < 10px)──► RECOGNIZED
+                             │
+                             ├── pointer_up (> 150ms) ──────────────► FAILED
+                             └── pointer_moved (> 10px) ─────────────► FAILED
+
+DoubleTap recognizer:
+  Threshold: two Tap sequences, inter-tap interval < 300ms, second tap ≤ 20px from first.
+  Note: DoubleTap recognizer delays Tap RECOGNIZED by up to 300ms to check for second tap.
+
+  IDLE ──1st pointer_down──► WAIT_FIRST_UP ──1st pointer_up (< 150ms, < 10px)──► WAIT_SECOND_DOWN
+                                                     │ (> 150ms or > 10px)                │
+                                                     ▼                                    │ > 300ms
+                                                  FAILED                                  ▼
+                                                                                        FAILED (Tap emitted)
+  WAIT_SECOND_DOWN ──2nd pointer_down (≤ 20px from 1st, < 300ms since 1st up)──► WAIT_SECOND_UP
+       │
+       └── 2nd pointer_up (< 150ms, < 10px) ──► RECOGNIZED
+
+LongPress recognizer:
+  Threshold: pointer held ≥ 500ms without movement > 10px.
+
+  IDLE ──pointer_down──► POSSIBLE ──(500ms timer)──► RECOGNIZED (→ ContextMenuEvent on touch)
+                             │
+                             └── pointer_moved (> 10px) ──► FAILED (timer cancelled)
+
+Drag recognizer:
+  Threshold: pointer movement > 10px while button held, velocity < 400 px/s at lift.
+  (Swipe takes priority if velocity ≥ 400 px/s at lift — see Swipe below.)
+
+  IDLE ──pointer_down──► POSSIBLE ──pointer_moved (> 10px)──► BEGAN (ongoing)
+                             │                                      │
+                             └── pointer_up without > 10px ──► FAILED  ├── pointer_moved ──► CHANGED
+                                                                        └── pointer_up ──► check velocity:
+                                                                              velocity < 400 px/s → ENDED
+                                                                              velocity ≥ 400 px/s → CANCELLED (Swipe wins)
+
+Swipe recognizer:
+  Threshold: movement > 10px, total duration < 300ms from pointer_down to pointer_up,
+             and release velocity ≥ 400 px/s. Direction is the dominant axis at lift.
+
+  IDLE ──pointer_down──► POSSIBLE ──pointer_moved (> 10px)──► TRACKING
+                             │
+                             └── pointer_up without > 10px ──► FAILED
+
+  TRACKING ──pointer_up (duration < 300ms AND velocity ≥ 400 px/s)──► RECOGNIZED
+       │
+       └── pointer_up (duration ≥ 300ms OR velocity < 400 px/s) ──► FAILED (Drag wins)
+
+Pinch recognizer:
+  Threshold: two simultaneous touch contacts, spread change > 5%.
+
+  IDLE ──2nd touch_down (with 1st contact active)──► POSSIBLE ──spread_changed (> 5%)──► BEGAN
+                                                          │
+                                                          └── one contact up ──► FAILED
 ```
 
 **Budget:** Each recognizer update must complete in < 50μs. Total gesture recognition from the final event to winner selection: < 1ms.
@@ -323,12 +383,14 @@ When multiple recognizers signal RECOGNIZED for the same event sequence:
 
 1. `Pinch` (multi-touch, highest specificity)
 2. `LongPress`
-3. `Drag`
-4. `DoubleTap`
-5. `Tap`
-6. `ContextMenu`
+3. `Swipe`
+4. `Drag`
+5. `DoubleTap`
+6. `Tap`
 
 Higher-specificity gestures win. If two gestures have equal priority (e.g., a touch sequence that qualifies as both `Tap` and the beginning of `LongPress`), the `LongPress` recognizer delays its recognition until the minimum hold duration expires or the `Tap` recognizer's window closes.
+
+> **Note on ContextMenu:** ContextMenu is not in the gesture conflict priority list because it is not dispatched as `GestureEvent`. It is dispatched as `ContextMenuEvent` (see §3.2 and §7.3). On touch, the LongPress RECOGNIZED result triggers `ContextMenuEvent` (not `GestureEvent { long_press }`). On pointer, right-click produces `ContextMenuEvent` directly from the event preprocessor. No conflict with other gestures is possible because ContextMenu is emitted as a terminal event after the gesture sequence completes or right-click arrives.
 
 **Cross-tile gesture arbitration.** When a gesture spans multiple tiles (e.g., a drag that starts in tile A and crosses into tile B):
 
@@ -342,9 +404,13 @@ The arbiter tracks the `capture_tile_id` from the first `PointerDownEvent` and b
 
 When the arbiter selects a winner:
 
-1. The winner's recognizer enters ACTIVE state; the runtime dispatches `GestureBeganEvent` to the owning agent.
-2. All other recognizers for the same event sequence receive `GestureCancelledEvent` internally and return to IDLE.
-3. The agents of tiles involved in the losing recognizers receive `PointerCancelEvent` (if they had received any pointer events).
+1. **Phased gestures (Drag, Pinch, LongPress):** The winner's recognizer enters ACTIVE state and the runtime dispatches a `GestureEvent` with `phase = BEGAN` to the owning agent. Subsequent updates arrive as `phase = CHANGED` events. Completion is `phase = ENDED`; abnormal termination (e.g., capture theft) is `phase = CANCELLED`.
+
+2. **Point gestures (Tap, DoubleTap, Swipe):** These are single terminal events — the runtime dispatches one `GestureEvent` (e.g., `GestureEvent { tap { x, y, modifiers } }`) when the recognizer reaches RECOGNIZED state. There is no BEGAN/CHANGED/ENDED lifecycle for point gestures.
+
+3. **Losing recognizers** return to IDLE internally. No "GestureCancelledEvent" is dispatched to agents — the internal state reset is invisible externally. The agents of tiles involved in the losing recognizers receive a `PointerCancelEvent` (field 9 in `InputEnvelope`) if they had received any pointer events from the sequence.
+
+> **Implementation note:** There are no `GestureBeganEvent` or `GestureCancelledEvent` message types. Phased gesture lifecycle is carried by the `Phase` enum within each gesture's message (e.g., `DragGesture.Phase`, `PinchGesture.Phase`, `LongPressGesture.Phase`). Point gestures are single-shot and have no separate cancellation path.
 
 ### 3.7 Platform Gesture Integration
 
