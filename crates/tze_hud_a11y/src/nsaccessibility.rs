@@ -20,33 +20,25 @@
 
 #![cfg(target_os = "macos")]
 
-use tracing::warn;
 use tze_hud_scene::{SceneId, SceneGraph};
 
-use crate::{AccessibilityTree, LivePoliteness};
+use crate::{AccessibilityTree, LivePoliteness, WarnOnce};
+
+const STUB_MSG: &str = "tze_hud_a11y: macOS NSAccessibility bridge is a stub — accessibility \
+    features are not functional. Implement \
+    crates/tze_hud_a11y/src/nsaccessibility.rs to enable VoiceOver support.";
 
 /// macOS NSAccessibility bridge.
 ///
 /// Stub implementation. Emits a warning on first use.
 pub struct NsAccessibility {
-    warned: bool,
+    warner: WarnOnce,
 }
 
 impl NsAccessibility {
     /// Create a new NSAccessibility bridge stub.
     pub fn new() -> Self {
-        Self { warned: false }
-    }
-
-    fn warn_once(&mut self) {
-        if !self.warned {
-            warn!(
-                "tze_hud_a11y: macOS NSAccessibility bridge is a stub — accessibility \
-                 features are not functional. Implement \
-                 crates/tze_hud_a11y/src/nsaccessibility.rs to enable VoiceOver support."
-            );
-            self.warned = true;
-        }
+        Self { warner: WarnOnce::new() }
     }
 }
 
@@ -58,13 +50,13 @@ impl Default for NsAccessibility {
 
 impl AccessibilityTree for NsAccessibility {
     fn update_from_scene(&mut self, _scene: &SceneGraph) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: rebuild NSAccessibilityElement hierarchy from scene graph;
         //       post NSAccessibilityRowCountChangedNotification if structure changed
     }
 
     fn announce(&mut self, _message: &str, politeness: LivePoliteness) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: post NSAccessibilityAnnouncementRequestedNotification with
         //       NSAccessibilityPriorityKey set to NSAccessibilityPriorityHigh (assertive)
         //       or NSAccessibilityPriorityMedium (polite)
@@ -72,7 +64,7 @@ impl AccessibilityTree for NsAccessibility {
     }
 
     fn focus_changed(&mut self, _node_id: SceneId) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: post NSAccessibilityFocusedUIElementChangedNotification on the
         //       focused element's accessibility object
     }

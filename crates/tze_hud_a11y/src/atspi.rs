@@ -18,34 +18,26 @@
 
 #![cfg(target_os = "linux")]
 
-use tracing::warn;
 use tze_hud_scene::{SceneId, SceneGraph};
 
-use crate::{AccessibilityTree, LivePoliteness};
+use crate::{AccessibilityTree, LivePoliteness, WarnOnce};
+
+const STUB_MSG: &str = "tze_hud_a11y: AT-SPI2 bridge is a stub — accessibility features are \
+    not functional. Implement crates/tze_hud_a11y/src/atspi.rs to enable \
+    Linux screen reader support.";
 
 /// AT-SPI2 accessibility bridge for Linux.
 ///
 /// Stub implementation. Emits a warning on first use to remind implementors
 /// that the bridge is not yet wired to the actual D-Bus AT-SPI2 stack.
 pub struct AtspiAccessibility {
-    warned: bool,
+    warner: WarnOnce,
 }
 
 impl AtspiAccessibility {
     /// Create a new AT-SPI2 bridge stub.
     pub fn new() -> Self {
-        Self { warned: false }
-    }
-
-    fn warn_once(&mut self) {
-        if !self.warned {
-            warn!(
-                "tze_hud_a11y: AT-SPI2 bridge is a stub — accessibility features are \
-                 not functional. Implement crates/tze_hud_a11y/src/atspi.rs to enable \
-                 Linux screen reader support."
-            );
-            self.warned = true;
-        }
+        Self { warner: WarnOnce::new() }
     }
 }
 
@@ -57,17 +49,17 @@ impl Default for AtspiAccessibility {
 
 impl AccessibilityTree for AtspiAccessibility {
     fn update_from_scene(&mut self, _scene: &SceneGraph) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: diff scene graph → emit AT-SPI2 ChildrenChanged / ObjectPropertyChange signals
     }
 
     fn announce(&mut self, _message: &str, _politeness: LivePoliteness) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: call org.a11y.atspi.Event.Object:Announcement (AT-SPI2 live region)
     }
 
     fn focus_changed(&mut self, _node_id: SceneId) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: emit AT-SPI2 StateChanged:focused signal for the corresponding accessible object
     }
 }
