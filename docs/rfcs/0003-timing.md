@@ -42,6 +42,34 @@ The clock domain hierarchy is sound. The frame deadline model is complete and ba
 
 **No dimension below 3. Round 1 findings addressed. Ready for Round 2 (Technical Architecture Scrutiny).**
 
+### Round 2 — Technical Architecture Scrutiny (rig-5vq.20)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, validation.md, v1.md
+
+#### Doctrinal Alignment: 4/5
+
+No new doctrinal gaps. Round 1 fixes held. Score unchanged.
+
+#### Technical Robustness: 4/5
+
+- **[MUST-FIX → FIXED]** `ClockSync` RPC had messages defined in `timing.proto` but no `service` block and no home in any proto service. Added `ClockSyncService` to `timing.proto` §7.1 with a cross-reference note for RFC 0005.
+- **[MUST-FIX → FIXED]** Pending queue flush behavior on session close was unspecified. Added normative language to §5.3.
+- **[SHOULD-FIX → FIXED]** Expiry non-negotiability under load was stated only in Open Questions (recommendation), not as a normative requirement in §5.4. Promoted to normative text.
+- **[SHOULD-FIX → FIXED]** Clock skew estimation window had no fast-convergence path after a sudden clock jump. Added jump-detection reset condition to §4.3.
+- **[SHOULD-FIX → FIXED]** Explicit `DeleteTile` mid-deferral behavior was unspecified in §2.3. Added parity with expiry behavior.
+- **[CONSIDER]** Frame quantization boundary condition noted in §3.3; no change required.
+
+#### Cross-RFC Consistency: 4/5 (up from 3/5)
+
+- **[MUST-FIX → FIXED]** `ClockSync` RPC was referenced in §4.5/§7.2 but absent from RFC 0005 session service. Added `ClockSyncService` to `timing.proto` and added cross-reference note in §7.2 clarifying service home.
+- **[MUST-FIX → FIXED in RFC 0005]** `TimingHints.sync_group_id` was `string` in RFC 0005's inline definition but `bytes` in RFC 0003. Fixed the RFC 0005 inline `TimingHints` to `bytes`.
+- **[SHOULD-FIX → FIXED in RFC 0005]** `session_open_at_us` clock reference not exposed in `SessionEstablished`; agents had no way to align their clocks at handshake without an extra RPC. Added `compositor_wallclock_us` and `estimated_skew_us` to `SessionEstablished`.
+- **[CONSIDER]** `ZonePublish.ttl_ms` unit inconsistency deferred to RFC 0001 `_ms → _us` amendment sweep.
+
+**No dimension below 3. Round 2 findings addressed. Ready for Round 3.**
+
 ---
 
 ## Summary
@@ -199,6 +227,8 @@ pub enum SyncCommitPolicy {
 **Leaving a sync group.** A tile leaves via `UpdateTileSyncGroup { sync_group: None }`. After leaving, the tile's mutations are no longer subject to group commit constraints. Leaving is applied at the next scene commit.
 
 **Destroying a sync group.** A sync group is destroyed when explicitly deleted or when its last member leaves. Destruction removes the group from the scene graph. Any tile that still holds a reference to the group ID is automatically released from it.
+
+**Tile deletion mid-deferral.** An explicit `DeleteTile` mutation causes the tile to leave its sync group before deletion, identical to expiry behavior (see §5.4). The sync group's commit policy evaluates against the updated member set after the deletion. If the deleted tile was the only missing member in an `AllOrDefer` group, removing it unblocks the group: the remaining members' pending mutations may now commit in the same frame as the deletion.
 
 **Cross-agent sync groups.** Multiple agents can place tiles into the same sync group. The group does not belong to any single agent's mutation batch — it is a scene-graph object. When Agent A and Agent B both have tiles in the same sync group, their mutations are held in a pending queue until the commit policy's condition is satisfied. The compositor evaluates this at Stage 4 (Scene Commit) of the frame pipeline.
 
@@ -371,6 +401,8 @@ Two distinct drift concepts apply. Do not conflate them:
 
 **Update frequency.** The estimate is updated on every mutation batch arrival. The estimation window is bounded; the oldest sample is evicted when the window fills.
 
+**Clock jump detection.** If consecutive samples show a skew change greater than **`timing.clock_jump_detection_ms`** (default: 50ms) between them — indicating a sudden NTP step correction or agent clock adjustment, not gradual drift — the compositor resets the estimation window to the current single sample rather than continuing to accumulate. The estimate is re-initialized from this sample as a single-point estimate until the window refills. This prevents systematic miscorrection during the convergence period after a clock step, where a 32-sample median weighted by stale values would apply the wrong correction for up to 32 subsequent mutations.
+
 **Vsync jitter tracking.** Each frame's vsync arrival time is recorded. Jitter is computed as the standard deviation of inter-frame intervals over the last 120 frames (2 seconds at 60fps). High jitter triggers a telemetry warning and may indicate GPU or OS scheduling issues.
 
 ### 4.4 Drift Correction
@@ -471,6 +503,8 @@ A mutation batch with `present_at_us = T` is held in the pending queue until the
 
 **Maximum pending queue depth:** 256 entries per agent. Mutations that would exceed this limit are rejected with `PENDING_QUEUE_FULL`. Agents with many deferred mutations are scheduling too aggressively; they should reduce their schedule horizon or increase their mutation rate.
 
+**Session close flush.** The pending queue is session-scoped, not agent-scoped. When an agent session closes — gracefully (via `SessionClose`) or ungracefully (timeout, TCP reset, grace period expiry) — all entries in that session's pending queue are discarded. The compositor does not apply pending mutations from a closed session. A reconnecting agent starts with an empty queue and must retransmit any desired future-scheduled mutations under the new session. This ensures that budget accounting is clean: after session close, the session's pending queue entries no longer count against any resource budget.
+
 ### 5.4 Expiration Policy (`expires_at`)
 
 A tile with `expires_at_us = T` is automatically removed from the scene at the first frame F where `frame_F_vsync_us >= T`.
@@ -482,6 +516,8 @@ A tile with `expires_at_us = T` is automatically removed from the scene at the f
 3. Then apply the frame's explicit mutation batches.
 
 **Complexity:** O(expired_items) per frame, not O(total_items). The heap ensures only expired tiles are visited. Total tile count does not affect expiry evaluation cost.
+
+**Expiry is non-negotiable under load.** Expiry evaluation at Stage 4 is never deferred by degradation. The compositor must evaluate the expiry heap and apply implicit `DeleteTile` mutations even during degradation level 4 (ShedTiles) or 5 (Emergency). Expiry semantics are a correctness contract, not a performance optimization. An agent that sets `expires_at_us` must be able to rely on tile removal within one frame (≤ 16.6ms at 60fps) of the expiry time, regardless of compositor load. RFC 0002's degradation machinery must not shed Stage 4 expiry work.
 
 **Expiry notification:** when a tile expires, the compositor emits a `TileExpired { tile_id, expires_at_us, frame_number }` event to the owning agent's event subscription stream.
 
@@ -686,6 +722,28 @@ message TimingConfig {
                                              // receives no mutation for this many ms. Doctrine: failure.md §Agent is slow.
   // post-v1 fields:
   uint32 max_media_drift_ms            = 9;  // Default 10 (post-v1)
+  // Round 2 addition (T-R4):
+  uint32 clock_jump_detection_ms       = 10; // Default 50. If consecutive skew samples differ by more
+                                             // than this value, the estimation window is reset to the
+                                             // latest sample. Prevents miscorrection after NTP step
+                                             // adjustments. See §4.3.
+}
+
+// ─── Clock Sync Service ───────────────────────────────────────────────────────
+//
+// ClockSync is a unary RPC available to resident agents for clock alignment.
+// This service block documents the message contract. The preferred implementation
+// adds ClockSync as a method on the SessionService in RFC 0005 (session.proto)
+// rather than exposing a separate gRPC service endpoint, keeping all
+// agent-runtime communication on one endpoint. See §7.2 for details.
+//
+// If a standalone service is required (e.g., for versioning), use this block.
+service ClockSyncService {
+  // Unary RPC: agent sends its current timestamp; compositor responds with
+  // its clock reference and the current skew estimate. Agents SHOULD call
+  // this once at session start (to avoid cold-start validation failures)
+  // and after receiving CLOCK_SKEW_HIGH events. See §4.5.
+  rpc ClockSync(ClockSyncRequest) returns (ClockSyncResponse);
 }
 ```
 
@@ -698,7 +756,7 @@ The fields in `timing.proto` supplement the scene contract defined in RFC 0001. 
 - `CreateSyncGroupMutation` and `DeleteSyncGroupMutation` are new variants in the `SceneMutation` oneof (RFC 0001 §8, field numbers **21 and 22** respectively). Field 20 is already occupied by `ClearZoneMutation` (RFC 0001 §8).
 - `SyncGroupConfig` supplements `UpdateTileSyncGroupMutation` (RFC 0001 field 11): sync group creation is now an explicit, separate operation rather than an implicit side effect of assigning a tile to a group ID. `UpdateTileSyncGroupMutation` continues to handle tile membership changes; `CreateSyncGroupMutation` / `DeleteSyncGroupMutation` handle group lifecycle.
 - `FrameTimingRecord` is embedded in `TelemetryRecord` (RFC 0002 §3.2, Stage 8).
-- The `ClockSyncRequest`/`ClockSyncResponse` pair is a unary RPC on the session service, separate from the bidirectional mutation stream.
+- The `ClockSyncRequest`/`ClockSyncResponse` pair is a unary RPC. The **preferred implementation** adds a `ClockSync` method to the `SessionService` defined in RFC 0005 (session.proto). This keeps all agent-runtime communication on a single service endpoint. The `ClockSyncService` block in §7.1 documents the contract; RFC 0005 carries the normative `SessionService` definition. Do not create a second standalone gRPC service endpoint unless versioning requires it.
 
 ### 7.3 Wire Encoding Notes
 
@@ -729,6 +787,8 @@ pub struct SimulatedClock { /* atomic u64 cell, manually advanced */ } // Tests
 
 This satisfies DR-V4 (deterministic test scenes): all timing-dependent behavior can be exercised with a `SimulatedClock` without wall-clock interference.
 
+**Clock trait design constraint.** The `Clock` trait has no `advance` or `set_time` method. Time advancement is a concern of concrete test implementations only — `SimulatedClock::advance_by_us(delta: u64)` exists on the struct directly, not on the trait. Do not add mutation methods to the `Clock` trait: the trait is an observation interface; adding `advance` would require production implementations to carry dead no-ops and would violate single-responsibility.
+
 ### 8.2 Test Coverage Requirements
 
 The following behaviors must be covered by Layer 0 (scene graph assertion) tests:
@@ -743,6 +803,10 @@ The following behaviors must be covered by Layer 0 (scene graph assertion) tests
 - Clock skew > tolerance: rejection with structured error.
 - Clock skew within tolerance: correction applied transparently.
 - Expiry heap: O(expired_items) behavior verified with large tile sets.
+- Pending queue flush on session close: queued entries are discarded on disconnect; not applied after reconnect.
+- Expiry under degradation: expiry evaluation runs even when compositor is in ShedTiles or Emergency mode.
+- Clock jump detection: consecutive samples differing by > `clock_jump_detection_ms` trigger window reset; subsequent corrections use single-point estimate.
+- Tile deletion mid-deferral: deleting a tile that is the sole missing member of an `AllOrDefer` group unblocks the group in the same frame.
 
 ### 8.3 Chaos Test Requirements
 
