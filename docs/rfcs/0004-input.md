@@ -254,7 +254,7 @@ Gestures are recognized from raw touch and pointer events by the runtime's gestu
 | `LongPress` | 1-finger hold ≥ 500ms | Right mouse button press | Extended hold |
 | `Drag` | 1-finger move | Left button + move | Single-finger translation |
 | `Pinch` | 2-finger spread/squeeze | Scroll wheel (zoom axis) | Scale gesture |
-| `Swipe` | 1-finger quick flick | — | Directional fast swipe |
+| `Swipe` | 1-finger quick flick | Not supported | Directional fast swipe |
 | `ContextMenu` | Long press or 2-finger tap | Right click | Context menu request |
 
 ### 3.3 Gesture Recognizer Pipeline
@@ -487,18 +487,18 @@ Agents declare accessibility metadata on nodes and tiles. The runtime does not i
 Tiles and nodes carry accessibility metadata:
 
 ```protobuf
-message AccessibilityMetadata {
+message AccessibilityConfig {
   string label        = 1;   // Human-readable label (required for interactive elements)
   string role_hint    = 2;   // Override default role mapping: "button", "link", "menuitem", etc.
   string description  = 3;   // Longer description for screen reader detail mode
   bool   live         = 4;   // true = announce content changes (aria-live equivalent)
-  LivePoliteness live_politeness = 5;
 
   enum LivePoliteness {
     POLITE     = 0;  // Announce after current speech finishes
     ASSERTIVE  = 1;  // Interrupt current speech
     OFF        = 2;  // No announcement (default)
   }
+  LivePoliteness live_politeness = 5;
 }
 ```
 
@@ -652,7 +652,7 @@ Timeline:
 pub struct HitRegionNode {
     // Inherited from RFC 0001:
     pub bounds: Rect,               // Relative to tile origin
-    pub interaction_id: String,     // Agent-defined; forwarded in all events
+    pub interaction_id: String,     // Agent-defined; used by agent to correlate events (not forwarded in proto messages; agents correlate by SceneId)
     pub accepts_focus: bool,        // Whether keyboard focus can land here
     pub accepts_pointer: bool,      // Whether pointer events are captured here
 
@@ -709,7 +709,7 @@ Bounds are relative to the tile origin, matching RFC 0001 §5.2. Hit-test traver
 ```protobuf
 message PointerDownEvent {
   string tile_id          = 1;
-  string node_id          = 2;   // interaction_id from HitRegionNode
+  string node_id          = 2;   // SceneId of the hit HitRegionNode
   string device_id        = 3;
   PointerButton button    = 4;
   float  x                = 5;   // node-local coordinates
