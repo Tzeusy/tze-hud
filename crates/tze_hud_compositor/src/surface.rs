@@ -61,7 +61,7 @@ impl HeadlessSurface {
     fn aligned_bytes_per_row(width: u32) -> u32 {
         let unaligned = width * 4; // RGBA8 = 4 bytes per pixel
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        (unaligned + align - 1) / align * align
+        unaligned.div_ceil(align) * align
     }
 
     /// Copy the rendered texture to the readback buffer.

@@ -1,14 +1,33 @@
 //! Scene graph: the core data structure holding all tabs, tiles, nodes, leases.
 //! Pure data — no GPU, no async, no I/O.
 
+use crate::clock::{Clock, SystemClock};
 use crate::types::*;
 use crate::validation::ValidationError;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+
+/// Returns a `SystemClock` wrapped in `Arc<dyn Clock>`.
+/// Used as the serde default for the `clock` field so that deserialized
+/// graphs behave like freshly constructed ones.
+fn default_clock() -> Arc<dyn Clock> {
+    Arc::new(SystemClock)
+}
 
 /// The root scene graph.
+///
+/// Time-dependent operations (lease grant, tab creation timestamps, expiry
+/// checks) are routed through the injected [`Clock`].  Use
+/// [`SceneGraph::new`] for production code — it installs a [`SystemClock`].
+/// Use [`SceneGraph::new_with_clock`] in tests to inject a [`TestClock`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SceneGraph {
+    /// Clock used for all `now_millis()` calls inside the graph.
+    /// Skipped during serialization; restored to `SystemClock` on
+    /// deserialization.
+    #[serde(skip, default = "default_clock")]
+    clock: Arc<dyn Clock>,
     /// All tabs, keyed by ID.
     pub tabs: HashMap<SceneId, Tab>,
     /// The currently active tab.
@@ -29,12 +48,19 @@ pub struct SceneGraph {
     pub version: u64,
 }
 
-use serde::{Deserialize, Serialize};
-
 impl SceneGraph {
-    /// Create a new empty scene graph with the given display dimensions.
+    /// Create a new empty scene graph using the real system clock.
     pub fn new(width: f32, height: f32) -> Self {
+        Self::new_with_clock(width, height, Arc::new(SystemClock))
+    }
+
+    /// Create a new empty scene graph with an injected clock.
+    ///
+    /// Prefer this constructor in tests so that time-dependent behaviour
+    /// (lease expiry, timestamps) is fully deterministic.
+    pub fn new_with_clock(width: f32, height: f32, clock: Arc<dyn Clock>) -> Self {
         Self {
+            clock,
             tabs: HashMap::new(),
             active_tab: None,
             tiles: HashMap::new(),
@@ -61,7 +87,7 @@ impl SceneGraph {
             return Err(ValidationError::DuplicateDisplayOrder { order: display_order });
         }
         let id = SceneId::new();
-        let now_ms = now_millis();
+        let now_ms = self.clock.now_millis();
         self.tabs.insert(
             id,
             Tab {
@@ -96,7 +122,7 @@ impl SceneGraph {
         capabilities: Vec<Capability>,
     ) -> SceneId {
         let id = SceneId::new();
-        let now_ms = now_millis();
+        let now_ms = self.clock.now_millis();
         self.leases.insert(
             id,
             Lease {
@@ -135,7 +161,7 @@ impl SceneGraph {
             .leases
             .get_mut(&lease_id)
             .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
-        lease.granted_at_ms = now_millis();
+        lease.granted_at_ms = self.clock.now_millis();
         lease.ttl_ms = new_ttl_ms;
         self.version += 1;
         Ok(())
@@ -143,7 +169,7 @@ impl SceneGraph {
 
     /// Expire all leases past their TTL. Returns IDs of expired leases.
     pub fn expire_leases(&mut self) -> Vec<SceneId> {
-        let now = now_millis();
+        let now = self.clock.now_millis();
         let expired: Vec<SceneId> = self
             .leases
             .values()
@@ -312,10 +338,10 @@ impl SceneGraph {
     }
 
     pub(crate) fn remove_tile_and_nodes(&mut self, tile_id: SceneId) {
-        if let Some(tile) = self.tiles.remove(&tile_id) {
-            if let Some(root_id) = tile.root_node {
-                self.remove_node_tree(root_id);
-            }
+        if let Some(tile) = self.tiles.remove(&tile_id)
+            && let Some(root_id) = tile.root_node
+        {
+            self.remove_node_tree(root_id);
         }
     }
 
@@ -358,10 +384,10 @@ impl SceneGraph {
             }
 
             // Check hit regions within this tile (depth-first, front-to-back)
-            if let Some(root_id) = tile.root_node {
-                if let Some(node_id) = self.hit_test_node(root_id, local_x, local_y) {
-                    return Some((tile.id, node_id));
-                }
+            if let Some(root_id) = tile.root_node
+                && let Some(node_id) = self.hit_test_node(root_id, local_x, local_y)
+            {
+                return Some((tile.id, node_id));
             }
 
             // If the tile itself was hit (but no specific node), return tile-level hit
@@ -435,7 +461,7 @@ impl SceneGraph {
             });
         }
 
-        let now_ms = now_millis();
+        let now_ms = self.clock.now_millis();
         let record = ZonePublishRecord {
             zone_name: zone_name.to_string(),
             publisher_namespace: publisher_namespace.to_string(),
@@ -546,16 +572,19 @@ impl SceneGraph {
     }
 }
 
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::TestClock;
+
+    /// Convenience: build a SceneGraph backed by a TestClock starting at t=1000ms.
+    fn scene_with_test_clock() -> (SceneGraph, TestClock) {
+        let clock = TestClock::new(1_000);
+        let scene =
+            SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        (scene, clock)
+    }
 
     #[test]
     fn test_create_scene_with_tab_and_tiles() {
@@ -671,22 +700,53 @@ mod tests {
 
     #[test]
     fn test_lease_expiry() {
-        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let (mut scene, clock) = scene_with_test_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
 
-        // Grant a lease that's already expired (ttl = 0)
-        let lease_id = scene.grant_lease("test", 0, vec![Capability::CreateTile]);
+        // Grant a lease with a 500 ms TTL.
+        // Clock is at t=1000; lease expires at t=1500.
+        let lease_id = scene.grant_lease("test", 500, vec![Capability::CreateTile]);
         scene
             .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
             .unwrap();
 
         assert_eq!(scene.tile_count(), 1);
 
-        // Wait a tiny bit so it expires, then expire
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        // Before expiry: clock still at t=1000, lease lives.
+        let expired = scene.expire_leases();
+        assert_eq!(expired.len(), 0);
+        assert_eq!(scene.tile_count(), 1);
+
+        // Advance past the TTL.
+        clock.advance(501);
         let expired = scene.expire_leases();
         assert_eq!(expired.len(), 1);
         assert_eq!(scene.tile_count(), 0);
+    }
+
+    #[test]
+    fn test_tab_created_at_uses_clock() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        assert_eq!(scene.tabs[&tab_id].created_at_ms, 1_000);
+
+        // Advancing the clock does NOT retroactively change existing timestamps.
+        clock.advance(100);
+        assert_eq!(scene.tabs[&tab_id].created_at_ms, 1_000);
+    }
+
+    #[test]
+    fn test_renew_lease_uses_clock() {
+        let (mut scene, clock) = scene_with_test_clock();
+        // Clock at t=1000.
+        let lease_id = scene.grant_lease("test", 5_000, vec![]);
+        assert_eq!(scene.leases[&lease_id].granted_at_ms, 1_000);
+
+        // Advance clock then renew.
+        clock.advance(2_000);
+        scene.renew_lease(lease_id, 10_000).unwrap();
+        assert_eq!(scene.leases[&lease_id].granted_at_ms, 3_000);
+        assert_eq!(scene.leases[&lease_id].ttl_ms, 10_000);
     }
 
     #[test]

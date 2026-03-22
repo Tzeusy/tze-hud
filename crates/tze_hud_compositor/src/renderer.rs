@@ -214,27 +214,27 @@ impl Compositor {
 
     /// Determine the background color for a tile based on its content.
     fn tile_background_color(&self, tile: &Tile, scene: &SceneGraph) -> [f32; 4] {
-        if let Some(root_id) = tile.root_node {
-            if let Some(node) = scene.nodes.get(&root_id) {
-                match &node.data {
-                    NodeData::SolidColor(sc) => return sc.color.to_array(),
-                    NodeData::TextMarkdown(tm) => {
-                        if let Some(bg) = &tm.background {
-                            return bg.to_array();
-                        }
-                        return [0.15, 0.15, 0.25, tile.opacity];
+        if let Some(root_id) = tile.root_node
+            && let Some(node) = scene.nodes.get(&root_id)
+        {
+            match &node.data {
+                NodeData::SolidColor(sc) => return sc.color.to_array(),
+                NodeData::TextMarkdown(tm) => {
+                    if let Some(bg) = &tm.background {
+                        return bg.to_array();
                     }
-                    NodeData::HitRegion(_) => {
-                        // Check local state for visual feedback
-                        if let Some(state) = scene.hit_region_states.get(&root_id) {
-                            if state.pressed {
-                                return [0.4, 0.7, 1.0, tile.opacity]; // Active blue
-                            } else if state.hovered {
-                                return [0.3, 0.5, 0.8, tile.opacity]; // Hover blue
-                            }
+                    return [0.15, 0.15, 0.25, tile.opacity];
+                }
+                NodeData::HitRegion(_) => {
+                    // Check local state for visual feedback
+                    if let Some(state) = scene.hit_region_states.get(&root_id) {
+                        if state.pressed {
+                            return [0.4, 0.7, 1.0, tile.opacity]; // Active blue
+                        } else if state.hovered {
+                            return [0.3, 0.5, 0.8, tile.opacity]; // Hover blue
                         }
-                        return [0.2, 0.3, 0.5, tile.opacity]; // Default hit region
                     }
+                    return [0.2, 0.3, 0.5, tile.opacity]; // Default hit region
                 }
             }
         }

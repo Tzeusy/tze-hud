@@ -7,6 +7,7 @@
 //! All types are constructable, mutable, queryable, serializable,
 //! and assertable without any GPU context.
 
+pub mod clock;
 pub mod types;
 pub mod graph;
 pub mod mutation;
@@ -14,6 +15,7 @@ pub mod diff;
 pub mod validation;
 pub mod test_scenes;
 
+pub use clock::{Clock, SystemClock, TestClock};
 pub use types::*;
 pub use graph::SceneGraph;
 pub use mutation::{MutationBatch, SceneMutation};

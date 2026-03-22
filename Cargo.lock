@@ -2412,6 +2412,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tze_hud_scene",
 ]
 
 [[package]]
