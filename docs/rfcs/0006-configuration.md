@@ -1155,8 +1155,8 @@ pub struct DisplayProfile {
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct DisplayProfileConfig {
     /// If set, the named built-in profile is loaded and then the remaining fields
-    /// in this section override it. Must name a built-in (`full-display`, `mobile`,
-    /// `headless`). Custom profiles extending custom profiles are not supported.
+    /// in this section override it. Must name a built-in profile (`full-display` or `mobile`).
+    /// Extending the `headless` profile or another custom profile is not supported.
     #[serde(default)]
     pub extends: Option<ProfileName>,
     // All DisplayProfile fields are optional overrides here.
