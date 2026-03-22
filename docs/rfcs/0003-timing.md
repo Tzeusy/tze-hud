@@ -239,8 +239,8 @@ pub struct SyncGroup {
     /// least one other member was absent. Incremented at Stage 4 on each
     /// incomplete-deferral frame; reset to 0 on normal commit or force-commit.
     /// Has no meaning for AvailableMembers groups (always 0).
-    /// When this value equals max_defer_frames(G), the next Stage 4 evaluation
-    /// triggers a force-commit (see §2.4.1).
+    /// When this value reaches max_defer_frames(G), the Stage 4 evaluation
+    /// for the current frame triggers a force-commit (see §2.4.1).
     pub deferred_frames_count: u32,
 }
 
@@ -374,7 +374,7 @@ AllOrDefer group G with max_defer_frames = N
              │ YES                                    │ NO
              ▼                                        ▼
   ┌────────────────────────┐           ┌──────────────────────────────┐
-  │ Apply all mutations    │           │ G.deferred_frames_count == N? │
+  │ Apply all mutations    │           │ G.deferred_frames_count >= N? │
   │ atomically.            │           └───────────────────┬──────────┘
   │ Reset deferred_frames  │                               │
   │ counter to 0.          │          ┌────────────────────┴──────────┐
