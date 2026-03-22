@@ -136,11 +136,22 @@ impl InputProcessor {
                 // Dispatch pointer_leave to previous owning agent
                 if let Some((old_tile_id, _)) = self.current_hover {
                     if let Some(namespace) = tile_namespace(scene, old_tile_id) {
+                        let leave_interaction_id = scene
+                            .nodes
+                            .get(&old_id)
+                            .and_then(|n| {
+                                if let NodeData::HitRegion(hr) = &n.data {
+                                    Some(hr.interaction_id.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default();
                         dispatch = Some(AgentDispatch {
                             namespace,
                             tile_id: old_tile_id,
                             node_id: old_id,
-                            interaction_id: String::new(),
+                            interaction_id: leave_interaction_id,
                             local_x: 0.0,
                             local_y: 0.0,
                             display_x: event.x,
@@ -229,11 +240,22 @@ impl InputProcessor {
                         if let Some(namespace) = tile_namespace(scene, pressed_tile_id) {
                             let (local_x, local_y) =
                                 display_to_local(scene, pressed_tile_id, event.x, event.y);
+                            let up_interaction_id = scene
+                                .nodes
+                                .get(&pressed_node_id)
+                                .and_then(|n| {
+                                    if let NodeData::HitRegion(hr) = &n.data {
+                                        Some(hr.interaction_id.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or_default();
                             dispatch = Some(AgentDispatch {
                                 namespace,
                                 tile_id: pressed_tile_id,
                                 node_id: pressed_node_id,
-                                interaction_id: String::new(),
+                                interaction_id: up_interaction_id,
                                 local_x,
                                 local_y,
                                 display_x: event.x,
@@ -487,6 +509,7 @@ mod tests {
         assert_eq!(dispatch.namespace, "test");
         assert_eq!(dispatch.tile_id, tile_id);
         assert_eq!(dispatch.node_id, hr_node_id);
+        assert_eq!(dispatch.interaction_id, "test-button");
     }
 
     #[test]
@@ -552,6 +575,7 @@ mod tests {
         assert_eq!(dispatch.kind, AgentDispatchKind::PointerUp);
         assert_eq!(dispatch.tile_id, tile_id);
         assert_eq!(dispatch.node_id, hr_node_id);
+        assert_eq!(dispatch.interaction_id, "test-button");
     }
 
     #[test]
