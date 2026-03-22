@@ -71,6 +71,13 @@ tze_hud runs as a single OS process. Agents are external gRPC clients; they do n
 │  │  owned by compositor thread; main thread has      │            │
 │  │  read-only surface handle for present()          │            │
 │  └──────────────────────────────────────────────────┘            │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────┐            │
+│  │  Media Worker Pool (post-v1, not spawned in v1)  │            │
+│  │  managed by GStreamer's internal scheduler        │            │
+│  │  decode, clock sync, timed metadata              │            │
+│  │  → DecodedFrameReady channel → compositor thread │            │
+│  └──────────────────────────────────────────────────┘            │
 └──────────────────────────────────────────────────────────────────┘
 
           ▲                              ▲
@@ -154,6 +161,8 @@ Fatal GPU errors (device lost, out of memory) trigger an emergency path: flush t
 ### 2.1 Overview
 
 The compositor uses a fixed, small set of threads with explicit responsibilities and typed channels between them. Thread count is determined at startup; no dynamic thread spawning during normal operation.
+
+A media worker pool boundary is reserved for post-v1 GStreamer and WebRTC integration (§2.7). It is not spawned in v1. The channel interface and ownership rules are pre-defined so that adding media workers does not require restructuring the thread model.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -272,6 +281,9 @@ All inter-thread communication uses bounded channels. No unbounded queues.
 | `SceneEventStateStream` (compositor → network) | bounded + coalesce map | 512 | Coalesce-key merging (intermediate states skipped, not dropped) |
 | `SceneEventEphemeral` (compositor → network) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
 | `TelemetryRecord` (compositor → telemetry) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
+| `DecodedFrameReady` (media pool → compositor) | ring buffer (custom) | 4 per stream | Oldest dropped (decoder runs ahead; compositor picks latest ready frame) |
+
+**`DecodedFrameReady` (post-v1, reserved).** This channel is not created in v1. Its entry in the topology table reserves the interface so that implementors building the v1 channel graph do not design around it. See §2.7 for the full ownership and threading rules.
 
 **`SceneLocalPatch` type.** A `SceneLocalPatch` carries only the hit-region local state changes produced by Stage 2 (pressed/hovered flags). It does not carry mutations that require lease validation or invariant checking. The compositor thread drains the `SceneLocalPatch` channel alongside `InputEvent` and `MutationBatch` at the start of Stage 3 and applies local state patches directly to the scene without a full commit cycle. The `ArcSwapFull<HitTestSnapshot>` is updated after applying local patches (T-11: resolves missing channel in topology table). (T-11)
 
@@ -299,6 +311,80 @@ The compositor thread classifies each outbound `SceneEvent` by traffic class at 
 Backpressure on the `MutationBatch` channel propagates naturally to gRPC flow control: tonic's `AsyncRead`/`AsyncWrite` buffers fill up and the TCP window shrinks. Agents that send faster than the compositor can process will see their streams slow — this is correct behavior, not an error.
 
 Backpressure on `SceneEventTransactional` is bounded by the rate of transactional events (lease operations, mutation acks). These are low-rate by design (at most one per agent mutation batch, capped by `max_update_rate_hz`). A full `SceneEventTransactional` channel indicates a severely stalled or unresponsive agent — acceptable to apply backpressure in that case.
+
+### 2.7 Future: Media Worker Boundary
+
+> **This section is a reservation, not an implementation spec.** Nothing in this section is built in v1. It documents where media workers will live in the thread model and what constraints must be preserved so that adding them post-v1 does not require restructuring the v1 design.
+
+#### Motivation
+
+Post-v1 integration of GStreamer media pipelines and WebRTC will require threads that are neither Tokio tasks nor `std::thread`s owned by the compositor. GStreamer has its own internal thread pool (managed by its scheduler and element graph). WebRTC ICE/DTLS threads are managed by the WebRTC library. These cannot be collapsed into the Tokio runtime — GStreamer's threading model is incompatible with cooperative async scheduling, and WebRTC libraries typically manage their own OS threads internally.
+
+Without a pre-defined boundary, a future implementor faces three bad options: break the "fixed thread model" contract (§2.1), hack media decode onto the compositor thread (violates frame budget), or restructure the entire thread model in a disruptive RFC revision. This section defines the boundary now at low cost.
+
+This is also required by architecture.md §Media: GStreamer ("media is not an add-on") and §Multiple video feeds are a compositor problem ("isolate decode, scene update, and presentation work").
+
+#### The Boundary
+
+**The media worker pool is managed entirely by GStreamer's internal scheduler.** From the compositor's perspective, the media pool is a black box that delivers decoded frames. The compositor does not spawn, manage, or join any GStreamer thread. It only interacts with GStreamer pipelines via the `DecodedFrameReady` channel (§2.6) and GStreamer's Rust pipeline API.
+
+**Thread count:** Determined by GStreamer at pipeline construction time (based on element graph topology and system core count). Not under compositor control. Not observable as named threads in the compositor's thread table.
+
+**Lifetime:** The media pool is created when the first media pipeline is started (post-v1) and torn down when the last pipeline is stopped. It does not exist at all in v1.
+
+#### GPU Device Ownership Invariant
+
+This is the critical constraint that the boundary must preserve:
+
+**The compositor thread is the sole owner of the wgpu `Device` and `Queue`. No media worker thread may access the GPU device directly.**
+
+The reason: wgpu (and the underlying Vulkan/D3D12/Metal backends) do not permit concurrent access to a `Device` from multiple threads without explicit synchronization. The compositor thread already owns the device. Allowing GStreamer threads to submit GPU work would require either a second device (expensive, no zero-copy) or explicit mutex-guarded device sharing (frame-pipeline budget risk, correctness hazard).
+
+The consequence: decoded video frames must be uploaded to GPU textures by the compositor thread, not by media worker threads. The flow is:
+
+```
+GStreamer decode thread
+  → decoded CPU buffer (or mapped DMA-BUF on Linux)
+  → DecodedFrameReady { texture_data, presentation_ts, stream_id }
+  → [ring buffer, capacity 4 per stream, drop-oldest]
+Compositor thread (Stage 3 or dedicated sub-stage)
+  → drain DecodedFrameReady signals
+  → device.create_texture() + queue.write_texture() (CPU-side upload)
+     OR: import DMA-BUF as wgpu texture (zero-copy, Linux/Vulkan only, post-v1 optimization)
+  → GPU-resident texture handle stored in tile's media node
+Stage 6: Render Encode
+  → blit GPU texture into tile's compositing region
+```
+
+On Linux with Vulkan and DMA-BUF, a zero-copy path is possible (GStreamer produces a DMA-BUF handle; the compositor imports it as a wgpu external texture). This optimization is post-v1 and must not influence v1 channel design.
+
+#### Channel Interface
+
+The `DecodedFrameReady` channel (see §2.6 Channel Topology table) carries:
+
+```rust
+// Non-normative sketch. Authoritative definition deferred to the post-v1 Media RFC.
+pub struct DecodedFrameReady {
+    pub stream_id: SceneId,         // Which media stream / tile this frame belongs to
+    pub presentation_ts: Duration,  // GStreamer running-time timestamp (media clock)
+    pub data: MediaFrameData,       // CPU-side decoded data or OS-specific zero-copy handle
+    pub sequence: u64,              // Monotonically increasing per stream; compositor skips gaps
+}
+
+pub enum MediaFrameData {
+    CpuRgba { width: u32, height: u32, bytes: Vec<u8> },
+    // Post-v1: DmaBuf { fd: RawFd, planes: Vec<DmaBufPlane> }, // Linux/Vulkan zero-copy
+}
+```
+
+The channel is a ring buffer with capacity 4 per active stream (drop-oldest). The compositor reads the latest ready frame during Stage 3 (or a dedicated sub-stage inserted between Stage 3 and Stage 4). It uploads the texture to the GPU and updates the tile's media node with the new texture handle. The compositor may skip frames if the decoder runs ahead — the ring buffer's drop-oldest semantics ensure the compositor always sees the freshest decoded frame, never a stale one.
+
+#### What Must NOT Change in v1 to Accommodate This
+
+- The compositor thread's exclusive ownership of `wgpu::Device` and `wgpu::Queue` must not be relaxed.
+- The `MutationBatch` channel and the compositor thread's main loop structure must not be changed to make room for media. Media input arrives on its own channel, drained in a distinct step.
+- The Tokio runtime must not be used to schedule GStreamer pipeline state changes. GStreamer has its own pipeline state machine and must be driven from a dedicated control point (likely a thin wrapper on the compositor thread or a helper `std::thread`).
+- The v1 channel topology table (§2.6) already includes the `DecodedFrameReady` row. Any v1 implementation that creates the channel infrastructure must leave the slot empty (channel not created) rather than removing the row — removing it would require a channel topology amendment at integration time.
 
 ---
 
@@ -409,7 +495,7 @@ Build wgpu `CommandEncoder` from the `RenderFrame`. For each tile in the composi
 
 Render encoding does not submit to the GPU queue. It only prepares `CommandBuffer` objects.
 
-Media tiles (deferred to post-v1) will add video surface compositing here.
+Media tiles (deferred to post-v1) will add video surface compositing here. The compositor thread will drain `DecodedFrameReady` signals during Stage 3 (Mutation Intake) or a dedicated sub-stage, upload decoded GPU textures (preserving GPU device ownership — see §2.7), and blit the resulting textures during Stage 6. No media decode work happens on the compositor thread.
 
 #### Stage 7: GPU Submit + Present
 **Thread:** Compositor | **Budget:** p99 < 8ms
