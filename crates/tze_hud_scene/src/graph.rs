@@ -389,6 +389,142 @@ impl SceneGraph {
         }
     }
 
+    // ─── Zone operations ─────────────────────────────────────────────────
+
+    /// Register a zone definition in the zone registry.
+    pub fn register_zone(&mut self, zone: ZoneDefinition) {
+        self.zone_registry.register(zone);
+        self.version += 1;
+    }
+
+    /// Unregister a zone by name. Returns the removed definition if found.
+    pub fn unregister_zone(&mut self, name: &str) -> Option<ZoneDefinition> {
+        let removed = self.zone_registry.unregister(name);
+        if removed.is_some() {
+            self.version += 1;
+        }
+        removed
+    }
+
+    /// Publish content to a zone. Applies contention policy.
+    ///
+    /// Token validation is out-of-scope for the pure scene graph layer;
+    /// callers (e.g., the gRPC server) must validate the token before calling this.
+    pub fn publish_to_zone(
+        &mut self,
+        zone_name: &str,
+        content: ZoneContent,
+        publisher_namespace: &str,
+        merge_key: Option<String>,
+    ) -> Result<(), ValidationError> {
+        // Check zone exists and content type is accepted
+        let (contention_policy, max_publishers, accepted) = {
+            let zone = self
+                .zone_registry
+                .get_by_name(zone_name)
+                .ok_or_else(|| ValidationError::ZoneNotFound { name: zone_name.to_string() })?;
+            let accepted = Self::content_media_type(&content)
+                .map(|mt| zone.accepted_media_types.contains(&mt))
+                .unwrap_or(true);
+            (zone.contention_policy, zone.max_publishers, accepted)
+        };
+
+        if !accepted {
+            return Err(ValidationError::ZoneMediaTypeMismatch {
+                zone: zone_name.to_string(),
+            });
+        }
+
+        let now_ms = now_millis();
+        let record = ZonePublishRecord {
+            zone_name: zone_name.to_string(),
+            publisher_namespace: publisher_namespace.to_string(),
+            content,
+            published_at_ms: now_ms,
+            merge_key: merge_key.clone(),
+        };
+
+        let publishes = self
+            .zone_registry
+            .active_publishes
+            .entry(zone_name.to_string())
+            .or_default();
+
+        match contention_policy {
+            ContentionPolicy::LatestWins => {
+                // Replace all with the single new record
+                *publishes = vec![record];
+            }
+            ContentionPolicy::Replace => {
+                // Single occupant: evict current and replace
+                *publishes = vec![record];
+            }
+            ContentionPolicy::Stack { max_depth } => {
+                // Check publisher count limit
+                let publisher_count = publishes
+                    .iter()
+                    .filter(|r| r.publisher_namespace == publisher_namespace)
+                    .count() as u32;
+                if publisher_count >= max_publishers {
+                    return Err(ValidationError::ZoneMaxPublishersReached {
+                        zone: zone_name.to_string(),
+                        max: max_publishers,
+                    });
+                }
+                publishes.push(record);
+                // Trim oldest if stack exceeds max_depth
+                let max = max_depth as usize;
+                if publishes.len() > max {
+                    let excess = publishes.len() - max;
+                    publishes.drain(0..excess);
+                }
+            }
+            ContentionPolicy::MergeByKey { max_keys } => {
+                let key = merge_key.clone().unwrap_or_default();
+                // Replace existing entry with same key
+                if let Some(pos) = publishes.iter().position(|r| {
+                    r.merge_key.as_deref().unwrap_or("") == key.as_str()
+                }) {
+                    publishes[pos] = record;
+                } else {
+                    // Check key count limit
+                    if publishes.len() >= max_keys as usize {
+                        return Err(ValidationError::ZoneMaxPublishersReached {
+                            zone: zone_name.to_string(),
+                            max: max_keys as u32,
+                        });
+                    }
+                    publishes.push(record);
+                }
+            }
+        }
+
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Clear all active publishes for a zone.
+    pub fn clear_zone(&mut self, zone_name: &str) -> Result<(), ValidationError> {
+        if !self.zone_registry.zones.contains_key(zone_name) {
+            return Err(ValidationError::ZoneNotFound { name: zone_name.to_string() });
+        }
+        self.zone_registry.active_publishes.remove(zone_name);
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Map ZoneContent to its ZoneMediaType, if deterministic.
+    fn content_media_type(content: &ZoneContent) -> Option<ZoneMediaType> {
+        match content {
+            ZoneContent::StreamText(_) => Some(ZoneMediaType::StreamText),
+            ZoneContent::Notification(_) => Some(ZoneMediaType::ShortTextWithIcon),
+            ZoneContent::StatusBar(_) => Some(ZoneMediaType::KeyValuePairs),
+            ZoneContent::SolidColor(_) => Some(ZoneMediaType::SolidColor),
+        }
+    }
+
+    // ─── Queries ─────────────────────────────────────────────────────────
+
     /// Snapshot the entire scene graph as JSON.
     pub fn snapshot_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
@@ -587,5 +723,340 @@ mod tests {
         assert_eq!(visible[0].z_order, 1);
         assert_eq!(visible[1].z_order, 3);
         assert_eq!(visible[2].z_order, 5);
+    }
+
+    // ─── Zone tests ───────────────────────────────────────────────────────
+
+    fn make_subtitle_zone() -> ZoneDefinition {
+        ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_string(),
+            description: "Subtitle overlay".to_string(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 48.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 2,
+            transport_constraint: None,
+            auto_clear_ms: None,
+        }
+    }
+
+    fn make_notification_zone() -> ZoneDefinition {
+        ZoneDefinition {
+            id: SceneId::new(),
+            name: "notifications".to_string(),
+            description: "Notification stack".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 3 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: Some(5_000),
+        }
+    }
+
+    fn make_status_bar_zone() -> ZoneDefinition {
+        ZoneDefinition {
+            id: SceneId::new(),
+            name: "status-bar".to_string(),
+            description: "Status bar".to_string(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.04,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::MergeByKey { max_keys: 8 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+        }
+    }
+
+    fn dummy_token() -> ZonePublishToken {
+        ZonePublishToken { token: vec![0xDE, 0xAD, 0xBE, 0xEF] }
+    }
+
+    #[test]
+    fn test_zone_register_unregister() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone = make_subtitle_zone();
+
+        scene.register_zone(zone.clone());
+        assert!(scene.zone_registry.get_by_name("subtitle").is_some());
+
+        let removed = scene.unregister_zone("subtitle");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().name, "subtitle");
+        assert!(scene.zone_registry.get_by_name("subtitle").is_none());
+    }
+
+    #[test]
+    fn test_zone_query_by_name() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone());
+        scene.register_zone(make_notification_zone());
+
+        let zone = scene.zone_registry.get_by_name("subtitle").unwrap();
+        assert_eq!(zone.name, "subtitle");
+        assert!(scene.zone_registry.get_by_name("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_zone_query_by_media_type() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone());
+        scene.register_zone(make_notification_zone());
+
+        let stream_text_zones = scene.zone_registry.zones_accepting(ZoneMediaType::StreamText);
+        assert_eq!(stream_text_zones.len(), 1);
+        assert_eq!(stream_text_zones[0].name, "subtitle");
+
+        let notif_zones = scene.zone_registry.zones_accepting(ZoneMediaType::ShortTextWithIcon);
+        assert_eq!(notif_zones.len(), 1);
+        assert_eq!(notif_zones[0].name, "notifications");
+    }
+
+    #[test]
+    fn test_default_zones_populated() {
+        let registry = ZoneRegistry::with_defaults();
+        assert!(registry.get_by_name("status-bar").is_some());
+        assert!(registry.get_by_name("notification-area").is_some());
+        assert!(registry.get_by_name("subtitle").is_some());
+    }
+
+    #[test]
+    fn test_zone_publish_not_found() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let result = scene.publish_to_zone(
+            "nonexistent",
+            ZoneContent::StreamText("hello".to_string()),
+            "agent",
+            None,
+        );
+        assert!(matches!(result, Err(ValidationError::ZoneNotFound { .. })));
+    }
+
+    #[test]
+    fn test_zone_publish_media_type_mismatch() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone()); // accepts StreamText only
+
+        let result = scene.publish_to_zone(
+            "subtitle",
+            ZoneContent::Notification(NotificationPayload {
+                text: "Hello".to_string(),
+                icon: "".to_string(),
+                urgency: 1,
+            }),
+            "agent",
+            None,
+        );
+        assert!(matches!(result, Err(ValidationError::ZoneMediaTypeMismatch { .. })));
+    }
+
+    #[test]
+    fn test_contention_latest_wins() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone());
+
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("first".to_string()), "a1", None).unwrap();
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("second".to_string()), "a2", None).unwrap();
+
+        let publishes = scene.zone_registry.active_for_zone("subtitle");
+        assert_eq!(publishes.len(), 1);
+        assert_eq!(publishes[0].content, ZoneContent::StreamText("second".to_string()));
+        assert_eq!(publishes[0].publisher_namespace, "a2");
+    }
+
+    #[test]
+    fn test_contention_stack() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_notification_zone()); // Stack { max_depth: 3 }
+
+        let notification = |text: &str| ZoneContent::Notification(NotificationPayload {
+            text: text.to_string(),
+            icon: "".to_string(),
+            urgency: 1,
+        });
+
+        scene.publish_to_zone("notifications", notification("msg1"), "a1", None).unwrap();
+        scene.publish_to_zone("notifications", notification("msg2"), "a2", None).unwrap();
+        scene.publish_to_zone("notifications", notification("msg3"), "a3", None).unwrap();
+
+        let publishes = scene.zone_registry.active_for_zone("notifications");
+        assert_eq!(publishes.len(), 3);
+
+        // 4th publish should trim the oldest
+        scene.publish_to_zone("notifications", notification("msg4"), "a4", None).unwrap();
+        let publishes = scene.zone_registry.active_for_zone("notifications");
+        assert_eq!(publishes.len(), 3);
+        // Oldest (msg1) should be gone, newest (msg4) at end
+        if let ZoneContent::Notification(n) = &publishes[0].content {
+            assert_eq!(n.text, "msg2");
+        } else {
+            panic!("expected Notification");
+        }
+        if let ZoneContent::Notification(n) = &publishes[2].content {
+            assert_eq!(n.text, "msg4");
+        } else {
+            panic!("expected Notification");
+        }
+    }
+
+    #[test]
+    fn test_contention_merge_by_key() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_status_bar_zone()); // MergeByKey { max_keys: 8 }
+
+        let kv = |k: &str, v: &str| {
+            let mut entries = std::collections::HashMap::new();
+            entries.insert(k.to_string(), v.to_string());
+            ZoneContent::StatusBar(StatusBarPayload { entries })
+        };
+
+        // Publish with different keys
+        scene.publish_to_zone("status-bar", kv("clock", "12:00"), "a1", Some("clock".to_string())).unwrap();
+        scene.publish_to_zone("status-bar", kv("battery", "80%"), "a2", Some("battery".to_string())).unwrap();
+
+        let publishes = scene.zone_registry.active_for_zone("status-bar");
+        assert_eq!(publishes.len(), 2);
+
+        // Update existing key "clock"
+        scene.publish_to_zone("status-bar", kv("clock", "12:01"), "a1", Some("clock".to_string())).unwrap();
+        let publishes = scene.zone_registry.active_for_zone("status-bar");
+        assert_eq!(publishes.len(), 2); // Still 2 (clock replaced, battery retained)
+        let clock = publishes.iter().find(|r| r.merge_key.as_deref() == Some("clock")).unwrap();
+        if let ZoneContent::StatusBar(sb) = &clock.content {
+            assert_eq!(sb.entries["clock"], "12:01");
+        } else {
+            panic!("expected StatusBar");
+        }
+    }
+
+    #[test]
+    fn test_contention_replace() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone = ZoneDefinition {
+            id: SceneId::new(),
+            name: "pip".to_string(),
+            description: "Picture in picture".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.80,
+                y_pct: 0.80,
+                width_pct: 0.18,
+                height_pct: 0.18,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+        };
+        scene.register_zone(zone);
+
+        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::WHITE), "a1", None).unwrap();
+        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::BLACK), "a2", None).unwrap();
+
+        let publishes = scene.zone_registry.active_for_zone("pip");
+        assert_eq!(publishes.len(), 1);
+        assert_eq!(publishes[0].publisher_namespace, "a2");
+    }
+
+    #[test]
+    fn test_clear_zone() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone());
+
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "a1", None).unwrap();
+        assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
+
+        scene.clear_zone("subtitle").unwrap();
+        assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 0);
+    }
+
+    #[test]
+    fn test_clear_zone_not_found() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let result = scene.clear_zone("nonexistent");
+        assert!(matches!(result, Err(ValidationError::ZoneNotFound { .. })));
+    }
+
+    #[test]
+    fn test_zone_registry_snapshot() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone());
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hi".to_string()), "a1", None).unwrap();
+
+        let snap = scene.zone_registry.snapshot();
+        assert_eq!(snap.zones.len(), 1);
+        assert_eq!(snap.active_publishes.len(), 1);
+        assert_eq!(snap.active_publishes[0].zone_name, "subtitle");
+    }
+
+    #[test]
+    fn test_zone_publish_via_mutation_batch() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone());
+
+        use crate::mutation::{MutationBatch, SceneMutation};
+
+        let batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![
+                SceneMutation::PublishToZone {
+                    zone_name: "subtitle".to_string(),
+                    content: ZoneContent::StreamText("batch publish".to_string()),
+                    publish_token: dummy_token(),
+                    merge_key: None,
+                },
+            ],
+        };
+
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied, "batch should be applied");
+        let publishes = scene.zone_registry.active_for_zone("subtitle");
+        assert_eq!(publishes.len(), 1);
+        assert_eq!(publishes[0].content, ZoneContent::StreamText("batch publish".to_string()));
+    }
+
+    #[test]
+    fn test_clear_zone_via_mutation_batch() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.register_zone(make_subtitle_zone());
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "a1", None).unwrap();
+
+        use crate::mutation::{MutationBatch, SceneMutation};
+
+        let batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![
+                SceneMutation::ClearZone {
+                    zone_name: "subtitle".to_string(),
+                    publish_token: dummy_token(),
+                },
+            ],
+        };
+
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied);
+        assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 0);
     }
 }

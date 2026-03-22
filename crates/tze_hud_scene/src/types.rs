@@ -303,24 +303,292 @@ impl Lease {
     }
 }
 
-// ─── Zone (minimal, from config) ────────────────────────────────────────────
+// ─── Zone types ─────────────────────────────────────────────────────────────
 
+/// Display edge for edge-anchored zone geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DisplayEdge {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// Geometry policy — how a zone is positioned on the display.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum GeometryPolicy {
+    /// Percentage-based position relative to display area.
+    Relative {
+        x_pct: f32,
+        y_pct: f32,
+        width_pct: f32,
+        height_pct: f32,
+    },
+    /// Anchored to a display edge.
+    EdgeAnchored {
+        edge: DisplayEdge,
+        /// Used for Top/Bottom edges.
+        height_pct: f32,
+        /// Used for Left/Right edges.
+        width_pct: f32,
+        margin_px: f32,
+    },
+}
+
+/// Media types that can be published to a zone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZoneMediaType {
+    /// Stream-text with optional breakpoints.
+    StreamText,
+    /// Notification: text + icon + urgency.
+    ShortTextWithIcon,
+    /// Status-bar: key-value map.
+    KeyValuePairs,
+    /// Reference to a media surface (post-v1 media layer).
+    VideoSurfaceRef,
+    /// Static image resource.
+    StaticImage,
+    /// Solid color fill.
+    SolidColor,
+}
+
+/// Rendering policy — how content is presented in the zone.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RenderingPolicy {
+    pub font_size_px: Option<f32>,
+    pub backdrop: Option<Rgba>,
+    pub text_align: Option<TextAlign>,
+    pub margin_px: Option<f32>,
+}
+
+/// Contention policy — what happens when multiple agents publish to the same zone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContentionPolicy {
+    /// Most recent publish replaces previous content.
+    LatestWins,
+    /// Publishes accumulate as a stack; each auto-dismisses.
+    Stack { max_depth: u8 },
+    /// Each publish includes a key; same key replaces, different keys coexist.
+    MergeByKey { max_keys: u8 },
+    /// Only one occupant; new publish evicts current one.
+    Replace,
+}
+
+/// Transport constraint for zone publishing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransportConstraint {
+    /// Content must arrive via gRPC session stream.
+    GrpcOnly,
+    /// Content may arrive via MCP tool call.
+    McpAllowed,
+    /// Content requires WebRTC media channel (post-v1).
+    WebRtcRequired,
+}
+
+/// Full zone definition per RFC 0001 §2.5.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ZoneDefinition {
     pub id: SceneId,
     pub name: String,
     pub description: String,
+    pub geometry_policy: GeometryPolicy,
+    pub accepted_media_types: Vec<ZoneMediaType>,
+    pub rendering_policy: RenderingPolicy,
+    pub contention_policy: ContentionPolicy,
+    pub max_publishers: u32,
+    pub transport_constraint: Option<TransportConstraint>,
+    /// Auto-clear timeout in milliseconds; None = no auto-clear.
+    pub auto_clear_ms: Option<u64>,
 }
 
+// ─── Zone publish token ──────────────────────────────────────────────────────
+
+/// Opaque capability token that authorizes publishing to a specific zone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZonePublishToken {
+    /// Opaque bytes issued at session auth.
+    pub token: Vec<u8>,
+}
+
+// ─── Zone content ────────────────────────────────────────────────────────────
+
+/// Notification payload: text + optional icon + urgency.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPayload {
+    pub text: String,
+    /// Resource name or empty string.
+    pub icon: String,
+    /// 0=low, 1=normal, 2=urgent, 3=critical.
+    pub urgency: u32,
+}
+
+/// Status-bar payload: key → display string map.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusBarPayload {
+    pub entries: HashMap<String, String>,
+}
+
+/// Content that can be published to a zone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ZoneContent {
+    StreamText(String),
+    Notification(NotificationPayload),
+    StatusBar(StatusBarPayload),
+    SolidColor(Rgba),
+}
+
+// ─── Zone publish records ────────────────────────────────────────────────────
+
+/// Record of a single publish event into a zone.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ZonePublishRecord {
+    pub zone_name: String,
+    pub publisher_namespace: String,
+    pub content: ZoneContent,
+    pub published_at_ms: u64,
+    /// For MergeByKey contention: the key under which this record is stored.
+    pub merge_key: Option<String>,
+}
+
+// ─── Zone registry ───────────────────────────────────────────────────────────
+
+/// Snapshot of the zone registry (all zones + active publishes).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ZoneRegistrySnapshot {
+    pub zones: Vec<ZoneDefinition>,
+    pub active_publishes: Vec<ZonePublishRecord>,
+}
+
+/// Runtime-owned zone registry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZoneRegistry {
+    /// Zone definitions keyed by zone name.
     pub zones: HashMap<String, ZoneDefinition>,
+    /// Active publishes per zone name.
+    /// For LatestWins/Replace: at most one entry per zone.
+    /// For Stack: ordered oldest-first, bounded by max_depth.
+    /// For MergeByKey: keyed by merge_key, bounded by max_keys.
+    pub active_publishes: HashMap<String, Vec<ZonePublishRecord>>,
 }
 
 impl ZoneRegistry {
     pub fn new() -> Self {
         Self {
             zones: HashMap::new(),
+            active_publishes: HashMap::new(),
+        }
+    }
+
+    /// Create a registry pre-populated with the default v1 zones.
+    pub fn with_defaults() -> Self {
+        let mut registry = Self::new();
+
+        // status-bar zone: edge-anchored bottom, MergeByKey
+        registry.register(ZoneDefinition {
+            id: SceneId::new(),
+            name: "status-bar".to_string(),
+            description: "Status bar at the bottom of the display".to_string(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.04,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::MergeByKey { max_keys: 32 },
+            max_publishers: 16,
+            transport_constraint: None,
+            auto_clear_ms: None,
+        });
+
+        // notification-area zone: edge-anchored top-right, Stack
+        registry.register(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_string(),
+            description: "Notification overlay area".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 16,
+            transport_constraint: None,
+            auto_clear_ms: Some(5_000),
+        });
+
+        // subtitle zone: edge-anchored bottom, LatestWins
+        registry.register(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_string(),
+            description: "Subtitle / caption overlay".to_string(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 48.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+        });
+
+        registry
+    }
+
+    /// Register a zone definition. Overwrites any existing definition with the same name.
+    pub fn register(&mut self, zone: ZoneDefinition) {
+        self.zones.insert(zone.name.clone(), zone);
+    }
+
+    /// Remove a zone definition by name. Returns the removed definition if present.
+    pub fn unregister(&mut self, name: &str) -> Option<ZoneDefinition> {
+        self.active_publishes.remove(name);
+        self.zones.remove(name)
+    }
+
+    /// Look up a zone by name.
+    pub fn get_by_name(&self, name: &str) -> Option<&ZoneDefinition> {
+        self.zones.get(name)
+    }
+
+    /// Query zones that accept a given media type.
+    pub fn zones_accepting(&self, media_type: ZoneMediaType) -> Vec<&ZoneDefinition> {
+        self.zones
+            .values()
+            .filter(|z| z.accepted_media_types.contains(&media_type))
+            .collect()
+    }
+
+    /// Return all zone definitions.
+    pub fn all_zones(&self) -> Vec<&ZoneDefinition> {
+        self.zones.values().collect()
+    }
+
+    /// Get the current active publish(es) for a zone.
+    pub fn active_for_zone(&self, zone_name: &str) -> &[ZonePublishRecord] {
+        self.active_publishes
+            .get(zone_name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Snapshot the registry (all definitions + all active publishes).
+    pub fn snapshot(&self) -> ZoneRegistrySnapshot {
+        ZoneRegistrySnapshot {
+            zones: self.zones.values().cloned().collect(),
+            active_publishes: self
+                .active_publishes
+                .values()
+                .flat_map(|v| v.iter().cloned())
+                .collect(),
         }
     }
 }
