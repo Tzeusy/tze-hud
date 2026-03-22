@@ -16,6 +16,7 @@
 | 2 | 2026-03-22 | rig-5vq.28 | Technical architecture scrutiny | Removed dead resume fields from `SessionInit` (reserved 9–10); completed state machine (Handshaking→Closed, Resuming→Closed paths); added `heartbeat_missed_threshold = 3` config param (3× not 2×); per-session dedup window; `SubscriptionChangeResult` replaces `MutationResult` for subscription acks; `ZonePublishResult` for durable zone acks; `RuntimeError.ErrorCode` typed enum; `CapabilityRequest` rejection semantics; v1 implementation note in §6.4; `InputMessage` variant filter rule in §7.1; embodied presence Q in §12. |
 | 3 | 2026-03-22 | rig-upg | Telemetry gap fix | Defined `TelemetryFrame` message (§9) with compositor performance fields; added `telemetry_frame = 41` to `SessionMessage` oneof; added `TELEMETRY_FRAMES = 7` to `SubscriptionCategory` enum (§7.1, §7.3, §9 proto); added `TelemetryFrame` row to §3.2 server→client table; updated §2.1 to reference `TelemetryFrame`; updated §9.2 field allocation note. |
 | 4 | 2026-03-22 | rig-5xu | Dedicated ack message for SubscriptionChange | §5.3 updated: `SubscriptionChange` added to the sequence-correlated non-batch message list alongside `LeaseRequest` and `CapabilityRequest`; explicit note that `MutationResult` is never used to ack non-mutation messages. Completes the `SubscriptionChangeResult` work introduced in Round 2. |
+| 5 | 2026-03-22 | rig-6c2 | Doctrinal alignment — guest MCP surface | Restricted §8.3 guest tool set to zone-centric operations (`publish_to_zone`, `list_zones`, restricted `list_scene`); gated tile management tools (`create_tab`, `create_tile`, `set_content`, `dismiss`) behind `resident_mcp` capability; added `CAPABILITY_REQUIRED` error semantics for gated tools; updated §8.1 purpose to state v1 guest surface restriction; added post-v1 promoted guest pattern note. |
 
 ---
 
@@ -658,7 +659,9 @@ Mobile Presence Nodes (post-v1) may negotiate reduced-granularity event delivery
 
 The MCP bridge provides a compatibility surface for guest-level LLM agents that use JSON-RPC tool calls (stdio or Streamable HTTP) rather than holding a persistent gRPC session. Guest agents cannot subscribe to events, hold surface leases, or access media streams. They perform one-off operations and disconnect.
 
-The MCP bridge is not a simplified version of the gRPC API — it is a separate transport adapter that maps specific, LLM-optimized tool calls to the same scene mutation and zone publish operations that resident agents use. The scene model is shared; only the transport differs.
+For v1, the guest MCP tool surface is intentionally restricted to zone-centric operations. Zones are the LLM-first publishing surface: a guest can publish content to a named zone with a single tool call and zero scene context. Low-level tile management (create_tab, create_tile, set_content, dismiss) requires a resident-level presence and is not available to guest agents over MCP in v1. This aligns with the trust gradient defined in security.md §"Trust gradient" and the v1 success criteria in v1.md §"V1 success criteria".
+
+The MCP bridge is not a simplified version of the gRPC API — it is a separate transport adapter that maps specific, LLM-optimized tool calls to zone publish operations and bounded read queries. The scene model is shared; only the transport and capability surface differ.
 
 ### 8.2 Transport
 
@@ -671,17 +674,30 @@ Both modes use JSON-RPC 2.0 as the message format. Neither mode supports persist
 
 ### 8.3 MCP Tool Set
 
+The v1 guest MCP tool surface is restricted to zone-centric operations and a bounded read query. Tools that require tile lifecycle ownership (lease acquisition, tile creation, tile mutation) are not available to guest agents in v1.
+
+**Guest-accessible tools (v1):**
+
 | Tool | Parameters | Effect |
 |------|-----------|--------|
-| `create_tab` | `name: string` | Create a new tab |
-| `create_tile` | `tab_id, bounds, z_order` | Create a tile; returns `tile_id` |
-| `set_content` | `tile_id, node: NodeSpec` | Set or replace the root node of a tile |
-| `dismiss` | `tile_id` | Delete a tile and release its lease |
-| `list_scene` | *(none)* | Returns current scene topology as JSON |
-| `publish_to_zone` | `zone_name, content, ttl_ms?, merge_key?` | Publish content to a zone |
+| `publish_to_zone` | `zone_name, content, ttl_ms?, merge_key?` | Publish content to a zone; primary LLM-first surface |
 | `list_zones` | *(none)* | Returns zone registry (names, types, current occupancy) |
+| `list_scene` | *(none)* | Returns tab names and zone registry only — not full tile topology |
 
-Tools `publish_to_zone` and `list_zones` are the primary LLM-first surface. They require no scene context and zero tile management. See v1.md §"V1 success criteria" for the design intent.
+`publish_to_zone` and `list_zones` require no scene context and zero tile management. `list_scene` for guest agents returns a restricted view (tabs and zones) rather than full tile topology, sufficient for zone discovery without exposing internal scene structure. See v1.md §"V1 success criteria" for the design intent.
+
+**Tile management tools — not available to guest agents in v1:**
+
+| Tool | Parameters | Requires |
+|------|-----------|----------|
+| `create_tab` | `name: string` | `resident_mcp` capability or gRPC-backed session |
+| `create_tile` | `tab_id, bounds, z_order` | `resident_mcp` capability or gRPC-backed session |
+| `set_content` | `tile_id, node: NodeSpec` | `resident_mcp` capability or gRPC-backed session |
+| `dismiss` | `tile_id` | `resident_mcp` capability or gRPC-backed session |
+
+These tools are defined in the MCP spec but gated behind the `resident_mcp` capability. A guest agent invoking any of these tools receives a `PERMISSION_DENIED` error with `error_code: "CAPABILITY_REQUIRED"` and `hint: {"required_capability": "resident_mcp"}`. The tools are not exposed in the tool list returned to guest sessions.
+
+**Note — promoted guest pattern (post-v1):** A future extension will allow an MCP session to be promoted to a resident-level presence by pairing it with a backing gRPC session. A promoted guest acquires the `resident_mcp` capability and gains access to tile management tools without a full gRPC-native agent implementation. This pattern is out of scope for v1.
 
 ### 8.4 Authentication Over MCP
 
