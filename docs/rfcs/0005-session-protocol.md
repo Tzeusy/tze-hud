@@ -21,6 +21,7 @@
 | 7 | 2026-03-22 | rig-de2 | ID type alignment with RFC 0001 SceneId | `MutationBatch.batch_id` and `MutationBatch.lease_id` changed from `string` to `SceneId`; `MutationResult.batch_id` and `MutationResult.created_ids` changed from `string`/`repeated string` to `SceneId`/`repeated SceneId`; updated §3.3, §5.2, §9 (proto), §9.1 (import graph), §11; added ID type convention note distinguishing scene-object IDs (use `SceneId`) from session-level identifiers (`agent_id`, `session_token`, `namespace` remain `string`). |
 | 8 | 2026-03-22 | rig-8uq | Snapshot gap fix | Added `SceneSnapshot` (imported from RFC 0001 §7.1) as field 42 in `SessionMessage` oneof (field 41 was allocated to `TelemetryFrame` in Round 3); added scene snapshot comment block in §9 proto; noted snapshot delivery in §1.3 (`SessionEstablished`) and §3.2 server→client table; updated §6.5 to reference `SceneSnapshot` by name; updated §6.4 v1 note to use `SceneSnapshot` instead of `SceneEvent`; updated §9.1 import graph and §9.2 field registry; updated §11 cross-RFC table with RFC 0001 snapshot format dependency. Corrected §3.2 table and §9 comment: `SessionResumeResult` corresponds to within-grace-period resume (§6.4), not post-grace. |
 | 9 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification (subsumed by Round 7) | Cross-RFC pass that added `import "scene.proto"` and converted `lease_id`/`created_ids` to `SceneId`. The `batch_id` conversion was also completed in Round 7 (rig-de2), which is authoritative — RFC 0001 §4 and §7.1 establish `batch_id` as a scene-object ID (`SceneId`), not a session-level string. This round's RFC 0003, RFC 0004, and RFC 0007 changes (SyncGroupConfig, input proto, session proto ID unification) remain as committed on those files. |
+| 10 | 2026-03-22 | rig-3uy | Align v1 reconnect with full-snapshot model, defer delta burst | Replaced §6.4 "State Delta on Resume" with v1-correct "Reconnect Within Grace Period (Full Snapshot)": runtime sends `SceneSnapshot` (not incremental delta replay) on accepted resume, then restores orphaned leases. Moved delta-burst mechanism to post-v1 callout in §6.4 with forward-compatibility guidance. Updated `SessionResume.last_seen_server_sequence` comment to reflect v1 purpose (identity binding / lease reclaim) vs post-v1 purpose (delta replay). Reserved field 38 (`StateDeltaComplete`) in both `SessionMessage` oneof blocks with deferred label. Updated `StateDeltaComplete` comment block in §9 proto. Updated §9.2 field registry: field 38 now listed as reserved/deferred. Updated `SceneSnapshot` comment in §9 to enumerate all three delivery cases (new connection, resume, post-grace reconnect). Updated §1.3 snapshot delivery cross-reference. |
 
 ---
 
@@ -309,11 +310,11 @@ message SessionMessage {
     DegradationNotice   degradation_notice    = 35;
     RuntimeError        runtime_error         = 36;
     CapabilityNotice    capability_notice     = 37;  // Mid-session grant/revoke
-    StateDeltaComplete  state_delta_complete  = 38;  // Sentinel: end of resume delta burst (§6.4)
+    // Field 38 reserved: StateDeltaComplete — post-v1 delta-replay sentinel (§6.4 post-v1 note; deferred)
     SubscriptionChangeResult subscription_change_result = 39;  // Ack for SubscriptionChange (§7.3)
     ZonePublishResult   zone_publish_result   = 40;  // Ack for durable ZonePublish (§3.1)
     TelemetryFrame      telemetry_frame       = 41;  // Runtime perf/health sample; TELEMETRY_FRAMES subscribers only (§7.1)
-    SceneSnapshot       scene_snapshot        = 42;  // Full scene state; sent after SessionEstablished and post-grace reconnect (§1.3, §6.5)
+    SceneSnapshot       scene_snapshot        = 42;  // Full scene state; sent after SessionEstablished and on resume (§1.3, §6.4, §6.5)
   }
 }
 ```
@@ -584,12 +585,14 @@ When reconnecting within the grace period, the agent sends `SessionResume` as th
 message SessionResume {
   string agent_id                  = 1;
   string session_token             = 2;
-  uint64 last_seen_server_sequence = 3;  // Last `sequence` the agent received before disconnect
+  uint64 last_seen_server_sequence = 3;  // Last `sequence` the agent received before disconnect.
+                                         // V1: used for identity binding / token validation and lease reclaim.
+                                         // Post-v1: enables incremental delta replay (§6.4).
   AuthCredential auth_credential   = 4;  // Re-authenticate even on resume
 }
 ```
 
-The `last_seen_server_sequence` allows the runtime to reconstruct the set of server messages the agent missed during the gap.
+The `last_seen_server_sequence` is used in v1 for identity binding — it proves the agent witnessed a specific runtime state, supporting session token validation and lease reclaim. In the post-v1 delta-replay upgrade, it additionally identifies the set of server messages the agent missed during the gap.
 
 ### 6.3 SessionResumeResult (Server → Client)
 
@@ -604,18 +607,17 @@ message SessionResumeResult {
 }
 ```
 
-### 6.4 State Delta on Resume
+### 6.4 Reconnect Within Grace Period (Full Snapshot)
 
-When a resume is accepted within the grace period:
+When a resume is accepted within the grace period (v1 behavior, aligned with v1.md §"V1 explicitly defers"):
 
-1. The runtime identifies all server-side `SceneEvent` and `LeaseResponse` messages with `sequence > last_seen_server_sequence`.
-2. It replays these missed transactional/state-stream messages as a burst of normal `SessionMessage` envelopes (carrying `SceneEvent`, `LeaseResponse`, or `CapabilityNotice` payloads). This replayed burst is informally called the "state delta." A dedicated `StateDeltaComplete` sentinel message (see §9) is sent as the final message in the burst to signal the end of the catch-up phase.
-3. Ephemeral events (cursor moves, interim speech tokens) are not replayed — they are inherently transient.
-4. Once the delta burst is complete (the agent receives `StateDeltaComplete`), the session transitions to `Active` state normally.
+1. The runtime sends a single `SceneSnapshot` message (§9) carrying the current scene topology — the same mechanism used for new connections (§1.3) and post-grace-period reconnects (§6.5).
+2. The agent's orphaned leases are automatically reclaimed: they were held during the grace period, so the runtime restores them and clears the disconnection badges. The agent receives its previously-held leases as part of the restored scene state.
+3. Once the agent receives the `SceneSnapshot`, the session transitions to `Active` state normally.
 
-If the agent's leases are still orphaned (not yet evicted — within grace period), they are automatically reclaimed as part of the state delta. The disconnection badges clear.
+The `last_seen_server_sequence` field in `SessionResume` is accepted by the runtime but not used for delta replay in v1. Its v1 purpose is identity binding: the sequence value proves the agent witnessed a specific runtime state, which is used to validate the session token and enable lease reclaim without capability re-negotiation.
 
-> **V1 implementation note:** v1.md §"V1 explicitly defers" states "No resumable state sync (reconnecting agents get a full snapshot, not a diff)." The delta-replay mechanism specified above is the target API contract for v1.1+. The v1 implementation ships a full scene snapshot on resume instead of incremental delta replay: rather than replaying individual missed `SceneEvent` messages, the runtime sends a single `SceneSnapshot` message (§9) carrying the current scene topology, followed by `StateDeltaComplete`. The `last_seen_server_sequence` field in `SessionResume` is accepted but may be ignored by the v1 implementation. Agents must handle both full-snapshot and delta-replay resume responses correctly (both terminate with `StateDeltaComplete`).
+> **Post-v1 (resumable diff sync):** v1.md deliberately defers WAL-based event replay. The planned post-v1 upgrade path adds incremental delta replay: the runtime replays missed `SceneEvent` and `LeaseResponse` messages (`sequence > last_seen_server_sequence`) as a burst terminating with a `StateDeltaComplete` sentinel. This avoids re-delivering the full scene on every transient reconnect when agent counts are higher. The `last_seen_server_sequence` field is already present in `SessionResume` to support this without a wire-format change. Field 38 in `SessionMessage` is reserved for `StateDeltaComplete` when this is implemented. Agents written for v1 that receive only a `SceneSnapshot` after `SessionResumeResult` are already conformant — no behavior change is needed when the runtime upgrades to delta replay, as long as agents do not depend on receiving `StateDeltaComplete` in the v1 path.
 
 ### 6.5 Post-Grace-Period Reconnect
 
@@ -918,9 +920,11 @@ message SessionResumeResult {
 }
 
 // ─── Scene snapshot (server → client) ────────────────────────────────────────
-// Full scene topology snapshot. Sent immediately after SessionEstablished on new
-// connections (§1.3) and post-grace-period reconnects (§6.5), and also on
-// successful session resumption within the grace period (§6.4).
+// Full scene topology snapshot. Sent in three cases:
+//   1. Immediately after SessionEstablished on new connections (§1.3).
+//   2. On successful session resumption within the grace period — v1 reconnect
+//      behavior (§6.4). Orphaned leases are reclaimed alongside snapshot delivery.
+//   3. After re-handshake on post-grace-period reconnects (§6.5).
 // Agents MUST process this before issuing any mutations or acting on incremental
 // SceneEvent updates.
 //
@@ -934,11 +938,16 @@ message SessionResumeResult {
 // referenced here as a SessionMessage payload variant; it is NOT redefined in
 // session.proto. The import line `import "scene_service.proto"` covers this type.
 
-// ─── State delta sentinel (server → client) ──────────────────────────────────
+// ─── State delta sentinel (server → client) — DEFERRED to post-v1 ────────────
 
-// Sent as the final message of the state-delta burst after session resumption
-// (§6.4). Signals that all missed transactional/state-stream messages have been
-// replayed. No payload fields are needed; receipt of this message is the signal.
+// Post-v1 only. Sent as the final message of the incremental state-delta burst
+// after session resumption (§6.4 post-v1 note). Signals that all missed
+// transactional/state-stream messages have been replayed. No payload fields are
+// needed; receipt of this message is the signal.
+//
+// V1 behavior: reconnecting agents receive a full SceneSnapshot (§6.4) instead
+// of an incremental delta burst; this message is not sent by v1 runtimes.
+// Field 38 in SessionMessage is reserved for when delta replay is implemented.
 message StateDeltaComplete {}
 
 // ─── Heartbeat ───────────────────────────────────────────────────────────────
@@ -1141,11 +1150,11 @@ message SessionMessage {
     DegradationNotice       degradation_notice       = 35;
     RuntimeError            runtime_error            = 36;  // Defined in session.proto (§3.5)
     CapabilityNotice        capability_notice        = 37;
-    StateDeltaComplete      state_delta_complete     = 38;  // Sentinel: end of resume delta burst (§6.4)
+    // Field 38 reserved: StateDeltaComplete — post-v1 delta-replay sentinel (§6.4 post-v1 note; deferred)
     SubscriptionChangeResult subscription_change_result = 39;  // Ack for SubscriptionChange (§7.3)
     ZonePublishResult       zone_publish_result      = 40;  // Ack for durable ZonePublish (§3.1)
     TelemetryFrame          telemetry_frame          = 41;  // Runtime perf/health sample; TELEMETRY_FRAMES subscribers only (§7.1)
-    SceneSnapshot           scene_snapshot           = 42;  // Full scene state; sent after SessionEstablished and post-grace reconnect (§1.3, §6.5)
+    SceneSnapshot           scene_snapshot           = 42;  // Full scene state; sent after SessionEstablished, on resume, and post-grace reconnect (§1.3, §6.4, §6.5)
     // Fields 43–49 reserved for future server→client messages.
     // Fields 50–99 reserved for future use.
   }
@@ -1194,7 +1203,7 @@ session.proto
 
 Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
 
-Currently allocated server→client fields: 30–38 (original), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`). Fields 43–49 are available for future server→client additions.
+Currently allocated server→client fields: 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`). Fields 43–49 are available for future server→client additions.
 
 ---
 
