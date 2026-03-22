@@ -229,6 +229,19 @@ pub enum UpdatePolicy {
     LatestWins,
 }
 
+/// Per-tile resource budget — embedded in every Tile and used during mutation validation.
+/// This struct carries the per-tile limits enforced at scene-graph level.
+///
+/// NOTE on two-budget design: RFC 0008 §4 defines a separate `ResourceBudget` struct at the
+/// *lease* level that includes per-session aggregate limits (`max_tiles`, `texture_bytes_total`,
+/// `max_active_leases`, `max_concurrent_streams`) in addition to per-tile limits. These two structs
+/// serve distinct purposes:
+///   - `tze_scene::ResourceBudget` (this struct): per-tile limits embedded in Tile, enforced
+///     during mutation validation in the scene graph layer.
+///   - `tze_lease::ResourceBudget` (RFC 0008 §10 proto): lease-level budget carried in
+///     LeaseRequest/LeaseResponse, governing aggregate session limits.
+/// Implementations must not conflate the two. The lease-level budget populates the per-tile
+/// budget at tile creation time; subsequent per-tile enforcement uses this struct.
 pub struct ResourceBudget {
     pub texture_bytes: u64,    // Max texture memory for this tile's nodes
     pub update_rate_hz: f32,   // Max mutation rate (mutations/second)
@@ -458,6 +471,21 @@ pub enum TransportConstraint {
     /// Content requires WebRTC media channel (post-v1)
     WebRtcRequired,
 }
+
+/// Privacy classification for zone publication content (presence.md §"Zone anatomy").
+/// The privacy gate (RFC 0009 §2.3) uses this to determine redaction behavior.
+/// Values match the viewer access matrix in RFC 0009 §2.3.
+pub enum ContentClassification {
+    /// Visible to all viewers including Unknown and Nobody.
+    Public,
+    /// Visible to Owner and HouseholdMember. Redacted for KnownGuest, Unknown, Nobody.
+    Household,
+    /// Visible to Owner only. Redacted for all others.
+    Private,
+    /// Visible to Owner only (same as Private but signals higher sensitivity).
+    /// Runtime may apply additional redaction indicators.
+    Sensitive,
+}
 ```
 
 **Zone-to-tile mapping:** The runtime creates and manages internal tiles for each active zone. Zone tiles are in a runtime-owned namespace. The `layer_attachment` field on `ZoneDefinition` (see §2.5 struct) determines which compositor layer the zone's tile occupies:
@@ -527,6 +555,13 @@ pub enum SceneMutation {
         publish_token: ZonePublishToken,
         expires_at_us: Option<u64>,   // Per-publish TTL (μs, UTC); None = use zone auto_clear_us
         publish_key: Option<String>,  // Key for MergeByKey zones; None for other policies
+        // Per-publication privacy classification (presence.md §"Zone anatomy" — publications
+        // carry "privacy classification" as a first-class field). The runtime's privacy gate
+        // (RFC 0009 §2.3) evaluates this against the current viewer class and may redact.
+        // None = inherit the zone's default_privacy classification from configuration.
+        // Effective classification = max(declared, zone_default_classification) — an agent
+        // cannot escalate visibility beyond the zone's ceiling (RFC 0009 §2.3).
+        content_classification: Option<ContentClassification>,
     },
     ClearZone { zone_name: String, publish_token: ZonePublishToken },
 
@@ -594,11 +629,13 @@ Agent submits MutationBatch
 ```
 mutation targets tile T
   → T.namespace == session.agent_namespace      (agent owns tile; namespace from authenticated session, not batch payload)
-  → lease_registry.get(T.lease_id).is_valid()  (lease not expired or revoked)
-  → lease has WRITE_SCENE capability
+  → lease_registry.get(T.lease_id).is_valid()  (lease not expired or revoked; per RFC 0008 §11 clarification: only ACTIVE leases are valid)
+  → agent holds modify_own_tiles capability     (canonical name per RFC 0006 §6.3; earlier drafts used WRITE_SCENE — that identifier is non-canonical)
 ```
 
-Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry.
+Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `zone_publish:<zone_name>` capability (RFC 0006 §6.3).
+
+> **Capability name note:** The canonical capability naming scheme uses `snake_case` for all identifiers (RFC 0006 §6.3). `CREATE_TILE`, `WRITE_SCENE`, and `MANAGE_TABS` are earlier informal names used in some RFC diagrams and examples. The authoritative names are `create_tiles`, `modify_own_tiles`, and `manage_tabs` respectively.
 
 #### Budget Check
 
@@ -1011,10 +1048,16 @@ message Tab {
   uint64   created_at_us = 4;   // UTC μs since Unix epoch (RFC 0003 §3.1); 0 = not set
 }
 
+// Per-tile resource budget embedded in Tile messages.
+// NOTE: This is the scene-graph-level per-tile budget. It is distinct from the
+// lease-level ResourceBudget defined in RFC 0008 §10 (tze.lease.v1.ResourceBudget),
+// which includes per-session aggregate limits (max_tiles, texture_bytes_total,
+// max_active_leases, max_concurrent_streams). Do not conflate the two; they are
+// in separate proto packages (tze_hud.scene.v1 vs tze.lease.v1).
 message ResourceBudget {
-  uint64 texture_bytes  = 1;
-  float  update_rate_hz = 2;
-  uint32 max_nodes      = 3;
+  uint64 texture_bytes  = 1;   // Max texture bytes for this tile's nodes
+  float  update_rate_hz = 2;   // Max mutations/second for this tile
+  uint32 max_nodes      = 3;   // Max nodes in tile tree [1, 64]
 }
 
 enum LatencyClass {
@@ -1162,12 +1205,25 @@ message ZonePublishToken {
   bytes token = 1;  // Opaque capability token issued at session auth
 }
 
+// Content privacy classification for zone publications.
+// Used by the privacy gate (RFC 0009 §2.3) to determine redaction behavior.
+// Corresponds to the ContentClassification Rust enum in §2.5.
+// UNSPECIFIED = inherit zone's default_privacy from configuration.
+enum ContentClassification {
+  CONTENT_CLASSIFICATION_UNSPECIFIED = 0;   // Inherit zone default
+  CONTENT_CLASSIFICATION_PUBLIC      = 1;   // All viewers
+  CONTENT_CLASSIFICATION_HOUSEHOLD   = 2;   // Owner + HouseholdMember
+  CONTENT_CLASSIFICATION_PRIVATE     = 3;   // Owner only
+  CONTENT_CLASSIFICATION_SENSITIVE   = 4;   // Owner only; higher-sensitivity signal
+}
+
 message PublishToZoneMutation {
-  string           zone_name     = 1;
-  ZoneContent      content       = 2;
-  ZonePublishToken publish_token = 3;
-  uint64           expires_at_us = 4;   // UTC μs; 0 = use zone auto_clear_us; >0 = per-publish TTL (RFC 0003 §3.1)
-  string           publish_key   = 5;   // Non-empty only for MergeByKey zones
+  string                  zone_name              = 1;
+  ZoneContent             content                = 2;
+  ZonePublishToken        publish_token          = 3;
+  uint64                  expires_at_us          = 4;   // UTC μs; 0 = use zone auto_clear_us; >0 = per-publish TTL (RFC 0003 §3.1)
+  string                  publish_key            = 5;   // Non-empty only for MergeByKey zones
+  ContentClassification   content_classification = 6;   // UNSPECIFIED = inherit zone default (see §2.5)
 }
 
 message ClearZoneMutation {
@@ -1662,9 +1718,9 @@ Input Point P = (x, y) in tab display space
 ║                                │ grants                  ║
 ║                    ┌───────────▼────────────┐           ║
 ║                    │  Capability Grants     │           ║
-║                    │  - CREATE_TILE          │           ║
-║                    │  - WRITE_SCENE          │           ║
-║                    │  - zone:publish:subtitle│           ║
+║                    │  - create_tiles         │           ║
+║                    │  - modify_own_tiles     │           ║
+║                    │  - zone_publish:subtitle│           ║
 ║                    └───────────┬────────────┘           ║
 ║                                │ scopes                  ║
 ║              ┌─────────────────▼──────────────────────┐ ║
@@ -1906,6 +1962,56 @@ No new cross-RFC contradictions found beyond the already-tracked timestamp migra
 **Date:** 2026-03-22
 
 **[MUST-FIX → FIXED]** `CreateSyncGroupMutation` had two fields (`SceneId id = 1; bytes config = 2;`) while RFC 0003 §7.1 defines it as one field (`SyncGroupConfig config = 1;`). The RFC 0001 form was an early draft artifact predating RFC 0003's `SyncGroupConfig` message. The forms were wire-incompatible (different field numbers/types). Fixed: RFC 0001 §7.1 proto and Rust enum variant updated to match RFC 0003 canonical form — `SyncGroupConfig config = 1` (group ID is `config.id`). No change to `DeleteSyncGroupMutation` (both RFCs already used `sync_group_id = 1`).
+
+### Round 3 — Cross-RFC Consistency and Integration (2026-03-22)
+
+**Reviewer:** rig-5vq.13 agent worker
+**Focus:** Cross-RFC coherence — do shared types match? Do capability names align? Are there contradictory requirements? Checks RFC 0008 (Lease Governance) and RFC 0009 (Policy & Arbitration) integration.
+**Doctrine read:** presence.md (zone anatomy, publications), architecture.md (capability model), security.md (capability scopes)
+
+---
+
+#### Doctrinal Alignment Score: 4/5
+
+No new doctrinal regressions. Prior round fixes held. Score unchanged.
+
+---
+
+#### Technical Robustness Score: 4/5
+
+No new technical regressions. Score unchanged.
+
+---
+
+#### Cross-RFC Consistency Score: 4/5 (up from initial 3/5 with fixes applied)
+
+Several cross-RFC consistency issues were found and fixed in this round:
+
+**Issues found and fixed:**
+
+1. **`PublishToZoneMutation` lacked `content_classification` field (MUST-FIX → Fixed):** presence.md §"Zone anatomy" explicitly lists "privacy classification" as a first-class field in zone publications. RFC 0009 §2.3 (privacy gate) references `VisibilityClassification` as the per-publication privacy input, but RFC 0001's `PublishToZoneMutation` had no such field — agents had no wire mechanism to declare content classification. Added `ContentClassification` enum and `content_classification` field (field 6) to `PublishToZoneMutation`. See §2.5 and §7.1.
+
+2. **Capability name inconsistency — non-canonical identifiers in §3.3 diagram and §9.4 (MUST-FIX → Fixed):** RFC 0001 used `CREATE_TILE`, `WRITE_SCENE`, `zone:publish:subtitle` (colon-separated) in its code and diagrams. RFC 0006 §6.3 defines the authoritative `snake_case` scheme: `create_tiles`, `modify_own_tiles`, `zone_publish:<zone_name>`. These identifiers must be consistent for config validation, audit logging, and capability grant enforcement to work correctly. Updated §3.3 lease check, §9.4 diagram. Added normative note clarifying the naming convention.
+
+3. **`ResourceBudget` two-struct confusion (SHOULD-FIX → Fixed):** RFC 0001 defines `ResourceBudget` with 3 per-tile fields; RFC 0008 §4/§10 defines a separate `ResourceBudget` with 7 lease-level fields (different field names). These serve genuinely different purposes but the identical struct name across different proto packages creates implementor confusion. Added explicit doc-comment to the Rust struct and proto `message ResourceBudget` in §7.1 explaining the two-budget design, their packages (`tze_hud.scene.v1` vs `tze.lease.v1`), and their relationship.
+
+**Remaining known cross-RFC items (not blocking):**
+- RFC 0008 §11 errata for RFC 0001 §3.3 (lease validity: only ACTIVE leases are valid) incorporated into §3.3 note above.
+- `SyncGroupConfig` serialization format: RFC 0003 §7.1 is authoritative; already noted in §11.7.
+
+---
+
+#### Actionable Findings Summary — Round 3
+
+| # | Severity | Location | Finding | Status |
+|---|----------|----------|---------|--------|
+| R3-1 | MUST-FIX | §2.5 `PublishToZone`, §7.1 proto | `content_classification` absent; presence.md mandates privacy classification on zone publications; RFC 0009 §2.3 references it | Fixed |
+| R3-2 | MUST-FIX | §3.3 lease check, §9.4 diagram | Non-canonical capability names (`CREATE_TILE`, `WRITE_SCENE`, `zone:publish:`) contradict RFC 0006 §6.3 canonical `snake_case` scheme | Fixed |
+| R3-3 | SHOULD-FIX | §2.3 `ResourceBudget`, §7.1 proto | Two `ResourceBudget` structs with same name across RFC 0001 and RFC 0008 create implementor confusion; no documentation of split | Fixed |
+
+---
+
+*Review round 3 complete. All MUST-FIX and SHOULD-FIX items addressed. No dimension scored below 3.*
 
 ---
 

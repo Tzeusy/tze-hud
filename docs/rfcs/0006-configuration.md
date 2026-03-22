@@ -67,6 +67,20 @@ No doctrinal regressions found.
 
 ---
 
+### Round 3 — Cross-RFC Consistency (rig-5vq.13)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** privacy.md (redaction behavior field ownership)
+
+#### Changes Applied
+
+**[MUST-FIX → FIXED]** Removed `redaction_style` from the `[chrome]` section (§2.8) per RFC 0009 §3.2 resolution. The `[chrome]` entry was a duplication error. The authoritative field is `[privacy].redaction_style`. The `ChromeConfig` Rust struct must not contain a `redaction_style` field — `PrivacyConfig` is the canonical owner. Hot-reload of `redaction_style` remains valid as a `[privacy]` field per §9.
+
+**No dimension below 3. Round 3 complete.**
+
+---
+
 ## Summary
 
 This RFC defines the configuration system for tze_hud: the file format, schema, display profile definitions, zone geometry policies, tab and layout configuration, agent registration, and privacy/degradation policies. Configuration is the primary mechanism for declaring scenes, zones, and policies in v1 before dynamic orchestration exists, so it is a first-class, schema-validated, LLM-readable surface.
@@ -343,9 +357,10 @@ show_system_indicators = true
 # Default: true
 show_override_controls = true
 
-# Redaction placeholder style. One of: "pattern", "agent_name", "icon".
-# Default: "pattern"
-redaction_style = "pattern"
+# NOTE: redaction_style has been removed from [chrome]. It belongs exclusively
+# in [privacy] per RFC 0009 §3.2. The [privacy].redaction_style field is the
+# authoritative configuration. The ChromeConfig Rust struct must not contain
+# a redaction_style field.
 ```
 
 ### 2.9 Structured Validation Errors

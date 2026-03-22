@@ -85,6 +85,20 @@ Four correctness gaps found and fixed in this round:
 
 ---
 
+### Round 3 — Cross-RFC Consistency (rig-5vq.13)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** security.md (human override, safe mode as pause not purge)
+
+#### Changes Applied
+
+**[MUST-FIX → FIXED]** §4.2 "Dismiss All / Safe Mode" step 1 previously stated "All active leases are **revoked** simultaneously." This contradicts RFC 0008 §3.4 (DR-LG7), which is the authoritative resolution of this conflict: safe mode **suspends** leases, not revokes them. Updated step 1 to "All active leases are **suspended** simultaneously" with full RFC 0008 cross-reference and rationale note. The corrected phrasing is consistent with §5.2 ("safe mode does not terminate sessions by default"), security.md ("safe mode as last resort, quickly reversible"), and the principle that revocation is for misbehavior, not emergency stops.
+
+**Post-fix scores: Doctrinal Alignment 4, Technical Robustness 4, Cross-RFC Consistency 4. No dimension below 3. Round 3 complete.**
+
+---
+
 ## Summary
 
 This RFC defines the System Shell — the runtime-owned chrome layer that guarantees viewer sovereignty. It specifies the composition rules that place the chrome above all agent content, the layout and behavior of every chrome element (tab bar, tile badges, override controls, safe mode overlay, and privacy indicator), the internal state machines and event types governing these elements, and the protobuf types used to drive them. The chrome layer is not an agent feature — it is the human's permanent contract with the runtime.
@@ -355,11 +369,13 @@ This ensures dismiss always has the effect the viewer expects, regardless of the
 **Secondary:** A "Dismiss All" control in the system status area (accessible via keyboard focus traversal through the chrome layer).
 
 **Action:**
-1. All active leases are revoked simultaneously.
+1. All active leases are suspended simultaneously. Sessions are not terminated; agents receive `SessionSuspended`. Leases transition to `SUSPENDED` state (RFC 0008 §3.3) and are restored to `ACTIVE` on safe mode exit without requiring the agent to re-request a lease.
 2. All agent sessions receive `SessionSuspended` with reason `viewer_safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale). **Note:** `SessionSuspended` is a new server→client message type that must be added to RFC 0005 §2 / §3.2 and the `SessionMessage` envelope's `oneof` block.
 3. The runtime enters safe mode (see §5).
 
 This is the "emergency stop" for the entire display. It is not reversible by agents — they cannot reinstate their sessions in response to this event. The viewer must explicitly exit safe mode.
+
+**Authoritative behavior:** RFC 0008 §3.4 (DR-LG7) is the authoritative specification of this action. "Dismiss All" **suspends** leases, not revokes them. The distinction is critical: a viewer who accidentally triggers safe mode can resume without agents needing to reconnect and re-establish their leases. Revocation is the correct response to *budget violations* and *malicious behavior*, not to the human pressing the emergency stop.
 
 ### 4.3 Freeze Scene
 
