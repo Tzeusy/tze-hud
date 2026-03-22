@@ -145,7 +145,7 @@ Shutdown is triggered by OS signal (SIGTERM/SIGINT), explicit shutdown RPC, or f
 7. **Release resources.** Drop GPU device, surface, and scene graph. Resource reference counts must reach zero cleanly.
 8. **Exit process.** Exit code 0 for clean shutdown, non-zero for error.
 
-Fatal GPU errors (device lost, out of memory) trigger an emergency path: flush telemetry, log structured error, exit immediately without waiting for agents.
+Fatal GPU errors (device lost, out of memory) trigger an emergency path: flush telemetry, log structured error, enter safe mode (RFC 0007 §5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit, then trigger graceful shutdown with non-zero exit code. If the safe mode overlay cannot render (GPU already unusable), skip directly to graceful shutdown. See §7.3 and RFC 0009 §5 for the authoritative GPU failure response procedure. (T-7: aligns with RFC 0009 §5 resolution.)
 
 ---
 
@@ -540,7 +540,7 @@ The post-revocation resource footprint for a revoked agent must be zero (per arc
 **Frame-time guardian** operates at the frame level, not the per-agent level. If the compositor thread detects that the current frame is on track to exceed 16.6ms:
 
 1. **Check at stage 5 (Layout Resolve).** If cumulative time for stages 3–5 exceeds 3ms, shed work.
-2. **Shed lowest-priority tiles.** Sort tiles by priority using a two-key tuple `(lease_priority DESC, z_order DESC)` — lease priority is the primary sort key; z-order is the tiebreaker. Tiles with lower lease priority (numerically higher values, per the convention where 0 = highest) and lower z-order are shed first. Skip render encoding for the lowest-priority tiles until the workload fits within budget.
+2. **Shed lowest-priority tiles.** Sort tiles by priority using `(lease_priority ASC, z_order DESC)` — lower `lease_priority` values (0 = highest priority) are preserved first; within the same priority class, higher `z_order` wins. Tiles with the highest `lease_priority` values and lowest `z_order` are shed first. Skip render encoding for the lowest-priority tiles until the workload fits within budget. (T-8: aligns sort direction phrasing with RFC 0008 §2.2 canonical formulation.)
 3. **Emit shed event.** `TelemetryRecord.shed_count` incremented. If shedding occurs for > 3 consecutive frames, trigger degradation policy evaluation (§6).
 
 ### 5.3 Budget Accounting Accuracy
@@ -588,7 +588,7 @@ Level 3: Disable Transparency
   │  frame_time_p95 > 14ms over 10 frames (still)
   ▼
 Level 4: Shed Tiles
-  • Sort active tiles by priority (lease priority, then z-order within priority)
+  • Sort active tiles by (lease_priority ASC, z_order DESC) — see RFC 0008 §2.2 for canonical sort semantics
   • Remove lowest-priority tiles from render pass
   • Remove one tier of tiles (approximately 25% of active tiles) per level
   • Removed tiles remain in scene graph — they are present but not rendered
@@ -596,7 +596,7 @@ Level 4: Shed Tiles
   ▼
 Level 5: Emergency
   • Render only: chrome layer + highest-priority single tile
-  • All other agent tiles suspended (not revoked — leases remain valid)
+  • All other agent tiles visually suppressed (rendering-only suppression — leases remain ACTIVE, NOT in SUSPENDED state; see RFC 0008 §3.3)
   • Human override controls always visible
   │  frame_time_p95 returns to < 12ms over 30 frames → recover one step
   ▲
@@ -718,7 +718,7 @@ GPU device lost (rare, but must be handled):
 1. Compositor thread detects `SurfaceError::Lost` or `SurfaceError::Outdated`.
 2. Flush telemetry with error event.
 3. Attempt surface reconfiguration. If successful, resume normally.
-4. If reconfiguration fails (device truly lost): trigger graceful shutdown (§1.4) with non-zero exit code.
+4. If reconfiguration fails (device truly lost): enter safe mode (RFC 0007 §5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit. If safe mode overlay renders within 2 seconds, display it briefly; then trigger graceful shutdown with non-zero exit code. If the overlay cannot render (GPU already unusable), skip directly to graceful shutdown. (T-7: required by RFC 0009 §5.3.)
 
 ---
 
