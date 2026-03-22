@@ -16,6 +16,7 @@
 | 4 | 2026-03-22 | rig-5vq.25 | Cross-RFC consistency and integration | §4.6 (second): renumbered duplicate `§4.6` to `§4.7 Input Method Support`. §8.3: corrected Note — RFC 0005 field 34 carries type `InputEvent` (from `scene_service.proto`), not `InputEnvelope`; specified that RFC 0005 must rename field 34 type to `EventBatch`; noted RFC 0005 §7.1 uses `InputMessage` (also needs alignment to `EventBatch`). §12: corrected RFC 0003 label from "Lease Model" → "Timing Model"; added RFC 0005 (Session Protocol) and RFC 0008 (Lease & Resource Governance) dependency entries with section references. §1.4: updated `FocusGainedEvent`/`FocusLostEvent` narrative snippet to use nested enum syntax matching §9.1 (removed standalone `FocusSource`/`FocusLostReason` enums). §2.3: updated `CaptureReleasedEvent` narrative snippet to use nested `enum Reason` matching §9.1 (removed standalone `CaptureReleaseReason` enum). All input event `timestamp_us` fields renamed to `timestamp_hw_us` to follow RFC 0003/RFC 0005 clock-domain naming convention; added clock-domain annotation ("OS hardware event timestamp, monotonic domain"); `batch_ts_us` in `EventBatch` annotated as wall-clock domain. |
 | 5 | 2026-03-22 | rig-5vq.26 | Final hardening and quantitative verification | §3.2: added ContextMenu dispatch note clarifying it is dispatched as `ContextMenuEvent` (not `GestureEvent`) and does not run through the recognizer pipeline. §3.3: added DoubleTap and Swipe recognizer boxes to pipeline diagram; added ContextMenu preprocessor note. §3.4: expanded recognizer state machines to cover all 6 gesture types (added DoubleTap, Swipe, Pinch machines alongside Tap, LongPress, Drag); added Swipe velocity threshold (≥ 400 px/s, duration < 300ms) and Swipe/Drag disambiguation rule. §3.5: removed `ContextMenu` from gesture conflict priority list (it is not a competing gesture); replaced with `Swipe` at position 3; added note explaining ContextMenu dispatch path. §3.6: rewrote to remove non-existent `GestureBeganEvent` / `GestureCancelledEvent` references; narrative now correctly describes phased gestures using `GestureEvent { phase = BEGAN/CHANGED/ENDED/CANCELLED }` and point gestures as terminal single events; added implementation note. |
 | 6 | 2026-03-22 | rig-khj | Resolve §11.2 scroll feedback (pre-implementation required) | §6.3: updated scroll row — removed "V1 deferred" annotation; row now references §6.7 and `ScrollOffsetChangedEvent`. §6.5: extended `SceneLocalPatch` with `scroll_offset_updates: Vec<ScrollOffsetUpdate>` and added `ScrollOffsetUpdate` struct. §6.7 (new): complete Scroll Feedback specification — `ScrollConfig` (scrollable_x/y, content size, `SnapMode`, `OverscrollMode`), `ScrollOffsetUpdate`, momentum model (OS-provided + Wayland fallback exponential-decay §6.7.2a), snap point mechanics (Mandatory/Proximity, 100ms ease-out animation), rubber-band overscroll with tension coefficient, agent notification semantics (`ScrollOffsetChangedEvent`, non-transactional/coalesced), programmatic `SetScrollOffsetRequest`, local feedback contract integration. §8.3: added `scroll_offset_changed = 21` to `InputEnvelope` oneof. §8.4: added coalescing rule for `ScrollOffsetChangedEvent` (latest-wins per tile). §8.5: added `ScrollOffsetChangedEvent` to non-transactional coalescing rules (step 3); updated step 6 to list scroll offset change as droppable at hard cap. §9.1: added `ScrollEvent` (internal pipeline message) and `ScrollOffsetChangedEvent` (agent-facing) proto definitions; added `scroll_offset_changed = 21` to `InputEnvelope` oneof in §9.1. §11.2: resolved — marked RESOLVED with full decision log. §13: removed "Scroll events and momentum physics (§11.2)"; replaced with "Custom scroll physics / agent-defined momentum curves" noting scroll local feedback is V1. |
+| 7 | 2026-03-22 | rig-eo4 | V1 scope split — mandatory vs reserved vs post-v1 | Added `## V1 Scope` section with three-tier table and per-capability breakdown. Added `[V1-mandatory]` / `[V1-reserved]` tier tags to §1–§8 section headers. Added `§3.0 V1 Scope Note` (gesture pipeline v1 fallback: tap/click-only), `§4.0 V1 Scope Note` (IME v1 fallback: CharacterEvent only), `§5.0 V1 Scope Note` (a11y v1 fallback: tree structure ships, platform bridge defers). §3.2: added `V1 tier` column to gestures table distinguishing V1-mandatory (Tap, DoubleTap, ContextMenu on pointer) from V1-reserved (LongPress, Drag, Pinch, Swipe, ContextMenu on touch). §13: restructured into `V1-reserved` and `Post-v1` subsections to distinguish defined-but-deferred from entirely-not-in-scope. |
 
 ---
 
@@ -38,6 +39,48 @@ Without a defined interaction model, every agent implements ad-hoc input handlin
 
 ---
 
+## V1 Scope
+
+This RFC defines behavior across three tiers. The tier determines implementation priority, not contract completeness — all definitions here are normative regardless of tier.
+
+| Tier | Meaning |
+|------|---------|
+| **V1-mandatory** | Must ship in v1. Blocks the v1 milestone. |
+| **V1-reserved** | Defined here for contract completeness. v1 ships a minimal fallback; the full behavior activates post-v1. |
+| **Post-v1** | Not required for v1 ship. Deferred explicitly in §13 Non-Goals. |
+
+### V1-mandatory capabilities
+
+These must be implemented before v1 ships:
+
+| Capability | RFC section |
+|------------|-------------|
+| Focus model (focus tree, acquisition, cycling, events) | §1 |
+| Pointer capture (acquire, release, theft) | §2 |
+| Local feedback contract (press/hover/focus states, < 4ms) | §6 |
+| HitRegionNode primitive (bounds, focus, pointer, local style) | §7.1–§7.2 |
+| Pointer events (down, up, move, enter, leave, click, cancel) | §7.3 |
+| Keyboard events (key down/up, character) | §7.4 |
+| Event dispatch protocol (routing, serialization, batching, backpressure) | §8 |
+| Protobuf schema for all mandatory event types | §9 |
+| Basic hit-testing (< 100μs for 50 tiles) | §7.2 |
+
+### V1-reserved capabilities
+
+These are fully specified here but v1 may ship with a reduced fallback. Full behavior activates in a post-v1 iteration without protocol changes (the schema and contracts are already locked here).
+
+| Capability | V1 fallback | RFC section |
+|------------|-------------|-------------|
+| Full gesture pipeline (6 recognizers, arbiter, conflict resolution) | v1 may ship with tap/click recognition only (Tap, DoubleTap, ContextMenu); the full pipeline including LongPress, Drag, Pinch, Swipe, and full arbiter may activate post-v1 | §3 |
+| IME composition (CJK, emoji, voice, dead keys) | v1 may ship without active IME composition support; direct ASCII keyboard input via `CharacterEvent` is v1-mandatory; the IME composition protocol (§4.2–§4.7) activates post-v1 | §4 |
+| Full platform a11y bridge (AT-SPI2, UIA, NSAccessibility) | v1 ships the a11y tree data structure and metadata fields; the platform API integration (tze_hud_a11y crate) may defer post-v1 | §5 |
+
+### Post-v1 (deferred, §13 Non-Goals)
+
+Drag-and-drop, scroll events and momentum physics, gamepad/controller input, stylus/pressure input, multi-pointer hover, pointer lock, custom gesture recognizers, dynamic a11y role changes.
+
+---
+
 ## Design Requirements Satisfied
 
 | ID | Requirement | Source |
@@ -56,7 +99,7 @@ Without a defined interaction model, every agent implements ad-hoc input handlin
 
 ---
 
-## 1. Focus Model
+## 1. Focus Model [V1-mandatory]
 
 ### 1.1 Focus Tree
 
@@ -176,7 +219,7 @@ message FocusLostEvent {
 
 ---
 
-## 2. Capture Model
+## 2. Capture Model [V1-mandatory]
 
 ### 2.1 Pointer Capture Semantics
 
@@ -249,23 +292,29 @@ When capture is stolen, the runtime sends a `PointerCancelEvent` to the capturin
 
 ---
 
-## 3. Gesture Model
+## 3. Gesture Model [V1-reserved]
+
+### 3.0 V1 Scope Note
+
+> **V1 fallback:** v1 may ship with tap/click recognition only (Tap, DoubleTap, ContextMenu via right-click). The full gesture pipeline including LongPress, Drag, Pinch, Swipe, and the full arbiter (§3.3–§3.6) is V1-reserved: fully specified here but not required to ship in v1. When the full pipeline is not present, pointer events (§7.3) carry the raw down/up/move events and agents may implement their own gesture logic on top. The `GestureEvent` message types are defined now so the schema is stable when the full pipeline activates.
 
 ### 3.1 Overview
 
 Gestures are recognized from raw touch and pointer events by the runtime's gesture pipeline. Agents do not implement gesture recognition; they receive named gesture events. The runtime arbitrates all conflicts.
 
-### 3.2 Supported Gestures (V1)
+### 3.2 Supported Gestures
 
-| Gesture | Touch | Pointer | Description |
-|---------|-------|---------|-------------|
-| `Tap` | 1-finger brief contact | Click (left button) | Brief touch or click |
-| `DoubleTap` | 1-finger two taps | Double click | Two taps within 300ms |
-| `LongPress` | 1-finger hold ≥ 500ms | Right mouse button press | Extended hold |
-| `Drag` | 1-finger move | Left button + move | Single-finger translation |
-| `Pinch` | 2-finger spread/squeeze | Scroll wheel (zoom axis) | Scale gesture |
-| `Swipe` | 1-finger quick flick | Not supported | Directional fast swipe |
-| `ContextMenu` | Long press or 2-finger tap | Right click | Context menu request |
+> **V1 note:** Tap, DoubleTap, and ContextMenu (via right-click on pointer) are the minimal set required for v1. LongPress, Drag, Pinch, and Swipe are V1-reserved — their schemas are defined here but they require the full arbiter pipeline (§3.3–§3.6) which may defer post-v1.
+
+| Gesture | Touch | Pointer | Description | V1 tier |
+|---------|-------|---------|-------------|---------|
+| `Tap` | 1-finger brief contact | Click (left button) | Brief touch or click | V1-mandatory |
+| `DoubleTap` | 1-finger two taps | Double click | Two taps within 300ms | V1-mandatory |
+| `LongPress` | 1-finger hold ≥ 500ms | Right mouse button press | Extended hold | V1-reserved |
+| `Drag` | 1-finger move | Left button + move | Single-finger translation | V1-reserved |
+| `Pinch` | 2-finger spread/squeeze | Scroll wheel (zoom axis) | Scale gesture | V1-reserved |
+| `Swipe` | 1-finger quick flick | Not supported | Directional fast swipe | V1-reserved |
+| `ContextMenu` | Long press or 2-finger tap | Right click | Context menu request | V1-mandatory (pointer); V1-reserved on touch (requires LongPress recognizer) |
 
 > **ContextMenu dispatch note:** `ContextMenu` is listed here for completeness but is **not** dispatched as a `GestureEvent`. It is dispatched as a standalone `ContextMenuEvent` (see `InputEnvelope` field 8 in §9.1). It does not run through the gesture recognizer pipeline and does not appear in the conflict resolution priority list in §3.5. On touch: the LongPress recognizer's RECOGNIZED result triggers a `ContextMenuEvent` directly (rather than a `GestureEvent { long_press }`). On pointer: a right-click is mapped to `ContextMenuEvent` by the event preprocessor, bypassing recognizer arbitration entirely.
 
@@ -419,7 +468,11 @@ OS-level gestures (e.g., macOS three-finger swipe for Mission Control, Windows t
 
 ---
 
-## 4. IME (Input Method Editor)
+## 4. IME (Input Method Editor) [V1-reserved]
+
+### 4.0 V1 Scope Note
+
+> **V1 fallback:** v1 may ship without active IME composition support. Direct ASCII and basic Unicode keyboard input via `KeyDownEvent`/`CharacterEvent` (§7.4) is V1-mandatory. The full IME composition protocol (§4.2–§4.7 — `ImeCompositionStarted`, `ImeCompositionUpdated`, `ImeCompositionCommitted`, `ImeCompositionCancelled`, and platform IME subsystem integration) is V1-reserved. The message types and proto schema are defined here so the contract is stable when IME support activates post-v1. Agents that rely on CJK, emoji, or voice input will need to wait for the full IME implementation.
 
 ### 4.1 Requirement
 
@@ -533,7 +586,11 @@ In overlay (HUD) mode, the OS IME candidate window renders above the tze_hud ove
 
 ---
 
-## 5. Accessibility
+## 5. Accessibility [V1-reserved]
+
+### 5.0 V1 Scope Note
+
+> **V1 fallback:** v1 ships the a11y tree data structures (§5.2–§5.5) and the `AccessibilityConfig` metadata fields on `HitRegionNode`. The platform API bridge (§5.8 — AT-SPI2, UIA, NSAccessibility) is V1-reserved: it is a major platform integration (the `tze_hud_a11y` crate) that is not required to ship in v1. Keyboard-only navigation (§5.7) is V1-mandatory because it depends only on the focus model (§1) and event routing (§8), not on the platform a11y API. Screen reader announcements and the platform bridge activate post-v1.
 
 ### 5.1 Commitment
 
@@ -636,7 +693,7 @@ The a11y bridge is a separate Rust module (crate: `tze_hud_a11y`) that subscribe
 
 ---
 
-## 6. Local Feedback Contract
+## 6. Local Feedback Contract [V1-mandatory]
 
 ### 6.1 Principle
 
@@ -884,7 +941,7 @@ The latency budget for scroll visual feedback is the same as for press state: `i
 
 ---
 
-## 7. Hit-Region Node Primitives
+## 7. Hit-Region Node Primitives [V1-mandatory]
 
 ### 7.1 HitRegionNode (V1 Interactive Primitive)
 
@@ -1101,7 +1158,7 @@ message CharacterEvent {
 
 ---
 
-## 8. Event Dispatch Protocol
+## 8. Event Dispatch Protocol [V1-mandatory]
 
 ### 8.1 Event Flow
 
@@ -1920,7 +1977,19 @@ RFC 0004 (this)
 
 ## 13. Non-Goals (V1)
 
-The following are explicitly deferred to post-V1:
+This section uses the three-tier model from §V1 Scope. Items are either V1-reserved (defined here, deferred ship) or post-v1 (entirely deferred, not defined here).
+
+### V1-reserved (defined in this RFC, deferred ship)
+
+These capabilities are fully specified in this RFC. Their schemas are normative and stable. v1 ships a reduced fallback; the full behavior activates post-v1 without protocol changes.
+
+- Full gesture pipeline with arbiter, conflict resolution, LongPress, Drag, Pinch, Swipe (§3.3–§3.6); v1 may ship tap/click-only recognition
+- IME composition (§4.2–§4.7); v1 may ship direct keyboard input only via `CharacterEvent`
+- Platform a11y bridge: AT-SPI2, UIAutomation, NSAccessibility integration (§5.8); v1 ships the a11y tree data structures and metadata
+
+### Post-v1 (explicitly deferred, not in v1 scope)
+
+The following are not specified in detail in this RFC and do not block v1:
 
 - Drag-and-drop between tiles or agents (§11.1)
 - Custom scroll physics / agent-defined momentum curves (scroll local feedback is V1 — see §6.7; only custom physics beyond the built-in modes is deferred)
