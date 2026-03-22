@@ -242,4 +242,34 @@ mod tests {
         assert!(json.contains("frame_time"));
         assert!(json.contains("12000"));
     }
+
+    #[test]
+    fn test_assert_p99_under_passes_when_within_budget() {
+        let mut bucket = LatencyBucket::new("test");
+        for _ in 0..100 {
+            bucket.record(5_000);
+        }
+        assert!(bucket.assert_p99_under(16_600).is_ok());
+    }
+
+    #[test]
+    fn test_assert_p99_under_fails_when_exceeds_budget() {
+        let mut bucket = LatencyBucket::new("test");
+        for _ in 0..100 {
+            bucket.record(20_000); // 20ms — over budget
+        }
+        let result = bucket.assert_p99_under(16_600);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("20000us"), "error should contain actual: {msg}");
+        assert!(msg.contains("16600us"), "error should contain budget: {msg}");
+    }
+
+    #[test]
+    fn test_assert_p99_under_fails_with_no_samples() {
+        let bucket = LatencyBucket::new("empty");
+        let result = bucket.assert_p99_under(16_600);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no samples"));
+    }
 }

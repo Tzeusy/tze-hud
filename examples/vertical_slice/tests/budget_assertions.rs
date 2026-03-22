@@ -548,58 +548,8 @@ async fn test_layer1_pixel_readback_z_order() {
     .unwrap_or_else(|e| panic!("{e}"));
 }
 
-// ─── LatencyBucket::assert_p99_under unit tests ───────────────────────────────
-
-#[test]
-fn test_assert_p99_under_passes_when_within_budget() {
-    let mut bucket = LatencyBucket::new("test");
-    for _ in 0..100 {
-        bucket.record(5_000);
-    }
-    assert!(bucket.assert_p99_under(16_600).is_ok());
-}
-
-#[test]
-fn test_assert_p99_under_fails_when_exceeds_budget() {
-    let mut bucket = LatencyBucket::new("test");
-    for _ in 0..100 {
-        bucket.record(20_000); // 20ms — over budget
-    }
-    let result = bucket.assert_p99_under(16_600);
-    assert!(result.is_err());
-    let msg = result.unwrap_err();
-    assert!(msg.contains("20000us"), "error should contain actual: {msg}");
-    assert!(msg.contains("16600us"), "error should contain budget: {msg}");
-}
-
-#[test]
-fn test_assert_p99_under_fails_with_no_samples() {
-    let bucket = LatencyBucket::new("empty");
-    let result = bucket.assert_p99_under(16_600);
-    assert!(result.is_err());
-    assert!(result.unwrap_err().contains("no samples"));
-}
-
-// ─── HeadlessSurface::assert_pixel_color unit tests ──────────────────────────
-
-#[test]
-fn test_assert_pixel_color_passes_within_tolerance() {
-    let pixels: Vec<u8> = vec![
-        100, 200, 50, 255, // pixel (0,0)
-        10, 20, 30, 255,   // pixel (1,0)
-    ];
-    HeadlessSurface::assert_pixel_color(&pixels, 2, 0, 0, [100, 200, 50, 255], 0, "exact")
-        .expect("exact match should pass");
-    HeadlessSurface::assert_pixel_color(&pixels, 2, 0, 0, [102, 200, 50, 255], 2, "within tol")
-        .expect("within-tolerance should pass");
-}
-
-#[test]
-fn test_assert_pixel_color_fails_outside_tolerance() {
-    let pixels: Vec<u8> = vec![100, 200, 50, 255];
-    let result =
-        HeadlessSurface::assert_pixel_color(&pixels, 1, 0, 0, [110, 200, 50, 255], 2, "outside");
-    assert!(result.is_err(), "should fail when diff > tolerance");
-    let msg = result.unwrap_err();
-    assert!(msg.contains("channel 0"), "error should identify channel: {msg}");
-}
+// Unit tests for LatencyBucket::assert_p99_under live in
+// crates/tze_hud_telemetry/src/record.rs.
+//
+// Unit tests for HeadlessSurface::assert_pixel_color live in
+// crates/tze_hud_compositor/src/surface.rs.
