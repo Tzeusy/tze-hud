@@ -1161,7 +1161,7 @@ message RuntimeError {
 
 // ─── Session suspend/resume (server → client) ────────────────────────────────
 // Sent on safe mode entry/exit (RFC 0007 §5.2, §5.5).
-// Protocol gap resolved in Round 11 (rig-5vq.29). See §3.7 for full semantics.
+// Protocol gap resolved in Round 12 (rig-5vq.29). See §3.7 for full semantics.
 
 message SessionSuspended {
   string reason = 1;  // e.g. "viewer_safe_mode"
@@ -1302,7 +1302,7 @@ session.proto
 
 Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
 
-**Currently allocated client→server fields:** 10–15 (lifecycle), 20–25 (original mutations/subscriptions), 26–29 (input control requests: `InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition` — added Round 11 per RFC 0004 §8.3.1).
+**Currently allocated client→server fields:** 10–15 (lifecycle), 20–25 (original mutations/subscriptions), 26–29 (input control requests: `InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition` — added Round 12 per RFC 0004 §8.3.1).
 
 **Currently allocated server→client fields:** 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`), 43 (`InputFocusResponse`), 44 (`InputCaptureResponse`), 45 (`SessionSuspended`), 46 (`SessionResumed`). Fields 47–49 are available for future server→client additions.
 
@@ -1335,9 +1335,9 @@ The session protocol exposes the following configurable parameters in the runtim
 | RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (RFC 0001 §7.1) — a typed protobuf message encoding a 16-byte little-endian UUIDv7. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` as they are not scene objects. **`SceneSnapshot` (§9) is defined in RFC 0001 §7.1 and imported into `session.proto` via `scene.proto`; this RFC depends on RFC 0001 for the snapshot wire format, field layout, and reconstruction algorithm.** |
 | RFC 0002 (Runtime Kernel) | The session service is a component of the runtime kernel. Lease lifecycle (grace period, revocation) is governed by RFC 0002. |
 | RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_wall_us` and `SessionEstablished.compositor_timestamp_wall_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. Clock-domain naming in this RFC follows the `_wall_us`/`_mono_us` convention (§2.4); see RFC 0003 §1.1 for the canonical clock domain definitions. |
-| RFC 0004 (Input Model) | `InputEvent` messages (field 34) follow RFC 0004 routing and dispatch rules. RFC 0004 §8.3.1 requires `SessionMessage` payload fields 26–29 (input control requests) and 43–44 (responses) — added in Round 11 (§3.8). RFC 0004 §8.3 specifies `EventBatch` delivery semantics for field 34; implementors must update from single `InputEnvelope` to `EventBatch` per RFC 0004 §8.4. |
+| RFC 0004 (Input Model) | `InputEvent` messages (field 34) follow RFC 0004 routing and dispatch rules. RFC 0004 §8.3.1 requires `SessionMessage` payload fields 26–29 (input control requests) and 43–44 (responses) — added in Round 12 (§3.8). RFC 0004 §8.3 specifies `EventBatch` delivery semantics for field 34; implementors must update from single `InputEnvelope` to `EventBatch` per RFC 0004 §8.4. |
 | RFC 0006 (Configuration) | Session parameters in §10 are exposed via `[runtime]` TOML section. `reconnect_grace_period_ms` maps to `reconnect_grace_secs` in the config file. RFC 0006 §2.2 is authoritative for TOML key names and types. |
-| RFC 0007 (System Shell) | `SessionSuspended` and `SessionResumed` (§3.7, fields 45–46) implement the safe mode session lifecycle defined in RFC 0007 §5.2 and §5.5. This RFC was the protocol gap flagged in RFC 0007 §8; resolved in Round 11. |
+| RFC 0007 (System Shell) | `SessionSuspended` and `SessionResumed` (§3.7, fields 45–46) implement the safe mode session lifecycle defined in RFC 0007 §5.2 and §5.5. This RFC was the protocol gap flagged in RFC 0007 §8; resolved in Round 12. |
 | RFC 0008 (Lease Governance) | Lease orphaning, grace period, and reclaim on resume are governed by RFC 0008. `SessionSuspended` triggers lease `ACTIVE → SUSPENDED` transitions per RFC 0008 §6.2; `SessionResumed` restores them. `SAFE_MODE_ACTIVE` error code (§3.5) is the mutation rejection code during suspension. |
 | RFC 0009 (Policy Arbitration) | `ArbitrationError` (defined in RFC 0009) extends `MutationBatchResult`; the `PERMISSION_DENIED` and `BUDGET_EXCEEDED` codes in §3.5 are reused by the arbitration pipeline. Transactional mutation delivery guarantees (§5.1) take precedence over RFC 0009 §7 shedding policy. |
 
