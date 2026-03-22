@@ -24,6 +24,7 @@
 | 10 | 2026-03-22 | rig-3uy | Align v1 reconnect with full-snapshot model, defer delta burst | Replaced §6.4 "State Delta on Resume" with v1-correct "Reconnect Within Grace Period (Full Snapshot)": runtime sends `SceneSnapshot` (not incremental delta replay) on accepted resume, then restores orphaned leases. Moved delta-burst mechanism to post-v1 callout in §6.4 with forward-compatibility guidance. Updated `SessionResume.last_seen_server_sequence` comment to reflect v1 purpose (identity binding / lease reclaim) vs post-v1 purpose (delta replay). Reserved field 38 (`StateDeltaComplete`) in both `SessionMessage` oneof blocks with deferred label. Updated `StateDeltaComplete` comment block in §9 proto. Updated §9.2 field registry: field 38 now listed as reserved/deferred. Updated `SceneSnapshot` comment in §9 to enumerate all three delivery cases (new connection, resume, post-grace reconnect). Updated §1.3 snapshot delivery cross-reference. |
 | 11 | 2026-03-22 | rig-5vq.21 | Cross-RFC consistency fixes from Timing RFC Round 3 review | `ZonePublish.ttl_ms` renamed to `ttl_us` (RFC 0003 §3.1: `_us` is authoritative for timing fields); `auto_clear_ms` prose reference updated to `auto_clear_us` (aligns with RFC 0001 `Zone.auto_clear_us`); `publish_to_zone` MCP tool `ttl_ms` parameter renamed to `ttl_us`; `TimingHints` inline note updated to confirm alignment with RFC 0003 §7.1 after Round 3 clock-domain naming fix. |
 | 12 | 2026-03-22 | rig-5vq.29 | Cross-RFC consistency and integration | Added `SessionSuspended`/`SessionResumed` messages (§3.2, §3.6, §9 proto, §9.2) closing protocol gap flagged in RFC 0007 §8 and RFC 0008 §11. Added input control request fields 26–29 (`InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition`) and corresponding response fields 43–44 (`InputFocusResponse`, `InputCaptureResponse`) to `SessionMessage` oneof (§3.1, §3.2, §9 proto), resolving RFC 0004 §8.3.1 dependency. Added RFC 0004 `EventBatch` note to §3.2 `InputEvent` row. Renamed `TelemetryFrame.sample_timestamp_us` → `sample_timestamp_wall_us` per §2.4 naming convention. Added `CLOCK_SKEW_HIGH` and `CLOCK_SKEW_EXCESSIVE` to `RuntimeError.ErrorCode` enum. Added `reconnect_grace_secs` cross-reference to §10 config table. Updated §11 cross-RFC table. |
+| 13 | 2026-03-22 | rig-5vq.30 | Final hardening and quantitative verification | Fixed §9 intro paragraph: removed `RuntimeError` from the list of types imported from `scene_service.proto` (it is defined in `session.proto` itself). Fixed §9.1 import graph: expanded to show both `"scene_service.proto"` and `"scene.proto"` imports with accurate type lists matching the proto header. Added `active_subscriptions` (field 7) and `denied_subscriptions` (field 8) to `SessionResumeResult` in §6.3 prose proto and §9 proto — mirrors `SessionEstablished` fields 7–8 so agents have confirmed subscription state after resume. |
 
 ---
 
@@ -676,6 +677,11 @@ message SessionResumeResult {
   uint32 negotiated_protocol_version = 4;
   repeated string granted_capabilities = 5;
   RuntimeError error             = 6;   // Populated if accepted = false
+  // Subscription state confirmed after resume. Mirrors SessionEstablished fields 7–8.
+  // Agents MUST use these rather than assuming their pre-disconnect subscription set
+  // is intact — capabilities may have changed during the grace period.
+  repeated SubscriptionCategory active_subscriptions = 7;   // Confirmed active subscriptions
+  repeated SubscriptionCategory denied_subscriptions = 8;   // Subscriptions denied (missing capability)
 }
 ```
 
@@ -856,7 +862,7 @@ Zone publishing is available via both protocol planes (gRPC `ZonePublish` and MC
 
 ## 9. Protobuf Schema
 
-The session protocol is defined in a new file `session.proto` in the `tze_hud.protocol.v1` package. It imports the existing `scene_service.proto` for `MutationProto`, `SceneEvent`, `InputEvent`, `RuntimeError`, and zone message types.
+The session protocol is defined in a new file `session.proto` in the `tze_hud.protocol.v1` package. It imports `scene_service.proto` for `MutationProto`, `SceneEvent`, `InputEvent`, `LeaseRequest`, `LeaseResponse`, `SceneSnapshot`, and zone message types (`ZoneContent`), and imports `scene.proto` for `SceneId`. `RuntimeError` is **defined in `session.proto` itself** (not imported) because it is used pervasively throughout the session protocol — see §3.5 and the definition block in §9.
 
 ```protobuf
 syntax = "proto3";
@@ -989,6 +995,10 @@ message SessionResumeResult {
   uint32  negotiated_protocol_version    = 4;
   repeated string granted_capabilities   = 5;
   RuntimeError error                     = 6;
+  // Subscription state confirmed after resume. Mirrors SessionEstablished fields 7–8.
+  // Agents MUST use these rather than assuming pre-disconnect subscription set is intact.
+  repeated SubscriptionCategory active_subscriptions = 7;  // Confirmed active subscriptions
+  repeated SubscriptionCategory denied_subscriptions = 8;  // Denied (missing capability)
 }
 
 // ─── Scene snapshot (server → client) ────────────────────────────────────────
@@ -1287,14 +1297,19 @@ service SessionService {
 
 ```
 session.proto
-  ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages
-  ├── imports scene.proto (RFC 0001)
-  │     └── defines: SceneId, MutationProto, ZoneContent, SceneEvent, InputEvent,
-  │                  LeaseRequest, LeaseResponse, SceneSnapshot (RFC 0001 §7.1)
+  ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages,
+  │            StateDeltaComplete, HeartbeatPing/Pong, CapabilityRequest/Notice,
+  │            SubscriptionChange/Result, MutationBatch/Result, ZonePublish/Result,
+  │            TelemetryFrame, SessionSuspended/Resumed, SessionInit/Established/Close/Error/Resume/ResumeResult
+  ├── imports "scene_service.proto" (RFC 0001 scene_service.proto)
+  │     └── provides: MutationProto, ZoneContent, SceneEvent, InputEvent,
+  │                   LeaseRequest, LeaseResponse, SceneSnapshot (RFC 0001 §7.1)
+  ├── imports "scene.proto" (RFC 0001 scene.proto)
+  │     └── provides: SceneId (tze_hud.scene.v1 — 16-byte little-endian UUIDv7)
   │     (SceneId is used for batch_id, lease_id, and created_ids in MutationBatch/MutationResult)
-  └── imports timing.proto (RFC 0003)
-        └── defines: ClockSyncRequest, ClockSyncResponse, TimingHints, MessageClass,
-                     DeliveryPolicy, TimestampedPayload
+  └── imports "timing.proto" (RFC 0003)
+        └── provides: ClockSyncRequest, ClockSyncResponse, TimingHints, MessageClass,
+                      DeliveryPolicy, TimestampedPayload
 ```
 
 `timing.proto` (RFC 0003) is imported for `TimingHints` in the full implementation; the inline definition above is provided for completeness during the pre-code draft phase. **Normative note:** if the inline `TimingHints` definition and the `timing.proto` definition in RFC 0003 ever diverge, RFC 0003 is authoritative. Implementers should flag any divergence for correction before the pre-code phase ends.
