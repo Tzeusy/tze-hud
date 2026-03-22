@@ -17,6 +17,7 @@
 | 3 | 2026-03-22 | rig-upg | Telemetry gap fix | Defined `TelemetryFrame` message (§9) with compositor performance fields; added `telemetry_frame = 41` to `SessionMessage` oneof; added `TELEMETRY_FRAMES = 7` to `SubscriptionCategory` enum (§7.1, §7.3, §9 proto); added `TelemetryFrame` row to §3.2 server→client table; updated §2.1 to reference `TelemetryFrame`; updated §9.2 field allocation note. |
 | 4 | 2026-03-22 | rig-5xu | Dedicated ack message for SubscriptionChange | §5.3 updated: `SubscriptionChange` added to the sequence-correlated non-batch message list alongside `LeaseRequest` and `CapabilityRequest`; explicit note that `MutationResult` is never used to ack non-mutation messages. Completes the `SubscriptionChangeResult` work introduced in Round 2. |
 | 5 | 2026-03-22 | rig-6c2 | Doctrinal alignment — guest MCP surface | Restricted §8.3 guest tool set to zone-centric operations (`publish_to_zone`, `list_zones`, restricted `list_scene`); gated tile management tools (`create_tab`, `create_tile`, `set_content`, `dismiss`) behind `resident_mcp` capability; added `CAPABILITY_REQUIRED` error semantics for gated tools; updated §8.1 purpose to state v1 guest surface restriction; added post-v1 promoted guest pattern note. |
+| 6 | 2026-03-22 | rig-77n | Clock-domain naming fix | Renamed all timestamp fields to encode clock domain explicitly: `_wall_us` suffix for wall-clock (UTC), `_mono_us` suffix for monotonic. Affected fields: `SessionMessage.timestamp_wall_us`, `SessionInit.agent_timestamp_wall_us`, `SessionEstablished.compositor_timestamp_wall_us`, `HeartbeatPing.client_timestamp_mono_us`, `HeartbeatPong.client_timestamp_mono_us` + `server_timestamp_wall_us`, `TimingHints.present_at_wall_us` + `expires_at_wall_us`. Added §2.4 "Clock Domains" subsection with field inventory and RFC 0003 cross-reference. Previous §2.4 renumbered §2.5. |
 
 ---
 
@@ -128,7 +129,8 @@ message SessionInit {
   // this session (see RFC 0003 §1.3). Agents SHOULD provide this.
   // If absent (0), the compositor cannot produce an initial skew estimate
   // and will return estimated_skew_us = 0 in SessionEstablished.
-  uint64 agent_timestamp_us = 11;  // Agent UTC µs since epoch at time of sending SessionInit
+  // Clock domain: wall-clock (UTC µs since Unix epoch). See §2.4 "Clock domains".
+  uint64 agent_timestamp_wall_us = 11;  // Agent UTC µs since epoch at time of sending SessionInit
 }
 ```
 
@@ -151,12 +153,13 @@ message SessionEstablished {
   // Agents SHOULD use these values to validate their timestamps before sending the first
   // mutation batch, avoiding TIMESTAMP_TOO_OLD rejections caused by undetected clock skew.
   // Eliminates the need for a separate ClockSync RPC call at session start.
-  uint64 compositor_wallclock_us = 9;   // Compositor UTC wall clock at handshake time (µs since epoch)
-  int64  estimated_skew_us       = 10;  // Initial skew estimate: agent_ts - compositor_ts (signed).
-                                        // Positive = agent clock ahead; negative = agent clock behind.
-                                        // Based on agent_timestamp_us from SessionInit (if agent
-                                        // supplies a timestamp there) or a single-sample estimate.
-                                        // Zero if no agent timestamp was available for estimation.
+  // Clock domain: wall-clock (UTC µs since Unix epoch). See §2.4 "Clock domains".
+  uint64 compositor_timestamp_wall_us = 9;   // Compositor UTC wall clock at handshake time (µs since epoch)
+  int64  estimated_skew_us            = 10;  // Initial skew estimate: agent_ts - compositor_ts (signed).
+                                             // Positive = agent clock ahead; negative = agent clock behind.
+                                             // Based on agent_timestamp_wall_us from SessionInit (if agent
+                                             // supplies a timestamp there) or a single-sample estimate.
+                                             // Zero if no agent timestamp was available for estimation.
 }
 ```
 
@@ -269,10 +272,12 @@ Embodied agents (post-v1) may additionally open a media signaling stream for Web
 
 Every message on the session stream — in both directions — is wrapped in a `SessionMessage` envelope. The envelope provides sequence numbering, timestamps, and a `oneof` payload.
 
+`SessionMessage.timestamp_wall_us` is the sender's wall-clock time (UTC µs since Unix epoch) at the moment the message was serialized. It is advisory only — the runtime does not enforce ordering or correctness guarantees based on this field. Clock-domain: wall-clock (network clock per RFC 0003 §1.1). For timing-sensitive operations (mutation scheduling, expiry), use `TimingHints` fields in the message payload. See §2.4 "Clock domains".
+
 ```protobuf
 message SessionMessage {
-  uint64    sequence  = 1;   // Per-direction monotonically increasing, starts at 1
-  uint64    timestamp_us = 2; // Sender wall-clock (µs since Unix epoch); advisory only
+  uint64    sequence         = 1;   // Per-direction monotonically increasing, starts at 1
+  uint64    timestamp_wall_us = 2;  // Sender wall-clock (µs since Unix epoch); advisory only
   oneof payload {
     // Session lifecycle (bidirectional)
     SessionInit         session_init          = 10;
@@ -310,7 +315,33 @@ message SessionMessage {
 - Client sequence starts at 1 on the first `SessionMessage` after `SessionInit`.
 - Sequence gaps indicate lost messages (stream close without `SessionClose`). On reconnect, the client's `SessionResume.last_seen_server_sequence` allows the server to reconstruct missed events.
 
-### 2.4 Backpressure
+### 2.4 Clock Domains
+
+All timestamp fields in the session protocol belong to one of two clock domains defined in RFC 0003 §1.1. The suffix in every field name encodes the domain explicitly:
+
+| Suffix | Domain | Source | Use |
+|--------|--------|--------|-----|
+| `_wall_us` | Wall-clock (network clock) | UTC µs since Unix epoch | Scheduling (`present_at`, `expires_at`), clock-skew estimation, audit |
+| `_mono_us` | Monotonic system clock | µs since arbitrary epoch (process start / OS boot) | RTT measurement, latency telemetry, deadline tracking |
+
+**Field inventory:**
+
+| Field | Suffix | Domain | Notes |
+|-------|--------|--------|-------|
+| `SessionMessage.timestamp_wall_us` | `_wall_us` | Wall-clock | Advisory; not enforced |
+| `SessionInit.agent_timestamp_wall_us` | `_wall_us` | Wall-clock | Per-session clock sync (RFC 0003 §1.3) |
+| `SessionEstablished.compositor_timestamp_wall_us` | `_wall_us` | Wall-clock | Per-session clock sync (RFC 0003 §1.3) |
+| `HeartbeatPing.client_timestamp_mono_us` | `_mono_us` | Monotonic | RTT base; echoed in pong |
+| `HeartbeatPong.client_timestamp_mono_us` | `_mono_us` | Monotonic | Echo for RTT calculation |
+| `HeartbeatPong.server_timestamp_wall_us` | `_wall_us` | Wall-clock | Advisory; not for RTT |
+| `TimingHints.present_at_wall_us` | `_wall_us` | Wall-clock | Mutation scheduling |
+| `TimingHints.expires_at_wall_us` | `_wall_us` | Wall-clock | Tile auto-expiry |
+
+`estimated_skew_us` (in `SessionEstablished`) is a signed delta (`int64`), not an absolute timestamp; it has no suffix.
+
+Cross-reference: RFC 0003 §1.1 defines the four clock domains. RFC 0003 §1.3 defines the per-session sync point that `agent_timestamp_wall_us` / `compositor_timestamp_wall_us` implement. RFC 0003 §4 defines drift thresholds and `CLOCK_SKEW_EXCESSIVE` rejection.
+
+### 2.5 Backpressure
 
 The session stream uses HTTP/2 flow control as the primary backpressure mechanism. Additionally:
 
@@ -339,7 +370,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 |---------|--------------|-------------|
 | `MutationResult` | Transactional | Accept/reject response for a `MutationBatch` |
 | `LeaseResponse` | Transactional | Grant/deny/revoke for a lease operation |
-| `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing` with server timestamp (wall-clock; not suitable for RTT measurement) |
+| `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing`; echoes monotonic client timestamp for RTT and includes wall-clock server receipt time |
 | `SceneEvent` | State-stream | Topology change, zone occupancy update, lease change |
 | `InputEvent` (pointer/key variants) | Ephemeral realtime | Pointer/touch/key events routed to agent via RFC 0004 `InputEnvelope`. Coalesced under backpressure (RFC 0004 §8.5). |
 | `InputEvent` (focus/capture/IME variants) | Transactional | `FocusGainedEvent`, `FocusLostEvent`, `CaptureReleasedEvent`, and IME events carried in the same RFC 0004 `InputEnvelope` oneof. Never dropped or coalesced per RFC 0004 §8.5 — delivery is reliable and ordered. |
@@ -433,18 +464,18 @@ Common error codes are defined per-subsystem: scene operation errors in RFC 0001
 
 ```protobuf
 message HeartbeatPing {
-  uint64 client_timestamp_us = 1;   // Client monotonic clock
+  uint64 client_timestamp_mono_us = 1;   // Client monotonic clock (µs since arbitrary epoch)
 }
 
 message HeartbeatPong {
-  uint64 client_timestamp_us = 1;   // Echo of ping value
-  uint64 server_timestamp_us = 2;   // Server wall-clock at receipt
+  uint64 client_timestamp_mono_us = 1;   // Echo of ping value (monotonic; for RTT calculation)
+  uint64 server_timestamp_wall_us = 2;   // Server wall-clock at receipt (UTC µs since epoch; advisory)
 }
 ```
 
 Heartbeat interval is negotiated at handshake (`SessionEstablished.heartbeat_interval_ms`). The runtime treats the session as ungracefully disconnected when `heartbeat_missed_threshold` consecutive pings are missed (default: `heartbeat_missed_threshold = 3`, so `3 × 5000 ms = 15 000 ms`).
 
-Note: `HeartbeatPong.server_timestamp_us` is a wall-clock value and is not suitable for round-trip latency estimation (wall clocks can jump). Agents that need RTT measurement should compute it from `HeartbeatPing.client_timestamp_us` using their own monotonic clock.
+**Clock domains:** `HeartbeatPing.client_timestamp_mono_us` is a monotonic clock value (RFC 0003 §1.1 "Monotonic system clock") — it is appropriate for RTT measurement because monotonic clocks do not jump. `HeartbeatPong.server_timestamp_wall_us` is a wall-clock value (UTC µs since Unix epoch) — it is advisory and not suitable for RTT calculation (wall clocks can jump due to NTP adjustments). To measure round-trip latency, compute `current_monotonic_us - HeartbeatPong.client_timestamp_mono_us`. See §2.4 "Clock domains".
 
 ---
 
@@ -812,7 +843,7 @@ message SessionInit {
   // Fields 9–10 are reserved. Resume uses SessionResume (§6.2), never SessionInit.
   reserved 9, 10;
   reserved "resume_session_token", "resume_last_seen_server_seq";
-  uint64 agent_timestamp_us = 11;  // Agent UTC µs since epoch (RFC 0003 §1.3 clock sync)
+  uint64 agent_timestamp_wall_us = 11;  // Agent UTC µs since epoch (wall-clock; RFC 0003 §1.3 clock sync)
 }
 
 message SessionEstablished {
@@ -824,8 +855,8 @@ message SessionEstablished {
   uint64  server_sequence                = 6;
   repeated SubscriptionCategory active_subscriptions = 7;
   repeated SubscriptionCategory denied_subscriptions = 8;
-  uint64 compositor_wallclock_us = 9;   // Compositor UTC wall clock at handshake time (µs since epoch)
-  int64  estimated_skew_us       = 10;  // Initial skew estimate: agent_ts - compositor_ts (signed)
+  uint64 compositor_timestamp_wall_us = 9;   // Compositor UTC wall clock at handshake time (µs since epoch)
+  int64  estimated_skew_us            = 10;  // Initial skew estimate: agent_ts - compositor_ts (signed)
 }
 
 message SessionClose {
@@ -882,12 +913,12 @@ message StateDeltaComplete {}
 // ─── Heartbeat ───────────────────────────────────────────────────────────────
 
 message HeartbeatPing {
-  uint64 client_timestamp_us = 1;
+  uint64 client_timestamp_mono_us = 1;  // Monotonic clock (µs); echoed in HeartbeatPong for RTT
 }
 
 message HeartbeatPong {
-  uint64 client_timestamp_us = 1;
-  uint64 server_timestamp_us = 2;
+  uint64 client_timestamp_mono_us = 1;  // Echo of HeartbeatPing value; monotonic clock
+  uint64 server_timestamp_wall_us = 2;  // Server wall-clock at receipt (UTC µs since epoch); advisory
 }
 
 // ─── Capability mid-session ───────────────────────────────────────────────────
@@ -934,9 +965,11 @@ message SubscriptionChangeResult {
 // (RFC 0001 §1.1) and RFC 0003 §2.2. All-zero bytes = "not in a sync group".
 
 message TimingHints {
-  uint64 present_at_us  = 1;   // Wall-clock (µs since epoch); 0 = present immediately
-  uint64 expires_at_us  = 2;   // Wall-clock; 0 = no expiry
-  bytes  sync_group_id  = 3;   // SyncGroupId: 16-byte UUIDv7 (RFC 0003 §2.2); all-zero = no group
+  uint64 present_at_wall_us = 1;  // Wall-clock (UTC µs since epoch); 0 = present immediately
+  uint64 expires_at_wall_us = 2;  // Wall-clock (UTC µs since epoch); 0 = no expiry
+  bytes  sync_group_id      = 3;  // SyncGroupId: 16-byte UUIDv7 (RFC 0003 §2.2); all-zero = no group
+  // Note: RFC 0003 §7.1 is authoritative. If RFC 0003 still uses the old _us suffix,
+  // treat this definition as the intended final form; RFC 0003 §7.1 should be updated to match.
 }
 
 message MutationBatch {
@@ -1043,8 +1076,8 @@ message TelemetryFrame {
 // ─── Envelope ────────────────────────────────────────────────────────────────
 
 message SessionMessage {
-  uint64    sequence     = 1;
-  uint64    timestamp_us = 2;
+  uint64    sequence          = 1;
+  uint64    timestamp_wall_us = 2;  // Sender wall-clock (UTC µs since epoch); advisory only. See §2.4.
   oneof payload {
     // Lifecycle
     SessionInit          session_init          = 10;
@@ -1152,7 +1185,7 @@ The session protocol exposes the following configurable parameters in the runtim
 |-----|-------------|
 | RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene topology events reference `SceneId` types from RFC 0001. |
 | RFC 0002 (Runtime Kernel) | The session service is a component of the runtime kernel. Lease lifecycle (grace period, revocation) is governed by RFC 0002. |
-| RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_us` and `SessionEstablished.compositor_wallclock_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. |
+| RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_wall_us` and `SessionEstablished.compositor_timestamp_wall_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. Clock-domain naming in this RFC follows the `_wall_us`/`_mono_us` convention (§2.4); see RFC 0003 §1.1 for the canonical clock domain definitions. |
 | RFC 0004 (Input Model) | `InputEvent` messages delivered over the session stream follow the routing and dispatch rules of RFC 0004. |
 
 ---
