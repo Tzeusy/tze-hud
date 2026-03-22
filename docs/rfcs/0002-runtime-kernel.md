@@ -354,7 +354,7 @@ Drain the `MutationBatch` channel. Apply agent envelope limits:
 
 **Batches are never coalesced.** Each `MutationBatch` is the unit of atomicity: it carries a `batch_id` and receives an independent `MutationResult` acknowledgement. Merging two batches would collapse their `batch_id`s into one, breaking the per-batch deduplication and retransmission contract defined in RFC 0005 §5.2–5.3. The compositor may process multiple batches in a single frame tick — draining all available batches before advancing to Scene Commit — but each batch is validated, committed, and acknowledged independently.
 
-**State-stream coalescing** (reducing update frequency under load) applies only to outbound `SceneEvent` notifications (RFC 0005 §3.1), not to inbound `MutationBatch` messages. See §6.2 (Degradation Ladder Level 1) for the coalescing policy.
+**State-stream coalescing** (reducing update frequency under load) applies only to outbound `SceneEvent` notifications (RFC 0005 §3.2), not to inbound `MutationBatch` messages. See §6.2 (Degradation Ladder Level 1) for the coalescing policy.
 
 #### Stage 4: Scene Commit
 **Thread:** Compositor | **Budget:** p99 < 1ms
