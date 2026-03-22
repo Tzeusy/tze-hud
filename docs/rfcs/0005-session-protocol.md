@@ -22,6 +22,7 @@
 | 8 | 2026-03-22 | rig-8uq | Snapshot gap fix | Added `SceneSnapshot` (imported from RFC 0001 §7.1) as field 42 in `SessionMessage` oneof (field 41 was allocated to `TelemetryFrame` in Round 3); added scene snapshot comment block in §9 proto; noted snapshot delivery in §1.3 (`SessionEstablished`) and §3.2 server→client table; updated §6.5 to reference `SceneSnapshot` by name; updated §6.4 v1 note to use `SceneSnapshot` instead of `SceneEvent`; updated §9.1 import graph and §9.2 field registry; updated §11 cross-RFC table with RFC 0001 snapshot format dependency. Corrected §3.2 table and §9 comment: `SessionResumeResult` corresponds to within-grace-period resume (§6.4), not post-grace. |
 | 9 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification (subsumed by Round 7) | Cross-RFC pass that added `import "scene.proto"` and converted `lease_id`/`created_ids` to `SceneId`. The `batch_id` conversion was also completed in Round 7 (rig-de2), which is authoritative — RFC 0001 §4 and §7.1 establish `batch_id` as a scene-object ID (`SceneId`), not a session-level string. This round's RFC 0003, RFC 0004, and RFC 0007 changes (SyncGroupConfig, input proto, session proto ID unification) remain as committed on those files. |
 | 10 | 2026-03-22 | rig-3uy | Align v1 reconnect with full-snapshot model, defer delta burst | Replaced §6.4 "State Delta on Resume" with v1-correct "Reconnect Within Grace Period (Full Snapshot)": runtime sends `SceneSnapshot` (not incremental delta replay) on accepted resume, then restores orphaned leases. Moved delta-burst mechanism to post-v1 callout in §6.4 with forward-compatibility guidance. Updated `SessionResume.last_seen_server_sequence` comment to reflect v1 purpose (identity binding / lease reclaim) vs post-v1 purpose (delta replay). Reserved field 38 (`StateDeltaComplete`) in both `SessionMessage` oneof blocks with deferred label. Updated `StateDeltaComplete` comment block in §9 proto. Updated §9.2 field registry: field 38 now listed as reserved/deferred. Updated `SceneSnapshot` comment in §9 to enumerate all three delivery cases (new connection, resume, post-grace reconnect). Updated §1.3 snapshot delivery cross-reference. |
+| 11 | 2026-03-22 | rig-5vq.21 | Cross-RFC consistency fixes from Timing RFC Round 3 review | `ZonePublish.ttl_ms` renamed to `ttl_us` (RFC 0003 §3.1: `_us` is authoritative for timing fields); `auto_clear_ms` prose reference updated to `auto_clear_us` (aligns with RFC 0001 `Zone.auto_clear_us`); `publish_to_zone` MCP tool `ttl_ms` parameter renamed to `ttl_us`; `TimingHints` inline note updated to confirm alignment with RFC 0003 §7.1 after Round 3 clock-domain naming fix. |
 
 ---
 
@@ -726,7 +727,7 @@ The v1 guest MCP tool surface is restricted to zone-centric operations and a bou
 
 | Tool | Parameters | Effect |
 |------|-----------|--------|
-| `publish_to_zone` | `zone_name, content, ttl_ms?, merge_key?` | Publish content to a zone; primary LLM-first surface |
+| `publish_to_zone` | `zone_name, content, ttl_us?, merge_key?` | Publish content to a zone; primary LLM-first surface |
 | `list_zones` | *(none)* | Returns zone registry (names, types, current occupancy) |
 | `list_scene` | *(none)* | Returns tab names and zone registry only — not full tile topology |
 
@@ -777,7 +778,7 @@ The `data` object is the `RuntimeError` proto (§3.5) serialized as JSON. Error 
 Zone publishing is available via both protocol planes (gRPC `ZonePublish` and MCP `publish_to_zone`). When an MCP guest publishes to a zone:
 
 - The guest does not acquire a lease. The zone's internal tile is runtime-owned (presence.md §"Guest agents and zone leases").
-- Content persists until the zone's `auto_clear_ms` timeout, or until another publish replaces/extends it.
+- Content persists until the zone's `auto_clear_us` timeout, or until another publish replaces/extends it.
 - The guest receives a success/failure response for the tool call. No events are sent to the guest (it has no subscription stream).
 
 ---
@@ -1008,8 +1009,8 @@ message TimingHints {
   uint64 present_at_wall_us = 1;  // Wall-clock (UTC µs since epoch); 0 = present immediately
   uint64 expires_at_wall_us = 2;  // Wall-clock (UTC µs since epoch); 0 = no expiry
   bytes  sync_group_id      = 3;  // SyncGroupId: 16-byte UUIDv7 (RFC 0003 §2.2); all-zero = no group
-  // Note: RFC 0003 §7.1 is authoritative. If RFC 0003 still uses the old _us suffix,
-  // treat this definition as the intended final form; RFC 0003 §7.1 should be updated to match.
+  // RFC 0003 §7.1 is authoritative; this inline definition matches it exactly after
+  // the Round 3 cross-RFC fix (rig-5vq.21) aligned RFC 0003 to the _wall_us/_mono_us convention.
 }
 
 // ID type convention: scene-object IDs (batch_id, lease_id, created_ids) use
@@ -1037,7 +1038,7 @@ message MutationResult {
 message ZonePublish {
   string      zone_name  = 1;
   ZoneContent content    = 2;    // Imported from scene_service.proto
-  uint64      ttl_ms     = 3;    // 0 = zone default; use zone's auto_clear_ms
+  uint64      ttl_us     = 3;    // UTC µs duration; 0 = zone default (use zone's auto_clear_us). RFC 0003 §3.1: _us is authoritative.
   string      merge_key  = 4;    // For MergeByKey contention policy; empty otherwise
 }
 
