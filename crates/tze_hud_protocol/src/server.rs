@@ -254,10 +254,10 @@ impl SceneService for SceneServiceImpl {
                 }
                 Some(mutation_proto::Mutation::SetTileRoot(str_)) => {
                     let tile_id = parse_scene_id(&str_.tile_id)?;
-                    if let Some(ref node_proto) = str_.node {
-                        if let Some(node) = convert::proto_node_to_scene(node_proto) {
-                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
-                        }
+                    if let Some(ref node_proto) = str_.node
+                        && let Some(node) = convert::proto_node_to_scene(node_proto)
+                    {
+                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
                     }
                 }
                 Some(mutation_proto::Mutation::PublishToZone(pz)) => {
@@ -455,6 +455,7 @@ pub fn dispatch_input_event(
     state.sessions.dispatch_to_namespace(namespace, event);
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_scene_id(s: &str) -> Result<tze_hud_scene::SceneId, Status> {
     uuid::Uuid::parse_str(s)
         .map(tze_hud_scene::SceneId::from_uuid)
