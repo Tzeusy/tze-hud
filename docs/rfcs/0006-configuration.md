@@ -157,6 +157,34 @@ No new inconsistencies. All prior-round fixes remain intact. Cross-RFC score rai
 
 ---
 
+### Round 6 — Headless Auto-Detection Branch (rig-6hz)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-6hz
+**Doctrine files reviewed:** v1.md §"V1 must prove", architecture.md §"Display profiles"
+
+#### Finding: §3.5 auto-detection had no headless branch
+
+**[MUST-FIX → FIXED]** §3.5 auto-detection had two branches (`full-display` and `mobile`) with no headless path. In CI or server environments (no display server, software-only rendering, or container environment), detection fell through to `mobile` — semantically incorrect for headless operation, and `mobile` is not exercised in v1.
+
+**Fixes applied:**
+
+1. **§3.5 Auto-detection rewritten as three ordered steps:**
+   - Step 1 (headless check, evaluated first): selects `headless` if `$DISPLAY`/`$WAYLAND_DISPLAY` are unset on Linux/macOS, Win32 display is unreachable on Windows, `/.dockerenv` exists (container hint), or wgpu reports software-only rendering. Logs an `INFO` entry naming the detected signal.
+   - Step 2 (full-display check): selects `full-display` if GPU VRAM > 4 GB and display refresh >= 60 Hz (unchanged from prior spec).
+   - Step 3 (failure): if neither condition matches, log `WARN` and abort — requires explicit `profile =`. Mobile is no longer a silent auto-detection fallback.
+
+2. **CI guidance note added** in §3.5: CI pipelines should set `profile = "headless"` explicitly; auto-detection will do the right thing when no display is present, but explicit config is more robust across environments with virtual displays.
+
+3. **`mobile` reservation note added** in §3.5: explains why `mobile` is excluded from auto-detection (cannot distinguish mobile hardware from degraded desktop without device-class signals unavailable at startup).
+
+4. **Open Question 2 updated** to reflect the headless detection signals and the broader set of heuristics now included.
+
+**No doctrinal regressions. Round 6 complete.**
+
+---
+
 ## Summary
 
 This RFC defines the configuration system for tze_hud: the file format, schema, display profile definitions, zone geometry policies, tab and layout configuration, agent registration, and privacy/degradation policies. Configuration is the primary mechanism for declaring scenes, zones, and policies in v1 before dynamic orchestration exists, so it is a first-class, schema-validated, LLM-readable surface.
@@ -617,10 +645,27 @@ This profile is selected by `profile = "headless"` in `[runtime]`. It cannot be 
 When the runtime starts, it selects the active profile as follows:
 
 1. **Explicit config**: if `[runtime].profile` names a profile, use it.
-2. **Auto-detection** (if `profile = "auto"`): the runtime queries hardware capabilities and selects the closest built-in profile. Detection logic:
-   - If a local GPU with > 4GB VRAM is present and display refresh >= 60Hz: `full-display`
-   - If no local GPU or display refresh < 60Hz: `mobile`
-   - If detection fails or hardware information is unavailable (virtualized environment, missing driver): fall back to `mobile` (most conservative), log a `WARN` with the detection output.
+2. **Auto-detection** (if `profile = "auto"`): the runtime queries environment and hardware capabilities and selects the closest built-in profile. Detection runs in the following order — the first matching branch wins:
+
+   **Step 1 — Headless environment check (evaluated first):**
+   Select `headless` if any of the following signals are present:
+   - On Linux/macOS: `$DISPLAY` is unset or empty **and** `$WAYLAND_DISPLAY` is unset or empty (no X11 or Wayland session).
+   - On Windows: no Win32 display server is reachable (e.g., `GetSystemMetrics(SM_CXSCREEN)` returns 0 or the call fails).
+   - Container hint: `/.dockerenv` exists (process is running inside a Docker container). This is an additional headless hint, not a sufficient condition on its own — a Docker container with a forwarded display is still treated as headless unless an explicit `profile =` is set.
+   - Software-only rendering: the wgpu adapter reports no hardware GPU and falls back to a software renderer (Mesa llvmpipe, WARP, or equivalent).
+
+   When this branch fires, log an `INFO` entry naming the detected signal (e.g., `"auto-detect: headless — $DISPLAY unset"`).
+
+   **Step 2 — Full-display check:**
+   Select `full-display` if a local GPU with > 4 GB VRAM is present **and** the primary display refresh rate is >= 60 Hz.
+
+   **Step 3 — Detection failure:**
+   If neither headless nor full-display conditions are met (e.g., display present but GPU VRAM below threshold, or hardware information is partially unavailable): log a `WARN` with the detection output and abort startup with a structured error. The operator must set an explicit `profile =` value.
+
+   > **Note:** `mobile` is a valid v1 built-in profile but is not a fallback target for `auto` detection. Auto-detection cannot reliably distinguish a mobile hardware environment from a degraded desktop environment without device-class signals (screen DPI, touch capability) that are unavailable at startup on all supported platforms. Select `profile = "mobile"` explicitly for mobile deployments.
+
+   > **CI guidance:** CI pipelines should set `profile = "headless"` explicitly in their config rather than relying on auto-detection. Auto-detection will select `headless` correctly when no display server is present, but explicit configuration is more robust across CI environments (some runners expose a virtual display). See §3.4 for the headless profile definition.
+
 3. **Profile extension**: if `[display_profile].extends` is set, the named base profile is loaded and then overridden field-by-field with any fields present in `[display_profile]`. The result is the effective profile; `[runtime].profile` names this effective profile. For a custom-named profile, `[runtime].profile` must be set to the custom name (e.g., `"glasses-v1"`) and `[display_profile].extends` must name the built-in base. If `[display_profile].extends` is set and `[runtime].profile` names a *different* built-in, the configuration is rejected with `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE` (see §2.3).
 
 The selected profile name is logged at startup and included in the runtime's gRPC handshake response so agents can inspect it.
@@ -1528,7 +1573,7 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 
 1. **Custom zone type discovery.** Should the runtime enumerate custom zone types in the `list_zones` gRPC/MCP response? Currently yes (all zones, built-in and custom, are listed). This exposes deployment-specific configuration to agents, which is intentional — agents need to discover what zones are available.
 
-2. **Profile auto-detection heuristics.** The auto-detection criteria in §3.5 (GPU VRAM threshold, display refresh rate) may need tuning once real mobile hardware targets are defined. The heuristics are conservative defaults; deployments should prefer explicit `profile =` settings.
+2. **Profile auto-detection heuristics.** The auto-detection criteria in §3.5 (GPU VRAM threshold, display refresh rate for `full-display`; environment variable and `/.dockerenv` signals for `headless`) may need tuning as real hardware targets are defined. The headless signals are conservative and enumerated (not exhaustive); future container runtimes or novel CI environments may require additional probes. Deployments should prefer explicit `profile =` settings whenever the target environment is known at deploy time.
 
 3. **Tab order persistence.** Tab order is defined by the order of `[[tabs]]` entries in the config. If the user reorders tabs via the UI (a future feature), should that reordering persist across restarts? For v1, tab order is config-only. Persistence is deferred.
 
