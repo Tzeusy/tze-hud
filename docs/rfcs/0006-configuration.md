@@ -61,7 +61,7 @@ No doctrinal regressions found.
 
 **[CONSIDER]** `tab_switch_on_event` unknown names are silently accepted at load time; a `WARN` log entry is recommended for names not in the built-in event registry.
 
-**[CONSIDER]** `profile = "auto"` failure path now specified: falls back to `mobile` with a `WARN` log.
+**[CONSIDER]** `profile = "auto"` failure path now specified: falls back to `mobile` with a `WARN` log. *(Superseded by Round 6: the auto-detection fallback was changed to `headless`; `mobile` is not a v1 auto-detection target.)*
 
 **No dimension below 3. Round 2 complete.**
 
@@ -119,6 +119,50 @@ No doctrinal regressions from prior rounds. All architectural commitments remain
 No new inconsistencies. All prior-round fixes remain intact. Cross-RFC score raised to 5/5: all identified gaps are now closed.
 
 **No dimension below 3. Round 4 complete. All scores ≥ 4.**
+
+---
+
+### Round 6 — Mobile Profile Doctrinal Alignment (rig-hix)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-hix
+**Doctrine files reviewed:** v1.md §"Mobile", architecture.md §"Display profiles", mobile.md §"Two profiles, one model"
+
+#### Finding: Mobile profile was active in v1, contradicting doctrine
+
+**[MUST-FIX → FIXED]** RFC 0006 §3.1 listed `mobile` as a v1 built-in runtime profile alongside `full-display` and `headless`. RFC 0006 §3.3 provided a fully-specified mobile profile with concrete budget values. RFC 0006 §3.5 auto-detection fell back to `mobile` for low-resource hardware. This directly contradicts:
+- v1.md §"Mobile": "No mobile build target. V1 is desktop/server only (Linux, Windows, macOS)."
+- v1.md §"Mobile": "Mobile capability negotiation is designed into the API but not exercised."
+- architecture.md §"Display profiles": "Mobile profiles are designed into the schema but not exercised until post-v1."
+
+**Fixes applied:**
+
+1. **§3.1 Profile table:** Added a `v1 Status` column. `mobile` is now documented as "Schema-reserved (post-v1)" with a cross-reference to §3.3. `full-display` and `headless` remain "Active". A prose note explains the doctrinal position.
+
+2. **§3.3 Mobile profile:** Added a doctrinal callout at the top of the section stating that `mobile` is schema-reserved in v1, the Rust struct exists for forward compatibility, and `profile = "mobile"` at runtime emits `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` and refuses to start. Added a full error message example. Added a note that implementers must not test against mobile budget values in v1.
+
+3. **§3.5 Profile negotiation:** Fixed the auto-detection fallback. "No local GPU or refresh < 60Hz" now falls back to `headless`, not `mobile`. Added an explicit rule: "`mobile` is never selected by auto-detection in v1." Added a note that `extends = "mobile"` is syntactically valid for custom profiles but does not activate absent mobile runtime paths.
+
+4. **§3.6 Custom profiles:** Added a prose note to the `extends = "mobile"` example clarifying it is post-v1; in v1 it produces a custom profile that does not activate mobile-specific runtime paths.
+
+5. **§4.2 Built-in policies:** Added a v1 note at the top of the section. All mobile-specific default parameter values are now annotated `(post-v1)` inline to prevent v1 implementers from writing tests against them.
+
+6. **§4.3 Per-profile policy overrides:** Added a comment to the `profile_overrides.mobile` example block noting it is post-v1 and will never activate in v1 builds.
+
+7. **§2.2 Validation rules:** Added a rule distinguishing `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` (mobile is recognized but refused) from `CONFIG_UNKNOWN_PROFILE` (name not known at all).
+
+8. **§2.9 Error example:** Fixed `CONFIG_UNKNOWN_PROFILE` example — updated `Expected` to list `full-display, headless` (not `full-display, mobile`).
+
+9. **§10 Rust types:** Added `ConfigMobileProfileNotExercised` variant to `ConfigErrorCode` enum with a doc comment.
+
+10. **§10 `DisplayProfileConfig.extends` doc comment:** Added note that `extends = "mobile"` is valid syntax but post-v1 behaviorally.
+
+11. **Summary of Validation Error Codes:** Added `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` row.
+
+12. **§11.3 Test fixtures:** Renamed `mobile.toml` to `mobile-reserved.toml` and updated its description to test the error case, not mobile budget values.
+
+**No doctrinal regressions. Round 6 complete.**
 
 ---
 
@@ -307,8 +351,10 @@ Each section is optional except `[runtime]` and at least one `[[tabs]]` entry. M
 
 ```toml
 [runtime]
-# Which display profile to use. One of: "full-display", "mobile", or a custom
+# Which display profile to use. One of: "full-display", "headless", or a custom
 # profile name defined in [display_profile]. Required.
+# Note: "mobile" is recognized but is not a valid v1 runtime target; it produces
+# CONFIG_MOBILE_PROFILE_NOT_EXERCISED. See §3.3.
 profile = "full-display"
 
 # Window mode. One of: "fullscreen", "overlay".
@@ -351,6 +397,7 @@ headless_height = 1080
 
 **Validation rules:**
 - `profile` must name a built-in profile or a profile defined in `[display_profile]`. Unknown profile → structured error `CONFIG_UNKNOWN_PROFILE`.
+- `profile = "mobile"` is a hard error in v1 → structured error `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` (see §3.3). This is distinct from `CONFIG_UNKNOWN_PROFILE` — `mobile` is a recognized name but is not a v1 runtime target.
 - `grpc_bind` and `mcp_bind` must be valid socket addresses. Invalid address → structured error `CONFIG_INVALID_ADDRESS`.
 - `window_mode = "overlay"` on an unsupported platform emits a warning and falls back to `"fullscreen"` at runtime (not a startup error).
 
@@ -487,9 +534,10 @@ Error loading config: 3 validation error(s)
 
   [CONFIG_UNKNOWN_PROFILE]
   Field: runtime.profile
-  Expected: one of: full-display, mobile
+  Expected: one of: full-display, headless, or a custom profile name defined in [display_profile]
   Got: "wall-display"
   Hint: define a custom profile under [display_profile] or use a built-in name
+  Note: the mobile profile is schema-reserved; use CONFIG_MOBILE_PROFILE_NOT_EXERCISED for that case
 
   [CONFIG_DUPLICATE_TAB_NAME]
   Field: tabs[2].name
@@ -516,13 +564,15 @@ Profiles are not a fork. The scene model, API, and protocol are identical across
 
 **V1 built-in profiles:**
 
-| Name | Purpose |
-|------|---------|
-| `full-display` | High-end local display (wall display, monitor, kiosk). GPU, persistent power. |
-| `mobile` | Mobile Presence Node (phone, glasses-class). Thermal limits, variable network. |
-| `headless` | CI/test, no window. Offscreen render target. Not for production deployments. |
+| Name | v1 Status | Purpose |
+|------|-----------|---------|
+| `full-display` | Active | High-end local display (wall display, monitor, kiosk). GPU, persistent power. |
+| `headless` | Active | CI/test, no window. Offscreen render target. Not for production deployments. |
+| `mobile` | Schema-reserved (post-v1) | Mobile Presence Node (phone, glasses-class). Designed into the schema; **not exercised in v1**. See §3.3. |
 
 The `"desktop"` alias used in early doctrine drafts maps to `full-display`. The `"headless"` profile is the v1 mechanism for CI testing (see architecture.md §"Display profiles": "V1 supports at least two built-in profiles: 'desktop' (high-end local display) and 'headless' (CI/test, no window)"). The RFC uses `full-display` as the canonical production name; `headless` is the third built-in to support the doctrinal requirement.
+
+The `mobile` profile is designed into the schema for forward compatibility (see v1.md §"Mobile": "Mobile capability negotiation is designed into the API but not exercised"; architecture.md §"Display profiles": "Mobile profiles are designed into the schema but not exercised until post-v1"). V1 is desktop/server only. Setting `profile = "mobile"` at runtime is not silently accepted — see §3.3 for the v1 enforcement rule.
 
 ### 3.2 Built-in Profile: `full-display`
 
@@ -573,10 +623,14 @@ allow_chrome_zones = true
 
 ### 3.3 Built-in Profile: `mobile`
 
-The Mobile Presence Node profile. Targets high-end phones and smart-glasses-class devices with variable network, thermal limits, and tighter display budgets.
+> **V1 doctrinal position:** The `mobile` profile is **schema-reserved in v1**. The Rust struct exists and the TOML schema documents it for forward compatibility, but `profile = "mobile"` at runtime emits a structured warning `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` and the runtime refuses to start. V1 is desktop/server only (Linux, Windows, macOS). See v1.md §"Mobile" and architecture.md §"Display profiles". Mobile capability negotiation is designed into the API but not exercised until post-v1.
+
+The Mobile Presence Node profile. Targets high-end phones and smart-glasses-class devices with variable network, thermal limits, and tighter display budgets. The schema is defined here to document the design intent and for use by custom profiles that `extends = "mobile"` in post-v1 deployments. **Implementers must not test against these budget values in v1** — the profile is not activated by the v1 runtime.
 
 ```toml
-# Built-in profile definition (shown for documentation)
+# Built-in profile definition (shown for documentation; post-v1 target)
+# IMPORTANT: profile = "mobile" is not valid in v1. The runtime will emit
+# CONFIG_MOBILE_PROFILE_NOT_EXERCISED and refuse to start.
 [profiles.mobile]
 max_tiles = 32
 max_texture_mb = 256
@@ -596,7 +650,7 @@ allowed_node_types = [
 # on platforms where overlay primitives are unavailable (see architecture.md
 # §"Window model: two deployment modes", Promise boundary).
 allowed_window_modes = ["fullscreen", "overlay"]
-max_media_streams = 1     # One primary live stream
+max_media_streams = 1     # One primary live stream (post-v1)
 max_agent_update_hz = 30  # Coalesce more aggressively
 allow_background_zones = false   # Background layer not available on mobile
 allow_chrome_zones = true
@@ -610,6 +664,24 @@ upstream_precomposition = false
 ```
 
 **Note on `prefer_zones` and `upstream_precomposition`:** These are mobile-specific advisory fields surfaced in the profile's TOML documentation. They are included in the `DisplayProfile` Rust struct as optional boolean fields with `#[serde(default)]`. They do not affect the compositor's enforcement budget — they are hints to orchestrators and the upstream service respectively.
+
+**V1 runtime enforcement rule:** If `[runtime].profile = "mobile"` is set, the config validator emits a structured error (not a warning) `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` and refuses to start:
+
+```
+Error loading config: 1 validation error(s)
+
+  [CONFIG_MOBILE_PROFILE_NOT_EXERCISED]
+  Field: runtime.profile
+  Expected: one of: full-display, headless, or a custom profile name
+  Got: "mobile"
+  Hint: the mobile profile is schema-reserved for post-v1. V1 is desktop/server only.
+        Use profile = "full-display" for production or profile = "headless" for CI.
+        To define a mobile-inspired custom profile, use [display_profile] extends = "mobile"
+        with a distinct custom name — but note this custom profile will also not activate
+        mobile-specific runtime paths that do not exist in v1.
+```
+
+This is a hard startup error, not a degraded run. Operators must not ship mobile configs against v1 builds.
 
 ### 3.4 Built-in Profile: `headless`
 
@@ -644,7 +716,7 @@ This profile is selected by `profile = "headless"` in `[runtime]`. It cannot be 
 
 When the runtime starts, it selects the active profile as follows:
 
-1. **Explicit config**: if `[runtime].profile` names a profile, use it.
+1. **Explicit config**: if `[runtime].profile` names a profile, use it. Note that `profile = "mobile"` is a hard startup error in v1 (see §3.3; `CONFIG_MOBILE_PROFILE_NOT_EXERCISED`).
 2. **Auto-detection** (if `profile = "auto"`): the runtime queries environment and hardware capabilities and selects the closest built-in profile. Detection runs in the following order — the first matching branch wins:
 
    **Step 1 — Headless environment check (evaluated first):**
@@ -662,11 +734,11 @@ When the runtime starts, it selects the active profile as follows:
    **Step 3 — Detection failure:**
    If neither headless nor full-display conditions are met (e.g., display present but GPU VRAM below threshold, or hardware information is partially unavailable): log a `WARN` with the detection output and abort startup with a structured error. The operator must set an explicit `profile =` value.
 
-   > **Note:** `mobile` is a valid v1 built-in profile but is not a fallback target for `auto` detection. Auto-detection cannot reliably distinguish a mobile hardware environment from a degraded desktop environment without device-class signals (screen DPI, touch capability) that are unavailable at startup on all supported platforms. Select `profile = "mobile"` explicitly for mobile deployments.
+   > **Note:** `mobile` is schema-reserved but **never selected by auto-detection in v1**. Auto-detection cannot reliably distinguish a mobile hardware environment from a degraded desktop environment without device-class signals (screen DPI, touch capability) that are unavailable at startup on all supported platforms. Any code path that would select `mobile` must instead select `headless` and log a clear warning.
 
    > **CI guidance:** CI pipelines should set `profile = "headless"` explicitly in their config rather than relying on auto-detection. Auto-detection will select `headless` correctly when no display server is present, but explicit configuration is more robust across CI environments (some runners expose a virtual display). See §3.4 for the headless profile definition.
-
 3. **Profile extension**: if `[display_profile].extends` is set, the named base profile is loaded and then overridden field-by-field with any fields present in `[display_profile]`. The result is the effective profile; `[runtime].profile` names this effective profile. For a custom-named profile, `[runtime].profile` must be set to the custom name (e.g., `"glasses-v1"`) and `[display_profile].extends` must name the built-in base. If `[display_profile].extends` is set and `[runtime].profile` names a *different* built-in, the configuration is rejected with `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE` (see §2.3).
+   - Note: `extends = "mobile"` is permitted for custom profiles (the `mobile` schema is available as a base), but the resulting custom profile does not activate any mobile-specific runtime paths that do not exist in v1. Operators must be aware that custom profiles derived from `mobile` are schema-compatible but behaviorally equivalent to `headless` in areas where mobile runtime paths are absent.
 
 The selected profile name is logged at startup and included in the runtime's gRPC handshake response so agents can inspect it.
 
@@ -679,7 +751,7 @@ A deployment can define a custom profile for specific hardware (e.g., a glasses 
 profile = "glasses-v1"
 
 [display_profile]
-extends = "mobile"
+extends = "mobile"   # post-v1: mobile schema is used as the base; see note below
 max_tiles = 8
 max_texture_mb = 64
 max_agents = 2
@@ -688,6 +760,8 @@ min_fps = 15
 max_media_streams = 0       # No media in v1 glasses profile
 allow_chrome_zones = false  # Minimal chrome on glasses
 ```
+
+**Note on `extends = "mobile"` in v1:** This custom profile example is shown for forward-compatibility documentation. In v1, a custom profile with `extends = "mobile"` is syntactically valid (the `mobile` schema is available as a base), but the resulting profile does not activate any mobile-specific runtime paths that are absent in v1. Operators targeting a constrained v1 deployment with mobile-like budgets should instead extend `full-display` and set conservative budget values, or use `profile = "headless"` for display-less environments. The `extends = "mobile"` form is intended for post-v1 use when the mobile runtime paths are implemented.
 
 Custom profiles extend a built-in profile. Extending another custom profile is not supported (avoids chain resolution complexity). The `headless` built-in cannot be used as a base for custom profiles — it implies an offscreen render path that cannot be extended with windowed-display parameters.
 
@@ -718,17 +792,19 @@ This is the concrete mechanism by which "same scene model, different budgets" wo
 
 All built-in policies accept a `[zones.<name>.policy_overrides]` table for per-profile customization (see §4.3).
 
+> **V1 note on mobile parameters:** The policy definitions below include per-profile default values for the `mobile` profile. These are documented to preserve design intent and support post-v1 implementation. In v1, the `mobile` profile is schema-reserved and not exercised (see §3.3). V1 implementers must not write code that tests geometry against these mobile values — they are reference documentation for post-v1.
+
 #### `bottom_strip`
 
 A horizontal strip anchored to the bottom edge of the content area (below the status bar, above the OS taskbar if in overlay mode).
 
 Default parameters:
-- Height: `5%` of display height on `full-display`, `10%` on `mobile`
+- Height: `5%` of display height on `full-display`, `10%` on `mobile` *(post-v1)*
 - Width: `100%` of display width minus horizontal margins
-- Horizontal margins: `2%` on `full-display`, `1%` on `mobile`
-- Vertical offset from bottom: `2%` on `full-display`, `3%` on `mobile`
+- Horizontal margins: `2%` on `full-display`, `1%` on `mobile` *(post-v1)*
+- Vertical offset from bottom: `2%` on `full-display`, `3%` on `mobile` *(post-v1)*
 - Background opacity: `0.75` (semi-transparent backdrop)
-- Text scale: `1.0` on `full-display`, `1.4` on `mobile` (larger for glanceability)
+- Text scale: `1.0` on `full-display`, `1.4` on `mobile` *(post-v1, larger for glanceability)*
 
 Typical uses: subtitle zone, transcript strip.
 
@@ -737,9 +813,9 @@ Typical uses: subtitle zone, transcript strip.
 A vertically stacking list of cards anchored to the top-right corner. New cards push downward.
 
 Default parameters:
-- Card width: `20%` of display width on `full-display`, `80%` on `mobile` (full-width banner)
+- Card width: `20%` of display width on `full-display`, `80%` on `mobile` *(post-v1, full-width banner)*
 - Card max height: `8%` of display height per card
-- Max visible cards: `5` on `full-display`, `2` on `mobile`
+- Max visible cards: `5` on `full-display`, `2` on `mobile` *(post-v1)*
 - Anchor: top-right corner, `2%` inset on each axis
 - Stack direction: downward
 - Auto-dismiss: card collapses after `timeout_secs` (configured per zone instance)
@@ -751,7 +827,7 @@ Typical uses: notification zone.
 A thin horizontal bar spanning the full display width. Attaches to the chrome layer.
 
 Default parameters:
-- Height: `3%` of display height on `full-display`, `4%` on `mobile`
+- Height: `3%` of display height on `full-display`, `4%` on `mobile` *(post-v1)*
 - Position: top or bottom (determined by `chrome.tab_bar_position`; status bar takes the opposite edge)
 - Content: horizontally scrolling key-value pairs
 - Always visible: yes (chrome layer)
@@ -764,7 +840,7 @@ A floating surface anchored to a named corner of the content area, draggable wit
 
 Default parameters:
 - Default anchor: `bottom_right`
-- Default size: `20%` × `15%` of display on `full-display`; `30%` × `25%` on `mobile`
+- Default size: `20%` × `15%` of display on `full-display`; `30%` × `25%` on `mobile` *(post-v1)*
 - Min size: `10%` × `8%`
 - Max size: `40%` × `35%`
 - Draggable: yes
@@ -790,8 +866,8 @@ A full-width bar at the top of the content area that pushes content tiles downwa
 The "push" mechanism works by dynamically adjusting `reserved_top_fraction` while the zone bar is active. The zone itself renders in the chrome layer (above all agent tiles), but its height is added to the content layer's reserved top area so agent tiles reflow below it rather than being occluded. When the zone dismisses, `reserved_top_fraction` returns to its configured value and tiles animate back to their prior positions. This is not the same as rendering in the content layer — the agent tiles move; the zone bar does not occlude them.
 
 Default parameters:
-- Height: `8%` of display height on `full-display`, `12%` on `mobile`
-- Expansion: animated (smooth push) on `full-display`, instant on `mobile`
+- Height: `8%` of display height on `full-display`, `12%` on `mobile` *(post-v1)*
+- Expansion: animated (smooth push) on `full-display`, instant on `mobile` *(post-v1)*
 - Dismiss: swipe up or tap ×
 - Layer: chrome (renders above the content layer; reserved area increase drives the tile reflow)
 
@@ -821,6 +897,9 @@ policy = "bottom_strip"
 layer = "content"
 
 # On the mobile profile, use a taller strip.
+# NOTE: profile_overrides.mobile is post-v1. The mobile profile is schema-reserved
+# and not exercised in v1 (see §3.3). This override block is valid TOML and will be
+# parsed without error, but it will never activate in v1 builds.
 [tabs.zones.subtitle.profile_overrides.mobile]
 height_fraction = 0.15
 text_scale = 1.6
@@ -1459,10 +1538,15 @@ pub struct DisplayProfile {
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct DisplayProfileConfig {
     /// If set, the named built-in profile is loaded and then the remaining fields
-    /// in this section override it. Must name `"full-display"` or `"mobile"`.
+    /// in this section override it. May name `"full-display"` or `"mobile"`.
     /// The `"headless"` profile is a recognized built-in but may not be used as an
     /// `extends` base — see `CONFIG_HEADLESS_NOT_EXTENDABLE`. Extending another
     /// custom profile is also not supported.
+    ///
+    /// Note: `extends = "mobile"` is valid syntax in v1 but the resulting custom
+    /// profile does not activate any mobile-specific runtime paths absent in v1.
+    /// The mobile schema is available as a budget reference for post-v1 deployments.
+    /// See RFC 0006 §3.6 and v1.md §"Mobile".
     #[serde(default)]
     pub extends: Option<ProfileName>,
     // All DisplayProfile fields are optional overrides here.
@@ -1494,6 +1578,10 @@ pub struct DisplayProfileConfig {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConfigErrorCode {
     ConfigUnknownProfile,
+    /// The `mobile` profile is schema-reserved and not exercised in v1.
+    /// Setting `profile = "mobile"` in `[runtime]` is a hard startup error.
+    /// See RFC 0006 §3.3 and v1.md §"Mobile".
+    ConfigMobileProfileNotExercised,
     ConfigInvalidAddress,
     ConfigNoTabs,
     ConfigDuplicateTabName,
@@ -1563,7 +1651,7 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 `tests/config/` contains:
 - `minimal.toml` — one tab, all defaults, must parse without errors
 - `full-display.toml` — comprehensive full-display config exercising all sections
-- `mobile.toml` — mobile profile with per-profile policy overrides
+- `mobile-reserved.toml` — asserts that `profile = "mobile"` produces `CONFIG_MOBILE_PROFILE_NOT_EXERCISED`; does not test mobile budget values (which are post-v1)
 - `invalid/*.toml` — one fixture per error code, asserting the exact structured error
 - `reload/` — fixtures for testing hot-reload behavior
 
@@ -1573,7 +1661,7 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 
 1. **Custom zone type discovery.** Should the runtime enumerate custom zone types in the `list_zones` gRPC/MCP response? Currently yes (all zones, built-in and custom, are listed). This exposes deployment-specific configuration to agents, which is intentional — agents need to discover what zones are available.
 
-2. **Profile auto-detection heuristics.** The auto-detection criteria in §3.5 (GPU VRAM threshold, display refresh rate for `full-display`; environment variable and `/.dockerenv` signals for `headless`) may need tuning as real hardware targets are defined. The headless signals are conservative and enumerated (not exhaustive); future container runtimes or novel CI environments may require additional probes. Deployments should prefer explicit `profile =` settings whenever the target environment is known at deploy time.
+2. **Profile auto-detection heuristics.** The auto-detection criteria in §3.5 (GPU VRAM threshold, display refresh rate for `full-display`; environment variable and `/.dockerenv` signals for `headless`) are v1-only heuristics. They will need revisiting when the mobile runtime is implemented in post-v1 (the current logic must not silently select `mobile`). The headless signals are conservative and enumerated (not exhaustive); future container runtimes or novel CI environments may require additional probes. Deployments should prefer explicit `profile =` settings whenever the target environment is known at deploy time.
 
 3. **Tab order persistence.** Tab order is defined by the order of `[[tabs]]` entries in the config. If the user reorders tabs via the UI (a future feature), should that reordering persist across restarts? For v1, tab order is config-only. Persistence is deferred.
 
@@ -1588,6 +1676,7 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 | Code | Section | Trigger |
 |------|---------|---------|
 | `CONFIG_UNKNOWN_PROFILE` | §2.2 | `runtime.profile` names an unknown profile |
+| `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` | §2.2, §3.3 | `runtime.profile = "mobile"` — mobile is schema-reserved and not a v1 runtime target |
 | `CONFIG_INVALID_ADDRESS` | §2.2 | `grpc_bind` or `mcp_bind` is not a valid socket address |
 | `CONFIG_NO_TABS` | §2.4 | `tabs` array is empty (at least one `[[tabs]]` entry required) |
 | `CONFIG_DUPLICATE_TAB_NAME` | §2.4 | Two `[[tabs]]` entries share a name |
