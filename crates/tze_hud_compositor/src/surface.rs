@@ -122,4 +122,64 @@ impl HeadlessSurface {
         let idx = ((y * width + x) * 4) as usize;
         [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]]
     }
+
+    /// Assert that a pixel at (x, y) is within `tolerance` of `expected` on
+    /// every channel (R, G, B, A).
+    ///
+    /// Returns `Ok([r, g, b, a])` on pass, `Err(message)` on failure.
+    ///
+    /// The `label` is included in the error message for diagnostic clarity.
+    ///
+    /// Software-rasterised GPU paths (llvmpipe / SwiftShader) may produce
+    /// values that differ from the linear-space input by ±2 per channel due
+    /// to sRGB conversion.  Use `tolerance = 2` for solid fills on CI.
+    pub fn assert_pixel_color(
+        data: &[u8],
+        width: u32,
+        x: u32,
+        y: u32,
+        expected: [u8; 4],
+        tolerance: u8,
+        label: &str,
+    ) -> Result<[u8; 4], String> {
+        let actual = Self::pixel_at(data, width, x, y);
+        for ch in 0..4 {
+            let diff = actual[ch].abs_diff(expected[ch]);
+            if diff > tolerance {
+                return Err(format!(
+                    "pixel assertion failed at ({x},{y}) [{label}]: \
+                     channel {ch} actual={} expected={} diff={} tolerance={}",
+                    actual[ch], expected[ch], diff, tolerance,
+                ));
+            }
+        }
+        Ok(actual)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assert_pixel_color_passes_within_tolerance() {
+        let pixels: Vec<u8> = vec![
+            100, 200, 50, 255, // pixel (0,0)
+            10, 20, 30, 255,   // pixel (1,0)
+        ];
+        HeadlessSurface::assert_pixel_color(&pixels, 2, 0, 0, [100, 200, 50, 255], 0, "exact")
+            .expect("exact match should pass");
+        HeadlessSurface::assert_pixel_color(&pixels, 2, 0, 0, [102, 200, 50, 255], 2, "within tol")
+            .expect("within-tolerance should pass");
+    }
+
+    #[test]
+    fn test_assert_pixel_color_fails_outside_tolerance() {
+        let pixels: Vec<u8> = vec![100, 200, 50, 255];
+        let result =
+            HeadlessSurface::assert_pixel_color(&pixels, 1, 0, 0, [110, 200, 50, 255], 2, "outside");
+        assert!(result.is_err(), "should fail when diff > tolerance");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("channel 0"), "error should identify channel: {msg}");
+    }
 }
