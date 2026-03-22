@@ -399,13 +399,14 @@ impl BudgetEnforcer {
             match &state.budget_state.clone() {
                 BudgetState::Normal => {
                     if currently_violated {
+                        let violation_kind = Self::primary_violation_kind(state);
                         state.budget_state = BudgetState::Warning { first_exceeded: now };
                         sink.emit_violation(BudgetViolationEvent {
                             namespace: namespace.clone(),
                             new_tier: BudgetTier::Warning,
-                            violation_kind: Self::primary_violation_kind(state),
+                            violation_kind,
                             timestamp_us: now
-                                .duration_since(state.budget_state_entered_instant(now))
+                                .duration_since(self.epoch)
                                 .as_micros() as u64,
                             detail: format!(
                                 "Agent '{}' has exceeded resource budget; 5s grace period before throttle",
@@ -442,10 +443,8 @@ impl BudgetEnforcer {
                         state.budget_state = BudgetState::Normal;
                     } else if now.duration_since(*throttled_since) >= THROTTLE_GRACE {
                         // 30s throttle sustained without resolution → Revoke.
-                        let violation = BudgetViolation::TileCountExceeded {
-                            current: state.tile_count,
-                            limit: state.budget.max_tiles,
-                        };
+                        // Build the violation from the actual dimension that is still exceeded.
+                        let violation = Self::primary_revocation_violation(state);
                         Self::transition_to_revoked(state, &violation, now, sink, &self.epoch);
                         revoked.push(namespace.clone());
                     }
@@ -566,6 +565,28 @@ impl BudgetEnforcer {
             BudgetViolationKind::TextureMemoryExceeded
         } else {
             BudgetViolationKind::UpdateRateExceeded
+        }
+    }
+
+    /// Build a `BudgetViolation` reflecting the actual exceeded dimension for use
+    /// in revocation events (prevents the Throttled→Revoke path from always
+    /// emitting a misleading `TileCountExceeded` reason).
+    fn primary_revocation_violation(state: &AgentResourceState) -> BudgetViolation {
+        if state.tile_count > state.budget.max_tiles {
+            BudgetViolation::TileCountExceeded {
+                current: state.tile_count,
+                limit: state.budget.max_tiles,
+            }
+        } else if state.texture_bytes_used > state.budget.max_texture_bytes {
+            BudgetViolation::TextureMemoryExceeded {
+                current_bytes: state.texture_bytes_used,
+                limit_bytes: state.budget.max_texture_bytes,
+            }
+        } else {
+            BudgetViolation::UpdateRateExceeded {
+                current_hz: state.current_update_rate_hz(),
+                limit_hz: state.budget.max_update_rate_hz,
+            }
         }
     }
 
