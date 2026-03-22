@@ -116,10 +116,138 @@ message MutationBatchRequest {
   repeated MutationProto mutations = 3;
 }
 
+// ─── Zone types ─────────────────────────────────────────────────────────────
+
+message NotificationPayload {
+  string text    = 1;
+  string icon    = 2;   // Resource name or empty
+  uint32 urgency = 3;   // 0=low, 1=normal, 2=urgent, 3=critical
+}
+
+message StatusBarPayload {
+  map<string, string> entries = 1;  // key → display string
+}
+
+message ZoneContent {
+  oneof payload {
+    string              stream_text  = 1;
+    NotificationPayload notification = 2;
+    StatusBarPayload    status_bar   = 3;
+    Rgba                solid_color  = 4;
+  }
+}
+
+message ZonePublishToken {
+  bytes token = 1;  // Opaque capability token issued at session auth
+}
+
+// Geometry policy variants for zone placement.
+enum DisplayEdge {
+  DISPLAY_EDGE_UNSPECIFIED = 0;
+  DISPLAY_EDGE_TOP         = 1;
+  DISPLAY_EDGE_BOTTOM      = 2;
+  DISPLAY_EDGE_LEFT        = 3;
+  DISPLAY_EDGE_RIGHT       = 4;
+}
+
+message RelativeGeometryPolicy {
+  float x_pct      = 1;
+  float y_pct      = 2;
+  float width_pct  = 3;
+  float height_pct = 4;
+}
+
+message EdgeAnchoredGeometryPolicy {
+  DisplayEdge edge       = 1;
+  float       height_pct = 2;   // Used for Top/Bottom edges
+  float       width_pct  = 3;   // Used for Left/Right edges
+  float       margin_px  = 4;
+}
+
+message GeometryPolicyProto {
+  oneof policy {
+    RelativeGeometryPolicy     relative     = 1;
+    EdgeAnchoredGeometryPolicy edge_anchored = 2;
+  }
+}
+
+// Rendering policy for zone content presentation.
+// All fields optional; absent = compositor default.
+message RenderingPolicyProto {
+  float  font_size_px = 1;   // 0.0 = not set
+  Rgba   backdrop     = 2;   // Zero alpha = not set
+  uint32 text_align   = 3;   // 0=unspecified, 1=start, 2=center, 3=end
+  float  margin_px    = 4;   // 0.0 = not set
+}
+
+// Contention policy values (used as enum int in ZoneDefinitionProto).
+enum ContentionPolicyProto {
+  CONTENTION_POLICY_UNSPECIFIED  = 0;
+  CONTENTION_POLICY_LATEST_WINS  = 1;
+  CONTENTION_POLICY_REPLACE      = 2;
+  CONTENTION_POLICY_STACK        = 3;
+  CONTENTION_POLICY_MERGE_BY_KEY = 4;
+}
+
+message ZoneDefinitionProto {
+  string               id                   = 1;
+  string               name                 = 2;
+  string               description          = 3;
+  GeometryPolicyProto  geometry_policy      = 4;
+  repeated string      accepted_media_types = 5;   // ZoneMediaType names
+  RenderingPolicyProto rendering_policy     = 6;
+  ContentionPolicyProto contention_policy   = 7;
+  uint32               max_publishers       = 8;
+  uint64               auto_clear_ms        = 9;   // 0 = no auto-clear
+  // Stack/MergeByKey parameters
+  uint32               stack_max_depth      = 10;  // For Stack policy
+  uint32               merge_max_keys       = 11;  // For MergeByKey policy
+}
+
+message ZonePublishRecordProto {
+  string      zone_name           = 1;
+  string      publisher_namespace = 2;
+  ZoneContent content             = 3;
+  uint64      published_at_ms     = 4;
+  string      merge_key           = 5;  // Empty if not MergeByKey
+}
+
+message ZoneRegistrySnapshotProto {
+  repeated ZoneDefinitionProto    zones           = 1;
+  repeated ZonePublishRecordProto active_publishes = 2;
+}
+
+// ─── Zone mutation messages ──────────────────────────────────────────────────
+
+message PublishToZoneMutation {
+  string           zone_name     = 1;
+  ZoneContent      content       = 2;
+  ZonePublishToken publish_token = 3;
+  string           merge_key     = 4;  // For MergeByKey contention; empty otherwise
+}
+
+message ClearZoneMutation {
+  string           zone_name     = 1;
+  ZonePublishToken publish_token = 2;
+}
+
+// ─── Zone query messages ─────────────────────────────────────────────────────
+
+message ZoneRegistryRequest {
+  string session_id = 1;
+}
+
+message ZoneRegistryResponse {
+  ZoneRegistrySnapshotProto registry = 1;
+  string error = 2;
+}
+
 message MutationProto {
   oneof mutation {
-    CreateTileMutation create_tile = 1;
-    SetTileRootMutation set_tile_root = 2;
+    CreateTileMutation    create_tile      = 1;
+    SetTileRootMutation   set_tile_root    = 2;
+    PublishToZoneMutation publish_to_zone  = 3;
+    ClearZoneMutation     clear_zone       = 4;
   }
 }
 
@@ -171,6 +299,9 @@ service SceneService {
 
   // Scene query
   rpc QueryScene(SceneQueryRequest) returns (SceneQueryResponse);
+
+  // Zone registry query
+  rpc QueryZoneRegistry(ZoneRegistryRequest) returns (ZoneRegistryResponse);
 
   // Event subscription (server-streaming)
   rpc SubscribeEvents(EventSubscribeRequest) returns (stream SceneEvent);
