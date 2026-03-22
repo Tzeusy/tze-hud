@@ -87,6 +87,7 @@ message NodeProto {
     SolidColorNodeProto solid_color = 10;
     TextMarkdownNodeProto text_markdown = 11;
     HitRegionNodeProto hit_region = 12;
+    StaticImageNodeProto static_image = 13;
   }
 }
 
@@ -108,6 +109,27 @@ message HitRegionNodeProto {
   string interaction_id = 2;
   bool accepts_focus = 3;
   bool accepts_pointer = 4;
+}
+
+// How image content is fitted within the node bounds.
+enum ImageFitModeProto {
+  IMAGE_FIT_MODE_UNSPECIFIED = 0;
+  IMAGE_FIT_MODE_CONTAIN     = 1;  // Scale uniformly so entire image is visible (may letterbox)
+  IMAGE_FIT_MODE_COVER       = 2;  // Scale uniformly to cover full bounds (may crop)
+  IMAGE_FIT_MODE_FILL        = 3;  // Stretch non-uniformly to fill bounds exactly
+  IMAGE_FIT_MODE_SCALE_DOWN  = 4;  // Like Contain but never scale up
+}
+
+// A static image node carrying raw RGBA8 pixel data.
+message StaticImageNodeProto {
+  // Raw RGBA8 pixel data (width * height * 4 bytes).
+  bytes  image_data    = 1;
+  uint32 width         = 2;
+  uint32 height        = 3;
+  // SHA-256 hex string for content-addressed deduplication.
+  string content_hash  = 4;
+  ImageFitModeProto fit_mode = 5;
+  Rect   bounds        = 6;
 }
 
 message MutationBatchRequest {

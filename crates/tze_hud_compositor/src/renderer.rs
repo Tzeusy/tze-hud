@@ -236,6 +236,10 @@ impl Compositor {
                     }
                     return [0.2, 0.3, 0.5, tile.opacity]; // Default hit region
                 }
+                NodeData::StaticImage(_) => {
+                    // Tile background for image tiles: near-black with slight tint
+                    return [0.05, 0.05, 0.05, tile.opacity];
+                }
             }
         }
         [0.1, 0.1, 0.2, tile.opacity]
@@ -325,6 +329,42 @@ impl Compositor {
                 );
                 vertices.extend_from_slice(&verts);
             }
+            NodeData::StaticImage(img) => {
+                // Render a representative colored quad for the image bounds.
+                //
+                // Full GPU texture upload (wgpu::Texture from RGBA data) is deferred to a
+                // follow-up iteration that adds a sampler pipeline. For the vertical slice this
+                // placeholder renders a warm-gray background quad with a smaller accent strip
+                // (mimicking the visual weight of an image) so that pixel-readback tests can
+                // verify the node is composited into the frame at the correct position.
+                let outer_color = [0.55_f32, 0.50, 0.45, 1.0]; // warm gray — "image placeholder"
+                let verts = rect_vertices(
+                    tile.bounds.x + img.bounds.x,
+                    tile.bounds.y + img.bounds.y,
+                    img.bounds.width,
+                    img.bounds.height,
+                    sw,
+                    sh,
+                    outer_color,
+                );
+                vertices.extend_from_slice(&verts);
+
+                // Inner accent strip — a slightly brighter inset rectangle.
+                let margin = 4.0_f32;
+                if img.bounds.width > margin * 2.0 && img.bounds.height > margin * 2.0 {
+                    let accent_color = [0.75_f32, 0.70, 0.65, 1.0];
+                    let verts = rect_vertices(
+                        tile.bounds.x + img.bounds.x + margin,
+                        tile.bounds.y + img.bounds.y + margin,
+                        img.bounds.width - margin * 2.0,
+                        img.bounds.height - margin * 2.0,
+                        sw,
+                        sh,
+                        accent_color,
+                    );
+                    vertices.extend_from_slice(&verts);
+                }
+            }
         }
 
         // Render children
@@ -344,3 +384,122 @@ pub enum CompositorError {
 
 // Make buffer init descriptor available
 use wgpu::util::DeviceExt;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::surface::HeadlessSurface;
+    use tze_hud_scene::graph::SceneGraph;
+
+    /// Convenience: build a minimal scene with one tile containing the given node.
+    fn scene_with_node(node: Node) -> SceneGraph {
+        let mut scene = SceneGraph::new(256.0, 256.0);
+        let tab_id = scene.create_tab("test", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), 1)
+            .unwrap();
+        scene.set_tile_root(tile_id, node).unwrap();
+        scene
+    }
+
+    /// Create a headless compositor and surface pair for testing.
+    async fn make_compositor_and_surface(w: u32, h: u32) -> (Compositor, HeadlessSurface) {
+        let compositor = Compositor::new_headless(w, h).await.expect("headless compositor");
+        let surface = HeadlessSurface::new(&compositor.device, w, h);
+        (compositor, surface)
+    }
+
+    #[tokio::test]
+    async fn test_static_image_node_renders_placeholder_quad() {
+        // The static image placeholder renders a warm-gray outer quad ~[0.55, 0.50, 0.45].
+        // In sRGB output the linear values are gamma-compressed.
+        // We just verify that *some* non-background pixels appear in the expected warm range.
+        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+
+        let (img_data, hash) = {
+            let data: Vec<u8> = (0..8 * 8).flat_map(|_| [255u8, 0, 0, 255]).collect();
+            let sum: u64 = data.iter().map(|b| *b as u64).sum();
+            (data, format!("{:016x}", sum))
+        };
+
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data: img_data,
+                width: 8,
+                height: 8,
+                content_hash: hash,
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        };
+
+        let scene = scene_with_node(node);
+        compositor.render_frame(&scene, &surface);
+        compositor.queue.submit(std::iter::empty());
+        compositor.device.poll(wgpu::Maintain::Wait);
+
+        let pixels = surface.read_pixels(&compositor.device);
+        // The background clear color is ~[0.05, 0.05, 0.1] in linear; tile bg is [0.05,0.05,0.05].
+        // The placeholder outer quad is warm gray [0.55, 0.50, 0.45] in linear.
+        // In sRGB this is approximately [198, 188, 176]. We look for pixels brighter than 150 in
+        // all three channels to confirm the quad was rendered (not just the dark background).
+        let any_warm_pixel = pixels
+            .chunks(4)
+            .any(|p| p[0] > 150 && p[1] > 140 && p[2] > 130);
+        assert!(any_warm_pixel, "expected warm-gray placeholder pixels from StaticImageNode");
+    }
+
+    #[tokio::test]
+    async fn test_static_image_node_composited_with_other_nodes() {
+        // Render a scene with both a SolidColor node and a StaticImage node in adjacent tiles.
+        let (mut compositor, surface) = make_compositor_and_surface(512, 256).await;
+
+        let mut scene = SceneGraph::new(512.0, 256.0);
+        let tab_id = scene.create_tab("test", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+
+        // Left tile: red solid color
+        let left_tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), 1)
+            .unwrap();
+        scene.set_tile_root(left_tile_id, Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        }).unwrap();
+
+        // Right tile: static image
+        let (img_data, hash) = {
+            let data: Vec<u8> = (0..8 * 8).flat_map(|_| [0u8, 255, 0, 255]).collect();
+            (data, "green-hash".to_string())
+        };
+        let right_tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(256.0, 0.0, 256.0, 256.0), 2)
+            .unwrap();
+        scene.set_tile_root(right_tile_id, Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data: img_data,
+                width: 8,
+                height: 8,
+                content_hash: hash,
+                fit_mode: ImageFitMode::Cover,
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        }).unwrap();
+
+        compositor.render_frame(&scene, &surface);
+        compositor.device.poll(wgpu::Maintain::Wait);
+
+        let pixels = surface.read_pixels(&compositor.device);
+        assert_eq!(pixels.len(), 512 * 256 * 4, "pixel buffer size mismatch");
+        // Just verify the frame completed without panic and returned the expected buffer size.
+    }
+}
