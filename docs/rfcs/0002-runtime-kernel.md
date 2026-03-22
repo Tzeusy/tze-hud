@@ -43,7 +43,7 @@ The Runtime Kernel resolves all of these by specifying the process as a collecti
 
 ### 1.1 Single-Process Model
 
-tze_hud runs as a single OS process. Agents are external gRPC clients; they do not share the compositor's address space. The compositor is the trusted, sovereign process — it owns the GPU context, the scene state, the input stream, and the window surface. Agents interact exclusively through the gRPC control plane (RFC 0003).
+tze_hud runs as a single OS process. Agents are external gRPC clients; they do not share the compositor's address space. The compositor is the trusted, sovereign process — it owns the GPU context, the scene state, the input stream, and the window surface. Agents interact through the gRPC resident control plane (RFC 0005) and the MCP compatibility plane; the Timing RFC (RFC 0003) defines timing semantics for payloads on both planes. (T-12: corrected erroneous reference to RFC 0003 as "the gRPC control plane.")
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -265,12 +265,26 @@ All inter-thread communication uses bounded channels. No unbounded queues.
 | Channel | Type | Capacity | On Full |
 |---------|------|----------|---------|
 | `InputEvent` (main → compositor) | ring buffer (crossbeam or custom) | 256 | Oldest input dropped, logged |
+| `SceneLocalPatch` (main → compositor) | ring buffer (custom) | 64 | Oldest dropped (latest hit-state wins) |
 | `MutationBatch` (network → compositor) | `crossbeam::bounded` | 64 | Agent back-pressured (gRPC flow control) |
 | `FrameReadySignal` (compositor → main) | `tokio::sync::watch` | N/A (latest value wins) | New value overwrites (latest frame wins) |
 | `EventNotification` (compositor → network) | ring buffer (custom) | 1024 | Oldest dropped, overflow counted |
 | `TelemetryRecord` (compositor → telemetry) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
 
-**Implementation note:** "Oldest dropped" semantics require a ring-buffer implementation, not a standard bounded channel. Standard `crossbeam::bounded` and `tokio::sync::mpsc` channels apply backpressure (blocking or error) when full — they do not drop the oldest entry. Channels that require drop-oldest behavior (`InputEvent`, `EventNotification`, `TelemetryRecord`) must use a ring buffer (e.g., `crossbeam::ArrayQueue` with try_push + manual eviction, or a dedicated ring-buffer crate). `FrameReadySignal` is best served by `tokio::sync::watch`, which always delivers the latest value and naturally discards stale signals.
+**`SceneLocalPatch` type.** A `SceneLocalPatch` carries only the hit-region local state changes produced by Stage 2 (pressed/hovered flags). It does not carry mutations that require lease validation or invariant checking. The compositor thread drains the `SceneLocalPatch` channel alongside `InputEvent` and `MutationBatch` at the start of Stage 3 and applies local state patches directly to the scene without a full commit cycle. The `ArcSwapFull<HitTestSnapshot>` is updated after applying local patches (T-11: resolves missing channel in topology table). (T-11)
+
+```rust
+pub struct SceneLocalPatch {
+    pub changes: Vec<(SceneId, LocalStateFlags)>, // (hit_region_node_id, new_flags)
+}
+
+pub struct LocalStateFlags {
+    pub pressed: bool,
+    pub hovered: bool,
+}
+```
+
+**Implementation note:** "Oldest dropped" semantics require a ring-buffer implementation, not a standard bounded channel. Standard `crossbeam::bounded` and `tokio::sync::mpsc` channels apply backpressure (blocking or error) when full — they do not drop the oldest entry. Channels that require drop-oldest behavior (`InputEvent`, `SceneLocalPatch`, `EventNotification`, `TelemetryRecord`) must use a ring buffer (e.g., `crossbeam::ArrayQueue` with try_push + manual eviction, or a dedicated ring-buffer crate). `FrameReadySignal` is best served by `tokio::sync::watch`, which always delivers the latest value and naturally discards stale signals.
 
 Backpressure on the `MutationBatch` channel propagates naturally to gRPC flow control: tonic's `AsyncRead`/`AsyncWrite` buffers fill up and the TCP window shrinks. Agents that send faster than the compositor can process will see their streams slow — this is correct behavior, not an error.
 
@@ -399,7 +413,7 @@ This stage includes GPU execution time, which is not fully under software contro
 
 The compositor thread sends a `TelemetryRecord` to the telemetry thread. The send is non-blocking (the record is copied into the bounded channel and the compositor thread continues immediately). The telemetry thread formats and emits asynchronously.
 
-`TelemetryRecord` contains: frame_number, stage_durations_us[8], tile_count, draw_call_count, mutation_count_this_frame, active_sessions, active_leases, texture_memory_bytes, telemetry_overflow_count. See Appendix A for the Rust sketch and RFC 0003 §FrameTimingRecord for the protobuf extension that embeds per-stage timestamps.
+`TelemetryRecord` contains: frame_number, stage_durations_us[8], tile_count, draw_call_count, mutation_count_this_frame, active_sessions, active_leases, texture_memory_bytes, degradation_level, shed_count, telemetry_overflow_count, timing_record (Option&lt;FrameTimingRecord&gt;). See Appendix A for the full Rust struct and RFC 0003 §FrameTimingRecord for the protobuf extension that embeds per-stage timestamps. (T-10: field list updated to match Appendix A struct.)
 
 ---
 
@@ -819,7 +833,7 @@ All budgets are p99 unless otherwise noted. "Normalized" means hardware-normaliz
 | Telemetry emit (Stage 8) | p99 < 200μs (non-blocking) | Stage 8 |
 | input_to_local_ack | p99 < 4ms | Stage 1 start → Stage 2 end |
 | input_to_scene_commit | p99 < 50ms (local agents) | Input event arrival → agent response applied to scene (network round-trip included; see RFC 0004 §latency budgets) |
-| input_to_next_present | p99 < 33ms | Stage 1 start → Stage 7 end |
+| input_to_next_present | p99 < 33ms | Stage 1 start → main thread `surface.present()` returns (after Stage 7 signals FrameReadySignal) |
 | Mutation to next present | p99 < 33ms | MutationBatch enqueue → Stage 7 end |
 | Agent connection (TCP → session) | < 50ms | Auth start → SessionAck |
 | Degradation response | Within 1 frame | Trigger detected → Level 1 active |
@@ -888,17 +902,25 @@ pub struct FrameReadySignal {
 
 // TelemetryRecord — internal Rust type sent from compositor thread to telemetry thread.
 // The wire-level protobuf extension that embeds per-stage timestamps is FrameTimingRecord,
-// defined in RFC 0003 §FrameTimingRecord and embedded here as timing_record.
+// defined in RFC 0003 §FrameTimingRecord. RFC 0002 will adopt RFC 0003's named-field approach
+// when the protobuf schema is finalized; the timing_record field below carries those per-stage
+// timestamps on the wire. (T-10: struct was previously missing draw_call_count,
+// mutation_count_this_frame, and timing_record fields that §3.2 Stage 8 prose referenced.)
 pub struct TelemetryRecord {
     pub frame_number: u64,
     pub stage_durations_us: [u64; 8],  // Indexed 0–7 corresponding to pipeline stages 1–8
     pub tile_count: u32,
+    pub draw_call_count: u32,          // T-10: draw calls issued in Stage 6 this frame
+    pub mutation_count_this_frame: u32, // T-10: MutationBatch operations applied in Stage 4 this frame
     pub active_sessions: u32,
     pub active_leases: u32,
     pub texture_memory_bytes: u64,
     pub degradation_level: DegradationLevel,  // T-4: typed enum, not u8; maps to uint32 in protobuf wire format
     pub shed_count: u32,
     pub telemetry_overflow_count: u64,
+    // Wire-level per-stage timestamp record (RFC 0003 §FrameTimingRecord).
+    // None until RFC 0003 schema is finalized; populated once the protobuf is available.
+    pub timing_record: Option<FrameTimingRecord>,  // T-10
 }
 
 // Degradation
@@ -925,4 +947,11 @@ pub struct HitTestSnapshot {
 // defined in RFC 0003 §FrameTimingRecord, which uses named per-stage fields. RFC 0002
 // will adopt RFC 0003's named-field approach when the protobuf schema is finalized.
 // See RFC 0003 round 1 review §Cross-RFC Consistency.
+
+// FrameTimingRecord — opaque placeholder; the authoritative definition is in RFC 0003 §FrameTimingRecord.
+// Used here only as the type of TelemetryRecord::timing_record. (T-10)
+pub struct FrameTimingRecord {
+    // Defined in RFC 0003. Named per-stage timestamp fields, one per pipeline stage.
+    // This struct is populated and serialized to protobuf by the telemetry thread.
+}
 ```
