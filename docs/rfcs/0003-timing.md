@@ -7,6 +7,43 @@
 
 ---
 
+## Review History
+
+### Round 1 — Doctrinal Alignment Deep-Dive (rig-5vq.19)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, presence.md, validation.md, v1.md, failure.md
+
+#### Doctrinal Alignment: 4/5
+
+The RFC correctly implements the core invariant ("arrival time is not presentation time"), all four message classes, sync group semantics, and the injectable clock architecture. Quantitative requirements are traceable to doctrine. The following doctrinal gaps were found and fixed in this round:
+
+- **[MUST-FIX → FIXED]** `architecture.md §Time is a first-class API concept` mandates `sequence`, `priority`, and `coalesce_key` as required timing fields on realtime payloads. These were absent from `TimestampedPayload`. Added in §7.1 and documented in §3.2.
+- **[MUST-FIX → FIXED]** `message_class` was a `string` field instead of a typed enum, losing proto-level type safety. Replaced with `MessageClass` enum.
+- **[MUST-FIX → FIXED]** `validation.md §Other performance budgets` specifies "sync drift < 500μs". The RFC had no mention of this budget. Added `sync_drift_budget_us` to §4.2, `TimingConfig`, and `FrameTimingRecord`.
+- **[MUST-FIX → FIXED]** `failure.md §Agent is slow` requires staleness indicators when data is stale beyond a threshold. The RFC had no staleness indicator specification. Added §4.7 "Staleness Indicators".
+- **[SHOULD-FIX → FIXED]** `presence.md §Tabs and tiles` lists "latency class" as a tile property with timing significance. The RFC did not explain the relationship between `latency_class` and sync group membership. Added §2.1 clarification.
+- **[CONSIDER]** `architecture.md §Time` mentions `effective_after` as a payload field. The RFC does not implement `effective_after` explicitly (it maps to `present_at`). This is acceptable for v1 but should be noted as a future field.
+
+#### Technical Robustness: 4/5
+
+The clock domain hierarchy is sound. The frame deadline model is complete and backed by RFC 0002 stage budgets. The following technical issues were found and fixed:
+
+- **[MUST-FIX → FIXED]** `uint64` drift correction arithmetic can underflow when skew is negative (agent clock behind compositor). `corrected = agent_ts - skew` is unsigned subtraction. Fixed §4.4 with correct signed arithmetic and overflow guard.
+- **[SHOULD-FIX → FIXED]** `SyncGroupId` was defined as a new wrapper `message { bytes id = 1; }` inconsistent with RFC 0001's `SceneId` pattern. Aligned to use `bytes` directly with a comment pointing to `scene.proto SceneId`.
+- **[CONSIDER]** `AllOrDefer` with growing member sets (Open Question 3) is unresolved. The recommendation in §9 is sound — document and defer to implementation.
+
+#### Cross-RFC Consistency: 3/5
+
+- **[MUST-FIX → NOTED, pending RFC 0001 amendment]** RFC 0001 uses `_ms` timestamp units throughout; RFC 0003 establishes `_us` as authoritative. §7.2 documents the migration requirement. A formal RFC 0001 amendment is tracked separately.
+- **[SHOULD-FIX → NOTED]** RFC 0002 `TelemetryRecord` has `stage_durations_us: [u64; 8]` as a fixed array. RFC 0003 `FrameTimingRecord` has named per-stage fields. These serve the same role; the named-field version in RFC 0003 is strictly more informative but they need to converge. RFC 0002 should adopt RFC 0003's named fields in a follow-on amendment.
+- **[SHOULD-FIX → FIXED]** `SyncGroupId` type was incompatible between RFC 0001 (bare `SceneId`) and RFC 0003 (wrapper message). Resolved by aligning to `bytes` with `scene.proto SceneId` reference.
+
+**No dimension below 3. Round 1 findings addressed. Ready for Round 2 (Technical Architecture Scrutiny).**
+
+---
+
 ## Summary
 
 This RFC defines the Timing Model for tze_hud — the authoritative specification for how time flows through the compositor, how it is expressed in the API, and how the system behaves when timing constraints are violated. It covers clock domains, sync groups, timestamp semantics, drift rules, deadline behavior, and the protobuf schema for timing-related messages.
@@ -118,6 +155,13 @@ The three active clock domains (display, monotonic, network) have two synchroniz
 A sync group is a set of tiles whose mutations must be applied atomically in the same frame. No member of a sync group can show an updated state while another member still shows its previous state — the compositor either applies all pending mutations for all group members in a single frame commit, or defers all of them.
 
 This is the mechanism by which multi-tile layouts, coordinated overlays, and multi-agent presentations remain visually coherent.
+
+**Relationship to tile latency class (doctrine: presence.md §Tabs and tiles):** Tiles carry a `latency_class` property that governs how aggressively their mutations are prioritized during Stage 3 (Mutation Intake). A tile's `latency_class` and its `sync_group` membership are orthogonal:
+
+- `latency_class` determines how quickly a tile's mutations are admitted under load (admission priority).
+- `sync_group` determines when the admitted mutations are applied to the scene (commit atomicity).
+
+A tile with `latency_class = Interactive` in a sync group gets prioritized admission but still waits for the sync group's commit policy before its mutation appears on screen. The RFC 0001 Scene Contract defines the `latency_class` values; the Timing RFC governs how they interact with sync group commit rules.
 
 ### 2.2 Sync Group Identity
 
@@ -245,16 +289,22 @@ Incorrect model (never do this):
     │── mutation ─────────► apply immediately → tearing, incoherence
 ```
 
-### 3.2 Timestamp Fields
+### 3.2 Timestamp and Ordering Fields
 
 All timestamps in the public API use **UTC microseconds since Unix epoch** as a `uint64`. This is the network clock domain. Zero (`0`) always means "not set" — the runtime started after 2025-01-01T00:00:00Z, so zero is never a valid timestamp.
 
-| Field | Scope | Semantics |
-|-------|-------|-----------|
-| `present_at_us` | `MutationBatch`, `Tile`, `TextNode`, `StaticImageNode` | Do not apply this mutation/render this content before this time. If zero, apply at the earliest available frame. |
-| `expires_at_us` | `Tile`, `UpdateTileExpiry` | Remove this tile from the scene at or after this time. If zero, no automatic expiry. |
-| `created_at_us` | `Tab`, `SyncGroup`, `SyncGroupConfig` | Wall-clock time of creation. Set by the compositor on object creation; agent-supplied values are advisory only and may be overwritten. |
-| `session_open_at_us` | Handshake | Session establishment wall-clock time. Used for clock-skew estimation. |
+Doctrine (architecture.md §Time is a first-class API concept): every meaningful realtime payload carries `present_at`, `effective_after`, `expires_at`, `sequence`, `priority`, `coalesce_key`, `sync_group`. All six timing fields are specified here.
+
+| Field | Type | Scope | Semantics |
+|-------|------|-------|-----------|
+| `present_at_us` | `uint64` | `MutationBatch`, `Tile`, `TextNode`, `StaticImageNode` | Do not apply this mutation/render this content before this time. If zero, apply at the earliest available frame. |
+| `expires_at_us` | `uint64` | `Tile`, `UpdateTileExpiry` | Remove this tile from the scene at or after this time. If zero, no automatic expiry. |
+| `created_at_us` | `uint64` | `Tab`, `SyncGroup`, `SyncGroupConfig` | Wall-clock time of creation. Set by the compositor on object creation; agent-supplied values are advisory only and may be overwritten. |
+| `session_open_at_us` | `uint64` | Handshake | Session establishment wall-clock time. Used for clock-skew estimation. |
+| `sequence` | `uint64` | `TimestampedPayload`, `MutationBatch` | Monotonically increasing per-source ordering number. Within a `coalesce_key`, only the payload with the highest sequence is presented. Payloads with sequence ≤ last-seen for their source are dropped with a warning event. |
+| `priority` | `uint32` | `TimestampedPayload` | Shedding priority under load. Higher value = more important. Zero = normal/unset (not shed first). Used by admission control in Stage 3 when the compositor is degrading. |
+| `coalesce_key` | `string` | `TimestampedPayload` | For `STATE_STREAM` class: payloads sharing the same non-empty key are coalesced to the latest sequence before frame commit. Empty = no coalescing. Cross-agent coalescing never happens — keys are scoped per agent session. |
+| `sync_group` | `SyncGroupId` | `Tile`, `MutationBatch` | Sync group membership for this mutation. Tiles declared in a sync group have their mutations held until the group's commit policy is satisfied (see §2). |
 
 **Precedence.** `present_at_us` can be set at both the batch level and the individual tile/node level:
 
@@ -285,7 +335,7 @@ The compositor applies these validation rules to all agent-supplied timestamps:
 | `present_at_us < session_open_at_us - 60_000_000` (> 60s in the past) | Reject: mutation too stale. Structured error `TIMESTAMP_TOO_OLD`. |
 | `present_at_us > current_wallclock_us + max_future_schedule_us` | Reject: timestamp too far in future. Structured error `TIMESTAMP_TOO_FUTURE`. Default `max_future_schedule_us`: 300_000_000 (5 minutes). |
 | `expires_at_us <= present_at_us` (expiry before or at presentation) | Reject: inconsistent timestamps. Structured error `TIMESTAMP_EXPIRY_BEFORE_PRESENT`. |
-| `delivery_policy == "drop_if_late"` and `message_class != "ephemeral_realtime"` | Reject: `drop_if_late` is only valid for the `ephemeral_realtime` message class. Structured error `INVALID_DELIVERY_POLICY`. |
+| `delivery_policy == DELIVERY_POLICY_DROP_IF_LATE` and `message_class != MESSAGE_CLASS_EPHEMERAL_REALTIME` | Reject: `DROP_IF_LATE` is only valid for the `EPHEMERAL_REALTIME` message class. Structured error `INVALID_DELIVERY_POLICY`. |
 | Clock skew > 100ms (see §4.2) | Warning in telemetry; apply timestamps with skew correction. |
 | Clock skew > 1s | Reject with structured error `CLOCK_SKEW_EXCESSIVE`. |
 
@@ -301,11 +351,19 @@ Clock drift is the divergence between the agent's clock (source of `present_at`,
 
 ### 4.2 Maximum Allowed Drift
 
-| Clock pair | Default tolerance | Configuration key |
-|-----------|------------------|-------------------|
-| Agent network clock vs. compositor monotonic | **100ms** | `timing.max_agent_clock_drift_ms` |
-| Display clock drift from nominal frame rate (jitter) | **2ms** | `timing.max_vsync_jitter_ms` |
-| (post-v1) Media clock vs. display clock | 10ms | `timing.max_media_drift_ms` |
+Two distinct drift concepts apply. Do not conflate them:
+
+- **Agent clock drift** — divergence between an agent's UTC wall clock and the compositor's clock. Tolerates network/NTP imprecision. Measured in milliseconds.
+- **Sync group presentation skew** — the spread between mutation arrival times across members of a sync group in the same frame. Measured in microseconds. Doctrine (validation.md §Other performance budgets): `sync drift < 500μs`. This is the *telemetry budget*, not a hard rejection threshold — it tracks whether sync group members are arriving with low latency relative to each other.
+
+| Clock pair | Default tolerance | Enforcement | Configuration key |
+|-----------|------------------|-------------|-------------------|
+| Agent network clock vs. compositor monotonic | **100ms** warning; **1s** rejection | Structured error `CLOCK_SKEW_EXCESSIVE` | `timing.max_agent_clock_drift_ms` |
+| Sync group member arrival spread (telemetry budget) | **500μs** | Telemetry alert `sync_drift_high`; stale indicator if exceeded at presentation | `timing.sync_drift_budget_us` |
+| Display clock drift from nominal frame rate (jitter) | **2ms** | Telemetry warning | `timing.max_vsync_jitter_ms` |
+| (post-v1) Media clock vs. display clock | 10ms | Telemetry warning | `timing.max_media_drift_ms` |
+
+**Sync drift tracking:** `sync_group_max_drift_us` in `FrameTimingRecord` (see §7.1) records the worst mutation-arrival spread across sync group members this frame. If this value exceeds `timing.sync_drift_budget_us` (default 500μs), a `sync_drift_high` telemetry event is emitted and the chrome layer staleness indicator is activated for the affected sync group's tiles.
 
 ### 4.3 Drift Detection
 
@@ -317,11 +375,15 @@ Clock drift is the divergence between the agent's clock (source of `present_at`,
 
 ### 4.4 Drift Correction
 
-When drift is within tolerance (≤ 100ms), the compositor applies an offset correction to the agent's timestamps before evaluation:
+When drift is within tolerance (≤ 100ms), the compositor applies an offset correction to the agent's timestamps before evaluation. The skew estimate (`int64`, signed) may be positive (agent clock ahead) or negative (agent clock behind).
 
+**Correct signed arithmetic (avoids `uint64` underflow):**
 ```
-corrected_present_at = agent_present_at - skew_estimate
+// skew_us is int64: positive = agent ahead, negative = agent behind
+corrected_present_at_us: i64 = (agent_present_at_us as i64) - skew_us
 ```
+
+Implementors must cast the `uint64` agent timestamp to `i64` for the correction arithmetic, then validate that the result is positive before re-casting. A negative corrected timestamp means the agent timestamp is so far in the past (after correction) that it should be treated as `present_at_us = 0` (immediate). A `TIMESTAMP_TOO_OLD` rejection (§3.5) normally catches this before drift correction is applied.
 
 This correction is transparent to the agent. The compositor applies it silently. Agents are notified of the current skew estimate via the session telemetry stream so they can self-correct if desired.
 
@@ -336,6 +398,18 @@ This correction is transparent to the agent. The compositor applies it silently.
 The compositor does not attempt to slew its own clock to match an agent's clock. The compositor's monotonic clock is sovereign. The compositor maintains a per-session skew estimate and applies it to evaluate the agent's timestamps. This is one-directional: the compositor adapts its evaluation to the agent's observed skew, but the underlying compositor clock is never adjusted by agent communication.
 
 The `ClockSync` RPC is designed for agents to align their clocks to the compositor, not the reverse.
+
+### 4.7 Staleness Indicators (Doctrine: failure.md §Agent is slow)
+
+Doctrine (failure.md): "If the agent's tiles depend on fresh data and the data is stale beyond a threshold, displays a staleness indicator."
+
+The timing model defines two staleness conditions detected from temporal signals:
+
+**Content staleness (no new mutations):** If a tile has not received any mutation within a configurable idle threshold (default: `timing.tile_stale_threshold_ms = 5000`, i.e., 5 seconds), and the tile's `message_class` is `STATE_STREAM` or `TRANSACTIONAL` (indicating it should be updated by an active agent), the compositor activates the chrome layer's staleness indicator for that tile. The threshold does not apply to tiles in `EPHEMERAL_REALTIME` class (silence is expected between events) or tiles without a registered agent session.
+
+**Sync group staleness (arrival spread exceeds budget):** If `sync_group_max_drift_us` for a committed sync group exceeds `timing.sync_drift_budget_us` (default 500μs), the compositor activates the staleness indicator for the slow member's tiles for that frame (see §4.2).
+
+The staleness indicator is a chrome-layer visual badge rendered by the runtime (see architecture.md §System shell). It does not affect tile content — the tile continues to render its last committed state. It is cleared when: (a) a new valid mutation arrives for the tile, or (b) the agent disconnects and the tile enters the grace period.
 
 ---
 
@@ -476,29 +550,54 @@ message MicrosecondTimestamp {
 
 /// Wraps any bytes payload with timing metadata.
 /// Used for generic payload scheduling on the gRPC session stream.
+/// Message class enum for typed discrimination.
+/// Doctrine: architecture.md §Message classes — four traffic classes with different delivery semantics.
+enum MessageClass {
+  MESSAGE_CLASS_UNSPECIFIED      = 0;
+  MESSAGE_CLASS_TRANSACTIONAL    = 1; // Reliable, ordered, acked. Never coalesced.
+  MESSAGE_CLASS_STATE_STREAM     = 2; // Reliable, ordered, coalesced. Latest-wins per coalesce_key.
+  MESSAGE_CLASS_EPHEMERAL_REALTIME = 3; // Low-latency, droppable, latest-wins per source.
+  MESSAGE_CLASS_CLOCKED_MEDIA_CUE  = 4; // Scheduled against media/display clock. Post-v1 active.
+}
+
+/// Delivery policy for ephemeral_realtime class.
+enum DeliveryPolicy {
+  DELIVERY_POLICY_UNSPECIFIED = 0;
+  DELIVERY_POLICY_DEFER       = 1; // Default: hold for next frame if late.
+  DELIVERY_POLICY_DROP_IF_LATE = 2; // Ephemeral only: discard if late (stale = wrong).
+}
+
 message TimestampedPayload {
-  bytes  payload          = 1; // Serialized inner message
-  uint64 present_at_us    = 2; // 0 = immediate
-  uint64 expires_at_us    = 3; // 0 = no expiry
-  uint64 created_at_us    = 4; // Agent-assigned creation time; advisory only
-  string message_class    = 5; // "transactional" | "state_stream" | "ephemeral_realtime" | "clocked_media_cue"
-  string delivery_policy  = 6; // "defer" | "drop_if_late" (ephemeral only; default "defer")
+  bytes         payload          = 1; // Serialized inner message
+  uint64        present_at_us    = 2; // 0 = immediate
+  uint64        expires_at_us    = 3; // 0 = no expiry
+  uint64        created_at_us    = 4; // Agent-assigned creation time; advisory only
+  MessageClass  message_class    = 5; // Traffic class; governs delivery semantics
+  DeliveryPolicy delivery_policy = 6; // Default DEFER; DROP_IF_LATE valid only for EPHEMERAL_REALTIME
+  uint64        sequence         = 7; // Monotonic per-source ordering. Doctrine: architecture.md §Time is a first-class API concept.
+  uint32        priority         = 8; // For shedding under load (higher = more important; 0 = unset/normal).
+  string        coalesce_key     = 9; // For state-stream dedup. Empty = no coalescing. Doctrine: architecture.md §Time.
 }
 
 // ─── Sync Group ──────────────────────────────────────────────────────────────
 
-/// Identifies a sync group in the scene graph.
-message SyncGroupId {
-  bytes id = 1; // UUIDv7 bytes (16 bytes)
-}
+// Cross-RFC consistency (RFC 0001): SyncGroupId is a SceneId (UUIDv7, 16 bytes),
+// consistent with RFC 0001 §1.1. It is NOT a separate wrapper type. Both the Rust
+// type alias `type SyncGroupId = SceneId` and the protobuf representation use the
+// same 16-byte UUIDv7 encoding defined in RFC 0001. A `SyncGroupId` of all-zero
+// bytes means "not set / not in a sync group" (consistent with RFC 0001 §10.1).
+//
+// Implementors: use the `SceneId` message type from scene.proto, not a local alias.
+// The scene.proto SceneId message is:
+//   message SceneId { bytes id = 1; }  // 16-byte UUIDv7
 
 /// Configuration for a sync group.
 message SyncGroupConfig {
-  SyncGroupId id              = 1;
-  string      name            = 2; // Optional; max 128 UTF-8 bytes
+  bytes  id              = 1; // SyncGroupId: 16-byte UUIDv7 (from scene.proto SceneId)
+  string name            = 2; // Optional; max 128 UTF-8 bytes
   SyncCommitPolicy commit_policy = 3;
-  uint32      max_defer_frames = 4; // Default 3; 0 = use default
-  uint64      created_at_us   = 5; // Agent-supplied creation time (UTC μs); advisory — compositor may overwrite
+  uint32 max_defer_frames = 4; // Default 3; 0 = use default
+  uint64 created_at_us   = 5; // Agent-supplied creation time (UTC μs); advisory — compositor may overwrite
 }
 
 enum SyncCommitPolicy {
@@ -514,14 +613,14 @@ message CreateSyncGroupMutation {
 
 /// Mutation: delete a sync group (tiles are removed from the group first).
 message DeleteSyncGroupMutation {
-  SyncGroupId id = 1;
+  bytes id = 1; // SyncGroupId: 16-byte UUIDv7
 }
 
 /// Event: emitted when a sync group is force-committed after max deferral.
 message SyncGroupForceCommitEvent {
-  SyncGroupId id                = 1;
-  uint32      defer_frames_used = 2;
-  uint64      frame_number      = 3;
+  bytes  id                = 1; // SyncGroupId: 16-byte UUIDv7
+  uint32 defer_frames_used = 2;
+  uint64 frame_number      = 3;
 }
 
 // ─── Clock Sync ──────────────────────────────────────────────────────────────
@@ -568,6 +667,8 @@ message FrameTimingRecord {
                                         // (latest_member_arrival_us - earliest_member_arrival_us).
                                         // Zero if no sync group committed this frame.
                                         // Expressed in microseconds (monotonic clock domain).
+  bool   sync_drift_budget_exceeded = 21; // True if sync_group_max_drift_us > timing.sync_drift_budget_us (default 500μs).
+                                          // Doctrine: validation.md §Other performance budgets — "sync drift < 500μs".
 }
 
 // ─── Timing Config ───────────────────────────────────────────────────────────
@@ -580,8 +681,11 @@ message TimingConfig {
   uint32 max_future_schedule_ms        = 4;  // Default 300,000 (5 minutes)
   uint32 sync_group_max_defer_frames   = 5;  // Default 3
   uint32 pending_queue_depth_per_agent = 6;  // Default 256
+  uint32 sync_drift_budget_us          = 7;  // Default 500. Doctrine: validation.md §Other performance budgets ("sync drift < 500μs").
+  uint32 tile_stale_threshold_ms       = 8;  // Default 5000. Staleness indicator activates if a STATE_STREAM/TRANSACTIONAL tile
+                                             // receives no mutation for this many ms. Doctrine: failure.md §Agent is slow.
   // post-v1 fields:
-  uint32 max_media_drift_ms            = 7;  // Default 10 (post-v1)
+  uint32 max_media_drift_ms            = 9;  // Default 10 (post-v1)
 }
 ```
 
@@ -601,7 +705,7 @@ The fields in `timing.proto` supplement the scene contract defined in RFC 0001. 
 1. All `uint64` timestamp fields use 0 to represent "not set." Zero is never a valid timestamp in this system.
 2. `SyncGroupId.id` is exactly 16 bytes (UUIDv7) or all-zero bytes to represent absent. Agents must not send partially filled IDs.
 3. `estimated_skew_us` in `ClockSyncResponse` is signed (`int64`) because skew can be positive (agent clock ahead) or negative (agent clock behind). A positive value means the agent's clock is ahead.
-4. `delivery_policy` in `TimestampedPayload` is a string enum for forward compatibility. Implementations must treat unknown values as `"defer"`.
+4. `delivery_policy` in `TimestampedPayload` is a protobuf enum (`DeliveryPolicy`). Implementations must treat unknown enum values as `DELIVERY_POLICY_DEFER`.
 
 ---
 
