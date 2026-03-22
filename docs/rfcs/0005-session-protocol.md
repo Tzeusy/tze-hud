@@ -19,6 +19,7 @@
 | 5 | 2026-03-22 | rig-6c2 | Doctrinal alignment — guest MCP surface | Restricted §8.3 guest tool set to zone-centric operations (`publish_to_zone`, `list_zones`, restricted `list_scene`); gated tile management tools (`create_tab`, `create_tile`, `set_content`, `dismiss`) behind `resident_mcp` capability; added `CAPABILITY_REQUIRED` error semantics for gated tools; updated §8.1 purpose to state v1 guest surface restriction; added post-v1 promoted guest pattern note. |
 | 6 | 2026-03-22 | rig-77n | Clock-domain naming fix | Renamed all timestamp fields to encode clock domain explicitly: `_wall_us` suffix for wall-clock (UTC), `_mono_us` suffix for monotonic. Affected fields: `SessionMessage.timestamp_wall_us`, `SessionInit.agent_timestamp_wall_us`, `SessionEstablished.compositor_timestamp_wall_us`, `HeartbeatPing.client_timestamp_mono_us`, `HeartbeatPong.client_timestamp_mono_us` + `server_timestamp_wall_us`, `TimingHints.present_at_wall_us` + `expires_at_wall_us`. Added §2.4 "Clock Domains" subsection with field inventory and RFC 0003 cross-reference. Previous §2.4 renumbered §2.5. |
 | 7 | 2026-03-22 | rig-de2 | ID type alignment with RFC 0001 SceneId | `MutationBatch.batch_id` and `MutationBatch.lease_id` changed from `string` to `SceneId`; `MutationResult.batch_id` and `MutationResult.created_ids` changed from `string`/`repeated string` to `SceneId`/`repeated SceneId`; updated §3.3, §5.2, §9 (proto), §9.1 (import graph), §11; added ID type convention note distinguishing scene-object IDs (use `SceneId`) from session-level identifiers (`agent_id`, `session_token`, `namespace` remain `string`). |
+| 8 | 2026-03-22 | rig-8uq | Snapshot gap fix | Added `SceneSnapshot` (imported from RFC 0001 §7.1) as field 42 in `SessionMessage` oneof (field 41 was allocated to `TelemetryFrame` in Round 3); added scene snapshot comment block in §9 proto; noted snapshot delivery in §1.3 (`SessionEstablished`) and §3.2 server→client table; updated §6.5 to reference `SceneSnapshot` by name; updated §6.4 v1 note to use `SceneSnapshot` instead of `SceneEvent`; updated §9.1 import graph and §9.2 field registry; updated §11 cross-RFC table with RFC 0001 snapshot format dependency. Corrected §3.2 table and §9 comment: `SessionResumeResult` corresponds to within-grace-period resume (§6.4), not post-grace. |
 
 ---
 
@@ -166,6 +167,8 @@ message SessionEstablished {
 
 `denied_subscriptions` is populated when an agent requests subscription categories for which it lacks the required capability (§7.2). The denied categories are listed here rather than being silently dropped — agents can inspect this field to detect capability gaps and request elevated capabilities if needed.
 
+**Snapshot delivery:** Immediately after `SessionEstablished`, the runtime sends a `SceneSnapshot` message (§9) containing the current scene topology. This ensures the agent has a consistent view of the scene before it can issue any mutations or receive incremental `SceneEvent` updates. Agents MUST wait for the `SceneSnapshot` before acting on scene state. See §6.5 for the equivalent behavior on post-grace-period reconnects and §6.4 for resume (reconnect within grace period).
+
 ### 1.4 Authentication
 
 Authentication is evaluated synchronously during handshake before `SessionEstablished` is sent. If authentication fails, the runtime sends `SessionError` and closes the stream.
@@ -305,6 +308,11 @@ message SessionMessage {
     DegradationNotice   degradation_notice    = 35;
     RuntimeError        runtime_error         = 36;
     CapabilityNotice    capability_notice     = 37;  // Mid-session grant/revoke
+    StateDeltaComplete  state_delta_complete  = 38;  // Sentinel: end of resume delta burst (§6.4)
+    SubscriptionChangeResult subscription_change_result = 39;  // Ack for SubscriptionChange (§7.3)
+    ZonePublishResult   zone_publish_result   = 40;  // Ack for durable ZonePublish (§3.1)
+    TelemetryFrame      telemetry_frame       = 41;  // Runtime perf/health sample; TELEMETRY_FRAMES subscribers only (§7.1)
+    SceneSnapshot       scene_snapshot        = 42;  // Full scene state; sent after SessionEstablished and post-grace reconnect (§1.3, §6.5)
   }
 }
 ```
@@ -373,6 +381,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `LeaseResponse` | Transactional | Grant/deny/revoke for a lease operation |
 | `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing`; echoes monotonic client timestamp for RTT and includes wall-clock server receipt time |
 | `SceneEvent` | State-stream | Topology change, zone occupancy update, lease change |
+| `SceneSnapshot` | Transactional | Full scene topology snapshot; sent after `SessionEstablished` (new connection) and after a successful `SessionResumeResult` (post-grace-period reconnect). See §9. |
 | `InputEvent` (pointer/key variants) | Ephemeral realtime | Pointer/touch/key events routed to agent via RFC 0004 `InputEnvelope`. Coalesced under backpressure (RFC 0004 §8.5). |
 | `InputEvent` (focus/capture/IME variants) | Transactional | `FocusGainedEvent`, `FocusLostEvent`, `CaptureReleasedEvent`, and IME events carried in the same RFC 0004 `InputEnvelope` oneof. Never dropped or coalesced per RFC 0004 §8.5 — delivery is reliable and ordered. |
 | `DegradationNotice` | Transactional | Runtime has changed degradation level; see §3.4 |
@@ -605,7 +614,7 @@ When a resume is accepted within the grace period:
 
 If the agent's leases are still orphaned (not yet evicted — within grace period), they are automatically reclaimed as part of the state delta. The disconnection badges clear.
 
-> **V1 implementation note:** v1.md §"V1 explicitly defers" states "No resumable state sync (reconnecting agents get a full snapshot, not a diff)." The delta-replay mechanism specified above is the target API contract for v1.1+. The v1 implementation ships a full scene snapshot on resume instead of incremental delta replay: rather than replaying individual missed `SceneEvent` messages, the runtime sends a single `SceneEvent` carrying a full scene topology snapshot, followed by `StateDeltaComplete`. The `last_seen_server_sequence` field in `SessionResume` is accepted but may be ignored by the v1 implementation. Agents must handle both full-snapshot and delta-replay resume responses correctly (both terminate with `StateDeltaComplete`).
+> **V1 implementation note:** v1.md §"V1 explicitly defers" states "No resumable state sync (reconnecting agents get a full snapshot, not a diff)." The delta-replay mechanism specified above is the target API contract for v1.1+. The v1 implementation ships a full scene snapshot on resume instead of incremental delta replay: rather than replaying individual missed `SceneEvent` messages, the runtime sends a single `SceneSnapshot` message (§9) carrying the current scene topology, followed by `StateDeltaComplete`. The `last_seen_server_sequence` field in `SessionResume` is accepted but may be ignored by the v1 implementation. Agents must handle both full-snapshot and delta-replay resume responses correctly (both terminate with `StateDeltaComplete`).
 
 ### 6.5 Post-Grace-Period Reconnect
 
@@ -614,7 +623,7 @@ If the grace period expires before the agent reconnects:
 1. The runtime has evicted the agent's leases and cleared its tiles.
 2. The `session_token` is no longer valid.
 3. The agent must perform a full re-handshake via `SessionInit` (no resume token).
-4. The runtime sends the current scene topology snapshot so the agent can make informed lease requests.
+4. After `SessionEstablished`, the runtime sends a `SceneSnapshot` message (§9) containing the current scene topology, so the agent can make informed lease requests from a consistent starting state.
 5. Capabilities are re-granted based on the agent's registered profile (capability grants are durable from config; security.md §"Authentication").
 
 ### 6.6 Runtime Restart
@@ -906,6 +915,22 @@ message SessionResumeResult {
   RuntimeError error                     = 6;
 }
 
+// ─── Scene snapshot (server → client) ────────────────────────────────────────
+// Full scene topology snapshot. Sent immediately after SessionEstablished on new
+// connections (§1.3) and after a successful SessionResumeResult on
+// post-grace-period reconnects (§6.5). Agents MUST process this before issuing
+// any mutations or acting on incremental SceneEvent updates.
+//
+// The SceneSnapshot message type is defined in scene_service.proto (RFC 0001 §7.1).
+// Its fields carry: sequence number at snapshot time, UTC wall clock, flat Tab/Tile/Node
+// lists (with tree structure reconstructible via tile.tab_id and Node.children),
+// zone registry state, active_tab, and a BLAKE3 integrity checksum.
+// See RFC 0001 §4.1 and §7.1 for the canonical definition and reconstruction algorithm.
+//
+// NOTE: SceneSnapshot is imported from scene_service.proto (RFC 0001). It is
+// referenced here as a SessionMessage payload variant; it is NOT redefined in
+// session.proto. The import line `import "scene_service.proto"` covers this type.
+
 // ─── State delta sentinel (server → client) ──────────────────────────────────
 
 // Sent as the final message of the state-delta burst after session resumption
@@ -1117,7 +1142,8 @@ message SessionMessage {
     SubscriptionChangeResult subscription_change_result = 39;  // Ack for SubscriptionChange (§7.3)
     ZonePublishResult       zone_publish_result      = 40;  // Ack for durable ZonePublish (§3.1)
     TelemetryFrame          telemetry_frame          = 41;  // Runtime perf/health sample; TELEMETRY_FRAMES subscribers only (§7.1)
-    // Fields 42–49 reserved for future server→client messages.
+    SceneSnapshot           scene_snapshot           = 42;  // Full scene state; sent after SessionEstablished and post-grace reconnect (§1.3, §6.5)
+    // Fields 43–49 reserved for future server→client messages.
     // Fields 50–99 reserved for future use.
   }
 }
@@ -1152,7 +1178,7 @@ session.proto
   ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages
   ├── imports scene.proto (RFC 0001)
   │     └── defines: SceneId, MutationProto, ZoneContent, SceneEvent, InputEvent,
-  │                  LeaseRequest, LeaseResponse
+  │                  LeaseRequest, LeaseResponse, SceneSnapshot (RFC 0001 §7.1)
   │     (SceneId is used for batch_id, lease_id, and created_ids in MutationBatch/MutationResult)
   └── imports timing.proto (RFC 0003)
         └── defines: ClockSyncRequest, ClockSyncResponse, TimingHints, MessageClass,
@@ -1165,7 +1191,7 @@ session.proto
 
 Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
 
-Currently allocated server→client fields: 30–38 (original), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`). Fields 42–49 are available for future server→client additions.
+Currently allocated server→client fields: 30–38 (original), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`). Fields 43–49 are available for future server→client additions.
 
 ---
 
@@ -1193,7 +1219,7 @@ The session protocol exposes the following configurable parameters in the runtim
 
 | RFC | Relationship |
 |-----|-------------|
-| RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (RFC 0001 §7.1) — a typed protobuf message encoding a 16-byte little-endian UUIDv7. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` as they are not scene objects. |
+| RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (RFC 0001 §7.1) — a typed protobuf message encoding a 16-byte little-endian UUIDv7. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` as they are not scene objects. **`SceneSnapshot` (§9) is defined in RFC 0001 §7.1 and imported into `session.proto` via `scene.proto`; this RFC depends on RFC 0001 for the snapshot wire format, field layout, and reconstruction algorithm.** |
 | RFC 0002 (Runtime Kernel) | The session service is a component of the runtime kernel. Lease lifecycle (grace period, revocation) is governed by RFC 0002. |
 | RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_wall_us` and `SessionEstablished.compositor_timestamp_wall_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. Clock-domain naming in this RFC follows the `_wall_us`/`_mono_us` convention (§2.4); see RFC 0003 §1.1 for the canonical clock domain definitions. |
 | RFC 0004 (Input Model) | `InputEvent` messages delivered over the session stream follow the routing and dispatch rules of RFC 0004. |
