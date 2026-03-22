@@ -2328,6 +2328,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
+name = "tze_hud_a11y"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "tracing",
+ "tze_hud_scene",
+]
+
+[[package]]
 name = "tze_hud_compositor"
 version = "0.1.0"
 dependencies = [
