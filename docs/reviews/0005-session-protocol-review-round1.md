@@ -22,7 +22,7 @@
 
 | Dimension | Score | Rationale |
 |-----------|-------|-----------|
-| Doctrinal Alignment | 4 | Strong coverage; 2 MUST-FIX gaps (mTLS omission, heartbeat default mismatch) and 1 SHOULD-FIX (max_concurrent_sessions split). All fixed in this round. |
+| Doctrinal Alignment | 4 | Strong coverage; 3 MUST-FIX gaps (mTLS omission, heartbeat default mismatch, max_concurrent_sessions split). All fixed in this round. |
 | Technical Robustness | 4 | Sound protocol design; SHOULD-FIX items addressed (FocusEvent routing clarity, subscription silent-downgrade, StateDelta formalization). |
 | Cross-RFC Consistency | 4 | Good overall; FocusEvent type inconsistency with RFC 0004 resolved, SessionEstablished updated to expose subscription state. |
 
@@ -188,7 +188,15 @@ All MUST-FIX and SHOULD-FIX items above have been applied directly to `docs/rfcs
 1. `heartbeat_interval_ms` default: 10,000 → 5,000
 2. `max_concurrent_sessions`: split into `max_concurrent_resident_sessions = 16` / `max_concurrent_guest_sessions = 64`
 3. `AuthCredential` oneof: added `MtlsCredential mtls = 4` in §1.4 and §9
-4. §3.2 `InputEvent` description: added explicit reference to RFC 0004 `InputMessage` and focus event variants
+4. §3.2 `InputEvent` traffic class: split into two rows — pointer/key variants remain Ephemeral; focus/capture/IME variants are Transactional (consistent with RFC 0004 §8.5 which mandates these are never dropped)
 5. `SessionEstablished`: added `active_subscriptions` (field 7) and `denied_subscriptions` (field 8) in §1.3 and §9
 6. §7.2: updated to describe the non-silent downgrade behaviour
-7. §6.4: formalized state-delta delivery as replayed `SceneEvent` messages with `DELTA_COMPLETE` sentinel
+7. §6.4 / §9: replaced informal `SceneEvent` with `type = DELTA_COMPLETE` sentinel (which required a non-existent `type` field) with a dedicated `StateDeltaComplete` message in the `SessionMessage` oneof (field 38). The `StateDeltaComplete` message is empty — receipt is the signal.
+
+### Post-round-1 fixes (review feedback)
+
+During reviewer-worker review (rig-9e0), three additional issues were identified and fixed:
+
+- **Summary table MUST-FIX count**: corrected from "2 MUST-FIX … 1 SHOULD-FIX" to "3 MUST-FIX" (max_concurrent_sessions split was already listed as MUST-FIX in the body; summary was inconsistent).
+- **`InputEvent` traffic class contradiction** (§3.2): the single-row description listed the traffic class as `Ephemeral realtime` while the text said focus events are `Transactional`. Resolved by splitting into two rows, aligned with RFC 0004 §8.5 delivery guarantees.
+- **`StateDeltaComplete` implementability** (§6.4, §9): the `SceneEvent` with `type = DELTA_COMPLETE` sentinel was unimplementable because `SceneEvent` (imported from `scene_service.proto`) has no `type` field. Replaced with a dedicated `StateDeltaComplete {}` message added to `SessionMessage` oneof (field 38).
