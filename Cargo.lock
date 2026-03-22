@@ -2349,6 +2349,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tze_hud_mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tze_hud_scene",
+ "uuid",
+]
+
+[[package]]
 name = "tze_hud_protocol"
 version = "0.1.0"
 dependencies = [
