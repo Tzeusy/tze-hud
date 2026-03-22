@@ -8,6 +8,15 @@
 
 ---
 
+## Review Changelog
+
+| Round | Date | Reviewer | Focus | Changes |
+|-------|------|----------|-------|---------|
+| 1 | 2026-03-22 | rig-5vq.27 | Doctrinal alignment deep-dive | `heartbeat_interval_ms` default 10000→5000; split `max_concurrent_sessions` into resident/guest; added `MtlsCredential`; split `InputEvent` traffic class row; added `active_subscriptions`/`denied_subscriptions` to `SessionEstablished`; replaced `SceneEvent` DELTA_COMPLETE sentinel with `StateDeltaComplete {}` message. |
+| 2 | 2026-03-22 | rig-5vq.28 | Technical architecture scrutiny | Removed dead resume fields from `SessionInit` (reserved 9–10); completed state machine (Handshaking→Closed, Resuming→Closed paths); added `heartbeat_missed_threshold = 3` config param (3× not 2×); per-session dedup window; `SubscriptionChangeResult` replaces `MutationResult` for subscription acks; `ZonePublishResult` for durable zone acks; `RuntimeError.ErrorCode` typed enum; `CapabilityRequest` rejection semantics; v1 implementation note in §6.4; `InputMessage` variant filter rule in §7.1; embodied presence Q in §12. |
+
+---
+
 ## Summary
 
 This RFC defines the wire-level session protocol for agent-to-runtime communication over the gRPC resident control plane. It covers the full session lifecycle (handshake through disconnect), the multiplexed session stream envelope format, all message types and their traffic class assignments, version negotiation, ordering and idempotency guarantees, reconnection and state resumption, subscription management, the MCP bridge, and the protobuf schema for all session messages.
@@ -49,12 +58,22 @@ This RFC resolves all of these by specifying the session protocol as a first-cla
 
 ### 1.1 Overview
 
-A resident agent session progresses through five states:
+A resident agent session progresses through six states:
 
 ```
-Connecting → Handshaking → Active → Disconnecting → Closed
-                              ↑             |
-                              └── Resuming ←┘ (within grace period)
+Connecting → Handshaking ──────────────────────────── Active ⇄ Disconnecting
+                  │ (auth/version failure)              │                │
+                  ↓                                     │ (ungraceful)   │ (graceful)
+                Closed                                  ↓                ↓
+                                                   Closed (orphaned leases, grace period)
+                                                        │
+                                              (within grace period)
+                                                        ↓
+                                                   Resuming
+                                                  ↙        ↘
+                                     (accepted)              (token expired/invalid)
+                                        ↓                           ↓
+                                      Active                      Closed
 ```
 
 States:
@@ -65,8 +84,8 @@ States:
 | `Handshaking` | Agent sends `SessionInit`; runtime validates auth and capabilities |
 | `Active` | Bidirectional `SessionMessage` stream open; agent can send mutations, receive events |
 | `Disconnecting` | Graceful close — agent sends `SessionClose` or server initiates |
-| `Closed` | Stream closed; leases enter orphan state with grace period |
-| `Resuming` | Reconnecting agent presents session token before grace period expiry |
+| `Closed` | Stream closed; if previously `Active`, leases enter orphan state with grace period. If from `Handshaking` (auth failure, version mismatch), no leases exist. |
+| `Resuming` | Reconnecting agent presents session token before grace period expiry. Transitions to `Active` on acceptance; to `Closed` on token expiry or invalid token. |
 
 ### 1.2 SessionInit (Client → Server)
 
@@ -94,10 +113,12 @@ message SessionInit {
   // Presence level hint (guest/resident/embodied)
   PresenceLevel presence_level = 8;
 
-  // Reconnection: if this is a resume attempt, supply the previous token
-  // Leave empty for a fresh connection.
-  string resume_session_token = 9;
-  uint64 resume_last_seen_server_seq = 10;
+  // Fields 9–10 are reserved. Resume attempts use SessionResume (§6.2), not SessionInit.
+  // Encoding resume fields in SessionInit would create a dual handshake path and bypass
+  // the SessionResume validation logic. An agent reconnecting within the grace period must
+  // send SessionResume as its first message, not SessionInit.
+  reserved 9, 10;
+  reserved "resume_session_token", "resume_last_seen_server_seq";
 }
 ```
 
@@ -179,7 +200,7 @@ If `expect_resume` is true, the runtime holds leases at the full grace period. I
 
 When the stream drops without a `SessionClose` (crash, network failure, heartbeat timeout), the runtime:
 
-1. Detects disconnection via gRPC stream EOF, RST, or heartbeat timeout (missing `HeartbeatPing` after `2 × heartbeat_interval_ms`).
+1. Detects disconnection via gRPC stream EOF, RST, or heartbeat timeout (missing `HeartbeatPing` after `heartbeat_missed_threshold × heartbeat_interval_ms`; default: `3 × 5000 ms = 15 000 ms`).
 2. Marks agent's leases as "orphaned" — rendered frozen at last known state.
 3. Displays a disconnection badge on affected tiles (chrome layer, non-blocking).
 4. Starts the reconnection grace period (default: 30 000 ms; configurable per-agent).
@@ -266,7 +287,7 @@ message SessionMessage {
 - Both directions maintain independent monotonically increasing sequence counters, starting at 1.
 - The server sends its initial `sequence` value in `SessionEstablished.server_sequence`.
 - Client sequence starts at 1 on the first `SessionMessage` after `SessionInit`.
-- Sequence gaps indicate lost messages (stream close without `SessionClose`). On reconnect, the client's `resume_last_seen_server_seq` allows the server to reconstruct missed events.
+- Sequence gaps indicate lost messages (stream close without `SessionClose`). On reconnect, the client's `SessionResume.last_seen_server_sequence` allows the server to reconstruct missed events.
 
 ### 2.4 Backpressure
 
@@ -286,10 +307,10 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 |---------|--------------|-------------|
 | `MutationBatch` | Transactional | Atomic set of scene mutations (RFC 0001 §4) |
 | `LeaseRequest` | Transactional | Request or renew a surface lease |
-| `HeartbeatPing` | Ephemeral | Keepalive; must arrive within `2 × heartbeat_interval_ms` |
+| `HeartbeatPing` | Ephemeral | Keepalive; must arrive within `heartbeat_missed_threshold × heartbeat_interval_ms` |
 | `CapabilityRequest` | Transactional | Request an additional capability mid-session |
-| `SubscriptionChange` | Transactional | Add/remove event subscription categories |
-| `ZonePublish` | State-stream or Transactional | Push content to a named zone (ephemeral or durable) |
+| `SubscriptionChange` | Transactional | Add/remove event subscription categories; acked by `SubscriptionChangeResult` |
+| `ZonePublish` | State-stream (ephemeral zones) or Transactional (durable zones) | Push content to a named zone. Durable-zone publishes receive a `ZonePublishResult` ack; ephemeral-zone publishes are fire-and-forget. |
 
 ### 3.2 Server → Client Messages
 
@@ -297,13 +318,15 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 |---------|--------------|-------------|
 | `MutationResult` | Transactional | Accept/reject response for a `MutationBatch` |
 | `LeaseResponse` | Transactional | Grant/deny/revoke for a lease operation |
-| `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing` with server timestamp |
+| `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing` with server timestamp (wall-clock; not suitable for RTT measurement) |
 | `SceneEvent` | State-stream | Topology change, zone occupancy update, lease change |
 | `InputEvent` (pointer/key variants) | Ephemeral realtime | Pointer/touch/key events routed to agent via RFC 0004 `InputEnvelope`. Coalesced under backpressure (RFC 0004 §8.5). |
 | `InputEvent` (focus/capture/IME variants) | Transactional | `FocusGainedEvent`, `FocusLostEvent`, `CaptureReleasedEvent`, and IME events carried in the same RFC 0004 `InputEnvelope` oneof. Never dropped or coalesced per RFC 0004 §8.5 — delivery is reliable and ordered. |
 | `DegradationNotice` | Transactional | Runtime has changed degradation level; see §3.4 |
 | `RuntimeError` | Transactional | Structured error (see §3.5) |
 | `CapabilityNotice` | Transactional | Mid-session capability grant or revocation |
+| `SubscriptionChangeResult` | Transactional | Ack/nack for a `SubscriptionChange`; echoes full active subscription set |
+| `ZonePublishResult` | Transactional | Ack/nack for a durable-zone `ZonePublish`; not sent for ephemeral zones |
 
 ### 3.3 MutationBatch
 
@@ -318,7 +341,7 @@ message MutationBatch {
 message MutationResult {
   string         batch_id      = 1;
   bool           accepted      = 2;
-  repeated string created_ids  = 3;  // IDs assigned to CreateTile/CreateNode mutations
+  repeated string created_ids  = 3;  // UUIDv7 SceneIds (RFC 0001 §1.1) assigned to CreateTile/CreateNode mutations
   RuntimeError   error         = 4;  // Populated if accepted = false
 }
 ```
@@ -354,12 +377,33 @@ The structured error model (architecture.md §"Error model") applies to all erro
 
 ```protobuf
 message RuntimeError {
-  string error_code = 1;   // Stable enumerated identifier; e.g. "LEASE_EXPIRED"
-  string message    = 2;   // Short human-readable sentence
-  string context    = 3;   // Invalid field, value, or operation
-  string hint       = 4;   // Machine-readable correction suggestion (JSON object)
+  string    error_code      = 1;   // String identifier for extensibility (e.g. "LEASE_EXPIRED")
+  string    message         = 2;   // Short human-readable sentence
+  string    context         = 3;   // Invalid field, value, or operation
+  string    hint            = 4;   // Machine-readable correction suggestion (JSON object)
+  ErrorCode error_code_enum = 5;   // Typed enum for well-known codes; preferred for programmatic handling
+
+  // Well-known error codes. String `error_code` is the canonical identifier (stable, not renamed).
+  // `error_code_enum` mirrors the most common values for type-safe handling in generated clients.
+  // Unknown codes not in this enum are represented as ERROR_CODE_UNKNOWN; inspect `error_code` for detail.
+  enum ErrorCode {
+    ERROR_CODE_UNSPECIFIED    = 0;
+    ERROR_CODE_UNKNOWN        = 1;   // Code not in this enum version; see string error_code
+    LEASE_EXPIRED             = 2;
+    LEASE_NOT_FOUND           = 3;
+    ZONE_TYPE_MISMATCH        = 4;
+    ZONE_NOT_FOUND            = 5;
+    BUDGET_EXCEEDED           = 6;
+    MUTATION_REJECTED         = 7;
+    PERMISSION_DENIED         = 8;
+    RATE_LIMITED              = 9;
+    INVALID_ARGUMENT          = 10;
+    SESSION_EXPIRED           = 11;
+  }
 }
 ```
+
+`error_code` (string) is the canonical, stable identifier across all protocol versions. `error_code_enum` is provided for type-safe handling in generated clients — set it to `ERROR_CODE_UNKNOWN` for any code not yet in the enum. The two fields always carry the same logical value.
 
 Common error codes are defined per-subsystem: scene operation errors in RFC 0001, lease errors in RFC 0002, input routing errors in RFC 0004, and session errors in §1.7 above.
 
@@ -376,7 +420,9 @@ message HeartbeatPong {
 }
 ```
 
-Heartbeat interval is negotiated at handshake (`SessionEstablished.heartbeat_interval_ms`). The runtime measures round-trip latency from consecutive pings. If a ping is not received within `2 × heartbeat_interval_ms`, the session is treated as ungracefully disconnected.
+Heartbeat interval is negotiated at handshake (`SessionEstablished.heartbeat_interval_ms`). The runtime treats the session as ungracefully disconnected when `heartbeat_missed_threshold` consecutive pings are missed (default: `heartbeat_missed_threshold = 3`, so `3 × 5000 ms = 15 000 ms`).
+
+Note: `HeartbeatPong.server_timestamp_us` is a wall-clock value and is not suitable for round-trip latency estimation (wall clocks can jump). Agents that need RTT measurement should compute it from `HeartbeatPing.client_timestamp_us` using their own monotonic clock.
 
 ---
 
@@ -425,11 +471,13 @@ The runtime picks the highest version within `[min, max]` that it supports and r
 
 ### 5.2 Batch Idempotency
 
-Every `MutationBatch` carries a `batch_id` (UUIDv7). The runtime maintains a deduplication window:
+Every `MutationBatch` carries a `batch_id` (UUIDv7). The runtime maintains a **per-session** deduplication window (not global — cross-session deduplication is neither required nor beneficial since UUIDv7 batch IDs are globally unique):
 
-- **Window size:** 1000 unique `batch_id` values, or 60 seconds, whichever expires first.
+- **Window size:** 1000 unique `batch_id` values per session, or 60 seconds, whichever expires first.
 - **Behavior on duplicate:** The runtime returns the original `MutationResult` without re-applying the mutations. This is transparent to the agent — retransmit produces the same result as the original send.
 - **Behavior after window expiry:** A `batch_id` that reappears after 60 seconds is treated as a new batch. Agents must not retransmit a batch after 60 seconds; they should treat the original as lost and issue a new batch with a new ID if needed.
+
+Per-session windows are required for correctness: with `max_concurrent_resident_sessions = 16` sessions each sending mutations at 60Hz, a global 1000-entry window would roll over in approximately 1 second — far short of the 60-second retransmit safety guarantee. Per-session windows eliminate this contention entirely.
 
 ### 5.3 Retransmission Policy
 
@@ -441,6 +489,8 @@ Agents are responsible for retransmitting unacknowledged transactional messages:
 4. After 3 retransmits with no acknowledgement, the agent should treat the session as degraded and attempt reconnection.
 
 Lease operations and `CapabilityRequest` follow the same at-least-once + retransmit pattern, using the `sequence` field as the correlation key (no separate `batch_id`; sequence numbers are per-direction unique).
+
+**`CapabilityRequest` rejection:** When the runtime denies a capability request (insufficient trust level, capability not available, or policy restriction), it sends a `RuntimeError` on the session stream with `error_code = "PERMISSION_DENIED"` and `context` set to the names of the denied capabilities (comma-separated). The `RuntimeError` is correlated to the request by matching its position in the server's response sequence against the client's `CapabilityRequest` sequence number. At most one `CapabilityRequest` should be in flight per session at a time; concurrent requests will be processed in arrival order but correlation becomes ambiguous if multiple requests are denied simultaneously.
 
 ### 5.4 Sequence Monotonicity
 
@@ -499,6 +549,8 @@ When a resume is accepted within the grace period:
 
 If the agent's leases are still orphaned (not yet evicted — within grace period), they are automatically reclaimed as part of the state delta. The disconnection badges clear.
 
+> **V1 implementation note:** v1.md §"V1 explicitly defers" states "No resumable state sync (reconnecting agents get a full snapshot, not a diff)." The delta-replay mechanism specified above is the target API contract for v1.1+. The v1 implementation ships a full scene snapshot on resume instead of incremental delta replay: rather than replaying individual missed `SceneEvent` messages, the runtime sends a single `SceneEvent` carrying a full scene topology snapshot, followed by `StateDeltaComplete`. The `last_seen_server_sequence` field in `SessionResume` is accepted but may be ignored by the v1 implementation. Agents must handle both full-snapshot and delta-replay resume responses correctly (both terminate with `StateDeltaComplete`).
+
 ### 6.5 Post-Grace-Period Reconnect
 
 If the grace period expires before the agent reconnects:
@@ -538,6 +590,12 @@ Agents declare which event categories they want to receive. Receiving events for
 
 `degradation_notices` and `lease_changes` are delivered unconditionally to all active sessions — they are not filterable because agents must react to them.
 
+**InputMessage variant routing:** `InputEvent` messages (field 34 in `SessionMessage`) carry an RFC 0004 `InputMessage` envelope. The runtime inspects the `InputMessage.event` oneof variant to determine which subscription filter applies:
+- Focus variants (`FocusGainedEvent`, `FocusLostEvent`, `CaptureReleasedEvent`, IME events) are filtered by the `focus_events` subscription.
+- All other variants (pointer, touch, key, gesture) are filtered by the `input_events` subscription.
+
+An agent subscribed to `input_events` but not `focus_events` will receive pointer/key events but not focus/IME events, even though both are delivered as `InputEvent` messages on the same wire channel. This is consistent with RFC 0004 §8.5, which classifies focus/IME variants as Transactional (never dropped) and pointer-move variants as Ephemeral (coalesced under backpressure).
+
 ### 7.2 Initial Subscriptions
 
 Declared in `SessionInit.initial_subscriptions`. Each category is filtered by the agent's granted capabilities: requesting a category for which the agent lacks the required capability is downgraded — the category is omitted from active delivery. The `SessionEstablished` response explicitly lists `active_subscriptions` (confirmed) and `denied_subscriptions` (omitted due to missing capability), so agents can detect and react to capability gaps rather than silently receiving no events (see §1.3).
@@ -561,7 +619,9 @@ enum SubscriptionCategory {
 }
 ```
 
-The runtime acknowledges via a `MutationResult` with an empty `batch_id`, correlated by `sequence` number (the same `sequence` as the `SubscriptionChange` envelope). This follows the sequence-correlation pattern for non-batch transactional messages described in §5.3. The new subscription set takes effect immediately after the ack is sent — events generated after that point use the new filter.
+The runtime acknowledges via a `SubscriptionChangeResult` (see §9), correlated by `sequence` number (the server's response sequence maps to the `SubscriptionChange` message's client sequence). Using `MutationResult` for this purpose would be a type-system abuse — subscription changes are not scene mutations. The new subscription set takes effect immediately after the ack is sent — events generated after that point use the new filter.
+
+`SubscriptionChangeResult` echoes the full active subscription set after the change, so agents always have a current view of which categories are active. Denied additions (due to missing capability) appear in `denied_subscriptions`.
 
 ### 7.4 Mobile Reduced Granularity
 
@@ -709,8 +769,9 @@ message SessionInit {
   repeated string requested_capabilities = 6;
   repeated SubscriptionCategory initial_subscriptions = 7;
   PresenceLevel  presence_level         = 8;
-  string         resume_session_token   = 9;
-  uint64         resume_last_seen_server_seq = 10;
+  // Fields 9–10 are reserved. Resume uses SessionResume (§6.2), never SessionInit.
+  reserved 9, 10;
+  reserved "resume_session_token", "resume_last_seen_server_seq";
 }
 
 message SessionEstablished {
@@ -800,11 +861,21 @@ message CapabilityNotice {
   uint64          effective_at_server_seq = 4;  // Change is effective after this server sequence
 }
 
-// ─── Subscription change ──────────────────────────────────────────────────────
+// ─── Subscription change ─────────────────────────────────────────────────────
 
 message SubscriptionChange {
   repeated SubscriptionCategory add    = 1;
   repeated SubscriptionCategory remove = 2;
+}
+
+// ─── Subscription change result (server → client) ────────────────────────────
+// Acks a SubscriptionChange. Correlated by sequence number. Replaces the
+// prior practice of reusing MutationResult for this purpose (§7.3).
+
+message SubscriptionChangeResult {
+  repeated SubscriptionCategory active_subscriptions = 1;  // Full active set after the change
+  repeated SubscriptionCategory denied_subscriptions = 2;  // Additions denied (missing capability)
+  RuntimeError                  error                = 3;  // Set if the request was malformed
 }
 
 // ─── Mutation batch (client → server) ────────────────────────────────────────
@@ -827,7 +898,7 @@ message MutationBatch {
 message MutationResult {
   string         batch_id     = 1;
   bool           accepted     = 2;
-  repeated string created_ids = 3;
+  repeated string created_ids = 3;  // UUIDv7 strings; type SceneId per RFC 0001 §1.1
   RuntimeError   error        = 4;
 }
 
@@ -838,6 +909,46 @@ message ZonePublish {
   ZoneContent content    = 2;    // Imported from scene_service.proto
   uint64      ttl_ms     = 3;    // 0 = zone default; use zone's auto_clear_ms
   string      merge_key  = 4;    // For MergeByKey contention policy; empty otherwise
+}
+
+// ─── Zone publish result (server → client) ───────────────────────────────────
+// Sent only for durable-zone publishes (Transactional traffic class).
+// Ephemeral-zone publishes are fire-and-forget; no ZonePublishResult is sent.
+// Correlated by request_sequence matching the ZonePublish envelope's sequence.
+
+message ZonePublishResult {
+  uint64       request_sequence = 1;  // Sequence of the ZonePublish that triggered this
+  bool         accepted         = 2;
+  RuntimeError error            = 3;  // Populated if accepted = false
+}
+
+// ─── Runtime error ───────────────────────────────────────────────────────────
+// Defined here (not imported) because RuntimeError is used throughout session.proto.
+// See §3.5 for the full specification.
+
+message RuntimeError {
+  string    error_code      = 1;  // String identifier (canonical, stable); e.g. "LEASE_EXPIRED"
+  string    message         = 2;  // Short human-readable sentence
+  string    context         = 3;  // Invalid field, value, or operation
+  string    hint            = 4;  // Machine-readable correction suggestion (JSON object)
+  ErrorCode error_code_enum = 5;  // Typed enum for well-known codes; preferred for programmatic use
+
+  // Well-known error codes. String error_code is canonical; error_code_enum mirrors it.
+  // Codes not in this enum are represented as ERROR_CODE_UNKNOWN; inspect error_code for detail.
+  enum ErrorCode {
+    ERROR_CODE_UNSPECIFIED    = 0;
+    ERROR_CODE_UNKNOWN        = 1;  // Code not yet in this enum; see string error_code
+    LEASE_EXPIRED             = 2;
+    LEASE_NOT_FOUND           = 3;
+    ZONE_TYPE_MISMATCH        = 4;
+    ZONE_NOT_FOUND            = 5;
+    BUDGET_EXCEEDED           = 6;
+    MUTATION_REJECTED         = 7;
+    PERMISSION_DENIED         = 8;
+    RATE_LIMITED              = 9;
+    INVALID_ARGUMENT          = 10;
+    SESSION_EXPIRED           = 11;
+  }
 }
 
 // ─── Degradation notice (server → client) ────────────────────────────────────
@@ -882,15 +993,19 @@ message SessionMessage {
     ZonePublish          zone_publish          = 25;
 
     // Runtime → Agent
-    MutationResult       mutation_result       = 30;
-    LeaseResponse        lease_response        = 31;  // Reuse from scene_service.proto
-    HeartbeatPong        heartbeat_pong        = 32;
-    SceneEvent           scene_event           = 33;  // Reuse from scene_service.proto
-    InputEvent           input_event           = 34;  // Reuse from scene_service.proto
-    DegradationNotice    degradation_notice    = 35;
-    RuntimeError         runtime_error         = 36;  // Defined in session.proto (§3.5)
-    CapabilityNotice     capability_notice     = 37;
-    StateDeltaComplete   state_delta_complete  = 38;  // Sentinel: end of resume delta burst (§6.4)
+    MutationResult          mutation_result          = 30;
+    LeaseResponse           lease_response           = 31;  // Reuse from scene_service.proto
+    HeartbeatPong           heartbeat_pong           = 32;
+    SceneEvent              scene_event              = 33;  // Reuse from scene_service.proto
+    InputEvent              input_event              = 34;  // Reuse from scene_service.proto
+    DegradationNotice       degradation_notice       = 35;
+    RuntimeError            runtime_error            = 36;  // Defined in session.proto (§3.5)
+    CapabilityNotice        capability_notice        = 37;
+    StateDeltaComplete      state_delta_complete     = 38;  // Sentinel: end of resume delta burst (§6.4)
+    SubscriptionChangeResult subscription_change_result = 39;  // Ack for SubscriptionChange (§7.3)
+    ZonePublishResult       zone_publish_result      = 40;  // Ack for durable ZonePublish (§3.1)
+    // Fields 41–49 reserved for future server→client messages.
+    // Fields 50–99 reserved for future use.
   }
 }
 
@@ -913,11 +1028,13 @@ session.proto
                      LeaseRequest, LeaseResponse
 ```
 
-`timing.proto` (RFC 0003) is imported for `TimingHints` in the full implementation; the inline definition above is provided for completeness during the pre-code draft phase.
+`timing.proto` (RFC 0003) is imported for `TimingHints` in the full implementation; the inline definition above is provided for completeness during the pre-code draft phase. **Normative note:** if the inline `TimingHints` definition and the `timing.proto` definition in RFC 0003 ever diverge, RFC 0003 is authoritative. Implementers should flag any divergence for correction before the pre-code phase ends.
 
 ### 9.2 Field Number Reservation
 
-Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use. Do not fill gaps speculatively.
+Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
+
+Currently allocated server→client fields: 30–38 (original), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`). Fields 41–49 are available for future server→client additions.
 
 ---
 
@@ -929,9 +1046,10 @@ The session protocol exposes the following configurable parameters in the runtim
 |-----------|---------|-------------|
 | `handshake_timeout_ms` | 5000 | Timeout for `SessionInit` arrival after stream open |
 | `heartbeat_interval_ms` | 5000 | How often agents must send `HeartbeatPing` |
+| `heartbeat_missed_threshold` | 3 | Number of consecutive missed heartbeats before ungraceful disconnect is declared. Disconnect timeout = `heartbeat_missed_threshold × heartbeat_interval_ms` = 15 000 ms by default. |
 | `reconnect_grace_period_ms` | 30 000 | How long orphaned leases are held after disconnect |
 | `retransmit_timeout_ms` | 5000 | Agent-side timeout before retransmitting unacked transactional message |
-| `dedup_window_size` | 1000 | Max unique `batch_id` values held in deduplication window |
+| `dedup_window_size` | 1000 | Max unique `batch_id` values held **per-session** in the deduplication window |
 | `dedup_window_ttl_s` | 60 | Time-to-live for deduplication window entries |
 | `max_sequence_gap` | 100 | Sequence gap that triggers stream close |
 | `ephemeral_buffer_max` | 16 | Per-session max queued ephemeral messages before drop |
@@ -960,3 +1078,5 @@ The session protocol exposes the following configurable parameters in the runtim
 3. **Multi-runtime federation**: the current model is one runtime per display node. If multiple runtime instances coordinate (e.g., a wall + a phone in the same session), session tokens would need to be federated. This is out of scope for v1.
 
 4. **Audit log**: capability grants, revocations, and session lifecycle events are auditable per security.md. The audit log format and delivery mechanism (local file, structured syslog, telemetry stream) is deferred to the Security/Audit RFC.
+
+5. **Embodied presence (post-v1)**: `EMBODIED = 3` in `PresenceLevel` is reserved per v1.md §"V1 explicitly defers: No embodied presence level." Embodied agents need a separate WebRTC media signaling stream. Whether to add this as new `SessionMessage.oneof` variants (fields 50+) or as a separate `rpc MediaSignaling(...)` on `SessionService` is an open design question deferred to the post-v1 Embodied Presence RFC.
