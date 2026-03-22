@@ -57,6 +57,6 @@ These were caught during review rounds. Know them to avoid re-introducing drift:
 | Compositor frame time p99 | < 8ms | RFC 0002 §3.2 |
 | Event classification latency | < 5us/event | RFC 0010 DR-SE8 |
 | Event delivery latency | < 100us from emission | RFC 0010 DR-SE9 |
-| Policy evaluation latency | < 100us/mutation | RFC 0009 §9 |
+| Policy evaluation latency | < 50us/mutation | RFC 0009 §9.1 |
 | Heartbeat interval | 5000ms default | RFC 0005 §1.3 |
 | Reconnect grace period | 30000ms default | RFC 0005 §10 |
