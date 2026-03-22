@@ -1,0 +1,280 @@
+syntax = "proto3";
+
+package tze_hud.protocol.v1.session;
+
+import "scene_service.proto";
+
+// ─── Session Protocol ─────────────────────────────────────────────────────────
+//
+// Bidirectional streaming session protocol for resident agent <-> runtime
+// communication. Implements RFC 0005 (Session/Protocol).
+//
+// This replaces the unary-RPC model in SceneService with a single
+// multiplexed bidirectional stream per agent.
+//
+// ID convention: All scene-object IDs use `bytes` (16-byte UUIDv7).
+// Future: import from common/ids.proto once SceneId message is extracted.
+
+// ─── gRPC service ─────────────────────────────────────────────────────────────
+
+service HudSession {
+  // Primary bidirectional session stream.
+  // All session traffic (handshake, mutations, events, heartbeats,
+  // lease management, subscriptions) flows over this single stream.
+  rpc Session(stream ClientMessage) returns (stream ServerMessage);
+}
+
+// ─── Client -> Server envelope ────────────────────────────────────────────────
+
+message ClientMessage {
+  uint64 sequence         = 1;  // Per-direction monotonically increasing, starts at 1
+  uint64 timestamp_wall_us = 2; // Sender wall-clock (UTC us since epoch); advisory only
+
+  oneof payload {
+    // Session lifecycle
+    SessionInit       session_init       = 10;
+    SessionResume     session_resume     = 11;
+    SessionClose      session_close      = 12;
+
+    // Scene mutations
+    MutationBatch     mutation_batch     = 20;
+
+    // Lease management (RFC 0008)
+    LeaseRequest      lease_request      = 21;
+    LeaseRenew        lease_renew        = 22;
+    LeaseRelease      lease_release      = 23;
+
+    // Subscriptions
+    SubscriptionChange subscription_change = 24;
+
+    // Keepalive
+    Heartbeat         heartbeat          = 25;
+
+    // Telemetry
+    TelemetryFrame    telemetry_frame    = 26;
+  }
+}
+
+// ─── Server -> Client envelope ────────────────────────────────────────────────
+
+message ServerMessage {
+  uint64 sequence         = 1;  // Per-direction monotonically increasing, starts at 1
+  uint64 timestamp_wall_us = 2; // Sender wall-clock (UTC us since epoch); advisory only
+
+  oneof payload {
+    // Session lifecycle
+    SessionAccepted       session_accepted       = 10;
+    SessionDenied         session_denied         = 11;
+
+    // Mutation responses
+    MutationResult        mutation_result        = 20;
+
+    // Lease lifecycle (RFC 0008)
+    LeaseGrant            lease_grant            = 21;
+    LeaseDenial           lease_denial           = 22;
+    LeaseStateChange      lease_state_change     = 23;
+
+    // Scene state
+    SceneSnapshot         scene_snapshot         = 30;
+    SceneDelta            scene_delta            = 31;
+
+    // Subscriptions
+    SubscriptionAck       subscription_ack       = 32;
+
+    // Keepalive
+    Heartbeat             heartbeat              = 33;
+
+    // Input (reuses InputEvent from scene_service.proto)
+    tze_hud.protocol.v1.InputEvent input_event   = 34;
+
+    // Backpressure
+    BackpressureSignal    backpressure_signal    = 35;
+  }
+}
+
+// ─── Session lifecycle messages ───────────────────────────────────────────────
+
+// First message from client on a new connection.
+// Must arrive within handshake_timeout (default 5000ms) or stream is closed.
+message SessionInit {
+  string agent_id               = 1;  // Stable agent identifier (e.g. "weather-agent")
+  string agent_display_name     = 2;  // Human-readable label
+  string pre_shared_key         = 3;  // PSK auth (v1); future: AuthCredential oneof
+
+  // Capabilities requested by the agent
+  repeated string requested_capabilities = 4;
+
+  // Initial event subscriptions
+  repeated string initial_subscriptions  = 5;
+
+  // Optional resume token from a previous session
+  bytes  resume_token           = 6;  // Empty = new session; non-empty = resume attempt
+
+  // Agent's wall-clock at handshake time (UTC us since epoch)
+  // Used for initial clock-skew estimation (RFC 0003 SS1.3)
+  // Clock domain: wall-clock. See RFC 0005 SS2.4.
+  uint64 agent_timestamp_wall_us = 7;
+}
+
+// First message from client for reconnection within grace period.
+// Alternative to SessionInit when agent has a valid resume token.
+message SessionResume {
+  string agent_id                   = 1;
+  bytes  resume_token               = 2;  // Token from previous SessionAccepted
+  uint64 last_seen_server_sequence  = 3;  // Last server sequence the client processed
+  string pre_shared_key             = 4;  // Re-authenticate on resume
+}
+
+// Graceful disconnect from client.
+message SessionClose {
+  string reason        = 1;  // Optional human-readable reason
+  bool   expect_resume = 2;  // Hint: agent intends to reconnect shortly
+}
+
+// Server response: session accepted.
+// Followed immediately by a SceneSnapshot.
+message SessionAccepted {
+  bytes  session_id               = 1;  // Opaque session identifier (UUIDv7)
+  string namespace                = 2;  // Agent's namespace in the scene (RFC 0001 SS1.2)
+  repeated string granted_capabilities = 3;  // Capabilities actually granted
+  bytes  resume_token             = 4;  // Token for future reconnect within grace period
+  uint64 heartbeat_interval_ms    = 5;  // How often client must send Heartbeat (default 5000)
+  uint64 server_sequence          = 6;  // Starting server-side sequence number
+
+  // Clock sync (RFC 0003 SS1.3)
+  // Clock domain: wall-clock (UTC us since epoch). See RFC 0005 SS2.4.
+  uint64 compositor_timestamp_wall_us = 7;
+  int64  estimated_skew_us            = 8;  // agent_ts - compositor_ts (signed)
+
+  // Subscription confirmation
+  repeated string active_subscriptions = 9;
+  repeated string denied_subscriptions = 10;
+}
+
+// Server response: session denied (auth failure, version mismatch, etc.)
+message SessionDenied {
+  string code    = 1;  // Error code (e.g. "AUTH_FAILED", "DUPLICATE_AGENT_ID")
+  string message = 2;  // Human-readable explanation
+  string hint    = 3;  // Machine-readable correction suggestion
+}
+
+// ─── Mutation messages ────────────────────────────────────────────────────────
+
+// Atomic batch of scene mutations (RFC 0001 SS4).
+message MutationBatch {
+  bytes  batch_id  = 1;  // UUIDv7; deduplication key (RFC 0005 SS5.2)
+  bytes  lease_id  = 2;  // Lease under which mutations execute
+  repeated tze_hud.protocol.v1.MutationProto mutations = 3;  // Ordered; applied atomically
+  // Future: TimingHints timing = 4;
+}
+
+// Server response to MutationBatch.
+message MutationResult {
+  bytes  batch_id       = 1;  // Echo of request batch_id
+  bool   accepted       = 2;
+  repeated bytes created_ids = 3;  // SceneIds assigned to CreateTile/CreateNode
+  string error_code     = 4;  // Populated if accepted = false
+  string error_message  = 5;
+}
+
+// ─── Lease messages (RFC 0008) ────────────────────────────────────────────────
+
+// Client requests a new lease.
+message LeaseRequest {
+  uint64 ttl_ms                  = 1;  // Requested TTL; 0 = server default
+  repeated string capabilities   = 2;  // Requested capability scope
+  uint32 lease_priority          = 3;  // Requested priority [0-4]; 2 = default
+}
+
+// Client renews an existing lease.
+message LeaseRenew {
+  bytes  lease_id   = 1;  // Lease to renew
+  uint64 new_ttl_ms = 2;  // New TTL; 0 = same as original
+}
+
+// Client voluntarily releases a lease.
+message LeaseRelease {
+  bytes lease_id = 1;  // Lease to release
+}
+
+// Server grants a lease.
+message LeaseGrant {
+  bytes  lease_id       = 1;  // Granted lease ID (UUIDv7)
+  uint64 granted_ttl_ms = 2;  // Actual TTL granted
+  uint32 granted_priority = 3;
+  repeated string granted_capabilities = 4;
+}
+
+// Server denies a lease request.
+message LeaseDenial {
+  string reason = 1;  // Why the lease was denied
+  string code   = 2;  // Machine-readable denial code
+}
+
+// Server notifies of lease state change (revocation, expiry, suspension, etc.)
+message LeaseStateChange {
+  bytes  lease_id       = 1;  // Affected lease
+  string previous_state = 2;  // e.g. "ACTIVE"
+  string new_state      = 3;  // e.g. "REVOKED", "EXPIRED", "SUSPENDED"
+  string reason         = 4;  // Human-readable reason
+  uint64 timestamp_wall_us = 5; // When the transition occurred (UTC us)
+}
+
+// ─── Subscription messages ────────────────────────────────────────────────────
+
+// Client changes event subscriptions.
+message SubscriptionChange {
+  repeated string subscribe   = 1;  // Categories to add
+  repeated string unsubscribe = 2;  // Categories to remove
+}
+
+// Server acknowledges subscription change.
+message SubscriptionAck {
+  repeated string active_subscriptions = 1;  // Full active set after change
+  repeated string denied_subscriptions = 2;  // Requested but denied (missing capability)
+}
+
+// ─── Heartbeat ────────────────────────────────────────────────────────────────
+
+// Bidirectional keepalive. Same message type in both directions.
+// Clock domain: _mono_us for RTT measurement (RFC 0005 SS2.4).
+message Heartbeat {
+  uint64 timestamp_mono_us = 1;  // Monotonic clock (us); echoed for RTT calculation
+}
+
+// ─── Telemetry ────────────────────────────────────────────────────────────────
+
+// Agent-side metrics pushed to the runtime.
+message TelemetryFrame {
+  uint64 sample_timestamp_wall_us = 1;  // Wall-clock UTC (us since epoch)
+  uint32 mutations_sent           = 2;  // Mutations sent since last frame
+  uint32 mutations_acked          = 3;  // Mutations acknowledged since last frame
+  uint64 rtt_estimate_us          = 4;  // Latest RTT estimate (us)
+}
+
+// ─── Scene state messages ─────────────────────────────────────────────────────
+
+// Full scene state sent on connect/reconnect.
+// Agents MUST process this before issuing mutations.
+message SceneSnapshot {
+  string scene_json = 1;  // Full scene topology as JSON (same as SceneQueryResponse)
+  uint64 version    = 2;  // Scene version at snapshot time
+}
+
+// Incremental scene update for subscribed events.
+message SceneDelta {
+  oneof delta {
+    tze_hud.protocol.v1.TileCreatedEvent tile_created = 1;
+    tze_hud.protocol.v1.TileDeletedEvent tile_deleted = 2;
+    tze_hud.protocol.v1.TileUpdatedEvent tile_updated = 3;
+    tze_hud.protocol.v1.LeaseEvent       lease_event  = 4;
+  }
+}
+
+// ─── Backpressure ─────────────────────────────────────────────────────────────
+
+// Server signals queue pressure to the client.
+message BackpressureSignal {
+  float  queue_pressure    = 1;  // 0.0 = empty, 1.0 = full
+  string suggested_action  = 2;  // "reduce_rate", "coalesce", etc.
+}

@@ -3,7 +3,7 @@
 //! Reference binary demonstrating all 6 layers of tze_hud:
 //! 1. Headless scene graph (pure data)
 //! 2. Native window + compositor (wgpu)
-//! 3. Resident gRPC agent
+//! 3. Resident gRPC agent (unary + streaming)
 //! 4. Lease acquisition
 //! 5. Interactive hit-region
 //! 6. Telemetry + artifacts
@@ -11,8 +11,12 @@
 //! Run headless:  cargo run -p vertical_slice -- --headless
 //! Run windowed:  cargo run -p vertical_slice
 
+#[allow(deprecated)]
 use tze_hud_protocol::proto::scene_service_client::SceneServiceClient;
+#[allow(deprecated)]
 use tze_hud_protocol::proto::*;
+use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
+use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 
@@ -30,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+#[allow(deprecated)]
 async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== tze_hud vertical slice (headless) ===\n");
 
@@ -51,8 +56,8 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     let _server = runtime.start_grpc_server().await?;
     println!("  gRPC server listening on [::1]:50051");
 
-    // ─── Layer 3+4: Connect agent and acquire lease ──────────────────────
-    println!("\nLayer 3+4: Agent connecting and acquiring lease...");
+    // ─── Layer 3+4: Connect agent and acquire lease (unary) ──────────────
+    println!("\nLayer 3+4: Agent connecting via unary RPCs...");
 
     let mut client =
         SceneServiceClient::connect("http://[::1]:50051").await?;
@@ -366,8 +371,125 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
         post_revoke_telemetry.tile_count, post_revoke_telemetry.node_count
     );
 
+    // ─── NEW: Streaming session demo (RFC 0005) ─────────────────────────
+    println!("\n=== Streaming Session Demo (RFC 0005) ===\n");
+
+    // Re-create a tab for streaming demo (tiles were revoked above)
+    {
+        let mut state = runtime.shared_state().lock().await;
+        state.scene.create_tab("StreamDemo", 1).unwrap();
+    }
+
+    let mut session_client =
+        HudSessionClient::connect("http://[::1]:50051").await?;
+
+    // Open bidirectional stream
+    let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+    // Send SessionInit
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+
+    tx.send(session_proto::ClientMessage {
+        sequence: 1,
+        timestamp_wall_us: now_us,
+        payload: Some(session_proto::client_message::Payload::SessionInit(
+            session_proto::SessionInit {
+                agent_id: "stream-agent".to_string(),
+                agent_display_name: "Streaming Agent".to_string(),
+                pre_shared_key: "vertical-slice-key".to_string(),
+                requested_capabilities: vec!["create_tile".to_string()],
+                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_us,
+            },
+        )),
+    })
+    .await?;
+
+    let mut response_stream = session_client.session(stream).await?.into_inner();
+
+    // Read SessionAccepted
+    use tokio_stream::StreamExt;
+    let msg = response_stream.next().await.unwrap()?;
+    match &msg.payload {
+        Some(session_proto::server_message::Payload::SessionAccepted(accepted)) => {
+            println!("  Session accepted: namespace={}", accepted.namespace);
+            println!("    heartbeat_interval={}ms", accepted.heartbeat_interval_ms);
+            println!("    capabilities={:?}", accepted.granted_capabilities);
+        }
+        other => {
+            return Err(format!("Expected SessionAccepted, got: {other:?}").into());
+        }
+    }
+
+    // Read SceneSnapshot
+    let msg = response_stream.next().await.unwrap()?;
+    match &msg.payload {
+        Some(session_proto::server_message::Payload::SceneSnapshot(snapshot)) => {
+            println!("  Scene snapshot received: version={}, json_len={}",
+                snapshot.version, snapshot.scene_json.len());
+        }
+        other => {
+            return Err(format!("Expected SceneSnapshot, got: {other:?}").into());
+        }
+    }
+
+    // Request lease over stream
+    tx.send(session_proto::ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_us,
+        payload: Some(session_proto::client_message::Payload::LeaseRequest(
+            session_proto::LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            },
+        )),
+    })
+    .await?;
+
+    let msg = response_stream.next().await.unwrap()?;
+    match &msg.payload {
+        Some(session_proto::server_message::Payload::LeaseGrant(grant)) => {
+            println!("  Lease granted: ttl={}ms, priority={}", grant.granted_ttl_ms, grant.granted_priority);
+        }
+        other => {
+            return Err(format!("Expected LeaseGrant, got: {other:?}").into());
+        }
+    }
+
+    // Heartbeat echo
+    let mono_us = 999_000u64;
+    tx.send(session_proto::ClientMessage {
+        sequence: 3,
+        timestamp_wall_us: now_us,
+        payload: Some(session_proto::client_message::Payload::Heartbeat(
+            session_proto::Heartbeat {
+                timestamp_mono_us: mono_us,
+            },
+        )),
+    })
+    .await?;
+
+    let msg = response_stream.next().await.unwrap()?;
+    match &msg.payload {
+        Some(session_proto::server_message::Payload::Heartbeat(hb)) => {
+            println!("  Heartbeat echo: mono_us={} (sent {})", hb.timestamp_mono_us, mono_us);
+            assert_eq!(hb.timestamp_mono_us, mono_us);
+        }
+        other => {
+            return Err(format!("Expected Heartbeat, got: {other:?}").into());
+        }
+    }
+
+    println!("\n  Streaming session demo complete.");
+
     println!("\n=== Vertical slice complete ===");
-    println!("All 6 layers demonstrated successfully.");
+    println!("All 6 layers demonstrated successfully (unary + streaming).");
 
     Ok(())
 }

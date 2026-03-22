@@ -2,6 +2,11 @@ syntax = "proto3";
 
 package tze_hud.protocol.v1;
 
+// TRANSITIONAL: This unary-RPC service is superseded by the bidirectional
+// streaming HudSession service defined in session.proto (RFC 0005).
+// It is retained for backward compatibility during the cutover period.
+// New code should use the session.proto HudSession service.
+
 // ─── Core Types ─────────────────────────────────────────────────────────────
 
 message Rect {

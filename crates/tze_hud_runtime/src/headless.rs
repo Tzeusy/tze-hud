@@ -3,8 +3,12 @@
 
 use tze_hud_compositor::{Compositor, HeadlessSurface};
 use tze_hud_input::InputProcessor;
+#[allow(deprecated)]
 use tze_hud_protocol::proto::scene_service_server::SceneServiceServer;
+use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
+#[allow(deprecated)]
 use tze_hud_protocol::server::{SceneServiceImpl, SharedState};
+use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_telemetry::{TelemetryCollector, FrameTelemetry};
 use std::sync::Arc;
@@ -35,12 +39,14 @@ pub struct HeadlessRuntime {
     pub surface: HeadlessSurface,
     pub input_processor: InputProcessor,
     pub telemetry: TelemetryCollector,
+    #[allow(deprecated)]
     pub grpc_service: SceneServiceImpl,
     pub config: HeadlessConfig,
 }
 
 impl HeadlessRuntime {
     /// Create a new headless runtime.
+    #[allow(deprecated)]
     pub async fn new(config: HeadlessConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let compositor = Compositor::new_headless(config.width, config.height).await?;
         let surface = HeadlessSurface::new(&compositor.device, config.width, config.height);
@@ -59,11 +65,13 @@ impl HeadlessRuntime {
     }
 
     /// Get a reference to the shared state (scene + sessions).
+    #[allow(deprecated)]
     pub fn shared_state(&self) -> &Arc<Mutex<SharedState>> {
         &self.grpc_service.state
     }
 
     /// Run one frame: render the current scene to the headless surface.
+    #[allow(deprecated)]
     pub async fn render_frame(&mut self) -> FrameTelemetry {
         let state = self.grpc_service.state.lock().await;
         let telemetry = self.compositor.render_frame(&state.scene, &self.surface);
@@ -77,18 +85,30 @@ impl HeadlessRuntime {
         self.surface.read_pixels(&self.compositor.device)
     }
 
-    /// Start the gRPC server in the background. Returns the server task handle.
+    /// Start the gRPC server in the background, serving both the old unary
+    /// SceneService and the new streaming HudSession service.
+    /// Returns the server task handle.
+    #[allow(deprecated)]
     pub async fn start_grpc_server(
         &self,
     ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
         let addr = format!("[::1]:{}", self.config.grpc_port).parse()?;
-        let service = SceneServiceImpl {
+
+        // Old unary service (transitional)
+        let old_service = SceneServiceImpl {
             state: self.grpc_service.state.clone(),
         };
 
+        // New streaming session service (RFC 0005)
+        let new_service = HudSessionImpl::from_shared_state(
+            self.grpc_service.state.clone(),
+            &self.config.psk,
+        );
+
         let handle = tokio::spawn(async move {
             tonic::transport::Server::builder()
-                .add_service(SceneServiceServer::new(service))
+                .add_service(SceneServiceServer::new(old_service))
+                .add_service(HudSessionServer::new(new_service))
                 .serve(addr)
                 .await
                 .expect("gRPC server failed");

@@ -20,6 +20,7 @@ tze_hud_input = { path = "../../crates/tze_hud_input" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
 tokio = { workspace = true }
 tonic = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
 wgpu = { workspace = true }
 winit = { workspace = true }
 serde_json = { workspace = true }

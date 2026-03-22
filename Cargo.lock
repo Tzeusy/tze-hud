@@ -2480,6 +2480,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tze_hud_compositor",
  "tze_hud_input",
