@@ -1047,10 +1047,10 @@ service SessionService {
   //
   // Round 2 addition (C-R2): ClockSync is defined in timing.proto (RFC 0003 §7.1)
   // as ClockSyncService.ClockSync but is hosted here on SessionService to keep
-  // all agent-runtime communication on a single gRPC endpoint. Agents SHOULD
-  // call ClockSync at session start (immediately after receiving SessionEstablished)
-  // for an up-to-date skew estimate, and after receiving CLOCK_SKEW_HIGH events.
-  // See RFC 0003 §4.5 for the re-synchronization protocol.
+  // all agent-runtime communication on a single gRPC endpoint. While the initial
+  // handshake provides a skew estimate via SessionEstablished, agents can call
+  // ClockSync for ongoing re-synchronization, especially after receiving
+  // CLOCK_SKEW_HIGH events. See RFC 0003 §4.5 for the re-synchronization protocol.
   //
   // ClockSyncRequest and ClockSyncResponse are defined in timing.proto and
   // imported here. See RFC 0003 §7.1 for the message definitions.

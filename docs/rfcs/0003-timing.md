@@ -63,7 +63,7 @@ No new doctrinal gaps. Round 1 fixes held. Score unchanged.
 
 #### Cross-RFC Consistency: 4/5 (up from 3/5)
 
-- **[MUST-FIX → FIXED]** `ClockSync` RPC was referenced in §4.5/§7.2 but absent from RFC 0005 session service. Added `ClockSyncService` to `timing.proto` and added cross-reference note in §7.2 clarifying service home.
+- **[MUST-FIX → FIXED]** `ClockSync` RPC was referenced in §4.5/§7.2 but absent from RFC 0005 session service. Added `rpc ClockSync` to `SessionService` in RFC 0005 §9. Added `ClockSyncService` to `timing.proto` §7.1 with a cross-reference note in §7.2 clarifying that the RPC is hosted on `SessionService` (not `ClockSyncService`) to keep all agent-runtime communication on one endpoint.
 - **[MUST-FIX → FIXED in RFC 0005]** `TimingHints.sync_group_id` was `string` in RFC 0005's inline definition but `bytes` in RFC 0003. Fixed the RFC 0005 inline `TimingHints` to `bytes`.
 - **[SHOULD-FIX → FIXED in RFC 0005]** `session_open_at_us` clock reference not exposed in `SessionEstablished`; agents had no way to align their clocks at handshake without an extra RPC. Added `compositor_wallclock_us` and `estimated_skew_us` to `SessionEstablished`.
 - **[CONSIDER]** `ZonePublish.ttl_ms` unit inconsistency deferred to RFC 0001 `_ms → _us` amendment sweep.

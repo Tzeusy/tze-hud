@@ -150,7 +150,7 @@ reading both RFCs could not determine where the RPC lives.
 to `SessionService` in RFC 0005 §9. Updated the import graph (§9.1) to show that
 `session.proto` imports `timing.proto`. Updated the cross-reference table (§11).
 
-### [SHOULD-FIX → FIXED] C-R3: `session_open_at_us` sync point not exposed in `SessionEstablished`
+### [SHOULD-FIX → FIXED] C-R3: No clock reference exposed at handshake
 
 **Problem:** RFC 0003 §1.3 defines the "per-handshake sync point" where the
 compositor records `session_open_wallclock_us` to initialize the clock-skew
