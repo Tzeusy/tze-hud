@@ -189,7 +189,7 @@ The compositor uses a fixed, small set of threads with explicit responsibilities
 │  │  • Runs: auth, capability negotiation, stream multiplexing   │    │
 │  │  • Receives: gRPC frames from agents                         │    │
 │  │  • Sends: MutationBatch to compositor thread                 │    │
-│  │           EventNotification to agents                        │    │
+│  │           SceneEvent (three traffic-class lanes) to agents   │    │
 │  └─────────────────────────────────────────────────────────────┘    │
 │                                                                      │
 │  ┌─────────────────────────────────────────────────────────────┐    │
@@ -244,7 +244,7 @@ A Tokio multi-thread runtime (default: `tokio::runtime::Builder::new_multi_threa
 - **MCP bridge.** JSON-RPC over stdio or Streamable HTTP.
 - **Session management.** Auth handshake, capability negotiation, session lifecycle.
 - **Mutation batching.** Collect individual RPC mutations into batches before forwarding to the compositor thread.
-- **Event fan-out.** When the compositor commits a scene change, notify subscribed agent sessions.
+- **Event fan-out.** When the compositor commits a scene change, notify subscribed agent sessions via the appropriate traffic-class lane (transactional, state-stream, or ephemeral — see §2.6).
 
 Network threads do **not** touch the scene graph or GPU state directly. They receive frames from agents, validate basic protocol structure, batch mutations, and forward them to the compositor thread. Scene validation (lease checks, budget enforcement, invariant verification) happens on the compositor thread, which is the sole owner of scene state.
 
@@ -268,7 +268,9 @@ All inter-thread communication uses bounded channels. No unbounded queues.
 | `SceneLocalPatch` (main → compositor) | ring buffer (custom) | 64 | Oldest dropped (latest hit-state wins) |
 | `MutationBatch` (network → compositor) | `crossbeam::bounded` | 64 | Agent back-pressured (gRPC flow control) |
 | `FrameReadySignal` (compositor → main) | `tokio::sync::watch` | N/A (latest value wins) | New value overwrites (latest frame wins) |
-| `EventNotification` (compositor → network) | ring buffer (custom) | 1024 | Oldest dropped, overflow counted |
+| `SceneEventTransactional` (compositor → network) | `crossbeam::bounded` | 256 | Compositor back-pressured (never dropped) |
+| `SceneEventStateStream` (compositor → network) | bounded + coalesce map | 512 | Coalesce-key merging (intermediate states skipped, not dropped) |
+| `SceneEventEphemeral` (compositor → network) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
 | `TelemetryRecord` (compositor → telemetry) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
 
 **`SceneLocalPatch` type.** A `SceneLocalPatch` carries only the hit-region local state changes produced by Stage 2 (pressed/hovered flags). It does not carry mutations that require lease validation or invariant checking. The compositor thread drains the `SceneLocalPatch` channel alongside `InputEvent` and `MutationBatch` at the start of Stage 3 and applies local state patches directly to the scene without a full commit cycle. The `ArcSwapFull<HitTestSnapshot>` is updated after applying local patches (T-11: resolves missing channel in topology table). (T-11)
@@ -284,9 +286,19 @@ pub struct LocalStateFlags {
 }
 ```
 
-**Implementation note:** "Oldest dropped" semantics require a ring-buffer implementation, not a standard bounded channel. Standard `crossbeam::bounded` and `tokio::sync::mpsc` channels apply backpressure (blocking or error) when full — they do not drop the oldest entry. Channels that require drop-oldest behavior (`InputEvent`, `SceneLocalPatch`, `EventNotification`, `TelemetryRecord`) must use a ring buffer (e.g., `crossbeam::ArrayQueue` with try_push + manual eviction, or a dedicated ring-buffer crate). `FrameReadySignal` is best served by `tokio::sync::watch`, which always delivers the latest value and naturally discards stale signals.
+**Traffic-class lane split (T-13).** The previous design placed all outbound `SceneEvent` notifications in a single `EventNotification` ring buffer with uniform drop-oldest semantics. This violated the session protocol's delivery guarantees (RFC 0005 §2.5, §5.1): transactional messages (lease revocations, `MutationResult` acks, `DegradationNotice`) are contractually never dropped, and state-stream messages must be coalesced rather than dropped. The three-lane split aligns the internal channel topology with the traffic-class delivery contracts:
+
+- **`SceneEventTransactional`** — `crossbeam::bounded` with capacity 256. When full, the compositor thread blocks (backpressure). Transactional events are low-rate (lease grants, revocations, mutation acks, degradation notices) so blocking is acceptable and correct: it propagates HTTP/2 flow control to the sending agent rather than silently discarding a lease revocation.
+- **`SceneEventStateStream`** — bounded channel (capacity 512) augmented with a per-session coalesce map keyed by `(tile_id, event_kind)`. When the channel is full, the runtime applies coalesce-key merging: a new state-stream event for the same tile and kind replaces the pending queued entry rather than being dropped or blocking. Intermediate states are skipped; the latest state always wins. This matches RFC 0005 §3.2 coalesce semantics.
+- **`SceneEventEphemeral`** — ring buffer (capacity 256) with drop-oldest. Latest-wins by design. Overflow is counted and emitted in `TelemetryRecord`. This is the behavior previously applied uniformly to all events.
+
+The compositor thread classifies each outbound `SceneEvent` by traffic class at emission time and enqueues it to the corresponding lane. The network thread drains all three lanes into the per-session gRPC send buffer, preserving per-lane ordering. Cross-lane ordering is best-effort and is not required by the protocol.
+
+**Implementation note:** "Oldest dropped" semantics require a ring-buffer implementation, not a standard bounded channel. Standard `crossbeam::bounded` and `tokio::sync::mpsc` channels apply backpressure (blocking or error) when full — they do not drop the oldest entry. Channels that require drop-oldest behavior (`InputEvent`, `SceneLocalPatch`, `SceneEventEphemeral`, `TelemetryRecord`) must use a ring buffer (e.g., `crossbeam::ArrayQueue` with try_push + manual eviction, or a dedicated ring-buffer crate). `FrameReadySignal` is best served by `tokio::sync::watch`, which always delivers the latest value and naturally discards stale signals. `SceneEventTransactional` uses `crossbeam::bounded` directly (backpressure is intentional). `SceneEventStateStream` requires a custom structure: a bounded channel paired with a `HashMap<CoalesceKey, QueueSlot>` to enable in-place replacement of pending entries.
 
 Backpressure on the `MutationBatch` channel propagates naturally to gRPC flow control: tonic's `AsyncRead`/`AsyncWrite` buffers fill up and the TCP window shrinks. Agents that send faster than the compositor can process will see their streams slow — this is correct behavior, not an error.
+
+Backpressure on `SceneEventTransactional` is bounded by the rate of transactional events (lease operations, mutation acks). These are low-rate by design (at most one per agent mutation batch, capped by `max_update_rate_hz`). A full `SceneEventTransactional` channel indicates a severely stalled or unresponsive agent — acceptable to apply backpressure in that case.
 
 ---
 
