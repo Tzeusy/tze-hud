@@ -1,0 +1,13 @@
+[package]
+name = "tze_hud_a11y"
+description = "Accessibility bridge for tze_hud — AT-SPI2, UIA, NSAccessibility, and no-op stubs"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tze_hud_scene = { path = "../tze_hud_scene" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

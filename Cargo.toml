@@ -8,6 +8,7 @@ members = [
     "crates/tze_hud_input",
     "crates/tze_hud_telemetry",
     "crates/tze_hud_mcp",
+    "crates/tze_hud_a11y",
     "examples/vertical_slice",
 ]
 
