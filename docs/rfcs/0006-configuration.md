@@ -1301,8 +1301,8 @@ capabilities = [
   "create_tiles",
   "modify_own_tiles",
   "subscribe_scene_events",
-  "zone_publish:subtitle",
-  "zone_publish:status_bar",
+  "publish_zone:subtitle",
+  "publish_zone:status_bar",
 ]
 
 # Resource budget overrides (overrides the profile's per-agent defaults).
@@ -1322,8 +1322,8 @@ capabilities = [
   "create_tiles",
   "modify_own_tiles",
   "subscribe_scene_events",
-  "zone_publish:notification",
-  "zone_publish:alert_banner",
+  "publish_zone:notification",
+  "publish_zone:alert_banner",
   "emit_scene_event:doorbell.ring",  # Can fire the doorbell tab-switch event
 ]
 
@@ -1349,20 +1349,20 @@ The capability grant list in each agent entry uses structured capability identif
 |------------|-------------|------------------|
 | `create_tiles` | May request tile leases. | RFC 0005, RFC 0008 §3.3 |
 | `modify_own_tiles` | May mutate content on own tiles. | RFC 0005 |
-| `read_scene` | May query the full scene topology, including other agents' lease metadata. | RFC 0005 §7.1 |
-| `subscribe_scene_events` | May subscribe to scene-level events on the scene-event bus (system events, scene topology events, agent-emittable named events — see §5.5). This is **not** an input-event subscription; input routing uses `receive_input`. | RFC 0005 §7.1 |
+| `read_scene_topology` | May query the full scene topology, including other agents' lease metadata. | RFC 0005 §7.1 |
+| `subscribe_scene_events` | May subscribe to scene-level events on the scene-event bus (system events, scene topology events, agent-emittable named events — see §5.5). This is **not** an input-event subscription; input routing uses `access_input_events`. | RFC 0005 §7.1 |
 | `overlay_privileges` | May request tiles with high z-order or overlay-level positions. | RFC 0005 |
-| `receive_input` | May receive input events forwarded from the runtime (pointer, touch, keyboard, gesture per RFC 0004). This is **not** the scene-event bus; use `subscribe_scene_events` for named scene events. | RFC 0005 §7.1 |
+| `access_input_events` | May receive input events forwarded from the runtime (pointer, touch, keyboard, gesture per RFC 0004). This is **not** the scene-event bus; use `subscribe_scene_events` for named scene events. | RFC 0005 §7.1 |
 | `high_priority_z_order` | May request z-order values in the top quartile. | RFC 0005 |
 | `exceed_default_budgets` | May request budget overrides at session time (requires user prompt). | RFC 0005 |
 | `read_telemetry` | May subscribe to `telemetry_frames` events (runtime performance samples). | RFC 0005 §7.1 |
-| `zone_publish:<zone_name>` | May publish to the named zone. One grant per zone. `zone_publish:*` grants all zones. | RFC 0005 §7.1 |
+| `publish_zone:<zone_name>` | May publish to the named zone. One grant per zone. `publish_zone:*` grants all zones. | RFC 0005 §7.1 |
 | `emit_scene_event:<event_name>` | May fire the named scene event on the scene-event bus (e.g., `emit_scene_event:doorbell.ring`). The `<event_name>` must follow the `<source>.<action>` naming convention and must not use the `system.` or `scene.` reserved prefix (§5.5). | RFC 0005 |
 | `lease:priority:<N>` | May request lease priority N or lower (0=Critical, 4=Speculative). See RFC 0008 §2.1. | RFC 0008 §2.1 |
 
-Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene` — these must be listed explicitly. Only `zone_publish:*` is supported as a wildcard form.
+Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene_topology` — these must be listed explicitly. Only `publish_zone:*` is supported as a wildcard form.
 
-> **Scene-event bus vs. input routing:** `subscribe_scene_events` / `emit_scene_event` operate on the scene-event bus defined in §5.5 (presence.md §"Inter-agent events" doctrine). They are distinct from input events (RFC 0004): `doorbell.ring` is a device/domain event, not a pointer or keyboard event. Granting an agent `receive_input` does not give it access to scene events, and granting `subscribe_scene_events` does not forward any input.
+> **Scene-event bus vs. input routing:** `subscribe_scene_events` / `emit_scene_event` operate on the scene-event bus defined in §5.5 (presence.md §"Inter-agent events" doctrine). They are distinct from input events (RFC 0004): `doorbell.ring` is a device/domain event, not a pointer or keyboard event. Granting an agent `access_input_events` does not give it access to scene events, and granting `subscribe_scene_events` does not forward any input.
 
 ### 6.4 Dynamic Agent Policy
 
@@ -1377,7 +1377,7 @@ allow_dynamic_agents = true
 default_capabilities = [
   "create_tiles",
   "modify_own_tiles",
-  "zone_publish:notification",
+  "publish_zone:notification",
 ]
 
 # Whether dynamic agents require a user prompt for elevated capabilities.

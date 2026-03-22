@@ -25,6 +25,7 @@
 | 11 | 2026-03-22 | rig-5vq.21 | Cross-RFC consistency fixes from Timing RFC Round 3 review | `ZonePublish.ttl_ms` renamed to `ttl_us` (RFC 0003 §3.1: `_us` is authoritative for timing fields); `auto_clear_ms` prose reference updated to `auto_clear_us` (aligns with RFC 0001 `Zone.auto_clear_us`); `publish_to_zone` MCP tool `ttl_ms` parameter renamed to `ttl_us`; `TimingHints` inline note updated to confirm alignment with RFC 0003 §7.1 after Round 3 clock-domain naming fix. |
 | 12 | 2026-03-22 | rig-5vq.29 | Cross-RFC consistency and integration | Added `SessionSuspended`/`SessionResumed` messages (§3.2, §3.6, §9 proto, §9.2) closing protocol gap flagged in RFC 0007 §8 and RFC 0008 §11. Added input control request fields 26–29 (`InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition`) and corresponding response fields 43–44 (`InputFocusResponse`, `InputCaptureResponse`) to `SessionMessage` oneof (§3.1, §3.2, §9 proto), resolving RFC 0004 §8.3.1 dependency. Added RFC 0004 `EventBatch` note to §3.2 `InputEvent` row. Renamed `TelemetryFrame.sample_timestamp_us` → `sample_timestamp_wall_us` per §2.4 naming convention. Added `CLOCK_SKEW_HIGH` and `CLOCK_SKEW_EXCESSIVE` to `RuntimeError.ErrorCode` enum. Added `reconnect_grace_secs` cross-reference to §10 config table. Updated §11 cross-RFC table. |
 | 13 | 2026-03-22 | rig-5vq.30 | Final hardening and quantitative verification | Fixed §9 intro paragraph: removed `RuntimeError` from the list of types imported from `scene_service.proto` (it is defined in `session.proto` itself). Fixed §9.1 import graph: expanded to show both `"scene_service.proto"` and `"scene.proto"` imports with accurate type lists matching the proto header. Added `active_subscriptions` (field 7) and `denied_subscriptions` (field 8) to `SessionResumeResult` in §6.3 prose proto and §9 proto — mirrors `SessionEstablished` fields 7–8 so agents have confirmed subscription state after resume. |
+| 14 | 2026-03-23 | P1 consolidation (rig-b2s, rig-3uy, rig-anb, rig-5xu, rig-upg, rig-77n, rig-6c2, rig-8uq, rig-de2) | Capability vocabulary alignment (Fix 3) | Unified §7.1 capability names with RFC 0006 §6.3 canonical vocabulary: `read_scene` → `read_scene_topology`, `receive_input` → `access_input_events`, `zone_publish:<zone>` → `publish_zone:<zone>`. Verified all other P1 fixes (Fixes 1–2, 4–9) were already applied in Rounds 2–13: duplicate resume paths resolved (Round 2), full-snapshot reconnect aligned (Round 10), SubscriptionChangeResult added (Rounds 2+4), TelemetryFrame defined (Round 3), clock-domain naming fixed (Round 6), guest MCP surface narrowed (Round 5), SceneSnapshot referenced (Round 8), SceneId types aligned (Rounds 7+9). All 9 P1 beads closed. |
 
 ---
 
@@ -727,12 +728,12 @@ Agents declare which event categories they want to receive. Receiving events for
 
 | Category | Description | Minimum Capability |
 |----------|-------------|-------------------|
-| `scene_topology` | Tile created/deleted/updated, tab switched | `read_scene` |
-| `input_events` | Pointer, touch, key events routed to agent's tiles | `receive_input` |
-| `focus_events` | Focus gained/lost on agent's tiles | `receive_input` |
+| `scene_topology` | Tile created/deleted/updated, tab switched | `read_scene_topology` |
+| `input_events` | Pointer, touch, key events routed to agent's tiles | `access_input_events` |
+| `focus_events` | Focus gained/lost on agent's tiles | `access_input_events` |
 | `degradation_notices` | Runtime degradation level changes | *(always subscribed)* |
 | `lease_changes` | Lease granted/renewed/revoked/expired for agent's leases | *(always subscribed)* |
-| `zone_events` | Zone occupancy changes in zones the agent has publish access to | `zone_publish:<zone>` |
+| `zone_events` | Zone occupancy changes in zones the agent has publish access to | `publish_zone:<zone>` |
 | `telemetry_frames` | Runtime performance and health telemetry samples (`TelemetryFrame` messages; see §9) | `read_telemetry` |
 
 `degradation_notices` and `lease_changes` are delivered unconditionally to all active sessions — they are not filterable because agents must react to them.
