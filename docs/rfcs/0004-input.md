@@ -11,6 +11,7 @@
 | Round | Date | Reviewer | Focus | Changes |
 |-------|------|----------|-------|---------|
 | 1 | 2026-03-22 | rig-5vq.23 | Doctrinal alignment deep-dive | DR table: added DR-I3/I4 (input_to_scene_commit, input_to_next_present) from validation.md §3; added DR-I11 (headless testability). §6.1a: new headless testability section. §7.1: fixed `interaction_id` comment (now consistent with RFC 0001 §2.4 "forwarded in events"). §7.3/§9.1: added `interaction_id` field to PointerDownEvent, PointerUpEvent, ClickEvent, DoubleClickEvent. §9.1: removed `HitRegionConfig` (replaced with canonical `HitRegionNode` reference to RFC 0001 §9). §11.2: scroll deferral reframed as requiring pre-implementation resolution (local-first scroll is a doctrine commitment). RFC 0001 §2.4 and §9: unified `HitRegionNode` to include all input-model fields with cross-reference to RFC 0004. |
+| 2 | 2026-03-22 | rig-5vq.24 | Technical architecture scrutiny | §10.3: fixed gesture threshold diagram (5px → 10px, consistent with §3.4 state machine). §8.3: corrected `SessionEnvelope` → `SessionMessage` (aligns with RFC 0005 §2.2 naming). §8.3.1 (new): documented agent-to-runtime input control request transport gap; specifies required RFC 0005 `SessionMessage` payload field additions for FocusRequest, CaptureRequest, CaptureReleaseRequest, SetImePositionRequest. §4.5 (new, renamed §4.5+): added IME active-composition-on-focus-loss behavior spec (cancel before FocusLost, ordering guarantee, capture-theft case). §1.4/§9.1: added `AGENT_DISCONNECTED = 6` to `FocusLostReason`. §7.3/§9.1: added `device_id` field to `ContextMenuEvent`. §9.1: added `interaction_id` field to `GestureEvent`. §8.5: resolved transactional-event drop contradiction (transactional events never dropped; only non-transactional dropped beyond hard cap). §8.3.1 follow-up (rig-k0d): clarified that CaptureReleaseRequest uses async CaptureReleasedEvent confirmation and SetImePositionRequest is fire-and-forget; removed misleading "runtime responds with corresponding response" blanket claim. §8.5 follow-up (rig-k0d): fixed contradictory "without bound, up to a hard cap" phrasing (now: "grows as needed to accommodate transactional events, which are never dropped"). |
 
 ---
 
@@ -165,12 +166,13 @@ enum FocusSource {
 }
 
 enum FocusLostReason {
-  CLICK_ELSEWHERE  = 0;
-  TAB_KEY          = 1;
-  PROGRAMMATIC     = 2;
-  TILE_DESTROYED   = 3;
-  TAB_SWITCHED     = 4;
-  LEASE_REVOKED    = 5;
+  CLICK_ELSEWHERE      = 0;
+  TAB_KEY              = 1;
+  PROGRAMMATIC         = 2;
+  TILE_DESTROYED       = 3;
+  TAB_SWITCHED         = 4;
+  LEASE_REVOKED        = 5;
+  AGENT_DISCONNECTED   = 6;  // Owning agent's session ended; focus cleared
 }
 ```
 
@@ -437,7 +439,21 @@ message ImeCompositionCancelledEvent {
 
 **Update latency target:** IME composition window must update within one frame (< 16.6ms) of the user's input.
 
-### 4.5 IME Candidate List Rendering
+### 4.5 IME State on Focus Loss
+
+When focus leaves a node that has an active IME composition in progress (i.e., after `ImeCompositionStartedEvent` but before `ImeCompositionCommittedEvent` or `ImeCompositionCancelledEvent`), the runtime **cancels the active composition** immediately:
+
+1. The OS IME subsystem is notified to discard the provisional text (platform API: `ImmNotifyIME` / `cancelComposition` / Wayland `preedit_string` with empty text).
+2. The runtime emits `ImeCompositionCancelledEvent` to the owning agent.
+3. The runtime emits `FocusLostEvent` to the owning agent after the IME cancel is sent.
+
+**Ordering guarantee:** `ImeCompositionCancelledEvent` is always delivered before `FocusLostEvent` when both are caused by the same focus transition. Agents must treat the IME session as terminated upon receiving `ImeCompositionCancelledEvent`.
+
+**Reason:** Allowing the IME candidate window to stay open after focus loss would let the OS IME deliver committed text to the wrong node. Cancellation is the only safe behavior.
+
+**Capture-theft case:** When pointer capture is revoked (§2.4), if the capturing node also holds IME focus, the same sequence applies: IME cancel → focus lost → capture released.
+
+### 4.6 IME Candidate List Rendering
 
 The IME candidate list (the popup showing input alternatives) is **rendered by the OS IME subsystem**, not by tze_hud. The runtime does not implement its own candidate list. This is intentional: OS IME subsystems have deep knowledge of locale, input methods, and accessibility that would be prohibitive to replicate.
 
@@ -813,11 +829,12 @@ message DoubleClickEvent {
 }
 
 message ContextMenuEvent {
-  string tile_id   = 1;
-  string node_id   = 2;
-  float  x         = 3;
-  float  y         = 4;
+  string tile_id      = 1;
+  string node_id      = 2;
+  float  x            = 3;
+  float  y            = 4;
   int64  timestamp_us = 5;
+  string device_id    = 6;   // Device that triggered the context menu (for multi-pointer disambiguation)
 }
 
 message PointerCancelEvent {
@@ -940,7 +957,9 @@ The event router resolves the owning agent for each input event:
 
 ### 8.3 Event Serialization
 
-Events are serialized as protobuf messages and multiplexed over the agent's existing gRPC session stream (from RFC 0002 §1). The session stream carries a `SessionEnvelope` that can hold either `MutationBatchAck` (runtime → agent), `EventBatch` (runtime → agent), or `MutationBatch` (agent → runtime).
+Events are serialized as protobuf messages and multiplexed over the agent's existing gRPC session stream (from RFC 0002 §1). The session stream uses the `SessionMessage` envelope defined in RFC 0005 §2.2. Input events travel **runtime → agent** as `SessionMessage` messages carrying an `input_event` payload (field 34), which wraps an `InputEnvelope`. Multiple input events for the same agent in a single frame are assembled into an `EventBatch` by the runtime and delivered as a single `SessionMessage` with the `EventBatch` carried inside the `input_event` field.
+
+> **Note:** RFC 0005 §2.2 currently defines `input_event` as a single `InputEnvelope`. The batching described here requires RFC 0005 to update field 34 to carry `EventBatch` (a `repeated InputEnvelope` with frame metadata). See §8.3.1 for the agent-to-runtime request transport gap.
 
 ```protobuf
 // Multiplexed on the session stream (runtime → agent direction)
@@ -976,6 +995,34 @@ message InputEnvelope {
 }
 ```
 
+### 8.3.1 Agent-to-Runtime Input Control Requests
+
+`FocusRequest`, `CaptureRequest`, `CaptureReleaseRequest`, and `SetImePositionRequest` travel **agent → runtime** on the same `SessionMessage` stream. These are transactional messages and must never be dropped.
+
+RFC 0005 §2.2 defines agent→runtime payload variants at fields 20–25 of `SessionMessage`. The current RFC 0005 schema does not include payload variants for input control requests. RFC 0005 must be extended with the following additions before the input subsystem can be implemented:
+
+```
+// To be added to RFC 0005 SessionMessage.payload (agent → runtime, fields 26–29):
+//   InputFocusRequest     input_focus_request     = 26;  // maps to FocusRequest (§1.2)
+//   InputCaptureRequest   input_capture_request   = 27;  // maps to CaptureRequest (§2.3)
+//   InputCaptureRelease   input_capture_release   = 28;  // maps to CaptureReleaseRequest (§2.3)
+//   SetImePosition        set_ime_position        = 29;  // maps to SetImePositionRequest (§4.3)
+
+// To be added to RFC 0005 SessionMessage.payload (runtime → agent, fields 39–40):
+//   InputFocusResponse    input_focus_response    = 39;  // maps to FocusResponse (§1.2)
+//   InputCaptureResponse  input_capture_response  = 40;  // maps to CaptureResponse (§2.3)
+//
+// Note: CaptureReleaseRequest and SetImePositionRequest do not use synchronous responses:
+//   - CaptureReleaseRequest is confirmed by the CaptureReleasedEvent (§2.3), which is an
+//     async event already delivered via field 34 (input_event). No separate response field needed.
+//   - SetImePositionRequest is a fire-and-forget hint to the OS IME subsystem; no response
+//     is defined or required.
+```
+
+`FocusRequest` and `CaptureRequest` use synchronous request/response semantics: sequence-correlated, at-least-once with retransmit on timeout (see RFC 0005 §5.2). The runtime responds with the corresponding `FocusResponse` or `CaptureResponse` correlated by `sequence` number. `CaptureReleaseRequest` is confirmed by the asynchronous `CaptureReleasedEvent`; `SetImePositionRequest` is fire-and-forget (no response).
+
+**Dependency note:** RFC 0004 defines the request/response message schemas (§1.2, §2.3, §4.3). RFC 0005 must add the `SessionMessage` payload variants above. Both RFCs must be updated together before implementation.
+
 ### 8.4 Event Batching
 
 Events that occur within the same frame are batched into a single `EventBatch` message. Batching is per-agent: events for different agents are in separate batches.
@@ -994,8 +1041,10 @@ If an agent's event queue is full (the agent is slow to consume events):
 1. **PointerMove events** are coalesced: only the latest position is retained.
 2. **Hover state changes** (enter/leave) are coalesced: only the net state (currently inside or outside) is emitted.
 3. **Transactional events** (down, up, click, key, focus, capture, IME) are never dropped. If the queue is full and a transactional event arrives, the oldest coalesced event is removed to make room.
-4. If the queue remains full after coalescing, the oldest transactional event is logged as an overflow (visible in telemetry) but not dropped — the queue grows up to a hard cap of 4096 events per agent.
-5. Beyond the hard cap, events are dropped and `telemetry_overflow_count` is incremented. This is a pathological condition; a well-behaved agent processes events within one frame.
+4. If the queue remains full after coalescing, the oldest coalesced (non-transactional) event is removed to make room. The queue grows as needed to accommodate transactional events, which are never dropped.
+5. Beyond the hard cap, **transactional events** (down, up, click, key, focus, capture, IME) continue to be enqueued — they are never dropped. **Non-transactional events** (PointerMove, hover enter/leave) that cannot be coalesced further are dropped at the hard cap, and `telemetry_overflow_count` is incremented.
+
+> **Overflow contract:** The hard cap ensures memory is bounded. In practice, a queue exceeding 4096 events indicates the agent has stalled; the runtime should log this as a health incident and the agent's lease watchdog timer (RFC 0003 §lease TTL) will eventually reclaim the session if the agent does not recover.
 
 **Event queue depth:** Default 256 events per agent. Hard cap 4096. Configurable per agent.
 
@@ -1037,6 +1086,7 @@ message FocusLostEvent {
   enum Reason {
     CLICK_ELSEWHERE = 0; TAB_KEY = 1; PROGRAMMATIC = 2;
     TILE_DESTROYED = 3; TAB_SWITCHED = 4; LEASE_REVOKED = 5;
+    AGENT_DISCONNECTED = 6;
   }
   Reason reason  = 3;
 }
@@ -1161,10 +1211,11 @@ message CharacterEvent {
 // ─── Gesture events ───────────────────────────────────────────────────────
 
 message GestureEvent {
-  string tile_id   = 1;
-  string node_id   = 2;
-  string device_id = 3;
-  int64  timestamp_us = 4;
+  string tile_id       = 1;
+  string node_id       = 2;
+  string device_id     = 3;
+  int64  timestamp_us  = 4;
+  string interaction_id = 5;  // Forwarded from HitRegionNode for agent correlation (same as pointer events)
 
   oneof gesture {
     TapGesture        tap         = 10;
@@ -1458,8 +1509,8 @@ Focus state per tab (suspended tabs preserve state, no events):
 
   t=5ms  PointerMove to (108, 200)   (8px delta)
          │
-         ├──► TapRecognizer:      FAILED (moved > 5px threshold)
-         ├──► LongPressRecognizer: FAILED (moved > 5px threshold)
+         ├──► TapRecognizer:      FAILED (moved > 10px threshold)
+         ├──► LongPressRecognizer: FAILED (moved > 10px threshold)
          └──► DragRecognizer:     state=BEGAN (threshold crossed)
 
   t=5ms  ARBITER:
