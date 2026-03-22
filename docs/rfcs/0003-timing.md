@@ -149,6 +149,25 @@ The following issues were identified during this round's systematic cross-RFC pa
 
 ---
 
+### Override State Interaction — Freeze and Safe Mode Timing Behavior (rig-zts)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-zts — RFC 0003: Define timer behavior during freeze and safe mode
+
+#### Changes Applied
+
+- **[MUST-FIX → FIXED]** Added §5.6 "Override State Interaction" specifying normative behavior for all six timing-sensitive constructs (present_at, expires_at, sync group deferral counters, staleness timers, clock-skew estimation window, and headless virtual clock) during freeze and safe mode. Grounded in RFC 0007 §4.3 (freeze queue semantics), RFC 0007 §5 (safe mode session suspension), and architecture.md §Policy arbitration (human override at position 1).
+- **[MUST-FIX → FIXED]** §2.4 "Timing Contract" — added a freeze cross-reference: `deferred_frames_count` does not increment while freeze is active. See §5.6.1.
+- **[MUST-FIX → FIXED]** §4.3 "Drift Detection" — added a safe mode cross-reference: the clock-skew estimation window is frozen during `SessionSuspended`; on `SessionResumed`, the window is reset to empty. See §5.6.2.
+- **[MUST-FIX → FIXED]** §4.7 "Staleness Indicators" — added freeze and safe mode exceptions: staleness timers are suspended during freeze; tile staleness is suppressed while a session's `SessionSuspended` is active. See §5.6.1 and §5.6.2.
+- **[MUST-FIX → FIXED]** §5.3 "Presentation Deadline (present_at)" — added freeze behavior: the pending queue drain condition is not evaluated during freeze. On unfreeze, mutations whose `present_at_us` has passed are applied immediately (same-frame flush). See §5.6.1.
+- **[MUST-FIX → FIXED]** §5.4 "Expiration Policy (expires_at)" — added freeze behavior: expiry heap evaluation is suspended during freeze. On unfreeze, all tiles whose `expires_at_us <= current_frame_vsync_us` are expired immediately in the first post-unfreeze Stage 4. See §5.6.1.
+- **[MUST-FIX → FIXED]** §8.2 "Test Coverage Requirements" — added seven new test cases covering override-state timing behavior.
+- **[SHOULD-FIX → FIXED]** Added `FrameTimingRecord.frozen` and `FrameTimingRecord.safe_mode_active` boolean fields to §7.1 proto, allowing telemetry consumers to identify frames affected by override states without needing to cross-reference `ChromeState`.
+
+---
+
 ### Round 4 — Final Hardening and Quantitative Verification (rig-5vq.22)
 
 **Reviewer:** Beads worker agent
@@ -383,6 +402,8 @@ This behavior ensures that cross-agent sync groups do not deadlock waiting for a
 **AllOrDefer policy:** if the policy is `AllOrDefer` and at least one member has no pending mutation at the time of Stage 4, the entire group is deferred to the next frame. This can cascade: if the group is still incomplete at the next frame, it defers again. Maximum deferral is `max_defer_frames` (configured in `SyncGroupConfig.max_defer_frames`; default 3 frames = 50ms at 60fps; 0 means use the runtime default `timing.sync_group_max_defer_frames`). If the group is still incomplete after `max_defer_frames` consecutive deferrals, a force-commit is triggered. See §2.4.1 for the full force-commit state machine and its normative contract.
 
 **AvailableMembers policy:** mutations from members with pending work are applied. Members without pending work remain unchanged. No deferral.
+
+**Freeze interaction.** While freeze is active (RFC 0007 §4.3), `deferred_frames_count` is NOT incremented. The deferral counter counts actual frames where the group was incomplete and a scene commit was blocked — frames where the scene is frozen are not missed-commit frames; they are not counted at all. On unfreeze, the group resumes from its pre-freeze `deferred_frames_count`. See §5.6.1 for the full normative freeze/safe mode override interaction.
 
 ```
 Sync Group Commit Flow (AllOrDefer, cross-agent)
@@ -650,6 +671,8 @@ Two distinct drift concepts apply. Do not conflate them:
 
 **Clock jump detection.** If consecutive samples show a skew change greater than **`timing.clock_jump_detection_ms`** (default: 50ms) between them — indicating a sudden NTP step correction or agent clock adjustment, not gradual drift — the compositor resets the estimation window to the current single sample rather than continuing to accumulate. The estimate is re-initialized from this sample as a single-point estimate until the window refills. This prevents systematic miscorrection during the convergence period after a clock step, where a 32-sample median weighted by stale values would apply the wrong correction for up to 32 subsequent mutations.
 
+**Safe mode interaction.** During safe mode, all agent sessions are suspended (`SessionSuspended` with reason `safe_mode`, RFC 0007 §5.1). No mutation batches arrive, so no new `(agent_ts, compositor_ts)` samples are added to the estimation window. On safe mode exit, when sessions receive `SessionResumed`, the estimation window is **reset to empty** rather than resumed with stale samples. Stale samples collected before a potentially long safe mode period (seconds to minutes) represent a different clock state and would bias the skew estimate. The window is re-initialized from fresh samples submitted by the agent after resumption. See §5.6.2 for the full normative safe mode timing interaction.
+
 **Vsync jitter tracking.** Each frame's vsync arrival time is recorded. Jitter is computed as the standard deviation of inter-frame intervals over the last 120 frames (2 seconds at 60fps). High jitter triggers a telemetry warning and may indicate GPU or OS scheduling issues.
 
 ### 4.4 Drift Correction
@@ -689,6 +712,13 @@ The timing model defines two staleness conditions detected from temporal signals
 **Sync group staleness (arrival spread exceeds budget):** If `sync_group_max_drift_us` for a committed sync group exceeds `timing.sync_drift_budget_us` (default 500μs), the compositor activates the staleness indicator for the slow member's tiles for that frame (see §4.2).
 
 The staleness indicator is a chrome-layer visual badge rendered by the runtime (see architecture.md §System shell). It does not affect tile content — the tile continues to render its last committed state. It is cleared when: (a) a new valid mutation arrives for the tile, or (b) the agent disconnects and the tile enters the grace period.
+
+**Freeze and safe mode exceptions.** Two override states affect staleness indicator behavior:
+
+- **During freeze (RFC 0007 §4.3):** The `tile_stale_threshold_ms` timer is suspended for all tiles. Since agents' mutations are queued and not applied during freeze, the absence of new mutations does not indicate agent slowness — it indicates the compositor is frozen. Staleness indicators MUST NOT be activated for tiles solely because they received no mutation during a freeze interval. The timer resumes on unfreeze; time elapsed during freeze does not count toward the staleness threshold. (Example: a tile has been idle for 4,800ms. The scene freezes for 2 seconds, then unfreezes. The tile is not stale until 200ms of additional unfreeze time passes — not 200ms after unfreeze.)
+- **During safe mode (RFC 0007 §5):** Sessions are suspended (`SessionSuspended`). A session's tiles MUST NOT show staleness indicators while that session's `SessionSuspended` is active. The tile is in a known-suspended state, not a stale state. Staleness indicators are re-evaluated fresh on `SessionResumed` (timer reset to 0 at the moment of resumption).
+
+See §5.6 for the unified override state interaction specification.
 
 ---
 
@@ -748,6 +778,8 @@ A mutation batch with `present_at_us = T` is held in the pending queue until the
 
 **Pending queue:** held pending mutations are stored in a per-agent sorted queue, ordered by `present_at_us` ascending. The queue is drained in Stage 3: mutations whose `present_at_us <= current_frame_vsync_us` are extracted and forwarded to Stage 4. This drain condition enforces the no-earlier-than guarantee directly: a mutation is released only once the frame's vsync has reached or passed the mutation's declared presentation time.
 
+**Freeze interaction.** While freeze is active (RFC 0007 §4.3), the pending queue drain condition (`present_at_us <= current_frame_vsync_us`) is NOT evaluated. Mutations continue to accumulate in the queue (up to the class-aware overflow rules in RFC 0007 §4.3), but no mutations are extracted and no scene commits occur. On unfreeze, the drain runs immediately in the next available Stage 3: all mutations whose `present_at_us <= current_frame_vsync_us` are extracted and applied in the first post-unfreeze frame. Mutations whose `present_at_us` had already passed when unfreeze occurs are treated as immediately applicable — their window has elapsed, but the compositor must still apply them rather than drop them (they are not "late" in the `DELIVERY_POLICY_DROP_IF_LATE` sense; that policy applies only to `EPHEMERAL_REALTIME` class). See §5.6.1 for the full normative freeze behavior.
+
 **Maximum pending queue depth:** 256 entries per agent. Mutations that would exceed this limit are rejected with `PENDING_QUEUE_FULL`. Agents with many deferred mutations are scheduling too aggressively; they should reduce their schedule horizon or increase their mutation rate.
 
 **Equal `present_at_us` ordering.** When two or more mutations from the same agent have identical `present_at_us` values, they are applied in **FIFO arrival order** within the same frame. This ordering is deterministic and reproducible. Agents that intend simultaneous mutations SHOULD include all of them in a single `MutationBatch` (which is applied atomically per batch) or use distinct `present_at_us` values. Relying on FIFO ordering across separate batches is possible but fragile — network reordering can change the effective order.
@@ -768,6 +800,10 @@ A tile with `expires_at_us = T` is automatically removed from the scene at the f
 
 **Expiry is non-negotiable under load.** Expiry evaluation at Stage 4 is never deferred by degradation. The compositor must evaluate the expiry heap and apply implicit `DeleteTile` mutations even during degradation level 4 (ShedTiles) or 5 (Emergency). Expiry semantics are a correctness contract, not a performance optimization. An agent that sets `expires_at_us` must be able to rely on tile removal within one frame (≤ 16.6ms at 60fps) of the expiry time, regardless of compositor load. RFC 0002's degradation machinery must not shed Stage 4 expiry work.
 
+**Freeze interaction.** While freeze is active (RFC 0007 §4.3), expiry heap evaluation is **suspended**. Stage 4 does not run during freeze, so no expired tiles are checked or removed. When unfreeze occurs, the expiry heap is drained immediately at Stage 4 of the first post-unfreeze frame: all tiles whose `expires_at_us <= current_frame_vsync_us` are removed in that frame. This means a tile whose `expires_at_us` passed during the freeze interval is expired on the first post-unfreeze frame — not gradually over subsequent frames. The one-frame accuracy guarantee (≤ 16.6ms) applies only to unfreeze time; the viewer's decision to freeze the scene is a human override (architecture.md §Policy arbitration, priority 1) that temporarily suspends all timing evaluation. See §5.6.1 for the full normative freeze behavior.
+
+**Safe mode interaction.** During safe mode (RFC 0007 §5), expiry evaluation continues normally. Unlike freeze, safe mode does not pause the compositor's frame loop — it suspends agent sessions. The frame pipeline still runs. Tiles with `expires_at_us` continue to be evaluated each frame and expire on schedule. This is intentional: expiry is a scene management contract set by the agent before safe mode; the compositor honors it regardless of session suspension state. See §5.6.2.
+
 **Expiry notification:** when a tile expires, the compositor emits a `TileExpired { tile_id, expires_at_us, frame_number }` event to the owning agent's event subscription stream.
 
 **Expiry and sync groups:** if a tile that is a member of a sync group expires, the tile is removed from the sync group first, then deleted. The sync group's commit policy evaluates against the updated member set.
@@ -777,6 +813,77 @@ A tile with `expires_at_us = T` is automatically removed from the scene at the f
 The compositor validates at mutation commit time that `expires_at_us > present_at_us` (see §3.5). If a tile's `present_at_us` is in the future and its `expires_at_us` is also in the future but before `present_at_us`, the mutation is rejected.
 
 A tile whose `present_at_us` has not yet been reached is not rendered, but it is in the scene graph and consumes resource budget. Agents scheduling large numbers of future mutations should be aware that each pending tile counts against their resource budget from the moment it is committed, not from the moment it becomes visible.
+
+### 5.6 Override State Interaction
+
+RFC 0007 (System Shell) defines two human override states — **Freeze** (§4.3) and **Safe Mode** (§5) — that affect the timing model in distinct ways. This section is the normative specification for all timing-sensitive interactions with both override states. Individual sections above contain forward references to this section; this section is the authoritative source.
+
+**Doctrinal grounding:** architecture.md §Policy arbitration establishes "Human override always wins" at priority 1. Timing evaluation is priority-2 runtime behavior. When a human override suspends or pauses timing machinery, that is correct and expected behavior — not a timer violation.
+
+#### 5.6.1 Freeze Behavior
+
+Freeze is entered when the viewer toggles the freeze shortcut (RFC 0007 §4.3). The compositor continues the frame loop and rendering, but scene commits are suppressed — mutations are queued but not applied.
+
+**Timing evaluation during freeze:**
+
+| Timing construct | Behavior during freeze |
+|-----------------|----------------------|
+| `present_at_us` pending queue drain | **Suspended.** Drain condition is not evaluated; no mutations are extracted from the queue. Mutations continue to accumulate (subject to RFC 0007 §4.3 class-aware overflow rules). |
+| `expires_at_us` expiry heap | **Suspended.** Stage 4 does not run; no expiry heap evaluation occurs; no tiles are expired. |
+| Sync group `deferred_frames_count` | **Not incremented.** Frozen frames are not "missed-commit" frames. The counter tracks actual incomplete-deferral events during live scene commits only. |
+| `tile_stale_threshold_ms` timer | **Suspended** for all tiles. Elapsed freeze time does not count toward the staleness threshold. |
+| Clock-skew estimation window | **Unaffected.** Agent mutation batches continue to arrive and are queued (not committed); each arrival contributes a `(agent_ts, compositor_ts)` sample to the estimation window as normal. The compositor still needs an accurate skew estimate for when unfreeze occurs. |
+| Vsync jitter tracking | **Unaffected.** Vsync interrupts continue; jitter is tracked for monitoring purposes. |
+
+**On unfreeze:**
+
+All timing machinery resumes immediately in the first available frame after unfreeze:
+
+1. **Pending queue flush.** The drain condition runs against all queued mutations. Mutations whose `present_at_us` has already passed (`present_at_us <= current_frame_vsync_us`) are applied in the first post-unfreeze Stage 4. The compositor applies them in `present_at_us` order (FIFO for equal values); there is no special "freeze catch-up" ordering. Ephemeral realtime mutations with `delivery_policy = DROP_IF_LATE` whose `present_at_us` is in the past are dropped (consistent with their drop-if-late semantics — being suspended in a frozen queue is equivalent to late arrival for these messages).
+
+2. **Expiry flush.** All tiles whose `expires_at_us <= current_frame_vsync_us` are expired immediately in Stage 4 of the first post-unfreeze frame. This may result in several tiles expiring at once; each generates a `TileExpired` event as normal. The one-frame accuracy guarantee (≤ 16.6ms) for expiry applies from the moment of unfreeze, not from the original `expires_at_us`.
+
+3. **Staleness timers resume.** All per-tile staleness timers resume from their pre-freeze values (not reset to zero). Time elapsed during freeze is not added to the timer.
+
+4. **Sync group deferral counters resume.** Groups resume from their pre-freeze `deferred_frames_count`. The first post-unfreeze Stage 4 evaluates all `AllOrDefer` groups normally.
+
+**Ephemeral realtime mutations during freeze:** The `DROP_IF_LATE` delivery policy applies at unfreeze time. An ephemeral mutation that arrived during freeze and whose `present_at_us` is now in the past is dropped on unfreeze. This is the correct behavior: ephemeral content (hover positions, interim speech tokens) frozen in the queue has already become stale. Agents should expect that ephemeral state submitted during a freeze period will not be applied.
+
+**Freeze + safe mode interaction:** If safe mode is triggered while freeze is active, the freeze queue is discarded and freeze is cancelled as part of safe mode entry (RFC 0007 §5.6). From the timing model's perspective, the freeze queue is purged, all suspended timing constructs are abandoned, and safe mode behavior (§5.6.2) applies. On safe mode exit, all timing machinery starts fresh (empty pending queues, reset staleness timers, reset estimation windows).
+
+#### 5.6.2 Safe Mode Behavior
+
+Safe mode is entered when the viewer triggers the emergency stop (RFC 0007 §5). The compositor's frame loop continues; the scene graph remains intact. All agent gRPC sessions receive `SessionSuspended` with reason `safe_mode`. All new mutation batches are rejected with `SAFE_MODE_ACTIVE` until safe mode exits.
+
+**Timing evaluation during safe mode:**
+
+| Timing construct | Behavior during safe mode |
+|-----------------|--------------------------|
+| `present_at_us` pending queue drain | **Runs normally.** The frame pipeline runs; Stage 3 evaluates the pending queue each frame. Mutations from the pre-safe-mode queue (submitted before `SessionSuspended`) continue to drain and are applied when their `present_at_us` is reached. New mutations cannot be submitted (rejected with `SAFE_MODE_ACTIVE`). |
+| `expires_at_us` expiry heap | **Runs normally.** Expiry evaluation is unaffected by safe mode. Tiles expire on schedule. `TileExpired` events are emitted but are not delivered to suspended sessions. |
+| Sync group `deferred_frames_count` | **Increments normally** (for groups with pending mutations from the pre-safe-mode queue). However, since new mutations cannot arrive, groups that were mid-deferral when safe mode began will eventually force-commit (once `deferred_frames_count` reaches `max_defer_frames`). This is correct behavior — the force-commit escape hatch applies regardless of why mutations stopped arriving. |
+| `tile_stale_threshold_ms` timer | **Suppressed** for sessions whose `SessionSuspended` is active. A tile is not "stale" because its agent is in a known-suspended state. The staleness indicator MUST NOT be shown for tiles owned by suspended sessions. |
+| Clock-skew estimation window (per session) | **Frozen.** No new mutation batches arrive for suspended sessions; the window does not update. On `SessionResumed`, the per-session estimation window is **reset to empty**. Stale samples from before safe mode may represent a different clock state (especially after a long safe mode) and must not bias post-resumption corrections. The window re-initializes from fresh samples after resumption. |
+| Vsync jitter tracking | **Unaffected.** The frame loop continues. |
+
+**On safe mode exit (`SessionResumed`):**
+
+1. Each session's clock-skew estimation window is reset to empty.
+2. Each session's staleness timer is reset to 0 (the resumed session is not immediately stale).
+3. All other timing machinery resumes normally. Pending queue draining, expiry heap evaluation, and sync group evaluation were not paused and need no special catch-up.
+4. Any mutations that were queued before `SessionSuspended` and survived in the pending queue (their `present_at_us` has not yet elapsed) are still eligible for application. Mutations whose `present_at_us` passed during safe mode are applied immediately in the first post-resumption Stage 3 drain (same as the freeze flush rule for non-ephemeral mutations).
+
+**Safe mode does not interrupt expiry.** This is a deliberate asymmetry with freeze. Freeze stops the compositor from committing any scene changes; safe mode does not. The compositor continues to run its full frame pipeline during safe mode, including expiry evaluation. An agent cannot rely on safe mode to "pause" their tiles' expiry timers — safe mode is a viewer sovereignty action, not a scene-pause. Agents that need tiles to survive long safe mode periods must either set long `expires_at_us` values or update them before safe mode entry.
+
+#### 5.6.3 Headless Mode and Virtual Clock
+
+In headless mode with `SimulatedClock`, the clock is advanced manually by tests. There is no real viewer, so freeze and safe mode are not triggered by human input. However, tests that model freeze/safe mode scenarios should advance the clock through override-state boundaries to verify the behaviors specified in §5.6.1 and §5.6.2.
+
+Specifically, tests should cover:
+- Freeze-then-advance-clock: set the clock to T, enter freeze, advance clock to T+100ms, unfreeze, then verify that tiles expired at T+10ms are expired in the first post-unfreeze frame and not before.
+- Safe mode during pre-scheduled mutations: enter safe mode with pending `present_at_us` mutations; verify they are applied (not discarded) when their time arrives, even though the session is suspended.
+
+See §8.2 for the full test coverage matrix.
 
 ---
 
@@ -1003,6 +1110,12 @@ message FrameTimingRecord {
                                         // Expressed in microseconds (monotonic clock domain).
   bool   sync_drift_budget_exceeded = 21; // True if sync_group_max_drift_us > timing.sync_drift_budget_us (default 500μs).
                                           // Doctrine: validation.md §Other performance budgets — "sync drift < 500μs".
+  bool   frozen            = 22;          // True if the compositor was in freeze state during this frame (RFC 0007 §4.3).
+                                          // When true: no pending queue drain, no expiry evaluation, no scene commit.
+                                          // mutations_applied, tiles_expired, and sync_groups_deferred will be 0.
+  bool   safe_mode_active  = 23;          // True if the compositor was in safe mode during this frame (RFC 0007 §5).
+                                          // When true: scene pipeline ran normally (expiry, drain), but agent sessions
+                                          // are suspended. Consumers should interpret this frame's data accordingly.
 }
 
 // ─── Timing Config ───────────────────────────────────────────────────────────
@@ -1116,6 +1229,16 @@ The following behaviors must be covered by Layer 0 (scene graph assertion) tests
 - Join during active deferral: a tile joining an `AllOrDefer` group with `deferred_frames_count > 0` is not evaluated as a required member until the next evaluation epoch; the joining tile does not extend the current deferral cycle.
 - Equal `present_at_us` ordering: two mutations with the same `present_at_us` are applied in FIFO arrival order; if packed in a single `MutationBatch`, they are applied atomically.
 - `max_future_schedule_us` rejection: a mutation with `present_at_us > current_wallclock_us + timing.max_future_schedule_us` is rejected with `TIMESTAMP_TOO_FUTURE`; the comparison uses microsecond units directly without conversion.
+
+**Override state interaction (§5.6):**
+
+- Freeze suspends `present_at_us` queue drain: a mutation with `present_at_us` in the past queued during freeze is NOT applied until after unfreeze; on unfreeze it is applied in the first post-unfreeze Stage 3.
+- Freeze suspends expiry heap: a tile whose `expires_at_us` passes during freeze is NOT expired until the first post-unfreeze Stage 4; multiple tiles expired simultaneously in the first post-unfreeze frame.
+- Freeze does not increment `deferred_frames_count`: an `AllOrDefer` group held mid-deferral before freeze retains its pre-freeze counter value after unfreeze.
+- Freeze suspends staleness timer: a tile that has been idle for 4,800ms (threshold: 5,000ms) before a 2-second freeze is not stale until 200ms after unfreeze (not 200ms total post-freeze elapsed time).
+- Safe mode: expiry heap continues to run; tiles expire on schedule during safe mode (not blocked by session suspension).
+- Safe mode: staleness indicators are suppressed for tiles owned by suspended sessions; indicator is cleared on `SessionResumed` and staleness timer resets to 0.
+- Safe mode: clock-skew estimation window is reset to empty on `SessionResumed`; first post-resumption skew estimate is derived from fresh samples only.
 
 ### 8.3 Chaos Test Requirements
 
