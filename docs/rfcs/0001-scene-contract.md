@@ -664,51 +664,18 @@ pub struct ZonePublishRecord {
 
 **Performance requirement:** < 1ms to serialize a 100-tile scene (10 nodes/tile average = 1000 nodes total) on reference hardware (measured as protobuf encoding time on a single core at 3GHz equivalent).
 
-### 4.2 Incremental Diff
+### 4.2 Incremental Diff (Future Extension — Deferred from V1)
 
-A diff captures the mutations between two sequence numbers. Used for reconnect sync.
+> **V1 scope note:** v1.md explicitly defers "resumable state sync". In v1, reconnecting agents always receive a full snapshot (§4.1) — there is no incremental diff path. The diff infrastructure described below (WAL, SceneDiff, DiffOp, branching reconnect logic) is documented here as a planned future extension only. Do not implement it in v1.
 
-```rust
-pub struct SceneDiff {
-    pub from_sequence: u64,   // Exclusive lower bound
-    pub to_sequence: u64,     // Inclusive upper bound
-    pub ops: Vec<DiffOp>,
-}
+Incremental diff is deferred because:
+- Reconnect-via-snapshot is simpler to implement and test correctly.
+- WAL retention and coalescing add complexity and memory pressure that is unjustified before the core scene model is proven.
+- The full snapshot path is required regardless (for cold reconnects), so v1 ships only the full snapshot path.
 
-pub enum DiffOp {
-    // Tabs
-    TabAdded(Tab),
-    TabRemoved { tab_id: SceneId },
-    TabModified { tab_id: SceneId, fields: TabFields },
+**V1 reconnect behavior:** When an agent reconnects, the runtime always sends a full snapshot regardless of how recently the agent was connected. The agent discards its prior scene state, applies the snapshot, and resumes from the snapshot's sequence number.
 
-    // Tiles
-    TileAdded(Tile),
-    TileRemoved { tile_id: SceneId },
-    TileModified { tile_id: SceneId, fields: TileFields },
-
-    // Nodes
-    NodeAdded { tile_id: SceneId, parent_id: Option<SceneId>, node: Node },
-    NodeRemoved { node_id: SceneId },
-    NodeModified { node_id: SceneId, fields: NodeFields },
-
-    // Zone state
-    ZonePublishChanged { zone_name: String, record: Option<ZonePublishRecord> },
-
-    // Sequence marker (no-op ops for dropped-frame gap filling)
-    SequenceMarker { sequence: u64 },
-}
-```
-
-**Diff computation:** The runtime maintains a write-ahead log (WAL) of committed mutation batches keyed by sequence number. Diff computation walks the WAL from `from_sequence+1` to `to_sequence` and coalesces operations on the same target object.
-
-**Performance requirement:** < 500μs to compute a diff representing a typical frame delta (10–30 mutations/frame) on reference hardware. Diff computation is O(changed_nodes), not O(total_nodes).
-
-**Reconnect behavior:** When an agent reconnects:
-1. If the agent's last known sequence is within the WAL retention window (default: last 1000 committed batches), the runtime sends an incremental diff.
-2. If the agent's sequence is too old or unknown, the runtime sends a full snapshot.
-3. The agent applies the diff/snapshot and resumes from the new sequence number.
-
-**WAL retention:** 1000 most recent committed batches, or 60 seconds of history, whichever is smaller.
+**Post-v1 (incremental diff):** Once the core compositor and lease system are stable, the runtime may add a WAL-backed incremental diff path. Reconnecting agents with a recent sequence number would receive only the delta. This is a protocol-compatible addition: the reconnect RPC can offer both snapshot and diff modes, selected by negotiation. Implementation is deferred.
 
 ---
 
@@ -1163,15 +1130,55 @@ message SceneSnapshot {
   bytes              checksum       = 8;   // BLAKE3, 32 bytes
 }
 
+// Geometry policy variants for zone placement.
+// Corresponds to the GeometryPolicy Rust enum.
+message RelativeGeometryPolicy {
+  float x_pct      = 1;
+  float y_pct      = 2;
+  float width_pct  = 3;
+  float height_pct = 4;
+}
+
+enum DisplayEdge {
+  DISPLAY_EDGE_UNSPECIFIED = 0;
+  DISPLAY_EDGE_TOP         = 1;
+  DISPLAY_EDGE_BOTTOM      = 2;
+  DISPLAY_EDGE_LEFT        = 3;
+  DISPLAY_EDGE_RIGHT       = 4;
+}
+
+message EdgeAnchoredGeometryPolicy {
+  DisplayEdge edge       = 1;
+  float       height_pct = 2;   // Used for top/bottom edges
+  float       width_pct  = 3;   // Used for left/right edges
+  float       margin_px  = 4;
+}
+
+message GeometryPolicyProto {
+  oneof policy {
+    RelativeGeometryPolicy    relative     = 1;
+    EdgeAnchoredGeometryPolicy edge_anchored = 2;
+  }
+}
+
+// Rendering policy for zone content presentation.
+// All fields are optional; absent = compositor default.
+message RenderingPolicyProto {
+  float     font_size_px = 1;   // 0.0 = not set (use compositor default)
+  Rgba      backdrop     = 2;   // Zero alpha = not set
+  TextAlign text_align   = 3;   // UNSPECIFIED = not set
+  float     margin_px    = 4;   // 0.0 = not set
+}
+
 message ZoneDefinitionProto {
-  SceneId           id                    = 1;
-  string            name                  = 2;
-  string            description           = 3;
-  string            geometry_policy_json  = 4;   // JSON-encoded GeometryPolicy
-  repeated string   accepted_media_types  = 5;   // ZoneMediaType names
-  string            rendering_policy_json = 6;   // JSON-encoded RenderingPolicy
-  ContentionPolicy  contention_policy     = 7;
-  uint64            auto_clear_ms         = 8;   // 0 = no auto-clear
+  SceneId              id                   = 1;
+  string               name                 = 2;
+  string               description          = 3;
+  GeometryPolicyProto  geometry_policy      = 4;
+  repeated string      accepted_media_types = 5;   // ZoneMediaType names
+  RenderingPolicyProto rendering_policy     = 6;
+  ContentionPolicy     contention_policy    = 7;
+  uint64               auto_clear_ms        = 8;   // 0 = no auto-clear
 }
 
 message ZonePublishRecordProto {
@@ -1186,17 +1193,43 @@ message ZoneRegistrySnapshot {
   repeated ZonePublishRecordProto active_publishes = 2;
 }
 
+// Typed partial-update messages for incremental diff ops.
+// All fields are optional; absent field = not changed in this diff.
+// (Used by DiffOp — part of the deferred incremental diff extension.)
+message TabPatch {
+  SceneId tab_id        = 1;
+  string  name          = 2;   // Empty = not changed
+  uint32  display_order = 3;   // 0 = not changed (display_order is never 0 in practice)
+}
+
+message TilePatch {
+  SceneId   tile_id    = 1;
+  Rect      bounds     = 2;   // Absent = not changed
+  uint32    z_order    = 3;   // 0 = not changed (use has_z_order wrapper field in impl)
+  float     opacity    = 4;   // 0.0 = not changed (use has_opacity wrapper field in impl)
+  InputMode input_mode = 5;   // UNSPECIFIED = not changed
+  SceneId   sync_group = 6;   // Zero bytes = not changed
+  uint64    expires_at_ms = 7; // 0 = not changed
+}
+
+message NodePatch {
+  SceneId node_id        = 1;
+  Rect    bounds         = 2;   // Absent = not changed; applies to node's primary bounds field
+  // Note: full node type replacement uses NodeAdded+NodeRemoved, not NodePatch.
+  // NodePatch covers bounds-only updates on existing nodes without changing node type.
+}
+
 message DiffOp {
   oneof op {
     Tab      tab_added            = 1;
     SceneId  tab_removed          = 2;
-    string   tab_modified_json    = 3;   // JSON patch for Tab fields
+    TabPatch tab_modified         = 3;
     Tile     tile_added           = 4;
     SceneId  tile_removed         = 5;
-    string   tile_modified_json   = 6;   // JSON patch for Tile fields
+    TilePatch tile_modified       = 6;
     NodeAddedDiff node_added      = 7;
     SceneId  node_removed         = 8;
-    string   node_modified_json   = 9;   // JSON patch for Node fields
+    NodePatch node_modified       = 9;
     ZonePublishChanged zone_publish_changed = 10;
     uint64   sequence_marker      = 11;
   }
@@ -1491,7 +1524,7 @@ Input Point P = (x, y) in tab display space
 | Metric | Requirement | Measurement Method |
 |--------|-------------|-------------------|
 | Snapshot serialization | < 1ms for 100-tile / 1000-node scene | Protobuf encode, single core, reference hw |
-| Diff computation | < 500μs for typical frame delta (10–30 mutations) | WAL walk + coalesce, single core |
+| Diff computation | < 500μs for typical frame delta (10–30 mutations) — **post-v1** | WAL walk + coalesce, single core |
 | Hit-test | < 100μs for single point query on 50 tiles | Pure Rust, no GPU, Layer 0 benchmark |
 | Transaction validation | < 200μs per batch of 10 mutations | Validation stage only, excludes commit |
 | Memory per tile | < 1KB structural overhead (excl. texture data) | Rust `size_of` + heap alloc accounting |
@@ -1504,9 +1537,9 @@ Hardware reference: single core at 3GHz equivalent (normalized; see validation.m
 
 ## 11. Open Questions
 
-1. **Zone geometry policy format:** The current spec uses a Rust enum `GeometryPolicy`. Should this be defined as structured JSON in the config file for human-editability, or as a formal protobuf message? Recommendation: JSON in config for authoring, proto message for wire; converge in the Config/Setup RFC.
+1. **Zone geometry policy config format:** The wire format is now typed protobuf (`GeometryPolicyProto`, `RenderingPolicyProto`). The config file format (TOML/YAML/JSON used for zone registry at startup) is a separate concern: it should be human-editable and deserializable into the Rust `GeometryPolicy` enum. Recommendation: TOML for authoring, convert to proto for wire. Defer config file schema to the Config/Setup RFC.
 
-2. **WAL retention policy:** 1000 batches or 60s, whichever is smaller, is a starting point. Under high mutation rates (1000 mutations/batch, 60fps), 1000 batches = ~16s of history. Is this sufficient for reconnect scenarios? Revisit when Session/Protocol RFC defines reconnect timeout guarantees.
+2. **WAL retention policy (post-v1):** 1000 batches or 60s, whichever is smaller, is a starting point for the deferred incremental diff extension. In v1, the WAL is used only for sequence ordering within the commit pipeline; agents reconnect via full snapshot and the WAL does not need to be queried externally. Revisit when incremental diff is implemented.
 
 3. **Snapshot checksum coverage:** Should `SceneSnapshot.checksum` cover the full serialization including zone state, or only the scene graph (tabs/tiles/nodes)? Recommendation: full serialization for integrity; exclude volatile fields like `timestamp_ms`.
 
@@ -1534,7 +1567,7 @@ crate: tze_scene (no GPU dependency)
 ├── mod validate   — Validator, ValidationError, all rule checks
 ├── mod scene      — Scene (root), transaction pipeline, WAL
 ├── mod snapshot   — SceneSnapshot, serialization
-├── mod diff       — SceneDiff, DiffOp, diff computation
+├── mod diff       — SceneDiff, DiffOp, diff computation  (post-v1; v1 ships snapshot only)
 ├── mod hit_test   — HitTestQuery, HitTestResult, traversal
 └── mod proto      — prost-generated types from scene.proto
 ```
