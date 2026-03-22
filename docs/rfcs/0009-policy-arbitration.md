@@ -2,33 +2,34 @@
 
 **Status:** Draft
 **Issue:** rig-em4
-**Date:** 2026-03-22
+**Date:** 2026-03-23
 **Authors:** tze_hud architecture team
-**Depends on:** RFC 0001 (Scene Contract), RFC 0002 (Runtime Kernel), RFC 0005 (Session Protocol), RFC 0006 (Configuration), RFC 0007 (System Shell)
+**Depends on:** RFC 0001 (Scene Contract), RFC 0002 (Runtime Kernel), RFC 0005 (Session Protocol), RFC 0006 (Configuration), RFC 0007 (System Shell), RFC 0008 (Lease Governance)
 
 ---
 
 ## Summary
 
-This RFC formalizes the tze_hud policy arbitration model: the single, authoritative specification of how the runtime resolves conflicts when multiple policy domains apply simultaneously. It defines the unified seven-step arbitration stack, the implementation contract for each step, cross-zone arbitration, and the degradation response model. It resolves two outstanding cross-RFC conflicts: the GPU failure response disagreement between RFC 0002 §7.3 and RFC 0007 §5.1, and the `redaction_style` ownership conflict between RFC 0006 `[chrome]` and RFC 0006 `[privacy]`.
+This RFC provides the single authoritative arbitration stack for all policy decisions in tze_hud. Policy is currently scattered across multiple doctrine files and RFCs with unresolved conflicts. This document consolidates everything into a formal precedence hierarchy with seven levels (0-6), defines conflict resolution rules for both cross-level and within-level disputes, specifies the policy evaluation pipeline for per-frame, per-event, and per-mutation paths, and resolves six outstanding cross-RFC contradictions.
 
-The policy arbitration order is not a design choice — it is doctrine (architecture.md §"Policy arbitration"). This RFC gives that doctrine an implementation home.
+The arbitration stack is not a design choice -- it is doctrine (architecture.md, "Policy arbitration"). This RFC gives that doctrine an implementation home with quantitative contracts and typed interfaces.
 
 ---
 
 ## Motivation
 
-The tze_hud doctrine names four policy sources — capabilities (security.md), privacy/attention (privacy.md), zone contention (presence.md), and degradation (failure.md) — and specifies a canonical priority order for resolving conflicts among them. That order is stated in architecture.md and referenced by name in RFC 0006 §5.4 and RFC 0007 §5.6, but it has no RFC of its own.
+tze_hud doctrine names four policy sources -- capabilities (security.md), privacy/attention (privacy.md), zone contention (presence.md), and degradation (failure.md) -- and specifies a canonical priority order for resolving conflicts. That order is stated in architecture.md and referenced by RFC 0006 and RFC 0007, but it has no formal specification of its own.
 
 Without a formal specification:
 
-- The arbitration order exists in doctrine but not in code contracts. Any implementation must infer the order from a cross-reference chain that spans four source documents.
-- Two RFCs give conflicting answers to the GPU device loss question: RFC 0002 says terminate the process; RFC 0007 says enter safe mode. Both cannot be right.
-- `redaction_style` is defined in both `[chrome]` and `[privacy]` configuration sections in RFC 0006. Implementations will disagree on which field governs.
-- Cross-zone arbitration (when two agents publish to the same zone in the same frame, or when zone geometry overlaps) has no specified resolution procedure.
-- The relationship between the degradation ladder (RFC 0002 §6) and the arbitration stack (architecture.md) is implicit.
+- Implementations must infer the arbitration order from a cross-reference chain spanning four doctrine files and six RFCs.
+- Two RFCs give conflicting GPU failure responses: RFC 0002 says exit; RFC 0007 says safe mode.
+- `redaction_style` is defined in both `[chrome]` and `[privacy]` in RFC 0006.
+- Freeze semantics are spread across RFC 0007 and RFC 0002 with no unified override model.
+- The capability vocabulary is split across RFC 0005 and RFC 0006 with naming mismatches.
+- No quantitative budgets exist for policy evaluation itself.
 
-This RFC resolves all of these by specifying the policy arbitration subsystem as a first-class component with defined contracts, typed inputs and outputs, and explicit conflict resolutions.
+This RFC resolves all of these.
 
 ---
 
@@ -36,102 +37,106 @@ This RFC resolves all of these by specifying the policy arbitration subsystem as
 
 | Requirement | This RFC |
 |-------------|----------|
-| Canonical arbitration order | §1: seven-step stack, implementation contract per step |
-| Human override is unconditional | §2.1: override interrupts the stack at every step |
-| GPU device loss response | §5: unified failure response; RFC 0002/0007 conflict resolved |
-| `redaction_style` ownership | §3.2: canonical field location defined; RFC 0006 conflict resolved |
-| Cross-zone arbitration | §4: per-zone contention policy plus cross-zone resolution procedure |
-| Degradation interacts with arbitration | §6: degradation as the terminal arbitration gate |
+| Canonical arbitration order | Section 1: seven-level stack with formal precedence |
+| Conflict resolution rules | Section 2: cross-level and within-level resolution |
+| Policy evaluation pipeline | Section 3: per-frame, per-event, per-mutation paths |
+| GPU failure response | Section 4: three-tier failure arbitration (resolves RFC 0002 vs. RFC 0007) |
+| `redaction_style` ownership | Section 5: privacy owns all redaction decisions |
+| Freeze semantics | Section 6: Level 0 action with backpressure signals |
+| Override semantics | Section 7: suppress/redirect/transform/block taxonomy |
+| Capability registry | Section 8: canonical vocabulary |
+| Quantitative requirements | Section 9: latency budgets for policy evaluation |
+| Cross-RFC resolutions | Section 10: six contradictions resolved |
 
 ---
 
 ## 1. The Arbitration Stack
 
-### 1.1 Overview
+### 1.1 Formal Precedence Hierarchy
 
-Every agent action that modifies the visible scene — publishing to a zone, creating a tile, updating content, requesting a lease — passes through the arbitration stack. The stack is evaluated top-to-bottom. Each step either passes the action forward, transforms it, queues it, or rejects it. Once a step rejects an action, no lower step is evaluated.
+The arbitration stack is a fixed priority order with seven levels, numbered 0 (highest) to 6 (lowest). Higher levels always win. This is doctrine.
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    ARBITRATION STACK                            │
-│                                                                 │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  STEP 1: Human Override                                   │  │
-│  │  Unconditional. Freeze, dismiss, safe mode, mute.         │  │
-│  │  Interrupts the stack at any point.                       │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                            │ pass                               │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  STEP 2: Capability Gate                                  │  │
-│  │  Does the agent have capability to publish here?          │  │
-│  │  Reject immediately with structured error if not.         │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                            │ pass                               │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  STEP 3: Privacy / Viewer Gate                            │  │
-│  │  Does the viewer context permit this content?             │  │
-│  │  Publish succeeds; rendering is redacted if not allowed.  │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                            │ pass (possibly with redaction)     │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  STEP 4: Interruption Policy                              │  │
-│  │  Is this interruption permitted right now?                │  │
-│  │  Queue or pass based on quiet hours and class.            │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                            │ pass or queue                      │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  STEP 5: Attention Budget                                 │  │
-│  │  Has this agent or zone been interrupting too frequently? │  │
-│  │  Coalesce or defer if budget is exhausted.                │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                            │ pass or defer                      │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  STEP 6: Zone Contention                                  │  │
-│  │  Does this publish conflict with existing zone occupancy? │  │
-│  │  Apply contention policy (latest-wins, stack, merge, …).  │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                            │ pass, replace, or stack            │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  STEP 7: Resource / Degradation Budget                    │  │
-│  │  Does the runtime have capacity to render this?           │  │
-│  │  Simplify, defer, or shed based on degradation level.     │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                            │ commit or shed                     │
-│                         SCENE COMMIT                            │
-└─────────────────────────────────────────────────────────────────┘
+ARBITRATION STACK -- FORMAL PRECEDENCE
+
+Level 0  HUMAN OVERRIDE       [HIGHEST]
+  |  Dismiss, safe mode, freeze, mute.
+  |  Local, instant, cannot be intercepted/delayed/vetoed.
+  |
+Level 1  SAFETY
+  |  Safe mode (automatic), critical error recovery, GPU failure response.
+  |  Degradation ladder activation at emergency thresholds.
+  |
+Level 2  PRIVACY
+  |  Viewer context changes, content redaction, classification enforcement.
+  |  Multi-viewer restriction. Redaction style ownership.
+  |
+Level 3  SECURITY
+  |  Capability enforcement, lease validity, agent isolation.
+  |  Namespace boundary enforcement. Session authentication.
+  |
+Level 4  ATTENTION
+  |  Interruption classification, quiet hours, attention budget.
+  |  Per-agent and per-zone interrupt rate limiting.
+  |
+Level 5  RESOURCE
+  |  Budget enforcement, degradation ladder, tile shedding.
+  |  Per-agent envelope limits. Frame-time guardian.
+  |
+Level 6  CONTENT                [LOWEST]
+     Zone contention, agent priority, z-order.
+     ContentionPolicy application. Cross-zone compositing.
 ```
 
-The stack is evaluated synchronously within the compositor thread's mutation intake stage (RFC 0002 §3.2 Stage 1). The result is a transformed `MutationBatch` — some mutations may be enriched with redaction flags, deferred to a queue, or dropped with a structured error.
+### 1.2 Doctrine Citations
 
-### 1.2 Rust Contract
+Each level is grounded in specific doctrine passages:
+
+| Level | Doctrine source | Key passage |
+|-------|----------------|-------------|
+| 0 | security.md, "Human override" | "The human is always the ultimate authority. No agent, regardless of trust level or capability scope, can prevent the human from: dismissing any tile or overlay, revoking any lease, terminating any agent session, muting any media stream, freezing the scene, entering a 'safe mode' that disconnects all agents. These overrides are handled locally by the runtime, not routed through an agent. They cannot be intercepted, delayed, or vetoed." |
+| 1 | failure.md, "Core principle" | "The runtime must always be usable, even when agents are not. No agent failure -- crash, hang, disconnect, misbehavior -- should make the screen unresponsive, blank, or stuck." |
+| 2 | privacy.md, "Viewer context" | "The runtime must own this decision, not individual agents. An agent that shows a calendar with meeting details does not know who is standing in front of the screen. The runtime does." |
+| 3 | security.md, "Capability scopes" | "Capabilities are granted per-session, not per-agent-type. An agent that was trusted yesterday can be restricted today. Capabilities are additive, not subtractive." |
+| 4 | attention.md, "Attention Budget" | "Every screen has finite attention capacity. Interruptions are withdrawals from that budget. A screen that interrupts constantly -- even with accurate, useful information -- becomes noise." |
+| 5 | failure.md, "Degradation axes" / security.md, "Resource governance" | "The runtime monitors resource consumption in real time. If an agent exceeds its budget: warning, throttle, revocation." |
+| 6 | architecture.md, "Policy arbitration", step 6 | "Zone contention. Does this publish conflict with existing zone occupancy? Apply the zone's contention policy." |
+
+### 1.3 Rust Contract
 
 ```rust
 /// The result of passing a single mutation through the arbitration stack.
 pub enum ArbitrationOutcome {
     /// Mutation is accepted and will be committed to the scene on the next frame.
     Commit(SceneMutation),
+
     /// Mutation is accepted but its rendered output will be replaced with a
     /// redaction placeholder. The mutation is committed; rendering is filtered.
     CommitRedacted {
         mutation: SceneMutation,
         redaction_reason: RedactionReason,
     },
+
     /// Mutation is accepted but its presentation is deferred until the queue
-    /// condition clears (quiet hours end, attention budget refills).
+    /// condition clears (quiet hours end, attention budget refills, freeze ends).
     Queue {
         mutation: SceneMutation,
         queue_reason: QueueReason,
         earliest_present_us: Option<u64>,  // None = condition-dependent
     },
+
     /// Mutation is rejected. The agent receives a structured error.
     Reject(ArbitrationError),
-    /// Mutation is shed by the degradation policy. No error is sent to the agent.
-    /// The mutation's zone-state effects are applied (zone occupancy updates), but
-    /// its render output is omitted for this frame. The agent is expected to back off
-    /// on receiving a DegradationEvent; no retransmit is required — the runtime resumes
-    /// rendering from last committed zone state when capacity recovers.
-    /// See §6.2 for the distinction between zone-state update and render commit.
+
+    /// Mutation is shed by resource/degradation policy. No error to the agent.
+    /// Zone-state effects are applied but render output is omitted.
     Shed { degradation_level: u32 },
+
+    /// Mutation is blocked by human override (freeze). Queued for later.
+    Blocked {
+        mutation: SceneMutation,
+        block_reason: BlockReason,
+    },
 }
 
 pub enum RedactionReason {
@@ -149,185 +154,184 @@ pub enum QueueReason {
     AttentionBudgetExhausted { per_agent: bool, per_zone: bool },
 }
 
+pub enum BlockReason {
+    /// Scene is frozen by human override. Mutations queue until unfreeze.
+    Freeze,
+}
+
 pub struct ArbitrationError {
     pub code: ArbitrationErrorCode,
     pub agent_id: AgentId,
     pub mutation_ref: SceneId,
     pub message: String,
     pub hint: Option<String>,
+    pub level: u8,  // Which arbitration level rejected (0-6)
 }
 
 pub enum ArbitrationErrorCode {
-    /// Step 2: agent lacks publish capability for this zone or tile.
+    // Level 3: Security
     CapabilityDenied,
-    /// Step 2: agent lacks capability to create/modify this resource type.
     CapabilityScopeInsufficient,
-    /// Step 6: zone has a Replace contention policy and was occupied by an
-    /// agent with higher lease priority. The publishing agent is outranked.
-    ZoneEvictionDenied,
-    /// Step 2: agent attempted to modify a resource outside its namespace.
     NamespaceViolation,
+    LeaseInvalid,
+    // Level 6: Content
+    ZoneEvictionDenied,
 }
 ```
 
 ---
 
-## 2. Step-by-Step Implementation
+## 2. Conflict Resolution Rules
 
-### 2.1 Step 1 — Human Override
+### 2.1 Cross-Level Conflicts
 
-Human override is not a gate in the normal sense. It is an asynchronous interrupt that can preempt any point in the arbitration pipeline, including mid-commit.
+When two policies at different levels conflict, the resolution is absolute:
 
-Override actions (dismiss tile, revoke lease, freeze scene, safe mode entry, mute media) are initiated from the main thread's input drain (RFC 0002 §2.2) and handled before any agent mutation intake for that frame. They are never queued behind agent mutations.
+**Rule CL-1: Higher level always wins.** There are no exceptions. A Level 2 (Privacy) decision cannot be overridden by a Level 5 (Resource) optimization or a Level 6 (Content) contention policy.
 
-**Implementation contract:**
-- Override commands are placed in a dedicated `OverrideCommandQueue` (bounded, capacity: 16, single-producer/single-consumer) read by the compositor thread at the top of each frame's Stage 1 intake before the `MutationBatch` channel is drained.
-- If an override command arrives during Stage 1 mutation intake, it preempts: all pending mutations in the current batch are held; the override is applied; then the held mutations are re-evaluated against the new state.
-- Human override cannot be deferred, coalesced, or suppressed by any other policy step.
-- The override action is complete within one frame (≤ 16.6ms from input event to visual effect), as specified by RFC 0007 §4 ("Frame-bounded response").
+**Rule CL-2: Side effects of the losing level are suppressed, not deferred.** When a higher level blocks an action, the lower level's side effects do not fire. The lower level is not evaluated at all (short-circuit).
 
-### 2.2 Step 2 — Capability Gate
+**Rule CL-3: The winning level's override type applies.** See Section 7 for the override type taxonomy (suppress, redirect, transform, block).
 
-The capability gate checks whether the agent's session holds the required capability scope for the requested operation.
+**Cross-level conflict decision table:**
 
-**Check matrix:**
+| Scenario | Winning level | Losing level | Resolution |
+|----------|--------------|-------------|------------|
+| Privacy says "redact tile" but Content says "show tile" | Level 2 (Privacy) | Level 6 (Content) | Tile is redacted. Content contention result is irrelevant. |
+| Human says "freeze" but Resource says "shed tile" | Level 0 (Human Override) | Level 5 (Resource) | Tile stays frozen. Degradation is paused. Tile is not shed. |
+| Safety enters safe mode but Attention has queued notifications | Level 1 (Safety) | Level 4 (Attention) | Queued notifications are discarded. Safe mode overrides. |
+| Security denies capability but Resource would allow the budget | Level 3 (Security) | Level 5 (Resource) | Mutation rejected at Level 3. Resource check never runs. |
+| Privacy redacts but Attention would have queued for quiet hours | Level 2 (Privacy) | Level 4 (Attention) | Mutation is committed with redaction. Quiet hours evaluation still runs for presentation scheduling. |
+| Resource sheds tile but Content had assigned z-order | Level 5 (Resource) | Level 6 (Content) | Tile is shed. Z-order assignment is committed to scene state but not rendered. |
+| Human dismisses tile but agent has valid lease | Level 0 (Human Override) | Level 3 (Security) | Lease is revoked immediately. Capability validity is irrelevant. |
 
-| Operation | Required capability |
-|-----------|-------------------|
-| Publish to a zone | `zone_publish:<zone_name>` or `zone_publish:*` |
-| Create a tile | `create_tiles` |
-| Modify own tiles | `modify_own_tiles` |
-| Request overlay z-order | `high_priority_z_order` |
-| Subscribe to scene events | `subscribe_scene_events` |
-| Access input events | `receive_input` |
-| Stream media | `stream_media` |
-| Read full topology | `read_scene` |
+### 2.2 Within-Level Conflicts
 
-> **Capability name convention:** All capability identifiers use `snake_case` with colon-separated sub-scopes for zone grants. This is the canonical format defined in RFC 0006 §6.3. Earlier drafts of this RFC used kebab-case identifiers — those are incorrect and this table is authoritative.
+When two policies at the same level conflict, level-specific tie-breaking rules apply:
 
-Capabilities are granted per-session at handshake time (RFC 0005 §2) and may be revoked mid-session (security.md §"Capability scopes"). Revocation is immediate: the next arbitration evaluation for the affected agent fails at Step 2 for any operation that required the revoked capability.
+**Level 0 (Human Override):** Multiple simultaneous overrides are applied in input-event order. If the viewer triggers freeze and dismiss-all in the same frame, the input that arrived first is processed first.
 
-**Outcome:** `Reject(CapabilityDenied)` or `Reject(CapabilityScopeInsufficient)`. The agent receives a structured error with the missing capability scope named in the `hint` field.
+**Level 1 (Safety):** When multiple safety triggers fire simultaneously (e.g., GPU failure and scene corruption detected in the same frame), the most severe response wins. Severity order: catastrophic exit > safe mode entry > GPU reconfiguration attempt.
 
-### 2.3 Step 3 — Privacy / Viewer Gate
+**Level 2 (Privacy):** When multiple viewer contexts conflict (multi-viewer scenario), the most restrictive viewer class wins (privacy.md, "Multi-viewer scenarios"). Restriction order: Nobody > Unknown > KnownGuest > HouseholdMember > Owner.
 
-The privacy gate compares the content's declared `VisibilityClassification` against the current `ViewerClass`. This step does not reject the mutation — it decorates it with a `CommitRedacted` outcome so the compositor applies the redaction placeholder during the chrome pass.
+**Level 3 (Security):** When multiple capability checks apply to a single mutation, all must pass. Security is conjunctive -- a single failing check rejects the mutation. There is no "most permissive wins" rule.
 
-**Evaluation:**
+**Level 4 (Attention):** When both quiet hours and attention budget would queue an interruption, the longer deferral wins. If quiet hours end at 08:00 and the attention budget refills in 30 seconds, the interruption is queued until 08:00.
 
-```
-content_classification ∈ { Public, Household, Private, Sensitive }
-viewer_class           ∈ { Owner, HouseholdMember, KnownGuest, Unknown, Nobody }
+**Level 5 (Resource):** When per-agent budget enforcement and frame-time guardian both trigger, the frame-time guardian takes precedence (it affects all agents, not just one). Per-agent throttling applies within the frame-time guardian's decisions.
 
-Access matrix (✓ = show content, ✗ = redact):
-
-                 Public  Household  Private  Sensitive
-Owner              ✓        ✓          ✓        ✓
-HouseholdMember    ✓        ✓          ✗        ✗
-KnownGuest         ✓        ✗          ✗        ✗
-Unknown            ✓        ✗          ✗        ✗
-Nobody             ✓        ✗          ✗        ✗
-```
-
-**Zone ceiling rule:** When an agent publishes to a zone, the effective classification is `max(agent_declared_classification, zone_default_classification)`. An agent cannot escalate visibility beyond the zone's ceiling — publishing `Public` content to a zone with a `Household` ceiling results in `Household` visibility (RFC 0001 §2.5).
-
-**Multi-viewer rule:** When multiple viewers are present, the runtime applies the most restrictive viewer class across all present viewers (privacy.md §"Multi-viewer scenarios"). The `multi_viewer_policy` configuration field (RFC 0006 §7, `[privacy]`) governs this behavior. The owner can explicitly override the multi-viewer restriction via the privacy indicator control (RFC 0007 §6).
-
-**Redaction rendering:** The redaction placeholder appearance — pattern, agent_name, or icon — is governed by `PrivacyConfig.redaction_style`. See §3.2 for the authoritative field location.
-
-**Outcome:** `CommitRedacted` if access is denied, otherwise passes to Step 4.
-
-### 2.4 Step 4 — Interruption Policy
-
-The interruption gate checks whether the mutation's `InterruptionClass` is permitted given the current runtime conditions.
-
-**Interruption classes** (from privacy.md):
-- `Silent` — always passes through. No display disruption.
-- `Gentle` — passes unless quiet hours are active.
-- `Normal` — passes unless quiet hours are active.
-- `Urgent` — passes through quiet hours. May be subject to attention budget (Step 5).
-- `Critical` — always passes. Bypasses both quiet hours and attention budget.
-
-**Quiet hours:** During quiet hours (configured in `[privacy.quiet_hours]`), interruptions below the `pass_through_class` threshold are queued. The runtime delivers queued mutations when quiet hours end (in FIFO order per zone). Queued mutations carry their original `InterruptionClass` — they are not reclassified on delivery.
-
-**Outcome:** `Queue(QuietHours)` for below-threshold interruptions during quiet hours, otherwise passes to Step 5.
-
-### 2.5 Step 5 — Attention Budget
-
-The attention budget is a dynamic per-agent and per-zone interruption rate limit. It prevents agents from saturating the screen with frequent interruptions even when quiet hours are not active.
-
-**Budget tracking:**
-- Each agent session and each zone maintains a rolling interruption-rate counter: the number of non-silent interruptions in the last 60 seconds.
-- The budget is configurable per deployment: `[privacy] max_interruptions_per_agent_per_minute` and `max_interruptions_per_zone_per_minute`.
-- `Critical` interruptions are exempt from budget tracking.
-- `Silent` updates are never counted (they are not interruptions).
-
-**When budget is exhausted:**
-- The mutation's interruption class is recorded but the visual effect is coalesced: the most recent queued content for this agent+zone key replaces any earlier queued content (latest-wins coalescing within the queue).
-- The agent is not notified. The runtime coalesces silently; the agent observes only that its visible update rate has slowed.
-- The budget refills continuously as time passes. There is no sharp reset.
-
-**Outcome:** `Queue(AttentionBudgetExhausted)` if budget is exhausted, otherwise passes to Step 6.
-
-### 2.6 Step 6 — Zone Contention
-
-Zone contention resolution applies when a publish operation targets a zone that already has content from another source (another agent or a prior publish by the same agent).
-
-This step applies the zone's `ContentionPolicy` (RFC 0001 §2.5). The contention policies are:
-
-| Policy | Behavior | Used by |
-|--------|----------|---------|
-| `LatestWins` | New publish replaces previous content immediately | subtitle, ambient-background |
-| `Stack` | New publish stacks on top; each entry auto-dismisses after `auto_clear_us` | notification |
-| `MergeByKey` | Key-addressed; same key replaces, different keys coexist up to `max_keys` | status-bar |
-| `Replace` | Single occupant; new publish evicts current occupant | pip (post-v1) |
-
-**Cross-zone arbitration:** Zone geometry may overlap (e.g., a notification zone and a subtitle zone that both occupy the lower viewport). Overlapping zone content is composited in zone layer order (RFC 0001 §2.5 `ZoneLayerAttachment`): Background < Content < Chrome. Within the same layer, zones are composited in z-order (defined by zone configuration). The runtime does not attempt to merge or arbitrate content across zone boundaries — each zone resolves its own contention independently.
-
-**Replace eviction rule:** For zones with `ContentionPolicy::Replace`, a new publish evicts the current occupant only if the new publish's agent session has equal or higher lease priority (numerically equal or lower priority value, following the convention where 0 = highest). If the incoming agent has lower priority than the current occupant, the publish is rejected with `ZoneEvictionDenied`. The current occupant is not notified of the attempted eviction.
-
-**Outcome:** Content is committed, stacked, merged, or replaced per the zone's contention policy. `Reject(ZoneEvictionDenied)` for lower-priority Replace eviction attempts.
-
-### 2.7 Step 7 — Resource / Degradation Budget
-
-The final gate checks whether the runtime has sufficient resources to render the committed mutation at the current degradation level.
-
-The degradation ladder is defined in RFC 0002 §6. The arbitration role at this step is to apply the degradation level's shed policy to pending mutations:
-
-| Degradation level | Arbitration action |
-|-------------------|--------------------|
-| Normal (0) | All mutations commit. |
-| Level 1 (Coalesce) | State-stream mutations coalesced; transactional mutations unaffected. |
-| Level 2 (Reduce Texture Quality) | Texture-bearing mutations accepted; textures downscaled at render time. |
-| Level 3 (Disable Transparency) | Alpha-blend mutations accepted; alpha forced to 1.0 at render time. |
-| Level 4 (Shed Tiles) | New tile creation below a priority threshold is shed. Existing tiles below threshold are removed from the render pass but their leases remain valid. |
-| Level 5 (Emergency) | Only the chrome layer and the single highest-priority tile are rendered. All other new tile mutations are shed. |
-
-**Shed semantics:** A `Shed` outcome does not produce an error to the agent. The mutation is discarded. The agent should observe the `DegradationEvent` subscription notification (RFC 0002 §6.4) and back off proactively. There is no retransmit obligation — the agent is expected to re-publish when conditions improve.
-
-**Transactional mutations are never shed.** `CreateTile`, `DeleteTile`, `LeaseRequest`, and `LeaseRelease` mutations are transactional (RFC 0005 §5.1) and are never dropped at Step 7. Only state-stream and ephemeral mutations are subject to shedding.
+**Level 6 (Content):** When two agents publish to the same zone in the same frame, the zone's `ContentionPolicy` resolves: LatestWins uses arrival order, Stack accumulates, MergeByKey uses key identity, Replace uses lease priority (RFC 0008 Section 2.2: lower numeric priority value wins).
 
 ---
 
-## 3. Policy Ownership: Resolved Conflicts
+## 3. Policy Evaluation Pipeline
 
-### 3.1 Conflict Register
+### 3.1 Evaluation Paths
 
-This section documents cross-RFC policy ownership conflicts and their resolutions. Each entry is binding: implementations must follow the resolution, not the conflicting prior text.
+The arbitration stack is not evaluated monolithically. Three evaluation paths exist, each with a different subset of levels and a different trigger:
 
-### 3.2 `redaction_style` — RFC 0006 `[chrome]` vs. `[privacy]`
+```
+PER-FRAME EVALUATION (every 16.6ms at 60fps)
+  Level 1: Safety    -> check GPU health, frame-time guardian
+  Level 2: Privacy   -> check viewer context changes, apply redaction
+  Level 5: Resource  -> degradation ladder evaluation
+  Level 6: Content   -> zone occupancy timeout/auto-clear
 
-**Conflict:** RFC 0006 defines `redaction_style` in two configuration sections:
-- `[chrome]` (RFC 0006 §2.8): `redaction_style = "pattern"` with comment "Redaction placeholder style."
-- `[privacy]` (RFC 0006 §7 `[privacy]`): `redaction_style = "pattern"` with the same valid values.
+PER-EVENT EVALUATION (on input events)
+  Level 0: Human Override  -> freeze, dismiss, safe mode, mute
+  Level 4: Attention       -> interruption class for event-triggered content
+  Level 3: Security        -> input routing capability check
 
-Two fields for the same concept in the same config file will cause implementations to disagree on which one governs and whether they must agree.
+PER-MUTATION EVALUATION (on each agent MutationBatch)
+  Level 3: Security   -> capability gate, lease validity, namespace check
+  Level 5: Resource   -> per-agent budget check, degradation shed policy
+  Level 6: Content    -> zone contention resolution
+```
 
-**Resolution:** `redaction_style` is a **privacy policy field**. It belongs exclusively in `[privacy]`. The `[chrome]` entry is a duplication error introduced during review and must be removed.
+### 3.2 Per-Frame Evaluation
 
-**Rationale:** Redaction is a privacy mechanism (privacy.md §"Redaction behavior") — it is the rendering expression of a privacy policy decision. The chrome layer renders the redaction placeholder, but the *style* of that placeholder is a privacy configuration concern, not a chrome layout concern. Chrome configuration governs display structure (tab bar position, indicator visibility, override control display). Privacy configuration governs content visibility policy (viewer classes, quiet hours, content classification, redaction appearance).
+The per-frame evaluation runs on the compositor thread at the start of each frame cycle, before mutation intake. It evaluates levels that depend on runtime state rather than individual agent actions.
 
-**Required change to RFC 0006:** Remove `redaction_style` from the `[chrome]` section (§2.8). The authoritative field is:
+**Order:** Safety (1) -> Privacy (2) -> Resource (5) -> Content (6)
+
+1. **Safety check.** Query GPU device health. If `wgpu::DeviceError::Lost` or frame-time guardian emergency threshold exceeded, trigger Level 1 response (see Section 4).
+2. **Privacy check.** If `ViewerClass` has changed since last frame (viewer identification pipeline produced a new result), apply redaction transitions to all affected tiles. Redaction transitions are immediate -- no animation, no delay.
+3. **Resource check.** Evaluate `frame_time_p95` over the rolling 10-frame window. If threshold exceeded, transition degradation level (RFC 0002 Section 6). If recovery threshold met over 30-frame window, recover one level.
+4. **Content maintenance.** Evaluate zone auto-clear timeouts. Remove expired zone publications.
+
+**Short-circuit rule:** If Level 1 triggers safe mode entry, Levels 2/5/6 are not evaluated for that frame. Safe mode suspends all normal rendering.
+
+### 3.3 Per-Event Evaluation
+
+The per-event evaluation runs on the main thread during Stage 1 (Input Drain) and Stage 2 (Local Feedback) of the frame pipeline (RFC 0002 Section 3.2).
+
+**Order:** Human Override (0) -> Attention (4) -> Security (3)
+
+1. **Human Override check.** Override commands (dismiss, freeze, safe mode, mute) are recognized and placed in the `OverrideCommandQueue` (bounded, capacity: 16, SPSC). Override commands are delivered to the compositor thread before any `MutationBatch` intake for that frame.
+2. **Attention check.** For input events that trigger agent-visible content changes (e.g., tab switch events configured in `tab_switch_on_event`), evaluate the interruption class. This check determines whether the resulting scene change is permitted under current quiet hours and attention budget.
+3. **Security check.** Input events are routed only to agents with `receive_input` capability. Input destined for agents without this capability is silently dropped.
+
+**Short-circuit rule:** If Level 0 triggers safe mode, Level 4 and Level 3 event processing stops. All input routes to the chrome layer exclusively.
+
+### 3.4 Per-Mutation Evaluation
+
+The per-mutation evaluation runs on the compositor thread during Stage 3 (Mutation Intake) and Stage 4 (Scene Commit). Every mutation in every `MutationBatch` passes through this path.
+
+**Order for zone publications (full stack):** Human Override (0, via `OverrideCommandQueue` preemption) -> Security (3) -> Privacy (2, redaction decoration) -> Attention (4, quiet hours / budget check) -> Resource (5, degradation shed) -> Content (6, zone contention)
+
+**Order for tile mutations:** Security (3) -> Resource (5) -> Content (6)
+
+1. **Override preemption.** If override commands are pending in the `OverrideCommandQueue`, process them first. All pending mutations in the current batch are held; the override is applied; then the held mutations are re-evaluated against the new state.
+2. **Security gate.** Does the agent's session hold the required capability? Is the lease valid? Is the mutation within the agent's namespace? If any check fails: `Reject(ArbitrationError)`.
+3. **Privacy decoration.** Compare content classification against current viewer class. If access is denied: the mutation is committed but marked `CommitRedacted`. The agent is not informed of redaction.
+4. **Attention gate.** Evaluate interruption class against quiet hours and attention budget. If below threshold during quiet hours: `Queue(QuietHours)`. If attention budget exhausted: `Queue(AttentionBudgetExhausted)`. Critical interruptions bypass both.
+5. **Resource gate.** Check per-agent budget (tiles, texture bytes, update rate). Check degradation level shed policy. If budget exceeded: reject the batch. If degradation level sheds this mutation's priority class: `Shed`.
+6. **Content resolution.** Apply zone's `ContentionPolicy`. For Replace zones with priority conflict: `Reject(ZoneEvictionDenied)`.
+
+**Short-circuit rule:** If a higher level rejects or blocks, lower levels are not evaluated. A mutation rejected at Level 3 (Security) never reaches Level 5 (Resource) or Level 6 (Content).
+
+---
+
+## 4. Failure Arbitration
+
+This section defines the authoritative failure response tiers. It **resolves** the conflict between RFC 0002 Section 1.4/Section 7.3 (exit on GPU loss) and RFC 0007 Section 5.1 (safe mode on GPU loss).
+
+### 4.1 Three-Tier Failure Response
+
+| Tier | Condition | Response | Governing RFC |
+|------|-----------|----------|---------------|
+| Tier 1: Recoverable GPU error | `SurfaceError::Lost` or `SurfaceError::Outdated` with successful reconfiguration | Attempt `surface.configure(device, &config)`. If success, continue. If fail, escalate to Tier 2. | RFC 0002 Section 7.3, steps 1-3 |
+| Tier 2: Non-recoverable GPU, CPU intact | `wgpu::DeviceError::Lost`, adapter invalid, reconfiguration failed | Enter safe mode (RFC 0007 Section 5.1). Leases suspended (not revoked). Chrome renders in software fallback. Emit `SafeModeEntryEvent` with `reason = CRITICAL_ERROR`. Wait up to 2 seconds for overlay to render. Then escalate to Tier 3. | RFC 0007 Section 5.1, this RFC |
+| Tier 3: Catastrophic | GPU unusable (safe mode overlay cannot render), or Tier 2 timeout elapsed | Flush telemetry (200ms grace). Trigger graceful shutdown (RFC 0002 Section 1.4) with non-zero exit code. | RFC 0002 Section 1.4 |
+
+### 4.2 Tier Interaction with Arbitration Levels
+
+Failure tiers interact with the arbitration stack at Level 1 (Safety):
+
+- **Tier 1** does not interrupt normal arbitration. The surface reconfiguration is transparent to agents.
+- **Tier 2** triggers safe mode, which suspends all leases (RFC 0008 Section 3.4) and rejects all agent mutations with `SAFE_MODE_ACTIVE`. The arbitration stack is effectively bypassed -- only Level 0 (Human Override: the viewer pressing Resume) and Level 1 (Safety: the safe mode overlay itself) are active.
+- **Tier 3** terminates the process. No arbitration is possible.
+
+### 4.3 Resolution Statement
+
+**RFC 0002 Section 1.4 (exit) applies only at Tier 3.** The process exits only after Tier 2 safe mode has been attempted and either displayed or timed out.
+
+**RFC 0007 Section 5.1 (safe mode) applies at Tier 2.** Safe mode is entered before shutdown to inform the viewer. It is not a permanent recovery -- it is a brief acknowledgement before exit.
+
+**Required change to RFC 0002 Section 7.3 step 4** (already applied by prior review): "If reconfiguration fails (device truly lost): enter safe mode (RFC 0007 Section 5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit. If safe mode overlay renders within 2 seconds, display it briefly; then trigger graceful shutdown (Section 1.4) with non-zero exit code. If the overlay cannot render (GPU already unusable), skip directly to graceful shutdown."
+
+---
+
+## 5. Redaction Ownership
+
+### 5.1 Principle
+
+**The Privacy level (Level 2) owns ALL redaction decisions.** This is a single-owner rule with no exceptions.
+
+### 5.2 Canonical Configuration Location
+
+The `[privacy]` config section is the single source of truth for `redaction_style`:
 
 ```toml
 [privacy]
@@ -336,135 +340,373 @@ Two fields for the same concept in the same config file will cause implementatio
 redaction_style = "pattern"
 ```
 
-The `ChromeConfig` Rust struct must not contain a `redaction_style` field. The `PrivacyConfig` Rust struct is the canonical owner.
+The `ChromeConfig` Rust struct (`[chrome]` config section) MUST NOT contain a `redaction_style` field. Any reference to `redaction_style` in the `[chrome]` section is a duplication error.
 
-**Hot-reload:** `redaction_style` is hot-reloadable as part of `[privacy]` (RFC 0006 §9 "Hot-reloadable fields"). The prior listing of `[chrome]` as hot-reloadable for "redaction style" is superseded by this resolution.
+### 5.3 Rendering Responsibility
 
----
+The chrome layer renders the redaction visual (RFC 0007 Section 3.4), but it does not decide what to redact. The decision flow is:
 
-## 4. Cross-Zone Arbitration
+1. **Privacy level decides** (Level 2): the per-frame privacy evaluation compares each tile's `VisibilityClassification` against the current `ViewerClass` and produces a redaction flag.
+2. **Chrome renders** (compositor Stage 6): the chrome render pass reads the redaction flag and draws the placeholder pattern specified by `PrivacyConfig.redaction_style`.
 
-### 4.1 Within-Zone Resolution
+The chrome layer is the renderer, not the arbiter. This separation ensures that redaction policy changes (viewer context transitions, multi-viewer rules) are evaluated at Level 2 and rendered by the chrome pass without the chrome layer needing to understand privacy policy.
 
-Each zone resolves its own contention independently using its `ContentionPolicy`. This is defined per-zone in the zone registry (RFC 0001 §2.5) and enforced at Step 6 of the arbitration stack.
+### 5.4 Resolution Statement
 
-### 4.2 Between-Zone Overlap
-
-When zone geometries overlap, the runtime composites them in a defined order without attempting content arbitration across zone boundaries:
-
-1. Background zones render first (behind all agent tiles).
-2. Content zones render in their assigned z-order among agent tiles. Content-layer zones are pinned at a z-order above all agent-controlled z-order values.
-3. Chrome zones render last, above all content. Agents publish data to chrome zones; the runtime renders it.
-
-Within each layer, overlapping zones are composited back-to-front in ascending z-order (lower z-order value = further back). Zone z-order is set in zone configuration and is not controllable by agents at publish time.
-
-**There is no cross-zone eviction.** An agent cannot evict another agent's content from a different zone by publishing to its own zone. Zone boundaries are hard walls, not soft priority suggestions.
-
-### 4.3 Same-Frame Contention
-
-When two agents publish to the same zone in the same `MutationBatch` (or in two batches queued for the same frame), the arbitration step for that zone is evaluated in the order mutations are received by the compositor thread's intake stage. The first mutation is applied; subsequent mutations are evaluated against the post-first-mutation zone state. This produces deterministic behavior under the zone's contention policy.
-
-**Example (Stack zone):** Agent A publishes notification X; Agent B publishes notification Y in the same frame. X is evaluated first (arrives first), then Y. Both are stacked because `Stack` policy accumulates entries. Result: both X and Y are visible in the notification stack.
-
-**Example (LatestWins zone):** Agent A publishes subtitle text X; Agent B publishes subtitle text Y in the same frame. X is applied first, then Y evicts X via LatestWins. Result: only Y is visible.
-
-Agents have no mechanism to control intra-frame ordering. If ordering matters, agents must use separate frames or coordinate via a shared orchestrator.
-
-### 4.4 Cross-Tab Zone Isolation
-
-Zones are scoped to the tab in which they are defined (RFC 0001 §2.4). An agent publishing to `tab_a/subtitle` does not interact with `tab_b/subtitle`, even if both zones are the same type with the same contention policy. Cross-tab zone arbitration does not exist: zones on inactive tabs are not rendered and their contention state is inactive.
+**This resolves rig-zeb:** The `[chrome]` section references `[privacy]` for `redaction_style` and does not define its own. RFC 0006 Section 2.8 `ChromeConfig` TOML example must not contain `redaction_style`. This was applied in RFC 0006 Round 3 review.
 
 ---
 
-## 5. GPU Failure Response — RFC 0002 vs. RFC 0007 Conflict Resolution
+## 6. Freeze Semantics
 
-### 5.1 Conflict Statement
+### 6.1 Classification
 
-RFC 0002 §7.3 and RFC 0007 §5.1 give incompatible responses to GPU device loss:
+Freeze is a **Level 0 (Human Override)** action. It shares Level 0 with dismiss, safe mode, and mute. It is local, instant, and cannot be intercepted, delayed, or vetoed by any agent or lower policy level.
 
-- **RFC 0002 §7.3:** "If reconfiguration fails (device truly lost): trigger graceful shutdown (§1.4) with non-zero exit code."
-- **RFC 0007 §5.1:** "Automatic entry on critical runtime error: If the compositor detects a condition that would otherwise produce a blank or unresponsive screen — scene graph corruption, GPU device loss, unrecoverable render failure — it enters safe mode rather than crashing."
+### 6.2 Behavior During Freeze
 
-RFC 0002 says: process exits. RFC 0007 says: enter safe mode (process continues). These are mutually exclusive for the "device truly lost" case.
+| Aspect | Behavior |
+|--------|----------|
+| Agent mutations | Queued in bounded per-session queue (1000 mutations, configurable). NOT rejected. |
+| Resource budgets | Paused. The degradation ladder does not advance during freeze. The frame-time guardian does not evaluate. |
+| Attention signals | Deferred. Quiet hours timers pause. Attention budget counters freeze. |
+| Tile rendering | Frozen at last committed state. Badges continue to render (a frozen tile can still show a disconnection badge). |
+| Input | Override controls remain active. Agent input routing is suspended. |
 
-### 5.2 Resolution
+### 6.3 Agent Notification Model
 
-**The RFC 0007 behavior is correct for partial/recoverable failures. RFC 0002 is correct for total GPU loss. The difference is GPU recovery attempt outcome.**
+**Agents receive a generic backpressure signal, not a freeze notification.** This is the decision documented in rig-9v1.
 
-The unified GPU failure response is a two-phase procedure:
+- Agents are NOT told about freeze specifically. The viewer's decision to freeze is viewer state and must not be exposed to agents (privacy.md, "Agent isolation").
+- At 80% queue capacity (800/1000 by default): the runtime sends `MUTATION_QUEUE_PRESSURE` via `RuntimeError` in `MutationResult`. This signal fires for any queue-pressure scenario -- freeze, slow compositor, degradation, contention -- not specifically for freeze.
+- On overflow: `MUTATION_DROPPED` for each shed mutation. Transactional mutations are never shed; they apply gRPC backpressure instead.
+- Agents that receive `MUTATION_QUEUE_PRESSURE` may voluntarily reduce submission rate. The freeze executes unconditionally regardless.
 
-**Phase 1 — Recovery attempt (RFC 0002 §7.3, steps 1–3 unchanged):**
-1. Compositor thread detects `SurfaceError::Lost` or `SurfaceError::Outdated`.
-2. Flush telemetry with a `gpu_surface_lost` error event.
-3. Attempt surface reconfiguration (`surface.configure(device, &config)`).
-   - If reconfiguration succeeds: resume normally. No safe mode entry required.
+### 6.4 Freeze Duration
 
-**Phase 2 — Safe mode before shutdown (RFC 0007 §5.1 governs):**
-If reconfiguration fails (device truly lost — `wgpu::DeviceError::Lost` or adapter becomes invalid):
-1. **Enter safe mode** (RFC 0007 §5.2): suspend all agent sessions, display the safe mode overlay.
-   - This replaces RFC 0002 §7.3 step 4 ("trigger graceful shutdown"). The intent of safe mode entry here is to inform the viewer that the display has failed before the process exits, rather than producing a silent blank screen or sudden disappearance.
-   - If the safe mode overlay cannot render because the GPU is already unusable (i.e., `ChromeState` cannot be committed to the frame), skip to step 2 immediately.
-2. **Emit `SafeModeEntryEvent`** with `reason = CRITICAL_ERROR` (RFC 0007 §7.3 `SafeModeEntryReason`).
-3. **Wait up to 2 seconds** for the safe mode overlay to render (one frame budget × headroom). If the frame pipeline is not responsive within this window, skip forward.
-4. **Trigger graceful shutdown** (RFC 0002 §1.4) with non-zero exit code.
+- **Max freeze duration:** Configurable, default 5 minutes.
+- On timeout: auto-unfreeze with `DegradationNotice` advisory to all agents indicating conditions may have changed.
+- The auto-unfreeze timeout is a safety net, not a policy decision. It prevents an accidentally frozen display from remaining indefinitely unresponsive.
 
-**Rationale:** RFC 0007's safe mode behavior was designed precisely for this scenario: "a condition that would otherwise produce a blank or unresponsive screen." GPU device loss is the canonical example. A silent process exit leaves the viewer with no explanation. Safe mode entry before shutdown provides a one-frame acknowledgement that the runtime is terminating intentionally. The shutdown still happens — RFC 0002 is correct that a truly lost device cannot be recovered — but RFC 0007's user-facing contract is honored.
+### 6.5 Freeze and Safe Mode Interaction
 
-### 5.3 Required Changes
+Per RFC 0007 Section 5.6:
 
-**RFC 0002 §7.3** must be updated. Replace the current step 4:
+- **Freeze active, safe mode triggered:** Safe mode wins (Level 1 overrides). The freeze state is cancelled. The freeze queue is discarded. `OverrideState.freeze_active` is set to `false`.
+- **Freeze attempted during safe mode:** Ignored. Safe mode captures all input.
+- **After safe mode exit:** Freeze is inactive. The viewer must re-trigger freeze if desired.
 
-> ~~4. If reconfiguration fails (device truly lost): trigger graceful shutdown (§1.4) with non-zero exit code.~~
+### 6.6 Resolution Statement
 
-With:
-
-> 4. If reconfiguration fails (device truly lost): enter safe mode (RFC 0007 §5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit. If safe mode overlay renders within 2 seconds, display it briefly; then trigger graceful shutdown (§1.4) with non-zero exit code. If the overlay cannot render (GPU already unusable), skip directly to graceful shutdown.
-
-**RFC 0007 §5.1** requires no text change; its specification already correctly describes automatic safe mode entry on GPU device loss. The addition of the subsequent shutdown step (which §5.1 did not address) is captured above.
+**This resolves rig-9v1:** Freeze is silent with backpressure signals. The `MUTATION_QUEUE_PRESSURE` signal is operationally useful without being a viewer-state leak.
 
 ---
 
-## 6. Arbitration and the Degradation Ladder
+## 7. Override Semantics by Level
 
-### 6.1 Relationship
+### 7.1 Override Type Taxonomy
 
-The degradation ladder (RFC 0002 §6) and the arbitration stack are complementary, not competing:
+Each arbitration level uses specific override types when it prevails over a lower level:
 
-- The **arbitration stack** evaluates individual mutations from agents. It answers the question: "Should this content appear, and in what form?"
-- The **degradation ladder** governs the runtime's overall rendering capacity. It answers the question: "How much can the runtime render right now?"
+| Override type | Definition | Effect on mutation |
+|---------------|-----------|-------------------|
+| **Suppress** | Action prevented entirely. | Mutation rejected with structured error. Agent is informed. |
+| **Redirect** | Action rerouted to a different target. | Input routed to chrome instead of agent tile. |
+| **Transform** | Action modified before commit. | Content committed but rendered with redaction placeholder. |
+| **Block** | Action queued for later delivery. | Mutation stored in bounded queue; delivered when condition clears. |
 
-Degradation level is an input to Step 7 of the arbitration stack. The degradation ladder transitions (RFC 0002 §6.3) happen on the compositor thread between frames and are visible to Step 7 on the next frame.
+### 7.2 Override Types by Level
 
-### 6.2 Degradation Does Not Bypass Arbitration
+| Level | Override types used | Examples |
+|-------|-------------------|---------|
+| 0: Human Override | Suppress, Redirect, Block | Dismiss = suppress (tile removed). Safe mode = redirect (all input to chrome). Freeze = block (mutations queued). Mute = suppress (media silenced). |
+| 1: Safety | Suppress, Redirect | Safe mode auto-entry = redirect (all input to chrome, mutations rejected with `SAFE_MODE_ACTIVE`). GPU reconfiguration = suppress (rendering paused, mutations held). |
+| 2: Privacy | Transform | Redaction = transform (mutation committed, rendering replaced with placeholder). Agent is not informed. |
+| 3: Security | Suppress | Capability denied = suppress. Namespace violation = suppress. Lease invalid = suppress. All produce structured errors. |
+| 4: Attention | Block | Quiet hours = block (mutations queued until window ends). Attention budget exhausted = block (mutations queued with coalescing). |
+| 5: Resource | Suppress, Transform | Budget exceeded = suppress (batch rejected). Degradation shed = suppress (mutation discarded, zone state updated). Texture downscale = transform (texture accepted at reduced resolution). |
+| 6: Content | Suppress | Zone eviction denied = suppress (lower-priority agent cannot evict higher-priority occupant in Replace zone). |
 
-A mutation shed at Step 7 is shed, not bypassed. It has already passed Steps 1–6. This means:
-- A shed mutation was capability-checked (Step 2).
-- Its privacy policy was evaluated (Step 3).
-- Its interruption class was evaluated (Step 4).
-- Its zone contention was resolved (Step 6) — the zone state was updated as if the mutation committed, then the render was omitted.
+### 7.3 Override Composition
 
-The distinction matters for zone state correctness: the zone's occupancy is updated even for shed render mutations. A LatestWins zone where the latest publish was shed at Step 7 still has its zone state updated to reflect that publish; it simply isn't rendered this frame.
+When multiple levels each want to apply an override, the highest level's override type takes precedence:
+
+- If Level 0 blocks (freeze) and Level 5 would suppress (budget), the mutation is blocked (freeze wins).
+- If Level 2 transforms (redact) and Level 4 would block (quiet hours), the mutation is both transformed and blocked: it is queued with a redaction flag, and when delivered, it renders with the placeholder.
+- If Level 3 suppresses (capability denied), no lower level is evaluated. The mutation is rejected immediately.
+
+---
+
+## 8. Capability Registry
+
+### 8.1 Canonical Vocabulary
+
+This table is THE authority for capability identifiers. Both RFC 0005 (session handshake) and RFC 0006 (configuration) reference this list. All identifiers use `snake_case` with colon-separated sub-scopes for parameterized grants.
+
+| Identifier | Description | Default grant | Scope | Authoritative source |
+|------------|-------------|--------------|-------|---------------------|
+| `create_tiles` | May request tile leases. | Not granted | Session | RFC 0005, RFC 0008 Section 3.3 |
+| `modify_own_tiles` | May mutate content on tiles owned by this session. | Not granted | Session | RFC 0005 |
+| `read_scene` | May query the full scene topology, including other agents' lease metadata. Without this, agent sees only its own leases and public structure. | Not granted | Session | RFC 0005 Section 7.1 |
+| `subscribe_scene_events` | May subscribe to the scene-event bus (system events, topology events, agent-emittable named events per RFC 0006 Section 5.5). NOT input events. | Not granted | Session | RFC 0005 Section 7.1 |
+| `receive_input` | May receive pointer, touch, keyboard, and gesture input events forwarded from the runtime (RFC 0004). NOT scene-event bus. | Not granted | Session | RFC 0005 Section 7.1 |
+| `overlay_privileges` | May request tiles with overlay-level z-order positions. | Not granted | Session | RFC 0005 |
+| `high_priority_z_order` | May request z-order values in the top quartile. | Not granted | Session | RFC 0005 |
+| `exceed_default_budgets` | May request budget overrides at session time. Requires user prompt. | Not granted | Session | RFC 0005 |
+| `read_telemetry` | May subscribe to `telemetry_frames` events (runtime performance samples). | Not granted | Session | RFC 0005 Section 7.1 |
+| `stream_media` | May negotiate WebRTC media sessions. | Not granted | Session | RFC 0005 (post-v1) |
+| `resident_mcp` | May use resident-level MCP tools (`create_tab`, `create_tile`, `set_content`, `dismiss`). Without this, only guest tools (`publish_to_zone`, `list_zones`, restricted `list_scene`). | Not granted | Session | RFC 0005 Section 8.3 |
+| `zone_publish:<zone_name>` | May publish to the named zone instance. One grant per zone. | Not granted | Zone instance | RFC 0005 Section 7.1 |
+| `zone_publish:*` | May publish to all zones. Wildcard form. | Not granted | All zones | RFC 0005 Section 7.1 |
+| `emit_scene_event:<event_name>` | May fire the named scene event on the scene-event bus. The `<event_name>` must follow `<source>.<action>` naming (RFC 0006 Section 5.5). Must not use `system.` or `scene.` prefix. | Not granted | Named event | RFC 0005 |
+| `lease:priority:<N>` | May request lease priority N or lower (0=Critical, 1=High, 2=Standard, 3=Low, 4=Speculative). | `lease:priority:2` | Lease | RFC 0008 Section 2.1 |
+
+### 8.2 Naming Convention
+
+- All identifiers: `snake_case`.
+- Sub-scoped identifiers: colon-separated (`zone_publish:notification`).
+- Wildcard: only `zone_publish:*` is supported. No other capability supports wildcards.
+- Older uppercase forms (`CREATE_TILE`, `WRITE_SCENE`) and kebab-case forms (`create-tiles`, `zone-publish`) appearing in RFC 0001 diagrams and earlier drafts of this RFC are superseded. The `snake_case` forms in Section 8.1 are canonical.
+
+### 8.3 Resolution Statement
+
+**This resolves rig-vbi (capability name format inconsistency).** RFC 0005 Section 7.1 and RFC 0006 Section 6.3 both reference this table as authoritative. The `snake_case` convention is established by RFC 0005 as the wire-format standard. Earlier RFC 0009 drafts used kebab-case; those are incorrect. This table supersedes all prior capability name listings.
+
+---
+
+## 9. Quantitative Requirements
+
+### 9.1 Policy Evaluation Latency Budgets
+
+| Metric | Budget | Rationale |
+|--------|--------|-----------|
+| Full per-frame evaluation (Levels 1, 2, 5, 6) | < 200us | Must fit within Stage 3 mutation intake budget (RFC 0002: p99 < 1ms) with headroom for mutation processing. |
+| Per-mutation policy check (Levels 3, 5, 6) | < 50us | A frame with 64 mutations (max batch) at 50us each = 3.2ms; fits within the combined Stage 3+4 budget of 2ms. |
+| Human override response (Level 0) | < 1 frame (16.6ms) | Override visual effect must appear within one frame of the input event (RFC 0007 Section 4.5: "Frame-bounded response"). |
+| Privacy transition (viewer context change, Level 2) | < 2 frames (33.2ms) | Viewer identification pipeline produces result; redaction transitions apply on the next frame; visual update on the frame after. Two-frame budget allows the identification result to arrive mid-frame. |
+| Capability check (Level 3, single capability) | < 5us | Capability checks are hash-table lookups against the session's granted set. Must not dominate per-mutation budget. |
+| Attention budget check (Level 4) | < 10us | Rolling counter comparison against configured thresholds. |
+| Zone contention resolution (Level 6) | < 20us | ContentionPolicy application for a single zone. LatestWins and MergeByKey are O(1); Stack is O(log n) for insertion. |
+
+### 9.2 Telemetry Integration
+
+Policy evaluation latency is tracked in the per-frame `TelemetryRecord`:
+
+```rust
+pub struct PolicyTelemetry {
+    pub per_frame_eval_us: u32,          // Total per-frame evaluation time
+    pub per_mutation_eval_us_p99: u32,   // p99 per-mutation policy check (this frame)
+    pub mutations_rejected: u32,          // Count of Level 3 rejections this frame
+    pub mutations_redacted: u32,          // Count of Level 2 redactions this frame
+    pub mutations_queued: u32,            // Count of Level 4 queued this frame
+    pub mutations_shed: u32,              // Count of Level 5 shed this frame
+    pub override_commands_processed: u32, // Count of Level 0 overrides this frame
+}
+```
+
+---
+
+## 10. Cross-RFC Resolutions
+
+This section lists every cross-RFC contradiction resolved by this RFC. Each entry is binding: implementations must follow the resolution.
+
+### 10.1 rig-nev: Arbitration Order Canonicalization
+
+**Conflict:** Architecture.md defines a 7-step policy evaluation order. RFC 0002 defines a 5-level degradation ladder. RFC 0007 defines override semantics. No single document specifies how these interact or which takes precedence when they disagree.
+
+**Resolution:** This RFC (Sections 1-3) provides the unified 7-level arbitration stack with formal precedence, conflict resolution rules, and three evaluation pipelines. Architecture.md's 7-step order is faithfully mapped to Levels 0-6 with the addition of the Safety level (Level 1) which was implicit in the doctrine but not explicitly named. The degradation ladder (RFC 0002 Section 6) is a mechanism within Level 5 (Resource). Override controls (RFC 0007 Section 4) are mechanisms within Level 0 (Human Override).
+
+### 10.2 rig-81i: GPU Failure Response Contradiction
+
+**Conflict:** RFC 0002 Section 7.3 step 4 says "trigger graceful shutdown" on GPU device loss. RFC 0007 Section 5.1 says "enter safe mode" on GPU device loss. Both cannot be correct for the same failure condition.
+
+**Resolution:** Section 4 of this RFC defines a three-tier failure response. Tier 2 (non-recoverable GPU, CPU intact) enters safe mode (RFC 0007 is correct) for up to 2 seconds, then triggers graceful shutdown (RFC 0002 is correct). Both RFCs are correct for different phases of the failure response. RFC 0002 Section 7.3 has been updated to reference this resolution.
+
+### 10.3 rig-tew: Degradation Ladder vs. Arbitration Stack
+
+**Conflict:** RFC 0002 Section 6 defines a degradation ladder that sheds tiles by priority, but the arbitration stack in architecture.md places degradation at step 7 (after zone contention). This creates ambiguity about whether shed decisions respect zone contention results.
+
+**Resolution:** Section 3.4 of this RFC specifies that degradation shedding (Level 5) operates after Content resolution (Level 6) in the per-mutation evaluation path. A shed mutation has already had its zone contention resolved -- the zone state is updated, but the render output is omitted. Tile shedding at the per-frame level (frame-time guardian) operates on already-committed scene state and sheds lowest-priority tiles from the render pass without modifying zone state.
+
+### 10.4 rig-zeb: Redaction Style Dual Ownership
+
+**Conflict:** RFC 0006 defined `redaction_style` in both `[chrome]` (Section 2.8) and `[privacy]` (Section 7). Two config fields for the same concept causes implementation disagreement.
+
+**Resolution:** Section 5 of this RFC assigns exclusive ownership to `[privacy]`. The `[chrome]` entry was a duplication error. RFC 0006 Round 3 review removed `redaction_style` from `ChromeConfig`. The `PrivacyConfig` Rust struct is the canonical owner.
+
+### 10.5 rig-9v1: Freeze Agent Notification
+
+**Conflict:** RFC 0007 Section 4.3 originally stated "agents are not informed that the scene is frozen." This is sovereignty-pure but wasteful -- agents generate mutations that will be queued and eventually dropped. The question was whether to send an advisory (which leaks viewer state) or a backpressure signal (which does not).
+
+**Resolution:** Section 6 of this RFC specifies silent freeze with backpressure signal. The runtime sends `MUTATION_QUEUE_PRESSURE` at 80% queue capacity and `MUTATION_DROPPED` on overflow. These signals do not reveal freeze specifically -- they fire for any queue-pressure scenario. RFC 0007 Section 4.3 has been updated with this model.
+
+### 10.6 rig-vbi: Capability Name Format Inconsistency
+
+**Conflict:** RFC 0005 and RFC 0006 Section 6.3 use `snake_case` capability names (`create_tiles`, `zone_publish`). Earlier drafts of RFC 0009 used kebab-case (`create-tiles`, `zone-publish`). RFC 0001 diagrams use uppercase (`CREATE_TILE`). Three naming conventions for the same identifiers.
+
+**Resolution:** Section 8 of this RFC establishes the canonical capability registry. All identifiers use `snake_case` as defined by RFC 0005 (wire-format authority). Kebab-case and uppercase forms are superseded and must not be used in new code or documentation.
+
+---
+
+## 11. Step-by-Step Implementation Detail
+
+### 11.1 Level 0 -- Human Override
+
+Human override is not a gate in the normal sense. It is an asynchronous interrupt that can preempt any point in the arbitration pipeline, including mid-commit.
+
+Override actions (dismiss tile, revoke lease, freeze scene, safe mode entry, mute media) are initiated from the main thread's input drain (RFC 0002 Section 2.2) and handled before any agent mutation intake for that frame. They are never queued behind agent mutations.
+
+**Implementation contract:**
+
+- Override commands are placed in a dedicated `OverrideCommandQueue` (bounded, capacity: 16, SPSC) read by the compositor thread at the top of each frame's Stage 3 intake before the `MutationBatch` channel is drained.
+- If an override command arrives during Stage 3 mutation intake, it preempts: all pending mutations in the current batch are held; the override is applied; then the held mutations are re-evaluated against the new state.
+- Human override cannot be deferred, coalesced, or suppressed by any other policy level.
+- The override action is complete within one frame (16.6ms), as specified by RFC 0007 Section 4.5.
+
+### 11.2 Level 1 -- Safety
+
+The safety level monitors runtime health and triggers protective responses when the system is at risk of becoming unresponsive.
+
+**Triggers:**
+
+| Trigger | Response | Threshold |
+|---------|----------|-----------|
+| GPU device lost (unrecoverable) | Tier 2 failure response (Section 4) | `wgpu::DeviceError::Lost` |
+| Scene graph corruption | Safe mode entry | Invariant check failure in Stage 4 |
+| Frame-time guardian emergency | Degradation Level 5 (emergency) | `frame_time_p95 > 14ms` sustained through all degradation levels |
+
+**Interaction with Level 0:** If the viewer has frozen the scene and a safety trigger fires, safety wins. Freeze is cancelled and safe mode is entered (RFC 0007 Section 5.6).
+
+### 11.3 Level 2 -- Privacy
+
+The privacy level compares content classification against viewer context and produces redaction decisions.
+
+**Access matrix:**
+
+```
+                 Public  Household  Private  Sensitive
+Owner              SHOW     SHOW      SHOW      SHOW
+HouseholdMember    SHOW     SHOW    REDACT    REDACT
+KnownGuest         SHOW   REDACT    REDACT    REDACT
+Unknown            SHOW   REDACT    REDACT    REDACT
+Nobody             SHOW   REDACT    REDACT    REDACT
+```
+
+**Zone ceiling rule:** The effective classification of a zone publication is `max(agent_declared_classification, zone_default_classification)`. An agent cannot escalate visibility beyond the zone's ceiling.
+
+**Multi-viewer rule:** When multiple viewers are present, the most restrictive viewer class applies (privacy.md, "Multi-viewer scenarios"). The owner can override this via the privacy indicator control (RFC 0007 Section 6).
+
+### 11.4 Level 3 -- Security
+
+The security level enforces capability scopes, lease validity, and namespace isolation.
+
+**Check matrix (per Section 8.1 capability registry):**
+
+| Operation | Required capability |
+|-----------|-------------------|
+| Publish to a zone | `zone_publish:<zone_name>` or `zone_publish:*` |
+| Create a tile | `create_tiles` |
+| Modify own tiles | `modify_own_tiles` |
+| Request overlay z-order | `overlay_privileges` |
+| Request high z-order | `high_priority_z_order` |
+| Subscribe to scene events | `subscribe_scene_events` |
+| Access input events | `receive_input` |
+| Stream media | `stream_media` |
+| Read full topology | `read_scene` |
+| Read telemetry | `read_telemetry` |
+| Use resident MCP tools | `resident_mcp` |
+| Request lease priority N | `lease:priority:<N>` |
+| Emit scene event | `emit_scene_event:<event_name>` |
+
+Capabilities are granted per-session at handshake (RFC 0005 Section 1.3) and may be revoked mid-session. Revocation is immediate: the next arbitration evaluation fails at Level 3.
+
+**Outcome:** `Reject(CapabilityDenied)`, `Reject(CapabilityScopeInsufficient)`, or `Reject(NamespaceViolation)` with the missing capability named in the `hint` field.
+
+### 11.5 Level 4 -- Attention
+
+The attention level manages interruption flow to prevent notification fatigue and respect quiet hours.
+
+**Interruption classes** (from privacy.md):
+- `Silent` -- always passes. No display disruption. Not counted against budget.
+- `Gentle` -- passes unless quiet hours active. Counted against budget.
+- `Normal` -- passes unless quiet hours active. Counted against budget.
+- `Urgent` -- passes through quiet hours. Subject to attention budget.
+- `Critical` -- always passes. Bypasses both quiet hours and attention budget.
+
+**Quiet hours:** During quiet hours, `Gentle` and `Normal` interruptions are queued. `Silent` continues (invisible by definition). `Urgent` and `Critical` pass through. Queued mutations are delivered when quiet hours end, in FIFO order per zone.
+
+**Attention budget:** Rolling per-agent and per-zone counters track non-silent interruptions over the last 60 seconds. Configurable limits: `max_interruptions_per_agent_per_minute` (default: 6) and `max_interruptions_per_zone_per_minute` (default: 12). When exhausted, mutations are coalesced (latest-wins within agent+zone key). Budget refills continuously. `Critical` interruptions are exempt.
+
+### 11.6 Level 5 -- Resource
+
+The resource level enforces per-agent budgets and applies the degradation ladder.
+
+**Per-agent budget enforcement** (RFC 0002 Section 5): three-tier ladder (Warning -> Throttle -> Revocation). Budget checks happen in Stage 3 before scene modification. Over-budget batches are rejected atomically.
+
+**Degradation ladder** (RFC 0002 Section 6): five levels (Coalesce -> Reduce Texture Quality -> Disable Transparency -> Shed Tiles -> Emergency). Degradation level is an input to this arbitration step.
+
+**Shed semantics:** A `Shed` outcome does not produce an error. Zone state is updated but rendering is omitted. Transactional mutations (`CreateTile`, `DeleteTile`, `LeaseRequest`, `LeaseRelease`) are never shed.
+
+### 11.7 Level 6 -- Content
+
+The content level resolves zone contention and agent priority.
+
+**Contention policies** (RFC 0001 Section 2.5):
+
+| Policy | Behavior | Used by |
+|--------|----------|---------|
+| `LatestWins` | New publish replaces previous content | subtitle, ambient-background |
+| `Stack` | New publish stacks; each entry auto-dismisses after `auto_clear_us` | notification |
+| `MergeByKey` | Same key replaces; different keys coexist up to `max_keys` | status-bar |
+| `Replace` | Single occupant; eviction by equal-or-higher lease priority | pip (post-v1) |
+
+**Cross-zone arbitration:** Zone geometry overlaps are resolved by compositing order (Background < Content < Chrome). Within a layer, zones are composited in ascending z-order. There is no cross-zone eviction.
+
+**Same-frame contention:** When two agents publish to the same zone in the same frame, mutations are evaluated in arrival order. The first is applied; subsequent mutations are evaluated against the post-first-mutation zone state.
+
+**Cross-tab zone isolation:** Zones are scoped to the tab in which they are defined (RFC 0001 Section 2.4). An agent publishing to `tab_a/subtitle` does not interact with `tab_b/subtitle`. Cross-tab zone arbitration does not exist.
+
+---
+
+## 12. Arbitration and the Degradation Ladder
+
+### 12.1 Relationship
+
+The degradation ladder (RFC 0002 Section 6) and the arbitration stack are complementary, not competing:
+
+- The **arbitration stack** evaluates individual mutations from agents. It answers: "Should this content appear, and in what form?"
+- The **degradation ladder** governs the runtime's overall rendering capacity. It answers: "How much can the runtime render right now?"
+
+Degradation level is an input to Level 5 of the arbitration stack. The degradation ladder transitions (RFC 0002 Section 6.3) happen on the compositor thread between frames and are visible to Level 5 on the next frame.
+
+### 12.2 Degradation Does Not Bypass Arbitration
+
+A mutation shed at Level 5 is shed, not bypassed. It has already passed Levels 3 and higher. This means:
+- A shed mutation was capability-checked (Level 3).
+- Its privacy policy was evaluated (Level 2).
+- Its interruption class was evaluated (Level 4).
+- Its zone contention was resolved (Level 6) -- the zone state was updated as if the mutation committed, then the render was omitted.
+
+The distinction matters for zone state correctness: the zone's occupancy is updated even for shed render mutations. A LatestWins zone where the latest publish was shed at Level 5 still has its zone state updated to reflect that publish; it simply is not rendered this frame.
 
 **Exception:** Tile shed at degradation Level 4 or 5 means the tile is excluded from the render pass but remains in the scene graph with its current content state. When the degradation level recovers, the tile's last committed content resumes rendering without any agent re-publish.
 
-### 6.3 DegradationEvent and Agent Backpressure
+### 12.3 DegradationEvent and Agent Backpressure
 
-When the runtime transitions to degradation Level 1 or higher, it emits a `DegradationEvent` to all subscribed agents (RFC 0002 §6.4). Agents that receive this event should reduce their update rate voluntarily. The arbitration stack does not require them to do so — it enforces the degradation policy independently — but voluntary backpressure reduces the amount of work that must be shed at Step 7.
-
-Agents that ignore `DegradationEvent` and continue publishing at their normal rate will have a higher fraction of their state-stream mutations coalesced or shed. Transactional mutations from those agents are never shed (§2.7), so lease and tile management operations remain reliable even under degradation.
+When the runtime transitions to degradation Level 1 or higher, it emits a `DegradationEvent` to all subscribed agents (RFC 0002 Section 6.4). Agents that receive this event should reduce their update rate voluntarily. The arbitration stack does not require them to do so -- it enforces the degradation policy independently -- but voluntary backpressure reduces the amount of work that must be shed at Level 5.
 
 ---
 
-## 7. Audit and Observability
+## 13. Audit and Observability
 
-### 7.1 Arbitration Telemetry
+### 13.1 Arbitration Telemetry
 
-Every Step 2 rejection and every Step 7 shed emits a telemetry record:
+Every Level 3 rejection and every Level 5 shed emits a telemetry record:
 
 ```json
 {
   "event": "arbitration_reject",
-  "step": 2,
+  "level": 3,
   "code": "CAPABILITY_DENIED",
   "agent_id": "agent-abc",
   "mutation_ref": "mut-xyz",
@@ -476,7 +718,7 @@ Every Step 2 rejection and every Step 7 shed emits a telemetry record:
 ```json
 {
   "event": "arbitration_shed",
-  "step": 7,
+  "level": 5,
   "agent_id": "agent-abc",
   "mutation_ref": "mut-xyz",
   "degradation_level": 4,
@@ -485,15 +727,15 @@ Every Step 2 rejection and every Step 7 shed emits a telemetry record:
 }
 ```
 
-Steps 3–5 (redaction, queue, attention budget) emit telemetry at a lower rate — one record per session per minute when those outcomes are active — to avoid flooding the telemetry stream during sustained redaction or quiet-hour queueing.
+Levels 2 (redaction) and 4 (attention budget) emit telemetry at a lower rate -- one record per session per minute when those outcomes are active -- to avoid flooding the telemetry stream during sustained redaction or quiet-hour queueing.
 
-### 7.2 Per-Agent Arbitration Summary
+### 13.2 Per-Agent Arbitration Summary
 
 The `RuntimeService.GetSessionDiagnostics` RPC (post-v1) will expose per-agent arbitration statistics: reject counts by code, shed counts by level, queue depths. In v1, these are available only via telemetry.
 
-### 7.3 Capability Grant Audit
+### 13.3 Capability Grant Audit
 
-Every capability grant and revocation is logged (security.md §"Capability scopes"):
+Every capability grant and revocation is logged (security.md, "Capability scopes"):
 
 ```json
 {
@@ -517,68 +759,85 @@ Every capability grant and revocation is logged (security.md §"Capability scope
 
 ---
 
-## 8. Protobuf Schema
+## 14. Protobuf Schema
 
-The following types are new or extend existing schemas.
+### 14.1 New Types
 
 ```protobuf
-// ArbitrationError is included in MutationBatchResult (extends RFC 0005 §3.1).
+// ArbitrationError is included in MutationBatchResult (extends RFC 0005 Section 3.1).
 message ArbitrationError {
-  ArbitrationErrorCode code    = 1;
-  string               agent_id       = 2;
-  string               mutation_ref   = 3;  // batch_id from MutationBatch
-  string               message        = 4;
-  optional string      hint           = 5;
+  ArbitrationErrorCode code          = 1;
+  string               agent_id     = 2;
+  string               mutation_ref = 3;  // batch_id from MutationBatch
+  string               message      = 4;
+  optional string      hint         = 5;
+  uint32               level        = 6;  // Arbitration level that rejected (0-6)
 }
 
 enum ArbitrationErrorCode {
-  ARBITRATION_ERROR_CODE_UNSPECIFIED    = 0;
-  CAPABILITY_DENIED                     = 1;
-  CAPABILITY_SCOPE_INSUFFICIENT         = 2;
-  ZONE_EVICTION_DENIED                  = 3;
-  NAMESPACE_VIOLATION                   = 4;
+  ARBITRATION_ERROR_CODE_UNSPECIFIED = 0;
+  CAPABILITY_DENIED                 = 1;
+  CAPABILITY_SCOPE_INSUFFICIENT     = 2;
+  ZONE_EVICTION_DENIED              = 3;
+  NAMESPACE_VIOLATION               = 4;
+  LEASE_INVALID                     = 5;
 }
 
-// DegradationShedEvent is emitted per-mutation when shed at Step 7.
-// Distinct from DegradationEvent (RFC 0002 §6.4) which is a level-change event.
+// DegradationShedEvent is emitted per-mutation when shed at Level 5.
+// Distinct from DegradationEvent (RFC 0002 Section 6.4) which is a level-change event.
 message DegradationShedEvent {
-  string mutation_ref        = 1;
-  uint32 degradation_level   = 2;
-  string traffic_class       = 3;  // "state_stream" | "ephemeral" (transactional mutations are never shed; see §2.7)
-  uint64 timestamp_us        = 4;
+  string mutation_ref      = 1;
+  uint32 degradation_level = 2;
+  string traffic_class     = 3;  // "state_stream" | "ephemeral"
+  uint64 timestamp_us      = 4;
 }
 
 // AttentionBudgetEvent: emitted when an agent's attention budget is exhausted.
-// Agents may use this to reduce their interrupt rate proactively.
 message AttentionBudgetEvent {
-  string  agent_id          = 1;
-  string  zone_id           = 2;  // empty if per-agent budget (not zone-specific)
-  uint32  interruptions_per_minute_actual  = 3;
-  uint32  interruptions_per_minute_budget  = 4;
-  uint64  timestamp_us      = 5;
+  string agent_id                           = 1;
+  string zone_id                            = 2;  // empty if per-agent (not zone-specific)
+  uint32 interruptions_per_minute_actual    = 3;
+  uint32 interruptions_per_minute_budget    = 4;
+  uint64 timestamp_us                       = 5;
+}
+
+// PolicyTelemetry: embedded in TelemetryRecord (RFC 0002 Section 3.2, Stage 8).
+message PolicyTelemetry {
+  uint32 per_frame_eval_us            = 1;
+  uint32 per_mutation_eval_us_p99     = 2;
+  uint32 mutations_rejected           = 3;
+  uint32 mutations_redacted           = 4;
+  uint32 mutations_queued             = 5;
+  uint32 mutations_shed               = 6;
+  uint32 override_commands_processed  = 7;
 }
 ```
 
 ---
 
-## 9. Cross-RFC Interaction Table
+## 15. Cross-RFC Interaction Table
 
 | RFC | Interaction |
 |-----|-------------|
-| RFC 0001 (Scene Contract) | Zone `ContentionPolicy` types are the input to Step 6. Zone `ZoneLayerAttachment` governs cross-zone compositing order (§4.2). `VisibilityClassification` is the privacy gate input (Step 3). |
-| RFC 0002 (Runtime Kernel) | Degradation ladder level is the Step 7 input. RFC 0002 §7.3 GPU failure response is superseded by §5.2 of this RFC. Arbitration runs within RFC 0002 Stage 1 (mutation intake). |
-| RFC 0005 (Session Protocol) | Capability grants and revocations (Step 2 inputs) are established at session handshake (RFC 0005 §2). `ArbitrationError` is added to `MutationBatchResult`. Transactional message guarantees (RFC 0005 §5.1) take precedence over Step 7 shed policy. |
-| RFC 0006 (Configuration) | `[privacy].redaction_style` is the authoritative configuration field (§3.2). `[privacy].quiet_hours` and `[privacy].max_interruptions_*` configure Steps 4 and 5. The `[chrome].redaction_style` field is removed. |
-| RFC 0007 (System Shell) | Human override (Step 1) is implemented by RFC 0007 §4. Safe mode entry (RFC 0007 §5.1) is the GPU failure response for partial failure before shutdown (§5.2). Redaction placeholder rendering is the chrome pass described in RFC 0007 §3.4; `redaction_style` in `PrivacyConfig` governs its appearance. |
+| RFC 0001 (Scene Contract) | Zone `ContentionPolicy` types are the input to Level 6. Zone `ZoneLayerAttachment` governs cross-zone compositing order (Section 11.7). `VisibilityClassification` is the Level 2 input. |
+| RFC 0002 (Runtime Kernel) | Degradation ladder level is the Level 5 input. RFC 0002 Section 7.3 GPU failure response is resolved by Section 4 of this RFC. Arbitration runs within RFC 0002 Stage 3 (mutation intake). Frame-time guardian (RFC 0002 Section 5.2) is a Level 5 mechanism. |
+| RFC 0005 (Session Protocol) | Capability grants and revocations (Level 3 inputs) are established at session handshake. `ArbitrationError` is added to `MutationBatchResult`. Transactional message guarantees (RFC 0005 Section 5.1) take precedence over Level 5 shed policy. Canonical capability names defined in Section 8.1 of this RFC. `MUTATION_QUEUE_PRESSURE` and `MUTATION_DROPPED` error codes added to `RuntimeError.ErrorCode`. |
+| RFC 0006 (Configuration) | `[privacy].redaction_style` is the authoritative configuration field (Section 5). `[privacy].quiet_hours` and `[privacy].max_interruptions_*` configure Level 4. The `[chrome].redaction_style` field is removed. Capability identifiers in Section 6.3 of RFC 0006 reference Section 8.1 of this RFC. |
+| RFC 0007 (System Shell) | Human override (Level 0) is implemented by RFC 0007 Section 4. Safe mode (RFC 0007 Section 5) implements Level 1 safety response. Freeze semantics (RFC 0007 Section 4.3) are governed by Section 6 of this RFC. Redaction placeholder rendering is the chrome pass described in RFC 0007 Section 3.4; `redaction_style` in `PrivacyConfig` governs its appearance. |
+| RFC 0008 (Lease Governance) | Lease validity is a Level 3 security check. `lease:priority:<N>` capability defined in Section 8.1. Safe mode suspends leases (RFC 0008 Section 3.4, DR-LG7); this is a Level 1 safety action. Tile shedding at Level 5 leaves leases ACTIVE (rendering-only suppression). |
+| RFC 0010 (Scene Events) | Scene-event bus capabilities (`subscribe_scene_events`, `emit_scene_event:<name>`) are Level 3 security checks defined in Section 8.1. |
+| RFC 0011 (Resource Store) | Resource reference counting and lifecycle are Level 5 resource governance inputs. |
 
 ---
 
-## 10. Open Questions
+## 16. Open Questions
 
-1. **Attention budget defaults.** The doctrine states that attention budget is a real constraint (attention.md) but does not quantify it. This RFC defers the specific default values for `max_interruptions_per_agent_per_minute` and `max_interruptions_per_zone_per_minute` to the Configuration RFC revision. A reasonable starting point: 6 per agent per minute (one per 10 seconds), 12 per zone per minute (allowing multiple agents to publish to the same zone at moderate rates).
+1. **Attention budget defaults.** The doctrine states attention budget is a real constraint but does not quantify it. Default values proposed in Section 11.5 (6 per agent per minute, 12 per zone per minute) are starting points subject to tuning.
 
-2. **Step 7 shed notification.** Currently agents are not notified when a mutation is shed. A `DegradationShedEvent` subscription category could let agents observe their shed rate and back off. This is deferred to post-v1 to keep the subscription surface minimal.
+2. **Level 5 shed notification.** Currently agents are not notified when a mutation is shed. A `DegradationShedEvent` subscription category could let agents observe their shed rate. Deferred to post-v1.
 
-3. **Attention budget persistence across quiet hours.** If an agent exhausted its attention budget at 21:55 and quiet hours begin at 22:00, do queued mutations that were attention-budget-deferred also get queued under the quiet-hours queue, or do they expire? The current spec says queues are independent. This interaction should be tested explicitly in the `policy_arbitration_collision` test scene (validation.md §"Test scene registry").
+3. **Attention budget persistence across quiet hours.** If an agent exhausted its budget at 21:55 and quiet hours begin at 22:00, queues are independent. The attention budget queue holds budget-deferred mutations; the quiet hours queue holds time-deferred mutations. Both are delivered independently when their conditions clear.
 
-4. **Cross-tab zone state.** §4.4 states that zones on inactive tabs have inactive contention state. The behavior when a tab becomes active and a zone on that tab has pending content from before it was last visible is unspecified. This is deferred to the Scene Contract RFC revision.
+4. **Cross-tab zone state.** Section 11.7 states zones on inactive tabs have inactive contention state. Behavior when a tab becomes active with pending zone content is deferred to the Scene Contract RFC revision.
+
+5. **Per-frame privacy evaluation cost.** With many tiles (64+) and frequent viewer context changes, the per-frame privacy check could approach the 200us budget. An incremental dirty-flag approach (only re-evaluate tiles whose classification changed or when viewer class changes) would reduce this to O(changed_tiles) instead of O(all_tiles).
