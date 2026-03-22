@@ -94,6 +94,34 @@ No new technical regressions found. Cross-references corrected; vocabulary clari
 
 ---
 
+### Round 4 — Final Hardening and Quantitative Verification (rig-5vq.34)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, v1.md, failure.md, validation.md
+
+#### Doctrinal Alignment: 4/5
+No doctrinal regressions from prior rounds. All architectural commitments remain faithfully implemented.
+
+#### Technical Robustness: 4/5 (after fixes)
+
+**[MUST-FIX → FIXED]** §2.1 required "at least one `[[tabs]]` entry" with no enforcement. Added `CONFIG_NO_TABS` validation rule to §2.4, added `ConfigNoTabs` variant to the `ConfigErrorCode` enum, and added the row to the Summary of Validation Error Codes table.
+
+**[MUST-FIX → FIXED]** §5.3 `reserved_*_fraction` fields documented as float (0.0–1.0) but had no validation rule or error code. Added `CONFIG_INVALID_RESERVED_FRACTION` covering out-of-range individual values and horizontal/vertical sum ≥ 1.0 (which would leave zero space for agent tiles). Added to enum and summary table.
+
+**[MUST-FIX → FIXED]** §6.2 agent budgets had no cross-profile validation. Per-agent `max_tiles`, `max_texture_mb`, and `max_update_hz` could silently exceed the active profile ceiling. Added `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE` validation rules, added to enum and summary table. Also corrected the `doorbell_agent` example `max_texture_mb = 512` (which exceeded the `full-display` profile ceiling of 2048 but was inconsistent with the mobile profile ceiling of 256) to `max_texture_mb = 128` with a clarifying comment.
+
+**[SHOULD-FIX → FIXED]** §5.4 `tab_switch_on_event` unknown names were silently ignored with no documented behavior. Added explicit WARN log behavior for unrecognized event names (not a hard error, for forward compatibility with post-v1 custom events). An empty string is documented as valid with no warning.
+
+**[SHOULD-FIX → FIXED]** §10 `DisplayProfileConfig.extends` doc comment listed only `full-display` and `mobile` as built-ins, omitting `headless`. Updated to clarify `headless` is a built-in but cannot be used as an `extends` base, pointing to `CONFIG_HEADLESS_NOT_EXTENDABLE`.
+
+#### Cross-RFC Consistency: 5/5
+No new inconsistencies. All prior-round fixes remain intact. Cross-RFC score raised to 5/5: all identified gaps are now closed.
+
+**No dimension below 3. Round 4 complete. All scores ≥ 4.**
+
+---
+
 ## Summary
 
 This RFC defines the configuration system for tze_hud: the file format, schema, display profile definitions, zone geometry policies, tab and layout configuration, agent registration, and privacy/degradation policies. Configuration is the primary mechanism for declaring scenes, zones, and policies in v1 before dynamic orchestration exists, so it is a first-class, schema-validated, LLM-readable surface.
@@ -317,6 +345,7 @@ reserved_top_fraction = 0.04     # for status_bar zone
 ```
 
 **Validation rules:**
+- The `tabs` array must contain at least one entry. Empty array → `CONFIG_NO_TABS` with hint: "add at least one `[[tabs]]` entry."
 - `name` must be unique across all tabs. Duplicate → `CONFIG_DUPLICATE_TAB_NAME`.
 - At most one tab may set `default_tab = true`. Multiple → `CONFIG_MULTIPLE_DEFAULT_TABS`.
 - `default_layout` must be one of the enumerated values. Unknown value → `CONFIG_UNKNOWN_LAYOUT`.
@@ -818,6 +847,11 @@ The layout mode is advisory in v1: agents may request specific tile geometry in 
 
 Reserved fractions are additive with chrome layer zones. If `tab_bar_position = "top"` and `reserved_top_fraction = 0.04`, the effective top reserved area is `tab_bar_height + reserved_top_fraction`.
 
+**Validation rules:**
+- Each `reserved_*_fraction` must be in the range [0.0, 1.0]. Values outside this range → `CONFIG_INVALID_RESERVED_FRACTION` identifying the field and the out-of-range value.
+- `reserved_top_fraction + reserved_bottom_fraction` must be strictly less than 1.0. A sum of exactly 1.0 or greater leaves zero vertical space for agent tiles. Violation → `CONFIG_INVALID_RESERVED_FRACTION` with hint: "vertical reserved fractions sum to <value>, leaving no room for agent tiles; reduce `reserved_top_fraction` or `reserved_bottom_fraction`."
+- `reserved_left_fraction + reserved_right_fraction` must be strictly less than 1.0. Same rationale. Violation → `CONFIG_INVALID_RESERVED_FRACTION` with equivalent hint.
+
 ### 5.4 Tab Switching Policy
 
 The `tab_switch_on_event` field names a scene-level event (see RFC 0004) that automatically activates the tab. This is the mechanism for interrupt-driven tab switching without agent involvement:
@@ -829,6 +863,8 @@ tab_switch_on_event = ""                 # No automatic switch (default)
 ```
 
 Tab switches triggered by `tab_switch_on_event` are subject to the canonical policy evaluation order defined in architecture.md §"Policy arbitration" (steps 1–7: human override → capability gate → privacy/viewer gate → interruption policy → attention budget → zone contention → resource/degradation budget). The interruption class check (step 4) is what determines whether the tab switch fires during quiet hours: a `doorbell.ring` event carries `interruption_class = "urgent"` and therefore passes through quiet-hours gating. A `morning.routine` event with `interruption_class = "normal"` would be suppressed during quiet hours.
+
+**Unknown event names:** If `tab_switch_on_event` names an event not found in the built-in event registry (see RFC 0004 §scene-level events), the runtime accepts the configuration without error and emits a `WARN` log entry at startup: `tab_switch_on_event '<name>' in tab '<tab>': event name not recognized; this tab will never auto-switch until this event is registered`. This is not a hard validation error — custom events may be registered at runtime in post-v1 deployments, and treating an unrecognized event name as an error would block forward compatibility. An empty string (`""`) is a valid value meaning "no automatic switch" and does not generate a warning.
 
 ---
 
@@ -898,9 +934,17 @@ capabilities = [
 
 [agents.registered.doorbell_agent.budgets]
 max_tiles = 2
-max_texture_mb = 512  # Camera feed budget (post-v1)
+max_texture_mb = 128  # v1 snapshot budget; camera feed (post-v1) will require a higher ceiling
 max_update_hz = 60
 ```
+
+**Validation rules for agent budgets:**
+- Per-agent `max_tiles` may not exceed the active profile's `max_tiles` ceiling. Violation → `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE` identifying the agent name, the field, the configured value, and the profile ceiling.
+- Per-agent `max_texture_mb` may not exceed the active profile's `max_texture_mb` ceiling. Same error code.
+- Per-agent `max_update_hz` may not exceed the active profile's `max_agent_update_hz` ceiling. Same error code.
+- These rules apply to both `[agents.registered.<name>.budgets]` and `[agents.dynamic_policy.default_budgets]`.
+
+Note: per-agent budgets are sub-allocations of the profile total. An agent claiming more than the entire profile budget is always misconfigured; the runtime's admission control (RFC 0002 §4.3) would reject it at session time anyway — catching it at config load is strictly better for operator feedback.
 
 ### 6.3 Capability Identifiers
 
@@ -1263,8 +1307,10 @@ pub struct DisplayProfile {
 #[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct DisplayProfileConfig {
     /// If set, the named built-in profile is loaded and then the remaining fields
-    /// in this section override it. Must name a built-in profile (`full-display` or `mobile`).
-    /// Extending the `headless` profile or another custom profile is not supported.
+    /// in this section override it. Must name `"full-display"` or `"mobile"`.
+    /// The `"headless"` profile is a recognized built-in but may not be used as an
+    /// `extends` base — see `CONFIG_HEADLESS_NOT_EXTENDABLE`. Extending another
+    /// custom profile is also not supported.
     #[serde(default)]
     pub extends: Option<ProfileName>,
     // All DisplayProfile fields are optional overrides here.
@@ -1297,12 +1343,14 @@ pub struct DisplayProfileConfig {
 pub enum ConfigErrorCode {
     ConfigUnknownProfile,
     ConfigInvalidAddress,
+    ConfigNoTabs,
     ConfigDuplicateTabName,
     ConfigMultipleDefaultTabs,
     ConfigUnknownLayout,
     ConfigUnknownZoneType,
     ConfigUnknownGeometryPolicy,
     ConfigIncompatibleZoneLayer,
+    ConfigInvalidReservedFraction,
     ConfigUnknownBaseProfile,
     ConfigHeadlessNotExtendable,
     ConfigProfileBudgetEscalation,
@@ -1316,6 +1364,7 @@ pub enum ConfigErrorCode {
     ConfigInvalidThreshold,
     ConfigUnknownShedPriority,
     ConfigDegradationThresholdOrder,
+    ConfigAgentBudgetExceedsProfile,
 }
 
 /// A validation error with structured fields.
@@ -1384,6 +1433,7 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 |------|---------|---------|
 | `CONFIG_UNKNOWN_PROFILE` | §2.2 | `runtime.profile` names an unknown profile |
 | `CONFIG_INVALID_ADDRESS` | §2.2 | `grpc_bind` or `mcp_bind` is not a valid socket address |
+| `CONFIG_NO_TABS` | §2.4 | `tabs` array is empty (at least one `[[tabs]]` entry required) |
 | `CONFIG_DUPLICATE_TAB_NAME` | §2.4 | Two `[[tabs]]` entries share a name |
 | `CONFIG_MULTIPLE_DEFAULT_TABS` | §2.4 | More than one tab sets `default_tab = true` |
 | `CONFIG_UNKNOWN_LAYOUT` | §2.4 | `default_layout` is not a known layout mode |
@@ -1396,6 +1446,7 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 | `CONFIG_PROFILE_BUDGET_ESCALATION` | §3.6 | Custom profile numeric override exceeds base profile value |
 | `CONFIG_PROFILE_CAPABILITY_ESCALATION` | §3.6 | Custom profile enables a boolean capability the base profile disables (`allow_background_zones`, `allow_chrome_zones`) |
 | `CONFIG_INVALID_FPS_RANGE` | §3.6 | `target_fps < min_fps` |
+| `CONFIG_INVALID_RESERVED_FRACTION` | §5.3 | A `reserved_*_fraction` is outside [0.0, 1.0] or the sum of vertical/horizontal reserved fractions ≥ 1.0 |
 | `CONFIG_UNKNOWN_CLASSIFICATION` | §7.1 | Unknown `default_classification` value |
 | `CONFIG_UNKNOWN_VIEWER_CLASS` | §7.1 | Unknown `default_viewer_class` value |
 | `CONFIG_INVALID_TIME` | §7.1 | Quiet hours `start` or `end` is not valid `HH:MM` |
@@ -1403,3 +1454,4 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 | `CONFIG_INVALID_THRESHOLD` | §7.2 | Degradation threshold is zero or negative |
 | `CONFIG_UNKNOWN_SHED_PRIORITY` | §7.2 | Unknown `shed_priority` value |
 | `CONFIG_DEGRADATION_THRESHOLD_ORDER` | §7.2 | Degradation thresholds are not monotonically non-decreasing (heavier step fires before lighter step) |
+| `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE` | §6.2 | Per-agent budget override (`max_tiles`, `max_texture_mb`, `max_update_hz`) exceeds the active profile's ceiling |
