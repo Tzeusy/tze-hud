@@ -400,7 +400,7 @@ message MutationResult {
 }
 ```
 
-Mutations map directly to RFC 0001 §4 scene operations. The `batch_id` is used for at-least-once deduplication (§5.2). `SceneId` is imported from `scene_service.proto` (RFC 0001 §7.1) — it encodes a 16-byte little-endian UUIDv7.
+Mutations map directly to RFC 0001 §4 scene operations. The `batch_id` is used for at-least-once deduplication (§5.2). `SceneId` is imported from `scene.proto` (RFC 0001 §7.1) — it encodes a 16-byte little-endian UUIDv7.
 
 **ID type convention:** Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (binary UUIDv7) because they refer to scene objects governed by the Scene Contract. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` because they are opaque or human-assigned identifiers that are not scene objects and do not participate in the scene graph identity model.
 
@@ -1150,7 +1150,7 @@ service SessionService {
 ```
 session.proto
   ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages
-  ├── imports scene_service.proto (RFC 0001)
+  ├── imports scene.proto (RFC 0001)
   │     └── defines: SceneId, MutationProto, ZoneContent, SceneEvent, InputEvent,
   │                  LeaseRequest, LeaseResponse
   │     (SceneId is used for batch_id, lease_id, and created_ids in MutationBatch/MutationResult)
