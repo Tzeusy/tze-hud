@@ -14,6 +14,7 @@ pub mod mutation;
 pub mod diff;
 pub mod validation;
 pub mod test_scenes;
+pub mod calibration;
 
 pub use clock::{Clock, SystemClock, TestClock};
 pub use types::*;
@@ -25,3 +26,4 @@ pub use test_scenes::{
     ClockMs, SceneSpec, TestSceneRegistry, InvariantViolation, SceneGraphTestExt,
     assert_layer0_invariants,
 };
+pub use calibration::{test_budget, CalibrationResult};

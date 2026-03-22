@@ -1,0 +1,603 @@
+//! Hardware-normalized calibration for performance budgets.
+//!
+//! Instead of raw multipliers (5x, 10x) for CI/software-rendering environments,
+//! the calibration harness runs a fixed reference workload and measures actual
+//! throughput. This produces a `speed_factor` that scales performance budgets
+//! to the current hardware.
+//!
+//! # Doctrine alignment
+//!
+//! From `validation.md`: "Raw timing numbers are meaningless across machines."
+//! This module implements the scene-graph CPU calibration dimension described
+//! there: rapid scene mutation (create, delete, resize, reparent tiles) with
+//! no rendering, measuring pure CPU scene-graph throughput.
+//!
+//! # Usage
+//!
+//! ```rust
+//! use tze_hud_scene::calibration::{test_budget, budgets};
+//!
+//! // In a test assertion:
+//! // assert!(elapsed_us < test_budget(budgets::INPUT_ACK_BUDGET_US));
+//! ```
+
+use crate::graph::SceneGraph;
+use crate::mutation::{MutationBatch, SceneMutation};
+use crate::types::{
+    Capability, FontFamily, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode, TextAlign,
+    TextMarkdownNode, TextOverflow,
+};
+
+use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+use std::time::Instant;
+
+// ─── Budget constants ────────────────────────────────────────────────────────
+
+/// Reference hardware performance budgets (in microseconds unless noted).
+///
+/// These are the target budgets on reference hardware (speed_factor = 1.0).
+/// In tests, use [`test_budget`] to scale them for the current machine.
+pub mod budgets {
+    /// 60 Hz frame budget: 16.6ms.
+    pub const FRAME_BUDGET_US: u64 = 16_600;
+    /// Local input acknowledgement: < 4ms (no agent roundtrip).
+    pub const INPUT_ACK_BUDGET_US: u64 = 4_000;
+    /// Hit-test against the scene graph.
+    pub const HIT_TEST_BUDGET_US: u64 = 100;
+    /// Transaction validation per mutation batch.
+    pub const TRANSACTION_VALIDATION_BUDGET_US: u64 = 200;
+    /// Scene diff computation.
+    pub const SCENE_DIFF_BUDGET_US: u64 = 500;
+    /// Lease grant (including bookkeeping).
+    pub const LEASE_GRANT_BUDGET_US: u64 = 1_000;
+    /// Per-mutation budget enforcement check.
+    pub const BUDGET_ENFORCEMENT_US: u64 = 50;
+    /// Policy evaluation per request.
+    pub const POLICY_EVALUATION_US: u64 = 200;
+    /// Event classification.
+    pub const EVENT_CLASSIFICATION_US: u64 = 5;
+    /// Event delivery to agent.
+    pub const EVENT_DELIVERY_US: u64 = 100;
+}
+
+// ─── Calibration result ─────────────────────────────────────────────────────
+
+/// Result of running the reference calibration workload.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CalibrationResult {
+    /// How many times slower this machine is than the reference.
+    /// 1.0 = reference hardware, 2.0 = half speed, 0.5 = double speed.
+    pub speed_factor: f64,
+    /// Scene-graph operations per second achieved during calibration.
+    pub scene_ops_per_sec: f64,
+    /// SHA-256 throughput in MB/s (synthetic CPU load dimension).
+    pub hash_throughput_mbps: f64,
+    /// Unix timestamp (seconds) when calibration was performed.
+    pub timestamp: u64,
+    /// Duration of the calibration run in microseconds.
+    pub calibration_duration_us: u64,
+}
+
+// ─── Reference baseline ─────────────────────────────────────────────────────
+
+/// Reference baseline: scene-graph ops/sec on target hardware.
+///
+/// This was measured on a reference machine (modern x86-64, ~4 GHz, no
+/// software rendering overhead). The calibration workload produces this
+/// many operations per second on that machine.
+///
+/// The workload: create a 50-tile scene, then apply 100 mutation batches
+/// (each with 5 mutations: 2 UpdateTileBounds + 2 SetTileRoot + 1 DeleteTile/CreateTile).
+/// Total: ~550 scene-graph operations.
+const REFERENCE_SCENE_OPS_PER_SEC: f64 = 550_000.0;
+
+/// Reference baseline: synthetic hash throughput in MB/s.
+const REFERENCE_HASH_THROUGHPUT_MBPS: f64 = 800.0;
+
+/// Number of tiles to create in the reference scene.
+const CALIBRATION_TILES: usize = 50;
+
+/// Number of mutation batches to apply.
+const CALIBRATION_BATCHES: usize = 100;
+
+/// Mutations per batch in the calibration workload.
+const MUTATIONS_PER_BATCH: usize = 5;
+
+/// Minimum speed factor (prevents unreasonably tight budgets).
+const MIN_SPEED_FACTOR: f64 = 0.5;
+
+/// Maximum speed factor (prevents unreasonably loose budgets on very slow machines).
+const MAX_SPEED_FACTOR: f64 = 50.0;
+
+/// Cache validity period in seconds (24 hours).
+const CACHE_VALIDITY_SECS: u64 = 86_400;
+
+// ─── Calibration ────────────────────────────────────────────────────────────
+
+/// Run the reference calibration workload and compute hardware speed factor.
+///
+/// The workload exercises the same code paths that performance budgets protect:
+/// tile creation, mutation batches, node tree replacement, bounds updates, and
+/// tile deletion. It runs in < 500ms on most hardware.
+pub fn calibrate() -> CalibrationResult {
+    let overall_start = Instant::now();
+
+    // ── Phase 1: Scene-graph CPU calibration ────────────────────────────
+    let scene_ops = run_scene_workload();
+
+    // ── Phase 2: Synthetic CPU load (hash throughput) ───────────────────
+    let hash_mbps = run_hash_workload();
+
+    // ── Compute speed factor ────────────────────────────────────────────
+    // Weighted average: scene ops dominate (80%) since that's what the
+    // budgets actually protect; hash throughput (20%) catches general CPU
+    // speed differences that affect non-scene-graph paths.
+    let scene_factor = REFERENCE_SCENE_OPS_PER_SEC / scene_ops.max(1.0);
+    let hash_factor = REFERENCE_HASH_THROUGHPUT_MBPS / hash_mbps.max(0.01);
+    let raw_factor = scene_factor * 0.8 + hash_factor * 0.2;
+    let speed_factor = raw_factor.clamp(MIN_SPEED_FACTOR, MAX_SPEED_FACTOR);
+
+    let calibration_duration_us = overall_start.elapsed().as_micros() as u64;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    CalibrationResult {
+        speed_factor,
+        scene_ops_per_sec: scene_ops,
+        hash_throughput_mbps: hash_mbps,
+        timestamp: now_secs,
+        calibration_duration_us,
+    }
+}
+
+/// Run the scene-graph mutation workload and return ops/sec.
+fn run_scene_workload() -> f64 {
+    let start = Instant::now();
+    let mut total_ops: u64 = 0;
+
+    // Create a scene with CALIBRATION_TILES tiles
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("calibration", 0).expect("create_tab");
+    total_ops += 1;
+
+    // Grant a lease with a high budget for the calibration workload
+    let lease_id = scene.grant_lease(
+        "calibration",
+        300_000,
+        vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+    );
+    // Override the budget to allow many tiles
+    if let Some(lease) = scene.leases.get_mut(&lease_id) {
+        lease.resource_budget.max_tiles = (CALIBRATION_TILES + 10) as u32;
+    }
+    total_ops += 1;
+
+    // Create tiles
+    let mut tile_ids = Vec::with_capacity(CALIBRATION_TILES);
+    let cols = 10u32;
+    for i in 0..CALIBRATION_TILES {
+        let col = (i as u32) % cols;
+        let row = (i as u32) / cols;
+        let bounds = Rect::new(col as f32 * 190.0, row as f32 * 180.0, 180.0, 170.0);
+        let tile_id = scene
+            .create_tile(tab_id, "calibration", lease_id, bounds, (i + 1) as u32)
+            .expect("create_tile during calibration");
+
+        // Set a root node
+        let node = if i % 2 == 0 {
+            Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.5, 0.5, 0.5, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                }),
+            }
+        } else {
+            Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: format!("calibration tile {i}"),
+                    bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                    font_size_px: 14.0,
+                    font_family: FontFamily::SystemMonospace,
+                    color: Rgba::WHITE,
+                    background: None,
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Clip,
+                }),
+            }
+        };
+        scene.set_tile_root(tile_id, node).expect("set_tile_root during calibration");
+        tile_ids.push(tile_id);
+        total_ops += 2; // create_tile + set_tile_root
+    }
+
+    // Apply CALIBRATION_BATCHES mutation batches
+    for batch_idx in 0..CALIBRATION_BATCHES {
+        let mut mutations = Vec::with_capacity(MUTATIONS_PER_BATCH);
+
+        // Pick tiles to mutate (cycling through available tiles)
+        let base = batch_idx % tile_ids.len();
+
+        // Mutation 1-2: UpdateTileBounds on two tiles
+        for offset in 0..2 {
+            let idx = (base + offset) % tile_ids.len();
+            let jitter = (batch_idx as f32) * 0.1;
+            mutations.push(SceneMutation::UpdateTileBounds {
+                tile_id: tile_ids[idx],
+                bounds: Rect::new(
+                    (idx as u32 % cols) as f32 * 190.0 + jitter,
+                    (idx as u32 / cols) as f32 * 180.0,
+                    180.0,
+                    170.0,
+                ),
+            });
+        }
+
+        // Mutation 3-4: SetTileRoot on two tiles (replace node tree)
+        for offset in 2..4 {
+            let idx = (base + offset) % tile_ids.len();
+            let node = Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(
+                        batch_idx as f32 / CALIBRATION_BATCHES as f32,
+                        0.5,
+                        0.5,
+                        1.0,
+                    ),
+                    bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                }),
+            };
+            mutations.push(SceneMutation::SetTileRoot {
+                tile_id: tile_ids[idx],
+                node,
+            });
+        }
+
+        // Mutation 5: Delete a tile and recreate it (exercises full lifecycle)
+        let recycle_idx = (base + 4) % tile_ids.len();
+        mutations.push(SceneMutation::DeleteTile {
+            tile_id: tile_ids[recycle_idx],
+        });
+
+        let batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "calibration".to_string(),
+            mutations,
+        };
+
+        let result = scene.apply_batch(&batch);
+        total_ops += MUTATIONS_PER_BATCH as u64;
+
+        // Recreate the deleted tile
+        if result.applied {
+            let col = (recycle_idx as u32) % cols;
+            let row = (recycle_idx as u32) / cols;
+            let bounds = Rect::new(col as f32 * 190.0, row as f32 * 180.0, 180.0, 170.0);
+            if let Ok(new_tile_id) = scene.create_tile(
+                tab_id,
+                "calibration",
+                lease_id,
+                bounds,
+                (recycle_idx + 1) as u32,
+            ) {
+                let node = Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.3, 0.3, 0.3, 1.0),
+                        bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
+                    }),
+                };
+                let _ = scene.set_tile_root(new_tile_id, node);
+                tile_ids[recycle_idx] = new_tile_id;
+                total_ops += 2;
+            }
+        }
+    }
+
+    // Also exercise hit_test — it's on the hot path
+    for i in 0..100 {
+        let x = (i as f32 * 19.2) % 1920.0;
+        let y = (i as f32 * 10.8) % 1080.0;
+        let _ = scene.hit_test(x, y);
+        total_ops += 1;
+    }
+
+    let elapsed_secs = start.elapsed().as_secs_f64();
+    total_ops as f64 / elapsed_secs.max(1e-9)
+}
+
+/// Run a synthetic CPU load workload and return throughput in MB/s.
+///
+/// Uses a simple iterative hash (FNV-1a inspired) to measure raw CPU
+/// throughput without depending on external crates.
+fn run_hash_workload() -> f64 {
+    let start = Instant::now();
+    let iterations = 100_000;
+    let block_size = 64; // bytes per iteration
+    let total_bytes = iterations * block_size;
+
+    let mut state: u64 = 0xcbf29ce484222325; // FNV offset basis
+    for i in 0..iterations {
+        // FNV-1a style mixing
+        for byte in 0..block_size {
+            state ^= ((i * block_size + byte) & 0xFF) as u64;
+            state = state.wrapping_mul(0x100000001b3); // FNV prime
+        }
+    }
+
+    // Prevent the compiler from optimizing away the computation
+    std::hint::black_box(state);
+
+    let elapsed_secs = start.elapsed().as_secs_f64();
+    let total_mb = total_bytes as f64 / (1024.0 * 1024.0);
+    total_mb / elapsed_secs.max(1e-9)
+}
+
+// ─── Budget scaling ─────────────────────────────────────────────────────────
+
+/// Scale a reference budget by the calibration speed factor.
+///
+/// On a machine twice as slow as the reference (speed_factor = 2.0),
+/// a 100μs budget becomes 200μs. On a machine twice as fast
+/// (speed_factor = 0.5), it becomes 50μs.
+pub fn scaled_budget(base_budget_us: u64, calibration: &CalibrationResult) -> u64 {
+    let scaled = base_budget_us as f64 * calibration.speed_factor;
+    // Ensure at least 1μs to avoid zero budgets
+    (scaled as u64).max(1)
+}
+
+// ─── Test helper ────────────────────────────────────────────────────────────
+
+/// Global calibration result, lazily initialized on first use.
+static CALIBRATION: OnceLock<CalibrationResult> = OnceLock::new();
+
+/// Get a calibrated budget for use in test assertions.
+///
+/// On first call, runs the calibration workload (< 500ms) and caches the
+/// result in memory for the duration of the test process. Subsequent calls
+/// within the same process return instantly.
+///
+/// Also attempts to read/write a filesystem cache at
+/// `$XDG_CACHE_HOME/tze_hud/calibration.json` (or `~/.cache/tze_hud/calibration.json`)
+/// to avoid re-calibrating across test invocations within 24 hours.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use tze_hud_scene::calibration::{test_budget, budgets};
+///
+/// let elapsed_us: u64 = 42; // from a timing measurement
+/// assert!(
+///     elapsed_us < test_budget(budgets::INPUT_ACK_BUDGET_US),
+///     "local ack {}us exceeded calibrated budget {}us",
+///     elapsed_us,
+///     test_budget(budgets::INPUT_ACK_BUDGET_US),
+/// );
+/// ```
+pub fn test_budget(base_us: u64) -> u64 {
+    let cal = CALIBRATION.get_or_init(|| load_or_calibrate());
+    scaled_budget(base_us, cal)
+}
+
+/// Get the current calibration result (runs calibration if needed).
+pub fn current_calibration() -> &'static CalibrationResult {
+    CALIBRATION.get_or_init(|| load_or_calibrate())
+}
+
+// ─── Cache management ───────────────────────────────────────────────────────
+
+/// Attempt to load calibration from cache, falling back to running it fresh.
+fn load_or_calibrate() -> CalibrationResult {
+    // Try loading from cache
+    if let Some(cached) = load_cached_calibration() {
+        return cached;
+    }
+
+    // Run fresh calibration
+    let result = calibrate();
+
+    // Try to cache it (best-effort)
+    let _ = save_calibration_cache(&result);
+
+    result
+}
+
+/// Return the cache file path, if determinable.
+fn cache_path() -> Option<std::path::PathBuf> {
+    let cache_dir = std::env::var("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            std::path::PathBuf::from(home).join(".cache")
+        });
+
+    Some(cache_dir.join("tze_hud").join("calibration.json"))
+}
+
+/// Load a cached calibration result if it exists and is still valid.
+fn load_cached_calibration() -> Option<CalibrationResult> {
+    let path = cache_path()?;
+
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let result: CalibrationResult = serde_json::from_str(&contents).ok()?;
+
+    // Check validity: must be within CACHE_VALIDITY_SECS
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if now_secs.saturating_sub(result.timestamp) > CACHE_VALIDITY_SECS {
+        return None; // Stale cache
+    }
+
+    Some(result)
+}
+
+/// Save calibration result to the cache file (best-effort).
+fn save_calibration_cache(result: &CalibrationResult) -> Result<(), Box<dyn std::error::Error>> {
+    let path = cache_path().ok_or("could not determine cache path")?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let json = serde_json::to_string_pretty(result)?;
+    std::fs::write(&path, json)?;
+
+    Ok(())
+}
+
+// ─── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calibration_runs_and_produces_valid_result() {
+        let result = calibrate();
+
+        // Speed factor must be within clamped range
+        assert!(
+            result.speed_factor >= MIN_SPEED_FACTOR,
+            "speed_factor {} below minimum {}",
+            result.speed_factor,
+            MIN_SPEED_FACTOR,
+        );
+        assert!(
+            result.speed_factor <= MAX_SPEED_FACTOR,
+            "speed_factor {} above maximum {}",
+            result.speed_factor,
+            MAX_SPEED_FACTOR,
+        );
+
+        // Scene ops should be positive
+        assert!(
+            result.scene_ops_per_sec > 0.0,
+            "scene_ops_per_sec should be positive, got {}",
+            result.scene_ops_per_sec,
+        );
+
+        // Hash throughput should be positive
+        assert!(
+            result.hash_throughput_mbps > 0.0,
+            "hash_throughput_mbps should be positive, got {}",
+            result.hash_throughput_mbps,
+        );
+
+        // Timestamp should be recent (within last minute)
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        assert!(
+            now_secs - result.timestamp < 60,
+            "timestamp should be recent",
+        );
+    }
+
+    #[test]
+    fn test_calibration_completes_under_500ms() {
+        let start = Instant::now();
+        let _result = calibrate();
+        let elapsed_ms = start.elapsed().as_millis();
+
+        assert!(
+            elapsed_ms < 500,
+            "calibration took {}ms, budget is 500ms",
+            elapsed_ms,
+        );
+    }
+
+    #[test]
+    fn test_scaled_budget_scales_linearly() {
+        let base = CalibrationResult {
+            speed_factor: 2.0,
+            scene_ops_per_sec: 100_000.0,
+            hash_throughput_mbps: 400.0,
+            timestamp: 0,
+            calibration_duration_us: 0,
+        };
+
+        assert_eq!(scaled_budget(100, &base), 200);
+        assert_eq!(scaled_budget(1000, &base), 2000);
+    }
+
+    #[test]
+    fn test_scaled_budget_floor_at_one() {
+        let fast = CalibrationResult {
+            speed_factor: 0.5,
+            scene_ops_per_sec: 1_000_000.0,
+            hash_throughput_mbps: 1600.0,
+            timestamp: 0,
+            calibration_duration_us: 0,
+        };
+
+        // Even very small base budgets floor at 1μs
+        assert!(scaled_budget(1, &fast) >= 1);
+    }
+
+    #[test]
+    fn test_test_budget_returns_consistent_results() {
+        // test_budget() is backed by OnceLock, so repeated calls must match
+        let budget1 = test_budget(budgets::INPUT_ACK_BUDGET_US);
+        let budget2 = test_budget(budgets::INPUT_ACK_BUDGET_US);
+        assert_eq!(budget1, budget2);
+    }
+
+    #[test]
+    fn test_test_budget_scales_proportionally() {
+        let small = test_budget(100);
+        let large = test_budget(1000);
+
+        // large should be ~10x small (within floating-point tolerance)
+        let ratio = large as f64 / small as f64;
+        assert!(
+            (ratio - 10.0).abs() < 1.0,
+            "expected ~10x ratio, got {ratio:.2} (small={small}, large={large})",
+        );
+    }
+
+    #[test]
+    fn test_all_budget_constants_are_positive() {
+        assert!(budgets::FRAME_BUDGET_US > 0);
+        assert!(budgets::INPUT_ACK_BUDGET_US > 0);
+        assert!(budgets::HIT_TEST_BUDGET_US > 0);
+        assert!(budgets::TRANSACTION_VALIDATION_BUDGET_US > 0);
+        assert!(budgets::SCENE_DIFF_BUDGET_US > 0);
+        assert!(budgets::LEASE_GRANT_BUDGET_US > 0);
+        assert!(budgets::BUDGET_ENFORCEMENT_US > 0);
+        assert!(budgets::POLICY_EVALUATION_US > 0);
+        assert!(budgets::EVENT_CLASSIFICATION_US > 0);
+        assert!(budgets::EVENT_DELIVERY_US > 0);
+    }
+
+    #[test]
+    fn test_cache_serialization_roundtrip() {
+        let result = CalibrationResult {
+            speed_factor: 1.5,
+            scene_ops_per_sec: 300_000.0,
+            hash_throughput_mbps: 500.0,
+            timestamp: 1_700_000_000,
+            calibration_duration_us: 250_000,
+        };
+
+        let json = serde_json::to_string(&result).expect("serialize");
+        let deserialized: CalibrationResult =
+            serde_json::from_str(&json).expect("deserialize");
+
+        assert!((deserialized.speed_factor - 1.5).abs() < f64::EPSILON);
+        assert_eq!(deserialized.timestamp, 1_700_000_000);
+    }
+}

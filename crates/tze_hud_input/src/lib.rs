@@ -431,6 +431,8 @@ mod tests {
 
     #[test]
     fn test_local_ack_under_4ms() {
+        use tze_hud_scene::calibration::{test_budget, budgets};
+
         let (mut scene, _, _) = setup_scene_with_hit_region();
         let mut processor = InputProcessor::new();
 
@@ -444,17 +446,20 @@ mod tests {
             &mut scene,
         );
 
-        // local_ack should be well under 4ms (4000 us) for a simple scene
+        let ack_budget = test_budget(budgets::INPUT_ACK_BUDGET_US);
+        let hit_budget = test_budget(budgets::HIT_TEST_BUDGET_US);
+
+        // local_ack should be within calibrated budget (hardware-normalized)
         assert!(
-            result.local_ack_us < 4000,
-            "local_ack_us was {}us, budget is 4000us",
-            result.local_ack_us
+            result.local_ack_us < ack_budget,
+            "local_ack_us was {}us, calibrated budget is {}us (base: {}us)",
+            result.local_ack_us, ack_budget, budgets::INPUT_ACK_BUDGET_US,
         );
-        // hit_test should be under 100us
+        // hit_test should be within calibrated budget
         assert!(
-            result.hit_test_us < 100,
-            "hit_test_us was {}us, budget is 100us",
-            result.hit_test_us
+            result.hit_test_us < hit_budget,
+            "hit_test_us was {}us, calibrated budget is {}us (base: {}us)",
+            result.hit_test_us, hit_budget, budgets::HIT_TEST_BUDGET_US,
         );
     }
 
