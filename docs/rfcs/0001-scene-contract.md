@@ -531,8 +531,9 @@ pub enum SceneMutation {
     ClearZone { zone_name: String, publish_token: ZonePublishToken },
 
     // Sync group lifecycle (RFC 0003 §7.2). Must be used before tiles can be assigned to the group.
-    CreateSyncGroup { id: SceneId, config: Option<Vec<u8>> }, // config = serialized SyncGroupConfig
-    DeleteSyncGroup { sync_group_id: SceneId },               // member tiles remain, unlinked
+    // CreateSyncGroup: group ID is embedded in config.id (SyncGroupConfig.id, RFC 0003 §7.1).
+    CreateSyncGroup { config: SyncGroupConfig }, // config.id is the group SceneId; no separate id field
+    DeleteSyncGroup { sync_group_id: SceneId },  // member tiles remain, unlinked
 }
 ```
 
@@ -1178,10 +1179,13 @@ message ClearZoneMutation {
 // Sync group creation/deletion is an explicit scene operation: a group must be created before
 // tiles can be assigned to it via UpdateTileSyncGroupMutation. Groups are deleted when the last
 // member tile is removed or via an explicit DeleteSyncGroupMutation.
-// SyncGroupConfig definition: see RFC 0003 §7.1.
+//
+// SyncGroupConfig is defined in timing.proto (RFC 0003 §7.1) and imported here.
+// The group ID is embedded in config.id (SyncGroupConfig field 1). There is no
+// separate top-level `id` field — use config.id. This is the canonical cross-RFC form;
+// RFC 0003 §7.1 CreateSyncGroupMutation matches this definition exactly.
 message CreateSyncGroupMutation {
-  SceneId id     = 1;  // Agent-chosen; must be unique in scene
-  bytes   config = 2;  // Serialized SyncGroupConfig (RFC 0003 §7.1); empty = runtime defaults
+  SyncGroupConfig config = 1;  // Full group configuration (RFC 0003 §7.1); config.id is the group SceneId
 }
 
 message DeleteSyncGroupMutation {
@@ -1894,6 +1898,14 @@ No new cross-RFC contradictions found beyond the already-tracked timestamp migra
 ---
 
 *Review round 2 complete. All MUST-FIX and SHOULD-FIX items addressed. No dimension scored below 3.*
+
+---
+
+### Cross-RFC Fix — CreateSyncGroupMutation Alignment (rig-5vq.21)
+
+**Date:** 2026-03-22
+
+**[MUST-FIX → FIXED]** `CreateSyncGroupMutation` had two fields (`SceneId id = 1; bytes config = 2;`) while RFC 0003 §7.1 defines it as one field (`SyncGroupConfig config = 1;`). The RFC 0001 form was an early draft artifact predating RFC 0003's `SyncGroupConfig` message. The forms were wire-incompatible (different field numbers/types). Fixed: RFC 0001 §7.1 proto and Rust enum variant updated to match RFC 0003 canonical form — `SyncGroupConfig config = 1` (group ID is `config.id`). No change to `DeleteSyncGroupMutation` (both RFCs already used `sync_group_id = 1`).
 
 ---
 

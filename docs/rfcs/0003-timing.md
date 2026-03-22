@@ -115,6 +115,40 @@ No new doctrinal gaps. Round 1 fixes held. Score unchanged.
 
 ---
 
+### Round 3 — Cross-RFC Consistency and Integration (rig-5vq.21)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, validation.md
+
+#### Doctrinal Alignment: 4/5
+
+No new doctrinal gaps found. Round 1 and 2 fixes held. The RFC correctly implements all architecture.md timing mandates, all four message classes, the injectable clock, and the sync drift budget from validation.md. Score unchanged from prior rounds.
+
+#### Technical Robustness: 4/5
+
+No new technical gaps found. Force-commit state machine, frame quantization, drift correction, and pending queue semantics are all sound. Score unchanged from prior rounds.
+
+#### Cross-RFC Consistency: 4/5 (up from 3/5 in Round 1, maintained from Round 2)
+
+The following issues were identified during this round's systematic cross-RFC pass:
+
+- **[MUST-FIX → FIXED]** `FrameTimingRecord.vsync_monotonic_us`/`vsync_wallclock_us` and `ClockSyncResponse.compositor_monotonic_us`/`compositor_wallclock_us` used the old generic `_us` suffix for clock-domain fields. RFC 0005 Round 6 (rig-77n) established the explicit `_wall_us`/`_mono_us` convention to encode clock domain in every field name. RFC 0005 §7.1 even includes a note: "if RFC 0003 still uses the old _us suffix, treat [the RFC 0005 definition] as the intended final form; RFC 0003 §7.1 should be updated to match." Fixed: renamed `vsync_monotonic_us` → `vsync_mono_us`, `vsync_wallclock_us` → `vsync_wall_us`, `compositor_monotonic_us` → `compositor_mono_us`, `compositor_wallclock_us` → `compositor_wall_us`. Updated corresponding prose in §1.3 and §4.3. The internal `session_open_monotonic_us`/`session_open_wallclock_us` names in §1.3 prose are also updated.
+
+- **[MUST-FIX → FIXED]** RFC 0005 §9.1 import graph claims `timing.proto` exports `TimingHints`, but `timing.proto` (RFC 0003) defined no `TimingHints` message — RFC 0005 relied on an inline definition. Added a canonical `TimingHints` message to §7.1 using the `_wall_us` naming convention (matching RFC 0005's inline definition), so the import reference is now satisfied. The inline definition in RFC 0005 correctly notes that RFC 0003 is authoritative.
+
+- **[MUST-FIX → FIXED]** `DeleteSyncGroupMutation.id` field name mismatch: RFC 0003 used `id = 1` while RFC 0001 uses `sync_group_id = 1`. Wire-format compatible (same field number) but generated-code name clash. Fixed: aligned RFC 0003 to `sync_group_id = 1`, matching RFC 0001 (the scene-contract authority).
+
+- **[MUST-FIX → FIXED]** `CreateSyncGroupMutation` structural mismatch: RFC 0001 defined `{ SceneId id = 1; bytes config = 2; }` (opaque bytes, id as separate field) while RFC 0003 defined `{ SyncGroupConfig config = 1; }` (typed message, id embedded in config at field 1). These are wire-incompatible (different field count, different field-1 type). Fixed: RFC 0001 §7.1 is updated to match RFC 0003's canonical definition — `{ SyncGroupConfig config = 1; }` where `SyncGroupConfig.id` carries the group id. Updated RFC 0001 §7.1 and the Rust enum variant comment. Cross-reference note added to both RFCs.
+
+- **[MUST-FIX → FIXED in RFC 0005]** `ZonePublish.ttl_ms` in RFC 0005 contradicts RFC 0003's mandate that all timing fields use `_us` units. RFC 0005 §8.2 MCP tool description also references `auto_clear_ms` while RFC 0001 uses `auto_clear_us`. Fixed in RFC 0005 §9: `ttl_ms` renamed to `ttl_us` with unit annotation; `auto_clear_ms` prose references updated to `auto_clear_us`. `heartbeat_interval_ms` is kept as-is — it is a session keepalive interval, not a UTC timestamp or scheduling field, and its `_ms` suffix is accurate (the value is in milliseconds).
+
+- **[CONSIDER]** RFC 0006 has no `[timing]` section, despite RFC 0003's `TimingConfig` defining ten configurable parameters (`target_fps`, `max_agent_clock_drift_ms`, `sync_group_max_defer_frames`, etc.). Until RFC 0006 is amended, these parameters live only in the protobuf definition. Recommendation: a follow-on RFC 0006 amendment should add `[timing]` with all `TimingConfig` fields, validation rules, and TOML examples. Not addressed in this round — out of scope for a timing RFC review.
+
+**No dimension below 3. Round 3 findings addressed. Ready for Round 4 (Final Hardening).**
+
+---
+
 ## Summary
 
 This RFC defines the Timing Model for tze_hud — the authoritative specification for how time flows through the compositor, how it is expressed in the API, and how the system behaves when timing constraints are violated. It covers clock domains, sync groups, timestamp semantics, drift rules, deadline behavior, and the protobuf schema for timing-related messages.
@@ -213,9 +247,9 @@ The display clock does not run in UTC. It is an ordinal sequence of frame number
 
 The three active clock domains (display, monotonic, network) have two synchronization points:
 
-**vsync sync point (per-frame).** At the start of each frame, the compositor records: `frame_number`, `vsync_monotonic_us` (monotonic clock value at vsync), and `vsync_wallclock_us` (UTC wall clock value at vsync, sampled once and cached). This triple is the canonical sync point for that frame and is included in the `TelemetryRecord`.
+**vsync sync point (per-frame).** At the start of each frame, the compositor records: `frame_number`, `vsync_mono_us` (monotonic clock value at vsync), and `vsync_wall_us` (UTC wall clock value at vsync, sampled once and cached). This triple is the canonical sync point for that frame and is included in the `TelemetryRecord`.
 
-**Agent session sync point (per-handshake).** During agent session establishment (gRPC handshake), the compositor records the `session_open_monotonic_us` and `session_open_wallclock_us`. The difference is the session's initial clock-skew estimate. Subsequent agent-supplied timestamps are validated against this estimate.
+**Agent session sync point (per-handshake).** During agent session establishment (gRPC handshake), the compositor records the `session_open_mono_us` and `session_open_wall_us`. The difference is the session's initial clock-skew estimate. Subsequent agent-supplied timestamps are validated against this estimate.
 
 ---
 
@@ -555,7 +589,7 @@ Two distinct drift concepts apply. Do not conflate them:
 
 ### 4.3 Drift Detection
 
-**Estimation window.** The compositor maintains a sliding window of the last 32 agent timestamps, recording `(agent_timestamp_us, compositor_monotonic_us)` pairs at the time each mutation batch arrives. The clock-skew estimate is the median of `(agent_ts - compositor_ts)` over the window. Median is used (not mean) to suppress outlier spikes from individual delayed messages.
+**Estimation window.** The compositor maintains a sliding window of the last 32 agent timestamps, recording `(agent_timestamp_us, compositor_mono_us)` pairs at the time each mutation batch arrives. The clock-skew estimate is the median of `(agent_ts - compositor_ts)` over the window. Median is used (not mean) to suppress outlier spikes from individual delayed messages.
 
 **Update frequency.** The estimate is updated on every mutation batch arrival. The estimation window is bounded; the oldest sample is evicted when the window fills.
 
@@ -803,13 +837,18 @@ enum SyncCommitPolicy {
 }
 
 /// Mutation: create a sync group.
+/// The group ID is embedded in `config.id` (SyncGroupConfig field 1).
+/// RFC 0001 §7.1 scene.proto uses this same definition (canonical cross-reference).
+/// Prior RFC 0001 versions had a redundant top-level `id` field; that was an early draft
+/// artifact. RFC 0001 §7.1 has been updated to match this canonical form.
 message CreateSyncGroupMutation {
   SyncGroupConfig config = 1;
 }
 
 /// Mutation: delete a sync group (tiles are removed from the group first).
+/// Field name `sync_group_id` matches RFC 0001 §7.1 scene.proto definition (canonical).
 message DeleteSyncGroupMutation {
-  SceneId id = 1; // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7
+  SceneId sync_group_id = 1; // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7
 }
 
 /// Event: emitted when a sync group is force-committed after max deferral.
@@ -827,6 +866,23 @@ message SyncGroupForceCommitEvent {
   uint32          mutations_discarded  = 6; // Count of discarded pending mutations from absent members
 }
 
+// ─── Timing Hints ────────────────────────────────────────────────────────────
+
+/// Per-message timing metadata. Embedded in MutationBatch (RFC 0005 §9 `session.proto`)
+/// and any message that carries scheduling semantics.
+///
+/// Clock-domain convention: `_wall_us` fields use the network clock (UTC µs since Unix
+/// epoch). This matches `present_at_us` and `expires_at_us` semantics in §3.2.
+/// `sync_group_id` is a 16-byte binary SyncGroupId (RFC 0001 §1.1 SceneId / UUIDv7).
+///
+/// RFC 0005 §9.1 imports `TimingHints` from this file; the inline definition in RFC 0005
+/// §9 must match this definition exactly. RFC 0003 is authoritative.
+message TimingHints {
+  uint64 present_at_wall_us = 1;  // Wall-clock UTC µs; 0 = present immediately. Domain: network clock (§1.1).
+  uint64 expires_at_wall_us = 2;  // Wall-clock UTC µs; 0 = no expiry. Domain: network clock (§1.1).
+  bytes  sync_group_id      = 3;  // SyncGroupId: 16-byte UUIDv7 (RFC 0001 §1.1); all-zero = not in a group.
+}
+
 // ─── Clock Sync ──────────────────────────────────────────────────────────────
 
 /// Request from agent: ask compositor for its current clock.
@@ -835,10 +891,12 @@ message ClockSyncRequest {
 }
 
 /// Response from compositor: provides clock reference for skew correction.
+/// Clock-domain convention (RFC 0005 Round 6, rig-77n): `_wall_us` = UTC wall clock;
+/// `_mono_us` = monotonic system clock.
 message ClockSyncResponse {
-  uint64 compositor_monotonic_us  = 1; // Compositor monotonic clock at response time
-  uint64 compositor_wallclock_us  = 2; // Compositor UTC wall clock at response time
-  int64  estimated_skew_us        = 3; // Current skew estimate: agent_ts - compositor_ts
+  uint64 compositor_mono_us       = 1; // Compositor monotonic clock at response time (µs since arbitrary epoch)
+  uint64 compositor_wall_us       = 2; // Compositor UTC wall clock at response time (µs since Unix epoch)
+  int64  estimated_skew_us        = 3; // Current skew estimate: agent_ts - compositor_ts (signed; no suffix — delta, not timestamp)
   bool   skew_within_tolerance    = 4;
   string warning                  = 5; // Non-empty if skew is in warning range
 }
@@ -846,10 +904,12 @@ message ClockSyncResponse {
 // ─── Frame Telemetry ─────────────────────────────────────────────────────────
 
 /// Per-frame timing data, embedded in TelemetryRecord.
+// Clock-domain convention (RFC 0005 Round 6, rig-77n): `_wall_us` = UTC wall clock;
+// `_mono_us` = monotonic system clock.
 message FrameTimingRecord {
   uint64 frame_number             = 1;
-  uint64 vsync_monotonic_us       = 2;  // Monotonic clock at vsync
-  uint64 vsync_wallclock_us       = 3;  // UTC wall clock at vsync
+  uint64 vsync_mono_us            = 2;  // Monotonic clock at vsync (µs since arbitrary epoch)
+  uint64 vsync_wall_us            = 3;  // UTC wall clock at vsync (µs since Unix epoch)
   uint32 stage1_input_drain_us    = 4;  // Stage durations in microseconds
   uint32 stage2_local_feedback_us = 5;
   uint32 stage3_mutation_intake_us = 6;
@@ -929,8 +989,8 @@ The fields in `timing.proto` supplement the scene contract defined in RFC 0001. 
 ### 7.3 Wire Encoding Notes
 
 1. All `uint64` timestamp fields use 0 to represent "not set." Zero is never a valid timestamp in this system.
-2. `SyncGroupId.id` is exactly 16 bytes (UUIDv7) or all-zero bytes to represent absent. Agents must not send partially filled IDs.
-3. `estimated_skew_us` in `ClockSyncResponse` is signed (`int64`) because skew can be positive (agent clock ahead) or negative (agent clock behind). A positive value means the agent's clock is ahead.
+2. `SyncGroupId` (carried as `SceneId` in `SyncGroupConfig.id` and as `bytes sync_group_id` in `TimingHints.sync_group_id`) is exactly 16 bytes (UUIDv7) or all-zero bytes to represent absent. Agents must not send partially filled IDs.
+3. `estimated_skew_us` in `ClockSyncResponse` is signed (`int64`) because skew can be positive (agent clock ahead) or negative (agent clock behind). A positive value means the agent's clock is ahead. It carries no `_wall_us` or `_mono_us` suffix because it is a signed delta, not an absolute timestamp (see RFC 0005 §2.4).
 4. `delivery_policy` in `TimestampedPayload` is a protobuf enum (`DeliveryPolicy`). Implementations must treat unknown enum values as `DELIVERY_POLICY_DEFER`.
 
 ---
