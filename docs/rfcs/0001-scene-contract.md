@@ -464,7 +464,7 @@ pub enum TransportConstraint {
 - `Content` zones render among agent tiles at a pinned z_order above all agent-controlled z_order values (subtitle, notification, pip).
 - `Chrome` zones render above all content; agents publish data but the runtime renders it (alert-banner, status-bar).
 
-Agent tiles cannot overlap or occlude Content-layer zone tiles (zone tiles are pinned at the highest z_order in the content layer). Chrome-layer zone tiles are entirely outside the z_order space of agent tiles.
+Agent tiles cannot occlude Content-layer zone tiles (as zone tiles are pinned at the highest z_order in the content layer). Chrome-layer zone tiles are entirely outside the z_order space of agent tiles.
 
 **Contention policies:**
 
@@ -566,7 +566,7 @@ Agent submits MutationBatch
 │  - Increment global scene sequence number (monotonic u64)  │
 │  - Release write lock                                       │
 │  - Emit BatchCommitted(batch_id, sequence_number)           │
-│  (WAL append for incremental diff: post-v1 only)            │
+│  (WAL append deferred to post-v1; see §4.2)                 │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
