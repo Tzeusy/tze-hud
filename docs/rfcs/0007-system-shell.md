@@ -10,6 +10,21 @@
 
 ## Review History
 
+### Privacy-Safe Capture Semantics (rig-i7f)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-i7f — Define privacy-safe capture semantics for redacted tiles
+
+#### Changes Applied
+
+- **[FEAT → ADDED]** §3.4.1: New subsection "Capture Safety: Redaction Strategy" defining two redaction strategies — overlay redaction (v1 default) and render-skip redaction (post-v1, activated when any capture surface is registered). Specifies two leakage vectors (pre-chrome-pass capture, texture export / debug paths), the activation rule (per-frame, driven by `capture_surface_active`), and the agent isolation guarantee.
+- **[PROTO → ADDED]** §7.2: Added `RedactionMode` enum (`OVERLAY`, `RENDER_SKIP`) and `redaction_mode` field (field 5) to `TileBadgeState`. Field is only meaningful when `redaction_active = true`. Always `OVERLAY` in v1.
+- **[PROTO → ADDED]** §7.1: Added `capture_surface_active` (field 7) to `ChromeState`. Set by the capture surface registry (not agents) when any capture/mirror/screenshot/recording surface is active. Always false in v1.
+- **[DEFERRED → NOTED]** §9: Explicit deferral entry for render-skip activation with a MUST constraint that the v1 implementation preserve the architectural separation of content rendering and chrome rendering.
+
+---
+
 ### Freeze Advisory Model Decision (rig-9v1)
 
 **Reviewer:** Beads worker agent
@@ -428,6 +443,29 @@ Behavior:
 - The agent is not notified that its tile is being redacted. Redaction is invisible to the publishing agent.
 - When the viewer context changes to one that permits the tile's classification, the placeholder is removed and the tile's content texture is composited normally.
 
+#### 3.4.1 Capture Safety: Redaction Strategy
+
+The default redaction approach (overlay redaction) draws the placeholder pattern over an already-rendered tile texture. This is safe for live local display — the final composited framebuffer is the only consumer, and the placeholder is always on top.
+
+However, once any capture surface is active (screen capture, OS screenshot, mirror output, remote view, recording), the pre-redaction tile texture continues to exist in GPU memory with the actual agent content. Two leakage vectors exist:
+
+1. **Pre-chrome-pass capture:** A mirror or remote view that reads the framebuffer before the chrome pass executes sees unredacted tile textures.
+2. **Texture export / debug paths:** A debug tool, OS-level screen grabber, or tile-texture export mechanism that reads individual tile textures — rather than the final composited output — sees unredacted content.
+
+To close these vectors, the compositor supports two redaction strategies, selected per-tile at render time:
+
+**Strategy 1 — Overlay redaction (v1 default):**
+The tile's content is rendered into its texture normally. The chrome pass draws the placeholder pattern over it. The tile texture in GPU memory contains actual agent content. This is the v1 default because v1 defers all capture, mirror, and remote viewing surfaces; there is no second consumer of tile textures and no pre-chrome-pass capture path.
+
+**Strategy 2 — Render-skip redaction (required when any capture surface is active):**
+The compositor skips rendering the tile's content entirely — the tile's texture slot is not populated with agent content. Instead, the placeholder pattern is rendered directly into the tile's bounds during the content layer pass (before the chrome pass). The tile texture never contains agent content. Because the placeholder is already in the framebuffer before any capture surface reads it, all capture consumers see only the placeholder regardless of when they sample the framebuffer.
+
+**Activation rule:** Render-skip redaction is activated automatically for all currently-redacted tiles whenever a capture surface is registered with the compositor. The compositor evaluates per-tile redaction strategy at the start of each frame, not at redaction-state-change time. The strategy transitions atomically with the per-frame `ChromeState` snapshot: a tile transitions from overlay to render-skip on the first frame after `capture_surface_active` becomes true, and back to overlay on the first frame after it becomes false.
+
+**V1 note:** Render-skip redaction is architecturally specified here to prevent implementation decisions that would foreclose it (e.g., merging content rendering and chrome rendering into a single monolithic pass). V1 ships overlay-only — `capture_surface_active` is always false in v1 because capture, mirroring, and remote viewing are all deferred post-v1. Implementations MUST NOT assume overlay-only is permanent; the compositor architecture MUST keep content rendering and chrome rendering as separable passes.
+
+**Agent isolation:** Neither strategy changes the agent-facing contract. Agents do not receive notification of which strategy is active. The strategy selection is invisible to agents — it is a compositor-internal detail governed by the presence of capture surfaces, which are a runtime (not agent) concern.
+
 ### 3.5 Budget Warning Badge
 
 Shown when an agent's session is approaching its resource budget limit (see security.md §Resource governance). This is a viewer-facing signal, not an agent error.
@@ -731,6 +769,12 @@ message ChromeState {
 
   // Viewer identification prompt (if active).
   optional ViewerPromptState viewer_prompt = 6;
+
+  // True when any capture surface is active (screen capture, OS screenshot, mirror,
+  // recording, remote view). When true, the compositor switches all currently-redacted
+  // tiles to REDACTION_MODE_RENDER_SKIP (§3.4.1). Always false in v1 — capture surfaces
+  // are deferred post-v1. This field is set by the capture surface registry, not by agents.
+  bool capture_surface_active = 7;
 }
 ```
 
@@ -747,6 +791,20 @@ message TileBadgeState {
   // budget_warning renders as an amber border highlight (§3.5), NOT as a stacked badge icon;
   //   it does not occupy the top-right badge position.
   // redaction_active drives a full content replacement, not a badge icon (§3.4).
+
+  // Redaction strategy for this tile (§3.4.1). Only meaningful when redaction_active = true.
+  // REDACTION_MODE_OVERLAY is always used in v1 (capture surfaces are deferred post-v1).
+  // The compositor selects REDACTION_MODE_RENDER_SKIP automatically when
+  // ChromeState.capture_surface_active is true. Agents never observe this field.
+  RedactionMode redaction_mode = 5;
+}
+
+// Redaction rendering strategy (§3.4.1).
+// V1 always uses OVERLAY; RENDER_SKIP is reserved for post-v1 capture surface support.
+enum RedactionMode {
+  REDACTION_MODE_UNSPECIFIED = 0;
+  REDACTION_MODE_OVERLAY = 1;      // Tile content rendered; placeholder drawn on top by chrome pass.
+  REDACTION_MODE_RENDER_SKIP = 2;  // Tile content not rendered; placeholder fills tile bounds in content pass.
 }
 
 enum ViewerClass {
@@ -1179,6 +1237,7 @@ Each `ShellAuditEvent` type is derived from a specific source:
 - Remote chrome state inspection via admin tooling.
 - Theme customization API (chrome renders with a fixed default theme in v1).
 - Remote audit log streaming endpoint (operators can consume the audit log via file/stdout in v1; a live streaming API is post-v1).
+- Render-skip redaction activation (§3.4.1): `capture_surface_active` is always false in v1. The capture surface registry and the `REDACTION_MODE_RENDER_SKIP` path are not implemented in v1. The architectural separation of content rendering and chrome rendering required to support render-skip MUST be preserved by the v1 implementation.
 
 ---
 
