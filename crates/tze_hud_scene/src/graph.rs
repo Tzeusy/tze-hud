@@ -119,6 +119,17 @@ impl SceneGraph {
 
     // ─── Lease operations ────────────────────────────────────────────────
 
+    /// Default maximum suspension time before a suspended lease is revoked (ms).
+    /// RFC 0008 SS3.2: default 300,000 ms (5 minutes).
+    pub const DEFAULT_MAX_SUSPENSION_MS: u64 = 300_000;
+
+    /// Default grace period for disconnected leases (ms).
+    /// RFC 0008 SS3.2: default 30,000 ms (30 seconds).
+    pub const DEFAULT_GRACE_PERIOD_MS: u64 = 30_000;
+
+    /// Budget soft-limit threshold (80% of hard limit).
+    pub const BUDGET_SOFT_LIMIT_PCT: f64 = 0.80;
+
     pub fn grant_lease(
         &mut self,
         namespace: &str,
@@ -132,10 +143,17 @@ impl SceneGraph {
             Lease {
                 id,
                 namespace: namespace.to_string(),
+                state: LeaseState::Active,
+                priority: 2, // Normal (default) per RFC 0008 SS2.1
                 granted_at_ms: now_ms,
                 ttl_ms,
+                renewal_policy: RenewalPolicy::default(),
                 capabilities,
                 resource_budget: ResourceBudget::default(),
+                suspended_at_ms: None,
+                ttl_remaining_at_suspend_ms: None,
+                disconnected_at_ms: None,
+                grace_period_ms: Self::DEFAULT_GRACE_PERIOD_MS,
             },
         );
         self.version += 1;
@@ -143,9 +161,14 @@ impl SceneGraph {
     }
 
     pub fn revoke_lease(&mut self, lease_id: SceneId) -> Result<(), ValidationError> {
-        if self.leases.remove(&lease_id).is_none() {
+        let lease = self
+            .leases
+            .get_mut(&lease_id)
+            .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
+        if lease.state.is_terminal() {
             return Err(ValidationError::LeaseNotFound { id: lease_id });
         }
+        lease.state = LeaseState::Revoked;
         // Remove all tiles associated with this lease
         let orphaned_tiles: Vec<SceneId> = self
             .tiles
@@ -165,38 +188,328 @@ impl SceneGraph {
             .leases
             .get_mut(&lease_id)
             .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
+        if !lease.is_active() {
+            return Err(ValidationError::LeaseNotFound { id: lease_id });
+        }
         lease.granted_at_ms = self.clock.now_millis();
         lease.ttl_ms = new_ttl_ms;
         self.version += 1;
         Ok(())
     }
 
-    /// Expire all leases past their TTL. Returns IDs of expired leases.
-    pub fn expire_leases(&mut self) -> Vec<SceneId> {
-        let now = self.clock.now_millis();
-        let expired: Vec<SceneId> = self
+    /// Suspend a lease (safe mode entry). Blocks mutations, preserves state.
+    pub fn suspend_lease(&mut self, lease_id: &SceneId, now_ms: u64) -> Result<(), LeaseError> {
+        let lease = self
+            .leases
+            .get_mut(lease_id)
+            .ok_or(LeaseError::LeaseNotFound(*lease_id))?;
+        lease.suspend(now_ms)?;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Resume a suspended lease (safe mode exit). Re-enables mutations.
+    pub fn resume_lease(&mut self, lease_id: &SceneId, now_ms: u64) -> Result<(), LeaseError> {
+        let lease = self
+            .leases
+            .get_mut(lease_id)
+            .ok_or(LeaseError::LeaseNotFound(*lease_id))?;
+        lease.resume(now_ms)?;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Mark a lease as disconnected (agent disconnect, enters grace period).
+    pub fn disconnect_lease(&mut self, lease_id: &SceneId, now_ms: u64) -> Result<(), LeaseError> {
+        let lease = self
+            .leases
+            .get_mut(lease_id)
+            .ok_or(LeaseError::LeaseNotFound(*lease_id))?;
+        lease.disconnect(now_ms)?;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Reconnect a disconnected lease (agent reconnect within grace period).
+    pub fn reconnect_lease(&mut self, lease_id: &SceneId, now_ms: u64) -> Result<(), LeaseError> {
+        let lease = self
+            .leases
+            .get_mut(lease_id)
+            .ok_or(LeaseError::LeaseNotFound(*lease_id))?;
+        lease.reconnect(now_ms)?;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Suspend all active leases (safe mode entry).
+    pub fn suspend_all_leases(&mut self, now_ms: u64) {
+        let active_ids: Vec<SceneId> = self
             .leases
             .values()
-            .filter(|l| l.is_expired(now))
+            .filter(|l| l.state == LeaseState::Active)
             .map(|l| l.id)
             .collect();
-        for id in &expired {
-            // Remove tiles owned by this lease
-            let orphaned_tiles: Vec<SceneId> = self
+        for id in active_ids {
+            if let Some(lease) = self.leases.get_mut(&id) {
+                let _ = lease.suspend(now_ms);
+            }
+        }
+        self.version += 1;
+    }
+
+    /// Resume all suspended leases (safe mode exit).
+    pub fn resume_all_leases(&mut self, now_ms: u64) {
+        let suspended_ids: Vec<SceneId> = self
+            .leases
+            .values()
+            .filter(|l| l.state == LeaseState::Suspended)
+            .map(|l| l.id)
+            .collect();
+        for id in suspended_ids {
+            if let Some(lease) = self.leases.get_mut(&id) {
+                let _ = lease.resume(now_ms);
+            }
+        }
+        self.version += 1;
+    }
+
+    /// Expire all leases past their TTL, handle grace period expiry for
+    /// disconnected leases, and handle suspension timeout.
+    ///
+    /// Returns detailed information about each expired/cleaned-up lease.
+    pub fn expire_leases(&mut self) -> Vec<LeaseExpiry> {
+        self.expire_leases_with_max_suspend(Self::DEFAULT_MAX_SUSPENSION_MS)
+    }
+
+    /// Like `expire_leases` but with a configurable max suspension time.
+    pub fn expire_leases_with_max_suspend(&mut self, max_suspend_ms: u64) -> Vec<LeaseExpiry> {
+        let now = self.clock.now_millis();
+        let mut expiries = Vec::new();
+
+        // Collect leases that need cleanup
+        let to_process: Vec<(SceneId, LeaseState)> = self
+            .leases
+            .values()
+            .filter_map(|l| {
+                // TTL-expired active/disconnected leases
+                if (l.state == LeaseState::Active || l.state == LeaseState::Disconnected)
+                    && l.is_expired(now)
+                {
+                    return Some((l.id, LeaseState::Expired));
+                }
+                // Grace-period-expired disconnected leases
+                if l.state == LeaseState::Disconnected && l.check_grace_expired(now) {
+                    return Some((l.id, LeaseState::Expired));
+                }
+                // Suspension-timeout leases
+                if l.state == LeaseState::Suspended
+                    && l.check_suspension_expired(now, max_suspend_ms)
+                {
+                    return Some((l.id, LeaseState::Revoked));
+                }
+                None
+            })
+            .collect();
+
+        for (id, terminal_state) in to_process {
+            // Collect tile IDs that will be removed
+            let removed_tiles: Vec<SceneId> = self
                 .tiles
                 .values()
-                .filter(|t| t.lease_id == *id)
+                .filter(|t| t.lease_id == id)
                 .map(|t| t.id)
                 .collect();
-            for tile_id in orphaned_tiles {
-                self.remove_tile_and_nodes(tile_id);
+            for tile_id in &removed_tiles {
+                self.remove_tile_and_nodes(*tile_id);
             }
-            self.leases.remove(id);
+            if let Some(lease) = self.leases.get_mut(&id) {
+                lease.state = terminal_state;
+            }
+            expiries.push(LeaseExpiry {
+                lease_id: id,
+                terminal_state,
+                removed_tiles,
+            });
         }
-        if !expired.is_empty() {
+
+        if !expiries.is_empty() {
             self.version += 1;
         }
-        expired
+        expiries
+    }
+
+    // ─── Budget enforcement ─────────────────────────────────────────────
+
+    /// Get current resource usage for a lease.
+    pub fn lease_resource_usage(&self, lease_id: &SceneId) -> ResourceUsage {
+        let mut usage = ResourceUsage::default();
+        for tile in self.tiles.values().filter(|t| t.lease_id == *lease_id) {
+            usage.tiles += 1;
+            // Count nodes in this tile
+            let node_count = self.count_nodes_in_tile(tile);
+            usage.nodes_per_tile.insert(tile.id, node_count);
+            // Sum texture bytes for static image nodes in this tile
+            if let Some(root_id) = tile.root_node {
+                usage.texture_bytes += self.sum_texture_bytes(root_id);
+            }
+        }
+        usage
+    }
+
+    /// Check if a mutation batch would exceed the lease's resource budget.
+    ///
+    /// Returns Ok(()) if within budget, or Err with the specific violation.
+    pub fn check_budget(
+        &self,
+        lease_id: &SceneId,
+        batch: &crate::mutation::MutationBatch,
+    ) -> Result<(), BudgetError> {
+        let lease = match self.leases.get(lease_id) {
+            Some(l) => l,
+            None => return Ok(()), // No lease = no budget to check
+        };
+        let budget = &lease.resource_budget;
+        let usage = self.lease_resource_usage(lease_id);
+
+        // Count new tiles in batch
+        let new_tiles: u32 = batch
+            .mutations
+            .iter()
+            .filter(|m| matches!(m, crate::mutation::SceneMutation::CreateTile { .. }))
+            .count() as u32;
+
+        if new_tiles > 0 {
+            let projected = usage.tiles as u64 + new_tiles as u64;
+            if projected > budget.max_tiles as u64 {
+                return Err(BudgetError {
+                    resource: "tiles".to_string(),
+                    current: usage.tiles as u64,
+                    limit: budget.max_tiles as u64,
+                    requested: new_tiles as u64,
+                });
+            }
+        }
+
+        // Count new nodes per tile (AddNode / SetTileRoot)
+        for mutation in &batch.mutations {
+            match mutation {
+                crate::mutation::SceneMutation::AddNode { tile_id, node, .. } => {
+                    let current = usage.nodes_per_tile.get(tile_id).copied().unwrap_or(0);
+                    let new_count = Self::count_node_tree(node);
+                    let projected = current as u64 + new_count as u64;
+                    if projected > budget.max_nodes_per_tile as u64 {
+                        return Err(BudgetError {
+                            resource: "nodes_per_tile".to_string(),
+                            current: current as u64,
+                            limit: budget.max_nodes_per_tile as u64,
+                            requested: new_count as u64,
+                        });
+                    }
+                }
+                crate::mutation::SceneMutation::SetTileRoot { tile_id, node } => {
+                    // SetTileRoot replaces the entire tree, so count new tree size
+                    let new_count = Self::count_node_tree(node);
+                    if new_count as u64 > budget.max_nodes_per_tile as u64 {
+                        return Err(BudgetError {
+                            resource: "nodes_per_tile".to_string(),
+                            current: 0,
+                            limit: budget.max_nodes_per_tile as u64,
+                            requested: new_count as u64,
+                        });
+                    }
+                    // Check texture bytes in new tree
+                    let new_tex = Self::count_texture_bytes_in_node(node);
+                    let other_tex = usage.texture_bytes
+                        - self
+                            .tiles
+                            .get(tile_id)
+                            .and_then(|t| t.root_node)
+                            .map(|r| self.sum_texture_bytes(r))
+                            .unwrap_or(0);
+                    if other_tex + new_tex > budget.max_texture_bytes {
+                        return Err(BudgetError {
+                            resource: "texture_bytes".to_string(),
+                            current: other_tex,
+                            limit: budget.max_texture_bytes,
+                            requested: new_tex,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a lease is at the soft budget warning threshold (80%).
+    pub fn is_lease_budget_warning(&self, lease_id: &SceneId) -> bool {
+        let lease = match self.leases.get(lease_id) {
+            Some(l) => l,
+            None => return false,
+        };
+        let usage = self.lease_resource_usage(lease_id);
+        let budget = &lease.resource_budget;
+
+        let tile_pct = usage.tiles as f64 / budget.max_tiles.max(1) as f64;
+        let tex_pct = usage.texture_bytes as f64 / budget.max_texture_bytes.max(1) as f64;
+
+        tile_pct >= Self::BUDGET_SOFT_LIMIT_PCT || tex_pct >= Self::BUDGET_SOFT_LIMIT_PCT
+    }
+
+    /// Count nodes in a tile by walking the root node tree.
+    fn count_nodes_in_tile(&self, tile: &Tile) -> u32 {
+        match tile.root_node {
+            Some(root_id) => self.count_node_subtree(root_id),
+            None => 0,
+        }
+    }
+
+    fn count_node_subtree(&self, node_id: SceneId) -> u32 {
+        match self.nodes.get(&node_id) {
+            Some(node) => {
+                1 + node
+                    .children
+                    .iter()
+                    .map(|c| self.count_node_subtree(*c))
+                    .sum::<u32>()
+            }
+            None => 0,
+        }
+    }
+
+    fn sum_texture_bytes(&self, node_id: SceneId) -> u64 {
+        match self.nodes.get(&node_id) {
+            Some(node) => {
+                let self_bytes = match &node.data {
+                    NodeData::StaticImage(img) => img.image_data.len() as u64,
+                    _ => 0,
+                };
+                self_bytes
+                    + node
+                        .children
+                        .iter()
+                        .map(|c| self.sum_texture_bytes(*c))
+                        .sum::<u64>()
+            }
+            None => 0,
+        }
+    }
+
+    /// Count nodes in a node tree (not yet inserted into the graph).
+    fn count_node_tree(_node: &Node) -> u32 {
+        // For the current node model, children are SceneIds referencing
+        // other nodes. In a fresh batch submission, they would be separate
+        // AddNode mutations. So we count just this node.
+        1
+    }
+
+    /// Count texture bytes in a node (not yet inserted into the graph).
+    fn count_texture_bytes_in_node(node: &Node) -> u64 {
+        match &node.data {
+            NodeData::StaticImage(img) => img.image_data.len() as u64,
+            _ => 0,
+        }
     }
 
     // ─── Tile operations ─────────────────────────────────────────────────
@@ -989,7 +1302,8 @@ mod tests {
         assert_eq!(scene.tile_count(), 2);
         scene.revoke_lease(lease_id).unwrap();
         assert_eq!(scene.tile_count(), 0);
-        assert!(scene.leases.is_empty());
+        // Revoked leases remain in the map with terminal state
+        assert_eq!(scene.leases[&lease_id].state, LeaseState::Revoked);
     }
 
     #[test]
@@ -1785,5 +2099,619 @@ mod tests {
         // Old image node should be gone.
         assert!(!scene.nodes.contains_key(&node1_id));
         assert_eq!(scene.node_count(), 1);
+    }
+
+    // ─── Lease State Machine Tests (RFC 0008) ───────────────────────────
+
+    #[test]
+    fn test_lease_state_defaults_to_active() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
+        assert!(scene.leases[&lease_id].is_active());
+        assert!(scene.leases[&lease_id].is_mutations_allowed());
+    }
+
+    #[test]
+    fn test_lease_suspend_from_active() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        clock.advance(10_000); // 10s elapsed
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+        let lease = &scene.leases[&lease_id];
+        assert_eq!(lease.state, LeaseState::Suspended);
+        assert!(!lease.is_mutations_allowed());
+        assert!(lease.suspended_at_ms.is_some());
+        assert!(lease.ttl_remaining_at_suspend_ms.is_some());
+        // 60_000 - 10_000 = 50_000 remaining at suspend
+        assert_eq!(lease.ttl_remaining_at_suspend_ms, Some(50_000));
+    }
+
+    #[test]
+    fn test_lease_suspend_invalid_from_non_active() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+
+        // Suspend once (valid)
+        scene.suspend_lease(&lease_id, 1000).unwrap();
+
+        // Suspend again from Suspended state (invalid)
+        let err = scene.suspend_lease(&lease_id, 2000).unwrap_err();
+        assert!(matches!(err, LeaseError::InvalidTransition {
+            from: LeaseState::Suspended,
+            to: LeaseState::Suspended,
+        }));
+    }
+
+    #[test]
+    fn test_lease_resume_from_suspended() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+
+        clock.advance(10_000);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+        clock.advance(5_000); // 5s in suspended state
+        scene.resume_lease(&lease_id, clock.now_millis()).unwrap();
+
+        let lease = &scene.leases[&lease_id];
+        assert_eq!(lease.state, LeaseState::Active);
+        assert!(lease.is_mutations_allowed());
+        assert!(lease.suspended_at_ms.is_none());
+        assert!(lease.ttl_remaining_at_suspend_ms.is_none());
+        // After resume: TTL should reflect the remaining time from suspension
+        // remaining was 50_000 at suspend; now granted_at_ms is set to resume time
+        // so remaining_ms(now) should be ~50_000
+        assert_eq!(lease.remaining_ms(clock.now_millis()), 50_000);
+    }
+
+    #[test]
+    fn test_lease_resume_invalid_from_active() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+
+        let err = scene.resume_lease(&lease_id, 1000).unwrap_err();
+        assert!(matches!(err, LeaseError::InvalidTransition {
+            from: LeaseState::Active,
+            to: LeaseState::Active,
+        }));
+    }
+
+    #[test]
+    fn test_lease_disconnect_from_active() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+
+        clock.advance(5_000);
+        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+
+        let lease = &scene.leases[&lease_id];
+        assert_eq!(lease.state, LeaseState::Disconnected);
+        assert!(!lease.is_mutations_allowed());
+        assert_eq!(lease.disconnected_at_ms, Some(6_000)); // 1000 start + 5000
+    }
+
+    #[test]
+    fn test_lease_disconnect_invalid_from_suspended() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        scene.suspend_lease(&lease_id, 1000).unwrap();
+
+        let err = scene.disconnect_lease(&lease_id, 2000).unwrap_err();
+        assert!(matches!(err, LeaseError::InvalidTransition {
+            from: LeaseState::Suspended,
+            to: LeaseState::Disconnected,
+        }));
+    }
+
+    #[test]
+    fn test_lease_reconnect_within_grace() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+
+        clock.advance(5_000);
+        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Reconnect within the 30s grace period
+        clock.advance(10_000);
+        scene.reconnect_lease(&lease_id, clock.now_millis()).unwrap();
+
+        let lease = &scene.leases[&lease_id];
+        assert_eq!(lease.state, LeaseState::Active);
+        assert!(lease.is_mutations_allowed());
+        assert!(lease.disconnected_at_ms.is_none());
+    }
+
+    #[test]
+    fn test_lease_reconnect_after_grace_fails() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 120_000, vec![]);
+
+        clock.advance(5_000);
+        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Advance past the 30s grace period
+        clock.advance(31_000);
+        let err = scene.reconnect_lease(&lease_id, clock.now_millis()).unwrap_err();
+        assert!(matches!(err, LeaseError::InvalidTransition { .. }));
+    }
+
+    #[test]
+    fn test_lease_revoke_from_any_non_terminal() {
+        let (mut scene, _clock) = scene_with_test_clock();
+
+        // Revoke from Active
+        let l1 = scene.grant_lease("t1", 60_000, vec![]);
+        scene.leases.get_mut(&l1).unwrap().revoke().unwrap();
+        assert_eq!(scene.leases[&l1].state, LeaseState::Revoked);
+
+        // Revoke from Suspended
+        let l2 = scene.grant_lease("t2", 60_000, vec![]);
+        scene.leases.get_mut(&l2).unwrap().suspend(1000).unwrap();
+        scene.leases.get_mut(&l2).unwrap().revoke().unwrap();
+        assert_eq!(scene.leases[&l2].state, LeaseState::Revoked);
+
+        // Revoke from Disconnected
+        let l3 = scene.grant_lease("t3", 60_000, vec![]);
+        scene.leases.get_mut(&l3).unwrap().disconnect(1000).unwrap();
+        scene.leases.get_mut(&l3).unwrap().revoke().unwrap();
+        assert_eq!(scene.leases[&l3].state, LeaseState::Revoked);
+    }
+
+    #[test]
+    fn test_lease_revoke_from_terminal_fails() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        scene.leases.get_mut(&lease_id).unwrap().revoke().unwrap();
+
+        // Already revoked — should fail
+        let err = scene.leases.get_mut(&lease_id).unwrap().revoke().unwrap_err();
+        assert!(matches!(err, LeaseError::InvalidTransition {
+            from: LeaseState::Revoked,
+            to: LeaseState::Revoked,
+        }));
+    }
+
+    #[test]
+    fn test_lease_is_expired_not_when_suspended() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 1_000, vec![]);
+
+        // Suspend at t=500ms (halfway)
+        clock.advance(500);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Advance well past TTL
+        clock.advance(10_000);
+        assert!(!scene.leases[&lease_id].is_expired(clock.now_millis()));
+    }
+
+    // ─── Budget Enforcement Tests ───────────────────────────────────────
+
+    #[test]
+    fn test_budget_tile_count_within_limit() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+
+        // Default budget: max_tiles = 8. Create 1 tile — should be fine.
+        let batch = crate::mutation::MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "test".to_string(),
+            mutations: vec![crate::mutation::SceneMutation::CreateTile {
+                tab_id,
+                namespace: "test".to_string(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                z_order: 1,
+            }],
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied);
+        assert!(!result.budget_warning);
+    }
+
+    #[test]
+    fn test_budget_tile_count_exceeds_limit() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+
+        // Set budget to max 2 tiles
+        scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 2;
+
+        // Create 2 tiles (OK)
+        for i in 0..2 {
+            let batch = crate::mutation::MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "test".to_string(),
+                mutations: vec![crate::mutation::SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: "test".to_string(),
+                    lease_id,
+                    bounds: Rect::new(i as f32 * 120.0, 0.0, 100.0, 100.0),
+                    z_order: i + 1,
+                }],
+            };
+            let result = scene.apply_batch(&batch);
+            assert!(result.applied);
+        }
+
+        // Create a 3rd tile — should be rejected
+        let batch = crate::mutation::MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "test".to_string(),
+            mutations: vec![crate::mutation::SceneMutation::CreateTile {
+                tab_id,
+                namespace: "test".to_string(),
+                lease_id,
+                bounds: Rect::new(240.0, 0.0, 100.0, 100.0),
+                z_order: 3,
+            }],
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(!result.applied);
+        assert!(result.error.is_some());
+        assert_eq!(scene.tile_count(), 2);
+    }
+
+    #[test]
+    fn test_budget_soft_limit_warning() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+
+        // Set budget to max 5 tiles; soft limit at 80% = 4 tiles
+        scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 5;
+
+        // Create 4 tiles (should trigger soft limit warning on the 4th)
+        for i in 0..4 {
+            let batch = crate::mutation::MutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "test".to_string(),
+                mutations: vec![crate::mutation::SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: "test".to_string(),
+                    lease_id,
+                    bounds: Rect::new(i as f32 * 120.0, 0.0, 100.0, 100.0),
+                    z_order: i + 1,
+                }],
+            };
+            scene.apply_batch(&batch);
+        }
+
+        assert!(scene.is_lease_budget_warning(&lease_id));
+
+        // 5th tile should succeed (within hard limit) but with budget_warning
+        let batch = crate::mutation::MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "test".to_string(),
+            mutations: vec![crate::mutation::SceneMutation::CreateTile {
+                tab_id,
+                namespace: "test".to_string(),
+                lease_id,
+                bounds: Rect::new(480.0, 0.0, 100.0, 100.0),
+                z_order: 5,
+            }],
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied);
+        assert!(result.budget_warning);
+    }
+
+    // ─── Suspension Tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_suspend_blocks_mutations() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+
+        // Suspend the lease
+        clock.advance(1_000);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Try to create a tile — should fail
+        let batch = crate::mutation::MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "test".to_string(),
+            mutations: vec![crate::mutation::SceneMutation::CreateTile {
+                tab_id,
+                namespace: "test".to_string(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                z_order: 1,
+            }],
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(!result.applied);
+        assert_eq!(scene.tile_count(), 0);
+    }
+
+    #[test]
+    fn test_resume_allows_mutations_again() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+
+        // Suspend then resume
+        clock.advance(1_000);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+        clock.advance(2_000);
+        scene.resume_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Create a tile — should succeed
+        let batch = crate::mutation::MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "test".to_string(),
+            mutations: vec![crate::mutation::SceneMutation::CreateTile {
+                tab_id,
+                namespace: "test".to_string(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                z_order: 1,
+            }],
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied);
+        assert_eq!(scene.tile_count(), 1);
+    }
+
+    #[test]
+    fn test_ttl_paused_during_suspension() {
+        let (mut scene, clock) = scene_with_test_clock();
+        // Grant a 10-second lease
+        let lease_id = scene.grant_lease("test", 10_000, vec![]);
+
+        // At t=5s, suspend
+        clock.advance(5_000);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+        let remaining_at_suspend = scene.leases[&lease_id].ttl_remaining_at_suspend_ms;
+        assert_eq!(remaining_at_suspend, Some(5_000));
+
+        // Advance 20 seconds while suspended
+        clock.advance(20_000);
+        // Should NOT be expired (TTL paused)
+        assert!(!scene.leases[&lease_id].is_expired(clock.now_millis()));
+        // Remaining should still be 5_000
+        assert_eq!(scene.leases[&lease_id].remaining_ms(clock.now_millis()), 5_000);
+
+        // Resume
+        scene.resume_lease(&lease_id, clock.now_millis()).unwrap();
+        // Now remaining should be 5_000 from the resume point
+        assert_eq!(scene.leases[&lease_id].remaining_ms(clock.now_millis()), 5_000);
+
+        // Advance 4 seconds — not yet expired
+        clock.advance(4_000);
+        assert!(!scene.leases[&lease_id].is_expired(clock.now_millis()));
+        assert_eq!(scene.leases[&lease_id].remaining_ms(clock.now_millis()), 1_000);
+
+        // Advance 2 more seconds — now expired
+        clock.advance(2_000);
+        assert!(scene.leases[&lease_id].is_expired(clock.now_millis()));
+    }
+
+    // ─── Grace Period Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_grace_period_disconnect_and_reconnect() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 120_000, vec![Capability::CreateTile]);
+        scene
+            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        // Disconnect
+        clock.advance(5_000);
+        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        assert_eq!(scene.tile_count(), 1); // Tiles preserved
+
+        // Reconnect within grace (30s)
+        clock.advance(15_000);
+        scene.reconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
+        assert_eq!(scene.tile_count(), 1); // Tiles still there
+    }
+
+    #[test]
+    fn test_grace_period_expiry_cleans_up() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 120_000, vec![Capability::CreateTile]);
+        scene
+            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        // Disconnect
+        clock.advance(5_000);
+        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Grace period expires (30s)
+        clock.advance(31_000);
+        let expiries = scene.expire_leases();
+        assert_eq!(expiries.len(), 1);
+        assert_eq!(expiries[0].terminal_state, LeaseState::Expired);
+        assert_eq!(scene.tile_count(), 0); // Tiles cleaned up
+    }
+
+    #[test]
+    fn test_grace_period_check() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 120_000, vec![]);
+
+        clock.advance(5_000);
+        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Not expired yet
+        clock.advance(29_000);
+        assert!(!scene.leases[&lease_id].check_grace_expired(clock.now_millis()));
+
+        // Expired
+        clock.advance(2_000);
+        assert!(scene.leases[&lease_id].check_grace_expired(clock.now_millis()));
+    }
+
+    // ─── Safe Mode Tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_suspend_all_leases() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let l1 = scene.grant_lease("agent1", 60_000, vec![]);
+        let l2 = scene.grant_lease("agent2", 60_000, vec![]);
+        let l3 = scene.grant_lease("agent3", 60_000, vec![]);
+
+        clock.advance(5_000);
+        scene.suspend_all_leases(clock.now_millis());
+
+        assert_eq!(scene.leases[&l1].state, LeaseState::Suspended);
+        assert_eq!(scene.leases[&l2].state, LeaseState::Suspended);
+        assert_eq!(scene.leases[&l3].state, LeaseState::Suspended);
+    }
+
+    #[test]
+    fn test_resume_all_leases() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let l1 = scene.grant_lease("agent1", 60_000, vec![]);
+        let l2 = scene.grant_lease("agent2", 60_000, vec![]);
+
+        clock.advance(5_000);
+        scene.suspend_all_leases(clock.now_millis());
+
+        clock.advance(2_000);
+        scene.resume_all_leases(clock.now_millis());
+
+        assert_eq!(scene.leases[&l1].state, LeaseState::Active);
+        assert_eq!(scene.leases[&l2].state, LeaseState::Active);
+    }
+
+    #[test]
+    fn test_suspend_all_skips_non_active() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let l1 = scene.grant_lease("agent1", 60_000, vec![]);
+        let l2 = scene.grant_lease("agent2", 60_000, vec![]);
+
+        // Disconnect l2 first
+        clock.advance(1_000);
+        scene.disconnect_lease(&l2, clock.now_millis()).unwrap();
+
+        // Suspend all — only l1 should be suspended
+        clock.advance(1_000);
+        scene.suspend_all_leases(clock.now_millis());
+
+        assert_eq!(scene.leases[&l1].state, LeaseState::Suspended);
+        assert_eq!(scene.leases[&l2].state, LeaseState::Disconnected); // Unchanged
+    }
+
+    #[test]
+    fn test_resume_all_only_resumes_suspended() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let l1 = scene.grant_lease("agent1", 60_000, vec![]);
+        let l2 = scene.grant_lease("agent2", 60_000, vec![]);
+
+        // Disconnect l2
+        clock.advance(1_000);
+        scene.disconnect_lease(&l2, clock.now_millis()).unwrap();
+
+        // Suspend only l1
+        clock.advance(1_000);
+        scene.suspend_lease(&l1, clock.now_millis()).unwrap();
+
+        // Resume all — only l1 should be resumed
+        clock.advance(1_000);
+        scene.resume_all_leases(clock.now_millis());
+
+        assert_eq!(scene.leases[&l1].state, LeaseState::Active);
+        assert_eq!(scene.leases[&l2].state, LeaseState::Disconnected); // Unchanged
+    }
+
+    #[test]
+    fn test_suspension_timeout_revokes() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 600_000, vec![Capability::CreateTile]);
+        scene
+            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        clock.advance(1_000);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Use a short max_suspend for testing
+        let max_suspend = 5_000;
+        clock.advance(6_000);
+
+        let expiries = scene.expire_leases_with_max_suspend(max_suspend);
+        assert_eq!(expiries.len(), 1);
+        assert_eq!(expiries[0].terminal_state, LeaseState::Revoked);
+        assert_eq!(scene.leases[&lease_id].state, LeaseState::Revoked);
+        assert_eq!(scene.tile_count(), 0);
+    }
+
+    // ─── Renewal Policy Tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_renewal_policy_defaults_to_manual() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        assert_eq!(scene.leases[&lease_id].renewal_policy, RenewalPolicy::Manual);
+    }
+
+    #[test]
+    fn test_lease_priority_defaults_to_normal() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        assert_eq!(scene.leases[&lease_id].priority, 2);
+    }
+
+    // ─── Resource Usage Tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_lease_resource_usage() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
+
+        scene
+            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+        scene
+            .create_tile(tab_id, "test", lease_id, Rect::new(200.0, 0.0, 100.0, 100.0), 2)
+            .unwrap();
+
+        let usage = scene.lease_resource_usage(&lease_id);
+        assert_eq!(usage.tiles, 2);
+    }
+
+    #[test]
+    fn test_renew_lease_fails_when_not_active() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+
+        // Suspend lease
+        clock.advance(1_000);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Renew should fail (lease not active)
+        let err = scene.renew_lease(lease_id, 120_000);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_lease_expiry_returns_lease_expiry_struct() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 500, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        clock.advance(501);
+        let expiries = scene.expire_leases();
+        assert_eq!(expiries.len(), 1);
+        assert_eq!(expiries[0].lease_id, lease_id);
+        assert_eq!(expiries[0].terminal_state, LeaseState::Expired);
+        assert!(expiries[0].removed_tiles.contains(&tile_id));
     }
 }

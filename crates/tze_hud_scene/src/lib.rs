@@ -18,7 +18,7 @@ pub mod test_scenes;
 pub use clock::{Clock, SystemClock, TestClock};
 pub use types::*;
 pub use graph::{SceneGraph, SyncGroupCommitDecision};
-pub use mutation::{MutationBatch, SceneMutation};
+pub use mutation::{MutationBatch, MutationResult, SceneMutation};
 pub use diff::{SceneDiff, DiffEntry};
 pub use validation::ValidationError;
 pub use test_scenes::{

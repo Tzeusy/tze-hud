@@ -92,11 +92,75 @@ pub struct MutationResult {
     pub applied: bool,
     pub created_ids: Vec<SceneId>,
     pub error: Option<ValidationError>,
+    /// True if the lease is at the soft budget warning threshold (80%).
+    /// The batch was still applied, but the caller should notify the agent.
+    pub budget_warning: bool,
 }
 
 impl SceneGraph {
     /// Apply a mutation batch atomically. All-or-nothing.
+    ///
+    /// Before applying mutations, checks:
+    /// 1. That all referenced leases are in Active state (mutations allowed).
+    /// 2. That the batch would not exceed any lease's resource budget.
+    ///
+    /// If budget soft limit (80%) is reached, the batch is still applied
+    /// but the `budget_warning` flag is set on the result.
     pub fn apply_batch(&mut self, batch: &MutationBatch) -> MutationResult {
+        // Check lease state for mutations that reference a lease
+        for mutation in &batch.mutations {
+            if let Some(lease_id) = Self::lease_id_for_mutation(mutation) {
+                if let Some(lease) = self.leases.get(&lease_id) {
+                    if !lease.is_mutations_allowed() {
+                        return MutationResult {
+                            batch_id: batch.batch_id,
+                            applied: false,
+                            created_ids: vec![],
+                            error: Some(ValidationError::InvalidField {
+                                field: "lease_state".into(),
+                                reason: format!(
+                                    "lease {} is in {:?} state; mutations require Active state",
+                                    lease_id, lease.state,
+                                ),
+                            }),
+                            budget_warning: false,
+                        };
+                    }
+                }
+            }
+        }
+
+        // Check budget for lease-bound mutations.
+        // Find the lease_id from the batch (from CreateTile mutations or tile lookups).
+        let lease_ids: Vec<SceneId> = batch
+            .mutations
+            .iter()
+            .filter_map(|m| Self::lease_id_for_mutation(m))
+            .collect();
+
+        // Deduplicate
+        let mut unique_lease_ids: Vec<SceneId> = lease_ids.clone();
+        unique_lease_ids.sort();
+        unique_lease_ids.dedup();
+
+        let mut budget_warning = false;
+        for lid in &unique_lease_ids {
+            if let Err(budget_err) = self.check_budget(lid, batch) {
+                return MutationResult {
+                    batch_id: batch.batch_id,
+                    applied: false,
+                    created_ids: vec![],
+                    error: Some(ValidationError::BudgetExceeded {
+                        resource: format!("{}", budget_err),
+                    }),
+                    budget_warning: false,
+                };
+            }
+            if self.is_lease_budget_warning(lid) {
+                budget_warning = true;
+            }
+        }
+
         // Clone the scene for rollback on failure
         let snapshot = self.clone();
         let mut created_ids = Vec::new();
@@ -112,8 +176,16 @@ impl SceneGraph {
                         applied: false,
                         created_ids: vec![],
                         error: Some(e),
+                        budget_warning: false,
                     };
                 }
+            }
+        }
+
+        // Re-check budget warning after application (usage may have changed)
+        for lid in &unique_lease_ids {
+            if self.is_lease_budget_warning(lid) {
+                budget_warning = true;
             }
         }
 
@@ -122,6 +194,18 @@ impl SceneGraph {
             applied: true,
             created_ids,
             error: None,
+            budget_warning,
+        }
+    }
+
+    /// Extract the lease_id referenced by a mutation, if applicable.
+    fn lease_id_for_mutation(mutation: &SceneMutation) -> Option<SceneId> {
+        match mutation {
+            SceneMutation::CreateTile { lease_id, .. } => Some(*lease_id),
+            // For tile-modifying mutations, the lease is on the tile itself;
+            // we would need the tile to look it up. Budget enforcement for
+            // these is handled via the tile's lease_id at check_budget time.
+            _ => None,
         }
     }
 

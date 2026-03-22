@@ -515,7 +515,8 @@ impl SceneGraphTestExt for SceneGraph {
         ttl_ms: u64,
         capabilities: Vec<Capability>,
     ) -> SceneId {
-        use crate::types::{Lease, ResourceBudget};
+        use crate::types::{Lease, LeaseState, RenewalPolicy, ResourceBudget};
+        use crate::graph::SceneGraph;
 
         let id = SceneId::new();
         self.leases.insert(
@@ -523,10 +524,17 @@ impl SceneGraphTestExt for SceneGraph {
             Lease {
                 id,
                 namespace: namespace.to_string(),
+                state: LeaseState::Active,
+                priority: 2,
                 granted_at_ms,
                 ttl_ms,
+                renewal_policy: RenewalPolicy::default(),
                 capabilities,
                 resource_budget: ResourceBudget::default(),
+                suspended_at_ms: None,
+                ttl_remaining_at_suspend_ms: None,
+                disconnected_at_ms: None,
+                grace_period_ms: SceneGraph::DEFAULT_GRACE_PERIOD_MS,
             },
         );
         self.version += 1;

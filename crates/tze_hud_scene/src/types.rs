@@ -331,16 +331,151 @@ impl HitRegionLocalState {
     }
 }
 
-// ─── Lease (minimal for vertical slice) ─────────────────────────────────────
+// ─── Lease state machine (RFC 0008) ──────────────────────────────────────────
+
+/// Lease lifecycle state per RFC 0008 SS3.
+///
+/// Terminal states: `Revoked`, `Expired`, `Released`.
+/// Non-terminal: `Requested`, `Active`, `Suspended`, `Disconnected`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LeaseState {
+    /// Lease requested but not yet granted.
+    Requested,
+    /// Lease is active — mutations allowed.
+    Active,
+    /// Lease suspended (safe mode, freeze) — mutations blocked, state preserved.
+    Suspended,
+    /// Agent disconnected — in grace period before cleanup.
+    Disconnected,
+    /// Lease revoked — state destroyed.
+    Revoked,
+    /// Lease expired (TTL exceeded) — state destroyed.
+    Expired,
+    /// Agent voluntarily released lease — state destroyed.
+    Released,
+}
+
+impl LeaseState {
+    /// Whether this state is terminal (no further transitions possible).
+    pub fn is_terminal(self) -> bool {
+        matches!(self, LeaseState::Revoked | LeaseState::Expired | LeaseState::Released)
+    }
+}
+
+/// Renewal policy per RFC 0008 SS1.4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenewalPolicy {
+    /// Agent must explicitly renew before TTL expires.
+    Manual,
+    /// Runtime auto-renews at 75% TTL elapsed.
+    AutoRenew,
+    /// No renewal; expires at TTL.
+    OneShot,
+}
+
+impl Default for RenewalPolicy {
+    fn default() -> Self {
+        RenewalPolicy::Manual
+    }
+}
+
+/// Error type for lease state transitions.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LeaseError {
+    /// Attempted an invalid state transition.
+    InvalidTransition { from: LeaseState, to: LeaseState },
+    /// Lease not found in the scene graph.
+    LeaseNotFound(SceneId),
+    /// Lease exists but is not in Active state.
+    LeaseNotActive(SceneId),
+    /// Mutation would exceed the lease's resource budget.
+    BudgetExceeded(BudgetError),
+}
+
+impl std::fmt::Display for LeaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LeaseError::InvalidTransition { from, to } => {
+                write!(f, "invalid lease transition: {:?} -> {:?}", from, to)
+            }
+            LeaseError::LeaseNotFound(id) => write!(f, "lease not found: {}", id),
+            LeaseError::LeaseNotActive(id) => write!(f, "lease not active: {}", id),
+            LeaseError::BudgetExceeded(e) => write!(f, "budget exceeded: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for LeaseError {}
+
+/// Error returned when a mutation batch would exceed budget limits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BudgetError {
+    /// Which resource dimension was exceeded (e.g. "tiles", "texture_bytes").
+    pub resource: String,
+    /// Current usage before the mutation.
+    pub current: u64,
+    /// The configured limit.
+    pub limit: u64,
+    /// How much the mutation batch would add.
+    pub requested: u64,
+}
+
+impl std::fmt::Display for BudgetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: current={}, limit={}, requested={}",
+            self.resource, self.current, self.limit, self.requested
+        )
+    }
+}
+
+/// Current resource usage for a lease.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ResourceUsage {
+    /// Number of tiles owned by this lease.
+    pub tiles: u32,
+    /// Total texture bytes across all tiles.
+    pub texture_bytes: u64,
+    /// Node count per tile (tile_id -> count).
+    pub nodes_per_tile: HashMap<SceneId, u32>,
+}
+
+/// Information about an expired or cleaned-up lease.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LeaseExpiry {
+    /// The lease ID that was expired/cleaned up.
+    pub lease_id: SceneId,
+    /// The terminal state it entered.
+    pub terminal_state: LeaseState,
+    /// Tile IDs that were removed as a result.
+    pub removed_tiles: Vec<SceneId>,
+}
+
+// ─── Lease ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Lease {
     pub id: SceneId,
     pub namespace: String,
+    pub state: LeaseState,
+    /// Priority: 0=system/chrome, 1-3=agent, 4+=background (RFC 0008 SS2).
+    pub priority: u32,
     pub granted_at_ms: u64,
     pub ttl_ms: u64,
+    pub renewal_policy: RenewalPolicy,
     pub capabilities: Vec<Capability>,
     pub resource_budget: ResourceBudget,
+    // Suspension tracking
+    /// Timestamp when the lease was suspended (ms since epoch).
+    pub suspended_at_ms: Option<u64>,
+    /// TTL remaining at the moment of suspension (ms).
+    pub ttl_remaining_at_suspend_ms: Option<u64>,
+    // Disconnect tracking
+    /// Timestamp when the agent disconnected (ms since epoch).
+    pub disconnected_at_ms: Option<u64>,
+    /// Grace period before a disconnected lease is cleaned up (ms). Default 30_000.
+    pub grace_period_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,8 +490,22 @@ pub enum Capability {
 }
 
 impl Lease {
+    /// Check if the lease has expired based on effective TTL elapsed.
+    ///
+    /// Accounts for suspension: time spent in Suspended state does not count
+    /// toward TTL consumption (RFC 0008 SS4.3).
     pub fn is_expired(&self, now_ms: u64) -> bool {
-        now_ms > self.granted_at_ms + self.ttl_ms
+        match self.state {
+            // Terminal states are already past expiry semantics.
+            LeaseState::Revoked | LeaseState::Expired | LeaseState::Released => true,
+            // When suspended, TTL clock is paused — not expired.
+            LeaseState::Suspended => false,
+            // When disconnected, TTL continues from disconnected_at_ms.
+            // (Grace period handles cleanup separately.)
+            LeaseState::Disconnected | LeaseState::Active | LeaseState::Requested => {
+                self.effective_remaining_ms(now_ms) == 0
+            }
+        }
     }
 
     pub fn has_capability(&self, cap: Capability) -> bool {
@@ -364,9 +513,144 @@ impl Lease {
     }
 
     /// Remaining TTL in milliseconds (0 if expired).
+    ///
+    /// If the lease was previously suspended, the suspension duration is
+    /// deducted so that the effective TTL is preserved across suspend/resume.
     pub fn remaining_ms(&self, now_ms: u64) -> u64 {
-        let expires = self.granted_at_ms + self.ttl_ms;
-        expires.saturating_sub(now_ms)
+        self.effective_remaining_ms(now_ms)
+    }
+
+    /// Effective remaining TTL accounting for suspension pauses.
+    fn effective_remaining_ms(&self, now_ms: u64) -> u64 {
+        match self.state {
+            LeaseState::Suspended => {
+                // TTL frozen at the value saved when suspension started.
+                self.ttl_remaining_at_suspend_ms.unwrap_or(0)
+            }
+            _ => {
+                let expires = self.granted_at_ms + self.ttl_ms;
+                expires.saturating_sub(now_ms)
+            }
+        }
+    }
+
+    // ─── State transition methods ────────────────────────────────────────
+
+    /// Transition Active -> Suspended (safe mode entry).
+    ///
+    /// Pauses the TTL clock and records suspension timestamp.
+    pub fn suspend(&mut self, now_ms: u64) -> Result<(), LeaseError> {
+        if self.state != LeaseState::Active {
+            return Err(LeaseError::InvalidTransition {
+                from: self.state,
+                to: LeaseState::Suspended,
+            });
+        }
+        let remaining = self.effective_remaining_ms(now_ms);
+        self.suspended_at_ms = Some(now_ms);
+        self.ttl_remaining_at_suspend_ms = Some(remaining);
+        self.state = LeaseState::Suspended;
+        Ok(())
+    }
+
+    /// Transition Suspended -> Active (safe mode exit).
+    ///
+    /// Resumes the TTL clock. The `granted_at_ms` and `ttl_ms` are adjusted
+    /// so that the remaining TTL equals what was saved at suspension time.
+    pub fn resume(&mut self, now_ms: u64) -> Result<(), LeaseError> {
+        if self.state != LeaseState::Suspended {
+            return Err(LeaseError::InvalidTransition {
+                from: self.state,
+                to: LeaseState::Active,
+            });
+        }
+        // Restore TTL: set granted_at_ms so that granted_at_ms + ttl_ms
+        // equals now_ms + remaining.
+        if let Some(remaining) = self.ttl_remaining_at_suspend_ms {
+            self.granted_at_ms = now_ms;
+            self.ttl_ms = remaining;
+        }
+        self.suspended_at_ms = None;
+        self.ttl_remaining_at_suspend_ms = None;
+        self.state = LeaseState::Active;
+        Ok(())
+    }
+
+    /// Transition Active -> Disconnected (agent disconnect).
+    ///
+    /// Starts the grace period. TTL continues running.
+    pub fn disconnect(&mut self, now_ms: u64) -> Result<(), LeaseError> {
+        if self.state != LeaseState::Active {
+            return Err(LeaseError::InvalidTransition {
+                from: self.state,
+                to: LeaseState::Disconnected,
+            });
+        }
+        self.disconnected_at_ms = Some(now_ms);
+        self.state = LeaseState::Disconnected;
+        Ok(())
+    }
+
+    /// Transition Disconnected -> Active (agent reconnect within grace period).
+    pub fn reconnect(&mut self, now_ms: u64) -> Result<(), LeaseError> {
+        if self.state != LeaseState::Disconnected {
+            return Err(LeaseError::InvalidTransition {
+                from: self.state,
+                to: LeaseState::Active,
+            });
+        }
+        // Check that grace period has not expired.
+        if self.check_grace_expired(now_ms) {
+            return Err(LeaseError::InvalidTransition {
+                from: self.state,
+                to: LeaseState::Active,
+            });
+        }
+        self.disconnected_at_ms = None;
+        self.state = LeaseState::Active;
+        Ok(())
+    }
+
+    /// Transition any non-terminal state -> Revoked.
+    pub fn revoke(&mut self) -> Result<(), LeaseError> {
+        if self.state.is_terminal() {
+            return Err(LeaseError::InvalidTransition {
+                from: self.state,
+                to: LeaseState::Revoked,
+            });
+        }
+        self.state = LeaseState::Revoked;
+        Ok(())
+    }
+
+    /// Whether the lease is currently in Active state.
+    pub fn is_active(&self) -> bool {
+        self.state == LeaseState::Active
+    }
+
+    /// Whether mutations are allowed. Only Active state permits mutations.
+    pub fn is_mutations_allowed(&self) -> bool {
+        self.state == LeaseState::Active
+    }
+
+    /// Check if the grace period has expired for a disconnected lease.
+    pub fn check_grace_expired(&self, now_ms: u64) -> bool {
+        match (self.state, self.disconnected_at_ms) {
+            (LeaseState::Disconnected, Some(disc_at)) => {
+                now_ms >= disc_at + self.grace_period_ms
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if a suspended lease has exceeded the maximum suspension time.
+    pub fn check_suspension_expired(&self, now_ms: u64, max_suspend_ms: u64) -> bool {
+        match (self.state, self.suspended_at_ms) {
+            (LeaseState::Suspended, Some(susp_at)) => {
+                now_ms >= susp_at + max_suspend_ms
+            }
+            _ => false,
+        }
     }
 }
 
