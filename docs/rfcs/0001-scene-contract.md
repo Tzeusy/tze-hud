@@ -626,6 +626,15 @@ Agent submits MutationBatch
 
 #### Lease Check
 
+Tab mutations (`CreateTab`, `DeleteTab`, `RenameTab`, `ReorderTab`, `SwitchActiveTab`) require the `manage_tabs` capability (canonical name per RFC 0006 §6.3). Tab operations are not gated by a lease — they are capability-gated only, because tabs are not agent-owned resources.
+
+```
+tab mutation (CreateTab / DeleteTab / RenameTab / ReorderTab / SwitchActiveTab)
+  → agent holds manage_tabs capability          (canonical name per RFC 0006 §6.3; earlier drafts used MANAGE_TABS — that identifier is non-canonical)
+```
+
+Tile mutations require a valid lease:
+
 ```
 mutation targets tile T
   → T.namespace == session.agent_namespace      (agent owns tile; namespace from authenticated session, not batch payload)
@@ -633,7 +642,11 @@ mutation targets tile T
   → agent holds modify_own_tiles capability     (canonical name per RFC 0006 §6.3; earlier drafts used WRITE_SCENE — that identifier is non-canonical)
 ```
 
+`CreateTile` also requires the `create_tiles` capability in addition to `modify_own_tiles`.
+
 Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `zone_publish:<zone_name>` capability (RFC 0006 §6.3).
+
+Sync group mutations (`CreateSyncGroup`, `DeleteSyncGroup`) require the `manage_sync_groups` capability. A sync group is a scene-level object not tied to a specific tile, so it is capability-gated rather than lease-gated.
 
 > **Capability name note:** The canonical capability naming scheme uses `snake_case` for all identifiers (RFC 0006 §6.3). `CREATE_TILE`, `WRITE_SCENE`, and `MANAGE_TABS` are earlier informal names used in some RFC diagrams and examples. The authoritative names are `create_tiles`, `modify_own_tiles`, and `manage_tabs` respectively.
 
@@ -767,7 +780,12 @@ pub struct ZonePublishRecord {
     pub content: ZoneContent,
     pub published_at_us: u64,               // UTC microseconds since Unix epoch (RFC 0003 §3.1)
     pub expires_at_us: Option<u64>,          // Publication TTL (μs, UTC); None = governed by zone auto_clear_us
-    pub publish_key: Option<String>, // Key for MergeByKey zones; None for other contention policies
+    pub publish_key: Option<String>,         // Key for MergeByKey zones; None for other contention policies
+    // Per-publication privacy classification (presence.md §"Zone anatomy"; RFC 0009 §2.3).
+    // Preserved in snapshot so that reconnecting agents and the privacy gate can reconstruct
+    // the effective classification of each active zone publication after reconnect.
+    // None = publication inherited the zone's default classification.
+    pub content_classification: Option<ContentClassification>,
 }
 ```
 
@@ -1411,12 +1429,17 @@ message ZoneDefinitionProto {
 }
 
 message ZonePublishRecordProto {
-  string      zone_name           = 1;
-  string      publisher_namespace = 2;
-  ZoneContent content             = 3;
-  uint64      published_at_us     = 4;   // UTC μs since Unix epoch (RFC 0003 §3.1)
-  uint64      expires_at_us       = 5;   // UTC μs; 0 = governed by zone auto_clear_us (RFC 0003 §3.1)
-  string      publish_key         = 6;   // Non-empty only for MergeByKey zones
+  string                  zone_name              = 1;
+  string                  publisher_namespace    = 2;
+  ZoneContent             content                = 3;
+  uint64                  published_at_us        = 4;   // UTC μs since Unix epoch (RFC 0003 §3.1)
+  uint64                  expires_at_us          = 5;   // UTC μs; 0 = governed by zone auto_clear_us (RFC 0003 §3.1)
+  string                  publish_key            = 6;   // Non-empty only for MergeByKey zones
+  ContentClassification   content_classification = 7;   // UNSPECIFIED = publication inherited zone default
+  // Field 7 added in Round 4: propagates per-publication privacy classification from
+  // PublishToZoneMutation into the snapshot record so that reconnecting agents and the
+  // privacy gate can reconstruct effective classification state after reconnect.
+  // Reference: presence.md §"Zone anatomy"; RFC 0009 §2.3.
 }
 
 message ZoneRegistrySnapshot {
@@ -1774,13 +1797,13 @@ Hardware reference: single core at 3GHz equivalent (normalized; see validation.m
 
 2. **WAL retention policy (post-v1):** 1000 batches or 60s, whichever is smaller, is a starting point for the deferred incremental diff extension. In v1, the WAL is used only for sequence ordering within the commit pipeline; agents reconnect via full snapshot and the WAL does not need to be queried externally. Revisit when incremental diff is implemented.
 
-3. **Snapshot checksum coverage:** Should `SceneSnapshot.checksum` cover the full serialization including zone state, or only the scene graph (tabs/tiles/nodes)? Recommendation: full serialization for integrity; exclude volatile fields like `timestamp_us`.
+3. **Snapshot checksum coverage:** ~~Recommendation~~ **Normative decision (Round 4):** `SceneSnapshot.checksum` covers the full serialization — tabs, tiles, nodes, zone registry (zone definitions + active publishes) — in that canonical order, excluding only `timestamp_us` and `checksum` itself. The canonical serialization uses protobuf binary encoding with fields in tag-ascending order. This is normative: implementations that compute the checksum differently will produce divergent values and fail reconnect validation. The checksum is computed over the same proto binary that would be transmitted on the wire.
 
 4. **`#[no_std]` compatibility:** The `SceneId` (UUIDv7) constructor requires a clock source not available in no_std. Options: (a) accept that scene graph construction requires std, (b) inject a clock trait, (c) make `new()` require a timestamp argument. Recommendation: (b) inject a clock trait for test/embedded flexibility.
 
 5. **Tile bounds reference frame:** The spec says tile bounds are in "logical pixels relative to the tab's display area." The compositor must define what "logical pixel" means across display profiles (HiDPI, scaling). The Compositor RFC must define the coordinate space and DPI contract.
 
-6. **Zone publish token wire format:** The `ZonePublishToken` is currently an opaque bytes field. The Session/Protocol RFC must define how tokens are issued during auth and their expiry semantics.
+6. **Zone publish token wire format:** The `ZonePublishToken` is an opaque bytes field intentionally. The Session/Protocol RFC (RFC 0005) defines how tokens are issued during session auth and their expiry semantics. **Normative expectation for RFC 0001 (Round 4):** A `ZonePublishToken` is issued by the runtime as part of capability grants at session authentication time (RFC 0006 §6.3 grants `zone_publish:<zone_name>`, which causes the runtime to issue a token for that zone). The token is bound to the session: it is invalidated when the session ends or when the `zone_publish:<zone_name>` capability is revoked mid-session. Tokens are not transferable between sessions. RFC 0005 must define the token issuance protocol; this RFC provides the contract: the token embeds a session-scoped, zone-scoped authorization proof that the runtime can verify without a round-trip. The exact encoding (HMAC, JWT, or opaque blob) is an RFC 0005 implementation decision.
 
 ---
 
@@ -2014,5 +2037,133 @@ Several cross-RFC consistency issues were found and fixed in this round:
 *Review round 3 complete. All MUST-FIX and SHOULD-FIX items addressed. No dimension scored below 3.*
 
 ---
+
+### Round 4 — Final Hardening and Quantitative Verification (2026-03-22)
+
+**Reviewer:** rig-5vq.14 agent worker
+**Focus:** Final shipping readiness — quantitative verification, wire format completeness, state machine exhaustiveness, zero-ambiguity for implementors.
+**Doctrine read:** presence.md, architecture.md, security.md, validation.md, v1.md
+**RFCs consulted:** 0001 (this), 0003, 0005, 0006, 0008, 0009
+
+---
+
+#### Doctrinal Alignment: 5/5
+
+All prior round fixes held. The RFC faithfully implements the full doctrine mandate:
+
+- Scene hierarchy (Tab → Tile → Node) correctly models presence.md §"Tabs and tiles"
+- Zone anatomy (type → instance → publication → occupancy) is fully represented in §2.5
+- `content_classification` on zone publications (presence.md §"Zone anatomy", presence.md §"Publication") is present in `PublishToZoneMutation` (added R3) and now also in `ZonePublishRecord` (added R4 — see MUST-FIX R4-1 below)
+- Hit-test priority (Chrome → Content tiles by z_order descending → Passthrough) matches architecture.md §"Compositing model" and §"Policy arbitration" Step 1
+- Four message classes are represented by `LatencyClass` and `UpdatePolicy` enums
+- Transaction atomicity (no partial apply) matches presence.md §"Scene mutations are atomic"
+- `DR-V1` through `DR-V4` are explicitly satisfied (§ "Design Requirements Satisfied")
+- Durable vs. ephemeral state split matches architecture.md §"Resource lifecycle" and failure.md
+- Screen sovereignty enforced: `agent_namespace` is server-derived, not client-supplied (`reserved 2` in `MutationBatch`)
+
+No doctrinal gaps found after R4 fixes are applied.
+
+---
+
+#### Technical Robustness: 5/5
+
+**Quantitative requirements: all present and traceable**
+
+| Metric | Stated Requirement | Source |
+|--------|-------------------|--------|
+| Snapshot serialization | < 1ms for 100 tiles / 1000 nodes | §10, §4.1 |
+| Hit-test | < 100μs for 50 tiles | §5.1, §10 |
+| Validation | < 200μs per 10-mutation batch | §3.2, §10 |
+| Commit (lock→lock) | < 50μs for 10 mutations | §3.2 |
+| Full pipeline p99 | < 300μs for 10 mutations | §3.2 |
+| Memory per tile | < 1KB structural overhead | §8 |
+| Max scene | 256 tabs × 1024 tiles × 64 nodes | §2.1, §8 |
+| Max markdown | 65535 UTF-8 bytes | §2.4, §8 |
+
+All budgets have stated hardware reference ("single core at 3GHz equivalent, normalized per validation.md calibration"). Budget basis is defensible: validation of 10 mutations at 200μs is consistent with O(n) checks on small integer structures with no IO.
+
+**Performance budget arithmetic check:**
+- 10 mutations × 200μs = 2ms per second per agent for validation only, well within a 16.6ms frame budget shared across multiple agents
+- 50μs commit lock per batch × 60fps × up to N simultaneous agents: at 3 agents each submitting 1 batch/frame, commit latency is 150μs/frame — still < 1% of the 16.6ms budget
+
+**Wire format completeness:**
+- All enums have UNSPECIFIED = 0 default (proto3 best practice)
+- Zero-value conventions are documented for SceneId (absent = zero bytes), timestamps (0 = not set), and sync_group (0 = no group)
+- `agent_namespace` is `reserved 2` with a security comment
+- `BatchRejected` has typed structured error messages for all four error classes (ParseError, ValidationError, RateLimitExceeded, BatchSizeExceeded)
+- `ValidationErrorCode` enum covers all 16 failure modes across all mutation types
+
+**State machine completeness:**
+- HitRegionLocalState (hovered, pressed, focused) is defined but transitions are fully specified in RFC 0004 §7.1 — cross-reference is explicit
+- Lease state machine (ACTIVE → SUSPENDED → REVOKED) is fully specified in RFC 0008 §3 — cross-reference in §3.3 is present
+- Tab lifecycle: no explicit state machine needed — tabs are either present or absent; `display_order` uniqueness invariant is specified
+- Tile lifecycle: created via lease, deleted on lease revoke or explicit mutation; lease validity check in §3.3 closes the loop
+
+**Edge case coverage (verified against §3.3 and §2.1–2.4):**
+- Node cycle detection: invariant check §3.3.5 (post-batch invariant simulation step 3)
+- Duplicate ID collision: invariants §3.3.5 steps 1–2
+- Empty tile (no root node): allowed by design, `root_node = None`
+- Max nodes exceeded: `VALIDATION_ERROR_NODE_COUNT_EXCEEDED`
+- Bounds out of display area: `VALIDATION_ERROR_BOUNDS_OUT_OF_RANGE`
+- Wrong media type for zone: `VALIDATION_ERROR_ZONE_TYPE_MISMATCH`
+- Expired lease: `VALIDATION_ERROR_LEASE_EXPIRED` vs `VALIDATION_ERROR_LEASE_NOT_FOUND` (both exist)
+
+**Issues found and fixed in this round:**
+
+1. **`ZonePublishRecord` / `ZonePublishRecordProto` missing `content_classification` (MUST-FIX R4-1 → Fixed):** Added `content_classification` field to `PublishToZoneMutation` in R3, but the same field was not added to `ZonePublishRecord` (Rust snapshot struct §4.1) or `ZonePublishRecordProto` (proto §7.1). The snapshot is the reconnect mechanism — an agent reconnecting via full snapshot must reconstruct the active privacy classification of each zone publication. Without this field in the record, the privacy gate (RFC 0009 §2.3) cannot correctly enforce redaction on publication content that was classified at publish time. **Fixed: added `content_classification: Option<ContentClassification>` to the Rust struct and `content_classification: ContentClassification = 7` to the proto.**
+
+2. **Tab mutation validation rules absent from §3.3 (MUST-FIX R4-2 → Fixed):** The Validation Rules section (§3.3) specifies the Lease Check for tile mutations and zone publications, but the five tab mutations (`CreateTab`, `DeleteTab`, `RenameTab`, `ReorderTab`, `SwitchActiveTab`) had no stated capability requirement. The capability `manage_tabs` was mentioned only in a capability-name note (not a validation rule). An implementor cannot build the tab validation path from this RFC alone — they would have to guess which capability is required, or worse, allow unauthenticated tab mutation. Similarly, `CreateSyncGroup`/`DeleteSyncGroup` had no validation rule. **Fixed: added explicit capability check rules for tab mutations (`manage_tabs`) and sync group mutations (`manage_sync_groups`) with a note that these are capability-gated rather than lease-gated because tabs and sync groups are not agent-owned via the lease system.**
+
+3. **Open Question §11.3 snapshot checksum coverage resolved to normative decision (SHOULD-FIX R4-3 → Fixed):** For a final-round RFC, leaving checksum coverage as an open question means two implementations will compute different checksums for the same snapshot, causing false reconnect validation failures. **Fixed: promoted to normative decision — checksum covers full serialization (tabs + tiles + nodes + zone registry) excluding `timestamp_us` and `checksum` itself, using protobuf binary encoding with fields in tag-ascending order.**
+
+4. **Open Question §11.6 `ZonePublishToken` expiry semantics promoted to normative expectation (SHOULD-FIX R4-4 → Fixed):** The token was "opaque bytes" with no stated behavior contract, creating a circular dependency between RFC 0001 (which defines the token field) and RFC 0005 (which was supposed to define issuance). **Fixed: added a normative expectation — token is session-scoped and zone-scoped, invalidated on session end or capability revocation, not transferable between sessions. RFC 0005 defines the encoding; this RFC defines the semantic contract.**
+
+---
+
+#### Cross-RFC Consistency: 5/5
+
+All cross-RFC inconsistencies found in rounds 1–3 have been resolved. No new contradictions found.
+
+**Verified cross-RFC alignments:**
+
+- `ContentClassification` enum values match RFC 0009 §2.3 viewer access matrix (Public, Household, Private, Sensitive)
+- `ValidationErrorCode` covers all error conditions that RFC 0005 §5.x (error response model) expects to surface
+- `LatencyClass` and `UpdatePolicy` canonical pairings in §2.3 are consistent with RFC 0002 (Runtime Kernel) frame pipeline stages
+- `SyncGroupConfig` in `CreateSyncGroupMutation` defers to RFC 0003 §7.1 — cross-reference is explicit
+- Capability names in §3.3 and §9.4 use canonical `snake_case` (RFC 0006 §6.3): `create_tiles`, `modify_own_tiles`, `manage_tabs`, `zone_publish:<name>`
+- `manage_sync_groups` capability (new in R4) should be added to RFC 0006 §6.3 canonical capability table — noted as a discovered item for RFC 0006
+
+---
+
+#### Actionable Findings Summary — Round 4
+
+| # | Severity | Location | Finding | Status |
+|---|----------|----------|---------|--------|
+| R4-1 | MUST-FIX | §4.1 `ZonePublishRecord`, §7.1 `ZonePublishRecordProto` | `content_classification` absent from snapshot record; added to mutation in R3 but not propagated to snapshot/diff; privacy gate cannot reconstruct classification on reconnect | Fixed |
+| R4-2 | MUST-FIX | §3.3 Validation Rules | Tab mutations (`CreateTab` etc.) and sync group mutations (`CreateSyncGroup` etc.) have no stated capability requirement; implementors cannot build the validation path | Fixed |
+| R4-3 | SHOULD-FIX | §11.3 Open Questions | Snapshot checksum coverage was an open question; for final-round RFC this must be normative; ambiguity causes divergent checksum implementations | Fixed |
+| R4-4 | SHOULD-FIX | §11.6 Open Questions | `ZonePublishToken` expiry semantics deferred entirely to RFC 0005; creates circular dependency; needs normative expectation in this RFC | Fixed |
+
+---
+
+#### Discovered Issue for RFC 0006
+
+The capability `manage_sync_groups` was introduced in the R4 validation rules fix for sync group mutations. RFC 0006 §6.3 canonical capability table does not list this capability. RFC 0006 should add `manage_sync_groups` to its capability table for consistency. This is out of scope for this RFC but should be tracked.
+
+---
+
+#### Final Scores
+
+| Dimension | Score | Rationale |
+|-----------|-------|-----------|
+| Doctrinal Alignment | **5/5** | All doctrine commitments faithfully implemented. All prior gaps fixed and held. R4 fix for `content_classification` in snapshot closes the last doctrinal gap. |
+| Technical Robustness | **5/5** | All quantitative requirements present with hardware reference. Wire format complete and unambiguous. State machines exhaustive or explicitly cross-referenced. All edge cases covered. Tab/sync-group validation rules now complete. |
+| Cross-RFC Consistency | **5/5** | No remaining contradictions. All shared types align. R4 normative decisions on checksum and token semantics close the last open questions that would have caused inter-RFC divergence. |
+
+All dimensions ≥ 4. All dimensions ≥ 3. Round 4 (final) is complete. The Scene Contract RFC is ready for implementation.
+
+---
+
+*Review round 4 complete. All MUST-FIX and SHOULD-FIX items addressed. All dimensions scored ≥ 4. RFC is implementation-ready.*
 
 *End of RFC 0001.*
