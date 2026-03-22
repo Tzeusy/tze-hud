@@ -513,7 +513,7 @@ Critical triggers bypass the warning/throttle ladder and go directly to revocati
 1. Move agent's `BudgetState` to `Revoked`.
 2. Enqueue a `LeaseRevocationEvent` for all of the agent's active leases.
 3. Mark all agent-owned tiles as orphaned (rendered frozen at last state, disconnection badge applied).
-4. Start the reconnection grace period (default: 30s; see RFC 0005 §1.4). Revoked sessions do **not** get a grace period by default — the grace period applies only to unexpected disconnects, not policy-driven revocations. For revocations, leases are immediately cleared after the grace period in RFC 0005 §4.2 is bypassed.
+4. Unlike unexpected disconnects, which trigger a reconnection grace period for session resumption (see RFC 0005 §1.4), policy-driven revocations do not grant a grace period. Leases are marked for immediate reclamation; the session resumption window in RFC 0005 §4.2 is bypassed.
 5. After a configurable post-revocation delay (default: 100ms, to allow `LeaseRevocationEvent` fan-out), free all agent-owned textures and node data. Reference counts drop to zero; resources are released.
 6. Remove `AgentResourceState` from the compositor's per-agent table.
 
