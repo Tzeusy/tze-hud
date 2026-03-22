@@ -441,7 +441,7 @@ quiet_hours_end = "08:00"
 
 #### Merge Semantics
 
-Section-level merge (not deep field-level merge) to keep semantics predictable:
+Per-section merge with simple, type-specific rules (no recursive deep merge beyond what is described below):
 
 | Field type | Merge rule |
 |------------|-----------|
@@ -457,10 +457,10 @@ Array-replace semantics are intentional: append-merge of ordered structures (tab
 The post-v1 load sequence extends §11.2 with an `includes` resolution step:
 
 1. CLI / environment variable resolution to config file path
-2. File read (base overlay file)
+2. File read (overlay file)
 3. TOML parse of overlay file
-4. If `includes` is present: recursively load the base file (steps 2–3; depth limit: **2 levels** to prevent accidental cycles)
-5. Merge base onto overlay using section-level merge semantics above
+4. If `includes` is present: recursively load the base file (file read (base file) + TOML parse; depth limit: **2 levels** to limit complexity; cycles detected separately via `CONFIG_INCLUDES_CYCLE`)
+5. Merge base and overlay using the section-level merge semantics above (**overlay values take precedence**)
 6. Schema validation on the **merged result** (not on individual layers in isolation)
 7. Profile resolution (built-in lookup or extension merge)
 8. Defaults injection for missing optional fields
@@ -468,7 +468,7 @@ The post-v1 load sequence extends §11.2 with an `includes` resolution step:
 
 **Validation on merged result** is critical: it ensures that required fields (e.g., at least one `[[tabs]]` entry) can be satisfied by the base layer, and that cross-field validation rules (e.g., `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE`) operate on the final combined config. Individual layers in isolation may be structurally incomplete; only the merged result must be valid.
 
-**Depth limit:** Includes chains are limited to 2 levels (one overlay → one base). Diamond includes and transitive chains are rejected with `CONFIG_INCLUDES_DEPTH_EXCEEDED`. This is intentional — deeper layering dramatically increases the complexity of merge debugging and operator mental models. Fleet operators needing deeper layering should use external config templating (e.g., Ansible, Nix, Helm) to generate device configs from a shared template.
+**Depth limit:** Includes chains are limited to 2 levels (one overlay → one base). Transitive chains beyond this limit are rejected with `CONFIG_INCLUDES_DEPTH_EXCEEDED`. This is intentional — deeper layering dramatically increases the complexity of merge debugging and operator mental models. Fleet operators needing deeper layering should use external config templating (e.g., Ansible, Nix, Helm) to generate device configs from a shared template.
 
 #### Secret Indirection
 
@@ -476,7 +476,7 @@ The PSK env-var pattern in §6.2 already provides the canonical secret indirecti
 
 ```toml
 [agents.registered.doorbell_agent]
-psk = "${DOORBELL_AGENT_PSK}"  # Resolved from environment at load time.
+auth_psk_env = "DOORBELL_AGENT_PSK"  # Name of env var holding the PSK.
 ```
 
 Post-v1 layered composition does not change this pattern. Secrets remain in environment variables, not in overlay files. There is no plan to support Vault, key files, or other external secret providers in the config format itself — those are deployment concerns handled outside the tze_hud config surface.
