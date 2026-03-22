@@ -42,6 +42,8 @@ pub struct SceneGraph {
     pub hit_region_states: HashMap<SceneId, HitRegionLocalState>,
     /// Zone registry.
     pub zone_registry: ZoneRegistry,
+    /// Sync groups, keyed by ID.
+    pub sync_groups: HashMap<SceneId, SyncGroup>,
     /// Display area (the viewport dimensions).
     pub display_area: Rect,
     /// Monotonic version counter, incremented on every mutation.
@@ -68,6 +70,7 @@ impl SceneGraph {
             leases: HashMap::new(),
             hit_region_states: HashMap::new(),
             zone_registry: ZoneRegistry::new(),
+            sync_groups: HashMap::new(),
             display_area: Rect::new(0.0, 0.0, width, height),
             version: 0,
         }
@@ -314,6 +317,206 @@ impl SceneGraph {
         self.insert_node_tree(&node);
         self.version += 1;
         Ok(())
+    }
+
+    // ─── Sync group operations ───────────────────────────────────────────
+
+    /// Maximum sync groups per agent namespace (RFC 0003 §2.5).
+    pub const MAX_SYNC_GROUPS_PER_NAMESPACE: usize = 16;
+
+    /// Maximum tiles per sync group (RFC 0003 §2.5).
+    pub const MAX_MEMBERS_PER_SYNC_GROUP: usize = 64;
+
+    /// Create a new sync group. Returns the new sync group ID.
+    pub fn create_sync_group(
+        &mut self,
+        name: Option<String>,
+        owner_namespace: &str,
+        commit_policy: SyncCommitPolicy,
+        max_deferrals: u32,
+    ) -> Result<SceneId, ValidationError> {
+        // Enforce per-namespace limit (RFC 0003 §2.5)
+        let existing_count = self
+            .sync_groups
+            .values()
+            .filter(|sg| sg.owner_namespace == owner_namespace)
+            .count();
+        if existing_count >= Self::MAX_SYNC_GROUPS_PER_NAMESPACE {
+            return Err(ValidationError::SyncGroupLimitExceeded {
+                limit: Self::MAX_SYNC_GROUPS_PER_NAMESPACE,
+            });
+        }
+
+        let id = SceneId::new();
+        let created_at_us = now_micros();
+        self.sync_groups.insert(
+            id,
+            SyncGroup::new(
+                id,
+                name,
+                owner_namespace.to_string(),
+                commit_policy,
+                max_deferrals,
+                created_at_us,
+            ),
+        );
+        self.version += 1;
+        Ok(id)
+    }
+
+    /// Delete a sync group. All member tiles are automatically released.
+    pub fn delete_sync_group(&mut self, group_id: SceneId) -> Result<(), ValidationError> {
+        if !self.sync_groups.contains_key(&group_id) {
+            return Err(ValidationError::SyncGroupNotFound { id: group_id });
+        }
+        // Release all member tiles from the group
+        for tile in self.tiles.values_mut() {
+            if tile.sync_group == Some(group_id) {
+                tile.sync_group = None;
+            }
+        }
+        self.sync_groups.remove(&group_id);
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Add a tile to a sync group.
+    ///
+    /// A tile may belong to at most one sync group (RFC 0003 §2.3). Joining
+    /// replaces any previous group membership.
+    pub fn join_sync_group(
+        &mut self,
+        tile_id: SceneId,
+        group_id: SceneId,
+    ) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        if !self.sync_groups.contains_key(&group_id) {
+            return Err(ValidationError::SyncGroupNotFound { id: group_id });
+        }
+
+        // Enforce member limit
+        let member_count = self
+            .sync_groups
+            .get(&group_id)
+            .map(|sg| sg.members.len())
+            .unwrap_or(0);
+        // Only enforce if tile is not already in this group
+        let already_member = self
+            .sync_groups
+            .get(&group_id)
+            .map(|sg| sg.members.contains(&tile_id))
+            .unwrap_or(false);
+        if !already_member && member_count >= Self::MAX_MEMBERS_PER_SYNC_GROUP {
+            return Err(ValidationError::SyncGroupMemberLimitExceeded {
+                limit: Self::MAX_MEMBERS_PER_SYNC_GROUP,
+            });
+        }
+
+        // If tile is currently in a different group, remove it from that group first
+        let current_group = self.tiles.get(&tile_id).and_then(|t| t.sync_group);
+        if let Some(old_group_id) = current_group
+            && old_group_id != group_id
+            && let Some(old_group) = self.sync_groups.get_mut(&old_group_id)
+        {
+            old_group.members.remove(&tile_id);
+        }
+
+        // Update tile's sync_group reference
+        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        tile.sync_group = Some(group_id);
+
+        // Add to the group's member set
+        self.sync_groups
+            .get_mut(&group_id)
+            .unwrap()
+            .members
+            .insert(tile_id);
+
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Remove a tile from its sync group.
+    ///
+    /// Removes the tile from whatever group it currently belongs to.
+    /// If the tile is not in any group, this is a no-op (returns Ok).
+    /// If the group becomes empty after the last member leaves it is **not**
+    /// automatically destroyed — destruction is explicit (RFC 0003 §2.3).
+    pub fn leave_sync_group(&mut self, tile_id: SceneId) -> Result<(), ValidationError> {
+        if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+        let current_group = self.tiles.get(&tile_id).and_then(|t| t.sync_group);
+        if let Some(group_id) = current_group {
+            if let Some(group) = self.sync_groups.get_mut(&group_id) {
+                group.members.remove(&tile_id);
+            }
+            let tile = self.tiles.get_mut(&tile_id).unwrap();
+            tile.sync_group = None;
+        }
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Evaluate a sync group's commit policy for a given set of tiles that
+    /// have pending mutations this frame.
+    ///
+    /// Returns a `SyncGroupCommitDecision` describing whether to commit,
+    /// defer, or force-commit the group.
+    ///
+    /// This is called by the compositor at Stage 4 (Scene Commit).
+    pub fn evaluate_sync_group_commit(
+        &mut self,
+        group_id: SceneId,
+        tiles_with_pending: &std::collections::BTreeSet<SceneId>,
+    ) -> Result<SyncGroupCommitDecision, ValidationError> {
+        let group = self
+            .sync_groups
+            .get(&group_id)
+            .ok_or(ValidationError::SyncGroupNotFound { id: group_id })?;
+
+        match group.commit_policy {
+            SyncCommitPolicy::AvailableMembers => {
+                // Apply whatever is ready — never defers
+                let ready: Vec<SceneId> = group
+                    .members
+                    .iter()
+                    .filter(|id| tiles_with_pending.contains(id))
+                    .copied()
+                    .collect();
+                Ok(SyncGroupCommitDecision::Commit { tiles: ready })
+            }
+            SyncCommitPolicy::AllOrDefer => {
+                let all_ready = group.members.iter().all(|id| tiles_with_pending.contains(id));
+                if all_ready {
+                    // Reset deferral counter and commit all members
+                    let tiles: Vec<SceneId> = group.members.iter().copied().collect();
+                    self.sync_groups.get_mut(&group_id).unwrap().deferral_count = 0;
+                    Ok(SyncGroupCommitDecision::Commit { tiles })
+                } else if group.deferral_count < group.max_deferrals {
+                    // Defer: increment counter
+                    self.sync_groups.get_mut(&group_id).unwrap().deferral_count += 1;
+                    Ok(SyncGroupCommitDecision::Defer)
+                } else {
+                    // Force-commit with available members after exhausting deferrals
+                    let tiles: Vec<SceneId> = group
+                        .members
+                        .iter()
+                        .filter(|id| tiles_with_pending.contains(id))
+                        .copied()
+                        .collect();
+                    self.sync_groups.get_mut(&group_id).unwrap().deferral_count = 0;
+                    Ok(SyncGroupCommitDecision::ForceCommit { tiles })
+                }
+            }
+        }
+    }
+
+    /// Return the number of sync groups in the scene.
+    pub fn sync_group_count(&self) -> usize {
+        self.sync_groups.len()
     }
 
     // ─── Node tree helpers ───────────────────────────────────────────────
@@ -572,6 +775,25 @@ impl SceneGraph {
     }
 }
 
+
+fn now_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
+
+/// Decision returned by `SceneGraph::evaluate_sync_group_commit`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SyncGroupCommitDecision {
+    /// Commit the listed tiles' pending mutations this frame.
+    Commit { tiles: Vec<SceneId> },
+    /// Defer the entire group to the next frame (AllOrDefer policy).
+    Defer,
+    /// Force-commit with the listed tiles after exhausting max_deferrals.
+    /// The compositor should emit a `sync_group_force_commit` telemetry event.
+    ForceCommit { tiles: Vec<SceneId> },
+}
 
 #[cfg(test)]
 mod tests {
@@ -978,6 +1200,164 @@ mod tests {
         }
     }
 
+    // ─── Sync Group Tests ────────────────────────────────────────────────
+
+    fn make_scene_with_tiles(count: usize) -> (SceneGraph, SceneId, Vec<SceneId>) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let mut tile_ids = Vec::new();
+        for i in 0..count {
+            let tile_id = scene
+                .create_tile(
+                    tab_id,
+                    "agent",
+                    lease_id,
+                    Rect::new(i as f32 * 110.0, 0.0, 100.0, 100.0),
+                    i as u32,
+                )
+                .unwrap();
+            tile_ids.push(tile_id);
+        }
+        (scene, tab_id, tile_ids)
+    }
+
+    #[test]
+    fn test_create_sync_group() {
+        let (mut scene, _tab, _tiles) = make_scene_with_tiles(0);
+
+        let group_id = scene
+            .create_sync_group(
+                Some("test-group".to_string()),
+                "agent",
+                SyncCommitPolicy::AllOrDefer,
+                3,
+            )
+            .unwrap();
+
+        assert_eq!(scene.sync_group_count(), 1);
+        let group = scene.sync_groups.get(&group_id).unwrap();
+        assert_eq!(group.name, Some("test-group".to_string()));
+        assert_eq!(group.owner_namespace, "agent");
+        assert_eq!(group.commit_policy, SyncCommitPolicy::AllOrDefer);
+        assert_eq!(group.max_deferrals, 3);
+        assert!(group.members.is_empty());
+    }
+
+    #[test]
+    fn test_delete_sync_group() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(2);
+
+        let group_id = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3)
+            .unwrap();
+
+        // Join both tiles
+        scene.join_sync_group(tiles[0], group_id).unwrap();
+        scene.join_sync_group(tiles[1], group_id).unwrap();
+
+        // Deleting the group should release tiles
+        scene.delete_sync_group(group_id).unwrap();
+        assert_eq!(scene.sync_group_count(), 0);
+
+        // Tiles should have no sync_group reference
+        assert_eq!(scene.tiles[&tiles[0]].sync_group, None);
+        assert_eq!(scene.tiles[&tiles[1]].sync_group, None);
+    }
+
+    #[test]
+    fn test_delete_nonexistent_sync_group_errors() {
+        let (mut scene, _tab, _tiles) = make_scene_with_tiles(0);
+        let fake_id = SceneId::new();
+        let result = scene.delete_sync_group(fake_id);
+        assert!(matches!(result, Err(ValidationError::SyncGroupNotFound { .. })));
+    }
+
+    #[test]
+    fn test_join_sync_group() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(2);
+        let group_id = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AvailableMembers, 0)
+            .unwrap();
+
+        scene.join_sync_group(tiles[0], group_id).unwrap();
+        scene.join_sync_group(tiles[1], group_id).unwrap();
+
+        assert_eq!(scene.sync_groups[&group_id].members.len(), 2);
+        assert_eq!(scene.tiles[&tiles[0]].sync_group, Some(group_id));
+        assert_eq!(scene.tiles[&tiles[1]].sync_group, Some(group_id));
+    }
+
+    #[test]
+    fn test_join_replaces_old_group_membership() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(1);
+        let group_a = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AvailableMembers, 0)
+            .unwrap();
+        let group_b = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AvailableMembers, 0)
+            .unwrap();
+
+        scene.join_sync_group(tiles[0], group_a).unwrap();
+        // Now join a different group — should leave group_a automatically
+        scene.join_sync_group(tiles[0], group_b).unwrap();
+
+        assert!(!scene.sync_groups[&group_a].members.contains(&tiles[0]));
+        assert!(scene.sync_groups[&group_b].members.contains(&tiles[0]));
+        assert_eq!(scene.tiles[&tiles[0]].sync_group, Some(group_b));
+    }
+
+    #[test]
+    fn test_leave_sync_group() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(1);
+        let group_id = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3)
+            .unwrap();
+
+        scene.join_sync_group(tiles[0], group_id).unwrap();
+        assert!(scene.sync_groups[&group_id].members.contains(&tiles[0]));
+
+        scene.leave_sync_group(tiles[0]).unwrap();
+        assert!(!scene.sync_groups[&group_id].members.contains(&tiles[0]));
+        assert_eq!(scene.tiles[&tiles[0]].sync_group, None);
+        // Group still exists after tile leaves
+        assert_eq!(scene.sync_group_count(), 1);
+    }
+
+    #[test]
+    fn test_leave_when_not_in_group_is_noop() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(1);
+        // No group created — tile has no sync_group; leave should succeed silently
+        let result = scene.leave_sync_group(tiles[0]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_available_members_commit_policy() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(2);
+        let group_id = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AvailableMembers, 0)
+            .unwrap();
+        scene.join_sync_group(tiles[0], group_id).unwrap();
+        scene.join_sync_group(tiles[1], group_id).unwrap();
+
+        // Only tile[0] has a pending mutation
+        let mut pending = std::collections::BTreeSet::new();
+        pending.insert(tiles[0]);
+
+        let decision = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
+
+        // AvailableMembers: commit whatever is ready, no deferral
+        match decision {
+            SyncGroupCommitDecision::Commit { tiles: committed } => {
+                assert_eq!(committed, vec![tiles[0]]);
+            }
+            other => panic!("Expected Commit, got {:?}", other),
+        }
+    }
+
     #[test]
     fn test_contention_merge_by_key() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -1118,5 +1498,130 @@ mod tests {
         let result = scene.apply_batch(&batch);
         assert!(result.applied);
         assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 0);
+    }
+
+    #[test]
+    fn test_all_or_defer_commits_when_all_ready() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(2);
+        let group_id = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3)
+            .unwrap();
+        scene.join_sync_group(tiles[0], group_id).unwrap();
+        scene.join_sync_group(tiles[1], group_id).unwrap();
+
+        let mut pending = std::collections::BTreeSet::new();
+        pending.insert(tiles[0]);
+        pending.insert(tiles[1]);
+
+        let decision = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
+
+        // All members ready → Commit
+        match decision {
+            SyncGroupCommitDecision::Commit { tiles: committed } => {
+                assert_eq!(committed.len(), 2);
+            }
+            other => panic!("Expected Commit, got {:?}", other),
+        }
+        // Deferral counter should be reset to 0
+        assert_eq!(scene.sync_groups[&group_id].deferral_count, 0);
+    }
+
+    #[test]
+    fn test_all_or_defer_defers_when_incomplete() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(2);
+        let group_id = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3)
+            .unwrap();
+        scene.join_sync_group(tiles[0], group_id).unwrap();
+        scene.join_sync_group(tiles[1], group_id).unwrap();
+
+        // Only tile[0] has a pending mutation
+        let mut pending = std::collections::BTreeSet::new();
+        pending.insert(tiles[0]);
+
+        let decision = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
+        assert_eq!(decision, SyncGroupCommitDecision::Defer);
+        assert_eq!(scene.sync_groups[&group_id].deferral_count, 1);
+
+        // Second deferral
+        let decision2 = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
+        assert_eq!(decision2, SyncGroupCommitDecision::Defer);
+        assert_eq!(scene.sync_groups[&group_id].deferral_count, 2);
+
+        // Third deferral
+        let decision3 = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
+        assert_eq!(decision3, SyncGroupCommitDecision::Defer);
+        assert_eq!(scene.sync_groups[&group_id].deferral_count, 3);
+    }
+
+    #[test]
+    fn test_all_or_defer_force_commits_after_max_deferrals() {
+        let (mut scene, _tab, tiles) = make_scene_with_tiles(2);
+        // max_deferrals = 2
+        let group_id = scene
+            .create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 2)
+            .unwrap();
+        scene.join_sync_group(tiles[0], group_id).unwrap();
+        scene.join_sync_group(tiles[1], group_id).unwrap();
+
+        // Only tile[0] has pending mutations — tile[1] is always missing
+        let mut pending = std::collections::BTreeSet::new();
+        pending.insert(tiles[0]);
+
+        // Frame 1: deferral_count goes 0 → 1
+        let d1 = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+        assert_eq!(d1, SyncGroupCommitDecision::Defer);
+
+        // Frame 2: deferral_count goes 1 → 2
+        let d2 = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+        assert_eq!(d2, SyncGroupCommitDecision::Defer);
+
+        // Frame 3: deferral_count == max_deferrals (2) → force commit
+        let d3 = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+        match d3 {
+            SyncGroupCommitDecision::ForceCommit { tiles: committed } => {
+                // Only tile[0] should be committed (tile[1] has no pending)
+                assert_eq!(committed, vec![tiles[0]]);
+            }
+            other => panic!("Expected ForceCommit, got {:?}", other),
+        }
+        // Deferral counter reset after force-commit
+        assert_eq!(scene.sync_groups[&group_id].deferral_count, 0);
+    }
+
+    #[test]
+    fn test_sync_group_namespace_limit() {
+        let (mut scene, _tab, _tiles) = make_scene_with_tiles(0);
+
+        // Create 16 sync groups (the namespace limit)
+        for i in 0..SceneGraph::MAX_SYNC_GROUPS_PER_NAMESPACE {
+            scene
+                .create_sync_group(
+                    Some(format!("group-{}", i)),
+                    "agent",
+                    SyncCommitPolicy::AllOrDefer,
+                    3,
+                )
+                .unwrap();
+        }
+        assert_eq!(scene.sync_group_count(), SceneGraph::MAX_SYNC_GROUPS_PER_NAMESPACE);
+
+        // 17th should fail
+        let result =
+            scene.create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3);
+        assert!(matches!(result, Err(ValidationError::SyncGroupLimitExceeded { .. })));
+
+        // A different namespace can still create groups
+        let other_group = scene
+            .create_sync_group(None, "other-agent", SyncCommitPolicy::AllOrDefer, 3);
+        assert!(other_group.is_ok());
     }
 }

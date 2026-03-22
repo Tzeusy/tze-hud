@@ -46,4 +46,16 @@ pub enum ValidationError {
 
     #[error("zone '{zone}' has reached max keys ({max})")]
     ZoneMaxKeysReached { zone: String, max: u32 },
+
+    #[error("sync group not found: {id}")]
+    SyncGroupNotFound { id: crate::types::SceneId },
+
+    #[error("tile already in a sync group")]
+    TileAlreadyInSyncGroup { tile_id: crate::types::SceneId },
+
+    #[error("sync group limit exceeded: {limit} sync groups per namespace")]
+    SyncGroupLimitExceeded { limit: usize },
+
+    #[error("sync group member limit exceeded: {limit} tiles per sync group")]
+    SyncGroupMemberLimitExceeded { limit: usize },
 }
