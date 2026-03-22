@@ -17,6 +17,7 @@
 | 5 | 2026-03-22 | rig-5vq.26 | Final hardening and quantitative verification | §3.2: added ContextMenu dispatch note clarifying it is dispatched as `ContextMenuEvent` (not `GestureEvent`) and does not run through the recognizer pipeline. §3.3: added DoubleTap and Swipe recognizer boxes to pipeline diagram; added ContextMenu preprocessor note. §3.4: expanded recognizer state machines to cover all 6 gesture types (added DoubleTap, Swipe, Pinch machines alongside Tap, LongPress, Drag); added Swipe velocity threshold (≥ 400 px/s, duration < 300ms) and Swipe/Drag disambiguation rule. §3.5: removed `ContextMenu` from gesture conflict priority list (it is not a competing gesture); replaced with `Swipe` at position 3; added note explaining ContextMenu dispatch path. §3.6: rewrote to remove non-existent `GestureBeganEvent` / `GestureCancelledEvent` references; narrative now correctly describes phased gestures using `GestureEvent { phase = BEGAN/CHANGED/ENDED/CANCELLED }` and point gestures as terminal single events; added implementation note. |
 | 6 | 2026-03-22 | rig-khj | Resolve §11.2 scroll feedback (pre-implementation required) | §6.3: updated scroll row — removed "V1 deferred" annotation; row now references §6.7 and `ScrollOffsetChangedEvent`. §6.5: extended `SceneLocalPatch` with `scroll_offset_updates: Vec<ScrollOffsetUpdate>` and added `ScrollOffsetUpdate` struct. §6.7 (new): complete Scroll Feedback specification — `ScrollConfig` (scrollable_x/y, content size, `SnapMode`, `OverscrollMode`), `ScrollOffsetUpdate`, momentum model (OS-provided + Wayland fallback exponential-decay §6.7.2a), snap point mechanics (Mandatory/Proximity, 100ms ease-out animation), rubber-band overscroll with tension coefficient, agent notification semantics (`ScrollOffsetChangedEvent`, non-transactional/coalesced), programmatic `SetScrollOffsetRequest`, local feedback contract integration. §8.3: added `scroll_offset_changed = 21` to `InputEnvelope` oneof. §8.4: added coalescing rule for `ScrollOffsetChangedEvent` (latest-wins per tile). §8.5: added `ScrollOffsetChangedEvent` to non-transactional coalescing rules (step 3); updated step 6 to list scroll offset change as droppable at hard cap. §9.1: added `ScrollEvent` (internal pipeline message) and `ScrollOffsetChangedEvent` (agent-facing) proto definitions; added `scroll_offset_changed = 21` to `InputEnvelope` oneof in §9.1. §11.2: resolved — marked RESOLVED with full decision log. §13: removed "Scroll events and momentum physics (§11.2)"; replaced with "Custom scroll physics / agent-defined momentum curves" noting scroll local feedback is V1. |
 | 7 | 2026-03-22 | rig-eo4 | V1 scope split — mandatory vs reserved vs post-v1 | Added `## V1 Scope` section with three-tier table and per-capability breakdown. Added `[V1-mandatory]` / `[V1-reserved]` tier tags to §1–§8 section headers. Added `§3.0 V1 Scope Note` (gesture pipeline v1 fallback: tap/click-only), `§4.0 V1 Scope Note` (IME v1 fallback: CharacterEvent only), `§5.0 V1 Scope Note` (a11y v1 fallback: tree structure ships, platform bridge defers). §3.2: added `V1 tier` column to gestures table distinguishing V1-mandatory (Tap, DoubleTap, ContextMenu on pointer) from V1-reserved (LongPress, Drag, Pinch, Swipe, ContextMenu on touch). §13: restructured into `V1-reserved` and `Post-v1` subsections to distinguish defined-but-deferred from entirely-not-in-scope. |
+| 8 | 2026-03-22 | rig-8c6 | Platform-neutral command-input path for compact devices | Added DR-I12 (all interactive elements reachable via command input on pointer-free devices). §1.3: refactored "Tab Key Traversal" to "Focus Cycling" — focus movement now defined in terms of abstract NAVIGATE_NEXT/NAVIGATE_PREV commands; keyboard Tab is one binding. §1.4: added COMMAND_INPUT to FocusGainedEvent.Source and FocusLostEvent.Reason. §5.7: renamed to "Pointer-Free Navigation"; table now shows command input equivalents with keyboard bindings as one column. §7.1 EventMask: added `command_input` field. §8.2: added rule 5 for CommandInputEvent routing. §8.3 InputEnvelope: added `command_input = 22` to oneof. §9.1: added `CommandInputEvent` message (CommandAction enum × Source enum), added `command_input = 22` to InputEnvelope oneof (field 21 taken by `scroll_offset_changed`), added `command_input = 10` to EventMaskConfig, updated FocusGainedEvent/FocusLostEvent proto to match narrative changes. §10 (new): Command Input Model — rationale, CommandAction enum, binding table per device class (keyboard/D-pad/voice/clicker/rotary), InputCapabilitySet negotiation, local feedback contract for command actions. §12.3 (was §11.3 gamepad): updated to reference §10 for partial resolution. §14 Non-Goals: added agent-defined command bindings and voice recognition integration. Old §10 Diagrams renumbered to §11; old §11 Open Questions to §12; old §12 RFC Dependency Map to §13; old §13 Non-Goals to §14. |
 
 ---
 
@@ -96,6 +97,7 @@ Drag-and-drop, scroll events and momentum physics, gamepad/controller input, sty
 | DR-I9 | Keyboard-only navigation for all interactions | presence.md |
 | DR-I10 | Platform a11y API support (UIAutomation, NSAccessibility, AT-SPI) | presence.md |
 | DR-I11 | All input behavior testable headlessly (no display server required) | validation.md DR-V2, DR-V5 |
+| DR-I12 | All interactive elements reachable via command input on pointer-free devices (glasses, clicker, D-pad) | mobile.md, presence.md §Interaction |
 
 ---
 
@@ -162,20 +164,25 @@ An agent cannot forcibly steal focus from another agent unless `steal: true` is 
 
 **Focus isolation from other agents.** An agent cannot observe or query the focus state of tiles it does not own. The only focus event an agent receives is a `FocusGained`/`FocusLost` event for its own tiles/nodes.
 
-### 1.3 Focus Cycling (Tab Key Traversal)
+### 1.3 Focus Cycling
 
-Tab key advances focus forward through the focusable elements on the current tab; Shift+Tab advances backward.
+Focus cycling is defined in terms of the abstract `NAVIGATE_NEXT` and `NAVIGATE_PREV` commands (see §10 Command Input Model). The runtime translates device-specific inputs into these commands before executing focus movement.
+
+**Default bindings:**
+- Keyboard: Tab → `NAVIGATE_NEXT`, Shift+Tab → `NAVIGATE_PREV`
+- D-pad / directional controller: Down or Right → `NAVIGATE_NEXT`, Up or Left → `NAVIGATE_PREV`
+- Clicker: Next → `NAVIGATE_NEXT`, Prev → `NAVIGATE_PREV`
 
 **Traversal order** follows tile z-order (lowest z first) and within each tile, tree order of `HitRegionNode` elements (depth-first, left-to-right sibling order). Tiles with `input_mode == Passthrough` are excluded from traversal.
 
-**Cycle boundary.** After the last focusable element, focus wraps to the first. The chrome layer tab bar is excluded from the Tab key cycle (chrome focus is accessed via platform-standard keyboard shortcuts such as F6 or Ctrl+Tab).
+**Cycle boundary.** After the last focusable element, focus wraps to the first. The chrome layer tab bar is excluded from the focus cycle (chrome focus is accessed via platform-standard keyboard shortcuts such as F6 or Ctrl+Tab).
 
 **Chrome focus vs content focus.** Chrome focus (focus inside runtime UI) is logically separate from content focus (focus inside agent tiles). Switching between them uses platform-specific shortcuts. An agent cannot receive keyboard events when chrome focus is active.
 
 ```
 Focus cycle within a tab:
 
-Chrome layer   ──────────────────────────────── (not in Tab cycle)
+Chrome layer   ──────────────────────────────── (not in focus cycle)
                               ▲
                      F6 / platform shortcut
                               ▼
@@ -197,7 +204,7 @@ The runtime dispatches these events to the owning agent when focus changes:
 message FocusGainedEvent {
   SceneId tile_id  = 1;
   SceneId node_id  = 2;   // zero value = tile-level focus
-  enum Source { CLICK = 0; TAB_KEY = 1; PROGRAMMATIC = 2; }
+  enum Source { CLICK = 0; TAB_KEY = 1; PROGRAMMATIC = 2; COMMAND_INPUT = 3; }
   Source source    = 3;
 }
 
@@ -212,6 +219,7 @@ message FocusLostEvent {
     TAB_SWITCHED       = 4;
     LEASE_REVOKED      = 5;
     AGENT_DISCONNECTED = 6;  // Owning agent's session ended; focus cleared
+    COMMAND_INPUT      = 7;  // Focus moved by NAVIGATE_NEXT/NAVIGATE_PREV command
   }
   Reason reason    = 3;
 }
@@ -667,19 +675,21 @@ Focus indication is dual-channel:
 
 Both channels update within Stage 2 (Local Feedback) of the frame pipeline — the focus ring appears in the same frame as the event that causes focus transfer.
 
-### 5.7 Keyboard-Only Navigation
+### 5.7 Pointer-Free Navigation
 
-All interactions achievable with pointer input must also be achievable with keyboard input alone:
+All interactions achievable with pointer input must also be achievable without a pointer, using only command input (see §10). Command input is the universal abstraction; keyboard Tab/Enter is one concrete binding.
 
-| Pointer action | Keyboard equivalent |
-|----------------|---------------------|
-| Click tile | Tab to focus, Enter or Space |
-| Context menu | Application key, or Shift+F10 |
-| Drag | Keyboard move mode: focus + arrow keys (agent implements) |
-| Scroll | Arrow keys, Page Up/Down when tile has focus |
-| Tab close | Focus tab, Delete key |
+| Pointer action | Command input equivalent | Typical keyboard binding |
+|----------------|--------------------------|--------------------------|
+| Click tile | Focus tile, then `ACTIVATE` | Tab to focus, Enter or Space |
+| Context menu | `CONTEXT` on focused element | Application key, or Shift+F10 |
+| Drag | `ACTIVATE` to enter move mode, directional commands (agent implements) | arrow keys in move mode |
+| Scroll | `SCROLL_UP` / `SCROLL_DOWN` when tile has focus | Arrow keys, Page Up/Down |
+| Tab close | Focus tab, then `CANCEL` | Focus tab, Delete key |
 
-The runtime provides: Tab cycling, Enter/Space activation, Escape to cancel, arrow key routing to focused nodes. Complex interactions (drag, resize) are the agent's responsibility — the runtime provides focus and key events; the agent implements the keyboard mode.
+The runtime provides: focus cycling via `NAVIGATE_NEXT`/`NAVIGATE_PREV`, `ACTIVATE` as Enter/Space equivalent, `CANCEL` as Escape equivalent, and `SCROLL_UP`/`SCROLL_DOWN` routing to focused tiles. Complex interactions (drag, resize) are the agent's responsibility — the runtime provides focus and command events; the agent implements the interaction mode.
+
+On pointer-free profiles (glasses, clicker, voice-only), the runtime emits `CommandInputEvent` for all abstract actions. Agents that check for `ACTIVATE` and `CANCEL` work correctly on all input profiles without modification.
 
 ### 5.8 Platform A11y API Integration
 
@@ -991,6 +1001,7 @@ pub struct EventMask {
     pub double_click: bool,    // default: false
     pub context_menu: bool,    // default: false
     pub key_events: bool,      // default: true (when focused)
+    pub command_input: bool,   // default: true — CommandInputEvent when focused (see §10)
 }
 ```
 
@@ -1216,6 +1227,7 @@ The event router resolves the owning agent for each input event:
    - `Passthrough` → overlay mode: pass to desktop; fullscreen: discard
 3. For keyboard events: route to the session owning the currently focused tile/node.
 4. For captured pointer events: route to the capturing session (bypasses hit-test).
+5. For `CommandInputEvent`: route to the session owning the currently focused tile/node (same as keyboard events). If focus is `None`, the runtime handles navigation locally (advances focus to the first focusable element on `NAVIGATE_NEXT`). `ACTIVATE` and `CANCEL` with no focused node are discarded.
 
 **Budget:** Event routing (hit-test + session lookup) must complete in < 2ms from Stage 2 completion.
 
@@ -1256,6 +1268,7 @@ message InputEnvelope {
     ImeCompositionCancelledEvent ime_cancelled = 19;
     CaptureReleasedEvent         capture_released       = 20;
     ScrollOffsetChangedEvent     scroll_offset_changed  = 21;
+    CommandInputEvent            command_input          = 22;  // §10: abstract action from pointer-free device
   }
 }
 ```
@@ -1348,7 +1361,7 @@ message FocusResponse {
 message FocusGainedEvent {
   SceneId tile_id = 1;
   SceneId node_id = 2;  // zero value = tile-level focus
-  enum Source { CLICK = 0; TAB_KEY = 1; PROGRAMMATIC = 2; }
+  enum Source { CLICK = 0; TAB_KEY = 1; PROGRAMMATIC = 2; COMMAND_INPUT = 3; }
   Source source   = 3;
 }
 
@@ -1358,7 +1371,7 @@ message FocusLostEvent {
   enum Reason {
     CLICK_ELSEWHERE = 0; TAB_KEY = 1; PROGRAMMATIC = 2;
     TILE_DESTROYED = 3; TAB_SWITCHED = 4; LEASE_REVOKED = 5;
-    AGENT_DISCONNECTED = 6;
+    AGENT_DISCONNECTED = 6; COMMAND_INPUT = 7;
   }
   Reason reason   = 3;
 }
@@ -1536,6 +1549,37 @@ message SwipeGesture {
   float velocity = 2;  // pixels per second
 }
 
+// ─── Command input events (pointer-free / compact device) ─────────────────
+
+message CommandInputEvent {
+  SceneId tile_id        = 1;
+  SceneId node_id        = 2;   // zero value = tile-level focus
+  string  interaction_id = 3;   // Forwarded from HitRegionNode for agent correlation
+  int64   timestamp_hw_us = 4;  // OS hardware event timestamp (monotonic domain)
+  string  device_id      = 5;   // Input device that produced this command
+
+  enum Action {
+    NAVIGATE_NEXT   = 0;  // Advance focus to next focusable element
+    NAVIGATE_PREV   = 1;  // Move focus to previous focusable element
+    ACTIVATE        = 2;  // Confirm / activate the focused element
+    CANCEL          = 3;  // Cancel or dismiss current focus / interaction
+    CONTEXT         = 4;  // Open context menu or secondary options
+    SCROLL_UP       = 5;  // Scroll focused tile toward start
+    SCROLL_DOWN     = 6;  // Scroll focused tile toward end
+  }
+  Action action = 6;
+
+  enum Source {
+    KEYBOARD        = 0;  // Tab/Enter/Escape/etc. translated to abstract action
+    DPAD            = 1;  // D-pad, directional controller, temple button
+    VOICE           = 2;  // Voice command from OS or platform voice layer
+    REMOTE_CLICKER  = 3;  // Presentation clicker or remote
+    ROTARY_DIAL     = 4;  // Crown or rotary encoder
+    PROGRAMMATIC    = 5;  // Issued by agent or test harness
+  }
+  Source source = 7;
+}
+
 // ─── IME events ───────────────────────────────────────────────────────────
 
 message SetImePositionRequest {
@@ -1622,6 +1666,7 @@ message InputEnvelope {
     ImeCompositionCancelledEvent ime_cancelled = 19;
     CaptureReleasedEvent         capture_released       = 20;
     ScrollOffsetChangedEvent     scroll_offset_changed  = 21;
+    CommandInputEvent            command_input          = 22;  // §10: abstract action from pointer-free device
   }
 }
 
@@ -1664,6 +1709,7 @@ message EventMaskConfig {
   bool double_click    = 7;
   bool context_menu    = 8;
   bool key_events      = 9;
+  bool command_input   = 10;  // CommandInputEvent when focused (see §10); default true
 }
 
 message AccessibilityConfig {
@@ -1695,9 +1741,160 @@ enum CursorStyle {
 
 ---
 
-## 10. Diagrams
+## 10. Command Input Model
 
-### 10.1 Event Flow: OS to Agent
+### 10.1 Rationale
+
+The input model in §1–§8 is pointer-centric: touch, mouse, keyboard. This serves desktop and touch-enabled mobile, but tze_hud explicitly targets smart glasses and other compact devices (mobile.md, CLAUDE.md §Mobile Presence Node). Compact devices have input surfaces that do not map to pointer semantics:
+
+- **D-pad / directional controller** — glasses temple buttons, remote controls
+- **Single confirm/cancel button** — glasses tap, trackpoint center click
+- **Voice command** — 'yes'/'no'/'next'/'select' voice triggers
+- **Remote clicker** — presentation clicker with next/prev/select
+- **Rotary dial / crown** — smartwatch-style crown or dial
+
+These devices can navigate the focus tree and activate elements, but they do not produce pointer events. A `NAVIGATE_NEXT` command from a D-pad must produce the same focus change as a Tab key or a glasses temple-button press — they are the same abstract action.
+
+**Doctrine basis:** presence.md §Interaction — "the system supports: touch, pointer, buttons, local keyboard/mouse, voice triggers". mobile.md — "input capabilities" is an explicit negotiated dimension. CLAUDE.md §Core Rules — "One scene model, two profiles" — input must not fork.
+
+### 10.2 CommandAction Enum
+
+All pointer-free interactions reduce to seven abstract actions:
+
+| Action | Semantics | Keyboard binding | D-pad binding | Voice binding | Clicker binding |
+|--------|-----------|------------------|---------------|---------------|-----------------|
+| `NAVIGATE_NEXT` | Advance focus to next focusable element | Tab | Down / Right | "next" | Next button |
+| `NAVIGATE_PREV` | Move focus to previous focusable element | Shift+Tab | Up / Left | "previous" / "back" | Prev button |
+| `ACTIVATE` | Activate the focused element (confirm) | Enter / Space | Center button | "yes" / "select" / "ok" | Click / center |
+| `CANCEL` | Cancel or dismiss the current focus / interaction | Escape | Back button | "no" / "cancel" / "dismiss" | Back button |
+| `CONTEXT` | Open context menu or secondary options | Application key / Shift+F10 | Long-press center | "options" / "menu" | Long press |
+| `SCROLL_UP` | Scroll focused tile toward start | Page Up / Arrow Up (tile focus) | Up (when tile has focus, no focusable nodes) | "scroll up" / "up" | — |
+| `SCROLL_DOWN` | Scroll focused tile toward end | Page Down / Arrow Down (tile focus) | Down (when tile has focus, no focusable nodes) | "scroll down" / "down" | — |
+
+**Disambiguation rule for D-pad Up/Down:** When the focused element is a `HitRegionNode` inside a tile, Up/Down produce `NAVIGATE_PREV`/`NAVIGATE_NEXT`. When the focus owner is a tile (no focused node), Up/Down produce `SCROLL_UP`/`SCROLL_DOWN`. The runtime applies this rule; agents receive the resolved `CommandInputEvent`.
+
+### 10.3 CommandInputEvent
+
+```protobuf
+message CommandInputEvent {
+  SceneId tile_id        = 1;
+  SceneId node_id        = 2;   // zero value = tile-level focus
+  string  interaction_id = 3;   // Forwarded from HitRegionNode (same as pointer events)
+  int64   timestamp_hw_us = 4;  // Hardware/OS event timestamp (monotonic domain)
+  string  device_id      = 5;   // Input device that produced this command
+
+  enum Action {
+    NAVIGATE_NEXT  = 0;
+    NAVIGATE_PREV  = 1;
+    ACTIVATE       = 2;
+    CANCEL         = 3;
+    CONTEXT        = 4;
+    SCROLL_UP      = 5;
+    SCROLL_DOWN    = 6;
+  }
+  Action action = 6;
+
+  enum Source {
+    KEYBOARD      = 0;  // Tab/Enter/Escape/etc. — translated to abstract action
+    DPAD          = 1;  // D-pad, directional controller, temple button
+    VOICE         = 2;  // Voice command recognized by OS or runtime voice layer
+    REMOTE_CLICKER = 3; // Presentation clicker or equivalent remote
+    ROTARY_DIAL   = 4;  // Crown or rotary encoder
+    PROGRAMMATIC  = 5;  // Issued by agent or test harness
+  }
+  Source source = 7;
+}
+```
+
+**Delivery:** `CommandInputEvent` is delivered via the same `EventBatch` / `InputEnvelope` path as pointer and keyboard events (field 22). It is a **transactional event** — it is never coalesced or dropped (see §8.5 backpressure rules).
+
+**NAVIGATE_NEXT / NAVIGATE_PREV handling:** When the runtime resolves a `NAVIGATE_NEXT` or `NAVIGATE_PREV` action, it executes the focus cycle (§1.3) and dispatches a `FocusGainedEvent` (source=`COMMAND_INPUT`) to the newly focused node and a `FocusLostEvent` (reason=`COMMAND_INPUT`) to the previously focused node. It then delivers the `CommandInputEvent` to the **new** focus owner, so the agent can implement navigation-aware animations if desired. Agents that do not handle `CommandInputEvent` transparently receive focus events and may ignore the command event.
+
+**ACTIVATE handling:** The runtime maps `ACTIVATE` to local feedback immediately (pressed state on the focused `HitRegionNode`) and then delivers the `CommandInputEvent` to the owning agent. The local feedback contract (§6) applies: pressed state appears in the same frame as the event. The rollback path (§6.6) applies on agent rejection.
+
+**CANCEL handling:** Delivered to the focused node/tile as-is. If there is an active IME composition, the runtime cancels it first (same sequence as §4.5 focus-loss behavior) before delivering `CANCEL`.
+
+**SCROLL_UP / SCROLL_DOWN handling:** Delivered to the focused tile. Scroll feedback is local (§11.2).
+
+### 10.4 Input Capability Negotiation
+
+Each display node advertises its `InputCapabilitySet` during session establishment. The runtime uses this to determine which command bindings are active.
+
+```protobuf
+message InputCapabilitySet {
+  bool has_pointer        = 1;  // Mouse or touchpad
+  bool has_touch          = 2;  // Touchscreen
+  bool has_keyboard       = 3;  // Physical keyboard
+  bool has_dpad           = 4;  // D-pad or directional controller
+  bool has_voice_commands = 5;  // Voice command recognition available
+  bool has_remote_clicker = 6;  // Remote clicker / presentation device
+  bool has_rotary_dial    = 7;  // Rotary crown or encoder
+}
+```
+
+The runtime selects active bindings based on `InputCapabilitySet`. On a glasses-class device with `has_dpad=true` and no pointer, the D-pad bindings for all seven actions are active. On a desktop, only keyboard bindings are active for command input (pointer takes over for ACTIVATE, etc.).
+
+**Principle:** Command input is always available as a routing path. On pointer-capable devices, pointer events take priority for ACTIVATE (click replaces `ACTIVATE`). On pointer-free devices, `CommandInputEvent` is the primary interaction path.
+
+### 10.5 Local Feedback for Command Input
+
+`ACTIVATE` triggers the same local feedback as `PointerDownEvent` on the focused node: pressed state via `SceneLocalPatch` in Stage 2. The latency budget is the same: `input_to_local_ack` p99 < 4ms (DR-I1).
+
+`NAVIGATE_NEXT` / `NAVIGATE_PREV` trigger focus ring updates in Stage 2: the old focused node's ring is removed and the new focused node's ring appears in the same frame. No agent roundtrip is required.
+
+`CANCEL`, `CONTEXT`, `SCROLL_UP`, `SCROLL_DOWN` have no default local visual feedback at the runtime level — agents may update content in response.
+
+### 10.6 Binding Table Summary
+
+The runtime maintains a platform-configurable binding table. Default bindings:
+
+```
+Input device         Action         CommandAction
+────────────────── ───────────────── ──────────────────
+Keyboard            Tab              NAVIGATE_NEXT
+Keyboard            Shift+Tab        NAVIGATE_PREV
+Keyboard            Enter            ACTIVATE
+Keyboard            Space            ACTIVATE (when node accepts_focus)
+Keyboard            Escape           CANCEL
+Keyboard            App key          CONTEXT
+Keyboard            Shift+F10        CONTEXT
+Keyboard            PgDn             SCROLL_DOWN (tile focus)
+Keyboard            PgUp             SCROLL_UP  (tile focus)
+Keyboard            Arrow Down       NAVIGATE_NEXT (node focus) / SCROLL_DOWN (tile focus)
+Keyboard            Arrow Up         NAVIGATE_PREV (node focus) / SCROLL_UP  (tile focus)
+
+D-pad               Down / Right     NAVIGATE_NEXT (node focus) / SCROLL_DOWN (tile focus)
+D-pad               Up / Left        NAVIGATE_PREV (node focus) / SCROLL_UP  (tile focus)
+D-pad               Center           ACTIVATE
+D-pad               Back             CANCEL
+D-pad               Center (long)    CONTEXT
+
+Voice               "next"           NAVIGATE_NEXT
+Voice               "previous"/"back" NAVIGATE_PREV
+Voice               "select"/"yes"/"ok" ACTIVATE
+Voice               "cancel"/"no"/"dismiss" CANCEL
+Voice               "options"/"menu" CONTEXT
+Voice               "scroll up"/"up" SCROLL_UP
+Voice               "scroll down"/"down" SCROLL_DOWN
+
+Remote clicker      Next             NAVIGATE_NEXT
+Remote clicker      Prev             NAVIGATE_PREV
+Remote clicker      Click            ACTIVATE
+Remote clicker      Back             CANCEL
+Remote clicker      Long press       CONTEXT
+
+Rotary dial         Clockwise        NAVIGATE_NEXT / SCROLL_DOWN
+Rotary dial         Counter-CW       NAVIGATE_PREV / SCROLL_UP
+Rotary dial         Press            ACTIVATE
+```
+
+Bindings are not configurable by agents in V1. Platform-level key remapping (e.g., accessibility key remapping by the OS) applies before the runtime's binding table.
+
+---
+
+## 11. Diagrams
+
+### 11.1 Event Flow: OS to Agent
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
@@ -1761,7 +1958,7 @@ enum CursorStyle {
                          Agent Process
 ```
 
-### 10.2 Focus Tree with Chrome/Content Separation
+### 11.2 Focus Tree with Chrome/Content Separation
 
 ```
 tze_hud Window
@@ -1798,7 +1995,7 @@ Focus state per tab (suspended tabs preserve state, no events):
   Suspended tab: FocusOwner::Tile { tile_id: T5 }               ← preserved
 ```
 
-### 10.3 Gesture Arbitration Pipeline
+### 11.3 Gesture Arbitration Pipeline
 
 ```
   Touch event stream (example: a drag starting as a tap candidate)
@@ -1847,7 +2044,7 @@ Focus state per tab (suspended tabs preserve state, no events):
          → GestureEvent { pinch { phase=BEGAN, scale=1.2, ... } }
 ```
 
-### 10.4 Local Feedback vs Remote Response Timeline
+### 11.4 Local Feedback vs Remote Response Timeline
 
 ```
 t=0ms    ─── PointerDown event arrives at main thread (winit) ───────────►
@@ -1899,15 +2096,15 @@ t=30ms   Runtime receives rejection:
 
 ---
 
-## 11. Open Questions
+## 12. Open Questions
 
 These questions require decisions before implementation of the input subsystem begins. They are not blockers for RFC approval.
 
-### 11.1 Drag-and-Drop
+### 12.1 Drag-and-Drop
 
 V1 does not specify drag-and-drop between tiles or agents. The `DragGesture` event covers single-tile drag interactions. Cross-tile and cross-agent DnD requires a separate protocol (drag offer, drop target negotiation) and is deferred post-V1. If a tile needs drag-and-drop in V1, it must implement a custom protocol over pointer events.
 
-### 11.2 Scroll Events — RESOLVED
+### 12.2 Scroll Events — RESOLVED
 
 Scroll feedback has been fully specified in §6.7. The decisions made are:
 
@@ -1921,25 +2118,25 @@ Scroll feedback has been fully specified in §6.7. The decisions made are:
 
 The contradiction between §11.2 and §13 is resolved: scroll local feedback is V1 (§6.7); scroll momentum snap-configuration beyond the built-in modes (custom physics, agent-defined momentum curves) remains post-V1.
 
-### 11.3 Gamepad / Controller Input
+### 12.3 Gamepad / Controller Input
 
-Not addressed in this RFC. The architecture can accommodate it via a new device class in the Input Drain stage, but the routing model (which tile receives gamepad events?) and the event types need specification.
+Partially addressed by §10 (Command Input Model). A gamepad's D-pad maps to NAVIGATE_NEXT/NAVIGATE_PREV, face buttons to ACTIVATE/CANCEL/CONTEXT, and analog sticks to SCROLL_UP/SCROLL_DOWN. The routing model follows §8.2 rule 5 (route to focused tile/node). **Open questions:** analog stick dead-zone tuning, trigger buttons (no command mapping defined), and rumble/haptic feedback delivery path. These need specification before gamepad support is implemented.
 
-### 11.4 Stylus / Pressure Input
+### 12.4 Stylus / Pressure Input
 
 Pointer events in this RFC carry basic coordinates. Stylus-specific properties (pressure, tilt, twist) are not included. This should be a future extension to `PointerDownEvent` / `PointerMoveEvent`.
 
-### 11.5 Accessibility Tree Storage Strategy
+### 12.5 Accessibility Tree Storage Strategy
 
 The a11y tree is currently specified as in-memory only. For headless test environments, the a11y tree should be accessible via a programmatic API (for Layer 0 scene graph assertions). The module boundary for the a11y bridge and its test surface needs to be specified before implementation.
 
-### 11.6 Key Code Normalization
+### 12.6 Key Code Normalization
 
 `KeyDownEvent.key_code` uses DOM `KeyboardEvent.code` identifiers ("KeyA", "ArrowLeft"). winit provides its own key code enumeration. The normalization layer (winit code → DOM code string) needs a complete mapping table, particularly for platform-specific keys (Windows key, Menu key, media keys).
 
 ---
 
-## 12. RFC Dependency Map
+## 13. RFC Dependency Map
 
 ```
 RFC 0001 (Scene Contract)
@@ -1971,11 +2168,18 @@ RFC 0008 (Lease & Resource Governance)
 RFC 0004 (this)
   └── Input model: focus, capture, gestures, IME, a11y, local feedback,
       hit-region primitives, event dispatch protocol, protobuf schema
+  └── §10 Command Input Model: platform-neutral NAVIGATE/ACTIVATE/CANCEL/CONTEXT/SCROLL
+      abstraction for pointer-free devices (glasses, D-pad, clicker, voice)
+
+Doctrine references (heart-and-soul/):
+  mobile.md     — "input capabilities" as negotiated dimension; smart-glasses-class device
+  presence.md   — "touch, pointer, buttons, local keyboard/mouse, voice triggers" (§Interaction)
+  architecture.md — display profiles; input capabilities: touch/pointer/keyboard/voice/none
 ```
 
 ---
 
-## 13. Non-Goals (V1)
+## 14. Non-Goals (V1)
 
 This section uses the three-tier model from §V1 Scope. Items are either V1-reserved (defined here, deferred ship) or post-v1 (entirely deferred, not defined here).
 
@@ -1991,12 +2195,14 @@ These capabilities are fully specified in this RFC. Their schemas are normative 
 
 The following are not specified in detail in this RFC and do not block v1:
 
-- Drag-and-drop between tiles or agents (§11.1)
+- Drag-and-drop between tiles or agents (§12.1)
 - Custom scroll physics / agent-defined momentum curves (scroll local feedback is V1 — see §6.7; only custom physics beyond the built-in modes is deferred)
-- Gamepad/controller input (§11.3)
-- Stylus/pressure input (§11.4)
+- Full gamepad/controller input (§12.3 partial; command input covers navigation)
+- Stylus/pressure input (§12.4)
 - Multi-pointer hover (distinct hover states for multiple cursors simultaneously)
 - Touch force (3D Touch / haptic pressure)
 - Pointer lock (mouse grab for FPS-style input)
 - Custom gesture recognizers defined by agents (agents receive gesture events; they cannot add recognizer types)
 - Dynamic a11y role changes at runtime (roles are set at node creation, not mutated)
+- Agent-defined command bindings (bindings are runtime-configured, not per-agent)
+- Voice recognition integration (§10.6 lists voice bindings; the OS/platform voice layer is assumed to translate voice to command actions before they reach the runtime)
