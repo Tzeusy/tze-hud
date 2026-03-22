@@ -107,25 +107,41 @@ The mode is selected at startup via config or `--headless` flag. No runtime fork
 
 ```rust
 pub trait CompositorSurface: Send + 'static {
-    fn current_texture(&self) -> wgpu::TextureView;
-    fn present(&self);
+    /// Acquire the next frame. The returned CompositorFrame must be kept alive
+    /// for the duration of the render pass and passed to present() when done.
+    /// For WindowSurface this wraps wgpu::SurfaceTexture (which must outlive
+    /// its TextureView); for HeadlessSurface the guard is a no-op.
+    fn acquire_frame(&self) -> CompositorFrame;
+    fn present(&self, frame: CompositorFrame);
     fn size(&self) -> (u32, u32);
+}
+
+/// Bundles the TextureView with the implementation-specific ownership guard.
+/// Dropping a CompositorFrame before present() is called is a correctness
+/// error — the guard keeps the underlying SurfaceTexture alive.
+pub struct CompositorFrame {
+    pub view: wgpu::TextureView,
+    // Holds the SurfaceTexture for WindowSurface, or a no-op for HeadlessSurface.
+    // Box<dyn Any + Send> avoids making CompositorSurface generic over frame types.
+    _guard: Box<dyn std::any::Any + Send>,
 }
 
 pub struct WindowSurface { /* winit + wgpu::Surface */ }
 pub struct HeadlessSurface { /* wgpu::Texture, optionally with readback buffer */ }
 ```
 
+**Soundness note (T-1):** The previous `current_texture() -> wgpu::TextureView` signature was unsound for `WindowSurface`: `wgpu::Surface::get_current_texture()` returns a `SurfaceTexture` that must remain alive until after `present()`. Discarding it at the trait boundary causes the `TextureView` to dangle. `CompositorFrame` makes the ownership explicit.
+
 ### 1.4 Graceful Shutdown
 
 Shutdown is triggered by OS signal (SIGTERM/SIGINT), explicit shutdown RPC, or fatal internal error. The shutdown sequence is ordered:
 
 1. **Stop accepting new connections.** gRPC and MCP servers stop accepting; existing sessions are notified.
-2. **Drain active mutations.** Wait up to 500ms for any in-flight mutation batch to commit.
+2. **Drain active mutations.** Signal the compositor thread to stop accepting new frames after the current one completes. Wait up to 500ms for the compositor thread to finish its in-progress frame (including Stage 7 GPU Submit + Present) and return to its inter-frame idle state. This is a wait on the compositor thread's frame-completion signal, not a `MutationBatch` channel drain — the compositor thread must not begin a new frame after receiving the shutdown signal. GPU work in progress completes normally within Stage 7's 8ms budget; shutdown initiation and frame completion are therefore non-circular. (T-3)
 3. **Revoke all leases.** Send revocation events to all connected agents. Do not wait for acknowledgement.
 4. **Flush telemetry.** Flush the telemetry queue with up to 200ms grace.
 5. **Terminate agent sessions.** Drop all gRPC and MCP connections.
-6. **GPU drain.** Submit any pending GPU work; wait for device idle.
+6. **GPU drain.** Call `device.poll(wgpu::Maintain::Wait)` to ensure all GPU submissions from step 2 have completed. This is a safety step; the compositor thread's frame completion in step 2 already implies GPU work for the last frame is submitted. Step 6 ensures the device is fully idle before resource release.
 7. **Release resources.** Drop GPU device, surface, and scene graph. Resource reference counts must reach zero cleanly.
 8. **Exit process.** Exit code 0 for clean shutdown, non-zero for error.
 
@@ -327,7 +343,7 @@ Process input events that have immediate visual response requirements:
 
 Local feedback is always within 1ms of input arrival (stages 1+2 combined). It does not wait for agent response, scene commit, or any network round-trip. This satisfies the `input_to_local_ack` p99 < 4ms budget with substantial headroom.
 
-The hit-test used here uses the last committed tile bounds snapshot, maintained as an atomic snapshot updated each frame. It does not read the mutable scene graph (no locking required for the common path).
+The hit-test used here uses the last committed tile bounds snapshot. The snapshot is stored as `Arc<HitTestSnapshot>` inside an `ArcSwapFull<HitTestSnapshot>` (from the `arc-swap` crate or equivalent). The main thread calls `arc_swap.load()` at the start of Stage 2, receives a guard holding the current `Arc<HitTestSnapshot>`, and uses it for the duration of Stage 2. No mutex is held. The compositor thread swaps in a new `Arc<HitTestSnapshot>` after Stage 4 commit using `arc_swap.store(Arc::new(new_snapshot))`. This is a pointer-width atomic write — the main thread either sees the old or new snapshot, never a torn intermediate state. The old snapshot is dropped when the last `Arc` reference falls away (T-2: eliminates data race between Stage 2 main-thread read and Stage 4 compositor-thread write).
 
 #### Stage 3: Mutation Intake
 **Thread:** Compositor | **Budget:** p99 < 1ms
@@ -343,7 +359,7 @@ Coalescing rule for state-stream mutations: if multiple batches from the same ag
 
 Apply validated mutation batches to the scene graph (RFC 0001 §4 — Mutation Pipeline). Scene commit is all-or-nothing per batch: either the entire batch applies or it is rejected with a structured error. Lease validation, budget checks, and invariant verification happen here.
 
-After commit: update the hit-test snapshot atomically so main thread's local feedback uses the latest bounds.
+After commit: publish the updated hit-test snapshot by constructing a new `Arc<HitTestSnapshot>` and calling `arc_swap.store(new_arc)`. The main thread picks up the new snapshot at the start of its next Stage 2 cycle. See Stage 2 above for the full synchronization protocol (T-2).
 
 #### Stage 5: Layout Resolve
 **Thread:** Compositor | **Budget:** p99 < 1ms
@@ -527,7 +543,7 @@ The post-revocation resource footprint for a revoked agent must be zero (per arc
 
 ### 5.3 Budget Accounting Accuracy
 
-Per-frame resource accounting uses integer arithmetic to avoid floating-point non-determinism. Texture memory is tracked in bytes. Update rates are tracked as a sliding window of event arrival timestamps over the last 1 second.
+Per-frame resource accounting uses integer arithmetic to avoid floating-point non-determinism. Texture memory is tracked in bytes. Update rates are tracked as a sliding window of event arrival timestamps over the last 1 second. Specifically: each agent's `AgentResourceState` carries a `VecDeque<Instant>` of mutation batch arrival timestamps. On each mutation intake (Stage 3), timestamps older than `now - 1s` are evicted from the front of the deque. After eviction, `deque.len()` is compared against the agent's `max_update_rate_hz` limit. A mutation batch is rejected if appending it would push `len` above the limit. This is a sliding window that allows short bursts up to the limit within any 1-second window (T-5: makes enforcement semantics unambiguous). A token-bucket alternative is a post-v1 consideration if burst tolerance proves problematic in practice.
 
 Budget checks happen in stage 3 (Mutation Intake) before the scene is modified. A mutation batch that would push the agent over budget is rejected in whole with a structured error. Partial acceptance within a batch is not supported — all-or-nothing is simpler to reason about and prevents partial state.
 
@@ -653,7 +669,7 @@ Override WM_NCHITTEST:
   - For points within any active hit-region: return HTCLIENT
   - For all other points: return HTTRANSPARENT
 ```
-The compositor maintains an `InputRegionMask` — a set of `Rect` values corresponding to active hit-regions in the current committed scene. This mask is updated atomically after each scene commit (stage 4). The WM_NCHITTEST handler reads this mask without locking (atomic swap pointer).
+The compositor maintains an `InputRegionMask` — a set of `Rect` values corresponding to active hit-regions in the current committed scene. This mask is stored as `Arc<InputRegionMask>` inside an `ArcSwapFull<InputRegionMask>` (the same pattern as `HitTestSnapshot` in §3.2 Stage 2). After each Stage 4 scene commit, the compositor thread constructs a new `Arc<InputRegionMask>` and stores it via `arc_swap.store()`. The WM_NCHITTEST handler on the main thread calls `arc_swap.load()` to read the current mask with no lock contention (T-2: eliminates the data race between the WM_NCHITTEST callback and Stage 4 commit).
 
 **macOS:**
 ```
@@ -876,7 +892,7 @@ pub struct TelemetryRecord {
     pub active_sessions: u32,
     pub active_leases: u32,
     pub texture_memory_bytes: u64,
-    pub degradation_level: u8,
+    pub degradation_level: DegradationLevel,  // T-4: typed enum, not u8; maps to uint32 in protobuf wire format
     pub shed_count: u32,
     pub telemetry_overflow_count: u64,
 }
@@ -891,8 +907,18 @@ pub enum DegradationLevel {
     Emergency = 5,
 }
 
-// Hit-test snapshot (read by main thread, written by compositor thread)
+// Hit-test snapshot (read by main thread, written by compositor thread).
+// Synchronization: stored as ArcSwapFull<HitTestSnapshot> — see §3.2 Stage 2.
 pub struct HitTestSnapshot {
     pub regions: Vec<(SceneId, Rect, InputMode)>, // (tile_id, bounds, mode)
 }
+// ArcSwapFull<HitTestSnapshot> usage:
+//   Compositor thread writes: arc_swap.store(Arc::new(new_snapshot))
+//   Main thread reads:        let guard = arc_swap.load(); // pointer-width atomic, no lock
+
+// Note on stage_durations_us (T-6): the array-indexed form above is an internal Rust type
+// used on the compositor thread. The wire-level representation is FrameTimingRecord as
+// defined in RFC 0003 §FrameTimingRecord, which uses named per-stage fields. RFC 0002
+// will adopt RFC 0003's named-field approach when the protobuf schema is finalized.
+// See RFC 0003 round 1 review §Cross-RFC Consistency.
 ```
