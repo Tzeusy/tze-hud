@@ -47,9 +47,17 @@ impl Clock for SystemClock {
 /// clock.advance(500);
 /// assert_eq!(clock.now_millis(), 1_500);
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct TestClock {
     now_ms: Arc<Mutex<u64>>,
+}
+
+impl fmt::Debug for TestClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TestClock")
+            .field("now_ms", &self.now_millis())
+            .finish()
+    }
 }
 
 impl TestClock {
