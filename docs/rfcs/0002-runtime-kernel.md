@@ -145,7 +145,7 @@ Shutdown is triggered by OS signal (SIGTERM/SIGINT), explicit shutdown RPC, or f
 7. **Release resources.** Drop GPU device, surface, and scene graph. Resource reference counts must reach zero cleanly.
 8. **Exit process.** Exit code 0 for clean shutdown, non-zero for error.
 
-Fatal GPU errors (device lost, out of memory) trigger an emergency path: flush telemetry, log structured error, enter safe mode (RFC 0007 §5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit, then trigger graceful shutdown (§1.4) with non-zero exit code. If the safe mode overlay cannot render (GPU already unusable), skip directly to graceful shutdown. See §7.3 and RFC 0009 §5 for the authoritative GPU failure response procedure. (T-7: aligns with RFC 0009 §5 resolution.)
+Fatal GPU errors (device lost, out of memory) trigger an emergency path: flush telemetry, log structured error, enter safe mode (RFC 0007 §5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit, then trigger graceful shutdown with non-zero exit code. If the safe mode overlay cannot render (GPU already unusable), skip directly to graceful shutdown. See §7.3 and RFC 0009 §5 for the authoritative GPU failure response procedure. (T-7: aligns with RFC 0009 §5 resolution.)
 
 ---
 
@@ -718,7 +718,7 @@ GPU device lost (rare, but must be handled):
 1. Compositor thread detects `SurfaceError::Lost` or `SurfaceError::Outdated`.
 2. Flush telemetry with error event.
 3. Attempt surface reconfiguration. If successful, resume normally.
-4. If reconfiguration fails (device truly lost): enter safe mode (RFC 0007 §5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit. If safe mode overlay renders within 2 seconds, display it briefly; then trigger graceful shutdown (§1.4) with non-zero exit code. If the overlay cannot render (GPU already unusable), skip directly to graceful shutdown. (T-7: required by RFC 0009 §5.3.)
+4. If reconfiguration fails (device truly lost): enter safe mode (RFC 0007 §5.1, `CRITICAL_ERROR` reason) to inform the viewer before process exit. If safe mode overlay renders within 2 seconds, display it briefly; then trigger graceful shutdown with non-zero exit code. If the overlay cannot render (GPU already unusable), skip directly to graceful shutdown. (T-7: required by RFC 0009 §5.3.)
 
 ---
 
