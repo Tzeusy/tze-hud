@@ -59,7 +59,7 @@ No new doctrinal gaps. Round 1 fixes held. Score unchanged.
 - **[SHOULD-FIX → FIXED]** Expiry non-negotiability under load was stated only in Open Questions (recommendation), not as a normative requirement in §5.4. Promoted to normative text.
 - **[SHOULD-FIX → FIXED]** Clock skew estimation window had no fast-convergence path after a sudden clock jump. Added jump-detection reset condition to §4.3.
 - **[SHOULD-FIX → FIXED]** Explicit `DeleteTile` mid-deferral behavior was unspecified in §2.3. Added parity with expiry behavior.
-- **[CONSIDER]** Frame quantization boundary condition noted in §3.3; no change required.
+- **[CONSIDER → SUBSEQUENTLY FIXED in rig-fim]** Frame quantization boundary condition noted in §3.3; at the time of Round 2 this was flagged as a boundary condition only. Post-Round 2 analysis (rig-fim) identified this as a correctness bug: the half-frame tolerance allowed mutations to present before their declared `present_at_us`, violating the no-earlier-than guarantee in §5.3. Fixed in rig-fim correctness pass.
 
 #### Cross-RFC Consistency: 4/5 (up from 3/5)
 
@@ -69,6 +69,18 @@ No new doctrinal gaps. Round 1 fixes held. Score unchanged.
 - **[CONSIDER]** `ZonePublish.ttl_ms` unit inconsistency deferred to RFC 0001 `_ms → _us` amendment sweep.
 
 **No dimension below 3. Round 2 findings addressed. Ready for Round 3.**
+
+---
+
+### Correctness Fix — Frame Quantization (rig-fim)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+
+#### Changes Applied
+
+- **[MUST-FIX → FIXED]** §3.3 used a half-frame tolerance in the quantization rule (`T <= frame_F_vsync_us + frame_budget_us / 2`), which contradicted §5.3's normative "no earlier than T" guarantee. A mutation with `present_at_us = V + 8ms` would be applied at frame F (vsync at V), presenting 8ms before the declared time. Fixed by replacing the half-frame rule with a strict vsync boundary: `T <= frame_F_vsync_us`. Added explanatory note on the expected one-frame delay for timestamps just after a vsync.
+- **[MUST-FIX → FIXED]** §5.3 pending queue drain condition used `present_at_us <= current_frame_vsync_us + half_frame`, propagating the same early-presentation bug into the implementation contract. Fixed to `present_at_us <= current_frame_vsync_us` to match the corrected §3.3 rule and the no-earlier-than guarantee.
 
 ---
 
@@ -363,9 +375,11 @@ Timestamps are stored and compared at **microsecond (μs) resolution**. The disp
 
 **Frame quantization:** a `present_at_us` timestamp T is "in scope" for frame F if:
 ```
-T <= frame_F_vsync_us + frame_budget_us / 2
+T <= frame_F_vsync_us
 ```
-Where `frame_budget_us` is 16,667μs at 60fps. Timestamps within half a frame period after the vsync are treated as belonging to that frame. This prevents off-by-one frame errors when timestamps and vsync are very close.
+Where `frame_F_vsync_us` is the vsync time of frame F. A timestamp must not exceed the frame's vsync time to be applied at that frame. This is a strict no-earlier-than rule: content is never presented before its declared `present_at_us`. A timestamp that falls between two vsync times is held until the next frame whose vsync is at or after T.
+
+**Note on off-by-one frame delays.** A mutation with `present_at_us` just after vsync F will wait until vsync F+1. This is intentional: the no-earlier-than guarantee is more valuable than saving one frame of latency. Agents that want minimal latency should set `present_at_us` to the earliest acceptable frame, not a future frame.
 
 ### 3.4 Timezone Handling
 
@@ -514,7 +528,7 @@ A mutation batch with `present_at_us = T` is held in the pending queue until the
 
 **Presentation accuracy:** ±1 frame (±16.6ms at 60fps). The compositor guarantees that a mutation with `present_at_us = T` will be applied no earlier than T and no later than T + 16.6ms (one frame after the target). Accuracy depends on mutation arrival before the frame's intake cutoff; a mutation arriving late may shift by one additional frame.
 
-**Pending queue:** held pending mutations are stored in a per-agent sorted queue, ordered by `present_at_us` ascending. The queue is drained in Stage 3: mutations whose `present_at_us <= current_frame_vsync_us + half_frame` are extracted and forwarded to Stage 4.
+**Pending queue:** held pending mutations are stored in a per-agent sorted queue, ordered by `present_at_us` ascending. The queue is drained in Stage 3: mutations whose `present_at_us <= current_frame_vsync_us` are extracted and forwarded to Stage 4. This drain condition enforces the no-earlier-than guarantee directly: a mutation is released only once the frame's vsync has reached or passed the mutation's declared presentation time.
 
 **Maximum pending queue depth:** 256 entries per agent. Mutations that would exceed this limit are rejected with `PENDING_QUEUE_FULL`. Agents with many deferred mutations are scheduling too aggressively; they should reduce their schedule horizon or increase their mutation rate.
 
