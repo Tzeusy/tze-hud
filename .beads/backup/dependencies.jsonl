@@ -6,9 +6,11 @@
 {"created_at":"2026-03-22T11:35:13Z","created_by":"Tzeusy","depends_on_id":"rig-5vq","issue_id":"rig-5vq.3","type":"parent-child"}
 {"created_at":"2026-03-22T11:38:09Z","created_by":"Tzeusy","depends_on_id":"rig-5vq.1","issue_id":"rig-5vq.3","type":"blocks"}
 {"created_at":"2026-03-22T11:38:09Z","created_by":"Tzeusy","depends_on_id":"rig-5vq.2","issue_id":"rig-5vq.3","type":"blocks"}
+{"created_at":"2026-03-22T12:56:15Z","created_by":"Tzeusy","depends_on_id":"rig-cz0","issue_id":"rig-5vq.3","type":"blocks"}
 {"created_at":"2026-03-22T11:36:22Z","created_by":"Tzeusy","depends_on_id":"rig-5vq","issue_id":"rig-5vq.4","type":"parent-child"}
 {"created_at":"2026-03-22T11:38:09Z","created_by":"Tzeusy","depends_on_id":"rig-5vq.1","issue_id":"rig-5vq.4","type":"blocks"}
 {"created_at":"2026-03-22T11:38:09Z","created_by":"Tzeusy","depends_on_id":"rig-5vq.2","issue_id":"rig-5vq.4","type":"blocks"}
+{"created_at":"2026-03-22T13:01:24Z","created_by":"Tzeusy","depends_on_id":"rig-9bw","issue_id":"rig-5vq.4","type":"blocks"}
 {"created_at":"2026-03-22T11:36:52Z","created_by":"Tzeusy","depends_on_id":"rig-5vq","issue_id":"rig-5vq.5","type":"parent-child"}
 {"created_at":"2026-03-22T11:37:39Z","created_by":"Tzeusy","depends_on_id":"rig-5vq","issue_id":"rig-5vq.6","type":"parent-child"}
 {"created_at":"2026-03-22T11:38:09Z","created_by":"Tzeusy","depends_on_id":"rig-5vq.1","issue_id":"rig-5vq.6","type":"blocks"}
