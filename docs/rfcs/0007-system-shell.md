@@ -60,6 +60,7 @@ Four correctness gaps found and fixed in this round:
 
 - **[SHOULD-FIX → FIXED]** §7.4 (`ViewerPromptState.timeout_at_us`): Used `int64` but RFC 0003 §1.1 establishes `uint64` as the canonical type for monotonic timestamps in µs. Fixed to `uint64`.
 - **[SHOULD-FIX → FIXED]** §7.3: `OverrideEvent.trigger` was an unvalidated `string`. Valid values are a closed set; replaced with `OverrideTrigger` enum for type safety and audit-log correctness. Similarly, `SafeModeEntryEvent.reason` was an unvalidated `string`; replaced with `SafeModeEntryReason` enum.
+- **[SHOULD-FIX → FIXED]** §7.3 / §7.5: `OverrideEvent.timestamp_us` was `int64`; missed by the initial pass. Fixed to `uint64` (RFC 0003 §1.1). `SafeModeState.entered_at_us` was similarly `int64`; fixed to `uint64`. `SafeModeState.entry_reason` was `optional string` while `SafeModeEntryEvent.reason` is `SafeModeEntryReason` — fixed to use the enum for type consistency.
 - **[CONSIDER]** §4.1: Dismiss swipe threshold (40% of tile width) is not configurable. On small tiles this risks accidental dismissals. Acceptable for v1 but worth making configurable in a future revision.
 - **[CONSIDER]** §7.6: `SafeModeOverlayCmd.banner_text` and `resume_button_label` carry string literals rather than localization keys. Acceptable for v1 English-only deployments but creates a future I18N regression point.
 
@@ -609,7 +610,7 @@ message OverrideEvent {
     SafeModeEntryEvent safe_mode_entry = 5;
     SafeModeExitEvent safe_mode_exit = 6;
   }
-  int64 timestamp_us = 10;   // Monotonic microseconds (RFC 0003 §1.1).
+  uint64 timestamp_us = 10;  // Monotonic microseconds (RFC 0003 §1.1 uint64 µs).
   OverrideTrigger trigger = 11;
 }
 
@@ -683,8 +684,8 @@ message ViewerIdentityChoice {
 // Internal — not agent-accessible.
 message SafeModeState {
   SafeModePhase phase = 1;
-  optional string entry_reason = 2;
-  optional int64 entered_at_us = 3;
+  optional SafeModeEntryReason entry_reason = 2;  // Typed to match SafeModeEntryEvent.reason (§7.3).
+  optional uint64 entered_at_us = 3;               // Monotonic timestamp (RFC 0003 §1.1 uint64 µs).
 }
 
 enum SafeModePhase {
