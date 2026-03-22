@@ -256,6 +256,10 @@ fn test_transaction_validation_p99_within_budget() {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     let tab = scene.create_tab("Main", 0).unwrap();
     let lease = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+    // Raise tile budget so budget enforcement doesn't reject batches in this timing test
+    if let Some(l) = scene.leases.get_mut(&lease) {
+        l.resource_budget.max_tiles = 256;
+    }
 
     let mut validation_bucket = LatencyBucket::new("validation");
 
