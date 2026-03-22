@@ -166,6 +166,38 @@ No new inconsistencies. All prior-round fixes remain intact. Cross-RFC score rai
 
 ---
 
+### Round 7 — Viewer ID Method Pipeline Design Note (rig-6x2)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-6x2
+**Doctrine files reviewed:** privacy.md §"Viewer context"
+
+#### Finding: `viewer_id_method` is a single string — pipeline design direction undocumented
+
+**[DESIGN NOTE — P3]** RFC 0006 §7.1 defines `viewer_id_method` as a single string enum. In practice, deployments with multiple identification signals (face recognition as primary, phone proximity as fallback, explicit login as override) cannot express multi-signal identification under this schema. privacy.md §"Viewer context" explicitly states: "The runtime defines a trait for viewer identity and lets the deployment plug in what's appropriate." A pipeline model is the natural expression of that trait-based design.
+
+The ChatGPT 5.4 Pro review noted: "Let viewer identification be a pipeline of detectors instead of single `viewer_id_method` string."
+
+This round documents the pipeline design direction and the migration path from the v1 single-string form. No v1 behavior is changed.
+
+**Changes applied:**
+
+1. **§7.1 Viewer Identification:** Expanded the `viewer_id_method` description with:
+   - A note that single-string form is the v1 implementation.
+   - A post-v1 design note showing the `[[privacy.viewer_detectors]]` pipeline syntax with `method`, `priority`, and `confidence_threshold` fields.
+   - Pipeline semantics: detectors are evaluated in ascending priority order (lower number = higher priority); the first detector returning a confident identification wins; if no detector identifies a viewer, `default_viewer_class` applies.
+   - A compatibility note: the single-string form is a convenience shorthand for single-detector deployments; a v1 parser treats `viewer_id_method = "face_recognition"` as a pipeline of length 1 with default threshold.
+   - Validation rules for the detector array (post-v1): duplicate priorities, unknown method names, `confidence_threshold` out of range.
+
+2. **§10 Rust types:** Added `ViewerDetectorConfig` struct and `ViewerIdConfig` enum (design note for post-v1) covering both the shorthand string form and the full pipeline array form.
+
+3. **Open Questions:** Added Open Question 6 about timing of the pipeline promotion and whether a dedicated RFC should own the detector plugin contract.
+
+**No v1 behavior changed. No doctrinal regressions. Round 7 complete.**
+
+---
+
 ### Round 5 — Scene-Event Taxonomy (rig-f52)
 
 **Reviewer:** Beads worker agent
@@ -1255,9 +1287,15 @@ default_classification = "private"
 # Default: "unknown"
 default_viewer_class = "unknown"
 
-# Viewer identification method. One of: "none", "face_recognition", "proximity_badge",
-# "phone_presence", "explicit_login". Pluggable; the runtime defines a trait.
+# Viewer identification method (v1 form — single string).
+# One of: "none", "face_recognition", "proximity_badge", "phone_presence", "explicit_login".
+# Pluggable; the runtime defines a trait for viewer identity (see privacy.md §"Viewer context").
 # Default: "none" (viewer class always equals default_viewer_class).
+#
+# POST-V1 DESIGN DIRECTION — Detector Pipeline:
+# viewer_id_method will become a pipeline of ordered detector configurations.
+# The single-string form above remains valid as a convenience shorthand (pipeline of length 1).
+# See §7.1 "Viewer Identification Pipeline (Post-V1 Design Note)" for the full syntax.
 viewer_id_method = "none"
 
 # Redaction style for tiles whose classification exceeds the viewer's access.
@@ -1315,6 +1353,63 @@ dim_level = 0.1
 - `default_viewer_class` must be one of: `"owner"`, `"household_member"`, `"known_guest"`, `"unknown"`, `"nobody"`. The `"nobody"` class is valid and means "screen detects no viewer present" (see privacy.md). Unknown → `CONFIG_UNKNOWN_VIEWER_CLASS`.
 - `start` and `end` must be valid `HH:MM` strings. Invalid → `CONFIG_INVALID_TIME`.
 - `pass_through_class` must be one of the enumerated values. Unknown → `CONFIG_UNKNOWN_INTERRUPTION_CLASS`.
+
+#### Viewer Identification Pipeline (Post-V1 Design Note)
+
+> **This section is a design note only.** The v1 implementation uses the single `viewer_id_method` string above. The pipeline syntax below is forward-looking doctrine to prevent locking the config schema into a single-detector architecture. See Open Question 6 and Round 7 review history.
+
+In v1, `viewer_id_method` accepts a single method name (or `"none"`). The runtime instantiates one detector and uses its output directly.
+
+**Post-v1 direction:** `viewer_id_method` will be superseded by `[[privacy.viewer_detectors]]`, an ordered array of detector configurations. The single-string form is retained as a convenience shorthand that expands to a one-entry pipeline with default threshold settings — ensuring backward compatibility for simple deployments.
+
+**Post-v1 pipeline syntax:**
+
+```toml
+# Explicit login always wins (priority 0 = highest).
+[[privacy.viewer_detectors]]
+method = "explicit_login"
+priority = 0
+
+# Face recognition as primary biometric detector.
+[[privacy.viewer_detectors]]
+method = "face_recognition"
+priority = 1
+confidence_threshold = 0.85  # 0.0–1.0; default: 0.75
+
+# Phone proximity as fallback when face recognition is unavailable or inconclusive.
+[[privacy.viewer_detectors]]
+method = "phone_presence"
+priority = 2
+```
+
+**Pipeline semantics:**
+
+1. Detectors are evaluated in ascending `priority` order (lower number = higher priority).
+2. The first detector that returns an identification result with confidence ≥ `confidence_threshold` wins; its viewer class assignment is used.
+3. If no detector produces a confident identification, `default_viewer_class` applies.
+4. The `"explicit_login"` method always produces confidence 1.0 (binary: logged in or not) and should be given the highest priority (lowest number) when present.
+5. Multiple detectors may run concurrently; priority governs which result is accepted, not evaluation order.
+
+**Compatibility rules:**
+
+- `viewer_id_method = "face_recognition"` (v1 string form) is equivalent to:
+  ```toml
+  [[privacy.viewer_detectors]]
+  method = "face_recognition"
+  priority = 1
+  confidence_threshold = 0.75
+  ```
+- A config that supplies both `viewer_id_method` and `[[privacy.viewer_detectors]]` is a post-v1 validation error: `CONFIG_VIEWER_ID_AMBIGUOUS`.
+- The `"none"` method in the pipeline is only valid as a sole entry (pipeline of length 1, equivalent to `viewer_id_method = "none"`). Including `"none"` alongside other detectors is a validation error: `CONFIG_VIEWER_ID_NONE_NOT_MIXABLE`.
+
+**Post-v1 validation rules (not enforced in v1):**
+
+- Each entry's `method` must be one of the recognized detector types. Unknown → `CONFIG_UNKNOWN_VIEWER_METHOD`.
+- `priority` values must be unique across all entries in the pipeline. Duplicate priorities → `CONFIG_VIEWER_ID_DUPLICATE_PRIORITY`.
+- `confidence_threshold`, if set, must be in `[0.0, 1.0]`. Out of range → `CONFIG_INVALID_CONFIDENCE_THRESHOLD`.
+- Pipeline must have at least one entry. Empty array → treated as `viewer_id_method = "none"` with a WARN log.
+
+**Doctrinal alignment:** privacy.md §"Viewer context" states: "The runtime does not require a specific identification mechanism — it defines a trait for viewer identity and lets the deployment plug in what's appropriate." The pipeline model is the direct config-level expression of this trait-based architecture: each `[[privacy.viewer_detectors]]` entry is a registered implementation of the `ViewerIdentitySource` trait, evaluated in deployment-defined priority order.
 
 ### 7.2 Degradation Configuration
 
@@ -1625,6 +1720,83 @@ Full type definitions for `TabConfig`, `ZoneInstanceConfig`, `AgentRegistrationC
 
 ---
 
+### Viewer Identification Pipeline Types (Post-V1 Design Note)
+
+> **These types are a design note only.** V1 uses a `viewer_id_method: String` field in `PrivacyConfig`. The types below document the intended post-v1 representation. See §7.1 "Viewer Identification Pipeline (Post-V1 Design Note)" for the config syntax.
+
+```rust
+/// A single viewer identification detector in the pipeline.
+/// Each entry maps to one implementation of the `ViewerIdentitySource` trait.
+///
+/// Post-v1. In v1, `PrivacyConfig.viewer_id_method` is a plain `String`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ViewerDetectorConfig {
+    /// Detector type. One of: "none", "face_recognition", "proximity_badge",
+    /// "phone_presence", "explicit_login".
+    pub method: ViewerIdMethod,
+
+    /// Evaluation priority. Lower number = higher priority. Must be unique within
+    /// the pipeline. The first detector returning confidence >= `confidence_threshold`
+    /// wins; lower-priority detectors are not consulted.
+    pub priority: u32,
+
+    /// Minimum confidence score [0.0, 1.0] for this detector's result to be accepted.
+    /// Default: 0.75. The "explicit_login" method always returns confidence 1.0
+    /// (binary outcome) and does not require this field.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f32,
+}
+
+/// The recognized viewer identification methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerIdMethod {
+    /// No identification; viewer class is always `default_viewer_class`.
+    None,
+    /// Camera-based face recognition. Requires hardware camera and face recognition
+    /// plugin. Confidence is the recognition model's score for the top match.
+    FaceRecognition,
+    /// Bluetooth/NFC proximity badge detection. Confidence is binary (detected or not).
+    ProximityBadge,
+    /// Phone presence detection (Bluetooth LE, Wi-Fi association, or similar).
+    /// Confidence is binary (device detected or not).
+    PhonePresence,
+    /// Explicit PIN, password, or biometric login via the runtime's login screen.
+    /// Always returns confidence 1.0. Recommended for highest-priority slot.
+    ExplicitLogin,
+}
+
+/// The v1-to-post-v1 migration type for viewer identification configuration.
+///
+/// In v1, `PrivacyConfig` will hold `viewer_id_method: ViewerIdMethod` (a single
+/// enum value). Post-v1, it will hold `viewer_detectors: Vec<ViewerDetectorConfig>`.
+/// This union type supports both forms and is used by the post-v1 parser to
+/// accept configs written for either version.
+///
+/// The single-method form is normalized to a one-entry pipeline on load:
+/// ```
+/// viewer_id_method = "face_recognition"
+/// →
+/// ViewerIdConfig::Pipeline(vec![ViewerDetectorConfig {
+///     method: ViewerIdMethod::FaceRecognition,
+///     priority: 1,
+///     confidence_threshold: 0.75,
+/// }])
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ViewerIdConfig {
+    /// V1 form: single method string. Shorthand for a one-entry pipeline.
+    Single(ViewerIdMethod),
+    /// Post-v1 form: ordered pipeline of detector configurations.
+    Pipeline(Vec<ViewerDetectorConfig>),
+}
+
+fn default_confidence_threshold() -> f32 { 0.75 }
+```
+
+---
+
 ## 11. Implementation Notes
 
 ### 11.1 Config Crate
@@ -1668,6 +1840,10 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 4. **Secret management for PSK keys.** The current design reads keys from environment variables. Deployments with more complex secret management needs (Vault, key files, etc.) will need a post-v1 extension. The auth trait is designed to support this.
 
 5. **Scene events as a dedicated RFC.** §5.5 defines the v1 scene-event taxonomy inline because v1.md constrains scene events to basic topology changes plus agent-emittable named events. As post-v1 deployments add richer event routing (event filters, replay, subscriptions by prefix, custom payload schemas), the scene-event contract may outgrow a config section. Consider a dedicated RFC 0010 (Scene Event Bus) that owns the namespace registry, event payload schema, delivery guarantees, and subscription model. RFC 0006 would then cross-reference it for `tab_switch_on_event` semantics, as RFC 0004 owns input routing today.
+
+6. **Viewer identification pipeline promotion.** §7.1 documents the `[[privacy.viewer_detectors]]` pipeline syntax as a post-v1 design note. Two open questions remain for the promotion milestone:
+   - **When?** The pipeline syntax should be promoted to a first-class schema field as soon as any deployment needs more than one detector. It should not wait for a major version bump. The proposed trigger: when a second detector type ships a plugin implementation, the pipeline config is promoted from "design note" to "supported" in the same release.
+   - **Plugin contract.** The `ViewerIdentitySource` trait needs a dedicated RFC (or an appendix to an existing privacy/security RFC) that specifies the plugin interface: confidence score semantics, async evaluation contract, error handling when a detector is unavailable, and how the runtime surfaces detector health in telemetry. Without a stable plugin contract, third-party detector implementations cannot be guaranteed interoperable with the pipeline runtime. Consider whether this belongs in a dedicated RFC 0011 (Viewer Identity Plugin Contract) or as a §7 extension in this RFC.
 
 ---
 
