@@ -113,8 +113,12 @@ message SessionEstablished {
   uint64 heartbeat_interval_ms = 4;     // How often agent must send HeartbeatPing
   string namespace = 5;                 // Agent's namespace in the scene (RFC 0001 §1.2)
   uint64 server_sequence = 6;           // Starting server-side sequence number
+  repeated SubscriptionCategory active_subscriptions = 7;   // Confirmed subscriptions
+  repeated SubscriptionCategory denied_subscriptions = 8;   // Requested but denied (missing capability)
 }
 ```
+
+`denied_subscriptions` is populated when an agent requests subscription categories for which it lacks the required capability (§7.2). The denied categories are listed here rather than being silently dropped — agents can inspect this field to detect capability gaps and request elevated capabilities if needed.
 
 ### 1.4 Authentication
 
@@ -126,6 +130,7 @@ message AuthCredential {
     PreSharedKeyCredential pre_shared_key = 1;
     LocalSocketCredential  local_socket   = 2;
     OauthTokenCredential   oauth_token    = 3;
+    MtlsCredential         mtls           = 4;
   }
 }
 
@@ -144,9 +149,18 @@ message OauthTokenCredential {
   string access_token = 1;
   string token_type   = 2;  // e.g. "Bearer"
 }
+
+message MtlsCredential {
+  // mTLS: client certificate identity is validated at the TLS layer.
+  // This message signals that the agent is presenting a client cert via the
+  // underlying TLS handshake; no additional fields are required here.
+  // The runtime extracts and verifies the certificate chain from the TLS
+  // context before this message is even read.
+  string cert_fingerprint = 1;  // Optional: SHA-256 hex fingerprint for audit log
+}
 ```
 
-The runtime's auth mechanism is pluggable (security.md §"Authentication"). The `AuthCredential` oneof is the wire encoding — the runtime maps each variant to its registered auth handler.
+The runtime's auth mechanism is pluggable (security.md §"Authentication"). The `AuthCredential` oneof is the wire encoding — the runtime maps each variant to its registered auth handler. V1 ships pre-shared key and local socket implementations; mTLS and OAuth2/OIDC are supported as protocol-level variants but their full implementation is deferred to the Security RFC.
 
 ### 1.5 Graceful Disconnect
 
@@ -285,7 +299,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `LeaseResponse` | Transactional | Grant/deny/revoke for a lease operation |
 | `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing` with server timestamp |
 | `SceneEvent` | State-stream | Topology change, zone occupancy update, lease change |
-| `InputEvent` | Ephemeral realtime | Pointer/touch/key event routed to agent (RFC 0004) |
+| `InputEvent` | Ephemeral realtime | Pointer/touch/key/focus event routed to agent (RFC 0004). Carries `InputMessage` from RFC 0004, which includes `FocusGainedEvent` and `FocusLostEvent` variants alongside pointer/touch/key events. Focus events are Transactional (not droppable) despite being in the same envelope. |
 | `DegradationNotice` | Transactional | Runtime has changed degradation level; see §3.4 |
 | `RuntimeError` | Transactional | Structured error (see §3.5) |
 | `CapabilityNotice` | Transactional | Mid-session capability grant or revocation |
@@ -477,12 +491,12 @@ message SessionResumeResult {
 
 When a resume is accepted within the grace period:
 
-1. The runtime identifies all server-side messages with `sequence > last_seen_server_sequence`.
-2. It replays these as a `StateDelta` burst: scene topology changes, lease state changes, and zone occupancy changes that the agent missed.
+1. The runtime identifies all server-side `SceneEvent` and `LeaseResponse` messages with `sequence > last_seen_server_sequence`.
+2. It replays these missed transactional/state-stream messages as a burst of normal `SessionMessage` envelopes (carrying `SceneEvent`, `LeaseResponse`, or `CapabilityNotice` payloads). This replayed burst is informally called the "state delta." There is no separate `StateDelta` message type — the resume delta is simply a set of replayed `SceneEvent` messages followed by a sentinel `SceneEvent` with `type = DELTA_COMPLETE` to signal the end of the catch-up phase.
 3. Ephemeral events (cursor moves, interim speech tokens) are not replayed — they are inherently transient.
-4. Once the delta burst is complete, the session transitions to `Active` state normally.
+4. Once the delta burst is complete (the agent receives `SceneEvent` with `type = DELTA_COMPLETE`), the session transitions to `Active` state normally.
 
-If the agent's leases are still orphaned (not yet evicted — within grace period), they are automatically reclaimed. The disconnection badges clear.
+If the agent's leases are still orphaned (not yet evicted — within grace period), they are automatically reclaimed as part of the state delta. The disconnection badges clear.
 
 ### 6.5 Post-Grace-Period Reconnect
 
@@ -525,7 +539,7 @@ Agents declare which event categories they want to receive. Receiving events for
 
 ### 7.2 Initial Subscriptions
 
-Declared in `SessionInit.initial_subscriptions`. Each category is filtered by the agent's granted capabilities: requesting a category for which the agent lacks the required capability is silently downgraded (the category is omitted, not rejected with an error, to allow forward-compatible clients).
+Declared in `SessionInit.initial_subscriptions`. Each category is filtered by the agent's granted capabilities: requesting a category for which the agent lacks the required capability is downgraded — the category is omitted from active delivery. The `SessionEstablished` response explicitly lists `active_subscriptions` (confirmed) and `denied_subscriptions` (omitted due to missing capability), so agents can detect and react to capability gaps rather than silently receiving no events (see §1.3).
 
 ### 7.3 SubscriptionChange (Mid-Session)
 
@@ -658,11 +672,16 @@ message OauthTokenCredential {
   string token_type   = 2;
 }
 
+message MtlsCredential {
+  string cert_fingerprint = 1;  // SHA-256 hex fingerprint; optional, for audit log
+}
+
 message AuthCredential {
   oneof mechanism {
     PreSharedKeyCredential pre_shared_key = 1;
     LocalSocketCredential  local_socket   = 2;
     OauthTokenCredential   oauth_token    = 3;
+    MtlsCredential         mtls           = 4;
   }
 }
 
@@ -700,6 +719,8 @@ message SessionEstablished {
   uint64  heartbeat_interval_ms          = 4;
   string  namespace                      = 5;
   uint64  server_sequence                = 6;
+  repeated SubscriptionCategory active_subscriptions = 7;
+  repeated SubscriptionCategory denied_subscriptions = 8;
 }
 
 message SessionClose {
@@ -898,14 +919,15 @@ The session protocol exposes the following configurable parameters in the runtim
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `handshake_timeout_ms` | 5000 | Timeout for `SessionInit` arrival after stream open |
-| `heartbeat_interval_ms` | 10 000 | How often agents must send `HeartbeatPing` |
+| `heartbeat_interval_ms` | 5000 | How often agents must send `HeartbeatPing` |
 | `reconnect_grace_period_ms` | 30 000 | How long orphaned leases are held after disconnect |
 | `retransmit_timeout_ms` | 5000 | Agent-side timeout before retransmitting unacked transactional message |
 | `dedup_window_size` | 1000 | Max unique `batch_id` values held in deduplication window |
 | `dedup_window_ttl_s` | 60 | Time-to-live for deduplication window entries |
 | `max_sequence_gap` | 100 | Sequence gap that triggers stream close |
 | `ephemeral_buffer_max` | 16 | Per-session max queued ephemeral messages before drop |
-| `max_concurrent_sessions` | 32 | Hard limit on simultaneous active sessions |
+| `max_concurrent_resident_sessions` | 16 | Hard limit on simultaneous active resident/embodied sessions |
+| `max_concurrent_guest_sessions` | 64 | Hard limit on simultaneous active MCP guest sessions |
 
 ---
 
