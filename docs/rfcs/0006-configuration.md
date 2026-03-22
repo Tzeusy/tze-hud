@@ -154,6 +154,13 @@ reconnect_grace_secs = 30
 # If true, the runtime exports a JSON schema to stdout at startup (for tooling).
 # Default: false
 emit_schema = false
+
+# Virtual display dimensions for headless mode (profile = "headless").
+# Ignored when running with a real display.
+# Default: 1920 x 1080
+# Note: RFC 0002 §7 uses the same field names: headless_width, headless_height.
+headless_width = 1920
+headless_height = 1080
 ```
 
 **Validation rules:**
@@ -318,6 +325,16 @@ A display profile is a named set of resource budgets, capability constraints, an
 
 Profiles are not a fork. The scene model, API, and protocol are identical across profiles. A profile is a budget envelope. Agents negotiate within that envelope; the runtime enforces it.
 
+**V1 built-in profiles:**
+
+| Name | Purpose |
+|------|---------|
+| `full-display` | High-end local display (wall display, monitor, kiosk). GPU, persistent power. |
+| `mobile` | Mobile Presence Node (phone, glasses-class). Thermal limits, variable network. |
+| `headless` | CI/test, no window. Offscreen render target. Not for production deployments. |
+
+The `"desktop"` alias used in early doctrine drafts maps to `full-display`. The `"headless"` profile is the v1 mechanism for CI testing (see architecture.md §"Display profiles": "V1 supports at least two built-in profiles: 'desktop' (high-end local display) and 'headless' (CI/test, no window)"). The RFC uses `full-display` as the canonical production name; `headless` is the third built-in to support the doctrinal requirement.
+
 ### 3.2 Built-in Profile: `full-display`
 
 The Full Display Node profile. Targets wall displays, dedicated monitors, kiosks, and mirror displays with a local GPU and persistent power.
@@ -383,20 +400,58 @@ allowed_node_types = [
   "static_image",
   "hit_region",
 ]
+# Overlay mode is included for phone targets that support transparent windows
+# (e.g., PiP overlay on Android, transparent floating window on iOS).
+# On glasses-class devices, overlay is the primary rendering mode.
+# Not all mobile platforms support overlay — the runtime falls back to fullscreen
+# on platforms where overlay primitives are unavailable (see architecture.md
+# §"Window model: two deployment modes", Promise boundary).
 allowed_window_modes = ["fullscreen", "overlay"]
 max_media_streams = 1     # One primary live stream
 max_agent_update_hz = 30  # Coalesce more aggressively
-allow_background_zones = false   # Background layer not available
+allow_background_zones = false   # Background layer not available on mobile
 allow_chrome_zones = true
 
 # Mobile-specific: prefer zones over raw tiles (advisory to orchestrators).
+# Zones abstract geometry which varies dramatically across mobile devices (see mobile.md).
 prefer_zones = true
 
 # Mobile-specific: upstream precomposition allowed (post-v1).
 upstream_precomposition = false
 ```
 
-### 3.4 Profile Negotiation
+**Note on `prefer_zones` and `upstream_precomposition`:** These are mobile-specific advisory fields surfaced in the profile's TOML documentation. They are included in the `DisplayProfile` Rust struct as optional boolean fields with `#[serde(default)]`. They do not affect the compositor's enforcement budget — they are hints to orchestrators and the upstream service respectively.
+
+### 3.4 Built-in Profile: `headless`
+
+The headless profile. Targets CI pipelines, integration tests, and offline rendering. Creates an offscreen texture surface — no window, no display server required. This is the third v1 built-in, satisfying the architecture.md doctrine: "V1 supports at least two built-in profiles: 'desktop' (high-end local display) and 'headless' (CI/test, no window)."
+
+```toml
+# Built-in profile definition (shown for documentation)
+[profiles.headless]
+max_tiles = 256
+max_texture_mb = 512
+max_agents = 8
+target_fps = 60          # Software-driven; tokio::time::interval (see RFC 0002 §7)
+min_fps = 1              # No vsync pressure; any frame rate is acceptable in CI
+allowed_node_types = [
+  "solid_color",
+  "text_markdown",
+  "static_image",
+  "hit_region",
+]
+allowed_window_modes = ["fullscreen"]  # Window mode is ignored; surface is always offscreen
+max_media_streams = 0    # No WebRTC in CI context (v1)
+max_agent_update_hz = 60
+allow_background_zones = true
+allow_chrome_zones = true
+```
+
+This profile is selected by `profile = "headless"` in `[runtime]`. It cannot be extended via `[display_profile].extends` — headless is a terminal profile because its offscreen surface is a compile-time-invariant property (RF 0002 §7 headless mode).
+
+**Validation rule:** If `profile = "headless"` and `window_mode` is set to anything other than `"fullscreen"`, emit a warning and ignore `window_mode` (the offscreen path does not use a window surface).
+
+### 3.5 Profile Negotiation
 
 When the runtime starts, it selects the active profile as follows:
 
@@ -408,7 +463,7 @@ When the runtime starts, it selects the active profile as follows:
 
 The selected profile is logged at startup and included in the runtime's gRPC handshake response so agents can inspect it.
 
-### 3.5 Custom Profiles
+### 3.6 Custom Profiles
 
 A deployment can define a custom profile for specific hardware (e.g., a glasses device with unusual limits):
 
@@ -427,10 +482,11 @@ max_media_streams = 0       # No media in v1 glasses profile
 allow_chrome_zones = false  # Minimal chrome on glasses
 ```
 
-Custom profiles extend a built-in profile. Extending another custom profile is not supported (avoids chain resolution complexity).
+Custom profiles extend a built-in profile. Extending another custom profile is not supported (avoids chain resolution complexity). The `headless` built-in cannot be used as a base for custom profiles — it implies an offscreen render path that cannot be extended with windowed-display parameters.
 
 **Validation rules:**
 - Custom profile `extends` must name a built-in profile. Unknown base → `CONFIG_UNKNOWN_BASE_PROFILE`.
+- `extends = "headless"` is not permitted for custom profiles. Attempt → `CONFIG_HEADLESS_NOT_EXTENDABLE`.
 - Numeric overrides must not exceed the base profile's values (prevent escalation). Exceeding → `CONFIG_PROFILE_BUDGET_ESCALATION` with a note.
 - `target_fps` must be >= `min_fps`. Violated → `CONFIG_INVALID_FPS_RANGE`.
 
@@ -574,9 +630,11 @@ In headless mode (CI, tests), zone geometry resolves against a virtual display. 
 
 ```toml
 [runtime]
-headless_display_width = 1280
-headless_display_height = 720
+headless_width = 1280
+headless_height = 720
 ```
+
+**Cross-reference:** RFC 0002 §7 names these fields `headless_width` and `headless_height` in the `RuntimeConfig` Rust struct. This RFC adopts the same names for consistency. Earlier drafts used `headless_display_width`/`headless_display_height` — those names are rejected.
 
 All geometry fractions are computed against this virtual size. Tests can assert exact pixel coordinates for layout correctness.
 
@@ -672,7 +730,7 @@ tab_switch_on_event = "alert.fire"       # Switch on fire alert
 tab_switch_on_event = ""                 # No automatic switch (default)
 ```
 
-Tab switches triggered by `tab_switch_on_event` are subject to the policy evaluation order in architecture.md: they obey interruption class and quiet hours rules. A `doorbell.ring` event carries `interruption_class = "urgent"` and therefore fires even during quiet hours.
+Tab switches triggered by `tab_switch_on_event` are subject to the canonical policy evaluation order defined in architecture.md §"Policy arbitration" (steps 1–7: human override → capability gate → privacy/viewer gate → interruption policy → attention budget → zone contention → resource/degradation budget). The interruption class check (step 4) is what determines whether the tab switch fires during quiet hours: a `doorbell.ring` event carries `interruption_class = "urgent"` and therefore passes through quiet-hours gating. A `morning.routine` event with `interruption_class = "normal"` would be suppressed during quiet hours.
 
 ---
 
@@ -719,6 +777,8 @@ capabilities = [
 ]
 
 # Resource budget overrides (overrides the profile's per-agent defaults).
+# max_texture_mb is in mebibytes (MiB). RFC 0002 §4.3 tracks this as bytes internally;
+# the config layer converts: max_texture_mb × 1024 × 1024 = max_texture_bytes.
 [agents.registered.weather_agent.budgets]
 max_tiles = 4
 max_texture_mb = 32
@@ -876,6 +936,8 @@ dim_level = 0.1
 **Time format:** `HH:MM` in 24-hour local wall clock. Ranges that span midnight (e.g., `22:00`–`07:00`) are handled correctly. Multiple `[[privacy.quiet_hours.schedule]]` entries are unioned.
 
 **Validation rules:**
+- `default_classification` must be one of: `"public"`, `"household"`, `"private"`, `"sensitive"`. Unknown → `CONFIG_UNKNOWN_CLASSIFICATION`.
+- `default_viewer_class` must be one of: `"owner"`, `"household_member"`, `"known_guest"`, `"unknown"`, `"nobody"`. The `"nobody"` class is valid and means "screen detects no viewer present" (see privacy.md). Unknown → `CONFIG_UNKNOWN_VIEWER_CLASS`.
 - `start` and `end` must be valid `HH:MM` strings. Invalid → `CONFIG_INVALID_TIME`.
 - `pass_through_class` must be one of the enumerated values. Unknown → `CONFIG_UNKNOWN_INTERRUPTION_CLASS`.
 
@@ -1051,6 +1113,14 @@ pub struct RuntimeConfig {
     pub reconnect_grace_secs: u32,
     #[serde(default)]
     pub emit_schema: bool,
+    /// Virtual display width for headless mode (pixels). Default: 1920.
+    /// Matches RFC 0002 §7 field name `headless_width`.
+    #[serde(default = "default_headless_width")]
+    pub headless_width: u32,
+    /// Virtual display height for headless mode (pixels). Default: 1080.
+    /// Matches RFC 0002 §7 field name `headless_height`.
+    #[serde(default = "default_headless_height")]
+    pub headless_height: u32,
 }
 
 /// A display profile: resource budgets and rendering constraints.
@@ -1058,6 +1128,8 @@ pub struct RuntimeConfig {
 pub struct DisplayProfile {
     pub name: ProfileName,
     pub max_tiles: u32,
+    /// Texture memory budget in mebibytes. Config uses MB for human-editability;
+    /// the compositor converts to bytes internally. (RFC 0002 §4.3 uses `max_texture_bytes`.)
     pub max_texture_mb: u32,
     pub max_agents: u32,
     pub target_fps: u32,
@@ -1068,6 +1140,44 @@ pub struct DisplayProfile {
     pub max_agent_update_hz: u32,
     pub allow_background_zones: bool,
     pub allow_chrome_zones: bool,
+    /// Advisory hint to orchestrators: prefer zones over raw tiles.
+    /// Used in mobile profile. Does not affect budget enforcement.
+    #[serde(default)]
+    pub prefer_zones: bool,
+    /// Allow upstream precomposition of certain layers (post-v1, mobile only).
+    /// When false (default), composition is always local.
+    #[serde(default)]
+    pub upstream_precomposition: bool,
+}
+
+/// The user-editable `[display_profile]` section. Either names a built-in to use
+/// as-is (via `[runtime].profile`) or extends one with field overrides.
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct DisplayProfileConfig {
+    /// If set, the named built-in profile is loaded and then the remaining fields
+    /// in this section override it. Must name a built-in profile (`full-display` or `mobile`).
+    /// Extending the `headless` profile or another custom profile is not supported.
+    #[serde(default)]
+    pub extends: Option<ProfileName>,
+    // All DisplayProfile fields are optional overrides here.
+    #[serde(default)]
+    pub max_tiles: Option<u32>,
+    #[serde(default)]
+    pub max_texture_mb: Option<u32>,
+    #[serde(default)]
+    pub max_agents: Option<u32>,
+    #[serde(default)]
+    pub target_fps: Option<u32>,
+    #[serde(default)]
+    pub min_fps: Option<u32>,
+    #[serde(default)]
+    pub max_media_streams: Option<u32>,
+    #[serde(default)]
+    pub max_agent_update_hz: Option<u32>,
+    #[serde(default)]
+    pub allow_background_zones: Option<bool>,
+    #[serde(default)]
+    pub allow_chrome_zones: Option<bool>,
 }
 
 /// A validation error with structured fields.
@@ -1121,7 +1231,7 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 
 1. **Custom zone type discovery.** Should the runtime enumerate custom zone types in the `list_zones` gRPC/MCP response? Currently yes (all zones, built-in and custom, are listed). This exposes deployment-specific configuration to agents, which is intentional — agents need to discover what zones are available.
 
-2. **Profile auto-detection heuristics.** The auto-detection criteria in §3.4 (GPU VRAM threshold, display refresh rate) may need tuning once real mobile hardware targets are defined. The heuristics are conservative defaults; deployments should prefer explicit `profile =` settings.
+2. **Profile auto-detection heuristics.** The auto-detection criteria in §3.5 (GPU VRAM threshold, display refresh rate) may need tuning once real mobile hardware targets are defined. The heuristics are conservative defaults; deployments should prefer explicit `profile =` settings.
 
 3. **Tab order persistence.** Tab order is defined by the order of `[[tabs]]` entries in the config. If the user reorders tabs via the UI (a future feature), should that reordering persist across restarts? For v1, tab order is config-only. Persistence is deferred.
 
@@ -1141,9 +1251,12 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 | `CONFIG_UNKNOWN_ZONE_TYPE` | §2.4 | A zone instance references an undefined zone type |
 | `CONFIG_UNKNOWN_GEOMETRY_POLICY` | §2.4 | A zone instance references an undefined geometry policy |
 | `CONFIG_INCOMPATIBLE_ZONE_LAYER` | §2.4 | Zone layer override is incompatible with zone type |
-| `CONFIG_UNKNOWN_BASE_PROFILE` | §3.5 | Custom profile `extends` an unknown built-in |
-| `CONFIG_PROFILE_BUDGET_ESCALATION` | §3.5 | Custom profile override exceeds base profile budget |
-| `CONFIG_INVALID_FPS_RANGE` | §3.5 | `target_fps < min_fps` |
+| `CONFIG_UNKNOWN_BASE_PROFILE` | §3.6 | Custom profile `extends` an unknown built-in |
+| `CONFIG_HEADLESS_NOT_EXTENDABLE` | §3.6 | Custom profile attempts `extends = "headless"` |
+| `CONFIG_PROFILE_BUDGET_ESCALATION` | §3.6 | Custom profile override exceeds base profile budget |
+| `CONFIG_INVALID_FPS_RANGE` | §3.6 | `target_fps < min_fps` |
+| `CONFIG_UNKNOWN_CLASSIFICATION` | §7.1 | Unknown `default_classification` value |
+| `CONFIG_UNKNOWN_VIEWER_CLASS` | §7.1 | Unknown `default_viewer_class` value |
 | `CONFIG_INVALID_TIME` | §7.1 | Quiet hours `start` or `end` is not valid `HH:MM` |
 | `CONFIG_UNKNOWN_INTERRUPTION_CLASS` | §7.1 | Unknown `pass_through_class` value |
 | `CONFIG_INVALID_THRESHOLD` | §7.2 | Degradation threshold is zero or negative |
