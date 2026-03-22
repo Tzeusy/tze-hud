@@ -1626,4 +1626,164 @@ mod tests {
             .create_sync_group(None, "other-agent", SyncCommitPolicy::AllOrDefer, 3);
         assert!(other_group.is_ok());
     }
+
+    // ─── StaticImageNode tests ────────────────────────────────────────────
+
+    fn make_test_image(w: u32, h: u32) -> (Vec<u8>, String) {
+        // Solid red RGBA8 image.
+        let data: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 0, 255]).collect();
+        // Simple content hash: hex-encoded byte sum (not SHA-256 but sufficient for unit tests).
+        let sum: u64 = data.iter().map(|b| *b as u64).sum();
+        let hash = format!("{:016x}", sum);
+        (data, hash)
+    }
+
+    #[test]
+    fn test_static_image_node_creation() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateNode]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 300.0), 1)
+            .unwrap();
+
+        let (img_data, hash) = make_test_image(64, 48);
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data: img_data.clone(),
+                width: 64,
+                height: 48,
+                content_hash: hash.clone(),
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            }),
+        };
+
+        scene.set_tile_root(tile_id, node.clone()).unwrap();
+        assert_eq!(scene.node_count(), 1);
+
+        let stored = scene.nodes.get(&node.id).unwrap();
+        if let NodeData::StaticImage(si) = &stored.data {
+            assert_eq!(si.width, 64);
+            assert_eq!(si.height, 48);
+            assert_eq!(si.content_hash, hash);
+            assert_eq!(si.fit_mode, ImageFitMode::Contain);
+            assert_eq!(si.image_data.len(), 64 * 48 * 4);
+        } else {
+            panic!("expected StaticImage node data");
+        }
+    }
+
+    #[test]
+    fn test_static_image_node_all_fit_modes() {
+        // Verify all ImageFitMode variants are constructable and round-trip through JSON.
+        for fit_mode in [
+            ImageFitMode::Contain,
+            ImageFitMode::Cover,
+            ImageFitMode::Fill,
+            ImageFitMode::ScaleDown,
+        ] {
+            let (img_data, hash) = make_test_image(4, 4);
+            let node_data = NodeData::StaticImage(StaticImageNode {
+                image_data: img_data,
+                width: 4,
+                height: 4,
+                content_hash: hash,
+                fit_mode,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            });
+            let json = serde_json::to_string(&node_data).unwrap();
+            let restored: NodeData = serde_json::from_str(&json).unwrap();
+            if let NodeData::StaticImage(si) = restored {
+                assert_eq!(si.fit_mode, fit_mode);
+            } else {
+                panic!("wrong variant after JSON roundtrip");
+            }
+        }
+    }
+
+    #[test]
+    fn test_static_image_node_snapshot_roundtrip() {
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        let tab_id = scene.create_tab("Tab", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(10.0, 10.0, 200.0, 150.0), 1)
+            .unwrap();
+
+        let (img_data, hash) = make_test_image(16, 16);
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data: img_data,
+                width: 16,
+                height: 16,
+                content_hash: hash.clone(),
+                fit_mode: ImageFitMode::Cover,
+                bounds: Rect::new(0.0, 0.0, 200.0, 150.0),
+            }),
+        };
+        scene.set_tile_root(tile_id, node).unwrap();
+
+        let json = scene.snapshot_json().unwrap();
+        let restored = SceneGraph::from_json(&json).unwrap();
+
+        assert_eq!(scene.node_count(), restored.node_count());
+        // Verify the node data survived the roundtrip.
+        for (id, n) in &restored.nodes {
+            if let NodeData::StaticImage(si) = &n.data {
+                assert_eq!(si.content_hash, hash);
+                assert_eq!(si.fit_mode, ImageFitMode::Cover);
+                assert_eq!(si.width, 16);
+                assert_eq!(si.height, 16);
+                let _ = id;
+            }
+        }
+    }
+
+    #[test]
+    fn test_static_image_node_replace_with_set_tile_root() {
+        // Verify that replacing a StaticImageNode via set_tile_root removes the old node.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        let (img_data, hash) = make_test_image(8, 8);
+        let node1 = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data: img_data,
+                width: 8,
+                height: 8,
+                content_hash: hash,
+                fit_mode: ImageFitMode::Fill,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            }),
+        };
+        let node1_id = node1.id;
+        scene.set_tile_root(tile_id, node1).unwrap();
+        assert_eq!(scene.node_count(), 1);
+        assert!(scene.nodes.contains_key(&node1_id));
+
+        // Replace with a SolidColor node.
+        let node2 = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            }),
+        };
+        scene.set_tile_root(tile_id, node2).unwrap();
+        // Old image node should be gone.
+        assert!(!scene.nodes.contains_key(&node1_id));
+        assert_eq!(scene.node_count(), 1);
+    }
 }

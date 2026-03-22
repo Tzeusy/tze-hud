@@ -106,6 +106,25 @@ impl Rgba {
 
 // ─── Enums ──────────────────────────────────────────────────────────────────
 
+/// How image content is fitted within the node's bounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageFitMode {
+    /// Scale uniformly so the entire image is visible; may leave letterbox bars.
+    Contain,
+    /// Scale uniformly to cover the entire bounds; may crop the image.
+    Cover,
+    /// Stretch non-uniformly to fill bounds exactly.
+    Fill,
+    /// Like Contain but never scale up; display at native size if smaller than bounds.
+    ScaleDown,
+}
+
+impl Default for ImageFitMode {
+    fn default() -> Self {
+        ImageFitMode::Contain
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputMode {
     Passthrough,
@@ -242,6 +261,7 @@ pub enum NodeData {
     SolidColor(SolidColorNode),
     TextMarkdown(TextMarkdownNode),
     HitRegion(HitRegionNode),
+    StaticImage(StaticImageNode),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -268,6 +288,26 @@ pub struct HitRegionNode {
     pub interaction_id: String,
     pub accepts_focus: bool,
     pub accepts_pointer: bool,
+}
+
+/// A static image node that displays raw RGBA pixel data within the node's bounds.
+///
+/// Image data is content-addressed via `content_hash` for deduplication by the compositor.
+/// The `fit_mode` controls how the image is scaled to fill the bounds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StaticImageNode {
+    /// Raw RGBA8 pixel data (width * height * 4 bytes).
+    pub image_data: Vec<u8>,
+    /// Width of the image in pixels.
+    pub width: u32,
+    /// Height of the image in pixels.
+    pub height: u32,
+    /// SHA-256 hex string for content-based deduplication.
+    pub content_hash: String,
+    /// How the image is fitted within `bounds`.
+    pub fit_mode: ImageFitMode,
+    /// Position and size within the parent tile (in tile-local coordinates).
+    pub bounds: Rect,
 }
 
 // ─── Hit Region Local State (compositor-managed) ────────────────────────────

@@ -2333,6 +2333,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "thiserror 2.0.18",
+ "tokio",
  "tze_hud_scene",
  "tze_hud_telemetry",
  "wgpu",
