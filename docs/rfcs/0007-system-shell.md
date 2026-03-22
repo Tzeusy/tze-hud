@@ -10,6 +10,37 @@
 
 ## Review History
 
+### Freeze Advisory Model Decision (rig-9v1)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-9v1
+
+#### Decision: Silent freeze with backpressure signal
+
+§4.3 previously stated that agents are not informed when the scene is frozen. This is the correct default, but it creates a resource waste problem: under high-throughput conditions, agents continue generating and submitting mutations that are silently queued (up to 1000 per session) and then dropped when the queue overflows.
+
+**Tradeoff analysis:**
+
+- **Silent freeze** (original): Sovereignty-pure. Agents cannot detect freeze. But wasteful — agents spend compute and bandwidth generating mutations that will never be applied.
+- **Advisory freeze** (rejected): Sending a "scene is frozen" advisory would leak viewer action intent. The viewer's decision to freeze the scene is viewer state, and privacy.md §"Topology visibility" / §"Agent isolation" establishes that viewer state must not be exposed to agents. An explicit `SCENE_FROZEN` notice is therefore ruled out.
+- **Silent freeze with backpressure signal** (adopted): Instead of revealing that the viewer froze the scene, the runtime uses the existing mutation response path to signal general queue pressure. This does not reveal the *cause* of pressure — freeze is one possible cause, but so is a slow compositor, degradation mode, or high-throughput contention. The signal is operationally useful without being a viewer-state leak.
+
+**Decision:** Adopt **silent freeze with backpressure signal**. The runtime sends `MUTATION_QUEUE_PRESSURE` (via `RuntimeError` in `MutationResult`) when the per-session queue reaches 80% capacity (800/1000), and `MUTATION_DROPPED` for each shed mutation. Agents that receive `MUTATION_QUEUE_PRESSURE` may voluntarily reduce submission rate. The freeze still executes unconditionally regardless of agent response.
+
+**Doctrinal grounding:**
+
+- This does not violate security.md §"Human override": the freeze still happens unconditionally. The advisory does not allow interception, delay, or veto.
+- This does not violate privacy.md §"Agent isolation": the signal reveals queue pressure, not viewer intent. The same signal fires in any queue-pressure scenario (slow compositor, degradation, contention).
+- This is consistent with architecture.md §"Policy arbitration": the `MUTATION_QUEUE_PRESSURE` signal is below priority 1 (human override). It is informational feedback on the mutation pipeline, not a governance hook.
+- Parallel precedent: `DegradationNotice` (RFC 0005 §3.4) already notifies agents about runtime resource constraints without revealing viewer actions. `MUTATION_QUEUE_PRESSURE` is the same category of signal.
+
+**Changes applied in this round:**
+- **[NORMATIVE → APPLIED]** §4.3: Replaced "Agents are not informed that the scene is frozen" with the normative backpressure signal spec. Added `MUTATION_QUEUE_PRESSURE` and `MUTATION_DROPPED` behavior at 80% queue capacity and on overflow respectively.
+- **[CROSS-RFC → NOTED]** §8 RFC 0005 row updated: `MUTATION_QUEUE_PRESSURE` and `MUTATION_DROPPED` error codes must be added to RFC 0005 §3.5 `RuntimeError.ErrorCode` enum and the field number reservation table. Flagged as a protocol addition requirement.
+
+---
+
 ### Round 1 — Doctrinal Alignment Deep-Dive (rig-5vq.35)
 
 **Reviewer:** Beads worker agent
@@ -462,13 +493,28 @@ This is the "emergency stop" for the entire display. It is not reversible by age
 - While frozen, tile content does not update. Badges continue to render (a frozen tile can still show a disconnection badge from before freeze).
 - The freeze indicator appears in the system status area (a pause icon).
 - Queue limit: 1000 mutations per session (configurable). Overflow behavior is **traffic-class-aware** — not a blanket "drop oldest":
-  - **Transactional mutations** (RFC 0005 §5.1: "never dropped") are **never evicted** from the freeze queue. If the transactional portion of the queue is full, the runtime applies backpressure to that agent's session via gRPC flow control (same mechanism as the `MutationBatch` channel — see RFC 0002 §2.6). The agent's mutations accumulate in the gRPC send buffer until either the freeze ends or the agent's buffer fills and it observes backpressure. Agents are not informed the scene is frozen; they only observe reduced throughput.
+  - **Transactional mutations** (RFC 0005 §5.1: "never dropped") are **never evicted** from the freeze queue. If the transactional portion of the queue is full, the runtime applies backpressure to that agent's session via gRPC flow control (same mechanism as the `MutationBatch` channel — see RFC 0002 §2.6). The agent's mutations accumulate in the gRPC send buffer until either the freeze ends or the agent's buffer fills and it observes backpressure.
   - **State-stream mutations** (coalescing allowed): when the per-session queue is full, state-stream mutations from the same agent are coalesced (latest wins per coalesce key) before older entries are evicted. This matches normal backpressure behavior (RFC 0005 §2.4).
   - **Ephemeral realtime mutations**: dropped without delay when the queue is full, identical to normal backpressure behavior.
 - Unfreeze is triggered by the same shortcut (`Ctrl+Shift+F`) or via the freeze indicator in the status bar.
 - On unfreeze, queued mutations are applied in submission order in the next available frame batch.
 
-Freeze does not disconnect agents — their sessions remain active. Agents are not informed that the scene is frozen; they continue submitting mutations normally.
+**Freeze agent notification model (decided in rig-9v1): silent freeze with backpressure signal.**
+
+Freeze does not disconnect agents — their sessions remain active. Agents are **not** informed that the scene is frozen (the viewer's freeze action is viewer state and must not be exposed to agents per privacy.md §"Agent isolation"). An explicit `SCENE_FROZEN` advisory is therefore absent by design.
+
+Instead, the runtime uses the existing mutation response path to signal general queue pressure, without revealing the cause:
+
+1. **At 80% queue capacity** (800/1000 by default): the runtime sends a `RuntimeError` with `error_code = "MUTATION_QUEUE_PRESSURE"` in the `MutationResult` response for the triggering batch. This indicates that the per-session mutation queue is under pressure and that the agent should consider reducing submission rate. The signal fires for any queue-pressure scenario (freeze, slow compositor, degradation, high-throughput contention) — not specifically for freeze. Agents that honor this signal will voluntarily reduce submission rate; agents that ignore it continue normally.
+2. **On overflow** (queue full, mutation shed): the runtime sends a `RuntimeError` with `error_code = "MUTATION_DROPPED"` in the `MutationResult` for each shed mutation. Transactional mutations are never shed (see above); only state-stream and ephemeral mutations are eligible for overflow eviction.
+
+**Rationale for this model:**
+- Does not reveal viewer intent: the signal is triggered by queue pressure state, not by the freeze action. Any slow-consumption scenario (not just freeze) can produce the same signal.
+- Consistent with `DegradationNotice` (RFC 0005 §3.4): the runtime already notifies agents about resource constraints without revealing viewer actions.
+- Does not allow agent veto: the freeze executes unconditionally. Agents that reduce rate cooperate passively; agents that ignore the signal are correct — the runtime queues or sheds their mutations per the overflow rules above.
+- Compatible with architecture.md §"Policy arbitration": `MUTATION_QUEUE_PRESSURE` is informational feedback below priority 1. It does not intercept, delay, or veto the freeze action.
+
+**Note:** `MUTATION_QUEUE_PRESSURE` and `MUTATION_DROPPED` must be added to RFC 0005 §3.5 `RuntimeError.ErrorCode` enum. See §8 RFC 0005 row.
 
 ### 4.4 Mute (Reserved Surface — Defined, Not V1)
 
@@ -881,7 +927,7 @@ message TabEntry {
 | RFC 0002 (Runtime Kernel) | Chrome render pass executes as Stage 6 in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read under `Arc<RwLock<ChromeState>>` read lock at the start of the chrome render pass (see §7.1 synchronization contract). **GPU failure path:** RFC 0002 §7.3 and this RFC §5.1 previously conflicted on GPU device loss response (RFC 0002 said graceful shutdown; RFC 0007 said safe mode entry). RFC 0009 §5 resolves this: Phase 1 attempts surface reconfiguration (RFC 0002 §7.3 steps 1–3); Phase 2 enters safe mode before shutdown if reconfiguration fails. RFC 0002 §7.3 step 4 must be updated per RFC 0009 §5.3. |
 | RFC 0003 (Timing Model) | Override events carry `timestamp_mono_us` using the monotonic clock (RFC 0003 §1.3 `_mono_us` convention). Override execution is frame-bounded — effects appear within one frame of the event. |
 | RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0001 §5.2 traversal order: chrome always wins). Chrome shortcuts are evaluated before tile hit-testing by RFC 0004 §8 (Event Dispatch Protocol). In safe mode, the input model routes all events to the chrome layer exclusively. |
-| RFC 0005 (Session Protocol) | `SessionSuspended` (field 45) and `SessionResumed` (field 46) are defined in RFC 0005 §3.7 (added in Round 12, rig-5vq.29). The safe mode protocol gap documented in earlier rounds is resolved. Lease suspension on safe mode entry and lease revocation on tile dismiss both use the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). |
+| RFC 0005 (Session Protocol) | `SessionSuspended` (field 45) and `SessionResumed` (field 46) are defined in RFC 0005 §3.7 (added in Round 12, rig-5vq.29). The safe mode protocol gap documented in earlier rounds is resolved. Lease suspension on safe mode entry and lease revocation on tile dismiss both use the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). **Freeze backpressure (rig-9v1):** Two new error codes must be added to RFC 0005 §3.5 `RuntimeError.ErrorCode` enum: `MUTATION_QUEUE_PRESSURE` (sent at 80% queue capacity per session during freeze or any high-pressure scenario) and `MUTATION_DROPPED` (sent per shed non-transactional mutation on overflow). Both are carried in `MutationResult.error` on the existing `mutation_result = 30` field — no new `SessionMessage` payload fields are required. These codes must be added to the `ErrorCode` enum and documented in the §3.2 server→client table. |
 | RFC 0008 (Lease Governance) | Authoritative specification for lease lifecycle during safe mode. Safe mode entry suspends all `ACTIVE` leases (not revokes them — see §4.2 and RFC 0008 §3.4). Tile dismiss (§4.1) transitions a lease to `REVOKED`. TTL clock pauses during suspension (RFC 0008 §3.6). The revoke/suspend distinction is load-bearing: suspended leases survive safe mode exit intact. |
 | RFC 0009 (Policy Arbitration) | Human override (§4, §5) implements Step 1 of RFC 0009's seven-step arbitration stack — unconditional, preempts all other policy steps. RFC 0009 §5 resolves the GPU failure path conflict with RFC 0002 (see RFC 0002 row above). RFC 0009 §2.1 specifies the `OverrideCommandQueue` contract for how override actions preempt in-flight mutation intake. |
 
