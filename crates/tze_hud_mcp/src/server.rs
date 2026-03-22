@@ -126,9 +126,7 @@ impl McpServer {
                 Ok(serde_json::to_value(r)
                     .map_err(|e| crate::McpError::Internal(e.to_string()))?)
             }
-            unknown => Err(crate::McpError::Internal(format!(
-                "unknown tool: {unknown}"
-            ))),
+            unknown => Err(crate::McpError::MethodNotFound(unknown.to_string())),
         }
     }
 
@@ -227,14 +225,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unknown_method_returns_error() {
+    async fn test_unknown_method_returns_method_not_found() {
         let (server, _) = server_with_tab().await;
         let raw = server
             .dispatch(r#"{"jsonrpc":"2.0","method":"does_not_exist","id":1}"#)
             .await;
         let resp = parse_response(&raw);
-        // Internal error for unknown tool
-        assert!(resp["error"].is_object());
+        // JSON-RPC 2.0: unknown method must return -32601 Method not found
+        assert_eq!(resp["error"]["code"], -32601);
     }
 
     #[tokio::test]

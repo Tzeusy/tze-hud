@@ -453,12 +453,8 @@ pub struct ListZonesResult {
 /// # Errors
 /// - None (always succeeds; returns an empty list if no zones are registered).
 pub fn handle_list_zones(params: Value, scene: &SceneGraph) -> McpResult<ListZonesResult> {
-    // Tolerate either null/missing params or an explicit empty object
-    if !params.is_null() && !params.is_object() {
-        return Err(McpError::InvalidParams(
-            "list_zones takes no parameters (pass null or {})".to_string(),
-        ));
-    }
+    // Use the same parse_params helper as other tool handlers; tolerates null → {}
+    let _: ListZonesParams = parse_params(params)?;
 
     let active_tab = scene.active_tab;
     let tiles_on_active: std::collections::HashSet<&str> = scene
