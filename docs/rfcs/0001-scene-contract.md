@@ -174,6 +174,10 @@ pub struct Tile {
     pub opacity: f32,               // [0.0, 1.0]; 1.0 = fully opaque
     pub input_mode: InputMode,      // How input events are handled
 
+    // Traffic / update semantics (from presence.md "Tiles are territories")
+    pub latency_class: LatencyClass,   // Governs coalescing and scheduling priority
+    pub update_policy: UpdatePolicy,   // How the compositor handles arriving content updates
+
     // Timing / coordination
     pub sync_group: Option<SceneId>, // Sync group membership; None = unsynchronized
     pub present_at: Option<u64>,    // Scheduled presentation timestamp (ms); None = immediate
@@ -202,6 +206,29 @@ pub enum InputMode {
     LocalOnly,
 }
 
+/// Governs how the compositor schedules and coalesces this tile's updates.
+/// Corresponds to the four message classes in architecture.md §"Message classes".
+pub enum LatencyClass {
+    /// Transactional: reliable, ordered, acknowledged. For UI state changes.
+    Transactional,
+    /// State-stream: reliable, ordered, coalesced. For dashboard / continuous updates.
+    StateStream,
+    /// Ephemeral realtime: low-latency, droppable, latest-wins. For hover, cursor trails.
+    EphemeralRealtime,
+    /// Clocked media/cues: scheduled against media or display clock. For subtitles, AV sync.
+    ClockedMedia,
+}
+
+/// How the compositor handles arriving content updates for this tile.
+pub enum UpdatePolicy {
+    /// Apply every update in order; never drop (required for transactional tiles).
+    Ordered,
+    /// Coalesce rapid updates; deliver only the most recent coherent view.
+    Coalesce,
+    /// Accept latest-wins; older updates are discarded if a newer one arrives.
+    LatestWins,
+}
+
 pub struct ResourceBudget {
     pub texture_bytes: u64,    // Max texture memory for this tile's nodes
     pub update_rate_hz: f32,   // Max mutation rate (mutations/second)
@@ -216,6 +243,8 @@ pub struct ResourceBudget {
 4. `width > 0.0` and `height > 0.0`.
 5. `lease_id` must reference a currently-valid lease in the lease registry.
 6. `resource_budget.max_nodes <= 64`.
+7. `latency_class == ClockedMedia` requires `sync_group` to be `Some(_)` (clocked media tiles must belong to a sync group to be meaningful).
+8. `update_policy` must be consistent with `latency_class`: `Transactional + Ordered`, `StateStream + Coalesce`, `EphemeralRealtime + LatestWins`, `ClockedMedia + Ordered` are the canonical pairings. Non-canonical pairings are accepted but generate a validation warning.
 
 ### 2.4 Node Types (V1)
 
@@ -353,12 +382,25 @@ pub struct ZoneDefinition {
     pub id: SceneId,
     pub name: String,
     pub description: String,
+    pub layer_attachment: ZoneLayerAttachment,  // Which compositor layer this zone attaches to
     pub geometry_policy: GeometryPolicy,
     pub accepted_media_types: Vec<ZoneMediaType>,
     pub rendering_policy: RenderingPolicy,
     pub contention_policy: ContentionPolicy,
     pub transport_constraint: Option<TransportConstraint>,
     pub auto_clear_ms: Option<u64>,  // Auto-clear timeout; None = no auto-clear
+}
+
+/// Which compositor layer a zone instance attaches to (presence.md §"Layer attachment").
+pub enum ZoneLayerAttachment {
+    /// Behind all agent tiles; ambient-background zone.
+    Background,
+    /// Among agent tiles; z-order is pinned by runtime above all agent tiles.
+    /// subtitle, notification, pip.
+    Content,
+    /// Above all agent content; rendered by runtime using zone's policy.
+    /// alert-banner, status-bar. Agents publish data; runtime renders in chrome.
+    Chrome,
 }
 
 pub enum GeometryPolicy {
@@ -417,7 +459,12 @@ pub enum TransportConstraint {
 }
 ```
 
-**Zone-to-tile mapping:** The runtime creates and manages internal tiles for each active zone. Zone tiles are in a runtime-owned namespace and have the highest valid z_order in the overlay layer. Agent tiles cannot overlap or occlude zone tiles (zone tiles are in the chrome layer above the content layer for alert-banner; in the content layer at pinned z_order for subtitle/notification/status-bar).
+**Zone-to-tile mapping:** The runtime creates and manages internal tiles for each active zone. Zone tiles are in a runtime-owned namespace. The `layer_attachment` field on `ZoneDefinition` (see §2.5 struct) determines which compositor layer the zone's tile occupies:
+- `Background` zones render behind all agent tiles (ambient-background).
+- `Content` zones render among agent tiles at a pinned z_order above all agent-controlled z_order values (subtitle, notification, pip).
+- `Chrome` zones render above all content; agents publish data but the runtime renders it (alert-banner, status-bar).
+
+Agent tiles cannot occlude Content-layer zone tiles (as zone tiles are pinned at the highest z_order in the content layer). Chrome-layer zone tiles are entirely outside the z_order space of agent tiles.
 
 **Contention policies:**
 
@@ -471,7 +518,13 @@ pub enum SceneMutation {
     RemoveNode { node_id: SceneId },
 
     // Zone publishing
-    PublishToZone { zone_name: String, content: ZoneContent, publish_token: ZonePublishToken },
+    PublishToZone {
+        zone_name: String,
+        content: ZoneContent,
+        publish_token: ZonePublishToken,
+        expires_at_ms: Option<u64>,   // Per-publish TTL; None = use zone auto_clear_ms
+        publish_key: Option<String>,  // Key for MergeByKey zones; None for other policies
+    },
     ClearZone { zone_name: String, publish_token: ZonePublishToken },
 }
 ```
@@ -513,6 +566,7 @@ Agent submits MutationBatch
 │  - Increment global scene sequence number (monotonic u64)  │
 │  - Release write lock                                       │
 │  - Emit BatchCommitted(batch_id, sequence_number)           │
+│  (WAL append deferred to post-v1; see §4.2)                 │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -664,6 +718,8 @@ pub struct ZonePublishRecord {
     pub publisher_namespace: String,
     pub content: ZoneContent,
     pub published_at_ms: u64,
+    pub expires_at_ms: Option<u64>,  // Publication TTL; None = governed by zone auto_clear_ms
+    pub publish_key: Option<String>, // Key for MergeByKey zones; None for other contention policies
 }
 ```
 
@@ -950,6 +1006,21 @@ message ResourceBudget {
   uint32 max_nodes      = 3;
 }
 
+enum LatencyClass {
+  LATENCY_CLASS_UNSPECIFIED        = 0;
+  LATENCY_CLASS_TRANSACTIONAL      = 1;
+  LATENCY_CLASS_STATE_STREAM       = 2;
+  LATENCY_CLASS_EPHEMERAL_REALTIME = 3;
+  LATENCY_CLASS_CLOCKED_MEDIA      = 4;
+}
+
+enum UpdatePolicy {
+  UPDATE_POLICY_UNSPECIFIED = 0;
+  UPDATE_POLICY_ORDERED     = 1;
+  UPDATE_POLICY_COALESCE    = 2;
+  UPDATE_POLICY_LATEST_WINS = 3;
+}
+
 message Tile {
   SceneId        id              = 1;
   SceneId        tab_id          = 2;
@@ -964,6 +1035,8 @@ message Tile {
   uint64         expires_at_ms   = 11;  // 0 = no expiry
   ResourceBudget resource_budget = 12;
   SceneId        root_node       = 13;  // Zero value = empty tile
+  LatencyClass   latency_class   = 14;  // Default: STATE_STREAM if unspecified
+  UpdatePolicy   update_policy   = 15;  // Default: COALESCE if unspecified
 }
 
 // ─── Nodes ──────────────────────────────────────────────────────────────────
@@ -1053,10 +1126,18 @@ message ZoneContent {
   }
 }
 
+enum NotificationUrgency {
+  NOTIFICATION_URGENCY_UNSPECIFIED = 0;
+  NOTIFICATION_URGENCY_LOW         = 1;
+  NOTIFICATION_URGENCY_NORMAL      = 2;
+  NOTIFICATION_URGENCY_URGENT      = 3;
+  NOTIFICATION_URGENCY_CRITICAL    = 4;
+}
+
 message NotificationPayload {
-  string text    = 1;
-  string icon    = 2;   // Resource name or empty
-  uint32 urgency = 3;   // 0=low, 1=normal, 2=urgent, 3=critical
+  string               text    = 1;
+  string               icon    = 2;   // Resource name or empty
+  NotificationUrgency  urgency = 3;
 }
 
 message StatusBarPayload {
@@ -1071,6 +1152,8 @@ message PublishToZoneMutation {
   string           zone_name     = 1;
   ZoneContent      content       = 2;
   ZonePublishToken publish_token = 3;
+  uint64           expires_at_ms = 4;   // 0 = use zone auto_clear_ms; >0 = per-publish TTL
+  string           publish_key   = 5;   // Non-empty only for MergeByKey zones
 }
 
 message ClearZoneMutation {
@@ -1191,15 +1274,33 @@ message RenderingPolicyProto {
   float     margin_px    = 4;   // 0.0 = not set
 }
 
+enum ZoneMediaType {
+  ZONE_MEDIA_TYPE_UNSPECIFIED        = 0;
+  ZONE_MEDIA_TYPE_STREAM_TEXT        = 1;
+  ZONE_MEDIA_TYPE_SHORT_TEXT_ICON    = 2;
+  ZONE_MEDIA_TYPE_KEY_VALUE_PAIRS    = 3;
+  ZONE_MEDIA_TYPE_VIDEO_SURFACE_REF  = 4;
+  ZONE_MEDIA_TYPE_STATIC_IMAGE       = 5;
+  ZONE_MEDIA_TYPE_SOLID_COLOR        = 6;
+}
+
+enum ZoneLayerAttachment {
+  ZONE_LAYER_UNSPECIFIED = 0;
+  ZONE_LAYER_BACKGROUND  = 1;   // Behind all agent tiles
+  ZONE_LAYER_CONTENT     = 2;   // Among agent tiles; z-order pinned by runtime
+  ZONE_LAYER_CHROME      = 3;   // Above all agent tiles; runtime-rendered
+}
+
 message ZoneDefinitionProto {
-  SceneId              id                   = 1;
-  string               name                 = 2;
-  string               description          = 3;
-  GeometryPolicyProto  geometry_policy      = 4;
-  repeated string      accepted_media_types = 5;   // ZoneMediaType names
-  RenderingPolicyProto rendering_policy     = 6;
-  ContentionPolicy     contention_policy    = 7;
-  uint64               auto_clear_ms        = 8;   // 0 = no auto-clear
+  SceneId                    id                   = 1;
+  string                     name                 = 2;
+  string                     description          = 3;
+  GeometryPolicyProto        geometry_policy      = 4;
+  repeated ZoneMediaType     accepted_media_types = 5;
+  RenderingPolicyProto       rendering_policy     = 6;
+  ContentionPolicy           contention_policy    = 7;
+  uint64                     auto_clear_ms        = 8;   // 0 = no auto-clear
+  ZoneLayerAttachment        layer_attachment     = 9;   // Which compositor layer this zone attaches to
 }
 
 message ZonePublishRecordProto {
@@ -1207,6 +1308,8 @@ message ZonePublishRecordProto {
   string      publisher_namespace = 2;
   ZoneContent content             = 3;
   uint64      published_at_ms     = 4;
+  uint64      expires_at_ms       = 5;   // 0 = governed by zone auto_clear_ms
+  string      publish_key         = 6;   // Non-empty only for MergeByKey zones
 }
 
 message ZoneRegistrySnapshot {
@@ -1224,13 +1327,15 @@ message TabPatch {
 }
 
 message TilePatch {
-  SceneId   tile_id    = 1;
-  Rect      bounds     = 2;   // Absent = not changed
-  uint32    z_order    = 3;   // 0 = not changed (use has_z_order wrapper field in impl)
-  float     opacity    = 4;   // 0.0 = not changed (use has_opacity wrapper field in impl)
-  InputMode input_mode = 5;   // UNSPECIFIED = not changed
-  SceneId   sync_group = 6;   // Zero bytes = not changed
-  uint64    expires_at_ms = 7; // 0 = not changed
+  SceneId      tile_id       = 1;
+  Rect         bounds        = 2;   // Absent = not changed
+  uint32       z_order       = 3;   // 0 = not changed (use has_z_order wrapper field in impl)
+  float        opacity       = 4;   // 0.0 = not changed (use has_opacity wrapper field in impl)
+  InputMode    input_mode    = 5;   // UNSPECIFIED = not changed
+  SceneId      sync_group    = 6;   // Zero bytes = not changed
+  uint64       expires_at_ms = 7;   // 0 = not changed
+  LatencyClass latency_class = 8;   // UNSPECIFIED = not changed
+  UpdatePolicy update_policy = 9;   // UNSPECIFIED = not changed
 }
 
 message NodePatch {
@@ -1428,8 +1533,8 @@ Agent
 │  ─ acquire write lock                                │
 │  ─ apply mutations[0..n] in order                    │
 │  ─ increment sequence_number                         │
-│  ─ append to WAL                                     │
 │  ─ release write lock                                │
+│  (WAL append deferred to post-v1; see §4.2)          │
 └─────────────────────────┬────────────────────────────┘
                           ▼
                 BatchCommitted{batch_id, sequence}
@@ -1602,10 +1707,79 @@ crate: tze_scene (no GPU dependency)
 | RFC | Depends On | Topic |
 |-----|-----------|-------|
 | RFC 0001 (this) | — | Scene Contract: data model, mutations, hit-test |
-| RFC 0002 | 0001 | Session/Protocol: gRPC API, session lifecycle, MCP mapping |
-| RFC 0003 | 0001, 0002 | Lease Model: auth, capability grants, TTL, revocation |
-| RFC 0004 | 0001, 0002, 0003 | Compositor: render pipeline, headless mode, frame loop |
-| RFC 0005 | 0001, 0002, 0003 | Input: pointer/touch model, focus, gesture arbitration |
+| RFC 0002 | 0001 | Runtime Kernel: process architecture, thread model, frame pipeline, admission control, degradation |
+| RFC 0003 | 0001, 0002 | Timing Model: clock domains, sync groups, timestamp semantics, drift rules |
+| RFC 0004 | 0001, 0002, 0003 | Input Model: pointer/touch model, focus, gesture arbitration, IME, accessibility |
+| RFC 0005 | 0001, 0002, 0003, 0004 | Session/Protocol: gRPC API, session lifecycle, MCP mapping |
+| RFC 0006 | 0001 | Configuration: config file schema, display profiles, zone registry startup format |
+| RFC 0007 | 0001, 0002 | System Shell: chrome layer UI, tab bar, override controls, privilege prompts |
+
+---
+
+## 14. Review Record
+
+### Round 1 — Doctrinal Alignment Deep-Dive (2026-03-22)
+
+**Reviewer:** rig-5vq.11 agent worker
+**Focus:** Completeness — does the RFC cover every doctrine section it cites? Are doctrine commitments silently dropped?
+**Doctrine read:** presence.md, architecture.md, security.md, validation.md, v1.md, failure.md
+
+---
+
+#### Doctrinal Alignment Score: 4/5
+
+The RFC faithfully implements the core doctrine structure (scene hierarchy, transaction atomicity, lease-scoped namespaces, zone publishing model, hit-test priority order, durable vs. ephemeral state split, DR-V1 through DR-V4 traceability). Quantitative requirements are traceable to specific passages.
+
+**Gaps that reduced score from 5:**
+
+- `latency_class` and `update_policy` are explicit tile properties in presence.md ("Tiles are territories with … update policy … latency class") but were absent from the `Tile` struct and proto. **Fixed in this round.**
+- `ZoneDefinition` lacked `layer_attachment` despite presence.md's "Layer attachment" subsection making it a first-class part of zone anatomy. The zone-to-tile mapping note referenced it informally but the data structure did not model it. **Fixed in this round.**
+- Zone publications (`ZonePublishRecord`) lacked `expires_at_ms` and `publish_key` despite presence.md explicitly listing "TTL" and "key (for merge-by-key zones)" as publication fields. **Fixed in this round.**
+- The commit pipeline diagram had an "append to WAL" step that contradicted v1.md's explicit deferral of the WAL-backed diff path. **Fixed in this round.**
+- `ZoneDefinitionProto.accepted_media_types` used `repeated string` (untyped) instead of the typed `ZoneMediaType` enum, violating the no-JSON/no-untyped-strings-on-hot-paths principle. **Fixed in this round.**
+
+---
+
+#### Technical Robustness Score: 4/5
+
+Data structures are correct and well-specified. The transaction pipeline is sound: all-or-nothing semantics, ordered validation steps, monotonic sequence numbers, single writer lock with correct concurrency properties. Performance budgets are quantified and hardware-normalized per validation.md. Hit-test algorithm is correct and complete. Protobuf schema is well-formed with proper zero-value semantics documented.
+
+**Minor issues noted:**
+
+- `NotificationPayload.urgency` was `uint32` (magic numbers). Replaced with typed `NotificationUrgency` enum for API clarity and wire safety. **Fixed in this round.**
+- Tile invariants were incomplete: the semantics of `latency_class + ClockedMedia` requiring a sync_group, and the canonical `latency_class + update_policy` pairings, were not documented. **Fixed in this round.**
+
+**Items deferred to later rounds or design:**
+
+- `#[no_std]` compatibility for `SceneId::new()` (noted in Open Questions §11.4) — architectural choice needed.
+- Tile bounds reference frame / logical pixel definition (§11.5) — deferred to Compositor RFC.
+
+---
+
+#### Cross-RFC Consistency Score: 3/5 (pre-fix) → 4/5 (post-fix)
+
+The §13 Related RFCs table was wrong: it listed the old issue-description numbering (RFC 0002 as "Session/Protocol") rather than the actual RFC numbers (RFC 0002 = Runtime Kernel, RFC 0003 = Timing, RFC 0004 = Input, RFC 0005 = Session/Protocol). This was a documentation error, not a semantic contradiction, but it would have confused implementors integrating across RFCs. **Fixed in this round.**
+
+RFC 0004 (Input) references RFC 0001 §5 (hit-test) correctly. RFC 0005 (Session/Protocol) imports scene types from RFC 0001. No type contradictions detected in the portions read. `LatencyClass` and `UpdatePolicy` enums are new to this RFC and must be consumed by RFC 0002 (Runtime Kernel) and RFC 0003 (Timing) — those RFCs should reference this RFC's definitions rather than define their own.
+
+---
+
+#### Actionable Findings Summary
+
+| # | Severity | Location | Finding | Status |
+|---|----------|----------|---------|--------|
+| 1 | MUST-FIX | §13 Related RFCs | Wrong RFC numbers; old numbering scheme | Fixed |
+| 2 | MUST-FIX | §2.3 Tile, §7.1 proto | `latency_class` and `update_policy` absent from tile despite presence.md mandate | Fixed |
+| 3 | MUST-FIX | §3.2 / §9.2 commit diagram | "append to WAL" in v1 commit path contradicts §4.2 WAL deferral | Fixed |
+| 4 | MUST-FIX | §7.1 `ZoneDefinitionProto` | `accepted_media_types` is `repeated string`; should be typed `ZoneMediaType` enum | Fixed |
+| 5 | SHOULD-FIX | §2.5 `ZoneDefinition`, §7.1 | `layer_attachment` absent; presence.md "Layer attachment" is first-class zone anatomy | Fixed |
+| 6 | SHOULD-FIX | §7.1 `NotificationPayload` | `urgency` is raw `uint32`; should be typed enum | Fixed |
+| 7 | SHOULD-FIX | §4.1 `ZonePublishRecord` | Missing `expires_at_ms` and `publish_key`; presence.md lists TTL and key as publication fields | Fixed |
+| 8 | CONSIDER | §2.3 Tile invariants | Canonical `latency_class + update_policy` pairings not documented | Fixed (added as invariant note) |
+
+---
+
+*Review round 1 complete. All MUST-FIX and SHOULD-FIX items addressed. No dimension scored below 3.*
 
 ---
 
