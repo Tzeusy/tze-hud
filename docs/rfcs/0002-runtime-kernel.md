@@ -35,6 +35,7 @@ The Runtime Kernel resolves all of these by specifying the process as a collecti
 | DR-V2: Headless rendering | Offscreen texture surface; same pipeline, no display server. |
 | DR-V3: Structured telemetry | Telemetry thread with per-frame emission in the pipeline. |
 | DR-V5: Trivial headless invocation | Headless mode is a runtime flag, not a compile fork. |
+| DR-V6: No physical GPU required for CI | HEADLESS_FORCE_SOFTWARE env var forces llvmpipe/WARP on all platforms (§8.3). |
 
 ---
 
@@ -42,7 +43,7 @@ The Runtime Kernel resolves all of these by specifying the process as a collecti
 
 ### 1.1 Single-Process Model
 
-tze_hud runs as a single OS process. Agents are external gRPC clients; they do not share the compositor's address space. The compositor is the trusted, sovereign process — it owns the GPU context, the scene state, the input stream, and the window surface. Agents interact exclusively through the gRPC control plane (RFC 0003, forthcoming).
+tze_hud runs as a single OS process. Agents are external gRPC clients; they do not share the compositor's address space. The compositor is the trusted, sovereign process — it owns the GPU context, the scene state, the input stream, and the window surface. Agents interact exclusively through the gRPC control plane (RFC 0003).
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -196,6 +197,13 @@ The main thread runs the winit event loop — it cannot be moved to another thre
 - **Shutdown initiation.** `CloseRequested` and OS signals initiate the shutdown sequence.
 
 The main thread does **not** encode render commands or submit GPU work. It receives a `FrameReadySignal` from the compositor thread, then calls `present()`. The compositor thread owns the GPU queue.
+
+**Thread priority.** The main thread is elevated at startup to reduce scheduling jitter on the input/presentation path, which is the most latency-sensitive path in the system (input_to_local_ack p99 < 4ms). Platform-specific mechanism:
+- **Linux:** `pthread_setschedparam(SCHED_RR, priority=1)` for the main thread. Requires appropriate RLIMIT_RTPRIO or CAP_SYS_NICE. Falls back silently if the privilege is not available — log a warning but do not fail startup.
+- **macOS:** `pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)`.
+- **Windows:** `SetThreadPriority(THREAD_PRIORITY_TIME_CRITICAL)` on the main thread handle.
+
+The compositor thread is elevated to the same class. Network and telemetry threads run at normal priority.
 
 ### 2.3 Compositor Thread
 
@@ -373,7 +381,7 @@ This stage includes GPU execution time, which is not fully under software contro
 
 The compositor thread sends a `TelemetryRecord` to the telemetry thread. The send is non-blocking (the record is copied into the bounded channel and the compositor thread continues immediately). The telemetry thread formats and emits asynchronously.
 
-`TelemetryRecord` contains: frame_number, stage_durations[8], tile_count, draw_call_count, mutation_count_this_frame, active_agents, active_leases, texture_memory_bytes, telemetry_overflow_count.
+`TelemetryRecord` contains: frame_number, stage_durations_us[8], tile_count, draw_call_count, mutation_count_this_frame, active_sessions, active_leases, texture_memory_bytes, telemetry_overflow_count. See Appendix A for the Rust sketch and RFC 0003 §FrameTimingRecord for the protobuf extension that embeds per-stage timestamps.
 
 ---
 
@@ -475,7 +483,14 @@ pub enum BudgetState {
     Normal,
     Warning { first_exceeded: Instant },
     Throttled { throttled_since: Instant },
-    // Revoked is a terminal state; the session is torn down
+    Revoked { reason: RevocationReason },  // Terminal state: session teardown in progress
+}
+
+pub enum RevocationReason {
+    BudgetThrottleSustained,    // Throttle sustained for 30s without recovery
+    CriticalLimitExceeded,      // OOM attempt, texture hard-max exceeded
+    RepeatedInvariantViolation, // > 10 invariant violations in session
+    ProtocolViolation,          // Forged session IDs or malicious protocol abuse
 }
 ```
 
@@ -493,6 +508,16 @@ Critical triggers bypass the warning/throttle ladder and go directly to revocati
 - Attempt to allocate texture memory that would exceed the hard max.
 - Repeated invariant violations (> 10 in a session).
 - Protocol violations that indicate malicious intent (e.g., forged session IDs).
+
+**Resource cleanup on revocation.** When a session is revoked (budget tier or critical trigger), the compositor thread executes the following on the same frame tick:
+1. Move agent's `BudgetState` to `Revoked`.
+2. Enqueue a `LeaseRevocationEvent` for all of the agent's active leases.
+3. Mark all agent-owned tiles as orphaned (rendered frozen at last state, disconnection badge applied).
+4. Start the reconnection grace period (default: 30s; see RFC 0005 §1.4). Revoked sessions do **not** get a grace period by default — the grace period applies only to unexpected disconnects, not policy-driven revocations. For revocations, leases are immediately cleared after the grace period in RFC 0005 §4.2 is bypassed.
+5. After a configurable post-revocation delay (default: 100ms, to allow `LeaseRevocationEvent` fan-out), free all agent-owned textures and node data. Reference counts drop to zero; resources are released.
+6. Remove `AgentResourceState` from the compositor's per-agent table.
+
+The post-revocation resource footprint for a revoked agent must be zero (per architecture.md §Resource lifecycle). This is verified by the `disconnect_reclaim_multiagent` test scene.
 
 **Frame-time guardian** operates at the frame level, not the per-agent level. If the compositor thread detects that the current frame is on track to exceed 16.6ms:
 
@@ -557,6 +582,20 @@ Level 5: Emergency
   ▲
 Recovery (hysteresis) ───────────────────────────────────────────────
 ```
+
+**V1 scope note.** The doctrine degradation ladder (failure.md) defines six ordered axes: coalesce, reduce media quality, reduce concurrent streams, simplify rendering, shed tiles, and audio-first fallback. This RFC's five-level ladder maps to the doctrine as follows:
+
+| Doctrine axis | V1 Level | Notes |
+|---|---|---|
+| Coalesce | Level 1 | Implemented |
+| Reduce media quality | Level 2 | Texture resolution only; video decode deferred (no media in v1) |
+| Reduce concurrent streams | — | Deferred to post-v1; no media streams in v1 |
+| Simplify rendering | Level 3 | Disable transparency blending |
+| Shed tiles | Level 4 | Priority-ordered tile removal |
+| Audio-first fallback | — | Deferred to post-v1; no audio in v1 |
+| Emergency: chrome + one tile | Level 5 | Extends doctrine with an explicit last resort |
+
+Post-v1 RFC revisions must re-insert "reduce concurrent streams" (between Levels 2 and 3) and "audio-first fallback" (after Level 4) when GStreamer/WebRTC are integrated.
 
 ### 6.3 Hysteresis
 
@@ -759,6 +798,7 @@ All budgets are p99 unless otherwise noted. "Normalized" means hardware-normaliz
 | GPU submit + present (Stage 7) | p99 < 8ms | Stage 7 |
 | Telemetry emit (Stage 8) | p99 < 200μs (non-blocking) | Stage 8 |
 | input_to_local_ack | p99 < 4ms | Stage 1 start → Stage 2 end |
+| input_to_scene_commit | p99 < 50ms (local agents) | Input event arrival → agent response applied to scene (network round-trip included; see RFC 0004 §latency budgets) |
 | input_to_next_present | p99 < 33ms | Stage 1 start → Stage 7 end |
 | Mutation to next present | p99 < 33ms | MutationBatch enqueue → Stage 7 end |
 | Agent connection (TCP → session) | < 50ms | Auth start → SessionAck |
@@ -826,9 +866,12 @@ pub struct FrameReadySignal {
     pub render_complete_ts: Instant,
 }
 
+// TelemetryRecord — internal Rust type sent from compositor thread to telemetry thread.
+// The wire-level protobuf extension that embeds per-stage timestamps is FrameTimingRecord,
+// defined in RFC 0003 §FrameTimingRecord and embedded here as timing_record.
 pub struct TelemetryRecord {
     pub frame_number: u64,
-    pub stage_durations_us: [u64; 8],
+    pub stage_durations_us: [u64; 8],  // Indexed 0–7 corresponding to pipeline stages 1–8
     pub tile_count: u32,
     pub active_sessions: u32,
     pub active_leases: u32,
