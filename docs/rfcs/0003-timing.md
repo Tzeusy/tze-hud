@@ -335,7 +335,7 @@ The compositor applies these validation rules to all agent-supplied timestamps:
 | `present_at_us < session_open_at_us - 60_000_000` (> 60s in the past) | Reject: mutation too stale. Structured error `TIMESTAMP_TOO_OLD`. |
 | `present_at_us > current_wallclock_us + max_future_schedule_us` | Reject: timestamp too far in future. Structured error `TIMESTAMP_TOO_FUTURE`. Default `max_future_schedule_us`: 300_000_000 (5 minutes). |
 | `expires_at_us <= present_at_us` (expiry before or at presentation) | Reject: inconsistent timestamps. Structured error `TIMESTAMP_EXPIRY_BEFORE_PRESENT`. |
-| `delivery_policy == "drop_if_late"` and `message_class != "ephemeral_realtime"` | Reject: `drop_if_late` is only valid for the `ephemeral_realtime` message class. Structured error `INVALID_DELIVERY_POLICY`. |
+| `delivery_policy == DELIVERY_POLICY_DROP_IF_LATE` and `message_class != MESSAGE_CLASS_EPHEMERAL_REALTIME` | Reject: `DROP_IF_LATE` is only valid for the `EPHEMERAL_REALTIME` message class. Structured error `INVALID_DELIVERY_POLICY`. |
 | Clock skew > 100ms (see §4.2) | Warning in telemetry; apply timestamps with skew correction. |
 | Clock skew > 1s | Reject with structured error `CLOCK_SKEW_EXCESSIVE`. |
 
@@ -705,7 +705,7 @@ The fields in `timing.proto` supplement the scene contract defined in RFC 0001. 
 1. All `uint64` timestamp fields use 0 to represent "not set." Zero is never a valid timestamp in this system.
 2. `SyncGroupId.id` is exactly 16 bytes (UUIDv7) or all-zero bytes to represent absent. Agents must not send partially filled IDs.
 3. `estimated_skew_us` in `ClockSyncResponse` is signed (`int64`) because skew can be positive (agent clock ahead) or negative (agent clock behind). A positive value means the agent's clock is ahead.
-4. `delivery_policy` in `TimestampedPayload` is a string enum for forward compatibility. Implementations must treat unknown values as `"defer"`.
+4. `delivery_policy` in `TimestampedPayload` is a protobuf enum (`DeliveryPolicy`). Implementations must treat unknown enum values as `DELIVERY_POLICY_DEFER`.
 
 ---
 
