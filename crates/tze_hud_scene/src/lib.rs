@@ -12,9 +12,14 @@ pub mod graph;
 pub mod mutation;
 pub mod diff;
 pub mod validation;
+pub mod test_scenes;
 
 pub use types::*;
 pub use graph::SceneGraph;
 pub use mutation::{MutationBatch, SceneMutation};
 pub use diff::{SceneDiff, DiffEntry};
 pub use validation::ValidationError;
+pub use test_scenes::{
+    ClockMs, SceneSpec, TestSceneRegistry, InvariantViolation, SceneGraphTestExt,
+    assert_layer0_invariants,
+};
