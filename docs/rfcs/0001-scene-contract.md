@@ -405,12 +405,21 @@ pub struct ZoneDefinition {
     pub auto_clear_us: Option<u64>,  // Auto-clear timeout (μs duration); None = no auto-clear
 }
 
+/// Minimum z_order value reserved for runtime-managed zone tiles in the content layer.
+/// Agent-owned tiles must have z_order < ZONE_TILE_Z_MIN. This reservation keeps
+/// Content-layer zone tiles above all agent tiles without introducing a sub-layer.
+/// The upper 2^31 values (0x8000_0000 ..= 0xFFFF_FFFF) are the zone-reserved band.
+pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
+
 /// Which compositor layer a zone instance attaches to (presence.md §"Layer attachment").
 pub enum ZoneLayerAttachment {
     /// Behind all agent tiles; ambient-background zone.
     Background,
-    /// Among agent tiles; z-order is pinned by runtime above all agent tiles.
-    /// subtitle, notification, pip.
+    /// Within the content layer's z-order space, at a reserved high z-order range
+    /// (z_order >= ZONE_TILE_Z_MIN = 0x8000_0000). Agent-owned tiles must use z_order
+    /// values below this threshold. This is not a separate sub-layer — zone tiles
+    /// participate in the same content-layer z-order traversal as agent tiles; they
+    /// simply occupy the upper reserved band. subtitle, notification, pip.
     Content,
     /// Above all agent content; rendered by runtime using zone's policy.
     /// alert-banner, status-bar. Agents publish data; runtime renders in chrome.
@@ -488,12 +497,12 @@ pub enum ContentClassification {
 }
 ```
 
-**Zone-to-tile mapping:** The runtime creates and manages internal tiles for each active zone. Zone tiles are in a runtime-owned namespace. The `layer_attachment` field on `ZoneDefinition` (see §2.5 struct) determines which compositor layer the zone's tile occupies:
+**Zone-to-tile mapping:** The runtime creates and manages internal tiles for each active zone. Zone tiles are in a runtime-owned namespace. The `layer_attachment` field on `ZoneDefinition` (see §2.5 struct) determines which compositor layer the zone's tile occupies. This RFC uses the three-layer model defined in architecture.md §"Layer stack" (background / content / chrome) — no fourth layer is introduced:
 - `Background` zones render behind all agent tiles (ambient-background).
-- `Content` zones render among agent tiles at a pinned z_order above all agent-controlled z_order values (subtitle, notification, pip).
+- `Content` zones are realized as runtime-managed tiles **within the content layer's z-order space**. Zone tiles occupy a reserved upper z-order band: `z_order >= ZONE_TILE_Z_MIN` where `ZONE_TILE_Z_MIN = 0x8000_0000`. Agent-assigned z_order values must remain below this threshold (enforced at transaction validation time, §3.3 Budget Check). Zone tiles therefore appear above all agent tiles in the content layer's traversal without requiring a separate sub-layer (subtitle, notification, pip).
 - `Chrome` zones render above all content; agents publish data but the runtime renders it (alert-banner, status-bar).
 
-Agent tiles cannot occlude Content-layer zone tiles (as zone tiles are pinned at the highest z_order in the content layer). Chrome-layer zone tiles are entirely outside the z_order space of agent tiles.
+Agent tiles cannot occlude Content-layer zone tiles because the reserved z-order band is enforced: no agent tile may be assigned a z_order value within the zone-reserved range. Chrome-layer zone tiles are entirely outside the z_order space of agent tiles.
 
 **Contention policies:**
 
@@ -654,6 +663,7 @@ Sync group mutations (`CreateSyncGroup`, `DeleteSyncGroup`) require the `manage_
 
 For `CreateTile`:
 - `agent.active_leases.len() < agent.max_leases`
+- `tile.z_order < ZONE_TILE_Z_MIN` (= `0x8000_0000`): agent-owned tiles must not use the zone-reserved z-order band (see §2.5 Zone-to-tile mapping). Violations are rejected with `INVALID_Z_ORDER`.
 
 For `InsertNode` / `ReplaceNode`:
 - `tile.nodes.len() < tile.resource_budget.max_nodes`
@@ -883,6 +893,8 @@ Hit-testing traverses the layer stack in top-to-bottom (front-to-back) order:
 3. If no tile hit → return Passthrough
 ```
 
+**Zone tiles in the content layer:** Content-layer zone tiles (subtitle, notification, pip) are runtime-owned tiles with `z_order >= ZONE_TILE_Z_MIN = 0x8000_0000`. They participate in the same traversal as agent tiles (step 2 above) — no special-casing is required. Because their z_order values exceed all agent-owned tiles (which are validated to have z_order < ZONE_TILE_Z_MIN), zone tiles are encountered first in the descending traversal. Zone tile `input_mode` is `Passthrough` by default, meaning they do not intercept pointer events unless a zone explicitly declares interactive capability. Chrome-layer zones (status-bar, alert-banner) are handled in step 1 by the chrome layer check.
+
 **Diagram:**
 
 ```
@@ -894,6 +906,7 @@ Chrome layer?   ──yes──► Chrome hit
      ▼
 Tiles (z descending)
      │
+     ├── Zone tile z=0x8000_0003 (subtitle): Passthrough mode? → skip
      ├── Tile z=10: Passthrough mode? → skip
      ├── Tile z=8:  P in bounds?      → yes
      │              Nodes (reverse tree order):
@@ -1614,7 +1627,8 @@ The 1KB/tile target excludes node content (markdown text, texture references) wh
 ║  │                             │                                  ║
 ║  │  ┌────────────────────────────────┐                            ║
 ║  │  │ ZONE TILE (runtime-owned)      │  ← auto-managed by runtime ║
-║  │  │ zone: "subtitle" z=MAX         │                            ║
+║  │  │ zone: "subtitle"               │                            ║
+║  │  │ z=0x8000_0000 (reserved band)  │  ← within content layer   ║
 ║  │  │ bounds: 0,540,800,60           │                            ║
 ║  │  │  [NODE: TextMd (zone content)] │                            ║
 ║  │  └────────────────────────────────┘                            ║
@@ -1626,6 +1640,8 @@ CHROME LAYER (above all content — always on top)
 │  [TAB BAR] [SYSTEM INDICATORS] [OVERRIDE CONTROLS]              │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+**Layer note:** The subtitle zone tile shown above is still within the **content layer** (the second of three layers). The three-layer model from architecture.md §"Layer stack" is preserved: background / content / chrome. Content-layer zone tiles occupy a reserved z-order band (`z_order >= ZONE_TILE_Z_MIN = 0x8000_0000`) at the top of the content layer's z-order space. Agent-owned tiles are validated to use z_order values below this threshold. No fourth layer exists — zone tiles are realized as ordinary tiles with runtime-enforced z-order governance.
 
 ### 9.2 Transaction Pipeline
 
