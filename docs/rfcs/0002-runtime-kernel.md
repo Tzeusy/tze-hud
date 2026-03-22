@@ -240,11 +240,13 @@ All inter-thread communication uses bounded channels. No unbounded queues.
 
 | Channel | Type | Capacity | On Full |
 |---------|------|----------|---------|
-| `InputEvent` (main → compositor) | `std::sync::mpsc` | 256 | Oldest input dropped, logged |
+| `InputEvent` (main → compositor) | ring buffer (crossbeam or custom) | 256 | Oldest input dropped, logged |
 | `MutationBatch` (network → compositor) | `crossbeam::bounded` | 64 | Agent back-pressured (gRPC flow control) |
-| `FrameReadySignal` (compositor → main) | `std::sync::mpsc` | 4 | New signal overwrites (latest frame wins) |
-| `EventNotification` (compositor → network) | `tokio::sync::mpsc` | 1024 | Oldest dropped, overflow counted |
-| `TelemetryRecord` (compositor → telemetry) | `crossbeam::bounded` | 256 | Oldest dropped, overflow counted |
+| `FrameReadySignal` (compositor → main) | `tokio::sync::watch` | N/A (latest value wins) | New value overwrites (latest frame wins) |
+| `EventNotification` (compositor → network) | ring buffer (custom) | 1024 | Oldest dropped, overflow counted |
+| `TelemetryRecord` (compositor → telemetry) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
+
+**Implementation note:** "Oldest dropped" semantics require a ring-buffer implementation, not a standard bounded channel. Standard `crossbeam::bounded` and `tokio::sync::mpsc` channels apply backpressure (blocking or error) when full — they do not drop the oldest entry. Channels that require drop-oldest behavior (`InputEvent`, `EventNotification`, `TelemetryRecord`) must use a ring buffer (e.g., `crossbeam::ArrayQueue` with try_push + manual eviction, or a dedicated ring-buffer crate). `FrameReadySignal` is best served by `tokio::sync::watch`, which always delivers the latest value and naturally discards stale signals.
 
 Backpressure on the `MutationBatch` channel propagates naturally to gRPC flow control: tonic's `AsyncRead`/`AsyncWrite` buffers fill up and the TCP window shrinks. Agents that send faster than the compositor can process will see their streams slow — this is correct behavior, not an error.
 
@@ -413,10 +415,10 @@ Configurable limits with defaults:
 | Resident agent sessions | 16 | 256 |
 | Guest agent sessions | 64 | 1024 |
 | Total concurrent sessions | 80 | 1280 |
-| Protocol negotiation timeout | 5s | — |
-| Auth timeout | 10s | — |
-| Heartbeat interval | 15s | — |
-| Heartbeat timeout | 45s | — |
+| Protocol negotiation timeout | 5s | Not configurable |
+| Auth timeout | 10s | Not configurable |
+| Heartbeat interval | 15s | Not configurable |
+| Heartbeat timeout | 45s | Not configurable |
 
 When the resident session limit is reached, new resident connection attempts receive a `RESOURCE_EXHAUSTED` gRPC error with a structured body indicating current capacity and an estimated wait hint. New guest connections always succeed (guest sessions are cheap).
 
@@ -495,7 +497,7 @@ Critical triggers bypass the warning/throttle ladder and go directly to revocati
 **Frame-time guardian** operates at the frame level, not the per-agent level. If the compositor thread detects that the current frame is on track to exceed 16.6ms:
 
 1. **Check at stage 5 (Layout Resolve).** If cumulative time for stages 3–5 exceeds 3ms, shed work.
-2. **Shed lowest-priority tiles.** Sort tiles by priority (lease priority × z-order). Skip render encoding for the lowest-priority tiles until the workload fits within budget.
+2. **Shed lowest-priority tiles.** Sort tiles by priority using a two-key tuple `(lease_priority DESC, z_order DESC)` — lease priority is the primary sort key; z-order is the tiebreaker. Tiles with lower lease priority (numerically higher values, per the convention where 0 = highest) and lower z-order are shed first. Skip render encoding for the lowest-priority tiles until the workload fits within budget.
 3. **Emit shed event.** `TelemetryRecord.shed_count` incremented. If shedding occurs for > 3 consecutive frames, trigger degradation policy evaluation (§6).
 
 ### 5.3 Budget Accounting Accuracy
@@ -776,7 +778,7 @@ All budgets are p99 unless otherwise noted. "Normalized" means hardware-normaliz
 
 4. **Telemetry sink protocol.** File, stdout, or remote endpoint are all specified. For remote telemetry (production deployment), a simple UDP or TCP line-protocol sink is likely sufficient. The exact wire format for remote emission is deferred to the Telemetry RFC.
 
-5. **Session snapshot format.** Hot-connect delivers a full `SceneSnapshot` to new agents. For very large scenes, this could be a significant payload. Incremental snapshot (diff from empty) is deferred to post-v1 but the protocol slot should be reserved.
+5. **Session snapshot for large scenes.** Hot-connect delivers a full `SceneSnapshot` as defined in RFC 0001 §7. For very large scenes, this could be a significant payload. Incremental snapshot (diff from empty, rather than full state) is deferred to post-v1 per v1.md §Advanced protocol ("No resumable state sync"). The `SceneSnapshot` format is already specified in RFC 0001; the open question is only whether v1 needs a size budget or chunk-based delivery for pathological large scenes.
 
 ---
 
