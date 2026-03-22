@@ -144,7 +144,7 @@ impl HeadlessSurface {
     ) -> Result<[u8; 4], String> {
         let actual = Self::pixel_at(data, width, x, y);
         for ch in 0..4 {
-            let diff = (actual[ch] as i16 - expected[ch] as i16).unsigned_abs() as u8;
+            let diff = actual[ch].abs_diff(expected[ch]);
             if diff > tolerance {
                 return Err(format!(
                     "pixel assertion failed at ({x},{y}) [{label}]: \
@@ -154,5 +154,32 @@ impl HeadlessSurface {
             }
         }
         Ok(actual)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_assert_pixel_color_passes_within_tolerance() {
+        let pixels: Vec<u8> = vec![
+            100, 200, 50, 255, // pixel (0,0)
+            10, 20, 30, 255,   // pixel (1,0)
+        ];
+        HeadlessSurface::assert_pixel_color(&pixels, 2, 0, 0, [100, 200, 50, 255], 0, "exact")
+            .expect("exact match should pass");
+        HeadlessSurface::assert_pixel_color(&pixels, 2, 0, 0, [102, 200, 50, 255], 2, "within tol")
+            .expect("within-tolerance should pass");
+    }
+
+    #[test]
+    fn test_assert_pixel_color_fails_outside_tolerance() {
+        let pixels: Vec<u8> = vec![100, 200, 50, 255];
+        let result =
+            HeadlessSurface::assert_pixel_color(&pixels, 1, 0, 0, [110, 200, 50, 255], 2, "outside");
+        assert!(result.is_err(), "should fail when diff > tolerance");
+        let msg = result.unwrap_err();
+        assert!(msg.contains("channel 0"), "error should identify channel: {msg}");
     }
 }
