@@ -110,6 +110,9 @@ pub enum McpError {
     #[error("invalid id: {0}")]
     InvalidId(String),
 
+    #[error("method not found: {0}")]
+    MethodNotFound(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -125,6 +128,7 @@ impl From<McpError> for JsonRpcError {
             McpError::ZoneNotFound(name) => JsonRpcError::zone_not_found(&name),
             McpError::NoActiveTab => JsonRpcError::no_active_tab(),
             McpError::InvalidId(msg) => JsonRpcError::invalid_id(msg),
+            McpError::MethodNotFound(method) => JsonRpcError::method_not_found(&method),
             McpError::Internal(msg) => JsonRpcError::internal(msg),
         }
     }
