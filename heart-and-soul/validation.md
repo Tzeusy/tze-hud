@@ -207,6 +207,14 @@ The five validation layers cover rendering and scene logic. Protocol conformance
 
 These tests operate at the protocol boundary, not the scene graph level. They verify: schema validation, error response structure (code + context + correction hint per the error model), version negotiation, unknown-field handling, and graceful rejection of oversized payloads. They are a natural complement to protocol boundary fuzzing — fuzzing finds crashes, conformance tests verify correct behavior.
 
+### Record/replay traces
+
+The runtime can record a sequence of scene mutations, agent events, input events, zone publishes, and timing data as a structured trace. This trace can be replayed deterministically against the scene graph for debugging and regression testing.
+
+Record/replay is particularly valuable for the LLM development loop. When a bug is reported — "the subtitle zone flickers when a second agent connects during a tab switch" — an LLM can capture a replay trace that reproduces the issue, then iterate on a fix while replaying the same trace until the bug is gone. Without replay, reproducing timing-sensitive bugs requires manual orchestration of multiple agents, which LLMs cannot do.
+
+Replay traces are also the mechanism for turning fuzzing discoveries into permanent regression tests: the fuzzer captures the input sequence, the trace becomes a test, the test stays in the corpus forever.
+
 ### Soak and leak tests
 
 Hours-long sessions with repeated agent connects, disconnects, reconnects, lease grants, revocations, zone publishes, and content updates. Verify: no monotonically growing memory, no orphaned resources, no leaked file descriptors, no accumulating scene graph garbage.

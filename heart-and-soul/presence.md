@@ -152,7 +152,7 @@ These are illustrative, not exhaustive. The actual zone registry is defined per 
 
 **subtitle** — Content layer. Bottom of screen, ~5% height, centered, semi-transparent backdrop. Accepts stream-text with breakpoints. Ephemeral-realtime delivery. Auto-clears after timeout. Syncs to media clock if in a sync group. Contention: latest-wins.
 
-**notification** — Content layer. Top-right corner, stacks vertically, auto-dismisses after timeout. Accepts short text + optional icon + urgency level. Adjunct: urgent notifications play a sound; critical notifications play a louder sound. Contention: stack.
+**notification** — Content layer. Top-right corner, stacks vertically, auto-dismisses after timeout. Accepts short text + optional icon + urgency level. Default interruption class: normal (not urgent — urgency is declared per-publish by the agent, never assumed by the zone). Adjunct: urgent notifications play a sound; critical notifications play a louder sound. Contention: stack.
 
 **status-bar** — Chrome layer. Thin strip at top or bottom. Accepts key-value pairs rendered as a horizontal row. Coalesced updates (state-stream class). Always visible, never occluded by agent tiles. Contention: merge-by-key.
 
