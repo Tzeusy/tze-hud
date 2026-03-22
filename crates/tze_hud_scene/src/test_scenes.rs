@@ -529,6 +529,7 @@ pub fn assert_layer0_invariants(graph: &SceneGraph) -> Vec<InvariantViolation> {
     violations.extend(check_z_order_unique_per_tab(graph));
     violations.extend(check_lease_namespace_nonempty(graph));
     violations.extend(check_zone_names_nonempty(graph));
+    violations.extend(check_zone_name_key_consistency(graph));
     violations.extend(check_version_non_decreasing(graph));
 
     violations
@@ -762,6 +763,27 @@ pub fn check_zone_names_nonempty(graph: &SceneGraph) -> Vec<InvariantViolation> 
             InvariantViolation::new(
                 "empty_zone_name",
                 format!("zone {} has an empty name", z.id),
+            )
+        })
+        .collect()
+}
+
+/// The key of each entry in `zone_registry.zones` must match the `name` field of its
+/// `ZoneDefinition`. The map is keyed by zone name for O(1) lookup, but the `ZoneDefinition`
+/// also carries a `name` field. If they diverge the registry is silently inconsistent.
+pub fn check_zone_name_key_consistency(graph: &SceneGraph) -> Vec<InvariantViolation> {
+    graph
+        .zone_registry
+        .zones
+        .iter()
+        .filter(|(key, zone_def)| **key != zone_def.name)
+        .map(|(key, zone_def)| {
+            InvariantViolation::new(
+                "zone_name_key_mismatch",
+                format!(
+                    "zone registry key '{}' does not match zone definition name '{}' for zone id {}",
+                    key, zone_def.name, zone_def.id
+                ),
             )
         })
         .collect()
@@ -1143,6 +1165,26 @@ mod tests {
         let violations = check_active_tab_exists(&graph);
         assert!(!violations.is_empty(), "expected missing_active_tab violation");
         assert_eq!(violations[0].code, "missing_active_tab");
+    }
+
+    #[test]
+    fn invariant_detects_zone_name_key_mismatch() {
+        use crate::types::ZoneDefinition;
+
+        let mut graph = SceneGraph::new(1920.0, 1080.0);
+        // Insert a zone where the map key does not match the definition's name field
+        graph.zone_registry.zones.insert(
+            "wrong_key".to_string(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: "correct_name".to_string(),
+                description: "Intentionally mismatched key/name.".to_string(),
+            },
+        );
+
+        let violations = check_zone_name_key_consistency(&graph);
+        assert!(!violations.is_empty(), "expected zone_name_key_mismatch violation");
+        assert_eq!(violations[0].code, "zone_name_key_mismatch");
     }
 
     #[test]
