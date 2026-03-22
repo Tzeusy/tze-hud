@@ -147,21 +147,68 @@ pub struct Tab {
     pub created_at_ms: u64,
 }
 
+/// Per-agent resource envelope enforced by the budget enforcement ladder.
+///
+/// All four dimensions are checked at mutation intake (Stage 3). A mutation batch
+/// that would push any dimension over budget is rejected whole (all-or-nothing).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ResourceBudget {
-    pub texture_bytes: u64,
-    pub update_rate_hz: f32,
-    pub max_nodes: u8,
+    /// Maximum number of tiles this agent may hold simultaneously.
+    pub max_tiles: u32,
+    /// Maximum texture memory across all tiles, in bytes.
+    pub max_texture_bytes: u64,
+    /// Maximum scene mutation rate in Hz (sliding window over last 1 second).
+    pub max_update_rate_hz: f32,
+    /// Maximum nodes per individual tile.
+    pub max_nodes_per_tile: u32,
 }
 
 impl Default for ResourceBudget {
     fn default() -> Self {
         Self {
-            texture_bytes: 16 * 1024 * 1024, // 16 MiB
-            update_rate_hz: 30.0,
-            max_nodes: 64,
+            max_tiles: 8,
+            max_texture_bytes: 256 * 1024 * 1024, // 256 MiB
+            max_update_rate_hz: 30.0,
+            max_nodes_per_tile: 32,
         }
     }
+}
+
+/// A dimension in which an agent has violated its resource budget.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum BudgetViolation {
+    /// Agent holds more tiles than `max_tiles`.
+    TileCountExceeded {
+        current: u32,
+        limit: u32,
+    },
+    /// Texture memory across all tiles exceeds `max_texture_bytes`.
+    TextureMemoryExceeded {
+        current_bytes: u64,
+        limit_bytes: u64,
+    },
+    /// Scene mutation rate exceeds `max_update_rate_hz`.
+    UpdateRateExceeded {
+        current_hz: f32,
+        limit_hz: f32,
+    },
+    /// A single tile contains more nodes than `max_nodes_per_tile`.
+    NodeCountPerTileExceeded {
+        tile_id_hint: String,
+        current: u32,
+        limit: u32,
+    },
+    /// Mutation would push texture memory past the absolute hard maximum.
+    /// This is a critical violation — session is revoked immediately.
+    CriticalTextureOomAttempt {
+        requested_bytes: u64,
+        hard_max_bytes: u64,
+    },
+    /// Session has accumulated too many protocol invariant violations.
+    /// This is a critical violation — session is revoked immediately.
+    RepeatedInvariantViolations {
+        count: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

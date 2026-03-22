@@ -7,5 +7,8 @@
 pub mod record;
 pub mod collector;
 
-pub use record::{FrameTelemetry, SessionSummary, LatencyBucket};
+pub use record::{
+    FrameTelemetry, SessionSummary, LatencyBucket,
+    BudgetTier, BudgetViolationKind, BudgetViolationEvent, FrameTimeShedEvent,
+};
 pub use collector::{FrameRecorder, TelemetryCollector};
