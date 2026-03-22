@@ -690,10 +690,10 @@ The v1 guest MCP tool surface is restricted to zone-centric operations and a bou
 
 | Tool | Parameters | Requires |
 |------|-----------|----------|
-| `create_tab` | `name: string` | `resident_mcp` capability or gRPC-backed session |
-| `create_tile` | `tab_id, bounds, z_order` | `resident_mcp` capability or gRPC-backed session |
-| `set_content` | `tile_id, node: NodeSpec` | `resident_mcp` capability or gRPC-backed session |
-| `dismiss` | `tile_id` | `resident_mcp` capability or gRPC-backed session |
+| `create_tab` | `name: string` | `resident_mcp` capability |
+| `create_tile` | `tab_id, bounds, z_order` | `resident_mcp` capability |
+| `set_content` | `tile_id, node: NodeSpec` | `resident_mcp` capability |
+| `dismiss` | `tile_id` | `resident_mcp` capability |
 
 These tools are defined in the MCP spec but gated behind the `resident_mcp` capability. A guest agent invoking any of these tools receives a `PERMISSION_DENIED` error with `error_code: "CAPABILITY_REQUIRED"` and `hint: {"required_capability": "resident_mcp"}`. The tools are not exposed in the tool list returned to guest sessions.
 

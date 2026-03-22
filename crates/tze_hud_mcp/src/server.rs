@@ -116,6 +116,11 @@ impl McpServer {
                 Ok(serde_json::to_value(r)
                     .map_err(|e| crate::McpError::Internal(e.to_string()))?)
             }
+            "dismiss" => {
+                let r = tools::handle_dismiss(params, &mut scene)?;
+                Ok(serde_json::to_value(r)
+                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+            }
             "publish_to_zone" => {
                 let r = tools::handle_publish_to_zone(params, &mut scene)?;
                 Ok(serde_json::to_value(r)
@@ -123,6 +128,11 @@ impl McpServer {
             }
             "list_zones" => {
                 let r = tools::handle_list_zones(params, &scene)?;
+                Ok(serde_json::to_value(r)
+                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+            }
+            "list_scene" => {
+                let r = tools::handle_list_scene(params, &scene)?;
                 Ok(serde_json::to_value(r)
                     .map_err(|e| crate::McpError::Internal(e.to_string()))?)
             }

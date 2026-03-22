@@ -8,8 +8,10 @@
 //! - `create_tab`      → `handle_create_tab`
 //! - `create_tile`     → `handle_create_tile`
 //! - `set_content`     → `handle_set_content`
+//! - `dismiss`         → `handle_dismiss`
 //! - `publish_to_zone` → `handle_publish_to_zone`
 //! - `list_zones`      → `handle_list_zones`
+//! - `list_scene`      → `handle_list_scene`
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -302,6 +304,48 @@ pub fn handle_set_content(params: Value, scene: &mut SceneGraph) -> McpResult<Se
     })
 }
 
+// ─── dismiss ─────────────────────────────────────────────────────────────────
+
+/// Parameters for `dismiss`.
+#[derive(Debug, Deserialize)]
+pub struct DismissParams {
+    /// ID of the tile to delete. The tile's lease is revoked and the tile
+    /// (plus all its nodes) is removed from the scene.
+    pub tile_id: String,
+}
+
+/// Response from `dismiss`.
+#[derive(Debug, Serialize)]
+pub struct DismissResult {
+    /// UUID of the tile that was dismissed.
+    pub tile_id: String,
+}
+
+/// Delete a tile and release its lease.
+///
+/// Revokes the lease associated with the tile, which removes the tile and all
+/// of its nodes from the scene. This is the inverse of `create_tile`.
+///
+/// # Errors
+/// - `invalid_id` if `tile_id` is not a valid UUID.
+/// - `scene_error` if the tile does not exist or its lease is not found.
+pub fn handle_dismiss(params: Value, scene: &mut SceneGraph) -> McpResult<DismissResult> {
+    let p: DismissParams = parse_params(params)?;
+    let tile_id = parse_scene_id(&p.tile_id)?;
+
+    let lease_id = scene
+        .tiles
+        .get(&tile_id)
+        .ok_or_else(|| McpError::SceneError(format!("tile not found: {tile_id}")))?
+        .lease_id;
+
+    scene.revoke_lease(lease_id)?;
+
+    Ok(DismissResult {
+        tile_id: p.tile_id,
+    })
+}
+
 // ─── publish_to_zone ─────────────────────────────────────────────────────────
 
 /// Parameters for `publish_to_zone`.
@@ -484,6 +528,67 @@ pub fn handle_list_zones(params: Value, scene: &SceneGraph) -> McpResult<ListZon
     let count = zones.len();
 
     Ok(ListZonesResult { zones, count })
+}
+
+// ─── list_scene ──────────────────────────────────────────────────────────────
+
+/// Parameters for `list_scene` — no required fields.
+#[derive(Debug, Deserialize, Default)]
+pub struct ListSceneParams {}
+
+/// A single tab entry in the list_scene response.
+#[derive(Debug, Serialize)]
+pub struct TabEntry {
+    /// UUID of the tab.
+    pub tab_id: String,
+    /// Human-readable tab name.
+    pub name: String,
+    /// Display order.
+    pub display_order: u32,
+}
+
+/// Response from `list_scene` (guest-restricted view).
+///
+/// Returns tab names and the zone registry only — not full tile topology.
+/// This is intentionally limited to prevent guest agents from enumerating
+/// the internal scene structure. Full topology is available to resident agents
+/// via gRPC subscriptions.
+#[derive(Debug, Serialize)]
+pub struct ListSceneResult {
+    /// All tabs in display order.
+    pub tabs: Vec<TabEntry>,
+    /// All registered zones (same as `list_zones`).
+    pub zones: Vec<ZoneEntry>,
+}
+
+/// Return a restricted scene view: tab names and zone registry.
+///
+/// This is the guest-accessible variant of scene introspection. It does not
+/// expose tile topology, node contents, lease state, or agent namespaces.
+///
+/// # Errors
+/// - None (always succeeds; returns empty lists if scene is empty).
+pub fn handle_list_scene(params: Value, scene: &SceneGraph) -> McpResult<ListSceneResult> {
+    let _: ListSceneParams = parse_params(params)?;
+
+    let mut tabs: Vec<TabEntry> = scene
+        .tabs
+        .values()
+        .map(|t| TabEntry {
+            tab_id: t.id.to_string(),
+            name: t.name.clone(),
+            display_order: t.display_order,
+        })
+        .collect();
+    tabs.sort_by_key(|t| t.display_order);
+
+    // Reuse list_zones logic for the zone portion
+    let zones_result = handle_list_zones(Value::Null, scene)?;
+
+    Ok(ListSceneResult {
+        tabs,
+        zones: zones_result.zones,
+    })
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
