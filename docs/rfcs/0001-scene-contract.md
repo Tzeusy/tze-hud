@@ -999,7 +999,7 @@ message HitRegionNode {
   string interaction_id  = 2;  // Forwarded in input events for agent correlation
   bool   accepts_focus   = 3;
   bool   accepts_pointer = 4;
-  // Fields 5–11: see RFC 0004 §9.1 HitRegionConfig (merged here at implementation time)
+  // Fields 5–11: see RFC 0004 §7.1 for the behavioral contract of these input-model fields
   bool                auto_capture    = 5;
   bool                release_on_up   = 6;
   CursorStyle         cursor_style    = 7;
