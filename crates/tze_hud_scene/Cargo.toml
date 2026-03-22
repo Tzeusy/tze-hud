@@ -1,0 +1,14 @@
+[package]
+name = "tze_hud_scene"
+description = "Pure scene graph data model for tze_hud — no GPU dependency"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
