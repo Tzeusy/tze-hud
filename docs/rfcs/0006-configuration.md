@@ -67,15 +67,28 @@ No doctrinal regressions found.
 
 ---
 
-### Round 3 — Cross-RFC Consistency (rig-5vq.13)
+### Round 3 — Cross-RFC Consistency (rig-5vq.33)
 
 **Reviewer:** Beads worker agent
 **Date:** 2026-03-22
-**Doctrine files reviewed:** privacy.md (redaction behavior field ownership)
+**Doctrine files reviewed:** security.md, privacy.md
+**Related RFCs reviewed:** RFC 0005 (Session Protocol), RFC 0008 (Lease Governance), RFC 0009 (Policy Arbitration)
 
-#### Changes Applied
+#### Doctrinal Alignment: 4/5
+No doctrinal regressions from prior rounds.
 
-**[MUST-FIX → FIXED]** Removed `redaction_style` from the `[chrome]` section (§2.8) per RFC 0009 §3.2 resolution. The `[chrome]` entry was a duplication error. The authoritative field is `[privacy].redaction_style`. The `ChromeConfig` Rust struct must not contain a `redaction_style` field — `PrivacyConfig` is the canonical owner. Hot-reload of `redaction_style` remains valid as a `[privacy]` field per §9.
+#### Technical Robustness: 4/5
+No new technical regressions found. Cross-references corrected; vocabulary clarified.
+
+#### Cross-RFC Consistency: 4/5 (after fixes)
+
+**[MUST-FIX → FIXED]** `redaction_style` appeared in `[chrome]` section (§2.8) — RFC 0009 §3.2 explicitly mandates it belongs exclusively in `[privacy]`. Removed from §2.8 `ChromeConfig` TOML example; added clarifying note that `ChromeConfig` must not contain this field.
+
+**[MUST-FIX → FIXED]** RFC 0006 cross-references section was missing RFC 0005, RFC 0008, and RFC 0009. These RFCs were created after the original RFC 0006 draft, but RFC 0009 directly modifies RFC 0006 (redaction_style ownership) and RFC 0005/0008 define the capability vocabulary this RFC depends on. Added all three to the Cross-References section with precise interaction descriptions.
+
+**[MUST-FIX → FIXED]** Capability identifier table (§6.3) was missing two capabilities defined in other RFCs: `read_telemetry` (RFC 0005 §7.1, required to subscribe to `telemetry_frames` category) and `lease:priority:<N>` (RFC 0008 §2.1, permits requesting lease priority above default). Both added to the table with authoritative RFC citations. Also added a note clarifying that RFC 0001's uppercase/colon-format capability names (`CREATE_TILE`, `zone:publish:`) are illustration-only; the canonical wire-format strings are the lowercase underscore forms in this table (established by RFC 0005 as the protocol source of truth per PR #42).
+
+**[SHOULD-FIX → FIXED]** `reconnect_grace_secs` lacked cross-reference to the same parameter's definition in RFC 0005 §8 (`reconnect_grace_period_ms`, 30,000ms default) and RFC 0008 §3.3 ("orphan grace period"). Added inline comment noting the equivalence.
 
 **No dimension below 3. Round 3 complete.**
 
@@ -116,6 +129,9 @@ This RFC resolves all of these by specifying configuration as a validated, decla
 - RFC 0002 (Runtime Kernel) — startup sequence, config load path, reload-on-signal
 - RFC 0003 (Timing Model) — quiet hours time semantics, degradation timer thresholds
 - RFC 0004 (Input) — tab switching policy (tab_switch_on_event)
+- RFC 0005 (Session Protocol) — canonical capability identifier vocabulary (§7.1), `reconnect_grace_period_ms` (§8)
+- RFC 0008 (Lease Governance) — capability scope format, `lease:priority:<N>` capability, reconnect grace period semantics
+- RFC 0009 (Policy Arbitration) — `redaction_style` ownership (§3.2 mandates `[privacy]` as canonical section), arbitration stack (§1) that this config feeds
 - heart-and-soul/architecture.md — configuration model doctrine
 - heart-and-soul/mobile.md — two profiles, one model
 - heart-and-soul/presence.md — zones, geometry, layer attachment
@@ -222,7 +238,8 @@ log_level = "info"
 
 # Maximum agent reconnection grace period in seconds.
 # If an agent disconnects and reconnects within this window, it may reclaim leases.
-# Default: 30
+# Default: 30 (= 30,000ms; matches RFC 0005 §8 `reconnect_grace_period_ms` default)
+# Cross-reference: RFC 0008 §3.3 calls this the "orphan grace period"; value is consistent.
 reconnect_grace_secs = 30
 
 # If true, the runtime writes a JSON schema to stdout at startup and then
@@ -356,12 +373,9 @@ show_system_indicators = true
 # Show the "dismiss all" / "safe mode" override button.
 # Default: true
 show_override_controls = true
-
-# NOTE: redaction_style has been removed from [chrome]. It belongs exclusively
-# in [privacy] per RFC 0009 §3.2. The [privacy].redaction_style field is the
-# authoritative configuration. The ChromeConfig Rust struct must not contain
-# a redaction_style field.
 ```
+
+**Note:** `redaction_style` is NOT a chrome configuration field. It is a privacy policy field and belongs exclusively in `[privacy]` (see §7.1 and RFC 0009 §3.2). The `ChromeConfig` Rust struct must not contain a `redaction_style` field.
 
 ### 2.9 Structured Validation Errors
 
@@ -890,20 +904,22 @@ max_update_hz = 60
 
 ### 6.3 Capability Identifiers
 
-The capability grant list in each agent entry uses structured capability identifiers:
+The capability grant list in each agent entry uses structured capability identifiers. **These names are the wire-format canonical names as defined by RFC 0005 §7.1 and RFC 0008 §2.1.** RFC 0001 diagrams use an older uppercase form (`CREATE_TILE`, `WRITE_SCENE`) and a colon-delimited zone format (`zone:publish:<zone>`) for illustration purposes; the canonical runtime strings are the lowercase underscore forms in the table below.
 
-| Identifier | Description |
-|------------|-------------|
-| `create_tiles` | May request tile leases. |
-| `modify_own_tiles` | May mutate content on own tiles. |
-| `read_scene` | May query the full scene topology, including other agents' lease metadata. |
-| `subscribe_scene_events` | May subscribe to scene-level events (tab switches, agent joins/departs). |
-| `overlay_privileges` | May request tiles with high z-order or overlay-level positions. |
-| `receive_input` | May receive input events forwarded from the runtime. |
-| `high_priority_z_order` | May request z-order values in the top quartile. |
-| `exceed_default_budgets` | May request budget overrides at session time (requires user prompt). |
-| `zone_publish:<zone_name>` | May publish to the named zone. One grant per zone. `zone_publish:*` grants all zones. |
-| `emit_scene_event:<event_name>` | May fire the named scene event (e.g., `doorbell.ring`). |
+| Identifier | Description | Authoritative RFC |
+|------------|-------------|------------------|
+| `create_tiles` | May request tile leases. | RFC 0005, RFC 0008 §3.3 |
+| `modify_own_tiles` | May mutate content on own tiles. | RFC 0005 |
+| `read_scene` | May query the full scene topology, including other agents' lease metadata. | RFC 0005 §7.1 |
+| `subscribe_scene_events` | May subscribe to scene-level events (tab switches, agent joins/departs). | RFC 0005 §7.1 |
+| `overlay_privileges` | May request tiles with high z-order or overlay-level positions. | RFC 0005 |
+| `receive_input` | May receive input events forwarded from the runtime. | RFC 0005 §7.1 |
+| `high_priority_z_order` | May request z-order values in the top quartile. | RFC 0005 |
+| `exceed_default_budgets` | May request budget overrides at session time (requires user prompt). | RFC 0005 |
+| `read_telemetry` | May subscribe to `telemetry_frames` events (runtime performance samples). | RFC 0005 §7.1 |
+| `zone_publish:<zone_name>` | May publish to the named zone. One grant per zone. `zone_publish:*` grants all zones. | RFC 0005 §7.1 |
+| `emit_scene_event:<event_name>` | May fire the named scene event (e.g., `doorbell.ring`). | RFC 0005 |
+| `lease:priority:<N>` | May request lease priority N or lower (0=Critical, 4=Speculative). See RFC 0008 §2.1. | RFC 0008 §2.1 |
 
 Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene` — these must be listed explicitly. Only `zone_publish:*` is supported as a wildcard form.
 
