@@ -72,6 +72,21 @@ No new doctrinal gaps. Round 1 fixes held. Score unchanged.
 
 ---
 
+### Cross-RFC Pass — ID Type Unification (rig-6k5)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+
+#### Changes Applied
+
+- **[MUST-FIX → FIXED]** §7.1 proto comment contained an incorrect `SceneId` definition: `message SceneId { bytes id = 1; }`. The authoritative definition in RFC 0001 §7.1 is `message SceneId { bytes bytes = 1; }`. Comment corrected.
+- **[MUST-FIX → FIXED]** `SyncGroupConfig.id` changed `bytes id` → `SceneId id` (sync groups are scene objects with SceneId per RFC 0001 §1.1). Requires `import "scene.proto"` in `timing.proto`.
+- **[MUST-FIX → FIXED]** `DeleteSyncGroupMutation.id` changed `bytes id` → `SceneId id`.
+- **[MUST-FIX → FIXED]** `SyncGroupForceCommitEvent.id` changed `bytes id` → `SceneId id`.
+- **[FIXED]** Added `import "scene.proto"` to the `timing.proto` header.
+
+---
+
 ## Summary
 
 This RFC defines the Timing Model for tze_hud — the authoritative specification for how time flows through the compositor, how it is expressed in the API, and how the system behaves when timing constraints are violated. It covers clock domains, sync groups, timestamp semantics, drift rules, deadline behavior, and the protobuf schema for timing-related messages.
@@ -574,6 +589,8 @@ Post-v1 sync groups may declare a `media_clock_binding`: a reference to an activ
 syntax = "proto3";
 package tze_hud.timing.v1;
 
+import "scene.proto";  // SceneId (tze_hud.scene.v1) — RFC 0001 §7.1
+
 // ─── Timestamp ───────────────────────────────────────────────────────────────
 
 /// A UTC microsecond timestamp. Zero means "not set."
@@ -623,17 +640,17 @@ message TimestampedPayload {
 // same 16-byte UUIDv7 encoding defined in RFC 0001. A `SyncGroupId` of all-zero
 // bytes means "not set / not in a sync group" (consistent with RFC 0001 §10.1).
 //
-// Implementors: use the `SceneId` message type from scene.proto, not a local alias.
-// The scene.proto SceneId message is:
-//   message SceneId { bytes id = 1; }  // 16-byte UUIDv7
+// Implementors: use the `SceneId` message type from scene.proto (imported above).
+// The authoritative scene.proto SceneId message (RFC 0001 §7.1) is:
+//   message SceneId { bytes bytes = 1; }  // 16-byte UUIDv7 little-endian
 
 /// Configuration for a sync group.
 message SyncGroupConfig {
-  bytes  id              = 1; // SyncGroupId: 16-byte UUIDv7 (from scene.proto SceneId)
-  string name            = 2; // Optional; max 128 UTF-8 bytes
+  SceneId id             = 1; // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7
+  string  name           = 2; // Optional; max 128 UTF-8 bytes
   SyncCommitPolicy commit_policy = 3;
-  uint32 max_defer_frames = 4; // Default 3; 0 = use default
-  uint64 created_at_us   = 5; // Agent-supplied creation time (UTC μs); advisory — compositor may overwrite
+  uint32  max_defer_frames = 4; // Default 3; 0 = use default
+  uint64  created_at_us  = 5; // Agent-supplied creation time (UTC μs); advisory — compositor may overwrite
 }
 
 enum SyncCommitPolicy {
@@ -649,14 +666,14 @@ message CreateSyncGroupMutation {
 
 /// Mutation: delete a sync group (tiles are removed from the group first).
 message DeleteSyncGroupMutation {
-  bytes id = 1; // SyncGroupId: 16-byte UUIDv7
+  SceneId id = 1; // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7
 }
 
 /// Event: emitted when a sync group is force-committed after max deferral.
 message SyncGroupForceCommitEvent {
-  bytes  id                = 1; // SyncGroupId: 16-byte UUIDv7
-  uint32 defer_frames_used = 2;
-  uint64 frame_number      = 3;
+  SceneId id               = 1; // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7
+  uint32  defer_frames_used = 2;
+  uint64  frame_number      = 3;
 }
 
 // ─── Clock Sync ──────────────────────────────────────────────────────────────

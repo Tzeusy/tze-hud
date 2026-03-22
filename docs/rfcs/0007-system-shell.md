@@ -37,6 +37,23 @@ RFC 0005 gap flagged and documented; §8 table now complete.
 
 ---
 
+### Cross-RFC Pass — ID Type Unification (rig-6k5)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+
+#### Changes Applied
+
+- **[MUST-FIX → FIXED]** §7.3 `DismissTileEvent.tile_id`: changed `string` → `SceneId` (tile IDs are scene-object addresses per RFC 0001 §1.1).
+- **[MUST-FIX → FIXED]** §7.3 `MuteToggleEvent.tile_id`: changed `optional string` → `optional SceneId`.
+- **[MUST-FIX → FIXED]** §7.4 `OverrideState.muted_tile_ids`: changed `repeated string` → `repeated SceneId`.
+- **[MUST-FIX → FIXED]** §7.7 `TabBarState.active_tab_id`: changed `string` → `SceneId`.
+- **[MUST-FIX → FIXED]** §7.7 `TabEntry.tab_id`: changed `string` → `SceneId`.
+- **[DOCUMENTED]** §7.1 `ChromeState.tile_badges`: kept as `map<string, TileBadgeState>`. Protobuf 3 map keys must be scalar types — message types (including `SceneId`) are not permitted as map keys. The string key is the UUID string encoding of the tile's `SceneId`; the comment is updated to reflect this constraint.
+- Proto blocks in this RFC have no top-level `syntax = "proto3"` header; a `// import "scene.proto"` comment is added to the first proto block that references `SceneId`.
+
+---
+
 ### Round 2 — Technical Architecture Scrutiny (rig-5vq.36)
 
 **Reviewer:** Beads worker agent
@@ -548,6 +565,12 @@ The types in this section define the internal state and render commands for the 
 The compositor must never read `ChromeState` fields directly from a raw pointer or non-synchronized reference. The `Arc<RwLock<>>` (or `ArcSwap`) wrapper is the mandatory access path. This is a correctness invariant, not a performance suggestion — violation is a data race.
 
 ```protobuf
+// import "scene.proto";  // SceneId (tze_hud.scene.v1) — RFC 0001 §7.1
+//
+// Note: SceneId appears in several messages below. Protobuf 3 map keys must be
+// scalar types, so ChromeState.tile_badges uses string keys (UUID string encoding
+// of the tile SceneId). All other tile/tab ID fields use SceneId directly.
+
 // Internal — not agent-accessible.
 message ChromeState {
   // Tab bar state.
@@ -556,7 +579,9 @@ message ChromeState {
   // Viewer context for privacy indicator.
   ViewerClass viewer_class = 2;
 
-  // Per-tile badge state, keyed by tile SceneId (UUID string).
+  // Per-tile badge state, keyed by tile SceneId encoded as UUID string.
+  // Note: protobuf 3 map keys cannot be message types, so SceneId is encoded
+  // as a UUID string here. All other tile ID references in this RFC use SceneId.
   map<string, TileBadgeState> tile_badges = 3;
 
   // Active override state.
@@ -622,7 +647,7 @@ enum OverrideTrigger {
 }
 
 message DismissTileEvent {
-  string tile_id = 1;   // SceneId as UUID string.
+  SceneId tile_id = 1;
 }
 
 message DismissAllEvent {}
@@ -632,7 +657,7 @@ message FreezeToggleEvent {
 }
 
 message MuteToggleEvent {
-  optional string tile_id = 1;  // null = global mute.
+  optional SceneId tile_id = 1;  // absent = global mute.
   bool muted = 2;
 }
 
@@ -657,9 +682,9 @@ message SafeModeExitEvent {}
 ```protobuf
 // Internal — not agent-accessible.
 message OverrideState {
-  bool freeze_active = 1;        // Scene is frozen (Ctrl+Shift+F active).
-  bool global_mute_active = 2;   // Global audio mute active.
-  repeated string muted_tile_ids = 3;  // Per-tile muted tile SceneIds.
+  bool freeze_active = 1;          // Scene is frozen (Ctrl+Shift+F active).
+  bool global_mute_active = 2;     // Global audio mute active.
+  repeated SceneId muted_tile_ids = 3;  // Per-tile muted tile IDs.
 }
 ```
 
@@ -736,7 +761,7 @@ message SafeModeOverlayCmd {
 message TabBarState {
   TabBarPosition position = 1;
   repeated TabEntry tabs = 2;
-  string active_tab_id = 3;
+  SceneId active_tab_id = 3;
   int32 scroll_offset_px = 4;   // Horizontal scroll offset for overflow.
   bool overflow_active = 5;
   int32 hidden_tab_count = 6;
@@ -749,8 +774,8 @@ enum TabBarPosition {
 }
 
 message TabEntry {
-  string tab_id = 1;
-  string name = 2;
+  SceneId tab_id = 1;
+  string  name   = 2;
   // Active tab is identified by TabBarState.active_tab_id; no redundant is_active field.
 }
 ```

@@ -12,6 +12,7 @@
 |-------|------|----------|-------|---------|
 | 1 | 2026-03-22 | rig-5vq.23 | Doctrinal alignment deep-dive | DR table: added DR-I3/I4 (input_to_scene_commit, input_to_next_present) from validation.md §3; added DR-I11 (headless testability). §6.1a: new headless testability section. §7.1: fixed `interaction_id` comment (now consistent with RFC 0001 §2.4 "forwarded in events"). §7.3/§9.1: added `interaction_id` field to PointerDownEvent, PointerUpEvent, ClickEvent, DoubleClickEvent. §9.1: removed `HitRegionConfig` (replaced with canonical `HitRegionNode` reference to RFC 0001 §9). §11.2: scroll deferral reframed as requiring pre-implementation resolution (local-first scroll is a doctrine commitment). RFC 0001 §2.4 and §9: unified `HitRegionNode` to include all input-model fields with cross-reference to RFC 0004. |
 | 2 | 2026-03-22 | rig-5vq.24 | Technical architecture scrutiny | §10.3: fixed gesture threshold diagram (5px → 10px, consistent with §3.4 state machine). §8.3: corrected `SessionEnvelope` → `SessionMessage` (aligns with RFC 0005 §2.2 naming). §8.3.1 (new): documented agent-to-runtime input control request transport gap; specifies required RFC 0005 `SessionMessage` payload field additions for FocusRequest, CaptureRequest, CaptureReleaseRequest, SetImePositionRequest. §4.5 (new, renamed §4.5+): added IME active-composition-on-focus-loss behavior spec (cancel before FocusLost, ordering guarantee, capture-theft case). §1.4/§9.1: added `AGENT_DISCONNECTED = 6` to `FocusLostReason`. §7.3/§9.1: added `device_id` field to `ContextMenuEvent`. §9.1: added `interaction_id` field to `GestureEvent`. §8.5: resolved transactional-event drop contradiction (transactional events never dropped; only non-transactional dropped beyond hard cap). §8.3.1 follow-up (rig-k0d): clarified that CaptureReleaseRequest uses async CaptureReleasedEvent confirmation and SetImePositionRequest is fire-and-forget; removed misleading "runtime responds with corresponding response" blanket claim. §8.5 follow-up (rig-k0d): fixed contradictory "without bound, up to a hard cap" phrasing (now: "grows as needed to accommodate transactional events, which are never dropped"). |
+| 3 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification | §9.1 (input.proto): added `import "scene.proto"`; replaced all `string tile_id` and `string node_id` with `SceneId tile_id` / `SceneId node_id` across all proto messages (FocusRequest, FocusGainedEvent, FocusLostEvent, CaptureRequest, CaptureReleaseRequest, CaptureReleasedEvent, SetImePositionRequest, and all pointer/keyboard/gesture/IME event types). Non-scene identifiers (`session_id`, `device_id`, `interaction_id`) remain `string` — they are not scene-object addresses. Inline narrative proto snippets in §1.2, §1.4, §2.3, §4.3, §4.4 also updated to match. |
 
 ---
 
@@ -92,10 +93,10 @@ enum FocusOwner {
 
 ```protobuf
 message FocusRequest {
-  string session_id  = 1;
-  string tile_id     = 2;
-  string node_id     = 3;  // empty = tile-level focus
-  bool   steal       = 4;  // if false, request is denied if another agent holds focus
+  string  session_id = 1;
+  SceneId tile_id    = 2;
+  SceneId node_id    = 3;  // zero value = tile-level focus
+  bool    steal      = 4;  // if false, request is denied if another agent holds focus
 }
 
 message FocusResponse {
@@ -148,14 +149,14 @@ The runtime dispatches these events to the owning agent when focus changes:
 
 ```protobuf
 message FocusGainedEvent {
-  string tile_id  = 1;
-  string node_id  = 2;   // empty = tile-level focus
+  SceneId tile_id  = 1;
+  SceneId node_id  = 2;   // zero value = tile-level focus
   FocusSource source = 3;
 }
 
 message FocusLostEvent {
-  string tile_id  = 1;
-  string node_id  = 2;
+  SceneId tile_id  = 1;
+  SceneId node_id  = 2;
   FocusLostReason reason = 3;
 }
 
@@ -201,10 +202,10 @@ Only one node can hold pointer capture at a time, globally across the entire sce
 
 ```protobuf
 message CaptureRequest {
-  string session_id  = 1;
-  string tile_id     = 2;
-  string node_id     = 3;
-  string device_id   = 4;
+  string  session_id = 1;
+  SceneId tile_id    = 2;
+  SceneId node_id    = 3;
+  string  device_id  = 4;
 }
 
 message CaptureResponse {
@@ -218,16 +219,16 @@ message CaptureResponse {
 }
 
 message CaptureReleaseRequest {
-  string session_id = 1;
-  string tile_id    = 2;
-  string node_id    = 3;
-  string device_id  = 4;
+  string  session_id = 1;
+  SceneId tile_id    = 2;
+  SceneId node_id    = 3;
+  string  device_id  = 4;
 }
 
 message CaptureReleasedEvent {
-  string tile_id    = 1;
-  string node_id    = 2;
-  string device_id  = 3;
+  SceneId tile_id   = 1;
+  SceneId node_id   = 2;
+  string  device_id = 3;
   CaptureReleaseReason reason = 4;
 }
 
@@ -392,12 +393,12 @@ The insertion point is derived from:
 
 ```protobuf
 message SetImePositionRequest {
-  string session_id   = 1;
-  string tile_id      = 2;
-  string node_id      = 3;
-  float  cursor_x     = 4;   // display-space X coordinate
-  float  cursor_y     = 5;   // display-space Y coordinate
-  float  line_height  = 6;   // IME candidate window hint
+  string  session_id  = 1;
+  SceneId tile_id     = 2;
+  SceneId node_id     = 3;
+  float   cursor_x    = 4;   // display-space X coordinate
+  float   cursor_y    = 5;   // display-space Y coordinate
+  float   line_height = 6;   // IME candidate window hint
 }
 ```
 
@@ -412,28 +413,28 @@ The runtime forwards all IME events to the focused node's owning agent:
 
 ```protobuf
 message ImeCompositionStartedEvent {
-  string tile_id  = 1;
-  string node_id  = 2;
+  SceneId tile_id  = 1;
+  SceneId node_id  = 2;
 }
 
 message ImeCompositionUpdatedEvent {
-  string tile_id    = 1;
-  string node_id    = 2;
-  string text       = 3;   // current composition string (provisional)
-  uint32 cursor_pos = 4;   // byte offset of cursor within text
-  uint32 sel_start  = 5;   // highlighted range start (for candidate selection)
-  uint32 sel_end    = 6;   // highlighted range end
+  SceneId tile_id   = 1;
+  SceneId node_id   = 2;
+  string  text      = 3;   // current composition string (provisional)
+  uint32  cursor_pos = 4;  // byte offset of cursor within text
+  uint32  sel_start  = 5;  // highlighted range start (for candidate selection)
+  uint32  sel_end    = 6;  // highlighted range end
 }
 
 message ImeCompositionCommittedEvent {
-  string tile_id  = 1;
-  string node_id  = 2;
-  string text     = 3;   // final committed text
+  SceneId tile_id  = 1;
+  SceneId node_id  = 2;
+  string  text     = 3;   // final committed text
 }
 
 message ImeCompositionCancelledEvent {
-  string tile_id  = 1;
-  string node_id  = 2;
+  SceneId tile_id  = 1;
+  SceneId node_id  = 2;
 }
 ```
 
@@ -745,9 +746,9 @@ Bounds are relative to the tile origin, matching RFC 0001 §5.2. Hit-test traver
 
 ```protobuf
 message PointerDownEvent {
-  string tile_id          = 1;
-  string node_id          = 2;   // SceneId of the hit HitRegionNode
-  string device_id        = 3;
+  SceneId tile_id         = 1;
+  SceneId node_id         = 2;   // ID of the hit HitRegionNode
+  string  device_id       = 3;
   PointerButton button    = 4;
   float  x                = 5;   // node-local coordinates
   float  y                = 6;
@@ -759,89 +760,89 @@ message PointerDownEvent {
 }
 
 message PointerUpEvent {
-  string tile_id        = 1;
-  string node_id        = 2;
-  string device_id      = 3;
-  PointerButton button  = 4;
-  float  x              = 5;
-  float  y              = 6;
-  float  display_x      = 7;
-  float  display_y      = 8;
-  Modifiers modifiers   = 9;
-  int64  timestamp_us   = 10;
-  string interaction_id = 11;  // Agent-defined; forwarded for semantic correlation
+  SceneId tile_id        = 1;
+  SceneId node_id        = 2;
+  string  device_id      = 3;
+  PointerButton button   = 4;
+  float  x               = 5;
+  float  y               = 6;
+  float  display_x       = 7;
+  float  display_y       = 8;
+  Modifiers modifiers    = 9;
+  int64  timestamp_us    = 10;
+  string interaction_id  = 11;  // Agent-defined; forwarded for semantic correlation
 }
 
 message PointerMoveEvent {
-  string tile_id     = 1;
-  string node_id     = 2;
-  string device_id   = 3;
-  float  x           = 4;
-  float  y           = 5;
-  float  display_x   = 6;
-  float  display_y   = 7;
-  float  dx          = 8;   // delta from last move event
-  float  dy          = 9;
-  Modifiers modifiers = 10;
-  int64  timestamp_us = 11;
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  string  device_id    = 3;
+  float  x             = 4;
+  float  y             = 5;
+  float  display_x     = 6;
+  float  display_y     = 7;
+  float  dx            = 8;   // delta from last move event
+  float  dy            = 9;
+  Modifiers modifiers  = 10;
+  int64  timestamp_us  = 11;
 }
 
 message PointerEnterEvent {
-  string tile_id   = 1;
-  string node_id   = 2;
-  string device_id = 3;
-  float  x         = 4;
-  float  y         = 5;
-  int64  timestamp_us = 6;
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  string  device_id    = 3;
+  float  x             = 4;
+  float  y             = 5;
+  int64  timestamp_us  = 6;
 }
 
 message PointerLeaveEvent {
-  string tile_id   = 1;
-  string node_id   = 2;
-  string device_id = 3;
-  float  x         = 4;
-  float  y         = 5;
-  int64  timestamp_us = 6;
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  string  device_id    = 3;
+  float  x             = 4;
+  float  y             = 5;
+  int64  timestamp_us  = 6;
 }
 
 message ClickEvent {
-  string tile_id        = 1;
-  string node_id        = 2;
-  string device_id      = 3;
-  PointerButton button  = 4;
-  float  x              = 5;
-  float  y              = 6;
-  Modifiers modifiers   = 7;
-  int64  timestamp_us   = 8;
-  string interaction_id = 9;   // Agent-defined; forwarded for semantic correlation
+  SceneId tile_id        = 1;
+  SceneId node_id        = 2;
+  string  device_id      = 3;
+  PointerButton button   = 4;
+  float  x               = 5;
+  float  y               = 6;
+  Modifiers modifiers    = 7;
+  int64  timestamp_us    = 8;
+  string interaction_id  = 9;   // Agent-defined; forwarded for semantic correlation
 }
 
 message DoubleClickEvent {
-  string tile_id        = 1;
-  string node_id        = 2;
-  string device_id      = 3;
-  PointerButton button  = 4;
-  float  x              = 5;
-  float  y              = 6;
-  Modifiers modifiers   = 7;
-  int64  timestamp_us   = 8;
-  string interaction_id = 9;   // Agent-defined; forwarded for semantic correlation
+  SceneId tile_id        = 1;
+  SceneId node_id        = 2;
+  string  device_id      = 3;
+  PointerButton button   = 4;
+  float  x               = 5;
+  float  y               = 6;
+  Modifiers modifiers    = 7;
+  int64  timestamp_us    = 8;
+  string interaction_id  = 9;   // Agent-defined; forwarded for semantic correlation
 }
 
 message ContextMenuEvent {
-  string tile_id      = 1;
-  string node_id      = 2;
-  float  x            = 3;
-  float  y            = 4;
-  int64  timestamp_us = 5;
-  string device_id    = 6;   // Device that triggered the context menu (for multi-pointer disambiguation)
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  float  x             = 3;
+  float  y             = 4;
+  int64  timestamp_us  = 5;
+  string device_id     = 6;   // Device that triggered the context menu (for multi-pointer disambiguation)
 }
 
 message PointerCancelEvent {
-  string tile_id   = 1;
-  string node_id   = 2;
-  string device_id = 3;
-  int64  timestamp_us = 4;
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  string  device_id    = 3;
+  int64   timestamp_us = 4;
 }
 
 enum PointerButton {
@@ -864,29 +865,29 @@ When a `HitRegionNode` has focus (it or its containing tile is the focus owner),
 
 ```protobuf
 message KeyDownEvent {
-  string tile_id     = 1;
-  string node_id     = 2;
-  string key_code    = 3;   // Physical key: "KeyA", "ArrowLeft", "Enter", etc. (DOM KeyboardEvent.code)
-  string key         = 4;   // Logical key value: "a", "A", "ArrowLeft" (DOM KeyboardEvent.key)
-  Modifiers modifiers = 5;
-  bool   repeat      = 6;   // true = key is held (auto-repeat)
-  int64  timestamp_us = 7;
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  string  key_code     = 3;   // Physical key: "KeyA", "ArrowLeft", "Enter", etc. (DOM KeyboardEvent.code)
+  string  key          = 4;   // Logical key value: "a", "A", "ArrowLeft" (DOM KeyboardEvent.key)
+  Modifiers modifiers  = 5;
+  bool    repeat       = 6;   // true = key is held (auto-repeat)
+  int64   timestamp_us = 7;
 }
 
 message KeyUpEvent {
-  string tile_id     = 1;
-  string node_id     = 2;
-  string key_code    = 3;
-  string key         = 4;
-  Modifiers modifiers = 5;
-  int64  timestamp_us = 6;
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  string  key_code     = 3;
+  string  key          = 4;
+  Modifiers modifiers  = 5;
+  int64   timestamp_us = 6;
 }
 
 message CharacterEvent {
-  string tile_id   = 1;
-  string node_id   = 2;
-  string character = 3;   // Unicode character(s) produced by the key press (post-IME)
-  int64  timestamp_us = 4;
+  SceneId tile_id      = 1;
+  SceneId node_id      = 2;
+  string  character    = 3;   // Unicode character(s) produced by the key press (post-IME)
+  int64   timestamp_us = 4;
 }
 ```
 
@@ -1058,13 +1059,15 @@ If an agent's event queue is full (the agent is slow to consume events):
 syntax = "proto3";
 package tze_hud.input.v1;
 
+import "scene.proto";  // SceneId (tze_hud.scene.v1) — RFC 0001 §7.1
+
 // ─── Focus ────────────────────────────────────────────────────────────────
 
 message FocusRequest {
-  string session_id = 1;
-  string tile_id    = 2;
-  string node_id    = 3;
-  bool   steal      = 4;
+  string  session_id = 1;
+  SceneId tile_id    = 2;
+  SceneId node_id    = 3;  // zero value = tile-level focus
+  bool    steal      = 4;
 }
 
 message FocusResponse {
@@ -1074,30 +1077,30 @@ message FocusResponse {
 }
 
 message FocusGainedEvent {
-  string tile_id = 1;
-  string node_id = 2;
+  SceneId tile_id = 1;
+  SceneId node_id = 2;  // zero value = tile-level focus
   enum Source { CLICK = 0; TAB_KEY = 1; PROGRAMMATIC = 2; }
-  Source source  = 3;
+  Source source   = 3;
 }
 
 message FocusLostEvent {
-  string tile_id = 1;
-  string node_id = 2;
+  SceneId tile_id = 1;
+  SceneId node_id = 2;
   enum Reason {
     CLICK_ELSEWHERE = 0; TAB_KEY = 1; PROGRAMMATIC = 2;
     TILE_DESTROYED = 3; TAB_SWITCHED = 4; LEASE_REVOKED = 5;
     AGENT_DISCONNECTED = 6;
   }
-  Reason reason  = 3;
+  Reason reason   = 3;
 }
 
 // ─── Capture ──────────────────────────────────────────────────────────────
 
 message CaptureRequest {
-  string session_id = 1;
-  string tile_id    = 2;
-  string node_id    = 3;
-  string device_id  = 4;
+  string  session_id = 1;
+  SceneId tile_id    = 2;
+  SceneId node_id    = 3;
+  string  device_id  = 4;
 }
 
 message CaptureResponse {
@@ -1107,21 +1110,21 @@ message CaptureResponse {
 }
 
 message CaptureReleaseRequest {
-  string session_id = 1;
-  string tile_id    = 2;
-  string node_id    = 3;
-  string device_id  = 4;
+  string  session_id = 1;
+  SceneId tile_id    = 2;
+  SceneId node_id    = 3;
+  string  device_id  = 4;
 }
 
 message CaptureReleasedEvent {
-  string tile_id   = 1;
-  string node_id   = 2;
-  string device_id = 3;
+  SceneId tile_id   = 1;
+  SceneId node_id   = 2;
+  string  device_id = 3;
   enum Reason {
     AGENT_RELEASED = 0; POINTER_UP = 1;
     RUNTIME_REVOKED = 2; LEASE_REVOKED = 3;
   }
-  Reason reason    = 4;
+  Reason reason     = 4;
 }
 
 // ─── Pointer events ───────────────────────────────────────────────────────
@@ -1133,7 +1136,7 @@ message Modifiers {
 }
 
 message PointerDownEvent {
-  string tile_id     = 1; string node_id    = 2; string device_id  = 3;
+  SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; float display_x = 7; float display_y = 8;
   Modifiers modifiers = 9; int64 timestamp_us = 10;
@@ -1141,7 +1144,7 @@ message PointerDownEvent {
 }
 
 message PointerUpEvent {
-  string tile_id     = 1; string node_id    = 2; string device_id  = 3;
+  SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; float display_x = 7; float display_y = 8;
   Modifiers modifiers = 9; int64 timestamp_us = 10;
@@ -1149,73 +1152,74 @@ message PointerUpEvent {
 }
 
 message PointerMoveEvent {
-  string tile_id     = 1; string node_id    = 2; string device_id  = 3;
+  SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   float x = 4; float y = 5; float display_x = 6; float display_y = 7;
   float dx = 8; float dy = 9;
   Modifiers modifiers = 10; int64 timestamp_us = 11;
 }
 
 message PointerEnterEvent {
-  string tile_id = 1; string node_id = 2; string device_id = 3;
+  SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   float x = 4; float y = 5; int64 timestamp_us = 6;
 }
 
 message PointerLeaveEvent {
-  string tile_id = 1; string node_id = 2; string device_id = 3;
+  SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   float x = 4; float y = 5; int64 timestamp_us = 6;
 }
 
 message ClickEvent {
-  string tile_id = 1; string node_id = 2; string device_id = 3;
+  SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_us = 8;
   string interaction_id = 9;   // Forwarded from HitRegionNode for agent correlation
 }
 
 message DoubleClickEvent {
-  string tile_id = 1; string node_id = 2; string device_id = 3;
+  SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_us = 8;
   string interaction_id = 9;   // Forwarded from HitRegionNode for agent correlation
 }
 
 message ContextMenuEvent {
-  string tile_id = 1; string node_id = 2;
+  SceneId tile_id = 1; SceneId node_id = 2;
   float x = 3; float y = 4; int64 timestamp_us = 5;
+  string device_id = 6;  // Device that triggered the context menu (for multi-pointer disambiguation)
 }
 
 message PointerCancelEvent {
-  string tile_id = 1; string node_id = 2;
+  SceneId tile_id = 1; SceneId node_id = 2;
   string device_id = 3; int64 timestamp_us = 4;
 }
 
 // ─── Keyboard events ──────────────────────────────────────────────────────
 
 message KeyDownEvent {
-  string tile_id = 1; string node_id = 2;
+  SceneId tile_id = 1; SceneId node_id = 2;
   string key_code = 3; string key = 4;
   Modifiers modifiers = 5; bool repeat = 6; int64 timestamp_us = 7;
 }
 
 message KeyUpEvent {
-  string tile_id = 1; string node_id = 2;
+  SceneId tile_id = 1; SceneId node_id = 2;
   string key_code = 3; string key = 4;
   Modifiers modifiers = 5; int64 timestamp_us = 6;
 }
 
 message CharacterEvent {
-  string tile_id = 1; string node_id = 2;
+  SceneId tile_id = 1; SceneId node_id = 2;
   string character = 3; int64 timestamp_us = 4;
 }
 
 // ─── Gesture events ───────────────────────────────────────────────────────
 
 message GestureEvent {
-  string tile_id       = 1;
-  string node_id       = 2;
-  string device_id     = 3;
-  int64  timestamp_us  = 4;
-  string interaction_id = 5;  // Forwarded from HitRegionNode for agent correlation (same as pointer events)
+  SceneId tile_id        = 1;
+  SceneId node_id        = 2;
+  string  device_id      = 3;
+  int64   timestamp_us   = 4;
+  string  interaction_id = 5;  // Forwarded from HitRegionNode for agent correlation (same as pointer events)
 
   oneof gesture {
     TapGesture        tap         = 10;
@@ -1266,33 +1270,33 @@ message SwipeGesture {
 // ─── IME events ───────────────────────────────────────────────────────────
 
 message SetImePositionRequest {
-  string session_id  = 1;
-  string tile_id     = 2;
-  string node_id     = 3;
-  float  cursor_x    = 4;
-  float  cursor_y    = 5;
-  float  line_height = 6;
+  string  session_id  = 1;
+  SceneId tile_id     = 2;
+  SceneId node_id     = 3;
+  float   cursor_x    = 4;
+  float   cursor_y    = 5;
+  float   line_height = 6;
 }
 
 message ImeCompositionStartedEvent {
-  string tile_id = 1; string node_id = 2;
+  SceneId tile_id = 1; SceneId node_id = 2;
 }
 
 message ImeCompositionUpdatedEvent {
-  string tile_id    = 1; string node_id = 2;
-  string text       = 3;
-  uint32 cursor_pos = 4;
-  uint32 sel_start  = 5;
-  uint32 sel_end    = 6;
+  SceneId tile_id   = 1; SceneId node_id = 2;
+  string  text      = 3;
+  uint32  cursor_pos = 4;
+  uint32  sel_start  = 5;
+  uint32  sel_end    = 6;
 }
 
 message ImeCompositionCommittedEvent {
-  string tile_id = 1; string node_id = 2;
-  string text    = 3;
+  SceneId tile_id = 1; SceneId node_id = 2;
+  string  text    = 3;
 }
 
 message ImeCompositionCancelledEvent {
-  string tile_id = 1; string node_id = 2;
+  SceneId tile_id = 1; SceneId node_id = 2;
 }
 
 // ─── Dispatch batch ───────────────────────────────────────────────────────

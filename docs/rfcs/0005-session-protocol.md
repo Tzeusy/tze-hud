@@ -20,6 +20,7 @@
 | 6 | 2026-03-22 | rig-77n | Clock-domain naming fix | Renamed all timestamp fields to encode clock domain explicitly: `_wall_us` suffix for wall-clock (UTC), `_mono_us` suffix for monotonic. Affected fields: `SessionMessage.timestamp_wall_us`, `SessionInit.agent_timestamp_wall_us`, `SessionEstablished.compositor_timestamp_wall_us`, `HeartbeatPing.client_timestamp_mono_us`, `HeartbeatPong.client_timestamp_mono_us` + `server_timestamp_wall_us`, `TimingHints.present_at_wall_us` + `expires_at_wall_us`. Added §2.4 "Clock Domains" subsection with field inventory and RFC 0003 cross-reference. Previous §2.4 renumbered §2.5. |
 | 7 | 2026-03-22 | rig-de2 | ID type alignment with RFC 0001 SceneId | `MutationBatch.batch_id` and `MutationBatch.lease_id` changed from `string` to `SceneId`; `MutationResult.batch_id` and `MutationResult.created_ids` changed from `string`/`repeated string` to `SceneId`/`repeated SceneId`; updated §3.3, §5.2, §9 (proto), §9.1 (import graph), §11; added ID type convention note distinguishing scene-object IDs (use `SceneId`) from session-level identifiers (`agent_id`, `session_token`, `namespace` remain `string`). |
 | 8 | 2026-03-22 | rig-8uq | Snapshot gap fix | Added `SceneSnapshot` (imported from RFC 0001 §7.1) as field 42 in `SessionMessage` oneof (field 41 was allocated to `TelemetryFrame` in Round 3); added scene snapshot comment block in §9 proto; noted snapshot delivery in §1.3 (`SessionEstablished`) and §3.2 server→client table; updated §6.5 to reference `SceneSnapshot` by name; updated §6.4 v1 note to use `SceneSnapshot` instead of `SceneEvent`; updated §9.1 import graph and §9.2 field registry; updated §11 cross-RFC table with RFC 0001 snapshot format dependency. Corrected §3.2 table and §9 comment: `SessionResumeResult` corresponds to within-grace-period resume (§6.4), not post-grace. |
+| 9 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification (subsumed by Round 7) | Cross-RFC pass that added `import "scene.proto"` and converted `lease_id`/`created_ids` to `SceneId`. The `batch_id` conversion was also completed in Round 7 (rig-de2), which is authoritative — RFC 0001 §4 and §7.1 establish `batch_id` as a scene-object ID (`SceneId`), not a session-level string. This round's RFC 0003, RFC 0004, and RFC 0007 changes (SyncGroupConfig, input proto, session proto ID unification) remain as committed on those files. |
 
 ---
 
@@ -789,6 +790,7 @@ syntax = "proto3";
 package tze_hud.protocol.v1;
 
 import "scene_service.proto";
+import "scene.proto";  // SceneId (tze_hud.scene.v1) — RFC 0001 §7.1
 
 // ─── Presence ────────────────────────────────────────────────────────────────
 
