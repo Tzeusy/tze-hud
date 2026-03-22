@@ -46,6 +46,19 @@ pub enum SceneMutation {
     DeleteTile {
         tile_id: SceneId,
     },
+    /// Publish content to a zone.
+    PublishToZone {
+        zone_name: String,
+        content: ZoneContent,
+        publish_token: ZonePublishToken,
+        /// For MergeByKey contention: the key under which content is stored.
+        merge_key: Option<String>,
+    },
+    /// Clear all active publishes for a zone.
+    ClearZone {
+        zone_name: String,
+        publish_token: ZonePublishToken,
+    },
 }
 
 /// Result of applying a mutation batch.
@@ -91,7 +104,7 @@ impl SceneGraph {
     fn apply_single_mutation(
         &mut self,
         mutation: &SceneMutation,
-        _namespace: &str,
+        namespace: &str,
     ) -> Result<Vec<SceneId>, ValidationError> {
         match mutation {
             SceneMutation::CreateTab { name, display_order } => {
@@ -145,6 +158,22 @@ impl SceneGraph {
                 }
                 self.remove_tile_and_nodes(*tile_id);
                 self.version += 1;
+                Ok(vec![])
+            }
+            SceneMutation::PublishToZone {
+                zone_name,
+                content,
+                publish_token: _publish_token, // token validated by the gRPC layer
+                merge_key,
+            } => {
+                self.publish_to_zone(zone_name, content.clone(), namespace, merge_key.clone())?;
+                Ok(vec![])
+            }
+            SceneMutation::ClearZone {
+                zone_name,
+                publish_token: _publish_token, // token validated by the gRPC layer
+            } => {
+                self.clear_zone(zone_name)?;
                 Ok(vec![])
             }
         }
