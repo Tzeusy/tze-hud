@@ -125,9 +125,12 @@ pub enum ArbitrationOutcome {
     },
     /// Mutation is rejected. The agent receives a structured error.
     Reject(ArbitrationError),
-    /// Mutation is shed by the degradation policy. No error is sent to the agent;
-    /// the mutation is discarded and the agent is expected to retransmit when
-    /// conditions improve (or receive a DegradationEvent and back off).
+    /// Mutation is shed by the degradation policy. No error is sent to the agent.
+    /// The mutation's zone-state effects are applied (zone occupancy updates), but
+    /// its render output is omitted for this frame. The agent is expected to back off
+    /// on receiving a DegradationEvent; no retransmit is required — the runtime resumes
+    /// rendering from last committed zone state when capacity recovers.
+    /// See §6.2 for the distinction between zone-state update and render commit.
     Shed { degradation_level: u32 },
 }
 
@@ -539,7 +542,7 @@ enum ArbitrationErrorCode {
 message DegradationShedEvent {
   string mutation_ref        = 1;
   uint32 degradation_level   = 2;
-  string traffic_class       = 3;  // "transactional" | "state_stream" | "ephemeral"
+  string traffic_class       = 3;  // "state_stream" | "ephemeral" (transactional mutations are never shed; see §2.7)
   uint64 timestamp_us        = 4;
 }
 
