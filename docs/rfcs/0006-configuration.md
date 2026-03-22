@@ -841,8 +841,8 @@ capabilities = [
   "create_tiles",
   "modify_own_tiles",
   "subscribe_scene_events",
-  "publish_zone:subtitle",
-  "publish_zone:status_bar",
+  "zone_publish:subtitle",
+  "zone_publish:status_bar",
 ]
 
 # Resource budget overrides (overrides the profile's per-agent defaults).
@@ -862,8 +862,8 @@ capabilities = [
   "create_tiles",
   "modify_own_tiles",
   "subscribe_scene_events",
-  "publish_zone:notification",
-  "publish_zone:alert_banner",
+  "zone_publish:notification",
+  "zone_publish:alert_banner",
   "emit_scene_event:doorbell.ring",  # Can fire the doorbell tab-switch event
 ]
 
@@ -881,16 +881,16 @@ The capability grant list in each agent entry uses structured capability identif
 |------------|-------------|
 | `create_tiles` | May request tile leases. |
 | `modify_own_tiles` | May mutate content on own tiles. |
-| `read_scene_topology` | May query the full scene topology, including other agents' lease metadata. |
+| `read_scene` | May query the full scene topology, including other agents' lease metadata. |
 | `subscribe_scene_events` | May subscribe to scene-level events (tab switches, agent joins/departs). |
 | `overlay_privileges` | May request tiles with high z-order or overlay-level positions. |
-| `access_input_events` | May receive input events forwarded from the runtime. |
+| `receive_input` | May receive input events forwarded from the runtime. |
 | `high_priority_z_order` | May request z-order values in the top quartile. |
 | `exceed_default_budgets` | May request budget overrides at session time (requires user prompt). |
-| `publish_zone:<zone_name>` | May publish to the named zone. One grant per zone. `publish_zone:*` grants all zones. |
+| `zone_publish:<zone_name>` | May publish to the named zone. One grant per zone. `zone_publish:*` grants all zones. |
 | `emit_scene_event:<event_name>` | May fire the named scene event (e.g., `doorbell.ring`). |
 
-Capabilities not listed are not granted. There is no wildcard for tile/topology access — only `publish_zone:*` is supported as a wildcard form.
+Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene` — these must be listed explicitly. Only `zone_publish:*` is supported as a wildcard form.
 
 ### 6.4 Dynamic Agent Policy
 
@@ -905,7 +905,7 @@ allow_dynamic_agents = true
 default_capabilities = [
   "create_tiles",
   "modify_own_tiles",
-  "publish_zone:notification",
+  "zone_publish:notification",
 ]
 
 # Whether dynamic agents require a user prompt for elevated capabilities.
