@@ -149,7 +149,7 @@ pub struct Tab {
     pub id: SceneId,
     pub name: String,           // Human-readable label; max 128 UTF-8 bytes
     pub display_order: u32,     // Determines tab bar ordering; unique per scene
-    pub created_at: u64,        // Unix timestamp, milliseconds
+    pub created_at_us: u64,     // UTC microseconds since Unix epoch (RFC 0003 §3.1)
 }
 ```
 
@@ -180,8 +180,8 @@ pub struct Tile {
 
     // Timing / coordination
     pub sync_group: Option<SceneId>, // Sync group membership; None = unsynchronized
-    pub present_at: Option<u64>,    // Scheduled presentation timestamp (ms); None = immediate
-    pub expires_at: Option<u64>,    // Content expiry timestamp (ms); None = no auto-expiry
+    pub present_at_us: Option<u64>, // Scheduled presentation timestamp (μs, UTC); None = immediate (RFC 0003 §3.1)
+    pub expires_at_us: Option<u64>, // Content expiry timestamp (μs, UTC); None = no auto-expiry (RFC 0003 §3.1)
 
     // Resource governance
     pub resource_budget: ResourceBudget,
@@ -232,17 +232,18 @@ pub enum UpdatePolicy {
 pub struct ResourceBudget {
     pub texture_bytes: u64,    // Max texture memory for this tile's nodes
     pub update_rate_hz: f32,   // Max mutation rate (mutations/second)
-    pub max_nodes: u8,         // Max nodes in tile tree (default 64)
+    pub max_nodes: u8,         // Max nodes in tile tree; valid range [1, 64]; values > 64 are clamped to 64
+                               // (u8 allows up to 255 by type but values above the scene hard cap are rejected)
 }
 ```
 
 **Tile invariants:**
 1. `opacity` in `[0.0, 1.0]`.
 2. `bounds` must be fully contained within the tab's display area (runtime-defined; typically the display resolution).
-3. No two tiles with the same `z_order` value on the same tab may both be non-passthrough and have overlapping bounds (exclusive-z conflict).
+3. No two *agent-owned* tiles with the same `z_order` value on the same tab may both be non-passthrough and have overlapping bounds (exclusive-z conflict). Runtime-managed zone tiles are exempt from this check: they are pinned at z=MAX (content layer) or the chrome layer, which is outside the agent z_order space.
 4. `width > 0.0` and `height > 0.0`.
 5. `lease_id` must reference a currently-valid lease in the lease registry.
-6. `resource_budget.max_nodes <= 64`.
+6. `resource_budget.max_nodes` in `[1, 64]`. The `u8` type allows values up to 255, but any value above 64 is rejected with `VALIDATION_ERROR_INVALID_FIELD_VALUE`.
 7. `latency_class == ClockedMedia` requires `sync_group` to be `Some(_)` (clocked media tiles must belong to a sync group to be meaningful).
 8. `update_policy` must be consistent with `latency_class`: `Transactional + Ordered`, `StateStream + Coalesce`, `EphemeralRealtime + LatestWins`, `ClockedMedia + Ordered` are the canonical pairings. Non-canonical pairings are accepted but generate a validation warning.
 
@@ -293,7 +294,7 @@ pub struct TextMarkdownNode {
     pub background: Option<Rgba>,
     pub alignment: TextAlign,
     pub overflow: TextOverflow,
-    pub present_at: Option<u64>,    // Override tile-level present_at for this node
+    pub present_at_us: Option<u64>, // Override tile-level present_at_us for this node (μs, UTC; RFC 0003 §3.1)
 }
 
 pub enum FontFamily {
@@ -323,7 +324,7 @@ pub struct StaticImageNode {
     pub resource_id: ResourceId,    // Reference to uploaded image resource
     pub bounds: Rect,               // Relative to tile origin
     pub fit: ImageFit,
-    pub present_at: Option<u64>,
+    pub present_at_us: Option<u64>, // Override tile-level present_at_us for this node (μs, UTC; RFC 0003 §3.1)
 }
 
 pub enum ImageFit {
@@ -388,7 +389,7 @@ pub struct ZoneDefinition {
     pub rendering_policy: RenderingPolicy,
     pub contention_policy: ContentionPolicy,
     pub transport_constraint: Option<TransportConstraint>,
-    pub auto_clear_ms: Option<u64>,  // Auto-clear timeout; None = no auto-clear
+    pub auto_clear_us: Option<u64>,  // Auto-clear timeout (μs duration); None = no auto-clear
 }
 
 /// Which compositor layer a zone instance attaches to (presence.md §"Layer attachment").
@@ -488,7 +489,7 @@ pub struct MutationBatch {
     pub batch_id: SceneId,          // Agent-assigned; used in error responses
     pub agent_namespace: String,
     pub mutations: Vec<SceneMutation>,
-    pub present_at: Option<u64>,    // Apply in one frame at or after this time
+    pub present_at_us: Option<u64>, // Apply in one frame at or after this time (μs, UTC; RFC 0003 §3.1)
     pub sequence_hint: Option<u64>, // Agent's local sequence number; for ordering hints
 }
 
@@ -507,7 +508,7 @@ pub enum SceneMutation {
     UpdateTileOpacity { tile_id: SceneId, opacity: f32 },
     UpdateTileInputMode { tile_id: SceneId, input_mode: InputMode },
     UpdateTileSyncGroup { tile_id: SceneId, sync_group: Option<SceneId> },
-    UpdateTileExpiry { tile_id: SceneId, expires_at: Option<u64> },
+    UpdateTileExpiry { tile_id: SceneId, expires_at_us: Option<u64> },
     DeleteTile { tile_id: SceneId },
 
     // Node operations
@@ -522,10 +523,14 @@ pub enum SceneMutation {
         zone_name: String,
         content: ZoneContent,
         publish_token: ZonePublishToken,
-        expires_at_ms: Option<u64>,   // Per-publish TTL; None = use zone auto_clear_ms
+        expires_at_us: Option<u64>,   // Per-publish TTL (μs, UTC); None = use zone auto_clear_us
         publish_key: Option<String>,  // Key for MergeByKey zones; None for other policies
     },
     ClearZone { zone_name: String, publish_token: ZonePublishToken },
+
+    // Sync group lifecycle (RFC 0003 §7.2). Must be used before tiles can be assigned to the group.
+    CreateSyncGroup { id: SceneId, config: Option<Vec<u8>> }, // config = serialized SyncGroupConfig
+    DeleteSyncGroup { sync_group_id: SceneId },               // member tiles remain, unlinked
 }
 ```
 
@@ -655,7 +660,10 @@ pub enum BatchError {
         correction_hint: Option<serde_json::Value>,
     },
     BatchSizeExceeded { max: usize, got: usize },
-    RateLimitExceeded { limit_hz: f32, current_hz: f32 },
+    RateLimitExceeded {
+        limit_hz: f32,   // Agent's allowed rate budget (mutations/second)
+        current_hz: f32, // Observed rate that triggered the limit
+    },
 }
 
 pub enum ValidationErrorCode {
@@ -699,7 +707,7 @@ A snapshot is a complete, deterministic serialization of the scene graph at a sp
 ```rust
 pub struct SceneSnapshot {
     pub sequence: u64,                      // Commit sequence at time of snapshot
-    pub timestamp_ms: u64,                  // Wall clock at snapshot time
+    pub timestamp_us: u64,                  // Wall clock at snapshot time (μs, UTC; RFC 0003 §3.1)
     pub tabs: Vec<Tab>,                     // Ordered by display_order
     pub tiles: Vec<Tile>,                   // All tiles across all tabs
     pub nodes: Vec<Node>,                   // All nodes across all tiles
@@ -717,8 +725,8 @@ pub struct ZonePublishRecord {
     pub zone_name: String,
     pub publisher_namespace: String,
     pub content: ZoneContent,
-    pub published_at_ms: u64,
-    pub expires_at_ms: Option<u64>,  // Publication TTL; None = governed by zone auto_clear_ms
+    pub published_at_us: u64,               // UTC microseconds since Unix epoch (RFC 0003 §3.1)
+    pub expires_at_us: Option<u64>,          // Publication TTL (μs, UTC); None = governed by zone auto_clear_us
     pub publish_key: Option<String>, // Key for MergeByKey zones; None for other contention policies
 }
 ```
@@ -997,7 +1005,7 @@ message Tab {
   SceneId  id            = 1;
   string   name          = 2;
   uint32   display_order = 3;
-  uint64   created_at_ms = 4;
+  uint64   created_at_us = 4;   // UTC μs since Unix epoch (RFC 0003 §3.1); 0 = not set
 }
 
 message ResourceBudget {
@@ -1031,8 +1039,8 @@ message Tile {
   float          opacity         = 7;
   InputMode      input_mode      = 8;
   SceneId        sync_group      = 9;   // Zero value = not in a sync group
-  uint64         present_at_ms   = 10;  // 0 = immediate
-  uint64         expires_at_ms   = 11;  // 0 = no expiry
+  uint64         present_at_us   = 10;  // UTC μs; 0 = immediate (RFC 0003 §3.1)
+  uint64         expires_at_us   = 11;  // UTC μs; 0 = no expiry (RFC 0003 §3.1)
   ResourceBudget resource_budget = 12;
   SceneId        root_node       = 13;  // Zero value = empty tile
   LatencyClass   latency_class   = 14;  // Default: STATE_STREAM if unspecified
@@ -1055,14 +1063,14 @@ message TextMarkdownNode {
   Rgba         background    = 6;  // Zero alpha = transparent
   TextAlign    alignment     = 7;
   TextOverflow overflow      = 8;
-  uint64       present_at_ms = 9;  // 0 = use tile-level present_at
+  uint64       present_at_us = 9;  // UTC μs; 0 = use tile-level present_at_us (RFC 0003 §3.1)
 }
 
 message StaticImageNode {
   ResourceId resource_id  = 1;
   Rect       bounds       = 2;
   ImageFit   fit          = 3;
-  uint64     present_at_ms = 4; // 0 = use tile-level present_at
+  uint64     present_at_us = 4; // UTC μs; 0 = use tile-level present_at_us (RFC 0003 §3.1)
 }
 
 // HitRegionNode: base fields defined here; input-model fields defined in RFC 0004.
@@ -1107,10 +1115,13 @@ message UpdateTileZOrderMutation  { SceneId tile_id = 1; uint32 z_order = 2; }
 message UpdateTileOpacityMutation { SceneId tile_id = 1; float opacity = 2; }
 message UpdateTileInputModeMutation { SceneId tile_id = 1; InputMode input_mode = 2; }
 message UpdateTileSyncGroupMutation { SceneId tile_id = 1; SceneId sync_group = 2; }
-message UpdateTileExpiryMutation  { SceneId tile_id = 1; uint64 expires_at_ms = 2; }
+message UpdateTileExpiryMutation  { SceneId tile_id = 1; uint64 expires_at_us = 2; }  // UTC μs; 0 = clear expiry
 message DeleteTileMutation   { SceneId tile_id = 1; }
 
 message SetTileRootMutation  { SceneId tile_id = 1; Node node = 2; }
+// InsertNodeMutation: parent_id zero bytes = "no parent" (node becomes the tile root, equivalent
+// to SetTileRoot). Use SetTileRootMutation if the tile has no existing root; use InsertNode with
+// zero parent_id to atomically replace the root in a batch. Non-zero parent_id = add as child.
 message InsertNodeMutation   { SceneId tile_id = 1; SceneId parent_id = 2; Node node = 3; }
 message ReplaceNodeMutation  { SceneId node_id = 1; Node node = 2; }
 message UpdateNodeBoundsMutation { SceneId node_id = 1; Rect bounds = 2; }
@@ -1152,13 +1163,27 @@ message PublishToZoneMutation {
   string           zone_name     = 1;
   ZoneContent      content       = 2;
   ZonePublishToken publish_token = 3;
-  uint64           expires_at_ms = 4;   // 0 = use zone auto_clear_ms; >0 = per-publish TTL
+  uint64           expires_at_us = 4;   // UTC μs; 0 = use zone auto_clear_us; >0 = per-publish TTL (RFC 0003 §3.1)
   string           publish_key   = 5;   // Non-empty only for MergeByKey zones
 }
 
 message ClearZoneMutation {
   string           zone_name     = 1;
   ZonePublishToken publish_token = 2;
+}
+
+// Sync group lifecycle mutations (defined by RFC 0003 §7.2; consumed here in scene.proto).
+// Sync group creation/deletion is an explicit scene operation: a group must be created before
+// tiles can be assigned to it via UpdateTileSyncGroupMutation. Groups are deleted when the last
+// member tile is removed or via an explicit DeleteSyncGroupMutation.
+// SyncGroupConfig definition: see RFC 0003 §7.1.
+message CreateSyncGroupMutation {
+  SceneId id     = 1;  // Agent-chosen; must be unique in scene
+  bytes   config = 2;  // Serialized SyncGroupConfig (RFC 0003 §7.1); empty = runtime defaults
+}
+
+message DeleteSyncGroupMutation {
+  SceneId sync_group_id = 1;  // The sync group to delete; member tiles remain, unlinked
 }
 
 message SceneMutation {
@@ -1183,6 +1208,8 @@ message SceneMutation {
     RemoveNodeMutation        remove_node         = 18;
     PublishToZoneMutation     publish_to_zone     = 19;
     ClearZoneMutation         clear_zone          = 20;
+    CreateSyncGroupMutation   create_sync_group   = 21;  // RFC 0003 §7.2
+    DeleteSyncGroupMutation   delete_sync_group   = 22;  // RFC 0003 §7.2
   }
 }
 
@@ -1190,7 +1217,7 @@ message MutationBatch {
   SceneId            batch_id         = 1;
   string             agent_namespace  = 2;
   repeated SceneMutation mutations    = 3;
-  uint64             present_at_ms    = 4;  // 0 = immediate
+  uint64             present_at_us    = 4;  // UTC μs; 0 = immediate (RFC 0003 §3.1)
   uint64             sequence_hint    = 5;  // 0 = no hint
 }
 
@@ -1199,7 +1226,7 @@ message MutationBatch {
 message BatchCommitted {
   SceneId batch_id       = 1;
   uint64  sequence       = 2;
-  uint64  committed_at_ms = 3;
+  uint64  committed_at_us = 3;   // UTC μs; frame commit wall clock (RFC 0003 §3.1)
 }
 
 message MutationValidationError {
@@ -1211,24 +1238,38 @@ message MutationValidationError {
   string               correction_hint = 6;   // JSON object or empty
 }
 
+message RateLimitExceededError {
+  float  limit_hz   = 1;   // Agent's allowed rate budget (mutations/second)
+  float  current_hz = 2;   // Observed rate that exceeded the limit
+}
+
+message BatchSizeExceededError {
+  uint32 max = 1;   // Maximum allowed mutations per batch
+  uint32 got = 2;   // Actual number of mutations in the rejected batch
+}
+
 message BatchRejected {
   SceneId                    batch_id = 1;
   oneof error {
-    string                   parse_error   = 2;
-    MutationValidationError  validation    = 3;
-    string                   rate_limited  = 4;
-    string                   batch_too_large = 5;
+    string                   parse_error       = 2;
+    MutationValidationError  validation        = 3;
+    RateLimitExceededError   rate_limited      = 4;   // Structured rate-limit error (matches Rust BatchError::RateLimitExceeded)
+    BatchSizeExceededError   batch_too_large   = 5;   // Structured size error (matches Rust BatchError::BatchSizeExceeded)
   }
 }
 
 // ─── Snapshots and Diffs ────────────────────────────────────────────────────
 
+// SceneSnapshot: flat lists for deterministic serialization (required for checksum stability).
+// Tree reconstruction: tiles reference their tab via tile.tab_id. Node tree is reconstructed by
+// indexing nodes by id and walking Node.children recursively from each tile's root_node.
+// See Rust SceneSnapshot doc comment in §4.1 for the canonical reconstruction algorithm.
 message SceneSnapshot {
   uint64             sequence       = 1;
-  uint64             timestamp_ms   = 2;
+  uint64             timestamp_us   = 2;   // UTC μs; snapshot wall clock (RFC 0003 §3.1)
   repeated Tab       tabs           = 3;
-  repeated Tile      tiles          = 4;
-  repeated Node      nodes          = 5;
+  repeated Tile      tiles          = 4;   // All tiles; use tile.tab_id to group by tab
+  repeated Node      nodes          = 5;   // All nodes; use Node.children for tree structure
   ZoneRegistrySnapshot zone_registry = 6;
   SceneId            active_tab     = 7;   // Zero = no active tab
   bytes              checksum       = 8;   // BLAKE3, 32 bytes
@@ -1299,7 +1340,7 @@ message ZoneDefinitionProto {
   repeated ZoneMediaType     accepted_media_types = 5;
   RenderingPolicyProto       rendering_policy     = 6;
   ContentionPolicy           contention_policy    = 7;
-  uint64                     auto_clear_ms        = 8;   // 0 = no auto-clear
+  uint64                     auto_clear_us        = 8;   // μs duration; 0 = no auto-clear
   ZoneLayerAttachment        layer_attachment     = 9;   // Which compositor layer this zone attaches to
 }
 
@@ -1307,8 +1348,8 @@ message ZonePublishRecordProto {
   string      zone_name           = 1;
   string      publisher_namespace = 2;
   ZoneContent content             = 3;
-  uint64      published_at_ms     = 4;
-  uint64      expires_at_ms       = 5;   // 0 = governed by zone auto_clear_ms
+  uint64      published_at_us     = 4;   // UTC μs since Unix epoch (RFC 0003 §3.1)
+  uint64      expires_at_us       = 5;   // UTC μs; 0 = governed by zone auto_clear_us (RFC 0003 §3.1)
   string      publish_key         = 6;   // Non-empty only for MergeByKey zones
 }
 
@@ -1333,7 +1374,7 @@ message TilePatch {
   float        opacity       = 4;   // 0.0 = not changed (use has_opacity wrapper field in impl)
   InputMode    input_mode    = 5;   // UNSPECIFIED = not changed
   SceneId      sync_group    = 6;   // Zero bytes = not changed
-  uint64       expires_at_ms = 7;   // 0 = not changed
+  uint64       expires_at_us = 7;   // 0 = not changed (UTC μs; RFC 0003 §3.1)
   LatencyClass latency_class = 8;   // UNSPECIFIED = not changed
   UpdatePolicy update_policy = 9;   // UNSPECIFIED = not changed
 }
@@ -1416,7 +1457,7 @@ message ChromeHitResult {
 ### 7.2 Schema Constraints and Wire Format Notes
 
 1. All `SceneId` fields use the zero value (`[0u8; 16]`) to represent "absent/null" (e.g., `root_node = 0` means no root node; `sync_group = 0` means not in a sync group).
-2. All `uint64` timestamp fields use 0 to represent "not set" (zero is never a valid real timestamp in this system; the runtime started after 2025).
+2. All `uint64` timestamp fields use 0 to represent "not set" (zero is never a valid real timestamp in this system; the runtime started after 2025). All timestamp fields use **microsecond (μs) resolution** per RFC 0003 §3.1.
 3. `bytes checksum` in `SceneSnapshot` is exactly 32 bytes or empty (not yet computed).
 4. Mutation field numbers are stable; fields are never renumbered. New mutations are added with new field numbers.
 5. Unknown fields in messages are preserved (proto3 semantics). Agents must not fail on unknown fields.
@@ -1667,7 +1708,7 @@ Hardware reference: single core at 3GHz equivalent (normalized; see validation.m
 
 2. **WAL retention policy (post-v1):** 1000 batches or 60s, whichever is smaller, is a starting point for the deferred incremental diff extension. In v1, the WAL is used only for sequence ordering within the commit pipeline; agents reconnect via full snapshot and the WAL does not need to be queried externally. Revisit when incremental diff is implemented.
 
-3. **Snapshot checksum coverage:** Should `SceneSnapshot.checksum` cover the full serialization including zone state, or only the scene graph (tabs/tiles/nodes)? Recommendation: full serialization for integrity; exclude volatile fields like `timestamp_ms`.
+3. **Snapshot checksum coverage:** Should `SceneSnapshot.checksum` cover the full serialization including zone state, or only the scene graph (tabs/tiles/nodes)? Recommendation: full serialization for integrity; exclude volatile fields like `timestamp_us`.
 
 4. **`#[no_std]` compatibility:** The `SceneId` (UUIDv7) constructor requires a clock source not available in no_std. Options: (a) accept that scene graph construction requires std, (b) inject a clock trait, (c) make `new()` require a timestamp argument. Recommendation: (b) inject a clock trait for test/embedded flexibility.
 
@@ -1780,6 +1821,73 @@ RFC 0004 (Input) references RFC 0001 §5 (hit-test) correctly. RFC 0005 (Session
 ---
 
 *Review round 1 complete. All MUST-FIX and SHOULD-FIX items addressed. No dimension scored below 3.*
+
+---
+
+### Round 2 — Technical Architecture Scrutiny (2026-03-22)
+
+**Reviewer:** rig-5vq.12 agent worker
+**Focus:** Technical rigor — would a senior systems architect find holes? Data structure choices, concurrency safety, protocol correctness, error handling completeness, platform-specific feasibility, performance budget realism, API ergonomics, edge cases in state machines, cross-RFC interaction.
+**Doctrine read:** vision.md, v1.md, architecture.md, presence.md, failure.md, validation.md
+
+---
+
+#### Doctrinal Alignment Score: 4/5
+
+No new doctrinal gaps found — round 1 fixes held. The RFC correctly models all doctrine-mandated structures. Score unchanged from round 1.
+
+---
+
+#### Technical Robustness Score: 4/5
+
+The data model is sound, the transaction pipeline is well-specified, and the concurrency model (single writer lock, serialized batches, monotonic sequence) is correct. Performance budgets are quantified. Hit-test algorithm is complete.
+
+**Issues found and fixed in this round:**
+
+1. **Timestamp unit mismatch (cross-RFC):** RFC 0001 used millisecond-resolution (`_ms`) timestamp fields throughout Rust structs and the proto schema. RFC 0003 §3.1 and §7.2 establish microsecond (`_us`) as the authoritative resolution for all timing fields in the system. RFC 0003 round 1 explicitly tracked "A formal RFC 0001 amendment is tracked separately." This amendment is applied in this round. All `_ms` timestamp fields renamed to `_us`; units changed to UTC microseconds. **Fixed.**
+
+2. **`BatchRejected` error variants used unstructured `string` for structured errors:** `rate_limited` and `batch_too_large` in the proto `BatchRejected.oneof` were typed as `string` (unstructured), losing the `limit_hz/current_hz` and `max/got` fields present in the Rust `BatchError` enum. The architecture.md error model requires structured, machine-readable errors with context fields. Added typed `RateLimitExceededError` and `BatchSizeExceededError` messages. **Fixed.**
+
+3. **`SceneMutation` oneof missing sync group lifecycle mutations:** RFC 0003 §7.2 specifies that `CreateSyncGroupMutation` (field 21) and `DeleteSyncGroupMutation` (field 22) must be added to the `SceneMutation` oneof because sync group creation is now an explicit scene operation, not an implicit side effect. These mutations were absent from RFC 0001's proto. Added with corresponding Rust variants. **Fixed.**
+
+4. **`SceneSnapshot` flat `Vec` lacked reconstruction documentation:** The snapshot uses flat `Vec<Tile>` and `Vec<Node>` for deterministic serialization, but the reconstruction algorithm (how to reassemble the tree from the flat lists) was undocumented. Agents reconnecting via snapshot need this. Added reconstruction comment to both the Rust struct and proto message. **Fixed.**
+
+5. **`InsertNodeMutation.parent_id` zero-value semantics undocumented in proto:** The Rust type is `Option<SceneId>` (None = root), but the proto uses a bare `SceneId` with zero-bytes = "no parent" convention. This creates a footgun: implementors may not know that a zero `parent_id` makes the node the tile root rather than being an invalid/unset ID. Added explicit comment. **Fixed.**
+
+**Issues fixed (SHOULD-FIX):**
+
+6. **`ResourceBudget.max_nodes` type admits invalid values:** `u8` allows 255, but the hard cap is 64. The type and invariant are now explicit: valid range is `[1, 64]`; values above 64 are rejected with `VALIDATION_ERROR_INVALID_FIELD_VALUE`. **Fixed.**
+
+7. **Exclusive-z conflict invariant silently included zone tiles:** Invariant 3 said "no two tiles" but runtime-managed zone tiles are pinned at z=MAX (content layer) and are exempt from agent z_order conflict checks. Clarified to "agent-owned tiles" with an explicit note about zone tile exemption. **Fixed.**
+
+---
+
+#### Cross-RFC Consistency Score: 4/5
+
+No new cross-RFC contradictions found beyond the already-tracked timestamp migration. That migration is now applied (see Technical Robustness finding 1). The sync group mutation additions (finding 3) resolve the outstanding cross-reference from RFC 0003 §7.2. Score unchanged from post-fix round 1.
+
+**Remaining open cross-RFC items (deferred to later rounds or future RFCs):**
+- `#[no_std]` compatibility for `SceneId::new()` (§11.4) — clock trait injection required; deferred to implementation.
+- Tile bounds logical-pixel definition (§11.5) — deferred to Compositor RFC.
+- `SyncGroupConfig` serialization format for `CreateSyncGroupMutation.config` — defined in RFC 0003 §7.1; implementors should use that definition.
+
+---
+
+#### Actionable Findings Summary — Round 2
+
+| # | Severity | Location | Finding | Status |
+|---|----------|----------|---------|--------|
+| R2-1 | MUST-FIX | All `_ms` timestamp fields | Timestamp unit mismatch with RFC 0003 (ms vs μs); amendment tracked in RFC 0003 §7.2 | Fixed |
+| R2-2 | MUST-FIX | §3.4 `BatchRejected` proto | `rate_limited` and `batch_too_large` are unstructured `string`; should be typed error messages | Fixed |
+| R2-3 | MUST-FIX | §7.1 `SceneMutation` oneof | `CreateSyncGroupMutation` (field 21) and `DeleteSyncGroupMutation` (field 22) absent; required by RFC 0003 §7.2 | Fixed |
+| R2-4 | MUST-FIX | §4.1 `SceneSnapshot` / §7.1 proto | Flat Vec layout undocumented — agents need reconstruction algorithm to use snapshot | Fixed |
+| R2-5 | MUST-FIX | §7.1 `InsertNodeMutation` | `parent_id` zero-value semantics (= tile root) not documented in proto; footgun for implementors | Fixed |
+| R2-6 | SHOULD-FIX | §2.3 `ResourceBudget.max_nodes` | `u8` type admits values 65–255 which are invalid; invariant and comment clarified | Fixed |
+| R2-7 | SHOULD-FIX | §2.3 Tile invariant 3 | Exclusive-z conflict invariant incorrectly included runtime-managed zone tiles | Fixed |
+
+---
+
+*Review round 2 complete. All MUST-FIX and SHOULD-FIX items addressed. No dimension scored below 3.*
 
 ---
 
