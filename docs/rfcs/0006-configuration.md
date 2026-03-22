@@ -890,7 +890,7 @@ The capability grant list in each agent entry uses structured capability identif
 | `zone_publish:<zone_name>` | May publish to the named zone. One grant per zone. `zone_publish:*` grants all zones. |
 | `emit_scene_event:<event_name>` | May fire the named scene event (e.g., `doorbell.ring`). |
 
-Capabilities not listed are not granted. There is no wildcard for tile/topology access — only `zone_publish:*` is supported as a wildcard form.
+Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene` — these must be listed explicitly. Only `zone_publish:*` is supported as a wildcard form.
 
 ### 6.4 Dynamic Agent Policy
 
