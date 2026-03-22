@@ -1,7 +1,7 @@
 # RFC 0004 — Input Model
 
 **Status:** Draft
-**Depends on:** RFC 0001 (Scene Contract), RFC 0002 (Runtime Kernel), RFC 0003 (Lease Model)
+**Depends on:** RFC 0001 (Scene Contract), RFC 0002 (Runtime Kernel), RFC 0003 (Timing Model), RFC 0008 (Lease & Resource Governance)
 **Authored:** 2026-03-22
 
 ---
