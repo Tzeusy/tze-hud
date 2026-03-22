@@ -381,7 +381,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `LeaseResponse` | Transactional | Grant/deny/revoke for a lease operation |
 | `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing`; echoes monotonic client timestamp for RTT and includes wall-clock server receipt time |
 | `SceneEvent` | State-stream | Topology change, zone occupancy update, lease change |
-| `SceneSnapshot` | Transactional | Full scene topology snapshot; sent after `SessionEstablished` (new connection) and after a successful `SessionResumeResult` (post-grace-period reconnect). See §9. |
+| `SceneSnapshot` | Transactional | Full scene topology snapshot; sent after `SessionEstablished` (new connection or post-grace-period reconnect) and on session resume (within-grace-period reconnect, after `SessionResumeResult`). See §1.3, §6.4, and §6.5. |
 | `InputEvent` (pointer/key variants) | Ephemeral realtime | Pointer/touch/key events routed to agent via RFC 0004 `InputEnvelope`. Coalesced under backpressure (RFC 0004 §8.5). |
 | `InputEvent` (focus/capture/IME variants) | Transactional | `FocusGainedEvent`, `FocusLostEvent`, `CaptureReleasedEvent`, and IME events carried in the same RFC 0004 `InputEnvelope` oneof. Never dropped or coalesced per RFC 0004 §8.5 — delivery is reliable and ordered. |
 | `DegradationNotice` | Transactional | Runtime has changed degradation level; see §3.4 |
@@ -917,9 +917,10 @@ message SessionResumeResult {
 
 // ─── Scene snapshot (server → client) ────────────────────────────────────────
 // Full scene topology snapshot. Sent immediately after SessionEstablished on new
-// connections (§1.3) and after a successful SessionResumeResult on
-// post-grace-period reconnects (§6.5). Agents MUST process this before issuing
-// any mutations or acting on incremental SceneEvent updates.
+// connections (§1.3) and post-grace-period reconnects (§6.5), and also on
+// successful session resumption within the grace period (§6.4).
+// Agents MUST process this before issuing any mutations or acting on incremental
+// SceneEvent updates.
 //
 // The SceneSnapshot message type is defined in scene_service.proto (RFC 0001 §7.1).
 // Its fields carry: sequence number at snapshot time, UTC wall clock, flat Tab/Tile/Node
