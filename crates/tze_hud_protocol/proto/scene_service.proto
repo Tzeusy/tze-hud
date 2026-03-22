@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package tze_hud.protocol.v1;
+
+// ─── Core Types ─────────────────────────────────────────────────────────────
+
+message Rect {
+  float x      = 1;
+  float y      = 2;
+  float width  = 3;
+  float height = 4;
+}
+
+message Rgba {
+  float r = 1;
+  float g = 2;
+  float b = 3;
+  float a = 4;
+}
+
+// ─── Authentication ─────────────────────────────────────────────────────────
+
+message ConnectRequest {
+  string agent_name = 1;
+  string pre_shared_key = 2;
+  repeated string requested_capabilities = 3;
+}
+
+message ConnectResponse {
+  string session_id = 1;
+  string namespace = 2;
+  repeated string granted_capabilities = 3;
+  string error = 4;
+}
+
+// ─── Lease Management ───────────────────────────────────────────────────────
+
+message LeaseRequest {
+  string session_id = 1;
+  uint64 ttl_ms = 2;
+  repeated string capabilities = 3;
+}
+
+message LeaseResponse {
+  string lease_id = 1;
+  uint64 granted_ttl_ms = 2;
+  string error = 3;
+}
+
+message LeaseRenewRequest {
+  string session_id = 1;
+  string lease_id = 2;
+  uint64 new_ttl_ms = 3;
+}
+
+message LeaseRenewResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message LeaseRevokeRequest {
+  string session_id = 1;
+  string lease_id = 2;
+}
+
+message LeaseRevokeResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+// ─── Scene Mutations ────────────────────────────────────────────────────────
+
+message CreateTileMutation {
+  string tab_id = 1;
+  Rect bounds = 2;
+  uint32 z_order = 3;
+}
+
+message SetTileRootMutation {
+  string tile_id = 1;
+  NodeProto node = 2;
+}
+
+message NodeProto {
+  string id = 1;
+  oneof data {
+    SolidColorNodeProto solid_color = 10;
+    TextMarkdownNodeProto text_markdown = 11;
+    HitRegionNodeProto hit_region = 12;
+  }
+}
+
+message SolidColorNodeProto {
+  Rgba color = 1;
+  Rect bounds = 2;
+}
+
+message TextMarkdownNodeProto {
+  string content = 1;
+  Rect bounds = 2;
+  float font_size_px = 3;
+  Rgba color = 4;
+  Rgba background = 5;
+}
+
+message HitRegionNodeProto {
+  Rect bounds = 1;
+  string interaction_id = 2;
+  bool accepts_focus = 3;
+  bool accepts_pointer = 4;
+}
+
+message MutationBatchRequest {
+  string session_id = 1;
+  string lease_id = 2;
+  repeated MutationProto mutations = 3;
+}
+
+message MutationProto {
+  oneof mutation {
+    CreateTileMutation create_tile = 1;
+    SetTileRootMutation set_tile_root = 2;
+  }
+}
+
+message MutationBatchResponse {
+  bool success = 1;
+  repeated string created_ids = 2;
+  string error = 3;
+}
+
+// ─── Events ─────────────────────────────────────────────────────────────────
+
+message EventSubscribeRequest {
+  string session_id = 1;
+}
+
+message SceneEvent {
+  string event_type = 1;
+  string tile_id = 2;
+  string node_id = 3;
+  string interaction_id = 4;
+  string details = 5;
+  uint64 timestamp_ms = 6;
+}
+
+// ─── Scene Query ────────────────────────────────────────────────────────────
+
+message SceneQueryRequest {
+  string session_id = 1;
+}
+
+message SceneQueryResponse {
+  string scene_json = 1;
+  uint64 version = 2;
+}
+
+// ─── Service ────────────────────────────────────────────────────────────────
+
+service SceneService {
+  // Authentication
+  rpc Authenticate(ConnectRequest) returns (ConnectResponse);
+
+  // Lease management
+  rpc AcquireLease(LeaseRequest) returns (LeaseResponse);
+  rpc RenewLease(LeaseRenewRequest) returns (LeaseRenewResponse);
+  rpc RevokeLease(LeaseRevokeRequest) returns (LeaseRevokeResponse);
+
+  // Scene mutations
+  rpc ApplyMutations(MutationBatchRequest) returns (MutationBatchResponse);
+
+  // Scene query
+  rpc QueryScene(SceneQueryRequest) returns (SceneQueryResponse);
+
+  // Event subscription (server-streaming)
+  rpc SubscribeEvents(EventSubscribeRequest) returns (stream SceneEvent);
+}
