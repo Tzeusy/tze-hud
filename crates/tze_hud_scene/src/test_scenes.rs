@@ -555,6 +555,8 @@ pub fn assert_layer0_invariants(graph: &SceneGraph) -> Vec<InvariantViolation> {
     violations.extend(check_lease_namespace_nonempty(graph));
     violations.extend(check_zone_names_nonempty(graph));
     violations.extend(check_zone_name_key_consistency(graph));
+    violations.extend(check_sync_group_id_key_consistency(graph));
+    violations.extend(check_sync_group_member_back_refs(graph));
     violations.extend(check_version_non_decreasing(graph));
 
     violations
@@ -830,6 +832,55 @@ pub fn check_version_non_decreasing(graph: &SceneGraph) -> Vec<InvariantViolatio
     } else {
         vec![]
     }
+}
+
+/// For every entry in `sync_groups`, the HashMap key must match `sync_group.id`.
+/// Deserialization can silently produce a mismatch if the key and id field diverge.
+pub fn check_sync_group_id_key_consistency(graph: &SceneGraph) -> Vec<InvariantViolation> {
+    graph
+        .sync_groups
+        .iter()
+        .filter(|(key, sg)| **key != sg.id)
+        .map(|(key, sg)| {
+            InvariantViolation::new(
+                "sync_group_id_key_mismatch",
+                format!(
+                    "sync_groups map key {} does not match SyncGroup.id {}",
+                    key, sg.id
+                ),
+            )
+        })
+        .collect()
+}
+
+/// Every tile_id in a sync group's `members` set must reference a tile that
+/// exists in the graph AND whose `sync_group` field points back to this group.
+pub fn check_sync_group_member_back_refs(graph: &SceneGraph) -> Vec<InvariantViolation> {
+    let mut violations = Vec::new();
+    for (group_id, sg) in &graph.sync_groups {
+        for member_id in &sg.members {
+            match graph.tiles.get(member_id) {
+                None => violations.push(InvariantViolation::new(
+                    "sync_group_member_tile_missing",
+                    format!(
+                        "sync group {} member {} does not exist in tiles map",
+                        group_id, member_id
+                    ),
+                )),
+                Some(tile) if tile.sync_group != Some(*group_id) => {
+                    violations.push(InvariantViolation::new(
+                        "sync_group_member_back_ref_mismatch",
+                        format!(
+                            "sync group {} member {}: tile.sync_group = {:?}, expected Some({})",
+                            group_id, member_id, tile.sync_group, group_id
+                        ),
+                    ))
+                }
+                _ => {}
+            }
+        }
+    }
+    violations
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
