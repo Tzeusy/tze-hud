@@ -271,13 +271,73 @@ message EventSubscribeRequest {
   string session_id = 1;
 }
 
+// Typed scene lifecycle events (runtime → agent).
+message TileCreatedEvent {
+  string tile_id    = 1;
+  string namespace  = 2;  // owning agent namespace
+  uint64 timestamp_ms = 3;
+}
+
+message TileDeletedEvent {
+  string tile_id    = 1;
+  uint64 timestamp_ms = 2;
+}
+
+message TileUpdatedEvent {
+  string tile_id    = 1;
+  uint64 timestamp_ms = 2;
+}
+
+// Pointer input event dispatched to the agent that owns the hit tile.
+message InputEvent {
+  string tile_id       = 1;
+  string node_id       = 2;
+  string interaction_id = 3;
+  float  local_x       = 4;  // coordinates relative to tile origin
+  float  local_y       = 5;
+  float  display_x     = 6;  // raw display-space coordinates
+  float  display_y     = 7;
+  InputEventKind kind  = 8;
+  uint64 timestamp_ms  = 9;
+}
+
+enum InputEventKind {
+  INPUT_EVENT_KIND_UNSPECIFIED = 0;
+  POINTER_MOVE   = 1;
+  POINTER_DOWN   = 2;
+  POINTER_UP     = 3;
+  POINTER_ENTER  = 4;
+  POINTER_LEAVE  = 5;
+  ACTIVATED      = 6;  // press + release on the same hit region
+}
+
+// Lease lifecycle events dispatched to the owning agent.
+message LeaseEvent {
+  string lease_id     = 1;
+  string namespace    = 2;
+  LeaseEventKind kind = 3;
+  uint64 timestamp_ms = 4;
+}
+
+enum LeaseEventKind {
+  LEASE_EVENT_KIND_UNSPECIFIED = 0;
+  LEASE_GRANTED  = 1;
+  LEASE_RENEWED  = 2;
+  LEASE_REVOKED  = 3;
+  LEASE_EXPIRED  = 4;
+}
+
+// Envelope sent on the server-streaming SubscribeEvents RPC.
+// Each message carries exactly one event via the oneof.
 message SceneEvent {
-  string event_type = 1;
-  string tile_id = 2;
-  string node_id = 3;
-  string interaction_id = 4;
-  string details = 5;
-  uint64 timestamp_ms = 6;
+  uint64 timestamp_ms = 1;
+  oneof event {
+    TileCreatedEvent tile_created = 10;
+    TileDeletedEvent tile_deleted = 11;
+    TileUpdatedEvent tile_updated = 12;
+    InputEvent       input        = 20;
+    LeaseEvent       lease        = 30;
+  }
 }
 
 // ─── Scene Query ────────────────────────────────────────────────────────────
@@ -311,6 +371,6 @@ service SceneService {
   // Zone registry query
   rpc QueryZoneRegistry(ZoneRegistryRequest) returns (ZoneRegistryResponse);
 
-  // Event subscription (server-streaming)
+  // Event subscription (server-streaming, per-session filtered events)
   rpc SubscribeEvents(EventSubscribeRequest) returns (stream SceneEvent);
 }
