@@ -523,11 +523,13 @@ Typical uses: ambient-background zone.
 
 A full-width bar at the top of the content area that pushes content tiles downward when active, and collapses (tiles return to original position) when dismissed.
 
+The "push" mechanism works by dynamically adjusting `reserved_top_fraction` while the zone bar is active. The zone itself renders in the chrome layer (above all agent tiles), but its height is added to the content layer's reserved top area so agent tiles reflow below it rather than being occluded. When the zone dismisses, `reserved_top_fraction` returns to its configured value and tiles animate back to their prior positions. This is not the same as rendering in the content layer — the agent tiles move; the zone bar does not occlude them.
+
 Default parameters:
 - Height: `8%` of display height on `full-display`, `12%` on `mobile`
 - Expansion: animated (smooth push) on `full-display`, instant on `mobile`
 - Dismiss: swipe up or tap ×
-- Layer: chrome (renders above all agent tiles when active)
+- Layer: chrome (renders above the content layer; reserved area increase drives the tile reflow)
 
 Typical uses: alert-banner zone, urgent notifications.
 
@@ -606,7 +608,7 @@ tab_switch_on_event = ""  # No automatic switch; stays until user or agent switc
 subtitle      = { policy = "bottom_strip",     layer = "content"    }
 notification  = { policy = "top_right_stack",  layer = "content"    }
 status_bar    = { policy = "full_width_bar",   layer = "chrome"     }
-ambient_bg    = { policy = "fullscreen_behind", layer = "background" }
+ambient_background = { policy = "fullscreen_behind", layer = "background" }
 
 [tabs.layout]
 min_tile_width_px = 120
