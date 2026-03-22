@@ -160,6 +160,29 @@ The window mode is a runtime configuration choice, not a compile-time fork. The 
 
 **Promise boundary:** Fullscreen mode is guaranteed on all platforms. Overlay mode is supported where the platform provides the necessary primitives — Windows, macOS, X11, and wlroots Wayland. On platforms that lack overlay support, the runtime falls back to fullscreen gracefully. Do not treat "HUD everywhere" as a doctrine-level invariant.
 
+## Display profiles
+
+A display profile is the runtime's formal description of the current display environment. Zones, degradation policies, and capability negotiation all depend on it. A display profile declares:
+
+- **Screen dimensions and DPI.** Physical size, resolution, pixel density. A 65" 4K wall display and a 6" phone have different geometry policies even for the same zone type.
+- **Layer capabilities.** Does the display support transparency/overlay? How many concurrent surfaces? What is the maximum texture memory?
+- **Zone geometry policies.** Per-zone positioning, sizing, margins, and adaptation rules for this profile. The subtitle zone is 5% height on a wall display, 8% on a phone, audio-only on glasses.
+- **Input capabilities.** Touch, pointer, keyboard, voice, none. A wall display might have touch; glasses might have only voice and a single button.
+- **Performance budget ceilings.** Maximum concurrent tiles, maximum update rate, maximum texture memory, decoder count. The degradation ladder operates within these ceilings.
+- **Degradation thresholds.** At what resource pressure levels does each degradation step trigger for this profile.
+
+V1 supports at least two built-in profiles: "desktop" (high-end local display) and "headless" (CI/test, no window). Mobile profiles are designed into the schema but not exercised until post-v1. Profiles are loaded from configuration and are not negotiated at runtime in v1 — the compositor starts with a fixed profile. The Configuration RFC and Display Profiles RFC will define the schema; the principle is that profiles are declarative, not code.
+
+## Text rendering
+
+Text is a runtime responsibility, not an agent concern. When an agent publishes text — whether via a text/markdown node in a tile or stream-text with breakpoints to a subtitle zone — the agent provides the content and cue metadata. The runtime handles:
+
+- **Text shaping and layout.** Font selection, line breaking, bidirectional text, glyph positioning. The agent does not specify fonts, sizes, or line widths — those come from the zone's rendering policy or the tile's configured text style.
+- **Cue segmentation.** For stream-text with breakpoints, the runtime handles word-level highlighting, timing against sync groups, and smooth transitions between cue positions.
+- **Accessibility metadata.** The runtime exposes text content to platform accessibility APIs (screen readers, braille displays). The agent does not need to do this explicitly — the runtime bridges text nodes to the platform's accessibility surface automatically.
+
+This is the same principle as zone geometry abstraction: agents declare what to show, the runtime decides how to render it. An agent that publishes "The quick brown fox" with breakpoints to the subtitle zone does not know what font, size, color, or backdrop the runtime uses. That's the point.
+
 ## Media: GStreamer
 
 Media is not an add-on. It is one of the reasons the project exists. The media layer is built around GStreamer: graph-based pipelines, clock/timestamp/segment synchronization, Rust bindings for applications and plugins. This shapes live ingest, decode, synchronization, stream switching, timed metadata, subtitle/cue alignment, and low-latency AV composition.
@@ -176,8 +199,9 @@ The answer is a fixed priority order, evaluated top-to-bottom:
 2. **Capability gate.** Does the agent have the capability to publish here at all? If not, reject immediately with a structured error. No further evaluation.
 3. **Privacy/viewer gate.** Does the current viewer context permit this content to be shown? If the content's classification exceeds the viewer's access, the content is redacted (not rejected — the publish succeeds, the rendering is filtered). Redaction is invisible to the agent.
 4. **Interruption policy.** Is this interruption allowed right now? During quiet hours, normal and gentle interruptions are queued. Urgent and critical pass through. The interruption class is evaluated after privacy because even urgent content must be redacted if the viewer is a guest.
-5. **Zone contention.** Does this publish conflict with existing zone occupancy? Apply the zone's contention policy (latest-wins, stack, merge-by-key, replace).
-6. **Resource/degradation budget.** Does the runtime have sufficient resources to render this content at the current degradation level? If not, the content may be simplified, deferred, or shed according to the degradation ladder.
+5. **Attention budget.** Has this agent or zone been interrupting too frequently? The runtime tracks interruption rate per-agent and per-zone. Even valid urgent interruptions may be coalesced or deferred if the attention budget is exhausted — not as punishment, but because a screen that interrupts constantly becomes noise (see attention.md). This is distinct from quiet hours: quiet hours are scheduled, attention budget is dynamic.
+6. **Zone contention.** Does this publish conflict with existing zone occupancy? Apply the zone's contention policy (latest-wins, stack, merge-by-key, replace).
+7. **Resource/degradation budget.** Does the runtime have sufficient resources to render this content at the current degradation level? If not, the content may be simplified, deferred, or shed according to the degradation ladder.
 
 This is not a suggestion — it is the canonical evaluation order. The Policy/Arbitration RFC will define the implementation, but the priority order is doctrine. When in doubt about which rule wins, read this list top-to-bottom.
 
