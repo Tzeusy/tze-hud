@@ -5,6 +5,7 @@
 {"issue_id":"rig-5vq.2","label":"pr-review"}
 {"issue_id":"rig-5vq.3","label":"pr-review"}
 {"issue_id":"rig-5vq.4","label":"pr-review"}
+{"issue_id":"rig-5vq.6","label":"pr-review"}
 {"issue_id":"rig-9bw","label":"pr-review"}
 {"issue_id":"rig-9bw","label":"pr-review-task"}
 {"issue_id":"rig-9bw","label":"review-running"}
@@ -14,3 +15,6 @@
 {"issue_id":"rig-mgq","label":"pr-review"}
 {"issue_id":"rig-mgq","label":"pr-review-task"}
 {"issue_id":"rig-mgq","label":"review-running"}
+{"issue_id":"rig-xo3","label":"pr-review"}
+{"issue_id":"rig-xo3","label":"pr-review-task"}
+{"issue_id":"rig-xo3","label":"review-running"}
