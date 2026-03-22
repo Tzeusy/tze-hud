@@ -6,3 +6,5 @@
 # Rust build artifacts
 /target/
 
+# Worktrees
+.worktrees/

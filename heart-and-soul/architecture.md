@@ -70,6 +70,18 @@ A doorbell overlay, a passive ambient camera, and a high-frequency dashboard are
 
 The compositor manages a layered surface stack, not a flat pixel grid. Understanding this stack is critical because it determines how tiles, overlays, media, and runtime UI interact visually.
 
+### Terminology: surfaces
+
+The scene model has several rectangular concepts. To keep them straight:
+
+- A **surface** is any rectangular region the compositor renders. This is the umbrella term.
+- A **tile** is a leased surface — an agent owns it directly via the lease system.
+- A **zone** is a managed surface — the runtime owns it and agents publish content into it.
+- A **node** is content inside a surface (text, image, hit region, etc.).
+- A **layer** is where a surface attaches in the compositing stack.
+
+This vocabulary is not wire-protocol terminology — it is conceptual scaffolding for the doctrine. RFCs may use more precise terms.
+
 ### Layer stack
 
 The compositor renders three ordered layers, back to front:
@@ -151,6 +163,40 @@ The window mode is a runtime configuration choice, not a compile-time fork. The 
 ## Media: GStreamer
 
 Media is not an add-on. It is one of the reasons the project exists. The media layer is built around GStreamer: graph-based pipelines, clock/timestamp/segment synchronization, Rust bindings for applications and plugins. This shapes live ingest, decode, synchronization, stream switching, timed metadata, subtitle/cue alignment, and low-latency AV composition.
+
+## Policy arbitration
+
+The runtime enforces policy from four sources: capabilities (security.md), privacy/attention (privacy.md), zone contention (presence.md), and degradation (failure.md). These policies will collide in real life.
+
+Example: a guest-level agent publishes an urgent notification to a stacking zone during quiet hours while the system is degrading and the zone is chrome-attached. Which rule wins?
+
+The answer is a fixed priority order, evaluated top-to-bottom:
+
+1. **Human override.** Always wins. Dismiss, mute, safe mode, freeze — these are instantaneous and cannot be intercepted by any policy layer below.
+2. **Capability gate.** Does the agent have the capability to publish here at all? If not, reject immediately with a structured error. No further evaluation.
+3. **Privacy/viewer gate.** Does the current viewer context permit this content to be shown? If the content's classification exceeds the viewer's access, the content is redacted (not rejected — the publish succeeds, the rendering is filtered). Redaction is invisible to the agent.
+4. **Interruption policy.** Is this interruption allowed right now? During quiet hours, normal and gentle interruptions are queued. Urgent and critical pass through. The interruption class is evaluated after privacy because even urgent content must be redacted if the viewer is a guest.
+5. **Zone contention.** Does this publish conflict with existing zone occupancy? Apply the zone's contention policy (latest-wins, stack, merge-by-key, replace).
+6. **Resource/degradation budget.** Does the runtime have sufficient resources to render this content at the current degradation level? If not, the content may be simplified, deferred, or shed according to the degradation ladder.
+
+This is not a suggestion — it is the canonical evaluation order. The Policy/Arbitration RFC will define the implementation, but the priority order is doctrine. When in doubt about which rule wins, read this list top-to-bottom.
+
+## System shell
+
+The runtime is not just a compositor. It also owns a system shell: the local, always-available, agent-independent user interface that guarantees the human remains in control.
+
+The system shell includes:
+
+- **Tab bar.** Tab names, switching controls, current-tab indicator. Always visible in the chrome layer.
+- **System indicators.** Connection status, degradation state, active agent count, viewer class.
+- **Override controls.** Dismiss-all, safe mode (disconnect all agents), freeze scene, mute all media.
+- **Privacy state.** Current viewer class indicator. Explicit "show private content" toggle when redaction is active.
+- **Disconnection/staleness badges.** Visual indicators on orphaned or stale tiles.
+- **Privilege prompts.** When an agent requests elevated capabilities (overlay privileges, chrome-layer zones, media access), the shell presents the prompt. The agent cannot bypass this.
+
+The system shell renders entirely in the chrome layer. It does not depend on any agent — if every agent disconnects, the shell still works. It is the human's contract with the runtime: "I can always see where I am, what's happening, and how to stop it."
+
+The System Shell RFC will define the specific UI elements, layout, interaction model, and how the shell adapts across display profiles. The doctrine-level commitment is: the shell exists, it is local, it is always available, and no agent can interfere with it.
 
 ## Error model
 
