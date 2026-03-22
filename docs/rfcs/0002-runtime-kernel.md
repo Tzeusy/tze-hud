@@ -225,7 +225,7 @@ The compositor thread is elevated to the same class. Network and telemetry threa
 
 A dedicated `std::thread` spawned at startup. Runs a tightly controlled loop:
 
-- **Mutation intake.** Drain the `MutationBatch` channel. Coalesce batches from the same agent if multiple are queued.
+- **Mutation intake.** Drain the `MutationBatch` channel. Each batch is validated and committed independently — batches are never coalesced.
 - **Scene commit.** Apply validated mutation batches to the scene graph. Reject invalid mutations with structured errors.
 - **Layout resolve.** Recompute tile bounds, z-order, and compositing regions. Only runs for tiles that changed.
 - **Render encode.** Build wgpu render passes and encode command buffers.
@@ -348,11 +348,13 @@ The hit-test used here uses the last committed tile bounds snapshot. The snapsho
 #### Stage 3: Mutation Intake
 **Thread:** Compositor | **Budget:** p99 < 1ms
 
-Drain the `MutationBatch` channel. Coalesce batches from the same agent if multiple are queued (state-stream coalescing). Apply agent envelope limits:
+Drain the `MutationBatch` channel. Apply agent envelope limits:
 - Reject mutations that would exceed `max_nodes_per_tile` or `max_texture_bytes`.
 - Queue valid batches for scene commit.
 
-Coalescing rule for state-stream mutations: if multiple batches from the same agent are queued, merge the latest state into a single batch. Transactional mutations (create/delete) are never coalesced — each is committed in order.
+**Batches are never coalesced.** Each `MutationBatch` is the unit of atomicity: it carries a `batch_id` and receives an independent `MutationResult` acknowledgement. Merging two batches would collapse their `batch_id`s into one, breaking the per-batch deduplication and retransmission contract defined in RFC 0005 §5.2–5.3. The compositor may process multiple batches in a single frame tick — draining all available batches before advancing to Scene Commit — but each batch is validated, committed, and acknowledged independently.
+
+**State-stream coalescing** (reducing update frequency under load) applies only to outbound `SceneEvent` notifications (RFC 0005 §3.1), not to inbound `MutationBatch` messages. See §6.2 (Degradation Ladder Level 1) for the coalescing policy.
 
 #### Stage 4: Scene Commit
 **Thread:** Compositor | **Budget:** p99 < 1ms
@@ -517,7 +519,7 @@ pub enum RevocationReason {
 | Tier | Trigger | Duration | Action |
 |------|---------|----------|--------|
 | Warning | Any limit exceeded | — | Send `BudgetWarning` event to agent |
-| Throttle | Warning unresolved for 5s | Until resolved | Coalesce updates more aggressively; reduce effective `max_update_rate_hz` by 50% |
+| Throttle | Warning unresolved for 5s | Until resolved | Coalesce outbound `SceneEvent` notifications more aggressively; reduce effective `max_update_rate_hz` by 50% |
 | Revocation | Throttle sustained for 30s, or critical limit (e.g., OOM attempt) | Immediate | Revoke all leases; terminate session |
 
 Critical triggers bypass the warning/throttle ladder and go directly to revocation:
@@ -566,9 +568,11 @@ Normal ────────────────────────�
   │  frame_time_p95 > 14ms over 10 frames
   ▼
 Level 1: Coalesce
-  • Reduce state-stream update frequency for all tiles
+  • Reduce outbound SceneEvent notification frequency for state-stream tiles
   • Coalesce ratio: 2× (30Hz → 15Hz effective update rate for state-stream tiles)
-  • Transactional mutations unaffected
+  • Inbound MutationBatch messages are never coalesced (each retains its batch_id
+    and independent MutationResult); "coalesce" here applies only to outbound
+    SceneEvent fan-out to subscribers
   │  frame_time_p95 > 14ms over 10 frames (still)
   ▼
 Level 2: Reduce Texture Quality
@@ -603,7 +607,7 @@ Recovery (hysteresis) ───────────────────�
 
 | Doctrine axis | V1 Level | Notes |
 |---|---|---|
-| Coalesce | Level 1 | Implemented |
+| Coalesce | Level 1 | Implemented — outbound SceneEvent fan-out only; inbound MutationBatch never coalesced |
 | Reduce media quality | Level 2 | Texture resolution only; video decode deferred (no media in v1) |
 | Reduce concurrent streams | — | Deferred to post-v1; no media streams in v1 |
 | Simplify rendering | Level 3 | Disable transparency blending |
