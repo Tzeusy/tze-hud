@@ -1568,15 +1568,23 @@ message ChromeHitResult {
 | Agent namespace length | 128 bytes | UTF-8 encoded |
 | Interaction ID length | 256 bytes | UTF-8 encoded |
 
-**Memory budget (target):** < 1KB per tile excluding texture data. Approximation:
+**Memory budget (targets):** Two separate budgets govern structural overhead (content payloads are accounted via `ResourceBudget.texture_bytes` and excluded from both):
+
+| Budget | Target | What it covers |
+|--------|--------|----------------|
+| Per-tile struct | < 200 bytes | `Tile` fields: ID, bounds, opacity, z_order, lease ID, flags, metadata — no nodes |
+| Per-node struct | < 150 bytes | Node fields: ID, type tag, bounds, enum discriminants, parent/child IDs — no content payloads |
+
+Approximation at max capacity:
 
 ```
-Tile struct:     ~200 bytes
-Per node avg:    ~150 bytes (varies by node type; TextMarkdownNode has variable content)
-64 nodes/tile:   ~9.6 KB (at average; content excluded)
+Tile struct:             ~200 bytes
+Per node avg:            ~150 bytes (structural fields; TextMarkdownNode content excluded)
+64 nodes/tile (max):     ~9.6 KB structural node overhead
+Total at max_nodes=64:   ~9.8 KB per tile (tile struct + full node tree, content excluded)
 ```
 
-The 1KB/tile target excludes node content (markdown text, texture references) which is accounted via `ResourceBudget.texture_bytes`. Structural overhead (IDs, bounds, metadata) is the bounded quantity.
+These are independent budgets: an empty tile costs ~200 bytes; each additional node adds ~150 bytes. The two-budget model lets implementors bound memory linearly against actual node count rather than reserving worst-case allocation upfront.
 
 ---
 
@@ -1783,7 +1791,9 @@ Input Point P = (x, y) in tab display space
 | Diff computation | < 500μs for typical frame delta (10–30 mutations) — **post-v1** | WAL walk + coalesce, single core |
 | Hit-test | < 100μs for single point query on 50 tiles | Pure Rust, no GPU, Layer 0 benchmark |
 | Transaction validation | < 200μs per batch of 10 mutations | Validation stage only, excludes commit |
-| Memory per tile | < 1KB structural overhead (excl. texture data) | Rust `size_of` + heap alloc accounting |
+| Tile struct overhead | < 200 bytes (excl. texture data, excl. nodes) | Rust `size_of::<Tile>()` + metadata alloc |
+| Node struct overhead | < 150 bytes per node (excl. content payloads) | Rust `size_of::<Node>()` + ID alloc |
+| Max tile memory (64 nodes) | ~9.8 KB structural (excl. content/textures) | Tile struct + 64 × node struct |
 | Max scene | 256 tabs × 1024 tiles/tab × 64 nodes/tile | Hard limit enforced in validation |
 | Sequence number | Monotonic u64; wraps after ~1.8×10^19 | Never wraps in practice |
 
