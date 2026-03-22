@@ -177,7 +177,7 @@ No new inconsistencies. All prior-round fixes remain intact. Cross-RFC score rai
 
 **[DESIGN NOTE — P3]** RFC 0006 §7.1 defines `viewer_id_method` as a single string enum. In practice, deployments with multiple identification signals (face recognition as primary, phone proximity as fallback, explicit login as override) cannot express multi-signal identification under this schema. privacy.md §"Viewer context" explicitly states: "The runtime defines a trait for viewer identity and lets the deployment plug in what's appropriate." A pipeline model is the natural expression of that trait-based design.
 
-The ChatGPT 5.4 Pro review noted: "Let viewer identification be a pipeline of detectors instead of single `viewer_id_method` string."
+Prior review feedback noted: "Let viewer identification be a pipeline of detectors instead of single `viewer_id_method` string."
 
 This round documents the pipeline design direction and the migration path from the v1 single-string form. No v1 behavior is changed.
 
@@ -1384,11 +1384,11 @@ priority = 2
 
 **Pipeline semantics:**
 
-1. Detectors are evaluated in ascending `priority` order (lower number = higher priority).
-2. The first detector that returns an identification result with confidence ≥ `confidence_threshold` wins; its viewer class assignment is used.
+1. Each detector is assigned an integer `priority` (lower number = higher priority); `priority` defines ranking, not evaluation order.
+2. If one or more detectors return an identification result with confidence ≥ `confidence_threshold`, the result from the highest‑priority detector (lowest `priority` value) wins; its viewer class assignment is used.
 3. If no detector produces a confident identification, `default_viewer_class` applies.
 4. The `"explicit_login"` method always produces confidence 1.0 (binary: logged in or not) and should be given the highest priority (lowest number) when present.
-5. Multiple detectors may run concurrently; priority governs which result is accepted, not evaluation order.
+5. Multiple detectors may run concurrently; priority governs which successful result is accepted, not evaluation order or wall‑clock completion time.
 
 **Compatibility rules:**
 
@@ -1396,7 +1396,7 @@ priority = 2
   ```toml
   [[privacy.viewer_detectors]]
   method = "face_recognition"
-  priority = 1
+  priority = 0
   confidence_threshold = 0.75
   ```
 - A config that supplies both `viewer_id_method` and `[[privacy.viewer_detectors]]` is a post-v1 validation error: `CONFIG_VIEWER_ID_AMBIGUOUS`.
@@ -1407,7 +1407,7 @@ priority = 2
 - Each entry's `method` must be one of the recognized detector types. Unknown → `CONFIG_UNKNOWN_VIEWER_METHOD`.
 - `priority` values must be unique across all entries in the pipeline. Duplicate priorities → `CONFIG_VIEWER_ID_DUPLICATE_PRIORITY`.
 - `confidence_threshold`, if set, must be in `[0.0, 1.0]`. Out of range → `CONFIG_INVALID_CONFIDENCE_THRESHOLD`.
-- Pipeline must have at least one entry. Empty array → treated as `viewer_id_method = "none"` with a WARN log.
+- If neither `viewer_id_method` nor any `[[privacy.viewer_detectors]]` entries are present, the runtime normalizes this to `viewer_id_method = "none"` and emits a WARN log.
 
 **Doctrinal alignment:** privacy.md §"Viewer context" states: "The runtime does not require a specific identification mechanism — it defines a trait for viewer identity and lets the deployment plug in what's appropriate." The pipeline model is the direct config-level expression of this trait-based architecture: each `[[privacy.viewer_detectors]]` entry is a registered implementation of the `ViewerIdentitySource` trait, evaluated in deployment-defined priority order.
 
@@ -1722,13 +1722,13 @@ Full type definitions for `TabConfig`, `ZoneInstanceConfig`, `AgentRegistrationC
 
 ### Viewer Identification Pipeline Types (Post-V1 Design Note)
 
-> **These types are a design note only.** V1 uses a `viewer_id_method: String` field in `PrivacyConfig`. The types below document the intended post-v1 representation. See §7.1 "Viewer Identification Pipeline (Post-V1 Design Note)" for the config syntax.
+> **These types are a design note only.** In v1, `PrivacyConfig` holds a single `viewer_id_method: ViewerIdMethod` (enum) field. The types below document the intended post-v1 *pipeline* representation, where `viewer_id_method` becomes a structured list of detectors. See §7.1 "Viewer Identification Pipeline (Post-V1 Design Note)" for the config syntax.
 
 ```rust
 /// A single viewer identification detector in the pipeline.
 /// Each entry maps to one implementation of the `ViewerIdentitySource` trait.
 ///
-/// Post-v1. In v1, `PrivacyConfig.viewer_id_method` is a plain `String`.
+/// Post-v1. In v1, `PrivacyConfig.viewer_id_method` is a single `ViewerIdMethod` enum value, not a pipeline.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ViewerDetectorConfig {
     /// Detector type. One of: "none", "face_recognition", "proximity_badge",
@@ -1766,12 +1766,13 @@ pub enum ViewerIdMethod {
     ExplicitLogin,
 }
 
-/// The v1-to-post-v1 migration type for viewer identification configuration.
+/// This type is intended to be used as the value type of a single configuration
+/// field (e.g., `viewer_id_method`) whose syntax evolves over time. In v1, that
+/// field contains a single `ViewerIdMethod` enum value. Post-v1, it may instead
+/// contain a full detector pipeline (`Vec<ViewerDetectorConfig>`).
 ///
-/// In v1, `PrivacyConfig` will hold `viewer_id_method: ViewerIdMethod` (a single
-/// enum value). Post-v1, it will hold `viewer_detectors: Vec<ViewerDetectorConfig>`.
-/// This union type supports both forms and is used by the post-v1 parser to
-/// accept configs written for either version.
+/// This untagged union allows the post-v1 parser to accept both forms and
+/// normalize them internally.
 ///
 /// The single-method form is normalized to a one-entry pipeline on load:
 /// ```
@@ -1779,7 +1780,7 @@ pub enum ViewerIdMethod {
 /// →
 /// ViewerIdConfig::Pipeline(vec![ViewerDetectorConfig {
 ///     method: ViewerIdMethod::FaceRecognition,
-///     priority: 1,
+///     priority: 0,
 ///     confidence_threshold: 0.75,
 /// }])
 /// ```
