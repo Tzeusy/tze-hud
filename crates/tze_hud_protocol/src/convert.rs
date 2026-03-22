@@ -54,6 +54,23 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 accepts_pointer: hr.accepts_pointer,
             })
         }
+        Some(proto::node_proto::Data::StaticImage(si)) => {
+            let bounds = si.bounds.as_ref().map(proto_rect_to_scene).unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            let fit_mode = match proto::ImageFitModeProto::try_from(si.fit_mode).unwrap_or(proto::ImageFitModeProto::ImageFitModeUnspecified) {
+                proto::ImageFitModeProto::ImageFitModeContain | proto::ImageFitModeProto::ImageFitModeUnspecified => ImageFitMode::Contain,
+                proto::ImageFitModeProto::ImageFitModeCover => ImageFitMode::Cover,
+                proto::ImageFitModeProto::ImageFitModeFill => ImageFitMode::Fill,
+                proto::ImageFitModeProto::ImageFitModeScaleDown => ImageFitMode::ScaleDown,
+            };
+            NodeData::StaticImage(StaticImageNode {
+                image_data: si.image_data.clone(),
+                width: si.width,
+                height: si.height,
+                content_hash: si.content_hash.clone(),
+                fit_mode,
+                bounds,
+            })
+        }
         None => return None,
     };
 
@@ -214,6 +231,49 @@ pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicy
     }
 }
 
+/// Convert a scene Node to a protobuf NodeProto.
+pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
+    let data = match &n.data {
+        NodeData::SolidColor(sc) => Some(proto::node_proto::Data::SolidColor(proto::SolidColorNodeProto {
+            color: Some(proto::Rgba { r: sc.color.r, g: sc.color.g, b: sc.color.b, a: sc.color.a }),
+            bounds: Some(proto::Rect { x: sc.bounds.x, y: sc.bounds.y, width: sc.bounds.width, height: sc.bounds.height }),
+        })),
+        NodeData::TextMarkdown(tm) => Some(proto::node_proto::Data::TextMarkdown(proto::TextMarkdownNodeProto {
+            content: tm.content.clone(),
+            bounds: Some(proto::Rect { x: tm.bounds.x, y: tm.bounds.y, width: tm.bounds.width, height: tm.bounds.height }),
+            font_size_px: tm.font_size_px,
+            color: Some(proto::Rgba { r: tm.color.r, g: tm.color.g, b: tm.color.b, a: tm.color.a }),
+            background: tm.background.map(|c| proto::Rgba { r: c.r, g: c.g, b: c.b, a: c.a }),
+        })),
+        NodeData::HitRegion(hr) => Some(proto::node_proto::Data::HitRegion(proto::HitRegionNodeProto {
+            bounds: Some(proto::Rect { x: hr.bounds.x, y: hr.bounds.y, width: hr.bounds.width, height: hr.bounds.height }),
+            interaction_id: hr.interaction_id.clone(),
+            accepts_focus: hr.accepts_focus,
+            accepts_pointer: hr.accepts_pointer,
+        })),
+        NodeData::StaticImage(si) => {
+            let fit_mode = match si.fit_mode {
+                ImageFitMode::Contain => proto::ImageFitModeProto::ImageFitModeContain as i32,
+                ImageFitMode::Cover => proto::ImageFitModeProto::ImageFitModeCover as i32,
+                ImageFitMode::Fill => proto::ImageFitModeProto::ImageFitModeFill as i32,
+                ImageFitMode::ScaleDown => proto::ImageFitModeProto::ImageFitModeScaleDown as i32,
+            };
+            Some(proto::node_proto::Data::StaticImage(proto::StaticImageNodeProto {
+                image_data: si.image_data.clone(),
+                width: si.width,
+                height: si.height,
+                content_hash: si.content_hash.clone(),
+                fit_mode,
+                bounds: Some(proto::Rect { x: si.bounds.x, y: si.bounds.y, width: si.bounds.width, height: si.bounds.height }),
+            }))
+        }
+    };
+    proto::NodeProto {
+        id: n.id.to_string(),
+        data,
+    }
+}
+
 /// Convert a scene ZonePublishRecord to a protobuf ZonePublishRecordProto.
 pub fn zone_publish_record_to_proto(r: &ZonePublishRecord) -> proto::ZonePublishRecordProto {
     proto::ZonePublishRecordProto {
@@ -222,5 +282,92 @@ pub fn zone_publish_record_to_proto(r: &ZonePublishRecord) -> proto::ZonePublish
         content: Some(scene_zone_content_to_proto(&r.content)),
         published_at_ms: r.published_at_ms,
         merge_key: r.merge_key.clone().unwrap_or_default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_static_image_node(fit_mode: ImageFitMode) -> Node {
+        let pixel_count = 4u32 * 4u32;
+        let image_data: Vec<u8> = (0..pixel_count).flat_map(|_| [255u8, 128, 0, 255]).collect();
+        Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data,
+                width: 4,
+                height: 4,
+                content_hash: "deadbeef".to_string(),
+                fit_mode,
+                bounds: Rect::new(10.0, 20.0, 80.0, 60.0),
+            }),
+        }
+    }
+
+    #[test]
+    fn test_static_image_proto_roundtrip_contain() {
+        let original = make_static_image_node(ImageFitMode::Contain);
+        let proto = scene_node_to_proto(&original);
+        let restored = proto_node_to_scene(&proto).expect("conversion must succeed");
+
+        if let NodeData::StaticImage(si) = &restored.data {
+            assert_eq!(si.width, 4);
+            assert_eq!(si.height, 4);
+            assert_eq!(si.content_hash, "deadbeef");
+            assert_eq!(si.fit_mode, ImageFitMode::Contain);
+            assert_eq!(si.bounds.x, 10.0);
+            assert_eq!(si.bounds.y, 20.0);
+            assert_eq!(si.image_data.len(), 4 * 4 * 4);
+        } else {
+            panic!("expected StaticImage variant after proto roundtrip");
+        }
+    }
+
+    #[test]
+    fn test_static_image_proto_roundtrip_all_fit_modes() {
+        for (fit_mode, label) in [
+            (ImageFitMode::Contain, "Contain"),
+            (ImageFitMode::Cover, "Cover"),
+            (ImageFitMode::Fill, "Fill"),
+            (ImageFitMode::ScaleDown, "ScaleDown"),
+        ] {
+            let original = make_static_image_node(fit_mode);
+            let proto = scene_node_to_proto(&original);
+            let restored = proto_node_to_scene(&proto)
+                .unwrap_or_else(|| panic!("conversion failed for {}", label));
+            if let NodeData::StaticImage(si) = &restored.data {
+                assert_eq!(si.fit_mode, fit_mode, "fit_mode mismatch for {}", label);
+            } else {
+                panic!("wrong variant for {}", label);
+            }
+        }
+    }
+
+    #[test]
+    fn test_static_image_proto_preserves_pixel_data() {
+        // Verify pixel data survives proto encode/decode.
+        let image_data: Vec<u8> = (0..16u8).flat_map(|i| [i, i * 2, 255 - i, 128]).collect();
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data: image_data.clone(),
+                width: 4,
+                height: 1,
+                content_hash: "test-hash".to_string(),
+                fit_mode: ImageFitMode::Fill,
+                bounds: Rect::new(0.0, 0.0, 100.0, 25.0),
+            }),
+        };
+
+        let proto = scene_node_to_proto(&node);
+        let restored = proto_node_to_scene(&proto).unwrap();
+        if let NodeData::StaticImage(si) = &restored.data {
+            assert_eq!(si.image_data, image_data);
+        } else {
+            panic!("wrong variant");
+        }
     }
 }

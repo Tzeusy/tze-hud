@@ -13,3 +13,6 @@ tze_hud_telemetry = { path = "../tze_hud_telemetry" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
