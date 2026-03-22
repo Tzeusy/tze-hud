@@ -122,7 +122,7 @@ Agent                                  Runtime
   │◄──UploadResourceResponse ─────────────┤  8. Return ResourceId + storage metadata
 ```
 
-**Fast path:** If the runtime already stores the resource (dedup hit), it returns immediately after step 3 without re-receiving or re-validating bytes. The agent is responsible for sending bytes anyway (the runtime does not tell the agent "stop sending" mid-stream); a dedup hit means the runtime discards received bytes after confirming the hash matches.
+**Fast path:** If the runtime detects a dedup hit — only possible if `declared_hash` is provided in the `ResourceUploadFinalizer` and matches an already-stored resource — it returns a success `ResourceUploadResponse` with `was_deduplicated = true` after the finalizer arrives. The server still receives all chunks before responding; gRPC client-streaming does not support server-side stream interruption. Received bytes are discarded after the hash match is confirmed.
 
 ### 2.2 Upload RPC (Protobuf)
 
@@ -145,6 +145,11 @@ rpc StatResource(StatResourceRequest)
 rpc DownloadResource(DownloadResourceRequest)
     returns (stream DownloadResourceResponse);
 
+// Acquire an explicit hold on an already-uploaded resource (see §3.4).
+// Prevents GC between upload completion and node creation.
+rpc AcquireResourceHold(AcquireResourceHoldRequest)
+    returns (AcquireResourceHoldResponse);
+
 // Release an explicit hold on a resource (see §3.4).
 rpc ReleaseResourceHold(ReleaseResourceHoldRequest)
     returns (ReleaseResourceHoldResponse);
@@ -158,7 +163,13 @@ message ResourceUploadHeader {
   string         declared_mime  = 2;   // e.g., "image/png", "font/ttf"; validated server-side
   uint64         declared_size  = 3;   // Total byte size; must match received bytes; 0 = unknown (allowed)
   string         display_name   = 4;   // Human-readable label for debug tooling; not used for identity
-  bool           skip_if_exists = 5;   // If true, server will reject early if ResourceId already present
+  bool           skip_if_exists = 5;   // If true and the ResourceId (hash) already exists, server responds
+                                       // with UPLOAD_ERROR_ALREADY_EXISTS after receiving the finalizer
+                                       // (hash must be provided in ResourceUploadFinalizer.declared_hash).
+                                       // All bytes are still transmitted; the server checks identity only
+                                       // after finalizer arrives. Use when the agent does not want an implicit
+                                       // dedup-success response — it prefers an explicit error to detect
+                                       // inadvertent double-upload.
 }
 
 message ResourceUploadChunk {
@@ -235,6 +246,9 @@ enum UploadError {
   UPLOAD_ERROR_RESOURCE_CONFLICT    = 7;   // ResourceId exists with different content (impossible
                                            //   by construction; defensive error for corruption)
   UPLOAD_ERROR_SESSION_NOT_FOUND    = 8;   // Session expired between upload start and completion
+  UPLOAD_ERROR_DURABLE_QUOTA_EXCEEDED = 9;   // durable=true but max_blob_store_mib reached
+  UPLOAD_ERROR_OVERSIZED_TEXTURE_PIXELS = 10;  // Exceeds 8192×8192 pixel cap
+  UPLOAD_ERROR_ALREADY_EXISTS       = 11;  // skip_if_exists=true and resource already stored
 }
 ```
 
@@ -307,9 +321,9 @@ Use case: an agent pre-uploads a resource it intends to use soon but has not yet
 ```protobuf
 // An explicit hold is granted during upload (implicit) and can be released
 // when the agent no longer needs pre-GC protection.
+// Session identity is inferred from the authenticated gRPC connection; no session_id field needed.
 message ReleaseResourceHoldRequest {
   ResourceId resource_id = 1;
-  string     session_id  = 2;
 }
 
 message ReleaseResourceHoldResponse {
@@ -373,7 +387,7 @@ Formally: when a node is committed to the scene, the scene mutation pipeline (RF
 
 ### 5.1 GC Runs on the Compositor Thread
 
-All GC operations run on the compositor thread during a dedicated **resource-GC phase** appended to the end of each frame tick (after stage 7 "Telemetry Emit" in RFC 0002's pipeline). The GC phase has a time budget of **2ms per frame**. If the GC backlog requires more than 2ms, it is deferred to the next frame.
+All GC operations run on the compositor thread during a dedicated **resource-GC phase** that runs as a compositor-thread epilogue after stage 7 (GPU Submit + Present) completes, before the compositor thread begins stage 3 of the next frame (RFC 0002 §3.2). This places GC in the inter-frame idle window on the compositor thread. The GC phase has a time budget of **2ms per frame**. If the GC backlog requires more than 2ms, it is deferred to the next frame.
 
 **GC must not run during frame render** (RFC 0002 stages 4–7). It must not acquire any lock held by the render pipeline. It must not touch GPU device state. Memory deallocation (freeing decoded textures, removing blob store entries) runs in the GC phase only.
 
@@ -394,7 +408,9 @@ A resource that is pending-GC (refcount == 0, grace period not yet elapsed) can 
 - The resource transitions from pending-GC back to live.
 - Its decoded in-memory form (if still resident) does not need to be reloaded.
 
-If the resource's grace period has already elapsed and its decoded form has been evicted from memory (but the blob store entry is intact), resurrection requires a re-decode from the stored blob. The mutation pipeline must handle this transparently: the resource is re-decoded synchronously before the mutation is committed, within the 200μs mutation validation budget (RFC 0001 §4.2). If re-decode exceeds the budget, the mutation is rejected with `RESOURCE_DECODE_TIMEOUT`.
+If the resource's grace period has already elapsed and its decoded form has been evicted from memory (but the blob store entry is intact), resurrection requires a re-decode from the stored blob. The mutation pipeline **must not** perform this re-decode synchronously on the compositor thread — blob reads and image decoding can take up to 50ms (§2.7), which would shatter the 1ms Stage 4 budget (RFC 0002 §3.2).
+
+Instead, the mutation is rejected with `RESOURCE_NOT_RESIDENT` (a retriable error). The runtime simultaneously enqueues a re-decode job on the upload thread pool. Once the resource is GPU-resident again, the runtime emits a `ResourceResidentEvent` notification on the agent's event stream. The agent may then resubmit the mutation. The re-decode is idempotent and the blob store entry remains intact throughout.
 
 **Resurrection does not apply to resources whose blob store entry has been fully removed.** A fully-removed resource requires a new upload.
 
@@ -647,6 +663,7 @@ enum UploadError {
   UPLOAD_ERROR_SESSION_NOT_FOUND         = 8;
   UPLOAD_ERROR_DURABLE_QUOTA_EXCEEDED    = 9;
   UPLOAD_ERROR_OVERSIZED_TEXTURE_PIXELS  = 10;  // Exceeds 8192×8192 pixel cap
+  UPLOAD_ERROR_ALREADY_EXISTS            = 11;  // skip_if_exists=true and resource already stored
 }
 
 message ResourceUploadHeader {
@@ -836,7 +853,8 @@ Two agents each holding a reference to the same resource are each charged the fu
 | Font decode (≤ 1 MiB) | ≤ 20ms | Included in upload store |
 | Refcount change (per node) | < 1μs | Compositor thread, frame pipeline |
 | GC phase per frame | ≤ 2ms | Appended to frame tick |
-| Resurrection from GPU-evicted | ≤ 200μs | Re-decode from blob store during mutation validation |
+| Resurrection (blob-evicted) re-decode enqueue | < 1ms | Compositor thread rejects with RESOURCE_NOT_RESIDENT, enqueues re-decode on upload pool |
+| Re-decode on upload pool (≤ 1 MiB blob) | ≤ 200ms | Same budget as fresh upload; agent retries mutation after ResourceResidentEvent |
 | Blob eviction per resource | < 5ms synchronous; async if larger | Async IO thread for slow paths |
 
 ---
