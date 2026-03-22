@@ -129,6 +129,51 @@ Four correctness gaps found and fixed in this round:
 
 ---
 
+### Round 4 — Final Hardening and Quantitative Verification (rig-5vq.38)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** security.md, failure.md, v1.md, validation.md
+**Cross-RFC documents reviewed:** RFC 0003, RFC 0005 (including Round 12 changelog), RFC 0008
+
+#### Doctrinal Alignment: 5/5
+
+No new doctrinal violations found. All prior doctrinal gaps are resolved. Human override at position 1 (architecture.md §"Policy arbitration"), screen sovereignty, safe mode reversibility (security.md §"Human override"), lease governance (presence.md), and local feedback first (failure.md) are all correctly expressed. The pulsing animation fix aligns with v1.md's animation deferral policy. No doctrine commitment is silently dropped.
+
+#### Technical Robustness: 5/5
+
+One internal contradiction resolved in this round:
+
+- **[MUST-FIX → FIXED]** §5.4: Said "ChromeState is updated atomically and can be read without locks" — directly contradicted §7.1's specification of `Arc<RwLock<ChromeState>>`. The §5.4 text was stale from before Round 2 added the synchronization contract. Replaced with a correct description that references the §7.1 lock contract.
+
+One type correction:
+
+- **[SHOULD-FIX → FIXED]** §7.7 `TabBarState.scroll_offset_px` and `hidden_tab_count`: Used `int32` for quantities that are non-negative by definition (scroll offset is always ≥ 0 logical pixels; hidden tab count is always ≥ 0). Changed to `uint32` with explanatory comments. Using signed types for non-negative invariants forces callers to check for negative values that the model disallows.
+
+One v1 animation policy alignment:
+
+- **[SHOULD-FIX → FIXED]** §3.2: Disconnection badge specified a "pulsing animation (period: 2 seconds, opacity range: 60%–80%)" — directly contradicted §6.2 ("cross-fade over 300ms — the only animation permitted in v1 chrome") and the §9 deferred list ("Animated tile dismissal transitions"). Replaced with a static badge at 70% opacity with an explicit v1 deferral note for the animation.
+
+#### Cross-RFC Consistency: 5/5
+
+Three stale cross-reference notes resolved in this round:
+
+- **[MUST-FIX → FIXED]** §4.2 action step 2: Still said `SessionSuspended` "must be added to RFC 0005 §2 / §3.2" — but RFC 0005 Round 12 (rig-5vq.29) added it as field 45 in §3.7. Updated to reference the authoritative location.
+- **[MUST-FIX → FIXED]** §5.5 exit step 2: Said "`SessionResumed` must be added to RFC 0005 alongside `SessionSuspended` — see §8" — same staleness. Updated to reference RFC 0005 §3.7 field 46.
+- **[MUST-FIX → FIXED]** §8 RFC 0005 row: Still labelled the `SessionSuspended`/`SessionResumed` issue as "Protocol gap" requiring RFC 0005 to be updated. Replaced with the resolved status referencing RFC 0005 §3.7 and Round 12.
+
+One timestamp naming fix:
+
+- **[SHOULD-FIX → FIXED]** §7.3 `OverrideEvent.timestamp_us`: Plain `_us` suffix is ambiguous (RFC 0003 §1.3 establishes `_mono_us` for monotonic, `_wall_us` for wall-clock; RFC 0005 Round 6 (rig-77n) applied this convention across session protocol fields). Since §8 explicitly states override events use the monotonic clock, renamed to `timestamp_mono_us`. Also updated the §8 RFC 0003 row to match.
+
+One §8 RFC 0002 precision fix:
+
+- **[SHOULD-FIX → FIXED]** §8 RFC 0002 row: Said "ChromeState is read atomically from the same shared state" — vague after §7.1 specified `Arc<RwLock<ChromeState>>`. Updated to name the Stage 6 pipeline position and the specific synchronization mechanism.
+
+**Post-fix scores: Doctrinal Alignment 5, Technical Robustness 5, Cross-RFC Consistency 5. All dimensions ≥ 4. Round 4 (final) complete. RFC 0007 is shipping-ready.**
+
+---
+
 ## Summary
 
 This RFC defines the System Shell — the runtime-owned chrome layer that guarantees viewer sovereignty. It specifies the composition rules that place the chrome above all agent content, the layout and behavior of every chrome element (tab bar, tile badges, override controls, safe mode overlay, and privacy indicator), the internal state machines and event types governing these elements, and the protobuf types used to drive them. The chrome layer is not an agent feature — it is the human's permanent contract with the runtime.
@@ -308,7 +353,7 @@ All badges share a common visual language:
 Shown when the agent that owns the tile's lease has disconnected but the grace period has not yet expired (see failure.md §Agent crashes).
 
 Appearance:
-- A dim plug/link-break icon with a subtle pulsing animation (period: 2 seconds, opacity range: 60%–80%).
+- A dim plug/link-break icon at reduced opacity (70%). In v1, this badge is static — the pulsing animation described in earlier drafts is deferred post-v1 (§9.2 deferred list: "Animated tile dismissal transitions"). The badge is visually distinct from active state at a glance; animation adds polish but is not required for correctness.
 - The tile's content is rendered at reduced opacity (70%) to signal frozen state without being alarming.
 
 Behavior:
@@ -400,7 +445,7 @@ This ensures dismiss always has the effect the viewer expects, regardless of the
 
 **Action:**
 1. All active leases are suspended simultaneously. Sessions are not terminated; leases transition to `SUSPENDED` state (RFC 0008 §3.3) and are restored to `ACTIVE` on safe mode exit without requiring agents to re-request leases. (Correction per RFC 0008 §11 errata: the prior text incorrectly stated "revoked." Safe mode is a pause, not a purge — see RFC 0008 §3.4 for the canonical resolution of this revoke/suspend contradiction.)
-2. All agent sessions receive `SessionSuspended` with reason `safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale). **Note:** `SessionSuspended` is a new server→client message type that must be added to RFC 0005 §2 / §3.2 and the `SessionMessage` envelope's `oneof` block.
+2. All agent sessions receive `SessionSuspended` with reason `safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale). `SessionSuspended` is defined in RFC 0005 §3.7 (field 45 of `SessionMessage` oneof, added in RFC 0005 Round 12).
 3. The runtime enters safe mode (see §5).
 
 This is the "emergency stop" for the entire display. It is not reversible by agents — they cannot reinstate their sessions in response to this event. The viewer must explicitly exit safe mode.
@@ -460,7 +505,7 @@ Automatic entry logs the triggering condition to the runtime's structured error 
 ### 5.2 Safe Mode Behavior
 
 On safe mode entry:
-1. **Session suspension.** All agent gRPC sessions receive `SessionSuspended` with reason `safe_mode`. Sessions are not terminated — their network connections are maintained, but all mutations are rejected with `SAFE_MODE_ACTIVE` until safe mode exits. (See §8 for the RFC 0005 protocol gap this creates.)
+1. **Session suspension.** All agent gRPC sessions receive `SessionSuspended` with reason `safe_mode`. Sessions are not terminated — their network connections are maintained, but all mutations are rejected with `SAFE_MODE_ACTIVE` until safe mode exits. `SessionSuspended` is defined in RFC 0005 §3.7 (field 45 of `SessionMessage` oneof).
 2. **Scene replacement.** Agent tiles are replaced with neutral placeholders. The placeholder appearance matches the redaction placeholder (§3.4) — a subtle neutral pattern — but covers the full tile bounds with a "Session Paused" label in the center.
 3. **Safe mode overlay.** A full-viewport overlay is rendered with:
    - A centered banner: "Safe Mode — All agent sessions paused."
@@ -502,7 +547,7 @@ Safe mode does not terminate sessions by default. This is intentional: a viewer 
 
 ### 5.4 Scene Graph Independence
 
-Safe mode must render its overlay correctly even if the scene graph is in an invalid state. This is why the chrome layer's render pass reads exclusively from `ChromeState` (§7.1) rather than the scene graph. `ChromeState` is updated atomically and can be read without locks. Even if the scene graph's backing store is corrupted, the chrome pass can still complete.
+Safe mode must render its overlay correctly even if the scene graph is in an invalid state. This is why the chrome layer's render pass reads exclusively from `ChromeState` (§7.1) rather than the scene graph. `ChromeState` is protected by `Arc<RwLock<ChromeState>>` (§7.1 synchronization contract); the compositor acquires a read lock at the start of the chrome render pass and holds it only for command generation, not during GPU submit. Even if the scene graph's backing store is corrupted, the chrome pass can still complete — the safe mode overlay is derived entirely from `ChromeState` and references only theme colors and a font atlas.
 
 The safe mode overlay is specified as a fixed set of render commands (see §7.3 `SafeModeOverlayCmd`) that reference only theme colors and a font atlas — no scene graph entities.
 
@@ -515,7 +560,7 @@ Safe mode exits only by explicit viewer action:
 
 On exit:
 1. The safe mode overlay is dismissed.
-2. Sessions transition from suspended to active. Agents receive `SessionResumed`. (`SessionResumed` must be added to RFC 0005 alongside `SessionSuspended` — see §8.)
+2. Sessions transition from suspended to active. Agents receive `SessionResumed`. `SessionResumed` is defined in RFC 0005 §3.7 (field 46 of `SessionMessage` oneof, added in RFC 0005 Round 12).
 3. Agent mutations are accepted again.
 4. The compositor resumes applying pending scene mutations from the queue (if any were queued during suspension).
 5. The scene renders with current tile state (which may differ from pre-safe-mode state if agents continued submitting mutations during suspension — those mutations were queued, not discarded).
@@ -681,7 +726,7 @@ message OverrideEvent {
     SafeModeEntryEvent safe_mode_entry = 5;
     SafeModeExitEvent safe_mode_exit = 6;
   }
-  uint64 timestamp_us = 10;  // Monotonic microseconds (RFC 0003 §1.1 uint64 µs).
+  uint64 timestamp_mono_us = 10;  // Monotonic clock (RFC 0003 §1.3 `_mono_us` convention; µs since arbitrary epoch).
   OverrideTrigger trigger = 11;
 }
 
@@ -808,9 +853,9 @@ message TabBarState {
   TabBarPosition position = 1;
   repeated TabEntry tabs = 2;
   SceneId active_tab_id = 3;
-  int32 scroll_offset_px = 4;   // Horizontal scroll offset for overflow.
+  uint32 scroll_offset_px = 4;   // Horizontal scroll offset for overflow (non-negative logical pixels).
   bool overflow_active = 5;
-  int32 hidden_tab_count = 6;
+  uint32 hidden_tab_count = 6;   // Count of off-screen tabs (non-negative).
 }
 
 enum TabBarPosition {
@@ -833,10 +878,10 @@ message TabEntry {
 | RFC | Relationship |
 |-----|-------------|
 | RFC 0001 (Scene Contract) | Chrome renders above the scene graph. `SceneId` is used to key `TileBadgeState`. Chrome elements are not `SceneId`-addressable. |
-| RFC 0002 (Runtime Kernel) | Chrome render pass executes as the final stage in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read atomically from the same shared state the control plane writes. **GPU failure path:** RFC 0002 §7.3 and this RFC §5.1 previously conflicted on GPU device loss response (RFC 0002 said graceful shutdown; RFC 0007 said safe mode entry). RFC 0009 §5 resolves this: Phase 1 attempts surface reconfiguration (RFC 0002 §7.3 steps 1–3); Phase 2 enters safe mode before shutdown if reconfiguration fails. RFC 0002 §7.3 step 4 must be updated per RFC 0009 §5.3. |
-| RFC 0003 (Timing Model) | Override events carry `timestamp_us` using the monotonic clock (RFC 0003 §1.1). Override execution is frame-bounded — effects appear within one frame of the event. |
+| RFC 0002 (Runtime Kernel) | Chrome render pass executes as Stage 6 in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read under `Arc<RwLock<ChromeState>>` read lock at the start of the chrome render pass (see §7.1 synchronization contract). **GPU failure path:** RFC 0002 §7.3 and this RFC §5.1 previously conflicted on GPU device loss response (RFC 0002 said graceful shutdown; RFC 0007 said safe mode entry). RFC 0009 §5 resolves this: Phase 1 attempts surface reconfiguration (RFC 0002 §7.3 steps 1–3); Phase 2 enters safe mode before shutdown if reconfiguration fails. RFC 0002 §7.3 step 4 must be updated per RFC 0009 §5.3. |
+| RFC 0003 (Timing Model) | Override events carry `timestamp_mono_us` using the monotonic clock (RFC 0003 §1.3 `_mono_us` convention). Override execution is frame-bounded — effects appear within one frame of the event. |
 | RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0001 §5.2 traversal order: chrome always wins). Chrome shortcuts are evaluated before tile hit-testing by RFC 0004 §8 (Event Dispatch Protocol). In safe mode, the input model routes all events to the chrome layer exclusively. |
-| RFC 0005 (Session Protocol) | **Protocol gap:** `SessionSuspended` and `SessionResumed` server→client messages referenced in §4.2, §5.2, and §5.5 are not currently defined in RFC 0005's `SessionMessage` envelope or §3.2 message table. RFC 0008 §11 mandates these be added. RFC 0005 must be updated before this RFC can be fully implemented. Lease suspension on safe mode entry and lease revocation on tile dismiss both use the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). |
+| RFC 0005 (Session Protocol) | `SessionSuspended` (field 45) and `SessionResumed` (field 46) are defined in RFC 0005 §3.7 (added in Round 12, rig-5vq.29). The safe mode protocol gap documented in earlier rounds is resolved. Lease suspension on safe mode entry and lease revocation on tile dismiss both use the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). |
 | RFC 0008 (Lease Governance) | Authoritative specification for lease lifecycle during safe mode. Safe mode entry suspends all `ACTIVE` leases (not revokes them — see §4.2 and RFC 0008 §3.4). Tile dismiss (§4.1) transitions a lease to `REVOKED`. TTL clock pauses during suspension (RFC 0008 §3.6). The revoke/suspend distinction is load-bearing: suspended leases survive safe mode exit intact. |
 | RFC 0009 (Policy Arbitration) | Human override (§4, §5) implements Step 1 of RFC 0009's seven-step arbitration stack — unconditional, preempts all other policy steps. RFC 0009 §5 resolves the GPU failure path conflict with RFC 0002 (see RFC 0002 row above). RFC 0009 §2.1 specifies the `OverrideCommandQueue` contract for how override actions preempt in-flight mutation intake. |
 
