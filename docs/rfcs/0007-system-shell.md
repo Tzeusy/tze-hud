@@ -206,6 +206,7 @@ This RFC resolves all of these by treating the chrome layer as a first-class, in
 | Chrome always rendered above agent content | Chrome layer composition §1 |
 | Override controls are local and instantaneous | Override controls §4 |
 | Runtime always usable even if scene graph corrupted | Safe mode §5 |
+| Human interventions auditable (security.md: "every capability grant and revocation is logged") | Shell audit events §7.8 |
 
 ---
 
@@ -610,6 +611,7 @@ When the viewer context changes:
 2. Tiles whose visibility classification changes (newly visible or newly redacted) update on the next frame after the context change is applied.
 3. If private content transitions from visible to redacted (e.g., viewer switches from Owner to Guest), the transition is immediate — the placeholder pattern appears in the same frame the context change takes effect.
 4. If content transitions from redacted to visible, the same frame-immediacy applies.
+5. A `VIEWER_CLASS_CHANGED` audit event is emitted to the telemetry thread (§7.8) carrying `old_class` and `new_class`. The event contains only the resulting viewer class values — it does not carry viewer identity details (name, biometric scores, authentication method). See §7.8 privacy constraint.
 
 The agent is never notified of viewer context changes. Its mutations continue to be accepted or rejected based on capability scopes, not viewer context.
 
@@ -713,7 +715,7 @@ enum ViewerClass {
 
 ### 7.3 Override Event Types
 
-Override events are emitted by the input/chrome layer when a viewer override is activated. They are consumed by the control plane (which applies the state change) and logged to the audit stream.
+Override events are emitted by the input/chrome layer when a viewer override is activated. They are consumed by the control plane (which applies the state change) and logged to the audit stream. The audit stream is defined in §7.8 (Shell Audit Events). Each `OverrideEvent` is the source of one `ShellAuditEvent` — the control plane translates the override into the corresponding audit event type and emits it to the telemetry thread before applying the state change.
 
 ```protobuf
 // Internal — not agent-accessible.
@@ -871,6 +873,220 @@ message TabEntry {
 }
 ```
 
+### 7.8 Shell Audit Events
+
+Shell audit events record every human override action and viewer-context change for operator review, compliance analysis, and post-hoc debugging. This section defines the event envelope, the typed event set, the emission path, and the privacy constraints that govern the audit log.
+
+#### 7.8.1 Purpose and Scope
+
+The audit log answers the questions:
+- "What override actions did the viewer take, and when?"
+- "Why did an agent get disconnected?"
+- "When did the viewer context change, and from what to what?"
+
+The log is not a surveillance tool. It must contain only the information an operator legitimately needs to diagnose runtime behavior. Viewer identity details are explicitly excluded (see §7.8.4 Privacy Constraint).
+
+#### 7.8.2 Audit Event Envelope
+
+Every shell audit event is wrapped in a `ShellAuditEvent` envelope:
+
+```protobuf
+// Internal — not agent-accessible. Never sent to any agent.
+// Emitted to the telemetry thread (RFC 0002 §2.5) as an AuditRecord.
+message ShellAuditEvent {
+  // Monotonic timestamp at which the event was generated, in microseconds
+  // (RFC 0003 §1.3 `_mono_us` convention). Set by the control plane immediately
+  // before emitting the event — before the state change is applied.
+  uint64 timestamp_mono_us = 1;
+
+  // How the override was triggered (keyboard shortcut, pointer gesture, or
+  // automatic runtime action). Uses the same OverrideTrigger enum as §7.3
+  // to keep the audit log aligned with the override event model.
+  // OVERRIDE_TRIGGER_UNSPECIFIED is used for events that have no direct
+  // OverrideEvent source (e.g., VIEWER_CLASS_CHANGED driven by the
+  // auto-detection pipeline rather than an explicit viewer action).
+  OverrideTrigger trigger = 2;
+
+  // IDs of tiles directly affected by this event. Absent when the event is
+  // not tile-scoped (e.g., SAFE_MODE_ENTERED, VIEWER_CLASS_CHANGED).
+  // Uses SceneId (RFC 0001 §1.1) — the same type used in OverrideEvent.
+  repeated SceneId affected_tile_ids = 3;
+
+  // IDs of sessions directly affected. Absent when the event is not
+  // session-scoped. Session IDs are the same string identifiers used in
+  // RFC 0005. Not present for VIEWER_CLASS_CHANGED or prompt events.
+  repeated string affected_session_ids = 4;
+
+  // The specific audit event payload.
+  oneof event {
+    AuditTileDismissed      tile_dismissed       = 10;
+    AuditAllDismissed       all_dismissed        = 11;
+    AuditSafeModeEntered    safe_mode_entered    = 12;
+    AuditSafeModeExited     safe_mode_exited     = 13;
+    AuditFreezeActivated    freeze_activated     = 14;
+    AuditFreezeDeactivated  freeze_deactivated   = 15;
+    AuditViewerClassChanged viewer_class_changed = 16;
+    AuditViewerPromptShown  viewer_prompt_shown  = 17;
+    AuditViewerPromptResolved viewer_prompt_resolved = 18;
+  }
+}
+```
+
+#### 7.8.3 Event Payload Types
+
+Each payload type carries only the minimum fields needed to make the event useful for diagnostics. No viewer identity details are included in any payload (see §7.8.4).
+
+```protobuf
+// A single tile was dismissed by the viewer.
+// affected_tile_ids in the envelope carries the dismissed tile's SceneId.
+message AuditTileDismissed {}
+
+// All tiles were dismissed (Dismiss All action, §4.2).
+// This is emitted once for the Dismiss All action; it does not expand into
+// individual AuditTileDismissed events. affected_tile_ids carries the full
+// set of tile SceneIds that were dismissed.
+message AuditAllDismissed {
+  uint32 tile_count = 1;  // Number of tiles dismissed. Matches len(affected_tile_ids).
+}
+
+// Safe mode was entered (§5.2).
+message AuditSafeModeEntered {
+  SafeModeEntryReason reason = 1;  // VIEWER_ACTION or CRITICAL_ERROR (§7.3).
+  // error_detail is included only for CRITICAL_ERROR — never for VIEWER_ACTION.
+  // This mirrors SafeModeEntryEvent.error_detail (§7.3) to aid debugging.
+  // It must not contain viewer identity information.
+  optional string error_detail = 2;
+  uint32 sessions_suspended = 3;  // Count of sessions suspended on entry.
+}
+
+// Safe mode was exited (§5.5).
+message AuditSafeModeExited {
+  // Duration in microseconds from safe mode entry to exit.
+  // Computed as: exit timestamp_mono_us − SafeModeState.entered_at_us.
+  uint64 duration_us = 1;
+  uint32 sessions_resumed = 2;  // Count of sessions resumed on exit.
+}
+
+// Scene freeze was activated (Ctrl+Shift+F pressed with freeze_active=false).
+message AuditFreezeActivated {}
+
+// Scene freeze was deactivated (Ctrl+Shift+F pressed with freeze_active=true).
+message AuditFreezeDeactivated {
+  // Duration in microseconds the freeze was active.
+  uint64 duration_us = 1;
+}
+
+// The viewer class changed (§6.2). Contains only the class transition —
+// never viewer identity, name, face recognition confidence, or authentication
+// details. See §7.8.4.
+message AuditViewerClassChanged {
+  ViewerClass old_class = 1;
+  ViewerClass new_class = 2;
+}
+
+// The "Who's Watching?" identification prompt was shown (§6.3).
+message AuditViewerPromptShown {
+  uint32 choice_count = 1;  // Number of identity choices presented.
+  uint64 timeout_at_us = 2; // Monotonic timestamp when the prompt will auto-dismiss.
+}
+
+// The "Who's Watching?" prompt was resolved (selected or timed out).
+message AuditViewerPromptResolved {
+  AuditPromptResolution resolution = 1;
+  // viewer_class_after: the class applied after resolution.
+  // This is the only viewer-state field permitted — it is the same
+  // class value already visible via VIEWER_CLASS_CHANGED.
+  ViewerClass viewer_class_after = 2;
+}
+
+enum AuditPromptResolution {
+  AUDIT_PROMPT_RESOLUTION_UNSPECIFIED = 0;
+  VIEWER_SELECTED = 1;   // Viewer tapped a named identity.
+  GUEST_SELECTED  = 2;   // Viewer tapped the "Guest" fallback.
+  TIMED_OUT       = 3;   // Prompt expired; runtime applied lowest-confidence class.
+  DISMISSED       = 4;   // Viewer explicitly dismissed the prompt without selecting.
+}
+```
+
+#### 7.8.4 Privacy Constraint
+
+The audit log must not become a viewer surveillance record. The following data must **never** appear in any `ShellAuditEvent` field:
+
+- Viewer name, username, or account identifier.
+- Face recognition confidence score or biometric features.
+- Authentication method, credential type, or PIN attempt details.
+- Device identifiers associated with the viewer.
+- Geolocation or physical presence information.
+
+The `AuditViewerClassChanged` event carries only `old_class` and `new_class` (both `ViewerClass` enum values). The `AuditViewerPromptResolved` event carries only the resulting `ViewerClass` and a resolution enum. These are the only viewer-state fields permitted in audit events, and they are the same class values already visible in `ChromeState.viewer_class` — they add no new identity information.
+
+This constraint is enforced at the call site: the control plane must build `ShellAuditEvent` payloads exclusively from `OverrideEvent` fields and `ViewerClass` transitions, never from raw viewer-detection pipeline data.
+
+#### 7.8.5 Emission Path
+
+Shell audit events travel a dedicated path to the telemetry thread. They are never sent to agents.
+
+```
+Input/chrome layer
+  → OverrideEvent (§7.3) or viewer-context-change notification
+    → Control plane constructs ShellAuditEvent
+      → Emits to telemetry thread as AuditRecord
+        → Telemetry thread serializes to JSON and writes to sink
+```
+
+**Channel:** Audit events are sent via the existing `TelemetryRecord` channel (RFC 0002 §2.5, capacity 256, ring-buffer semantics — oldest dropped under overflow). They are wrapped in a new `AuditRecord` variant of `TelemetryRecord`:
+
+```rust
+// Added to TelemetryRecord as an additional field.
+// Audit events are low-frequency (bounded by human interaction rate) and
+// will not materially affect the telemetry channel's overflow budget.
+pub struct AuditRecord {
+    pub event: ShellAuditEvent,
+}
+```
+
+The `TelemetryRecord` channel already carries frame metrics and timing records. Audit events ride the same channel because:
+1. The telemetry thread is the correct consumer — it owns the structured-output sink.
+2. A separate channel would require the control plane to hold an additional channel reference with no benefit.
+3. Audit events are human-rate (< 1/sec in normal operation) and add negligible channel pressure.
+
+**Ordering guarantee:** The control plane emits the `ShellAuditEvent` *before* applying the state change (e.g., before updating `ChromeState`, before dispatching `SessionSuspended` to agents). This ensures the audit log reflects the viewer's intent even if the state change fails. If the telemetry channel is full and the event is dropped, the `telemetry_overflow_count` counter in `TelemetryRecord` is incremented — operators can detect dropped audit events via this counter.
+
+**Consumption:** The telemetry thread serializes `AuditRecord` events to the configured sink (stdout / file / remote endpoint) as structured JSON objects, distinct from per-frame metric records. Operators can filter by record type:
+
+```json
+{
+  "record_type": "shell_audit",
+  "timestamp_mono_us": 1234567890,
+  "trigger": "KEYBOARD_SHORTCUT",
+  "event_type": "safe_mode_entered",
+  "payload": {
+    "reason": "VIEWER_ACTION",
+    "sessions_suspended": 3
+  }
+}
+```
+
+**Agents never receive audit events.** There is no gRPC RPC, no MCP tool, and no `EventNotification` variant that exposes audit events to agents. The `EventNotification` channel (RFC 0002 §2.6) carries scene and session events for agents — audit events are routed exclusively to the telemetry thread, not to the `EventNotification` channel.
+
+#### 7.8.6 Source Mapping
+
+Each `ShellAuditEvent` type is derived from a specific source:
+
+| Audit Event | Source |
+|---|---|
+| `TILE_DISMISSED` | `DismissTileEvent` in `OverrideEvent` (§7.3) |
+| `ALL_DISMISSED` | `DismissAllEvent` in `OverrideEvent` (§7.3) |
+| `SAFE_MODE_ENTERED` | `SafeModeEntryEvent` in `OverrideEvent` (§7.3) |
+| `SAFE_MODE_EXITED` | `SafeModeExitEvent` in `OverrideEvent` (§7.3) |
+| `FREEZE_ACTIVATED` | `FreezeToggleEvent` (freeze_active=true) in `OverrideEvent` (§7.3) |
+| `FREEZE_DEACTIVATED` | `FreezeToggleEvent` (freeze_active=false) in `OverrideEvent` (§7.3) |
+| `VIEWER_CLASS_CHANGED` | Viewer-context-change notification from the viewer-detection pipeline (§6.2); not an `OverrideEvent`. Trigger is `OVERRIDE_TRIGGER_UNSPECIFIED` when driven by auto-detection, `POINTER_GESTURE` when driven by "Who's Watching?" prompt selection. |
+| `VIEWER_PROMPT_SHOWN` | "Who's Watching?" prompt displayed by the chrome layer (§6.3) |
+| `VIEWER_PROMPT_RESOLVED` | "Who's Watching?" prompt dismissed or timed out (§6.3) |
+
+`MuteToggleEvent` (§7.3) does not have a corresponding audit event in v1 — mute is a media-layer action whose full audit semantics depend on media integration (deferred post-v1). If mute is implemented in a future revision, a `MUTE_TOGGLED` audit event type should be added following the same pattern.
+
 ---
 
 ## 8. Interaction with Other RFCs
@@ -878,8 +1094,8 @@ message TabEntry {
 | RFC | Relationship |
 |-----|-------------|
 | RFC 0001 (Scene Contract) | Chrome renders above the scene graph. `SceneId` is used to key `TileBadgeState`. Chrome elements are not `SceneId`-addressable. |
-| RFC 0002 (Runtime Kernel) | Chrome render pass executes as Stage 6 in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read under `Arc<RwLock<ChromeState>>` read lock at the start of the chrome render pass (see §7.1 synchronization contract). **GPU failure path:** RFC 0002 §7.3 and this RFC §5.1 previously conflicted on GPU device loss response (RFC 0002 said graceful shutdown; RFC 0007 said safe mode entry). RFC 0009 §5 resolves this: Phase 1 attempts surface reconfiguration (RFC 0002 §7.3 steps 1–3); Phase 2 enters safe mode before shutdown if reconfiguration fails. RFC 0002 §7.3 step 4 must be updated per RFC 0009 §5.3. |
-| RFC 0003 (Timing Model) | Override events carry `timestamp_mono_us` using the monotonic clock (RFC 0003 §1.3 `_mono_us` convention). Override execution is frame-bounded — effects appear within one frame of the event. |
+| RFC 0002 (Runtime Kernel) | Chrome render pass executes as Stage 6 in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read under `Arc<RwLock<ChromeState>>` read lock at the start of the chrome render pass (see §7.1 synchronization contract). **Audit event path:** Shell audit events (§7.8) are emitted by the control plane to the telemetry thread via the existing `TelemetryRecord` channel (RFC 0002 §2.5, ring-buffer capacity 256). The `AuditRecord` wrapper rides the same channel as frame metrics; audit events are human-rate and add negligible channel pressure. **GPU failure path:** RFC 0002 §7.3 and this RFC §5.1 previously conflicted on GPU device loss response (RFC 0002 said graceful shutdown; RFC 0007 said safe mode entry). RFC 0009 §5 resolves this: Phase 1 attempts surface reconfiguration (RFC 0002 §7.3 steps 1–3); Phase 2 enters safe mode before shutdown if reconfiguration fails. RFC 0002 §7.3 step 4 must be updated per RFC 0009 §5.3. |
+| RFC 0003 (Timing Model) | Override events carry `timestamp_mono_us` using the monotonic clock (RFC 0003 §1.3 `_mono_us` convention). Override execution is frame-bounded — effects appear within one frame of the event. Shell audit events (§7.8) also carry `timestamp_mono_us` using the same convention. |
 | RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0001 §5.2 traversal order: chrome always wins). Chrome shortcuts are evaluated before tile hit-testing by RFC 0004 §8 (Event Dispatch Protocol). In safe mode, the input model routes all events to the chrome layer exclusively. |
 | RFC 0005 (Session Protocol) | `SessionSuspended` (field 45) and `SessionResumed` (field 46) are defined in RFC 0005 §3.7 (added in Round 12, rig-5vq.29). The safe mode protocol gap documented in earlier rounds is resolved. Lease suspension on safe mode entry and lease revocation on tile dismiss both use the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). |
 | RFC 0008 (Lease Governance) | Authoritative specification for lease lifecycle during safe mode. Safe mode entry suspends all `ACTIVE` leases (not revokes them — see §4.2 and RFC 0008 §3.4). Tile dismiss (§4.1) transitions a lease to `REVOKED`. TTL clock pauses during suspension (RFC 0008 §3.6). The revoke/suspend distinction is load-bearing: suspended leases survive safe mode exit intact. |
@@ -906,15 +1122,17 @@ message TabEntry {
 - Viewer context transition (immediate, 300ms cross-fade for icon).
 - Optional "Who's Watching?" prompt (disabled by default).
 - All `ChromeState`, badge, override event, and render command protobuf types.
+- Shell audit events (§7.8): `ShellAuditEvent` envelope, all nine event payload types, emission via `TelemetryRecord` channel, structured JSON output by telemetry thread.
 
 ### Deferred (Post-V1)
 
 - Animated tile dismissal transitions (slide-out).
-- Per-tile mute functionality (depends on media integration, RFC post-v1).
+- Per-tile mute functionality (depends on media integration, RFC post-v1); mute audit event (`MUTE_TOGGLED`) deferred alongside mute functionality.
 - Full tab picker UI (keyboard invoked list of all tabs).
 - Granular viewer authentication UI flows (biometric, PIN).
 - Remote chrome state inspection via admin tooling.
 - Theme customization API (chrome renders with a fixed default theme in v1).
+- Remote audit log streaming endpoint (operators can consume the audit log via file/stdout in v1; a live streaming API is post-v1).
 
 ---
 
