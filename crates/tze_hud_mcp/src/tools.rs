@@ -617,7 +617,7 @@ fn parse_scene_id(s: &str) -> McpResult<SceneId> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tze_hud_scene::{graph::SceneGraph, types::ZoneDefinition, SceneId};
+    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy}, SceneId};
 
     fn scene_with_tab() -> (SceneGraph, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -863,6 +863,13 @@ mod tests {
                 id: SceneId::new(),
                 name: zone_name.clone(),
                 description: "Primary overlay zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.1 },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 4,
+                transport_constraint: None,
+                auto_clear_ms: None,
             },
         );
         (scene, tab_id, zone_name)
@@ -902,6 +909,13 @@ mod tests {
                 id: SceneId::new(),
                 name: zone_name.clone(),
                 description: "z".to_string(),
+                geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.1 },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 4,
+                transport_constraint: None,
+                auto_clear_ms: None,
             },
         );
         let err =
@@ -967,6 +981,13 @@ mod tests {
                     id: SceneId::new(),
                     name: name.to_string(),
                     description: "".to_string(),
+                    geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.1 },
+                    accepted_media_types: vec![ZoneMediaType::StreamText],
+                    rendering_policy: RenderingPolicy::default(),
+                    contention_policy: ContentionPolicy::LatestWins,
+                    max_publishers: 4,
+                    transport_constraint: None,
+                    auto_clear_ms: None,
                 },
             );
         }

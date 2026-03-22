@@ -201,7 +201,7 @@ impl McpServer {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tze_hud_scene::{graph::SceneGraph, types::ZoneDefinition, SceneId};
+    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy}, SceneId};
 
     async fn server_with_tab() -> (McpServer, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -328,6 +328,13 @@ mod tests {
                     id: SceneId::new(),
                     name: "status".to_string(),
                     description: "Status zone".to_string(),
+                    geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.05 },
+                    accepted_media_types: vec![ZoneMediaType::StreamText],
+                    rendering_policy: RenderingPolicy::default(),
+                    contention_policy: ContentionPolicy::LatestWins,
+                    max_publishers: 4,
+                    transport_constraint: None,
+                    auto_clear_ms: None,
                 },
             );
         }
@@ -369,6 +376,13 @@ mod tests {
                     id: SceneId::new(),
                     name: "hud".to_string(),
                     description: "HUD zone".to_string(),
+                    geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.05 },
+                    accepted_media_types: vec![ZoneMediaType::StreamText],
+                    rendering_policy: RenderingPolicy::default(),
+                    contention_policy: ContentionPolicy::LatestWins,
+                    max_publishers: 4,
+                    transport_constraint: None,
+                    auto_clear_ms: None,
                 },
             );
         }
