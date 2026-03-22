@@ -11,7 +11,7 @@
 | Round | Date | Reviewer | Focus | Changes |
 |-------|------|----------|-------|---------|
 | 1 | 2026-03-22 | rig-5vq.23 | Doctrinal alignment deep-dive | DR table: added DR-I3/I4 (input_to_scene_commit, input_to_next_present) from validation.md §3; added DR-I11 (headless testability). §6.1a: new headless testability section. §7.1: fixed `interaction_id` comment (now consistent with RFC 0001 §2.4 "forwarded in events"). §7.3/§9.1: added `interaction_id` field to PointerDownEvent, PointerUpEvent, ClickEvent, DoubleClickEvent. §9.1: removed `HitRegionConfig` (replaced with canonical `HitRegionNode` reference to RFC 0001 §9). §11.2: scroll deferral reframed as requiring pre-implementation resolution (local-first scroll is a doctrine commitment). RFC 0001 §2.4 and §9: unified `HitRegionNode` to include all input-model fields with cross-reference to RFC 0004. |
-| 2 | 2026-03-22 | rig-5vq.24 | Technical architecture scrutiny | §10.3: fixed gesture threshold diagram (5px → 10px, consistent with §3.4 state machine). §8.3: corrected `SessionEnvelope` → `SessionMessage` (aligns with RFC 0005 §2.2 naming). §8.3.1 (new): documented agent-to-runtime input control request transport gap; specifies required RFC 0005 `SessionMessage` payload field additions for FocusRequest, CaptureRequest, CaptureReleaseRequest, SetImePositionRequest. §4.5 (new, renamed §4.5+): added IME active-composition-on-focus-loss behavior spec (cancel before FocusLost, ordering guarantee, capture-theft case). §1.4/§9.1: added `AGENT_DISCONNECTED = 6` to `FocusLostReason`. §7.3/§9.1: added `device_id` field to `ContextMenuEvent`. §9.1: added `interaction_id` field to `GestureEvent`. §8.5: resolved transactional-event drop contradiction (transactional events never dropped; only non-transactional dropped beyond hard cap). |
+| 2 | 2026-03-22 | rig-5vq.24 | Technical architecture scrutiny | §10.3: fixed gesture threshold diagram (5px → 10px, consistent with §3.4 state machine). §8.3: corrected `SessionEnvelope` → `SessionMessage` (aligns with RFC 0005 §2.2 naming). §8.3.1 (new): documented agent-to-runtime input control request transport gap; specifies required RFC 0005 `SessionMessage` payload field additions for FocusRequest, CaptureRequest, CaptureReleaseRequest, SetImePositionRequest. §4.5 (new, renamed §4.5+): added IME active-composition-on-focus-loss behavior spec (cancel before FocusLost, ordering guarantee, capture-theft case). §1.4/§9.1: added `AGENT_DISCONNECTED = 6` to `FocusLostReason`. §7.3/§9.1: added `device_id` field to `ContextMenuEvent`. §9.1: added `interaction_id` field to `GestureEvent`. §8.5: resolved transactional-event drop contradiction (transactional events never dropped; only non-transactional dropped beyond hard cap). §8.3.1 follow-up (rig-k0d): clarified that CaptureReleaseRequest uses async CaptureReleasedEvent confirmation and SetImePositionRequest is fire-and-forget; removed misleading "runtime responds with corresponding response" blanket claim. §8.5 follow-up (rig-k0d): fixed contradictory "without bound, up to a hard cap" phrasing (now: "grows as needed to accommodate transactional events, which are never dropped"). |
 
 ---
 
@@ -1011,9 +1011,15 @@ RFC 0005 §2.2 defines agent→runtime payload variants at fields 20–25 of `Se
 // To be added to RFC 0005 SessionMessage.payload (runtime → agent, fields 39–40):
 //   InputFocusResponse    input_focus_response    = 39;  // maps to FocusResponse (§1.2)
 //   InputCaptureResponse  input_capture_response  = 40;  // maps to CaptureResponse (§2.3)
+//
+// Note: CaptureReleaseRequest and SetImePositionRequest do not use synchronous responses:
+//   - CaptureReleaseRequest is confirmed by the CaptureReleasedEvent (§2.3), which is an
+//     async event already delivered via field 34 (input_event). No separate response field needed.
+//   - SetImePositionRequest is a fire-and-forget hint to the OS IME subsystem; no response
+//     is defined or required.
 ```
 
-All input control requests use the same transactional delivery semantics as `MutationBatch`: sequence-correlated, at-least-once with retransmit on timeout (see RFC 0005 §5.2). The runtime responds with the corresponding response message correlated by `sequence` number.
+`FocusRequest` and `CaptureRequest` use synchronous request/response semantics: sequence-correlated, at-least-once with retransmit on timeout (see RFC 0005 §5.2). The runtime responds with the corresponding `FocusResponse` or `CaptureResponse` correlated by `sequence` number. `CaptureReleaseRequest` is confirmed by the asynchronous `CaptureReleasedEvent`; `SetImePositionRequest` is fire-and-forget (no response).
 
 **Dependency note:** RFC 0004 defines the request/response message schemas (§1.2, §2.3, §4.3). RFC 0005 must add the `SessionMessage` payload variants above. Both RFCs must be updated together before implementation.
 
@@ -1035,7 +1041,7 @@ If an agent's event queue is full (the agent is slow to consume events):
 1. **PointerMove events** are coalesced: only the latest position is retained.
 2. **Hover state changes** (enter/leave) are coalesced: only the net state (currently inside or outside) is emitted.
 3. **Transactional events** (down, up, click, key, focus, capture, IME) are never dropped. If the queue is full and a transactional event arrives, the oldest coalesced event is removed to make room.
-4. If the queue remains full after coalescing, the oldest coalesced (non-transactional) event is removed to make room. The queue grows to accommodate transactional events without bound, up to a hard cap of 4096 events per agent.
+4. If the queue remains full after coalescing, the oldest coalesced (non-transactional) event is removed to make room. The queue grows as needed to accommodate transactional events, which are never dropped.
 5. Beyond the hard cap, **transactional events** (down, up, click, key, focus, capture, IME) continue to be enqueued — they are never dropped. **Non-transactional events** (PointerMove, hover enter/leave) that cannot be coalesced further are dropped at the hard cap, and `telemetry_overflow_count` is incremented.
 
 > **Overflow contract:** The hard cap ensures memory is bounded. In practice, a queue exceeding 4096 events indicates the agent has stalled; the runtime should log this as a health incident and the agent's lease watchdog timer (RFC 0003 §lease TTL) will eventually reclaim the session if the agent does not recover.
