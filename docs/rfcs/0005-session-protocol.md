@@ -299,7 +299,8 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `LeaseResponse` | Transactional | Grant/deny/revoke for a lease operation |
 | `HeartbeatPong` | Ephemeral | Reply to `HeartbeatPing` with server timestamp |
 | `SceneEvent` | State-stream | Topology change, zone occupancy update, lease change |
-| `InputEvent` | Ephemeral realtime | Pointer/touch/key/focus event routed to agent (RFC 0004). Carries `InputMessage` from RFC 0004, which includes `FocusGainedEvent` and `FocusLostEvent` variants alongside pointer/touch/key events. Focus events are Transactional (not droppable) despite being in the same envelope. |
+| `InputEvent` (pointer/key variants) | Ephemeral realtime | Pointer/touch/key events routed to agent via RFC 0004 `InputEnvelope`. Coalesced under backpressure (RFC 0004 §8.5). |
+| `InputEvent` (focus/capture/IME variants) | Transactional | `FocusGainedEvent`, `FocusLostEvent`, `CaptureReleasedEvent`, and IME events carried in the same RFC 0004 `InputEnvelope` oneof. Never dropped or coalesced per RFC 0004 §8.5 — delivery is reliable and ordered. |
 | `DegradationNotice` | Transactional | Runtime has changed degradation level; see §3.4 |
 | `RuntimeError` | Transactional | Structured error (see §3.5) |
 | `CapabilityNotice` | Transactional | Mid-session capability grant or revocation |
@@ -492,9 +493,9 @@ message SessionResumeResult {
 When a resume is accepted within the grace period:
 
 1. The runtime identifies all server-side `SceneEvent` and `LeaseResponse` messages with `sequence > last_seen_server_sequence`.
-2. It replays these missed transactional/state-stream messages as a burst of normal `SessionMessage` envelopes (carrying `SceneEvent`, `LeaseResponse`, or `CapabilityNotice` payloads). This replayed burst is informally called the "state delta." There is no separate `StateDelta` message type — the resume delta is simply a set of replayed `SceneEvent` messages followed by a sentinel `SceneEvent` with `type = DELTA_COMPLETE` to signal the end of the catch-up phase.
+2. It replays these missed transactional/state-stream messages as a burst of normal `SessionMessage` envelopes (carrying `SceneEvent`, `LeaseResponse`, or `CapabilityNotice` payloads). This replayed burst is informally called the "state delta." A dedicated `StateDeltaComplete` sentinel message (see §9) is sent as the final message in the burst to signal the end of the catch-up phase.
 3. Ephemeral events (cursor moves, interim speech tokens) are not replayed — they are inherently transient.
-4. Once the delta burst is complete (the agent receives `SceneEvent` with `type = DELTA_COMPLETE`), the session transitions to `Active` state normally.
+4. Once the delta burst is complete (the agent receives `StateDeltaComplete`), the session transitions to `Active` state normally.
 
 If the agent's leases are still orphaned (not yet evicted — within grace period), they are automatically reclaimed as part of the state delta. The disconnection badges clear.
 
@@ -767,6 +768,13 @@ message SessionResumeResult {
   RuntimeError error                     = 6;
 }
 
+// ─── State delta sentinel (server → client) ──────────────────────────────────
+
+// Sent as the final message of the state-delta burst after session resumption
+// (§6.4). Signals that all missed transactional/state-stream messages have been
+// replayed. No payload fields are needed; receipt of this message is the signal.
+message StateDeltaComplete {}
+
 // ─── Heartbeat ───────────────────────────────────────────────────────────────
 
 message HeartbeatPing {
@@ -882,6 +890,7 @@ message SessionMessage {
     DegradationNotice    degradation_notice    = 35;
     RuntimeError         runtime_error         = 36;  // Defined in session.proto (§3.5)
     CapabilityNotice     capability_notice     = 37;
+    StateDeltaComplete   state_delta_complete  = 38;  // Sentinel: end of resume delta burst (§6.4)
   }
 }
 
