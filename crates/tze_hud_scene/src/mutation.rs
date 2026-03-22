@@ -59,6 +59,30 @@ pub enum SceneMutation {
         zone_name: String,
         publish_token: ZonePublishToken,
     },
+    /// Create a new sync group.
+    CreateSyncGroup {
+        /// Optional human-readable label (max 128 UTF-8 bytes).
+        name: Option<String>,
+        /// Namespace creating this group (typically the agent namespace).
+        owner_namespace: String,
+        /// Commit policy: AllOrDefer or AvailableMembers.
+        commit_policy: SyncCommitPolicy,
+        /// Max deferral frames before force-commit (AllOrDefer only).
+        max_deferrals: u32,
+    },
+    /// Delete a sync group by ID. All member tiles are released automatically.
+    DeleteSyncGroup {
+        group_id: SceneId,
+    },
+    /// Add a tile to a sync group. Replaces any previous group membership.
+    JoinSyncGroup {
+        tile_id: SceneId,
+        group_id: SceneId,
+    },
+    /// Remove a tile from its current sync group. No-op if not in a group.
+    LeaveSyncGroup {
+        tile_id: SceneId,
+    },
 }
 
 /// Result of applying a mutation batch.
@@ -176,6 +200,32 @@ impl SceneGraph {
                 self.clear_zone(zone_name)?;
                 Ok(vec![])
             }
+            SceneMutation::CreateSyncGroup {
+                name,
+                owner_namespace,
+                commit_policy,
+                max_deferrals,
+            } => {
+                let id = self.create_sync_group(
+                    name.clone(),
+                    owner_namespace,
+                    *commit_policy,
+                    *max_deferrals,
+                )?;
+                Ok(vec![id])
+            }
+            SceneMutation::DeleteSyncGroup { group_id } => {
+                self.delete_sync_group(*group_id)?;
+                Ok(vec![])
+            }
+            SceneMutation::JoinSyncGroup { tile_id, group_id } => {
+                self.join_sync_group(*tile_id, *group_id)?;
+                Ok(vec![])
+            }
+            SceneMutation::LeaveSyncGroup { tile_id } => {
+                self.leave_sync_group(*tile_id)?;
+                Ok(vec![])
+            }
         }
     }
 
@@ -244,5 +294,111 @@ mod tests {
         assert!(!result.applied);
         // Entire batch rolled back — no tiles created
         assert_eq!(scene.tile_count(), 0);
+    }
+
+    #[test]
+    fn test_mutation_create_and_delete_sync_group() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+
+        // Create a sync group via mutation batch
+        let create_batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![SceneMutation::CreateSyncGroup {
+                name: Some("my-group".to_string()),
+                owner_namespace: "agent".to_string(),
+                commit_policy: SyncCommitPolicy::AllOrDefer,
+                max_deferrals: 3,
+            }],
+        };
+        let result = scene.apply_batch(&create_batch);
+        assert!(result.applied);
+        assert_eq!(result.created_ids.len(), 1);
+        let group_id = result.created_ids[0];
+        assert_eq!(scene.sync_group_count(), 1);
+
+        // Delete via mutation batch
+        let delete_batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![SceneMutation::DeleteSyncGroup { group_id }],
+        };
+        let result = scene.apply_batch(&delete_batch);
+        assert!(result.applied);
+        assert_eq!(scene.sync_group_count(), 0);
+    }
+
+    #[test]
+    fn test_mutation_join_leave_sync_group() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        // Create group and join tile in one batch
+        let batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![SceneMutation::CreateSyncGroup {
+                name: None,
+                owner_namespace: "agent".to_string(),
+                commit_policy: SyncCommitPolicy::AvailableMembers,
+                max_deferrals: 0,
+            }],
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied);
+        let group_id = result.created_ids[0];
+
+        // Join tile to group
+        let join_batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![SceneMutation::JoinSyncGroup { tile_id, group_id }],
+        };
+        let result = scene.apply_batch(&join_batch);
+        assert!(result.applied);
+        assert_eq!(scene.tiles[&tile_id].sync_group, Some(group_id));
+        assert!(scene.sync_groups[&group_id].members.contains(&tile_id));
+
+        // Leave sync group
+        let leave_batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![SceneMutation::LeaveSyncGroup { tile_id }],
+        };
+        let result = scene.apply_batch(&leave_batch);
+        assert!(result.applied);
+        assert_eq!(scene.tiles[&tile_id].sync_group, None);
+        assert!(!scene.sync_groups[&group_id].members.contains(&tile_id));
+    }
+
+    #[test]
+    fn test_mutation_batch_rollback_on_bad_sync_group_join() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        let nonexistent_group = SceneId::new();
+
+        // Batch that tries to join a non-existent group — should fail and rollback
+        let batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".to_string(),
+            mutations: vec![SceneMutation::JoinSyncGroup {
+                tile_id,
+                group_id: nonexistent_group,
+            }],
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(!result.applied);
+        assert!(result.error.is_some());
+        // Tile should remain without a sync group
+        assert_eq!(scene.tiles[&tile_id].sync_group, None);
     }
 }
