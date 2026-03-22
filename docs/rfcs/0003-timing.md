@@ -9,6 +9,23 @@
 
 ## Review History
 
+### Feature Addition — Relative Scheduling Primitives (rig-ohm)
+
+**Author:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-ohm
+
+#### Changes Applied
+
+- **[FEATURE → ADDED]** §3.2: Added `after_us`, `frames_from_now`, and `next_frame` to the Timestamp and Ordering Fields table. Added normative note block defining the `oneof schedule` wire encoding, mutual exclusivity, conversion semantics, and validation rules for relative scheduling fields.
+- **[FEATURE → ADDED]** §5.3: Added §5.3.1 "Relative Scheduling Primitives" specifying how the compositor converts `after_us`, `frames_from_now`, and `next_frame` to absolute `present_at_us` at Stage 3 intake. Defines the monotonic-clock conversion path, frame-number calculation, and pending queue behavior after conversion.
+- **[FEATURE → ADDED]** §7.1: Updated `TimestampedPayload` to use `oneof schedule` for `present_at_us`, `after_us`, `frames_from_now`, and `next_frame`. Updated `TimingHints` similarly. Added `RELATIVE_SCHEDULE_CONFLICT` error code and `RelativeScheduleConfig` to `TimingConfig`. Added `relative_scheduling` section to §7.3 wire encoding notes.
+- **[FEATURE → ADDED]** §8.2: Added test coverage requirements for all three relative scheduling primitives, including conversion accuracy, frame boundary behavior, error rejection, and pending queue ordering after conversion.
+
+**Doctrinal basis:** architecture.md §Time is a first-class API concept — "payloads carry timing semantics." The relative primitives are wire-level convenience sugar only; they are converted to absolute timestamps at Stage 3 intake and never enter the scene graph, telemetry, or stored state. This is consistent with the internal timing model already specified in §3 and §5.
+
+---
+
 ### Round 1 — Doctrinal Alignment Deep-Dive (rig-5vq.19)
 
 **Reviewer:** Beads worker agent
@@ -572,7 +589,10 @@ Doctrine (architecture.md §Time is a first-class API concept): every meaningful
 
 | Field | Type | Scope | Semantics |
 |-------|------|-------|-----------|
-| `present_at_us` | `uint64` | `MutationBatch`, `Tile`, `TextNode`, `StaticImageNode` | Do not apply this mutation/render this content before this time. If zero, apply at the earliest available frame. |
+| `present_at_us` | `uint64` | `MutationBatch`, `Tile`, `TextNode`, `StaticImageNode` | Do not apply this mutation/render this content before this time. If zero, apply at the earliest available frame. Part of `oneof schedule` — mutually exclusive with `after_us`, `frames_from_now`, and `next_frame`. |
+| `after_us` | `uint64` | `MutationBatch`, `TimestampedPayload` | Relative scheduling sugar: apply this mutation N microseconds from the compositor's monotonic clock at Stage 3 intake. The compositor converts to an absolute `present_at_us` at intake time (see §5.3.1). Zero means "immediately" (same as `present_at_us = 0`). Part of `oneof schedule` — mutually exclusive with `present_at_us`, `frames_from_now`, and `next_frame`. |
+| `frames_from_now` | `uint32` | `MutationBatch`, `TimestampedPayload` | Relative scheduling sugar: apply this mutation N display frames from the current frame at Stage 3 intake. The compositor converts to a target frame number and absolute `present_at_us` at intake time (see §5.3.1). Zero means "this frame" (earliest available frame, same as `present_at_us = 0`). Part of `oneof schedule` — mutually exclusive with `present_at_us`, `after_us`, and `next_frame`. |
+| `next_frame` | `bool` | `MutationBatch`, `TimestampedPayload` | Relative scheduling sugar for `frames_from_now = 1`: apply this mutation on the next display frame after intake, guaranteed not to be the current frame. Useful when a mutation must not appear in the same frame as co-batch mutations targeting the current frame. Part of `oneof schedule` — mutually exclusive with `present_at_us`, `after_us`, and `frames_from_now`. |
 | `expires_at_us` | `uint64` | `Tile`, `UpdateTileExpiry` | Remove this tile from the scene at or after this time. If zero, no automatic expiry. |
 | `created_at_us` | `uint64` | `Tab`, `SyncGroup`, `SyncGroupConfig` | Wall-clock time of creation. Set by the compositor on object creation; agent-supplied values are advisory only and may be overwritten. |
 | `session_open_at_us` | `uint64` | Handshake | Session establishment wall-clock time. Used for clock-skew estimation. |
@@ -586,6 +606,12 @@ Doctrine (architecture.md §Time is a first-class API concept): every meaningful
 1. Node-level `present_at_us` (if set) overrides tile-level.
 2. Tile-level `present_at_us` (if set) overrides batch-level.
 3. Batch-level `present_at_us` (if set) is the default for all tiles and nodes in the batch that do not set their own.
+
+**Relative scheduling fields (`after_us`, `frames_from_now`, `next_frame`) follow the same precedence hierarchy.** Whichever `oneof schedule` variant is set at the most specific level (node → tile → batch) governs the scheduling for that mutation.
+
+**`oneof schedule` — Mutual Exclusivity.** The scheduling fields `present_at_us`, `after_us`, `frames_from_now`, and `next_frame` are mutually exclusive. Setting more than one in the same message is a validation error; the compositor rejects the batch with `RELATIVE_SCHEDULE_CONFLICT`. Agents must set exactly one of these fields (or none — omitting all is equivalent to `present_at_us = 0`, i.e., immediate).
+
+**Wire-protocol only.** The relative scheduling fields (`after_us`, `frames_from_now`, `next_frame`) are wire-protocol convenience sugar. They are never stored in the scene graph, telemetry records, or internal state. The compositor converts them to absolute `present_at_us` values at Stage 3 intake before the mutation enters the pending queue. See §5.3.1 for the conversion semantics.
 
 ### 3.3 Timestamp Resolution
 
@@ -611,7 +637,9 @@ The compositor applies these validation rules to all agent-supplied timestamps:
 |-----------|--------|
 | `present_at_us < session_open_at_us - 60_000_000` (> 60s in the past) | Reject: mutation too stale. Structured error `TIMESTAMP_TOO_OLD`. |
 | `present_at_us > current_wallclock_us + timing.max_future_schedule_us` | Reject: timestamp too far in future. Structured error `TIMESTAMP_TOO_FUTURE`. Default `timing.max_future_schedule_us`: 300_000_000 μs (5 minutes). Unit: microseconds — the comparison is direct against `present_at_us` with no conversion needed. |
-| `expires_at_us <= present_at_us` (expiry before or at presentation) | Reject: inconsistent timestamps. Structured error `TIMESTAMP_EXPIRY_BEFORE_PRESENT`. |
+| Relative field (`after_us` or `frames_from_now`) converted to `present_at_us > current_wallclock_us + timing.max_future_schedule_us` | Reject: converted timestamp too far in future. Same structured error `TIMESTAMP_TOO_FUTURE`. The threshold is applied to the converted value, not the raw relative value. |
+| More than one `oneof schedule` variant set in the same message | Reject: mutually exclusive scheduling fields. Structured error `RELATIVE_SCHEDULE_CONFLICT`. See §7.2 for the error code registration in RFC 0005. |
+| `expires_at_us <= present_at_us` (expiry before or at presentation) | Reject: inconsistent timestamps. Structured error `TIMESTAMP_EXPIRY_BEFORE_PRESENT`. For relative scheduling, `present_at_us` here is the **converted** value computed at Stage 3 intake. |
 | `delivery_policy == DELIVERY_POLICY_DROP_IF_LATE` and `message_class != MESSAGE_CLASS_EPHEMERAL_REALTIME` | Reject: `DROP_IF_LATE` is only valid for the `EPHEMERAL_REALTIME` message class. Structured error `INVALID_DELIVERY_POLICY`. |
 | Clock skew > 100ms (see §4.2) | Warning in telemetry; apply timestamps with skew correction. |
 | Clock skew > 1s | Reject with structured error `CLOCK_SKEW_EXCESSIVE`. |
@@ -754,6 +782,63 @@ A mutation batch with `present_at_us = T` is held in the pending queue until the
 
 **Session close flush.** The pending queue is session-scoped, not agent-scoped. When an agent session closes — gracefully (via `SessionClose`) or ungracefully (timeout, TCP reset, grace period expiry) — all entries in that session's pending queue are discarded. The compositor does not apply pending mutations from a closed session. A reconnecting agent starts with an empty queue and must retransmit any desired future-scheduled mutations under the new session. This ensures that budget accounting is clean: after session close, the session's pending queue entries no longer count against any resource budget.
 
+### 5.3.1 Relative Scheduling Primitives
+
+The relative scheduling fields (`after_us`, `frames_from_now`, `next_frame`) are converted to absolute `present_at_us` values by the compositor at **Stage 3 intake**, before the mutation enters the pending queue. From that point forward, the mutation is treated identically to one submitted with an explicit `present_at_us`. The relative fields are never stored, logged, or emitted in telemetry — they exist only on the wire.
+
+#### `after_us` Conversion
+
+When a mutation batch carries `after_us = N` (N ≥ 0):
+
+1. At Stage 3 intake, the compositor reads its monotonic clock: `intake_mono_us = clock.monotonic_us()`.
+2. Compute target monotonic time: `target_mono_us = intake_mono_us + N`.
+3. Convert to wall-clock domain using the current per-session clock-skew estimate (§4.4):
+   `present_at_us = (target_mono_us as i64 + skew_us) as u64`
+   where `skew_us` is the current signed skew estimate (positive = agent ahead; the inversion converts from monotonic to wall time).
+4. If `N == 0`, the result is equivalent to `present_at_us = current_wallclock_us`, meaning "apply at the earliest available frame."
+
+**Precision note.** The skew estimate introduces up to `max_agent_clock_drift_ms` (default 100ms) of error in the wall-clock conversion. This is acceptable because `after_us` is intended for local agents on the same machine; clock skew for localhost agents is expected to be near zero. Remote agents with substantial skew SHOULD use `present_at_us` directly after performing `ClockSync`.
+
+**Validation.** The converted `present_at_us` is validated under the same rules as a directly supplied `present_at_us` (§3.5). An `after_us` value exceeding `timing.max_future_schedule_us` after conversion is rejected with `TIMESTAMP_TOO_FUTURE`.
+
+#### `frames_from_now` Conversion
+
+When a mutation batch carries `frames_from_now = N` (N ≥ 0):
+
+1. At Stage 3 intake, the compositor reads the current frame number: `current_frame = frame_state.current_frame_number`.
+2. Compute target frame: `target_frame = current_frame + N`.
+3. Estimate the vsync time for the target frame:
+   `target_vsync_us = current_vsync_mono_us + (N * frame_duration_us)`
+   where `frame_duration_us` is `1_000_000 / target_fps` (default: 16,667 μs at 60fps).
+4. Convert to wall-clock domain: `present_at_us = target_vsync_us_as_wall`.
+5. The converted `present_at_us` is then treated identically to an explicit `present_at_us` and enters the pending queue.
+
+If `N == 0`, `target_frame = current_frame` and `present_at_us` is set to `0` (immediate: apply this frame if intake deadline permits, otherwise next frame per §5.2).
+
+**Frame boundary note.** If Stage 3 intake occurs very close to the frame cutoff (within the last microseconds), a `frames_from_now = 0` mutation may miss the current frame's commit window and be deferred to the next frame. This is expected behavior — the no-earlier-than guarantee applies from the target frame onward; missing the current frame by one is not a violation.
+
+**Frame rate changes.** If `target_fps` changes between the time of conversion and the target frame (e.g., dynamic refresh rate), the estimated vsync time may not align exactly with the actual vsync. The mutation is still applied at the first frame whose vsync time meets or exceeds the stored `present_at_us`. Frame rate changes do not cause mutations to be applied earlier than intended; they may cause them to be applied one frame later if the new frame duration is longer.
+
+#### `next_frame` Conversion
+
+`next_frame = true` is exactly equivalent to `frames_from_now = 1`. The compositor converts it identically: the mutation is scheduled to apply on the display frame immediately following the current frame at intake. An agent that sets `next_frame = true` is guaranteed that the mutation will not be applied in the same frame as mutations arriving in the current frame's Stage 3 window.
+
+Use case: an agent submitting two related mutations — one for the current frame and one that must appear one frame later — can pack both in a single batch and use `next_frame` on the deferred mutation to prevent it from coalescing into the current frame's commit.
+
+**`next_frame = false` is treated as "field not set"** — it does not select any scheduling variant. The `oneof schedule` semantics apply: only one variant may be active; if `next_frame = false` is the only schedule field, the mutation uses no scheduling override (equivalent to omitting the oneof, which means `present_at_us = 0`).
+
+#### Interaction with `expires_at_us`
+
+For relative-scheduled mutations, `expires_at_us` is validated against the **converted** `present_at_us`, not the raw relative field. The validation `expires_at_us > present_at_us` (§3.5) is applied after conversion.
+
+#### Interaction with Sync Groups
+
+Relative scheduling converts to absolute `present_at_us` before sync group evaluation. The sync group's commit policy evaluates against the absolute `present_at_us` of each pending mutation exactly as it would for an explicitly absolute-scheduled mutation. There is no special behavior for sync group members that used relative scheduling.
+
+#### `after_us` and `frames_from_now` in `TimingHints` (MutationBatch)
+
+`TimingHints` is embedded in `MutationBatch` (RFC 0005 §9) and carries batch-level scheduling. The `after_us`, `frames_from_now`, and `next_frame` fields in `TimingHints` follow the same conversion semantics as in `TimestampedPayload`. They apply as batch-level defaults, subject to the precedence rules in §3.2 (node-level overrides tile-level overrides batch-level).
+
 ### 5.4 Expiration Policy (`expires_at`)
 
 A tile with `expires_at_us = T` is automatically removed from the scene at the first frame F where `frame_F_vsync_us >= T`.
@@ -856,7 +941,24 @@ enum DeliveryPolicy {
 
 message TimestampedPayload {
   bytes         payload          = 1; // Serialized inner message
-  uint64        present_at_us    = 2; // 0 = immediate
+
+  // Schedule oneof: exactly one of these fields may be set per message.
+  // Setting more than one is a validation error (RELATIVE_SCHEDULE_CONFLICT).
+  // Omitting all is equivalent to present_at_us = 0 (apply at earliest available frame).
+  //
+  // present_at_us: absolute UTC µs; 0 = immediate. Network clock domain (§1.1, §3.2).
+  // after_us: relative µs from compositor monotonic clock at Stage 3 intake (§5.3.1).
+  //   Converted to present_at_us at intake; never stored after conversion.
+  // frames_from_now: relative frame count from current frame at intake (§5.3.1).
+  //   Converted to present_at_us at intake; 0 = this frame (same as present_at_us=0).
+  // next_frame: sugar for frames_from_now=1 (§5.3.1). False = field not set.
+  oneof schedule {
+    uint64 present_at_us   = 2;  // Absolute UTC µs; 0 = immediate
+    uint64 after_us        = 20; // Relative: N µs from compositor monotonic clock at intake
+    uint32 frames_from_now = 21; // Relative: N display frames from current frame at intake
+    bool   next_frame      = 22; // Sugar: frames_from_now = 1 (next display frame)
+  }
+
   uint64        expires_at_us    = 3; // 0 = no expiry
   uint64        created_at_us    = 4; // Agent-assigned creation time; advisory only
   MessageClass  message_class    = 5; // Traffic class; governs delivery semantics
@@ -947,8 +1049,20 @@ message SyncGroupOrphanedEvent {
 ///
 /// RFC 0005 §9.1 imports `TimingHints` from this file; the inline definition in RFC 0005
 /// §9 must match this definition exactly. RFC 0003 is authoritative.
+///
+/// Schedule oneof: sets the batch-level scheduling for all mutations in a MutationBatch.
+/// Exactly one variant may be set. Setting more than one is a validation error
+/// (RELATIVE_SCHEDULE_CONFLICT). Subject to the precedence rules in §3.2 (node-level
+/// overrides tile-level overrides batch-level).
 message TimingHints {
-  uint64  present_at_wall_us = 1;  // Wall-clock UTC µs; 0 = present immediately. Domain: network clock (§1.1).
+  // Schedule oneof: batch-level presentation scheduling. Converted to present_at_us at
+  // Stage 3 intake for relative variants (§5.3.1). Omitting all = present immediately.
+  oneof schedule {
+    uint64 present_at_wall_us = 1;  // Absolute: wall-clock UTC µs; 0 = present immediately
+    uint64 after_us           = 10; // Relative: N µs from compositor monotonic clock at intake
+    uint32 frames_from_now    = 11; // Relative: N display frames from current frame at intake; 0 = this frame
+    bool   next_frame         = 12; // Sugar: frames_from_now = 1 (next display frame); false = not set
+  }
   uint64  expires_at_wall_us = 2;  // Wall-clock UTC µs; 0 = no expiry. Domain: network clock (§1.1).
   SceneId sync_group_id      = 3;  // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7; all-zero = not in a group.
 }
@@ -1052,6 +1166,8 @@ service ClockSyncService {
 
 **Timestamp unit migration (RFC 0001 → RFC 0003):** RFC 0001 used millisecond-resolution (`_ms`) timestamp fields throughout `scene.proto` and the Rust data model (e.g., `present_at_ms`, `expires_at_ms`, `committed_at_ms`). RFC 0003 establishes microsecond resolution (`_us`) as the authoritative standard, consistent with the architecture doctrine (CLAUDE.md: "μs resolution"). RFC 0001 must be updated in a follow-on amendment to rename all `_ms` timestamp fields to `_us` and change the units to UTC microseconds since Unix epoch. Until that amendment lands, `timing.proto` uses `_us` exclusively; implementors should treat the RFC 0001 `_ms` fields as pending migration.
 
+**Relative scheduling error code.** The `RELATIVE_SCHEDULE_CONFLICT` structured error is emitted when a `MutationBatch` or `TimestampedPayload` sets more than one variant in `oneof schedule`. This error code must be added to `RuntimeError.ErrorCode` in RFC 0005 `session.proto`. The string form is `"RELATIVE_SCHEDULE_CONFLICT"`; the enum form should be added as the next available code after `TIMESTAMP_EXPIRY_BEFORE_PRESENT` (currently code 17). Until RFC 0005 is amended to add the enum value, implementations MUST use the string form `error_code = "RELATIVE_SCHEDULE_CONFLICT"` and set `error_code_enum = ERROR_CODE_UNKNOWN` (code 1).
+
 The fields in `timing.proto` supplement the scene contract defined in RFC 0001. Key cross-references:
 
 - `CreateSyncGroupMutation` and `DeleteSyncGroupMutation` are new variants in the `SceneMutation` oneof (RFC 0001 §8, field numbers **21 and 22** respectively). Field 20 is already occupied by `ClearZoneMutation` (RFC 0001 §8).
@@ -1065,6 +1181,8 @@ The fields in `timing.proto` supplement the scene contract defined in RFC 0001. 
 2. `SyncGroupId` is a `SceneId` (RFC 0001 §1.1: 16-byte UUIDv7) in all contexts: `SyncGroupConfig.id`, `TimingHints.sync_group_id`, `DeleteSyncGroupMutation.sync_group_id`, `SyncGroupForceCommitEvent.id`, and `SyncGroupOrphanedEvent.id`. An all-zero `SceneId` means "not set / not in a sync group" (consistent with RFC 0001 §10.1). Agents must not send partially filled IDs.
 3. `estimated_skew_us` in `ClockSyncResponse` is signed (`int64`) because skew can be positive (agent clock ahead) or negative (agent clock behind). A positive value means the agent's clock is ahead. It carries no `_wall_us` or `_mono_us` suffix because it is a signed delta, not an absolute timestamp (see RFC 0005 §2.4).
 4. `delivery_policy` in `TimestampedPayload` is a protobuf enum (`DeliveryPolicy`). Implementations must treat unknown enum values as `DELIVERY_POLICY_DEFER`.
+5. **Relative scheduling oneof encoding.** In `TimestampedPayload` and `TimingHints`, the `oneof schedule` uses standard protobuf3 oneof semantics. Only one variant may be set per message. Setting multiple variants via manual byte manipulation is undefined behavior — implementations MUST reject such messages with `RELATIVE_SCHEDULE_CONFLICT`. The `next_frame = false` case is indistinguishable from "field not set" in proto3 (false is the default for bool). Implementations MUST NOT treat `next_frame = false` as an active scheduling choice; they must treat it as "oneof not set." Only `next_frame = true` activates the `next_frame` variant.
+6. **`after_us` field number alignment.** In `TimestampedPayload`, `after_us = 20` and `frames_from_now = 21` use high field numbers to avoid conflicts with any future additions to fields 10–19 of the message. These numbers match the issue specification (rig-ohm) and MUST NOT be renumbered without a wire-incompatible protocol version bump. In `TimingHints`, the corresponding fields are `after_us = 10` and `frames_from_now = 11` — lower numbers are safe because `TimingHints` has no pre-existing fields in that range.
 
 ---
 
@@ -1116,6 +1234,19 @@ The following behaviors must be covered by Layer 0 (scene graph assertion) tests
 - Join during active deferral: a tile joining an `AllOrDefer` group with `deferred_frames_count > 0` is not evaluated as a required member until the next evaluation epoch; the joining tile does not extend the current deferral cycle.
 - Equal `present_at_us` ordering: two mutations with the same `present_at_us` are applied in FIFO arrival order; if packed in a single `MutationBatch`, they are applied atomically.
 - `max_future_schedule_us` rejection: a mutation with `present_at_us > current_wallclock_us + timing.max_future_schedule_us` is rejected with `TIMESTAMP_TOO_FUTURE`; the comparison uses microsecond units directly without conversion.
+- `after_us` basic conversion: a mutation with `after_us = 500_000` (500ms) is converted at Stage 3 intake to `present_at_us ≈ current_wallclock_us + 500_000`; the converted mutation enters the pending queue and is applied at the correct frame.
+- `after_us = 0`: treated as `present_at_us = 0`; mutation is applied at the earliest available frame (this frame if intake deadline permits, else next frame).
+- `after_us` monotonic conversion accuracy: using a `SimulatedClock`, verify that `present_at_us` after conversion equals `(monotonic_us_at_intake + after_us)` mapped through the current skew estimate; the pending queue drain condition fires at the correct simulated frame.
+- `frames_from_now` basic conversion: a mutation with `frames_from_now = 3` at intake during frame N is converted to `present_at_us = vsync_mono_us_at_N + 3 * frame_duration_us` (wall-clock domain); the mutation is applied at frame N+3 and not before.
+- `frames_from_now = 0`: converted to `present_at_us = 0`; mutation is applied at the earliest available frame, identical to omitting the schedule field.
+- `frames_from_now = 1` vs `next_frame = true`: both converted to the same `present_at_us` (vsync of frame N+1); applied in the same frame; conversion produces identical pending queue entries.
+- `next_frame = false` is treated as "oneof not set": a message with only `next_frame = false` set is treated as having no schedule variant, equivalent to `present_at_us = 0` (immediate). It does NOT select the `next_frame` variant.
+- Relative scheduling and `expires_at_us`: `expires_at_us` is validated against the **converted** `present_at_us`; `TIMESTAMP_EXPIRY_BEFORE_PRESENT` fires when `expires_at_us <= converted_present_at_us`, not against the raw `after_us` or `frames_from_now` value.
+- `RELATIVE_SCHEDULE_CONFLICT` rejection: a mutation with two or more `oneof schedule` variants set (e.g., both `present_at_us` and `after_us`) is rejected with `RELATIVE_SCHEDULE_CONFLICT`; no partial processing occurs.
+- Relative scheduling and sync groups: a sync group mutation scheduled with `after_us` is evaluated by sync group commit policy against the absolute `present_at_us` after conversion; sync group atomicity is not affected by whether scheduling was relative or absolute.
+- Relative scheduling telemetry: `FrameTimingRecord` records the converted `present_at_us` value in all telemetry fields; the raw `after_us` / `frames_from_now` values do not appear in any telemetry record, scene graph state, or stored mutation.
+- `after_us` `TIMESTAMP_TOO_FUTURE` rejection: `after_us` exceeding `timing.max_future_schedule_us` after conversion triggers `TIMESTAMP_TOO_FUTURE`; the threshold is applied to the converted `present_at_us`, not to the raw `after_us` value.
+- `frames_from_now` frame rate change: if `target_fps` changes between conversion and target frame, the mutation is applied at the first frame whose actual vsync time meets or exceeds the stored `present_at_us`; the mutation is not applied earlier than the original intended frame.
 
 ### 8.3 Chaos Test Requirements
 
