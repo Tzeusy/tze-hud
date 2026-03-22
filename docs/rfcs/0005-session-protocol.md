@@ -1072,16 +1072,17 @@ message SubscriptionChangeResult {
 // in timing.proto (RFC 0003). The full implementation imports timing.proto;
 // this inline block must match RFC 0003 §7.1 exactly.
 //
-// Round 2 fix (C-R1): sync_group_id was incorrectly typed as `string`. It is
-// a 16-byte UUIDv7 binary value and must be `bytes`, consistent with SceneId
-// (RFC 0001 §1.1) and RFC 0003 §2.2. All-zero bytes = "not in a sync group".
+// Round 2 fix (C-R1): sync_group_id was incorrectly typed as `string`.
+// Round 4 fix (R4-T3): sync_group_id updated from `bytes` to `SceneId` for
+// type-system consistency with all other SyncGroupId fields in timing.proto.
+// All-zero SceneId = "not in a sync group" (RFC 0001 §10.1).
 
 message TimingHints {
-  uint64 present_at_wall_us = 1;  // Wall-clock (UTC µs since epoch); 0 = present immediately
-  uint64 expires_at_wall_us = 2;  // Wall-clock (UTC µs since epoch); 0 = no expiry
-  bytes  sync_group_id      = 3;  // SyncGroupId: 16-byte UUIDv7 (RFC 0003 §2.2); all-zero = no group
+  uint64  present_at_wall_us = 1;  // Wall-clock (UTC µs since epoch); 0 = present immediately
+  uint64  expires_at_wall_us = 2;  // Wall-clock (UTC µs since epoch); 0 = no expiry
+  SceneId sync_group_id      = 3;  // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7; all-zero = no group
   // RFC 0003 §7.1 is authoritative; this inline definition matches it exactly after
-  // the Round 3 cross-RFC fix (rig-5vq.21) aligned RFC 0003 to the _wall_us/_mono_us convention.
+  // the Round 4 cross-RFC fix (rig-5vq.22) aligned sync_group_id to use SceneId.
 }
 
 // ID type convention: scene-object IDs (batch_id, lease_id, created_ids) use
