@@ -1,0 +1,20 @@
+[package]
+name = "tze_hud_protocol"
+description = "gRPC protocol layer for tze_hud agent communication"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tze_hud_scene = { path = "../tze_hud_scene" }
+tze_hud_telemetry = { path = "../tze_hud_telemetry" }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+[build-dependencies]
+tonic-build = "0.13"
