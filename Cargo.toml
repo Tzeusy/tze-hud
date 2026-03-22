@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tze_hud_scene",
+    "crates/tze_hud_compositor",
+    "crates/tze_hud_runtime",
+    "crates/tze_hud_protocol",
+    "crates/tze_hud_input",
+    "crates/tze_hud_telemetry",
+    "examples/vertical_slice",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Scene graph
+uuid = { version = "1", features = ["v7", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async / networking
+tokio = { version = "1", features = ["full"] }
+tonic = "0.13"
+prost = "0.13"
+prost-types = "0.13"
+
+# GPU / windowing
+wgpu = "24"
+winit = "0.30"
+
+# Telemetry / timing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+# Testing
+proptest = "1"
+
+# Misc
+thiserror = "2"
+bytemuck = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
