@@ -23,6 +23,7 @@
 | 9 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification (subsumed by Round 7) | Cross-RFC pass that added `import "scene.proto"` and converted `lease_id`/`created_ids` to `SceneId`. The `batch_id` conversion was also completed in Round 7 (rig-de2), which is authoritative — RFC 0001 §4 and §7.1 establish `batch_id` as a scene-object ID (`SceneId`), not a session-level string. This round's RFC 0003, RFC 0004, and RFC 0007 changes (SyncGroupConfig, input proto, session proto ID unification) remain as committed on those files. |
 | 10 | 2026-03-22 | rig-3uy | Align v1 reconnect with full-snapshot model, defer delta burst | Replaced §6.4 "State Delta on Resume" with v1-correct "Reconnect Within Grace Period (Full Snapshot)": runtime sends `SceneSnapshot` (not incremental delta replay) on accepted resume, then restores orphaned leases. Moved delta-burst mechanism to post-v1 callout in §6.4 with forward-compatibility guidance. Updated `SessionResume.last_seen_server_sequence` comment to reflect v1 purpose (identity binding / lease reclaim) vs post-v1 purpose (delta replay). Reserved field 38 (`StateDeltaComplete`) in both `SessionMessage` oneof blocks with deferred label. Updated `StateDeltaComplete` comment block in §9 proto. Updated §9.2 field registry: field 38 now listed as reserved/deferred. Updated `SceneSnapshot` comment in §9 to enumerate all three delivery cases (new connection, resume, post-grace reconnect). Updated §1.3 snapshot delivery cross-reference. |
 | 11 | 2026-03-22 | rig-5vq.21 | Cross-RFC consistency fixes from Timing RFC Round 3 review | `ZonePublish.ttl_ms` renamed to `ttl_us` (RFC 0003 §3.1: `_us` is authoritative for timing fields); `auto_clear_ms` prose reference updated to `auto_clear_us` (aligns with RFC 0001 `Zone.auto_clear_us`); `publish_to_zone` MCP tool `ttl_ms` parameter renamed to `ttl_us`; `TimingHints` inline note updated to confirm alignment with RFC 0003 §7.1 after Round 3 clock-domain naming fix. |
+| 12 | 2026-03-22 | rig-5vq.29 | Cross-RFC consistency and integration | Added `SessionSuspended`/`SessionResumed` messages (§3.2, §3.6, §9 proto, §9.2) closing protocol gap flagged in RFC 0007 §8 and RFC 0008 §11. Added input control request fields 26–29 (`InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition`) and corresponding response fields 43–44 (`InputFocusResponse`, `InputCaptureResponse`) to `SessionMessage` oneof (§3.1, §3.2, §9 proto), resolving RFC 0004 §8.3.1 dependency. Added RFC 0004 `EventBatch` note to §3.2 `InputEvent` row. Renamed `TelemetryFrame.sample_timestamp_us` → `sample_timestamp_wall_us` per §2.4 naming convention. Added `CLOCK_SKEW_HIGH` and `CLOCK_SKEW_EXCESSIVE` to `RuntimeError.ErrorCode` enum. Added `reconnect_grace_secs` cross-reference to §10 config table. Updated §11 cross-RFC table. |
 
 ---
 
@@ -301,13 +302,18 @@ message SessionMessage {
     CapabilityRequest   capability_request    = 23;
     SubscriptionChange  subscription_change   = 24;
     ZonePublish         zone_publish          = 25;
+    // Input control requests (RFC 0004 §8.3.1; §3.8)
+    InputFocusRequest   input_focus_request   = 26;
+    InputCaptureRequest input_capture_request = 27;
+    InputCaptureRelease input_capture_release = 28;
+    SetImePosition      set_ime_position      = 29;
 
     // Runtime → Agent
     MutationResult      mutation_result       = 30;
     LeaseResponse       lease_response        = 31;
     HeartbeatPong       heartbeat_pong        = 32;
     SceneEvent          scene_event           = 33;
-    InputEvent          input_event           = 34;
+    InputEvent          input_event           = 34;  // EventBatch per RFC 0004 §8.3
     DegradationNotice   degradation_notice    = 35;
     RuntimeError        runtime_error         = 36;
     CapabilityNotice    capability_notice     = 37;  // Mid-session grant/revoke
@@ -316,6 +322,10 @@ message SessionMessage {
     ZonePublishResult   zone_publish_result   = 40;  // Ack for durable ZonePublish (§3.1)
     TelemetryFrame      telemetry_frame       = 41;  // Runtime perf/health sample; TELEMETRY_FRAMES subscribers only (§7.1)
     SceneSnapshot       scene_snapshot        = 42;  // Full scene state; sent after SessionEstablished and on resume (§1.3, §6.4, §6.5)
+    InputFocusResponse  input_focus_response  = 43;  // Ack for InputFocusRequest (RFC 0004 §1.2; §3.8)
+    InputCaptureResponse input_capture_response = 44;  // Ack for InputCaptureRequest (RFC 0004 §2.3; §3.8)
+    SessionSuspended    session_suspended     = 45;  // Safe mode entry (RFC 0007 §5.2; §3.7)
+    SessionResumed      session_resumed       = 46;  // Safe mode exit (RFC 0007 §5.5; §3.7)
   }
 }
 ```
@@ -375,6 +385,10 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `CapabilityRequest` | Transactional | Request an additional capability mid-session |
 | `SubscriptionChange` | Transactional | Add/remove event subscription categories; acked by `SubscriptionChangeResult` |
 | `ZonePublish` | State-stream (ephemeral zones) or Transactional (durable zones) | Push content to a named zone. Durable-zone publishes receive a `ZonePublishResult` ack; ephemeral-zone publishes are fire-and-forget. |
+| `InputFocusRequest` | Transactional | Request focus for a tile/node (RFC 0004 §1.2); acked by `InputFocusResponse` |
+| `InputCaptureRequest` | Transactional | Request exclusive pointer capture for a node (RFC 0004 §2.3); acked by `InputCaptureResponse` |
+| `InputCaptureRelease` | Transactional | Release pointer capture (RFC 0004 §2.3); confirmed by async `CaptureReleasedEvent` in `InputEvent` |
+| `SetImePosition` | Ephemeral | Advisory: update IME candidate window position (RFC 0004 §4.3); fire-and-forget |
 
 ### 3.2 Server → Client Messages
 
@@ -393,6 +407,12 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `SubscriptionChangeResult` | Transactional | Ack/nack for a `SubscriptionChange`; echoes full active subscription set |
 | `ZonePublishResult` | Transactional | Ack/nack for a durable-zone `ZonePublish`; not sent for ephemeral zones |
 | `TelemetryFrame` | State-stream | Runtime performance and health telemetry sample; delivered only to sessions subscribed to `telemetry_frames` (§7.1) |
+| `SessionSuspended` | Transactional | Runtime has suspended the session (safe mode entry, RFC 0007 §5.2); all mutations rejected with `SAFE_MODE_ACTIVE` until `SessionResumed` is received. See §3.7. |
+| `SessionResumed` | Transactional | Session resumed after suspension (safe mode exit, RFC 0007 §5.5); mutations accepted again. See §3.7. |
+| `InputFocusResponse` | Transactional | Ack/nack for `InputFocusRequest`; correlated by sequence number (RFC 0004 §1.2) |
+| `InputCaptureResponse` | Transactional | Ack/nack for `InputCaptureRequest`; correlated by sequence number (RFC 0004 §2.3) |
+
+**Note on `InputEvent` batching (RFC 0004 §8.3):** RFC 0004 §8.3 specifies that multiple input events for the same agent within a single frame are assembled into an `EventBatch` (a `repeated InputEnvelope` with frame metadata) and delivered as a single `SessionMessage`. The current `input_event` field 34 carries a single `InputEnvelope`; the full `EventBatch` type defined in RFC 0004 §8.4 is the v1 delivery contract. Implementors must update field 34 to carry `EventBatch` per RFC 0004 §8.3.1.
 
 ### 3.3 MutationBatch
 
@@ -467,13 +487,19 @@ message RuntimeError {
     RATE_LIMITED              = 9;
     INVALID_ARGUMENT          = 10;
     SESSION_EXPIRED           = 11;
+    CLOCK_SKEW_HIGH           = 12;  // Agent clock drift >100ms (default); timestamps still accepted with skew correction (RFC 0003 §4.5)
+    CLOCK_SKEW_EXCESSIVE      = 13;  // Agent clock drift >1s; mutation batch rejected; agent must re-sync via ClockSync RPC (RFC 0003 §4.5)
+    SAFE_MODE_ACTIVE          = 14;  // Mutation rejected because session is suspended in safe mode (RFC 0007 §5.2)
+    TIMESTAMP_TOO_OLD         = 15;  // present_at > 60s in the past (RFC 0003 §3.5)
+    TIMESTAMP_TOO_FUTURE      = 16;  // present_at > max_future_schedule_us in the future (RFC 0003 §3.5)
+    TIMESTAMP_EXPIRY_BEFORE_PRESENT = 17;  // expires_at <= present_at (RFC 0003 §3.5)
   }
 }
 ```
 
 `error_code` (string) is the canonical, stable identifier across all protocol versions. `error_code_enum` is provided for type-safe handling in generated clients — set it to `ERROR_CODE_UNKNOWN` for any code not yet in the enum. The two fields always carry the same logical value.
 
-Common error codes are defined per-subsystem: scene operation errors in RFC 0001, lease errors in RFC 0002, input routing errors in RFC 0004, and session errors in §1.7 above.
+Common error codes are defined per-subsystem: scene operation errors in RFC 0001, lease errors in RFC 0002, input routing errors in RFC 0004, and session errors in §1.7 above. Clock timing errors (`CLOCK_SKEW_HIGH`, `CLOCK_SKEW_EXCESSIVE`, `TIMESTAMP_TOO_OLD`, `TIMESTAMP_TOO_FUTURE`, `TIMESTAMP_EXPIRY_BEFORE_PRESENT`) originate from RFC 0003 §3.5 and §4.5; the string codes are the stable identifiers across protocol versions.
 
 ### 3.6 HeartbeatPing / HeartbeatPong
 
@@ -491,6 +517,51 @@ message HeartbeatPong {
 Heartbeat interval is negotiated at handshake (`SessionEstablished.heartbeat_interval_ms`). The runtime treats the session as ungracefully disconnected when `heartbeat_missed_threshold` consecutive pings are missed (default: `heartbeat_missed_threshold = 3`, so `3 × 5000 ms = 15 000 ms`).
 
 **Clock domains:** `HeartbeatPing.client_timestamp_mono_us` is a monotonic clock value (RFC 0003 §1.1 "Monotonic system clock") — it is appropriate for RTT measurement because monotonic clocks do not jump. `HeartbeatPong.server_timestamp_wall_us` is a wall-clock value (UTC µs since Unix epoch) — it is advisory and not suitable for RTT calculation (wall clocks can jump due to NTP adjustments). To measure round-trip latency, compute `current_monotonic_us - HeartbeatPong.client_timestamp_mono_us`. See §2.4 "Clock domains".
+
+### 3.7 SessionSuspended / SessionResumed
+
+These messages are emitted when the viewer activates or exits safe mode (RFC 0007 §5.2, §5.5). They are added here to close the protocol gap identified in RFC 0007 §8 and RFC 0008 §11.
+
+```protobuf
+message SessionSuspended {
+  string reason = 1;  // Human-readable reason; "viewer_safe_mode" for safe mode entry (RFC 0007 §5.2)
+}
+
+message SessionResumed {
+  // No payload fields required; receipt is the signal.
+  // After receiving this message, the agent may resume submitting mutations.
+}
+```
+
+**Semantics:**
+
+- `SessionSuspended` is sent to all active sessions when safe mode is entered (RFC 0007 §4.2). After delivery, the runtime rejects all `MutationBatch` messages from the suspended session with `RuntimeError.error_code = "SAFE_MODE_ACTIVE"`. The agent's session remains open and its leases transition to `SUSPENDED` state (RFC 0008 §6.2). The agent's network connection is maintained — it can still send `HeartbeatPing` and receive `HeartbeatPong`.
+- `SessionResumed` is sent to all suspended sessions when safe mode exits (RFC 0007 §5.5). After delivery, mutation submission is permitted again and leases return to `ACTIVE` state.
+- Both messages are `Transactional` — never dropped, reliably delivered before any subsequent message in the server-to-client direction.
+- Agents that do not implement safe mode support (e.g., v1 agents written before this round) will see their mutations rejected with `SAFE_MODE_ACTIVE` errors during safe mode; they will recover normally when they receive `SessionResumed` and mutations are accepted again.
+
+### 3.8 Input Control Requests (Agent → Runtime) and Responses (Runtime → Agent)
+
+These messages close the RFC 0004 §8.3.1 protocol gap: `FocusRequest`, `CaptureRequest`, `CaptureReleaseRequest`, and `SetImePositionRequest` (defined in RFC 0004 §1.2, §2.3, §4.3) must travel agent → runtime on the session stream. The corresponding `FocusResponse` and `CaptureResponse` travel runtime → agent.
+
+All four request types are `Transactional` (never dropped). `InputFocusRequest` and `InputCaptureRequest` use synchronous request/response semantics — correlated by `sequence` number, retransmit after `retransmit_timeout_ms` if no response arrives. `InputCaptureRelease` is confirmed asynchronously by `CaptureReleasedEvent` (already delivered inside `InputEvent`, field 34). `SetImePosition` is fire-and-forget.
+
+The message schemas are defined in RFC 0004 (§1.2, §2.3, §4.3 for request types; §1.2, §2.3 for response types). This RFC adds their `SessionMessage.payload` assignments:
+
+```protobuf
+// Agent → Runtime input control requests (fields 26–29)
+// Schemas defined in RFC 0004; payload fields assigned here.
+// InputFocusRequest     input_focus_request     = 26;  // RFC 0004 §1.2
+// InputCaptureRequest   input_capture_request   = 27;  // RFC 0004 §2.3
+// InputCaptureRelease   input_capture_release   = 28;  // RFC 0004 §2.3 (async confirm via CaptureReleasedEvent)
+// SetImePosition        set_ime_position        = 29;  // RFC 0004 §4.3 (fire-and-forget)
+
+// Runtime → Agent input control responses (fields 43–44)
+// InputFocusResponse    input_focus_response    = 43;  // RFC 0004 §1.2 (ack for InputFocusRequest)
+// InputCaptureResponse  input_capture_response  = 44;  // RFC 0004 §2.3 (ack for InputCaptureRequest)
+```
+
+**Dependency note:** RFC 0004 defines the request/response message schemas. Both RFCs must be read together for a complete picture. The field assignments above supersede the draft field numbers in RFC 0004 §8.3.1 (which proposed fields 39–40 for responses — those are now occupied by `SubscriptionChangeResult` and `ZonePublishResult`).
 
 ---
 
@@ -1079,7 +1150,25 @@ message RuntimeError {
     RATE_LIMITED              = 9;
     INVALID_ARGUMENT          = 10;
     SESSION_EXPIRED           = 11;
+    CLOCK_SKEW_HIGH           = 12;  // Agent clock drift >100ms; see RFC 0003 §4.5
+    CLOCK_SKEW_EXCESSIVE      = 13;  // Agent clock drift >1s; mutation batch rejected (RFC 0003 §4.5)
+    SAFE_MODE_ACTIVE          = 14;  // Session suspended in safe mode (RFC 0007 §5.2)
+    TIMESTAMP_TOO_OLD         = 15;  // present_at >60s in the past (RFC 0003 §3.5)
+    TIMESTAMP_TOO_FUTURE      = 16;  // present_at > max_future_schedule_us (RFC 0003 §3.5)
+    TIMESTAMP_EXPIRY_BEFORE_PRESENT = 17;  // expires_at <= present_at (RFC 0003 §3.5)
   }
+}
+
+// ─── Session suspend/resume (server → client) ────────────────────────────────
+// Sent on safe mode entry/exit (RFC 0007 §5.2, §5.5).
+// Protocol gap resolved in Round 11 (rig-5vq.29). See §3.7 for full semantics.
+
+message SessionSuspended {
+  string reason = 1;  // e.g. "viewer_safe_mode"
+}
+
+message SessionResumed {
+  // No payload; receipt is the signal.
 }
 
 // ─── Degradation notice (server → client) ────────────────────────────────────
@@ -1108,7 +1197,7 @@ message DegradationNotice {
 // Traffic class: State-stream (coalesced under backpressure; latest-wins).
 
 message TelemetryFrame {
-  uint64 sample_timestamp_us     = 1;  // Wall-clock (µs since epoch) at which the sample was taken
+  uint64 sample_timestamp_wall_us = 1;  // Wall-clock UTC (µs since epoch) at which the sample was taken; see §2.4
   uint32 compositor_frame_rate   = 2;  // Compositor render loop rate (frames per second)
   uint32 compositor_frame_budget_us = 3;  // Budget per frame (µs); typically 1 000 000 / target_fps
   uint32 compositor_frame_time_us  = 4;  // Actual last-frame render time (µs); >budget = frame drop
@@ -1141,13 +1230,18 @@ message SessionMessage {
     CapabilityRequest    capability_request    = 23;
     SubscriptionChange   subscription_change   = 24;
     ZonePublish          zone_publish          = 25;
+    // Input control requests (RFC 0004 §8.3.1): schemas defined in RFC 0004; assigned here (§3.8)
+    InputFocusRequest    input_focus_request   = 26;  // RFC 0004 §1.2 — request focus for a tile/node
+    InputCaptureRequest  input_capture_request = 27;  // RFC 0004 §2.3 — request exclusive pointer capture
+    InputCaptureRelease  input_capture_release = 28;  // RFC 0004 §2.3 — release pointer capture (confirmed by CaptureReleasedEvent)
+    SetImePosition       set_ime_position      = 29;  // RFC 0004 §4.3 — advisory IME candidate window position (fire-and-forget)
 
     // Runtime → Agent
     MutationResult          mutation_result          = 30;
     LeaseResponse           lease_response           = 31;  // Reuse from scene_service.proto
     HeartbeatPong           heartbeat_pong           = 32;
     SceneEvent              scene_event              = 33;  // Reuse from scene_service.proto
-    InputEvent              input_event              = 34;  // Reuse from scene_service.proto
+    InputEvent              input_event              = 34;  // EventBatch per RFC 0004 §8.3; see §3.2 note
     DegradationNotice       degradation_notice       = 35;
     RuntimeError            runtime_error            = 36;  // Defined in session.proto (§3.5)
     CapabilityNotice        capability_notice        = 37;
@@ -1156,8 +1250,12 @@ message SessionMessage {
     ZonePublishResult       zone_publish_result      = 40;  // Ack for durable ZonePublish (§3.1)
     TelemetryFrame          telemetry_frame          = 41;  // Runtime perf/health sample; TELEMETRY_FRAMES subscribers only (§7.1)
     SceneSnapshot           scene_snapshot           = 42;  // Full scene state; sent after SessionEstablished, on resume, and post-grace reconnect (§1.3, §6.4, §6.5)
-    // Fields 43–49 reserved for future server→client messages.
-    // Fields 50–99 reserved for future use.
+    InputFocusResponse      input_focus_response     = 43;  // Ack for InputFocusRequest (RFC 0004 §1.2; §3.8)
+    InputCaptureResponse    input_capture_response   = 44;  // Ack for InputCaptureRequest (RFC 0004 §2.3; §3.8)
+    SessionSuspended        session_suspended        = 45;  // Safe mode entry (RFC 0007 §5.2; §3.7)
+    SessionResumed          session_resumed          = 46;  // Safe mode exit (RFC 0007 §5.5; §3.7)
+    // Fields 47–49 reserved for future server→client messages.
+    // Fields 50–99 reserved for future use (e.g., post-v1 embodied presence/media signaling).
   }
 }
 
@@ -1204,7 +1302,9 @@ session.proto
 
 Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
 
-Currently allocated server→client fields: 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`). Fields 43–49 are available for future server→client additions.
+**Currently allocated client→server fields:** 10–15 (lifecycle), 20–25 (original mutations/subscriptions), 26–29 (input control requests: `InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition` — added Round 11 per RFC 0004 §8.3.1).
+
+**Currently allocated server→client fields:** 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`), 43 (`InputFocusResponse`), 44 (`InputCaptureResponse`), 45 (`SessionSuspended`), 46 (`SessionResumed`). Fields 47–49 are available for future server→client additions.
 
 ---
 
@@ -1217,7 +1317,7 @@ The session protocol exposes the following configurable parameters in the runtim
 | `handshake_timeout_ms` | 5000 | Timeout for `SessionInit` arrival after stream open |
 | `heartbeat_interval_ms` | 5000 | How often agents must send `HeartbeatPing` |
 | `heartbeat_missed_threshold` | 3 | Number of consecutive missed heartbeats before ungraceful disconnect is declared. Disconnect timeout = `heartbeat_missed_threshold × heartbeat_interval_ms` = 15 000 ms by default. |
-| `reconnect_grace_period_ms` | 30 000 | How long orphaned leases are held after disconnect |
+| `reconnect_grace_period_ms` | 30 000 | How long orphaned leases are held after disconnect. **Config file key:** `reconnect_grace_secs` (RFC 0006 §2.2; value in seconds — the runtime converts to ms internally). RFC 0008 §12 references this parameter as `reconnect_grace_period_ms`. |
 | `retransmit_timeout_ms` | 5000 | Agent-side timeout before retransmitting unacked transactional message |
 | `dedup_window_size` | 1000 | Max unique `batch_id` values held **per-session** in the deduplication window |
 | `dedup_window_ttl_s` | 60 | Time-to-live for deduplication window entries |
@@ -1235,7 +1335,11 @@ The session protocol exposes the following configurable parameters in the runtim
 | RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (RFC 0001 §7.1) — a typed protobuf message encoding a 16-byte little-endian UUIDv7. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` as they are not scene objects. **`SceneSnapshot` (§9) is defined in RFC 0001 §7.1 and imported into `session.proto` via `scene.proto`; this RFC depends on RFC 0001 for the snapshot wire format, field layout, and reconstruction algorithm.** |
 | RFC 0002 (Runtime Kernel) | The session service is a component of the runtime kernel. Lease lifecycle (grace period, revocation) is governed by RFC 0002. |
 | RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_wall_us` and `SessionEstablished.compositor_timestamp_wall_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. Clock-domain naming in this RFC follows the `_wall_us`/`_mono_us` convention (§2.4); see RFC 0003 §1.1 for the canonical clock domain definitions. |
-| RFC 0004 (Input Model) | `InputEvent` messages delivered over the session stream follow the routing and dispatch rules of RFC 0004. |
+| RFC 0004 (Input Model) | `InputEvent` messages (field 34) follow RFC 0004 routing and dispatch rules. RFC 0004 §8.3.1 requires `SessionMessage` payload fields 26–29 (input control requests) and 43–44 (responses) — added in Round 11 (§3.8). RFC 0004 §8.3 specifies `EventBatch` delivery semantics for field 34; implementors must update from single `InputEnvelope` to `EventBatch` per RFC 0004 §8.4. |
+| RFC 0006 (Configuration) | Session parameters in §10 are exposed via `[runtime]` TOML section. `reconnect_grace_period_ms` maps to `reconnect_grace_secs` in the config file. RFC 0006 §2.2 is authoritative for TOML key names and types. |
+| RFC 0007 (System Shell) | `SessionSuspended` and `SessionResumed` (§3.7, fields 45–46) implement the safe mode session lifecycle defined in RFC 0007 §5.2 and §5.5. This RFC was the protocol gap flagged in RFC 0007 §8; resolved in Round 11. |
+| RFC 0008 (Lease Governance) | Lease orphaning, grace period, and reclaim on resume are governed by RFC 0008. `SessionSuspended` triggers lease `ACTIVE → SUSPENDED` transitions per RFC 0008 §6.2; `SessionResumed` restores them. `SAFE_MODE_ACTIVE` error code (§3.5) is the mutation rejection code during suspension. |
+| RFC 0009 (Policy Arbitration) | `ArbitrationError` (defined in RFC 0009) extends `MutationBatchResult`; the `PERMISSION_DENIED` and `BUDGET_EXCEEDED` codes in §3.5 are reused by the arbitration pipeline. Transactional mutation delivery guarantees (§5.1) take precedence over RFC 0009 §7 shedding policy. |
 
 ---
 
