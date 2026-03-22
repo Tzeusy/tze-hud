@@ -47,7 +47,7 @@ This RFC resolves all of these by treating the chrome layer as a first-class, in
 
 ### 1.1 Layer Stack Position
 
-The compositor renders three ordered layers, back to front (specified in RFC 0002 §3):
+The compositor renders three ordered layers, back to front (specified in architecture.md §Compositing model):
 
 1. **Background layer** — ambient content or transparent passthrough. Runtime-owned.
 2. **Content layer** — agent tiles, z-ordered within the layer.
@@ -77,7 +77,7 @@ The chrome layer contains the following elements. All are defined in this RFC:
 | Tab bar | §2 | Visible |
 | System status indicator | §2.4 | Visible |
 | Tile badges | §3 | Conditional (per tile state) |
-| Focus ring | RFC 0004 §2.3 | Conditional (on active input focus) |
+| Focus ring | RFC 0004 §5.6 | Conditional (on active input focus) |
 | Override controls | §4 | Visible (opacity varies by context) |
 | Safe mode overlay | §5 | Hidden; shown only in safe mode |
 | Privacy indicator | §6 | Visible |
@@ -144,8 +144,8 @@ All tab navigation is available without mouse/touch:
 |--------|-----------------|
 | Next tab | `Ctrl+Tab` |
 | Previous tab | `Ctrl+Shift+Tab` |
-| Switch to tab N | `Ctrl+1` through `Ctrl+9` |
-| Switch to last tab | `Ctrl+0` |
+| Switch to tab N | `Ctrl+1` through `Ctrl+8` |
+| Switch to last tab | `Ctrl+9` (always the last tab, regardless of count — matches browser convention) |
 
 Shortcuts are configurable in `config.toml`. They are handled by the input model's chrome shortcut layer (RFC 0004 §4), not routed to any agent.
 
@@ -179,7 +179,7 @@ All badges share a common visual language:
 - **Position:** Top-right corner of the tile, inset by 4 logical pixels. This position is invariant — all badges appear in the same location.
 - **Size:** 20×20 logical pixels for icon-only badges; auto-width for text badges with a fixed icon prefix.
 - **Layering:** Multiple badges stack vertically downward from the top-right corner, each 4 logical pixels apart.
-- **Priority order** (top to bottom when stacked): disconnection, staleness, budget warning, redaction placeholder indicator.
+- **Priority order** (top to bottom when stacked): disconnection, staleness, budget warning. Redaction is not a stacking badge — it is a full content replacement (see §3.4).
 
 ### 3.2 Disconnection Badge
 
@@ -270,7 +270,7 @@ The agent may re-request a lease. The runtime does not permanently block an agen
 
 **Action:**
 1. All active leases are revoked simultaneously.
-2. All agent sessions receive `SessionTerminated` with reason `viewer_safe_mode`.
+2. All agent sessions receive `SessionSuspended` with reason `viewer_safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale).
 3. The runtime enters safe mode (see §5).
 
 This is the "emergency stop" for the entire display. It is not reversible by agents — they cannot reinstate their sessions in response to this event. The viewer must explicitly exit safe mode.
@@ -537,7 +537,35 @@ message SafeModeEntryEvent {
 message SafeModeExitEvent {}
 ```
 
-### 7.4 Safe Mode State Machine Type
+### 7.4 Override State and Viewer Prompt State Types
+
+`OverrideState` captures the current active override conditions (freeze, mute). It is a snapshot read by the chrome render pass each frame.
+
+```protobuf
+// Internal — not agent-accessible.
+message OverrideState {
+  bool freeze_active = 1;        // Scene is frozen (Ctrl+Shift+F active).
+  bool global_mute_active = 2;   // Global audio mute active.
+  repeated string muted_tile_ids = 3;  // Per-tile muted tile SceneIds.
+}
+```
+
+`ViewerPromptState` tracks whether the "Who's Watching?" identification prompt is currently displayed.
+
+```protobuf
+// Internal — not agent-accessible.
+message ViewerPromptState {
+  repeated ViewerIdentityChoice choices = 1;  // Selectable identities.
+  int64 timeout_at_us = 2;  // Monotonic timestamp; prompt auto-dismisses at this time.
+}
+
+message ViewerIdentityChoice {
+  string label = 1;         // Human-readable identity label (e.g., "Alice", "Guest").
+  ViewerClass viewer_class = 2;  // Viewer class that will be applied if selected.
+}
+```
+
+### 7.5 Safe Mode State Machine Type
 
 ```protobuf
 // Internal — not agent-accessible.
@@ -553,7 +581,7 @@ enum SafeModePhase {
 }
 ```
 
-### 7.5 Chrome Render Commands
+### 7.6 Chrome Render Commands
 
 The compositor's chrome render pass is driven by a sequence of `ChromeRenderCmd` values derived from `ChromeState` at frame time. These are not persisted — they are computed each frame.
 
@@ -583,7 +611,7 @@ message SafeModeOverlayCmd {
 }
 ```
 
-### 7.6 Tab Bar Internal State
+### 7.7 Tab Bar Internal State
 
 ```protobuf
 // Internal — not agent-accessible.
@@ -605,7 +633,7 @@ enum TabBarPosition {
 message TabEntry {
   string tab_id = 1;
   string name = 2;
-  bool is_active = 3;
+  // Active tab is identified by TabBarState.active_tab_id; no redundant is_active field.
 }
 ```
 
@@ -618,7 +646,7 @@ message TabEntry {
 | RFC 0001 (Scene Contract) | Chrome renders above the scene graph. `SceneId` is used to key `TileBadgeState`. Chrome elements are not `SceneId`-addressable. |
 | RFC 0002 (Runtime Kernel) | Chrome render pass executes as the final stage in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read atomically from the same shared state the control plane writes. |
 | RFC 0003 (Timing Model) | Override events carry `timestamp_us` using the monotonic clock (RFC 0003 §1.1). Override execution is frame-bounded — effects appear within one frame of the event. |
-| RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0004 §1 "Screen is sovereign"). Chrome shortcuts are registered in the input model's shortcut table and evaluated before tile hit-testing. In safe mode, the input model routes all events to the chrome layer exclusively. |
+| RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0001 §5.2 traversal order: chrome always wins). Chrome shortcuts are registered in the input model's shortcut table and evaluated before tile hit-testing. In safe mode, the input model routes all events to the chrome layer exclusively. |
 
 ---
 
