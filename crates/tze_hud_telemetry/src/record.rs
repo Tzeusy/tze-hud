@@ -92,6 +92,36 @@ impl LatencyBucket {
     pub fn p99(&self) -> Option<u64> {
         self.percentile(99.0)
     }
+
+    /// Assert that the p99 value is under the given budget (in microseconds).
+    ///
+    /// Returns `Ok(p99_value)` on pass, `Err(message)` on failure or if there
+    /// are no samples.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tze_hud_telemetry::LatencyBucket;
+    /// let mut bucket = LatencyBucket::new("frame_time");
+    /// for _ in 0..100 { bucket.record(5_000); }
+    /// assert!(bucket.assert_p99_under(16_600).is_ok());
+    /// ```
+    pub fn assert_p99_under(&self, budget_us: u64) -> Result<u64, String> {
+        match self.p99() {
+            None => Err(format!(
+                "budget assertion failed for '{}': no samples recorded",
+                self.name
+            )),
+            Some(p99) if p99 > budget_us => Err(format!(
+                "budget assertion failed for '{}': p99={p99}us exceeds budget={budget_us}us \
+                 (over by {}us, {:.1}%)",
+                self.name,
+                p99 - budget_us,
+                (p99 as f64 / budget_us as f64 - 1.0) * 100.0,
+            )),
+            Some(p99) => Ok(p99),
+        }
+    }
 }
 
 /// Tier in the budget enforcement ladder.
