@@ -92,6 +92,36 @@ impl LatencyBucket {
     pub fn p99(&self) -> Option<u64> {
         self.percentile(99.0)
     }
+
+    /// Assert that the p99 value is under the given budget (in microseconds).
+    ///
+    /// Returns `Ok(p99_value)` on pass, `Err(message)` on failure or if there
+    /// are no samples.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tze_hud_telemetry::LatencyBucket;
+    /// let mut bucket = LatencyBucket::new("frame_time");
+    /// for _ in 0..100 { bucket.record(5_000); }
+    /// assert!(bucket.assert_p99_under(16_600).is_ok());
+    /// ```
+    pub fn assert_p99_under(&self, budget_us: u64) -> Result<u64, String> {
+        match self.p99() {
+            None => Err(format!(
+                "budget assertion failed for '{}': no samples recorded",
+                self.name
+            )),
+            Some(p99) if p99 > budget_us => Err(format!(
+                "budget assertion failed for '{}': p99={p99}us exceeds budget={budget_us}us \
+                 (over by {}us, {:.1}%)",
+                self.name,
+                p99 - budget_us,
+                (p99 as f64 / budget_us as f64 - 1.0) * 100.0,
+            )),
+            Some(p99) => Ok(p99),
+        }
+    }
 }
 
 /// Tier in the budget enforcement ladder.
@@ -211,5 +241,35 @@ mod tests {
         let json = summary.to_json().unwrap();
         assert!(json.contains("frame_time"));
         assert!(json.contains("12000"));
+    }
+
+    #[test]
+    fn test_assert_p99_under_passes_when_within_budget() {
+        let mut bucket = LatencyBucket::new("test");
+        for _ in 0..100 {
+            bucket.record(5_000);
+        }
+        assert!(bucket.assert_p99_under(16_600).is_ok());
+    }
+
+    #[test]
+    fn test_assert_p99_under_fails_when_exceeds_budget() {
+        let mut bucket = LatencyBucket::new("test");
+        for _ in 0..100 {
+            bucket.record(20_000); // 20ms — over budget
+        }
+        let result = bucket.assert_p99_under(16_600);
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(msg.contains("20000us"), "error should contain actual: {msg}");
+        assert!(msg.contains("16600us"), "error should contain budget: {msg}");
+    }
+
+    #[test]
+    fn test_assert_p99_under_fails_with_no_samples() {
+        let bucket = LatencyBucket::new("empty");
+        let result = bucket.assert_p99_under(16_600);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no samples"));
     }
 }
