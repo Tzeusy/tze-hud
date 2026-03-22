@@ -482,9 +482,10 @@ impl BudgetEnforcer {
             return Vec::new();
         }
 
-        // Sort tiles by (lease_priority DESC, z_order DESC) — numerically higher
+        // Sort tiles by (lease_priority DESC, z_order ASC) — numerically higher
         // lease_priority = lower importance (0 = highest priority per RFC convention).
-        // We shed from the back of this sorted list (lowest importance).
+        // z_order is a secondary tiebreaker: lower z_order = lower importance → shed first.
+        // We shed from the front of this sorted list (lowest importance) using .take().
         let mut sorted: Vec<(SceneId, u32, u32)> = tile_priorities
             .iter()
             .map(|(_, tile_id, lp, zo)| (*tile_id, *lp, *zo))
@@ -551,10 +552,15 @@ impl BudgetEnforcer {
     // ── Internal helpers ───────────────────────────────────────────────────
 
     /// Returns true if the agent is currently exceeding any budget dimension.
+    ///
+    /// Uses `effective_max_update_rate_hz()` so that a throttled agent is only
+    /// considered resolved once it drops below the *halved* rate limit, not the
+    /// original one — otherwise an agent could escape Throttled state while still
+    /// violating the reduced limit.
     fn is_violated(state: &AgentResourceState) -> bool {
         state.tile_count > state.budget.max_tiles
             || state.texture_bytes_used > state.budget.max_texture_bytes
-            || state.current_update_rate_hz() > state.budget.max_update_rate_hz
+            || state.current_update_rate_hz() > state.effective_max_update_rate_hz()
     }
 
     /// Determine the primary violation kind for telemetry (first exceeded dimension).
