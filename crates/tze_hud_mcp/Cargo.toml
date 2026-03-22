@@ -1,0 +1,21 @@
+[package]
+name = "tze_hud_mcp"
+description = "MCP (Model Context Protocol) compatibility bridge for tze_hud — JSON-RPC tools for LLM interoperability"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tze_hud_scene = { path = "../tze_hud_scene" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Enable the reference HTTP server (run_http). Requires tokio's full feature set.
+http = []
+
+[dev-dependencies]
+tokio = { workspace = true }
