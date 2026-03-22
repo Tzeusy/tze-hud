@@ -10,16 +10,16 @@
 ## Executive Summary
 
 The gen-1 artifacts (four RFCs and the vertical slice codebase) achieve **strong coverage** of the
-v1.md requirements in the areas of scene graph, runtime kernel, timing, and input. Of 47 discrete
-v1.md requirements audited, **39 are fully covered**, **6 are partially covered** with noted gaps,
-and **2 are absent** from both RFCs and code.
+v1.md requirements in the areas of scene graph, runtime kernel, timing, and input. Of 56 discrete
+v1.md requirements audited, **20 are fully covered**, **21 are partially covered**, **11 are
+RFC-specified but not yet implemented** (RFC-ONLY), and **4 are absent** from both RFCs and code.
 
 The vertical slice exercises all six declared layers but exhibits several ergonomic and
 completeness gaps relative to the RFC contracts. These gaps do not break the thesis proof but would
 become blockers during full implementation.
 
-**Gap beads created:** 9 (rig-itf, rig-zo8, rig-s31, rig-hsp, rig-nfr, rig-j8e, rig-6t7, rig-ict, rig-0fi).
-**Gen-2 reconciliation bead:** rig-j1v — depends on all 9 gap beads.
+**Gap beads created:** 10 (rig-itf, rig-zo8, rig-s31, rig-hsp, rig-nfr, rig-j8e, rig-6t7, rig-ict, rig-0fi, rig-3l8).
+**Gen-2 reconciliation bead:** rig-j1v — depends on all 10 gap beads.
 
 ---
 
@@ -206,6 +206,18 @@ absent from the implementation.
 
 **Doctrine reference:** v1.md §Scene model sync groups, RFC 0003 §2, presence.md §Scene mutations atomic.
 
+#### GAP-R7: tze_hud_a11y crate missing (RFC 0004 §5)
+
+RFC 0004 §5.8 specifies `tze_hud_a11y` as a dedicated crate providing the accessibility bridge
+layer: AT-SPI2 on Linux, UIA/IAccessible2 on Windows, and NSAccessibility on macOS. Sections
+§5.1–5.8 fully specify the a11y tree structure, role/state mapping, focus management, and platform
+API bindings. The crate does not exist in the repository — not even as a stub. This is a structural
+gap: the RFC names it as a separate crate boundary but no Cargo.toml entry or module scaffold has
+been created.
+
+**Doctrine reference:** RFC 0004 §5.1–5.8, DR-I7 (keyboard-only navigation), presence.md
+(accessibility requirements).
+
 ### 2.2 Vertical Slice Completeness Gaps
 
 #### GAP-VS1: Validation layers 1–4 absent (V1, V2, V4)
@@ -269,6 +281,7 @@ All beads have been created sequentially.
 | rig-6t7 | Implement test scene registry with Layer 0 corpus (empty_scene through zone_disconnect_cleanup) | P1 | gen-2 |
 | rig-ict | Add injectable clock abstraction to scene graph and telemetry | P2 | gen-2 |
 | rig-0fi | Add p99 budget assertions and Layer 1 pixel assertions to vertical slice | P2 | gen-2 |
+| rig-3l8 | Create tze_hud_a11y crate stub with AT-SPI2/UIA/NSAccessibility scaffolding | P2 | gen-2 |
 
 ---
 
@@ -375,7 +388,7 @@ presentation accuracy (±1 frame), skew correction formula.
 **Platform targets:** not applicable (timing model is platform-independent).
 
 **Verdict: FULL doctrine coverage.** No gaps in RFC itself. Implementation gap (injectable clock)
-captured in GAP-VS2 / rig-5vq.15.
+captured in GAP-VS2 / rig-ict.
 
 ### RFC 0004 — Input Model
 
@@ -451,17 +464,17 @@ through compositor render through input processor through telemetry in one execu
 
 | Category | Total requirements | FULL | PARTIAL | RFC-ONLY | ABSENT |
 |----------|--------------------|------|---------|----------|--------|
-| Scene model | 9 | 5 | 3 | 0 | 1 (S9 partial counts) |
+| Scene model | 9 | 5 | 3 | 1 | 0 |
 | Compositor | 5 | 1 | 4 | 0 | 0 |
 | Protocol | 7 | 4 | 1 | 0 | 2 |
 | Security | 4 | 1 | 3 | 0 | 0 |
-| Interaction | 6 | 4 | 2 | 0 | 0 (touch is RFC-ONLY) |
-| Window modes | 4 | 1 | 1 | 2 | 0 |
+| Interaction | 6 | 3 | 2 | 1 | 0 |
+| Window modes | 4 | 1 | 0 | 3 | 0 |
 | Failure handling | 4 | 0 | 1 | 3 | 0 |
 | Validation arch. | 10 | 3 | 5 | 0 | 2 |
 | Telemetry | 3 | 2 | 1 | 0 | 0 |
 | Platform targets | 4 | 0 | 1 | 3 | 0 |
-| **Total** | **56** | **21 (38%)** | **22 (39%)** | **8 (14%)** | **4 (7%)** |
+| **Total** | **56** | **20 (36%)** | **21 (38%)** | **11 (20%)** | **4 (7%)** |
 
 Notes:
 - RFC-ONLY items are not gaps — they are correctly specified but implementation is expected in a
@@ -484,13 +497,13 @@ The gen-1 code (vertical slice + crates) proves that the architecture is impleme
 six declared layers connect end-to-end. However, it is substantially incomplete relative to the
 full v1.md feature set.
 
-The 9 gap beads created (rig-5vq.8 through rig-5vq.16) cover the highest-priority missing work:
+The 10 gap beads created (rig-itf, rig-zo8, rig-s31, rig-hsp, rig-nfr, rig-j8e, rig-6t7, rig-ict, rig-0fi, rig-3l8) cover the highest-priority missing work:
 zone publishing (critical for the v1 MCP thesis), MCP bridge (critical for the v1 LLM story),
 test scene registry (required for the validation thesis), and several protocol/security
 completeness items.
 
-A **gen-2 reconciliation bead** must be created that depends on all 9 gap beads and re-runs this
-audit workflow after those gaps are closed.
+A **gen-2 reconciliation bead** (rig-j1v) has been created that depends on all 10 gap beads and
+will re-run this audit workflow after those gaps are closed.
 
 ---
 
