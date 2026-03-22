@@ -194,14 +194,16 @@ The capability gate checks whether the agent's session holds the required capabi
 
 | Operation | Required capability |
 |-----------|-------------------|
-| Publish to a zone | `zone-publish:<zone_id>` or `zone-publish:*` |
-| Create a tile | `create-tiles` |
-| Modify own tiles | `modify-own-tiles` |
-| Request overlay z-order | `high-priority-z-order` |
-| Subscribe to scene events | `subscribe-scene-events` |
-| Access input events | `access-input-events` |
-| Stream media | `stream-media` |
-| Read full topology | `topology-read` |
+| Publish to a zone | `zone_publish:<zone_name>` or `zone_publish:*` |
+| Create a tile | `create_tiles` |
+| Modify own tiles | `modify_own_tiles` |
+| Request overlay z-order | `high_priority_z_order` |
+| Subscribe to scene events | `subscribe_scene_events` |
+| Access input events | `receive_input` |
+| Stream media | `stream_media` |
+| Read full topology | `read_scene` |
+
+> **Capability name convention:** All capability identifiers use `snake_case` with colon-separated sub-scopes for zone grants. This is the canonical format defined in RFC 0006 §6.3. Earlier drafts of this RFC used kebab-case identifiers — those are incorrect and this table is authoritative.
 
 Capabilities are granted per-session at handshake time (RFC 0005 §2) and may be revoked mid-session (security.md §"Capability scopes"). Revocation is immediate: the next arbitration evaluation for the affected agent fails at Step 2 for any operation that required the revoked capability.
 
@@ -466,7 +468,7 @@ Every Step 2 rejection and every Step 7 shed emits a telemetry record:
   "code": "CAPABILITY_DENIED",
   "agent_id": "agent-abc",
   "mutation_ref": "mut-xyz",
-  "capability_required": "zone-publish:notification",
+  "capability_required": "zone_publish:notification",
   "timestamp_us": 1234567890000
 }
 ```
@@ -497,7 +499,7 @@ Every capability grant and revocation is logged (security.md §"Capability scope
 {
   "event": "capability_grant",
   "agent_id": "agent-abc",
-  "capability": "zone-publish:notification",
+  "capability": "zone_publish:notification",
   "granted_at_us": 1234567890000,
   "granted_by": "session_handshake"
 }
@@ -507,7 +509,7 @@ Every capability grant and revocation is logged (security.md §"Capability scope
 {
   "event": "capability_revoke",
   "agent_id": "agent-abc",
-  "capability": "zone-publish:notification",
+  "capability": "zone_publish:notification",
   "revoked_at_us": 1234567891000,
   "reason": "admin_action"
 }
