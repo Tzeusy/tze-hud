@@ -106,55 +106,35 @@ impl Rgba {
 
 // ─── Enums ──────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputMode {
     Passthrough,
+    #[default]
     Capture,
     LocalOnly,
 }
 
-impl Default for InputMode {
-    fn default() -> Self {
-        InputMode::Capture
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FontFamily {
+    #[default]
     SystemSansSerif,
     SystemMonospace,
     SystemSerif,
 }
 
-impl Default for FontFamily {
-    fn default() -> Self {
-        FontFamily::SystemSansSerif
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextAlign {
+    #[default]
     Start,
     Center,
     End,
 }
 
-impl Default for TextAlign {
-    fn default() -> Self {
-        TextAlign::Start
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextOverflow {
+    #[default]
     Clip,
     Ellipsis,
-}
-
-impl Default for TextOverflow {
-    fn default() -> Self {
-        TextOverflow::Clip
-    }
 }
 
 // ─── Scene Objects ──────────────────────────────────────────────────────────
