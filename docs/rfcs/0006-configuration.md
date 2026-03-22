@@ -7,6 +7,66 @@
 
 ---
 
+## Review History
+
+### Round 1 — Doctrinal Alignment (rig-5vq.31)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, mobile.md, presence.md, privacy.md, security.md, failure.md
+
+#### Doctrinal Alignment: 4/5
+All MUST-FIX and SHOULD-FIX findings addressed. See PR #26 for details.
+
+**[MUST-FIX → FIXED]** Added `headless` built-in profile (§3.4) — architecture.md requires "at least two built-in profiles: 'desktop' and 'headless'"; RFC originally only had `full-display` and `mobile`.
+
+**[MUST-FIX → FIXED]** Fixed headless field names to match RFC 0002 §7 (`headless_width`/`headless_height`).
+
+**[MUST-FIX → FIXED]** Added `DisplayProfileConfig` Rust struct (user-editable `[display_profile]` section with optional overrides).
+
+**[MUST-FIX → FIXED]** Added `prefer_zones` and `upstream_precomposition` to `DisplayProfile` Rust struct.
+
+**[SHOULD-FIX → FIXED]** §5.4 now cites the canonical 7-step policy evaluation order from architecture.md §"Policy arbitration".
+
+**[SHOULD-FIX → FIXED]** Added `max_texture_mb` unit note (config is MiB; runtime uses bytes per RFC 0002 §4.3).
+
+**[SHOULD-FIX → FIXED]** Added validation rules for `default_classification` and `default_viewer_class` including all five viewer classes.
+
+**No dimension below 3. Round 1 complete.**
+
+---
+
+### Round 2 — Technical Architecture Scrutiny (rig-5vq.32)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, presence.md, security.md, privacy.md, failure.md, mobile.md
+
+#### Doctrinal Alignment: 4/5 (unchanged from Round 1)
+No doctrinal regressions found.
+
+#### Technical Robustness: 4/5 (after fixes)
+
+**[MUST-FIX → FIXED]** `ConfigError.code` was `&'static str`, not a typed enum. Introduced `ConfigErrorCode` enum; changed `ConfigError.code` to `ConfigErrorCode`. The enum is `JsonSchema`-derived, so the exported schema enumerates all valid codes — the summary table is no longer a separate source of truth that can drift.
+
+**[MUST-FIX → FIXED]** `[display_profile].extends` and `[runtime].profile` could be set to different built-ins with no validation error, resulting in silent misconfiguration. Added `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE` validation rule in §2.3; §3.5 now specifies the resolution order and failure path for auto-detection.
+
+**[MUST-FIX → FIXED]** Boolean capability escalation (`allow_background_zones`, `allow_chrome_zones`) was not guarded by the profile escalation rule, which only checked numeric fields. Added `CONFIG_PROFILE_CAPABILITY_ESCALATION` validation rule in §3.6.
+
+**[SHOULD-FIX → FIXED]** Degradation threshold ordering was not validated. Added `CONFIG_DEGRADATION_THRESHOLD_ORDER` rule requiring frame-time thresholds and GPU-fraction thresholds to be monotonically non-decreasing across ladder steps.
+
+**[SHOULD-FIX → FIXED]** `emit_schema = true` vs `--print-schema` semantics were ambiguous. §2.2 now documents that `emit_schema = true` continues running after emitting; `--print-schema` exits immediately; `--print-schema` takes precedence when both are set.
+
+#### Cross-RFC Consistency: 4/5
+
+**[CONSIDER]** `tab_switch_on_event` unknown names are silently accepted at load time; a `WARN` log entry is recommended for names not in the built-in event registry.
+
+**[CONSIDER]** `profile = "auto"` failure path now specified: falls back to `mobile` with a `WARN` log.
+
+**No dimension below 3. Round 2 complete.**
+
+---
+
 ## Summary
 
 This RFC defines the configuration system for tze_hud: the file format, schema, display profile definitions, zone geometry policies, tab and layout configuration, agent registration, and privacy/degradation policies. Configuration is the primary mechanism for declaring scenes, zones, and policies in v1 before dynamic orchestration exists, so it is a first-class, schema-validated, LLM-readable surface.
@@ -151,7 +211,10 @@ log_level = "info"
 # Default: 30
 reconnect_grace_secs = 30
 
-# If true, the runtime exports a JSON schema to stdout at startup (for tooling).
+# If true, the runtime writes a JSON schema to stdout at startup and then
+# continues running (useful for logging pipelines that capture stdout).
+# For non-interactive tooling use, prefer the --print-schema CLI flag, which
+# prints the schema and exits immediately without starting the runtime.
 # Default: false
 emit_schema = false
 
@@ -182,6 +245,10 @@ max_tiles = 512
 max_agents = 8
 target_fps = 30
 ```
+
+**Validation rules:**
+- If `[display_profile].extends` is set AND `[runtime].profile` names a different built-in, this is a configuration conflict. The operator almost certainly intended to name the custom profile (the result of extending the base) in `[runtime].profile`. → `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE` with a hint: "set `profile = \"<custom-name>\"` in `[runtime]` or remove the `extends` field."
+- When `extends` is set without any custom name in `[runtime].profile`, the runtime internally names the result `"custom"` for logging; the gRPC handshake reports `"custom"`. Deployments should set `[runtime].profile` to a descriptive custom name to avoid ambiguity (see §3.6 for the correct pattern).
 
 ### 2.4 `[[tabs]]` Section
 
@@ -459,9 +526,10 @@ When the runtime starts, it selects the active profile as follows:
 2. **Auto-detection** (if `profile = "auto"`): the runtime queries hardware capabilities and selects the closest built-in profile. Detection logic:
    - If a local GPU with > 4GB VRAM is present and display refresh >= 60Hz: `full-display`
    - If no local GPU or display refresh < 60Hz: `mobile`
-3. **Profile extension**: if `[display_profile].extends` is set, the named profile is loaded and then overridden with any fields present in `[display_profile]`.
+   - If detection fails or hardware information is unavailable (virtualized environment, missing driver): fall back to `mobile` (most conservative), log a `WARN` with the detection output.
+3. **Profile extension**: if `[display_profile].extends` is set, the named base profile is loaded and then overridden field-by-field with any fields present in `[display_profile]`. The result is the effective profile; `[runtime].profile` names this effective profile. For a custom-named profile, `[runtime].profile` must be set to the custom name (e.g., `"glasses-v1"`) and `[display_profile].extends` must name the built-in base. If `[display_profile].extends` is set and `[runtime].profile` names a *different* built-in, the configuration is rejected with `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE` (see §2.3).
 
-The selected profile is logged at startup and included in the runtime's gRPC handshake response so agents can inspect it.
+The selected profile name is logged at startup and included in the runtime's gRPC handshake response so agents can inspect it.
 
 ### 3.6 Custom Profiles
 
@@ -487,7 +555,8 @@ Custom profiles extend a built-in profile. Extending another custom profile is n
 **Validation rules:**
 - Custom profile `extends` must name a built-in profile. Unknown base → `CONFIG_UNKNOWN_BASE_PROFILE`.
 - `extends = "headless"` is not permitted for custom profiles. Attempt → `CONFIG_HEADLESS_NOT_EXTENDABLE`.
-- Numeric overrides must not exceed the base profile's values (prevent escalation). Exceeding → `CONFIG_PROFILE_BUDGET_ESCALATION` with a note.
+- Numeric overrides must not exceed the base profile's values (prevent budget escalation). Exceeding → `CONFIG_PROFILE_BUDGET_ESCALATION` with a note. Applies to: `max_tiles`, `max_texture_mb`, `max_agents`, `max_media_streams`, `max_agent_update_hz`.
+- Boolean capability fields (`allow_background_zones`, `allow_chrome_zones`) may not be set to `true` if the base profile sets them `false`. Attempting to do so escalates a capability the base profile was designed to restrict. → `CONFIG_PROFILE_CAPABILITY_ESCALATION` with a note identifying the field. Note: advisory hint fields (`prefer_zones`, `upstream_precomposition`) are not subject to this rule — they may be freely overridden.
 - `target_fps` must be >= `min_fps`. Violated → `CONFIG_INVALID_FPS_RANGE`.
 
 ---
@@ -1031,21 +1100,29 @@ enabled = false  # Disabled by default; opt-in for headless/glasses deployments
 **Validation rules:**
 - Threshold values must be positive. Zero or negative → `CONFIG_INVALID_THRESHOLD`.
 - `shed_priority` must be one of the enumerated values. Unknown → `CONFIG_UNKNOWN_SHED_PRIORITY`.
+- Frame-time thresholds must be monotonically non-decreasing in ladder order: `coalesce_frame_ms` ≤ `simplify_rendering_frame_ms` ≤ `shed_tiles_frame_ms` ≤ `audio_only_frame_ms`. Violation → `CONFIG_DEGRADATION_THRESHOLD_ORDER` identifying the pair that is out of order. (Rationale: the ladder is designed lightest-first per failure.md §Degradation axes; out-of-order thresholds cause heavy steps to fire before lighter ones have been tried.)
+- GPU fraction thresholds must be monotonically non-decreasing: `reduce_media_quality_gpu_fraction` ≤ `reduce_concurrent_streams_gpu_fraction`. Violation → `CONFIG_DEGRADATION_THRESHOLD_ORDER`.
 - Ladder steps that reference post-v1 features (media, audio) are accepted in the schema but noted as no-ops in v1 logs at startup.
 
 ---
 
 ## 8. Schema Export
 
-The runtime exports its full configuration JSON Schema on request:
+The runtime exports its full configuration JSON Schema in two ways:
+
+### `--print-schema` CLI flag (recommended for tooling)
 
 ```bash
 tze_hud --print-schema > tze_hud-config-schema.json
 ```
 
-Or by setting `emit_schema = true` in `[runtime]`.
+Prints the JSON Schema to stdout and **exits immediately**. The runtime does not start, does not bind ports, and does not initialize a GPU context. This is the safe, non-destructive path for CI pipelines, editors, and LLM tooling. If both `--print-schema` and `emit_schema = true` are present, `--print-schema` takes precedence.
 
-The schema is generated via `schemars` from the Rust config types. It is stable within a major version and versioned with the runtime. LLMs writing config files should use this schema as their primary reference. The schema includes the error code for each validation constraint as a custom annotation (`x-error-code`).
+### `emit_schema = true` in `[runtime]` (for logging pipelines)
+
+When `emit_schema = true`, the runtime writes the JSON Schema to stdout **once at startup, then continues running**. Useful for log pipelines that capture startup output. Not suitable for tooling that expects an early-exit schema dump.
+
+The schema is generated via `schemars` from the Rust config types, including `ConfigErrorCode` variants exported as a JSON Schema `enum` for tooling. The schema is stable within a major version and versioned with the runtime. LLMs writing config files should use this schema as their primary reference. The schema includes the error code for each validation constraint as a custom annotation (`x-error-code`).
 
 ---
 
@@ -1180,10 +1257,41 @@ pub struct DisplayProfileConfig {
     pub allow_chrome_zones: Option<bool>,
 }
 
+/// Typed validation error codes. Each variant corresponds to one entry in the
+/// Summary of Validation Error Codes table. Using an enum (rather than `&'static str`)
+/// ensures compile-time exhaustiveness at match sites and allows `schemars` to
+/// enumerate all valid codes in the exported JSON Schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConfigErrorCode {
+    ConfigUnknownProfile,
+    ConfigInvalidAddress,
+    ConfigDuplicateTabName,
+    ConfigMultipleDefaultTabs,
+    ConfigUnknownLayout,
+    ConfigUnknownZoneType,
+    ConfigUnknownGeometryPolicy,
+    ConfigIncompatibleZoneLayer,
+    ConfigUnknownBaseProfile,
+    ConfigHeadlessNotExtendable,
+    ConfigProfileBudgetEscalation,
+    ConfigProfileCapabilityEscalation,
+    ConfigProfileExtendsConflictsWithProfile,
+    ConfigInvalidFpsRange,
+    ConfigUnknownClassification,
+    ConfigUnknownViewerClass,
+    ConfigInvalidTime,
+    ConfigUnknownInterruptionClass,
+    ConfigInvalidThreshold,
+    ConfigUnknownShedPriority,
+    ConfigDegradationThresholdOrder,
+}
+
 /// A validation error with structured fields.
 #[derive(Debug, Serialize)]
 pub struct ConfigError {
-    pub code: &'static str,      // e.g., "CONFIG_UNKNOWN_PROFILE"
+    /// Stable, typed error code. Use `ConfigErrorCode` variants, not raw strings.
+    pub code: ConfigErrorCode,
     pub field_path: String,      // e.g., "runtime.profile"
     pub expected: String,
     pub got: String,
@@ -1251,9 +1359,11 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 | `CONFIG_UNKNOWN_ZONE_TYPE` | §2.4 | A zone instance references an undefined zone type |
 | `CONFIG_UNKNOWN_GEOMETRY_POLICY` | §2.4 | A zone instance references an undefined geometry policy |
 | `CONFIG_INCOMPATIBLE_ZONE_LAYER` | §2.4 | Zone layer override is incompatible with zone type |
+| `CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE` | §2.3, §3.5 | `[display_profile].extends` names a different built-in than `[runtime].profile` |
 | `CONFIG_UNKNOWN_BASE_PROFILE` | §3.6 | Custom profile `extends` an unknown built-in |
 | `CONFIG_HEADLESS_NOT_EXTENDABLE` | §3.6 | Custom profile attempts `extends = "headless"` |
-| `CONFIG_PROFILE_BUDGET_ESCALATION` | §3.6 | Custom profile override exceeds base profile budget |
+| `CONFIG_PROFILE_BUDGET_ESCALATION` | §3.6 | Custom profile numeric override exceeds base profile value |
+| `CONFIG_PROFILE_CAPABILITY_ESCALATION` | §3.6 | Custom profile enables a boolean capability the base profile disables (`allow_background_zones`, `allow_chrome_zones`) |
 | `CONFIG_INVALID_FPS_RANGE` | §3.6 | `target_fps < min_fps` |
 | `CONFIG_UNKNOWN_CLASSIFICATION` | §7.1 | Unknown `default_classification` value |
 | `CONFIG_UNKNOWN_VIEWER_CLASS` | §7.1 | Unknown `default_viewer_class` value |
@@ -1261,3 +1371,4 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 | `CONFIG_UNKNOWN_INTERRUPTION_CLASS` | §7.1 | Unknown `pass_through_class` value |
 | `CONFIG_INVALID_THRESHOLD` | §7.2 | Degradation threshold is zero or negative |
 | `CONFIG_UNKNOWN_SHED_PRIORITY` | §7.2 | Unknown `shed_priority` value |
+| `CONFIG_DEGRADATION_THRESHOLD_ORDER` | §7.2 | Degradation thresholds are not monotonically non-decreasing (heavier step fires before lighter step) |
