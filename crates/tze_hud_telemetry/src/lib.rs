@@ -8,4 +8,4 @@ pub mod record;
 pub mod collector;
 
 pub use record::{FrameTelemetry, SessionSummary, LatencyBucket};
-pub use collector::TelemetryCollector;
+pub use collector::{FrameRecorder, TelemetryCollector};
