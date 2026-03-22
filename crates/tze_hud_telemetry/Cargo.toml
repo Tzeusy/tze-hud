@@ -7,3 +7,4 @@ edition.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+tze_hud_scene = { path = "../tze_hud_scene" }
