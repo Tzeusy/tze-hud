@@ -10,6 +10,7 @@
 
 | Round | Date | Reviewer | Focus | Changes |
 |-------|------|----------|-------|---------|
+| 9 | 2026-03-22 | rig-uye | Post-v1 configurable tab-order design note | §1.3: added forward reference to §1.5 for post-v1 tab_index override. §1.5 (new): "Configurable Tab Order [Post-v1]" — documents `tab_index: Option<i32>` field on `HitRegionNode`, two-bucket traversal algorithm (explicit-index then default-order), reserved proto field note, and a11y tree mapping. §5.3: added post-v1 note on `tab_index` propagation to platform a11y APIs. §7.1: added post-v1 reserved `tab_index` field to `HitRegionNode` struct. §14: added "Configurable tab order beyond z-ascending default" to post-v1 list with §1.5 reference. |
 | 1 | 2026-03-22 | rig-5vq.23 | Doctrinal alignment deep-dive | DR table: added DR-I3/I4 (input_to_scene_commit, input_to_next_present) from validation.md §3; added DR-I11 (headless testability). §6.1a: new headless testability section. §7.1: fixed `interaction_id` comment (now consistent with RFC 0001 §2.4 "forwarded in events"). §7.3/§9.1: added `interaction_id` field to PointerDownEvent, PointerUpEvent, ClickEvent, DoubleClickEvent. §9.1: removed `HitRegionConfig` (replaced with canonical `HitRegionNode` reference to RFC 0001 §9). §11.2: scroll deferral reframed as requiring pre-implementation resolution (local-first scroll is a doctrine commitment). RFC 0001 §2.4 and §9: unified `HitRegionNode` to include all input-model fields with cross-reference to RFC 0004. |
 | 2 | 2026-03-22 | rig-5vq.24 | Technical architecture scrutiny | §10.3: fixed gesture threshold diagram (5px → 10px, consistent with §3.4 state machine). §8.3: corrected `SessionEnvelope` → `SessionMessage` (aligns with RFC 0005 §2.2 naming). §8.3.1 (new): documented agent-to-runtime input control request transport gap; specifies required RFC 0005 `SessionMessage` payload field additions for FocusRequest, CaptureRequest, CaptureReleaseRequest, SetImePositionRequest. §4.5 (new, renamed §4.5+): added IME active-composition-on-focus-loss behavior spec (cancel before FocusLost, ordering guarantee, capture-theft case). §1.4/§9.1: added `AGENT_DISCONNECTED = 6` to `FocusLostReason`. §7.3/§9.1: added `device_id` field to `ContextMenuEvent`. §9.1: added `interaction_id` field to `GestureEvent`. §8.5: resolved transactional-event drop contradiction (transactional events never dropped; only non-transactional dropped beyond hard cap). §8.3.1 follow-up (rig-k0d): clarified that CaptureReleaseRequest uses async CaptureReleasedEvent confirmation and SetImePositionRequest is fire-and-forget; removed misleading "runtime responds with corresponding response" blanket claim. §8.5 follow-up (rig-k0d): fixed contradictory "without bound, up to a hard cap" phrasing (now: "grows as needed to accommodate transactional events, which are never dropped"). |
 | 3 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification | §9.1 (input.proto): added `import "scene.proto"`; replaced all `string tile_id` and `string node_id` with `SceneId tile_id` / `SceneId node_id` across all proto messages (FocusRequest, FocusGainedEvent, FocusLostEvent, CaptureRequest, CaptureReleaseRequest, CaptureReleasedEvent, SetImePositionRequest, and all pointer/keyboard/gesture/IME event types). Non-scene identifiers (`session_id`, `device_id`, `interaction_id`) remain `string` — they are not scene-object addresses. Inline narrative proto snippets in §1.2, §1.4, §2.3, §4.3, §4.4 also updated to match. |
@@ -173,7 +174,7 @@ Focus cycling is defined in terms of the abstract `NAVIGATE_NEXT` and `NAVIGATE_
 - D-pad / directional controller: Down or Right → `NAVIGATE_NEXT`, Up or Left → `NAVIGATE_PREV`
 - Clicker: Next → `NAVIGATE_NEXT`, Prev → `NAVIGATE_PREV`
 
-**Traversal order** follows tile z-order (lowest z first) and within each tile, tree order of `HitRegionNode` elements (depth-first, left-to-right sibling order). Tiles with `input_mode == Passthrough` are excluded from traversal.
+**Traversal order** follows tile z-order (lowest z first) and within each tile, tree order of `HitRegionNode` elements (depth-first, left-to-right sibling order). Tiles with `input_mode == Passthrough` are excluded from traversal. Post-v1, agents may override this default via the `tab_index` field on `HitRegionNode` (see §1.5).
 
 **Cycle boundary.** After the last focusable element, focus wraps to the first. The chrome layer tab bar is excluded from the focus cycle (chrome focus is accessed via platform-standard keyboard shortcuts such as F6 or Ctrl+Tab).
 
@@ -224,6 +225,49 @@ message FocusLostEvent {
   Reason reason    = 3;
 }
 ```
+
+### 1.5 Configurable Tab Order [Post-v1]
+
+> **Post-v1 design note.** The v1 traversal order (z-ascending, tree order) is the sole ordering in v1. This section documents the configuration surface for post-v1 so the schema can be reserved without breaking the v1 contract.
+
+**Motivation.** Z-order is a defensible zero-configuration default, but real-world UIs frequently diverge: a sidebar may carry a high z-value for overlay purposes while logically belonging at the end of the tab cycle; wizard-style forms follow reading order, not stacking order. Forcing agents to abuse z-order to achieve desired navigation breaks the visual/logical separation. WCAG 2.4.3 (Focus Order) recommends that focusable components receive focus in an order that preserves meaning and operability.
+
+**Post-v1 field: `tab_index` on `HitRegionNode`.**
+
+```rust
+// Post-v1 addition to HitRegionNode (§7.1):
+pub tab_index: Option<i32>,  // None / 0 = default (z-ascending, tree order)
+                              // Positive = explicit order; lower values come first;
+                              //   explicit-index elements precede default-order elements.
+                              // Negative = excluded from tab cycle (still receives
+                              //   programmatic focus).
+```
+
+**Post-v1 traversal algorithm** (replaces the current z-ascending rule in §1.3):
+
+1. Collect all focusable elements in the tab (tiles and `HitRegionNode`s with `accepts_focus: true`, excluding `input_mode == Passthrough` tiles).
+2. Split into two buckets:
+   - **Explicit bucket:** elements with `tab_index > 0`. Sort ascending by `tab_index`; break ties by z-ascending, then tree order.
+   - **Default bucket:** elements with `tab_index == None` or `tab_index == 0`. Sort by z-ascending, then tree order (current v1 behavior).
+3. Traverse: explicit bucket first, then default bucket. Elements with `tab_index < 0` are excluded but remain reachable via programmatic `FocusRequest`.
+
+**Post-v1 proto addition** (to the `HitRegionNode` message in RFC 0001 §9 and §9.1 of this RFC):
+
+```protobuf
+// Post-v1 reserved field — do not use in v1 implementations.
+optional sint32 tab_index = <TBD>;
+// None/absent or 0 = default order; positive = explicit ascending order;
+// negative = excluded from cycle.
+```
+
+**A11y tree mapping** (post-v1, extends §5.3): When `tab_index` is set and non-negative, the a11y tree node exposes the effective sequential focus position to the platform bridge (UIA `TabIndex` property, AT-SPI2 `position-in-set`, NSAccessibility order). This ensures screen reader tab-order announcements match the visual/logical order declared by the agent.
+
+**Scope boundary.** The post-v1 work is limited to:
+- Adding `tab_index` to `HitRegionNode` in RFC 0001 and the proto schema.
+- Updating the compositor's focus-cycling loop to apply the two-bucket sort.
+- Propagating the effective tab position to the a11y bridge (§5.8).
+
+Agent-defined bindings and runtime-wide tab-order policies remain out of scope (see §14 Non-Goals).
 
 ---
 
@@ -636,6 +680,8 @@ A11yTree
 
 Agents declare accessibility metadata on nodes and tiles. The runtime does not infer accessibility semantics from content — it bridges what agents declare.
 
+> **Post-v1 note:** When `tab_index` (§1.5) is set on a `HitRegionNode`, the a11y bridge exposes the effective sequential focus position to the platform API (UIA `TabIndex`, AT-SPI2 `position-in-set`, NSAccessibility order) so screen reader tab-order announcements match the agent-declared logical order.
+
 ### 5.4 Accessibility Metadata (Agent-Declared)
 
 Tiles and nodes carry accessibility metadata:
@@ -975,6 +1021,9 @@ pub struct HitRegionNode {
     pub event_mask: EventMask,      // Which events to receive (bitmask)
     pub accessibility: AccessibilityMetadata,
     pub local_style: LocalFeedbackStyle,
+
+    // Post-v1 reserved field (see §1.5):
+    pub tab_index: Option<i32>,  // None/0 = default order; positive = explicit; negative = excluded from cycle
 }
 
 pub struct LocalFeedbackStyle {
@@ -2206,3 +2255,4 @@ The following are not specified in detail in this RFC and do not block v1:
 - Dynamic a11y role changes at runtime (roles are set at node creation, not mutated)
 - Agent-defined command bindings (bindings are runtime-configured, not per-agent)
 - Voice recognition integration (§10.6 lists voice bindings; the OS/platform voice layer is assumed to translate voice to command actions before they reach the runtime)
+- Configurable tab order beyond z-ascending default (`tab_index` field on `HitRegionNode`; design note and reserved schema in §1.5)

@@ -10,6 +10,19 @@
 
 ## Review History
 
+### Operator Diagnostics Overlay — Post-V1 Design Note (rig-1co)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-1co — RFC 0007: Add operator diagnostics overlay (post-v1 design note)
+
+#### Changes Applied
+
+- **[PROTO → ADDED]** §7.1: Added `diagnostics_active` (field 8) to `ChromeState`. Always false in v1. Set by a local runtime toggle (keyboard shortcut or config); never exposed to agents.
+- **[DEFERRED → NOTED]** §9: Added explicit design note for the operator diagnostics overlay under "Deferred (Post-V1)". Covers activation, content (per-tile state and reason, frame timing, agent session ID), chrome-layer rendering, privacy constraint (ViewerClass enum allowed; viewer identity prohibited), and agent isolation guarantee.
+
+---
+
 ### Privacy-Safe Capture Semantics (rig-i7f)
 
 **Reviewer:** Beads worker agent
@@ -775,6 +788,12 @@ message ChromeState {
   // tiles to REDACTION_MODE_RENDER_SKIP (§3.4.1). Always false in v1 — capture surfaces
   // are deferred post-v1. This field is set by the capture surface registry, not by agents.
   bool capture_surface_active = 7;
+
+  // True when the operator diagnostics overlay is active (§9 — post-v1).
+  // When true, the chrome layer renders per-tile diagnostic panels showing frame timing,
+  // agent status, and resource usage. Always false in v1. Set by a local runtime toggle
+  // (keyboard shortcut or config); never exposed to agents.
+  bool diagnostics_active = 8;
 }
 ```
 
@@ -1238,6 +1257,22 @@ Each `ShellAuditEvent` type is derived from a specific source:
 - Theme customization API (chrome renders with a fixed default theme in v1).
 - Remote audit log streaming endpoint (operators can consume the audit log via file/stdout in v1; a live streaming API is post-v1).
 - Render-skip redaction activation (§3.4.1): `capture_surface_active` is always false in v1. The capture surface registry and the `REDACTION_MODE_RENDER_SKIP` path are not implemented in v1. The architectural separation of content rendering and chrome rendering required to support render-skip MUST be preserved by the v1 implementation.
+- **Operator diagnostics overlay** (`diagnostics_active` — §7.1 field 8): A chrome-layer overlay for operator and developer use that surfaces per-tile diagnostic information. Design intent recorded here to prevent incompatible implementation decisions (e.g., building diagnostics as an agent-facing API instead of a chrome overlay).
+
+  **Activation.** A keyboard shortcut (e.g., `Ctrl+Shift+D`) or a configurable runtime toggle sets `ChromeState.diagnostics_active`. Toggling is a local display-node action; it does not generate any agent-visible event or mutation.
+
+  **Content (per-tile diagnostic panel).** When active, each visible tile renders an overlay panel showing:
+  - Current tile state: `redacted`, `shed`, `stale`, `budget-warned`, `frozen`, or `disconnected`.
+  - Reason for that state (e.g., "viewer class: Guest, tile classification: Private" for redaction; "degradation level 4, tile priority was lowest" for shed; "last update 45 s ago, threshold 30 s" for stale; "agent at 85% of texture memory budget" for budget-warned).
+  - Relevant thresholds (staleness threshold, budget percentage, degradation level).
+  - Agent session ID for the tile's lease holder (non-sensitive — session ID only, not viewer context).
+  - Last frame timestamp and frame timing statistics (frame duration, missed deadlines).
+
+  **Rendering.** Chrome-layer overlay — rendered in the same chrome pass as all other chrome elements (Stage 6, RFC 0002 §3.1). The diagnostics panel sits above tile content and other badge icons. Same composition guarantees and z-order rules apply.
+
+  **Privacy constraint.** The overlay MUST NOT expose viewer identity, viewer-detection pipeline data, or any information prohibited by §7.8.4 (Privacy Constraints on Audit Events). It MAY show the viewer's current `ViewerClass` enum value (already visible in `ChromeState.viewer_class`) to explain a redaction decision, but MUST NOT show viewer name, face-recognition score, biometric data, or geolocation. Example allowed display: "viewer class: Guest, tile classification: Private". Example prohibited display: "viewer: John Smith".
+
+  **Agent isolation.** The diagnostics overlay is entirely chrome-rendered. It is never forwarded through any agent-facing RPC, never included in scene topology visible to agents, and never reachable via MCP or gRPC agent APIs. `ChromeState.diagnostics_active` is an internal runtime field (same access class as all `ChromeState` fields — see §7.1).
 
 ---
 

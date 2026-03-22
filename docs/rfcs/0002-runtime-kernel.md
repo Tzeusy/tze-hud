@@ -67,16 +67,16 @@ tze_hud runs as a single OS process. Agents are external gRPC clients; they do n
 │  └──────────────────────────────────────────────────┘            │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────┐            │
-│  │  wgpu Device / Queue (GPU state)                 │            │
-│  │  owned by compositor thread; main thread has      │            │
-│  │  read-only surface handle for present()          │            │
-│  └──────────────────────────────────────────────────┘            │
-│                                                                   │
-│  ┌──────────────────────────────────────────────────┐            │
 │  │  Media Worker Pool (post-v1, not spawned in v1)  │            │
 │  │  managed by GStreamer's internal scheduler        │            │
 │  │  decode, clock sync, timed metadata              │            │
 │  │  → DecodedFrameReady channel → compositor thread │            │
+│  └──────────────────────────────────────────────────┘            │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────┐            │
+│  │  wgpu Device / Queue (GPU state)                 │            │
+│  │  owned by compositor thread; main thread has      │            │
+│  │  surface handle for present() (see §2.7)         │            │
 │  └──────────────────────────────────────────────────┘            │
 └──────────────────────────────────────────────────────────────────┘
 
@@ -162,8 +162,6 @@ Fatal GPU errors (device lost, out of memory) trigger an emergency path: flush t
 
 The compositor uses a fixed, small set of threads with explicit responsibilities and typed channels between them. Thread count is determined at startup; no dynamic thread spawning during normal operation.
 
-A media worker pool boundary is reserved for post-v1 GStreamer and WebRTC integration (§2.7). It is not spawned in v1. The channel interface and ownership rules are pre-defined so that adding media workers does not require restructuring the thread model.
-
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │ THREAD MODEL                                                         │
@@ -211,13 +209,15 @@ A media worker pool boundary is reserved for post-v1 GStreamer and WebRTC integr
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+A media worker pool boundary is reserved for post-v1 GStreamer and WebRTC integration (§2.8). It is not spawned in v1. The channel interface and ownership rules are pre-defined so that adding media workers does not require restructuring the thread model.
+
 ### 2.2 Main Thread
 
 The main thread runs the winit event loop — it cannot be moved to another thread because winit requires this on most platforms. Responsibilities:
 
 - **Input drain.** Process OS input events (mouse, touch, keyboard) within the winit event callback. Immediately produce `InputEvent` records with hardware timestamps.
 - **Local feedback.** Apply press/hover state changes to the scene's hit-region nodes for immediate visual response. This happens before any agent involvement.
-- **Frame presentation.** Call `surface.present()` when signaled by the compositor thread that a new frame is ready. This is the only thread that calls `present()`.
+- **Frame presentation.** Call `surface.present()` when signaled by the compositor thread via `FrameReadySignal` that a new frame is ready. This is the only thread that calls `present()`. See §2.7 for the ADR explaining why `present()` is pinned to the main thread.
 - **Resize handling.** Resize events reconfigure the surface and notify the compositor thread to rebuild the render pipeline.
 - **Shutdown initiation.** `CloseRequested` and OS signals initiate the shutdown sequence.
 
@@ -241,7 +241,7 @@ A dedicated `std::thread` spawned at startup. Runs a tightly controlled loop:
 - **GPU submit.** Submit command buffers to the wgpu queue. Signal the main thread to present when submission completes.
 - **Telemetry emit.** Send per-frame `TelemetryRecord` to the telemetry thread.
 
-The compositor thread owns the `wgpu::Device` and `wgpu::Queue`. No other thread touches the device. The main thread holds only the surface handle, which is safe to `present()` from the main thread on platforms where winit requires it.
+The compositor thread owns the `wgpu::Device` and `wgpu::Queue`. No other thread touches the device. The main thread holds the surface handle and is the only thread that calls `surface.present()`. This split is an intentional architectural decision driven by platform constraints (macOS/Metal requires presentation on the main thread) and frame-budget separation (GPU submission must not block input drain). See §2.7 for the full ADR.
 
 The compositor loop runs at the display refresh rate (default 60Hz). If a frame takes longer than the budget, the pipeline is marked as overbudget and the frame-time guardian evaluates degradation (§5.2).
 
@@ -280,10 +280,8 @@ All inter-thread communication uses bounded channels. No unbounded queues.
 | `SceneEventTransactional` (compositor → network) | `crossbeam::bounded` | 256 | Compositor back-pressured (never dropped) |
 | `SceneEventStateStream` (compositor → network) | bounded + coalesce map | 512 | Coalesce-key merging (intermediate states skipped, not dropped) |
 | `SceneEventEphemeral` (compositor → network) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
-| `TelemetryRecord` (compositor → telemetry) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
 | `DecodedFrameReady` (media pool → compositor) | ring buffer (custom) | 4 per stream | Oldest dropped (decoder runs ahead; compositor picks latest ready frame) |
-
-**`DecodedFrameReady` (post-v1, reserved).** This channel is not created in v1. Its entry in the topology table reserves the interface so that implementors building the v1 channel graph do not design around it. See §2.7 for the full ownership and threading rules.
+| `TelemetryRecord` (compositor → telemetry) | ring buffer (custom) | 256 | Oldest dropped, overflow counted |
 
 **`SceneLocalPatch` type.** A `SceneLocalPatch` carries only the hit-region local state changes produced by Stage 2 (pressed/hovered flags). It does not carry mutations that require lease validation or invariant checking. The compositor thread drains the `SceneLocalPatch` channel alongside `InputEvent` and `MutationBatch` at the start of Stage 3 and applies local state patches directly to the scene without a full commit cycle. The `ArcSwapFull<HitTestSnapshot>` is updated after applying local patches (T-11: resolves missing channel in topology table). (T-11)
 
@@ -297,6 +295,8 @@ pub struct LocalStateFlags {
     pub hovered: bool,
 }
 ```
+
+**`DecodedFrameReady` (post-v1, reserved).** This channel is not created in v1. Its entry in the topology table reserves the interface so that implementors building the v1 channel graph do not design around it. See §2.8 for the full ownership and threading rules.
 
 **Traffic-class lane split (T-13).** The previous design placed all outbound `SceneEvent` notifications in a single `EventNotification` ring buffer with uniform drop-oldest semantics. This violated the session protocol's delivery guarantees (RFC 0005 §2.5, §5.1): transactional messages (lease revocations, `MutationResult` acks, `DegradationNotice`) are contractually never dropped, and state-stream messages must be coalesced rather than dropped. The three-lane split aligns the internal channel topology with the traffic-class delivery contracts:
 
@@ -312,7 +312,82 @@ Backpressure on the `MutationBatch` channel propagates naturally to gRPC flow co
 
 Backpressure on `SceneEventTransactional` is bounded by the rate of transactional events (lease operations, mutation acks). These are low-rate by design (at most one per agent mutation batch, capped by `max_update_rate_hz`). A full `SceneEventTransactional` channel indicates a severely stalled or unresponsive agent — acceptable to apply backpressure in that case.
 
-### 2.7 Future: Media Worker Boundary
+### 2.7 ADR: Thread Ownership of surface.present() vs GPU Submit
+
+**Decision:** `surface.present()` is called exclusively by the main thread. GPU command submission (`wgpu::Queue::submit`) is performed exclusively by the compositor thread. These two operations are assigned to different threads by design and must never be migrated.
+
+#### Context and Constraints
+
+wgpu's threading model imposes platform-specific constraints that directly determine which thread may call which GPU operations:
+
+- **`wgpu::Queue::submit()`** is CPU-intensive command recording and is safe to call from any thread that owns the `wgpu::Queue`. There is no platform restriction. The compositor thread owns the `wgpu::Device` and `wgpu::Queue`; no other thread may call any method on these objects.
+- **`wgpu::Surface::get_current_texture()`** (frame acquisition) and **`wgpu::SurfaceTexture::present()`** (frame presentation) have a platform-critical constraint: on macOS (Metal) and iOS (Metal), these calls **must** occur on the main thread. This is a Metal/Core Animation requirement propagated through wgpu: Metal's `CAMetalLayer` is tied to the run loop of the thread that created the window. Calling `present()` from a non-main thread on macOS results in undefined behavior, visual corruption, or a crash.
+- **winit** requires the event loop to run on the main thread on all supported platforms. Since winit owns the window and surface handle, and since the main thread is the only legal thread for `present()` on macOS, the main thread is the only viable thread for presentation.
+
+#### The Split and Why It Is Correct
+
+The split — compositor thread submits GPU work; main thread presents — follows directly from the constraints above:
+
+1. **GPU submission on compositor thread.** Command encoding and queue submission are the CPU-heavy, latency-sensitive work. They must not run on the main thread, which also handles input drain. Running GPU submission on the main thread would either block input processing (violating the `input_to_local_ack` p99 < 4ms budget) or require the input drain to compete with GPU submission for the same thread.
+
+2. **`surface.present()` on main thread.** This is forced by the macOS/Metal requirement. The surface handle is held by the main thread; `present()` is a lightweight call (it signals the display server; it does not re-encode or re-submit GPU work). The cost is negligible.
+
+3. **The `_guard` in `CompositorFrame`.** wgpu requires that the `SurfaceTexture` returned by `get_current_texture()` remains alive until after `present()`. The `CompositorFrame._guard: Box<dyn Any + Send>` carries this ownership across the thread boundary safely. The `Send` bound is required because `CompositorFrame` is transferred from the compositor thread (where it is created during render encode) to the main thread (where `present()` is called). The `_guard` is `Send` because `wgpu::SurfaceTexture` implements `Send`. (T-1: this resolves the soundness issue in the earlier `current_texture() -> wgpu::TextureView` signature.)
+
+#### Safety Boundary: Which wgpu Calls Are Legal From Which Thread
+
+| wgpu call | Thread | Rationale |
+|-----------|--------|-----------|
+| `Device::create_*` (buffers, textures, pipelines) | Compositor only | Device owned by compositor thread |
+| `Queue::submit()` | Compositor only | Queue owned by compositor thread |
+| `Queue::write_buffer()` | Compositor only | Queue owned by compositor thread |
+| `Surface::get_current_texture()` | Main thread only | macOS/Metal main-thread requirement; surface held by main thread |
+| `SurfaceTexture::present()` | Main thread only | macOS/Metal main-thread requirement; must follow get_current_texture() on same thread |
+| `TextureView` creation from `SurfaceTexture` | Compositor thread | View is created from the guard before transfer; the guard (not the view) is what must be kept alive |
+| `device.poll()` | Main thread (shutdown only) | Shutdown is coordinated on main thread after compositor thread has idled |
+
+The `CompositorSurface` trait (§1.3) encodes this boundary structurally: `acquire_frame()` and `present()` are called in Stage 7 on the compositor thread for the `HeadlessSurface` case, and on the main thread for the `WindowSurface` case. Implementors of `CompositorSurface` must document which thread their implementation requires for each method. `WindowSurface` must document: acquire_frame() — main thread; present() — main thread.
+
+**Correction to §1.3 trait semantics:** The `CompositorSurface` trait as sketched has `acquire_frame()` and `present()` called from the compositor thread in the pipeline description (Stage 7). For `WindowSurface`, both must instead be called from the main thread. The compositor thread produces a `CommandBuffer` and sends a `FrameReadySignal`; the main thread calls `acquire_frame()` followed by `present()` on the `WindowSurface`. This requires that the `CompositorFrame` is acquired and presented on the main thread. The `_guard` transfer in the `HeadlessSurface` case remains a no-op. See the synchronization protocol below for the handoff mechanism.
+
+#### Synchronization Mechanism: FrameReadySignal
+
+The handoff between compositor thread (GPU submit) and main thread (present) is `FrameReadySignal`, a `tokio::sync::watch` channel. The protocol is:
+
+```
+Compositor Thread                          Main Thread (winit event loop)
+─────────────────                          ─────────────────────────────
+Stage 6: encode CommandBuffer
+Stage 7: Queue::submit(command_buffers)
+         → GPU begins executing
+         → send FrameReadySignal           ← watch::Receiver sees new value
+                                           call surface.acquire_frame()
+                                           call surface.present()
+                                           → frame visible on screen
+Stage 3 (next frame): mutation intake
+  (runs concurrently with present above)
+```
+
+**Invariants enforced by this protocol:**
+
+- **No present-before-submit:** The main thread only calls `present()` after receiving `FrameReadySignal`, which is sent only after `Queue::submit()` returns. `present()` before `submit()` is structurally impossible.
+- **No double-present:** `tokio::sync::watch` delivers the latest value; a stale signal is never re-delivered. The main thread processes each signal value at most once per winit event loop tick. If the main thread is slower than 60fps, a frame signal is overwritten by the next one — the main thread skips to the newest frame rather than presenting stale frames twice.
+- **No present-during-submit:** `Queue::submit()` completes before `FrameReadySignal` is sent. There is no window where present() could observe a partially submitted frame.
+
+The `FrameReadySignal` channel (capacity: N/A, latest value wins — `tokio::sync::watch`) is designed so that if the main thread falls behind, the compositor thread is never blocked. The compositor thread sends the signal and immediately begins Stage 3 for the next frame. GPU execution for frame N is pipelined with CPU work for frame N+1.
+
+#### Platform-Specific Presentation Notes
+
+| Platform | Presentation thread | Notes |
+|----------|--------------------|-|
+| macOS (Metal) | Main thread only | Metal/Core Animation hard requirement. No workaround. |
+| iOS (Metal) | Main thread only | Same as macOS. |
+| Linux (Vulkan/X11, Vulkan/Wayland) | Any thread with surface ownership | The compositor thread could call `present()` directly. Current design uses main thread for uniformity. |
+| Windows (Vulkan/D3D12) | Any thread with surface ownership | Same as Linux — no hard restriction. |
+
+**Future optimization opportunity.** On Linux and Windows, `present()` can be moved to the compositor thread, eliminating the cross-thread signal for `FrameReadySignal` on those platforms. This would reduce one inter-thread coordination step and slightly tighten the `input_to_next_present` budget. This is deferred as a post-v1 platform-specific optimization. Any implementation must preserve the macOS/iOS constraint and must gate the optimization on platform detection at startup, not compile time.
+
+### 2.8 Future: Media Worker Boundary
 
 > **This section is a reservation, not an implementation spec.** Nothing in this section is built in v1. It documents where media workers will live in the thread model and what constraints must be preserved so that adding them post-v1 does not require restructuring the v1 design.
 
@@ -495,7 +570,7 @@ Build wgpu `CommandEncoder` from the `RenderFrame`. For each tile in the composi
 
 Render encoding does not submit to the GPU queue. It only prepares `CommandBuffer` objects.
 
-Media tiles (deferred to post-v1) will add video surface compositing here. The compositor thread will drain `DecodedFrameReady` signals during Stage 3 (Mutation Intake) or a dedicated sub-stage, upload decoded GPU textures (preserving GPU device ownership — see §2.7), and blit the resulting textures during Stage 6. No media decode work happens on the compositor thread.
+Media tiles (deferred to post-v1) will add video surface compositing here. The compositor thread will drain `DecodedFrameReady` signals during Stage 3 (Mutation Intake) or a dedicated sub-stage, upload decoded GPU textures (preserving GPU device ownership — see §2.8), and blit the resulting textures during Stage 6. No media decode work happens on the compositor thread.
 
 #### Stage 7: GPU Submit + Present
 **Thread:** Compositor | **Budget:** p99 < 8ms
@@ -812,7 +887,7 @@ On platforms that do not support per-region passthrough (GNOME Wayland, KDE Wayl
 
 ### 7.3 Surface Lifecycle
 
-The window surface is owned by the main thread. The compositor thread owns the `wgpu::Device` and `wgpu::Queue`. Surface resize:
+The window surface is owned by the main thread. The compositor thread owns the `wgpu::Device` and `wgpu::Queue`. For the rationale behind this split, see §2.7 (Thread-Ownership ADR). Surface resize:
 
 1. Main thread receives `Resized(width, height)` from winit.
 2. Main thread sends `SurfaceResized(width, height)` to compositor thread via a dedicated channel (capacity: 1, overwrite).
