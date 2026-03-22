@@ -122,6 +122,41 @@ No new inconsistencies. All prior-round fixes remain intact. Cross-RFC score rai
 
 ---
 
+### Round 5 — Scene-Event Taxonomy (rig-f52)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Issue:** rig-f52
+**Doctrine files reviewed:** presence.md §"Inter-agent events", v1.md §"Advanced presence", architecture.md §"Policy arbitration"
+
+#### Finding: RFC 0004 cross-reference was incorrect for `tab_switch_on_event`
+
+**[MUST-FIX → FIXED]** §5.4 cited RFC 0004 (Input) as the source of scene-level event names. RFC 0004 owns pointer, touch, keyboard, focus, and gesture routing — not named domain events like `doorbell.ring` or `alert.fire`. The examples in §5.4 and the `emit_scene_event` capability in §6.3 reveal a scene-event bus contract that has no canonical definition in any RFC.
+
+**Fixes applied:**
+
+1. **Cross-References section:** Corrected RFC 0004 entry to note it owns input routing only and does not define the scene-event bus. Added presence.md §"Inter-agent events" (doctrine source) and v1.md §"Advanced presence" (v1 scope constraint) as explicit cross-references.
+
+2. **§5.4 Tab Switching Policy:** Changed `(see RFC 0004)` to `(see §5.5)`. Changed the unknown-event-name WARN prose to reference `§5.5` instead of `RFC 0004 §scene-level events` (the latter section does not exist in RFC 0004).
+
+3. **§5.5 Scene-Event Taxonomy (new section):** Defines the v1 scene-event contract inline, scoped to what v1.md permits:
+   - Event naming convention: `<source>.<action>`, dotted lowercase hierarchy.
+   - V1 event categories: system events (`system.*`, runtime-emitted, reserved prefix), scene topology events (`scene.*`, runtime-emitted), and agent-emittable named events (require `emit_scene_event:<name>` capability).
+   - V1 event payload: `event_name`, `emitted_at_us`, `source_agent_id`.
+   - Validation rules: `CONFIG_INVALID_EVENT_NAME` for malformed `tab_switch_on_event` values; `CONFIG_RESERVED_EVENT_PREFIX` for capability grants attempting to use `system.` or `scene.` prefix.
+
+4. **§6.3 Capability Identifiers:** Updated `subscribe_scene_events` description to clarify it is the scene-event bus capability (not input). Updated `emit_scene_event` description to cite §5.5 naming convention and reserved prefix constraint. Added a boxed note distinguishing scene-event bus from input routing.
+
+5. **§10 Rust types:** Added `ConfigInvalidEventName` and `ConfigReservedEventPrefix` to `ConfigErrorCode` enum.
+
+6. **Open Question 5 (new):** Added open question about whether scene events should have a dedicated RFC 0010 as the contract grows post-v1.
+
+7. **Summary of Validation Error Codes:** Added rows for `CONFIG_INVALID_EVENT_NAME` and `CONFIG_RESERVED_EVENT_PREFIX`.
+
+**No doctrinal regressions. Round 5 complete.**
+
+---
+
 ## Summary
 
 This RFC defines the configuration system for tze_hud: the file format, schema, display profile definitions, zone geometry policies, tab and layout configuration, agent registration, and privacy/degradation policies. Configuration is the primary mechanism for declaring scenes, zones, and policies in v1 before dynamic orchestration exists, so it is a first-class, schema-validated, LLM-readable surface.
@@ -156,16 +191,17 @@ This RFC resolves all of these by specifying configuration as a validated, decla
 - RFC 0001 (Scene Contract) — zone registry, tile identity, namespace model
 - RFC 0002 (Runtime Kernel) — startup sequence, config load path, reload-on-signal
 - RFC 0003 (Timing Model) — quiet hours time semantics, degradation timer thresholds
-- RFC 0004 (Input) — tab switching policy (tab_switch_on_event)
-- RFC 0005 (Session Protocol) — canonical capability identifier vocabulary (§7.1), `reconnect_grace_period_ms` (§8)
+- RFC 0004 (Input) — input routing, focus, gesture model; note: RFC 0004 does **not** define the scene-event bus — see §5.4 and §5.5 of this RFC
+- RFC 0005 (Session Protocol) — canonical capability identifier vocabulary (§7.1), `reconnect_grace_period_ms` (§8), `subscribe_scene_events` / `emit_scene_event` capability grants
 - RFC 0008 (Lease Governance) — capability scope format, `lease:priority:<N>` capability, reconnect grace period semantics
 - RFC 0009 (Policy Arbitration) — `redaction_style` ownership (§3.2 mandates `[privacy]` as canonical section), arbitration stack (§1) that this config feeds
-- heart-and-soul/architecture.md — configuration model doctrine
+- heart-and-soul/architecture.md — configuration model doctrine, policy arbitration order
 - heart-and-soul/mobile.md — two profiles, one model
-- heart-and-soul/presence.md — zones, geometry, layer attachment
+- heart-and-soul/presence.md — zones, geometry, layer attachment; §"Inter-agent events" is the doctrine source for the scene-event bus
 - heart-and-soul/privacy.md — viewer classes, quiet hours, content classification
 - heart-and-soul/failure.md — degradation axes and ladder
 - heart-and-soul/security.md — agent authentication, capability scopes
+- heart-and-soul/v1.md — §"Advanced presence": "No inter-agent event bus beyond basic scene topology changes" — defines v1 scene-event scope
 
 ---
 
@@ -329,7 +365,7 @@ status_bar = { policy = "full_width_bar", layer = "chrome" }
 ambient_background = { policy = "fullscreen_behind", layer = "background" }
 
 # Tab switching policy: this tab becomes active when the named event fires.
-# Event names are from RFC 0004 (Input) scene-level events.
+# Event names follow the scene-event taxonomy defined in §5.5 (<source>.<action>).
 # Optional.
 tab_switch_on_event = "doorbell.ring"
 
@@ -854,7 +890,7 @@ Reserved fractions are additive with chrome layer zones. If `tab_bar_position = 
 
 ### 5.4 Tab Switching Policy
 
-The `tab_switch_on_event` field names a scene-level event (see RFC 0004) that automatically activates the tab. This is the mechanism for interrupt-driven tab switching without agent involvement:
+The `tab_switch_on_event` field names a scene-level event (see §5.5) that automatically activates the tab. This is the mechanism for interrupt-driven tab switching without agent involvement:
 
 ```toml
 tab_switch_on_event = "doorbell.ring"    # Switch when doorbell rings
@@ -864,7 +900,76 @@ tab_switch_on_event = ""                 # No automatic switch (default)
 
 Tab switches triggered by `tab_switch_on_event` are subject to the canonical policy evaluation order defined in architecture.md §"Policy arbitration" (steps 1–7: human override → capability gate → privacy/viewer gate → interruption policy → attention budget → zone contention → resource/degradation budget). The interruption class check (step 4) is what determines whether the tab switch fires during quiet hours: a `doorbell.ring` event carries `interruption_class = "urgent"` and therefore passes through quiet-hours gating. A `morning.routine` event with `interruption_class = "normal"` would be suppressed during quiet hours.
 
-**Unknown event names:** If `tab_switch_on_event` names an event not found in the built-in event registry (see RFC 0004 §scene-level events), the runtime accepts the configuration without error and emits a `WARN` log entry at startup: `tab_switch_on_event '<name>' in tab '<tab>': event name not recognized; this tab will never auto-switch until this event is registered`. This is not a hard validation error — custom events may be registered at runtime in post-v1 deployments, and treating an unrecognized event name as an error would block forward compatibility. An empty string (`""`) is a valid value meaning "no automatic switch" and does not generate a warning.
+**Unknown event names:** If `tab_switch_on_event` names an event not found in the v1 scene-event taxonomy (§5.5), the runtime accepts the configuration without error and emits a `WARN` log entry at startup: `tab_switch_on_event '<name>' in tab '<tab>': event name not recognized; this tab will never auto-switch until this event is registered`. This is not a hard validation error — custom events may be registered at runtime in post-v1 deployments, and treating an unrecognized event name as an error would block forward compatibility. An empty string (`""`) is a valid value meaning "no automatic switch" and does not generate a warning.
+
+### 5.5 Scene-Event Taxonomy
+
+> **Doctrine:** presence.md §"Inter-agent events" establishes that "agents can subscribe to a shared event bus for coarse-grained coordination signals." These are scene-level events, not input events (pointer, touch, keyboard, gesture) — those belong to RFC 0004. The v1 scope constraint comes from v1.md §"Advanced presence": "No inter-agent event bus beyond basic scene topology changes."
+
+#### Event Naming Convention
+
+Scene events use a dotted hierarchy: `<source>.<action>`. Both segments use lowercase letters, digits, and underscores. No whitespace, no uppercase.
+
+Examples: `doorbell.ring`, `alert.fire`, `system.agent_connected`.
+
+The source segment identifies who or what generated the event. The action segment identifies what happened. A two-segment name is required; deeper nesting (e.g., `sensor.door.open`) is reserved for post-v1.
+
+#### V1 Event Categories
+
+Three categories of scene events exist in v1:
+
+**1. System events** (runtime-emitted, `system.*` prefix, reserved for runtime use):
+
+| Event name | Trigger | Interruption class |
+|---|---|---|
+| `system.agent_connected` | An agent completes `SessionEstablished` | `normal` |
+| `system.agent_disconnected` | An agent session closes or expires | `normal` |
+| `system.degradation_entered` | Runtime enters a degradation level | `normal` |
+| `system.degradation_exited` | Runtime exits a degradation level | `normal` |
+
+The `system.*` prefix is reserved. Agents may not emit events with names starting with `system.` — such capability grants are rejected at load time (see validation rules below).
+
+**2. Scene topology events** (runtime-emitted, delivered via `subscribe_scene_events` capability):
+
+These are coarse-grained state changes that agents can subscribe to (RFC 0005 §7.1 `scene_topology` category):
+
+| Event name | Trigger |
+|---|---|
+| `scene.tab_switched` | The active tab changed |
+| `scene.tile_created` | A tile was added to the scene |
+| `scene.tile_destroyed` | A tile was removed from the scene |
+
+Scene topology events are emitted by the runtime and are not agent-emittable.
+
+**3. Agent-emittable named events**:
+
+Agents can fire arbitrary named events by holding the `emit_scene_event:<name>` capability (§6.3). These events are named by the agent and correspond to domain-specific triggers: `doorbell.ring`, `alert.fire`, `morning.routine`, etc. An agent cannot emit an event it does not hold a specific capability for.
+
+Agent-emittable event names must conform to the naming convention above (`<source>.<action>`) and must not use the `system.` or `scene.` prefix.
+
+#### Event Payload (V1)
+
+All v1 scene events carry a minimal fixed payload:
+
+| Field | Type | Description |
+|---|---|---|
+| `event_name` | string | Canonical dotted event name (e.g., `doorbell.ring`) |
+| `emitted_at_us` | int64 | UTC microseconds when the event was fired (RFC 0003 clock domain) |
+| `source_agent_id` | SceneId or null | Agent that emitted the event; null for runtime-emitted events |
+
+Post-v1 event payloads may carry additional structured fields. V1 recipients must ignore unknown fields.
+
+#### Validation Rules for `tab_switch_on_event`
+
+- The field value must be either the empty string (`""`) or a valid dotted event name matching `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`. Values that fail this pattern → `CONFIG_INVALID_EVENT_NAME` with hint: "event name must follow the `<source>.<action>` dotted hierarchy".
+
+#### Validation Rules for `emit_scene_event:<name>` Capabilities (§6.3)
+
+- The `<name>` segment in `emit_scene_event:<name>` must be a valid dotted event name.
+- Capability grants with names starting `emit_scene_event:system.` are rejected at config load: `CONFIG_RESERVED_EVENT_PREFIX` with hint: "the `system.` prefix is reserved for runtime-emitted events; agents may not emit events with this prefix".
+- Capability grants with names starting `emit_scene_event:scene.` are also rejected: `CONFIG_RESERVED_EVENT_PREFIX` with equivalent hint.
+
+These validation rules are added to the `ConfigErrorCode` enum (§10) and the Summary of Validation Error Codes table.
 
 ---
 
@@ -955,17 +1060,19 @@ The capability grant list in each agent entry uses structured capability identif
 | `create_tiles` | May request tile leases. | RFC 0005, RFC 0008 §3.3 |
 | `modify_own_tiles` | May mutate content on own tiles. | RFC 0005 |
 | `read_scene` | May query the full scene topology, including other agents' lease metadata. | RFC 0005 §7.1 |
-| `subscribe_scene_events` | May subscribe to scene-level events (tab switches, agent joins/departs). | RFC 0005 §7.1 |
+| `subscribe_scene_events` | May subscribe to scene-level events on the scene-event bus (system events, scene topology events, agent-emittable named events — see §5.5). This is **not** an input-event subscription; input routing uses `receive_input`. | RFC 0005 §7.1 |
 | `overlay_privileges` | May request tiles with high z-order or overlay-level positions. | RFC 0005 |
-| `receive_input` | May receive input events forwarded from the runtime. | RFC 0005 §7.1 |
+| `receive_input` | May receive input events forwarded from the runtime (pointer, touch, keyboard, gesture per RFC 0004). This is **not** the scene-event bus; use `subscribe_scene_events` for named scene events. | RFC 0005 §7.1 |
 | `high_priority_z_order` | May request z-order values in the top quartile. | RFC 0005 |
 | `exceed_default_budgets` | May request budget overrides at session time (requires user prompt). | RFC 0005 |
 | `read_telemetry` | May subscribe to `telemetry_frames` events (runtime performance samples). | RFC 0005 §7.1 |
 | `zone_publish:<zone_name>` | May publish to the named zone. One grant per zone. `zone_publish:*` grants all zones. | RFC 0005 §7.1 |
-| `emit_scene_event:<event_name>` | May fire the named scene event (e.g., `doorbell.ring`). | RFC 0005 |
+| `emit_scene_event:<event_name>` | May fire the named scene event on the scene-event bus (e.g., `emit_scene_event:doorbell.ring`). The `<event_name>` must follow the `<source>.<action>` naming convention and must not use the `system.` or `scene.` reserved prefix (§5.5). | RFC 0005 |
 | `lease:priority:<N>` | May request lease priority N or lower (0=Critical, 4=Speculative). See RFC 0008 §2.1. | RFC 0008 §2.1 |
 
 Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene` — these must be listed explicitly. Only `zone_publish:*` is supported as a wildcard form.
+
+> **Scene-event bus vs. input routing:** `subscribe_scene_events` / `emit_scene_event` operate on the scene-event bus defined in §5.5 (presence.md §"Inter-agent events" doctrine). They are distinct from input events (RFC 0004): `doorbell.ring` is a device/domain event, not a pointer or keyboard event. Granting an agent `receive_input` does not give it access to scene events, and granting `subscribe_scene_events` does not forward any input.
 
 ### 6.4 Dynamic Agent Policy
 
@@ -1365,6 +1472,8 @@ pub enum ConfigErrorCode {
     ConfigUnknownShedPriority,
     ConfigDegradationThresholdOrder,
     ConfigAgentBudgetExceedsProfile,
+    ConfigInvalidEventName,
+    ConfigReservedEventPrefix,
 }
 
 /// A validation error with structured fields.
@@ -1425,6 +1534,8 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 
 4. **Secret management for PSK keys.** The current design reads keys from environment variables. Deployments with more complex secret management needs (Vault, key files, etc.) will need a post-v1 extension. The auth trait is designed to support this.
 
+5. **Scene events as a dedicated RFC.** §5.5 defines the v1 scene-event taxonomy inline because v1.md constrains scene events to basic topology changes plus agent-emittable named events. As post-v1 deployments add richer event routing (event filters, replay, subscriptions by prefix, custom payload schemas), the scene-event contract may outgrow a config section. Consider a dedicated RFC 0010 (Scene Event Bus) that owns the namespace registry, event payload schema, delivery guarantees, and subscription model. RFC 0006 would then cross-reference it for `tab_switch_on_event` semantics, as RFC 0004 owns input routing today.
+
 ---
 
 ## Summary of Validation Error Codes
@@ -1455,3 +1566,5 @@ Steps 3–6 are pure functions. Step 7 is the only point where the runtime takes
 | `CONFIG_UNKNOWN_SHED_PRIORITY` | §7.2 | Unknown `shed_priority` value |
 | `CONFIG_DEGRADATION_THRESHOLD_ORDER` | §7.2 | Degradation thresholds are not monotonically non-decreasing (heavier step fires before lighter step) |
 | `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE` | §6.2 | Per-agent budget override (`max_tiles`, `max_texture_mb`, `max_update_hz`) exceeds the active profile's ceiling |
+| `CONFIG_INVALID_EVENT_NAME` | §5.4, §5.5 | `tab_switch_on_event` value is not empty and does not match `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$` |
+| `CONFIG_RESERVED_EVENT_PREFIX` | §5.5, §6.3 | `emit_scene_event:<name>` capability grant uses the `system.` or `scene.` reserved prefix |
