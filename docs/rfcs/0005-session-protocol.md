@@ -119,6 +119,13 @@ message SessionInit {
   // send SessionResume as its first message, not SessionInit.
   reserved 9, 10;
   reserved "resume_session_token", "resume_last_seen_server_seq";
+
+  // Round 2 addition (C-R3 / RFC 0003 §1.3): Agent's current UTC clock at handshake time.
+  // Used by the compositor to compute the initial clock-skew estimate for
+  // this session (see RFC 0003 §1.3). Agents SHOULD provide this.
+  // If absent (0), the compositor cannot produce an initial skew estimate
+  // and will return estimated_skew_us = 0 in SessionEstablished.
+  uint64 agent_timestamp_us = 11;  // Agent UTC µs since epoch at time of sending SessionInit
 }
 ```
 
@@ -136,6 +143,17 @@ message SessionEstablished {
   uint64 server_sequence = 6;           // Starting server-side sequence number
   repeated SubscriptionCategory active_subscriptions = 7;   // Confirmed subscriptions
   repeated SubscriptionCategory denied_subscriptions = 8;   // Requested but denied (missing capability)
+
+  // Round 2 addition (C-R3 / RFC 0003 §1.3): Clock reference for initial skew alignment.
+  // Agents SHOULD use these values to validate their timestamps before sending the first
+  // mutation batch, avoiding TIMESTAMP_TOO_OLD rejections caused by undetected clock skew.
+  // Eliminates the need for a separate ClockSync RPC call at session start.
+  uint64 compositor_wallclock_us = 9;   // Compositor UTC wall clock at handshake time (µs since epoch)
+  int64  estimated_skew_us       = 10;  // Initial skew estimate: agent_ts - compositor_ts (signed).
+                                        // Positive = agent clock ahead; negative = agent clock behind.
+                                        // Based on agent_timestamp_us from SessionInit (if agent
+                                        // supplies a timestamp there) or a single-sample estimate.
+                                        // Zero if no agent timestamp was available for estimation.
 }
 ```
 
@@ -772,6 +790,7 @@ message SessionInit {
   // Fields 9–10 are reserved. Resume uses SessionResume (§6.2), never SessionInit.
   reserved 9, 10;
   reserved "resume_session_token", "resume_last_seen_server_seq";
+  uint64 agent_timestamp_us = 11;  // Agent UTC µs since epoch (RFC 0003 §1.3 clock sync)
 }
 
 message SessionEstablished {
@@ -783,6 +802,8 @@ message SessionEstablished {
   uint64  server_sequence                = 6;
   repeated SubscriptionCategory active_subscriptions = 7;
   repeated SubscriptionCategory denied_subscriptions = 8;
+  uint64 compositor_wallclock_us = 9;   // Compositor UTC wall clock at handshake time (µs since epoch)
+  int64  estimated_skew_us       = 10;  // Initial skew estimate: agent_ts - compositor_ts (signed)
 }
 
 message SessionClose {
@@ -881,11 +902,19 @@ message SubscriptionChangeResult {
 // ─── Mutation batch (client → server) ────────────────────────────────────────
 // TimingHints imported from timing.proto (RFC 0003) in the full implementation.
 // Defined inline here for completeness.
+//
+// IMPORTANT: This is a documentation aid only. The authoritative definition is
+// in timing.proto (RFC 0003). The full implementation imports timing.proto;
+// this inline block must match RFC 0003 §7.1 exactly.
+//
+// Round 2 fix (C-R1): sync_group_id was incorrectly typed as `string`. It is
+// a 16-byte UUIDv7 binary value and must be `bytes`, consistent with SceneId
+// (RFC 0001 §1.1) and RFC 0003 §2.2. All-zero bytes = "not in a sync group".
 
 message TimingHints {
   uint64 present_at_us  = 1;   // Wall-clock (µs since epoch); 0 = present immediately
   uint64 expires_at_us  = 2;   // Wall-clock; 0 = no expiry
-  string sync_group_id  = 3;   // Scene sync group (RFC 0001 §3)
+  bytes  sync_group_id  = 3;   // SyncGroupId: 16-byte UUIDv7 (RFC 0003 §2.2); all-zero = no group
 }
 
 message MutationBatch {
@@ -1015,6 +1044,20 @@ service SessionService {
   // Primary bidirectional session stream.
   // All session traffic (handshake, mutations, events, heartbeats) flows here.
   rpc Session(stream SessionMessage) returns (stream SessionMessage);
+
+  // Unary RPC: agent sends its current timestamp; compositor responds with
+  // its clock reference and the current skew estimate.
+  //
+  // Round 2 addition (C-R2): ClockSync is defined in timing.proto (RFC 0003 §7.1)
+  // as ClockSyncService.ClockSync but is hosted here on SessionService to keep
+  // all agent-runtime communication on a single gRPC endpoint. While the initial
+  // handshake provides a skew estimate via SessionEstablished, agents can call
+  // ClockSync for ongoing re-synchronization, especially after receiving
+  // CLOCK_SKEW_HIGH events. See RFC 0003 §4.5 for the re-synchronization protocol.
+  //
+  // ClockSyncRequest and ClockSyncResponse are defined in timing.proto and
+  // imported here. See RFC 0003 §7.1 for the message definitions.
+  rpc ClockSync(ClockSyncRequest) returns (ClockSyncResponse);
 }
 ```
 
@@ -1023,9 +1066,12 @@ service SessionService {
 ```
 session.proto
   ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages
-  └── imports scene_service.proto
-        └── defines: MutationProto, ZoneContent, SceneEvent, InputEvent,
-                     LeaseRequest, LeaseResponse
+  ├── imports scene_service.proto
+  │     └── defines: MutationProto, ZoneContent, SceneEvent, InputEvent,
+  │                  LeaseRequest, LeaseResponse
+  └── imports timing.proto (RFC 0003)
+        └── defines: ClockSyncRequest, ClockSyncResponse, TimingHints, MessageClass,
+                     DeliveryPolicy, TimestampedPayload
 ```
 
 `timing.proto` (RFC 0003) is imported for `TimingHints` in the full implementation; the inline definition above is provided for completeness during the pre-code draft phase. **Normative note:** if the inline `TimingHints` definition and the `timing.proto` definition in RFC 0003 ever diverge, RFC 0003 is authoritative. Implementers should flag any divergence for correction before the pre-code phase ends.
@@ -1064,7 +1110,7 @@ The session protocol exposes the following configurable parameters in the runtim
 |-----|-------------|
 | RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene topology events reference `SceneId` types from RFC 0001. |
 | RFC 0002 (Runtime Kernel) | The session service is a component of the runtime kernel. Lease lifecycle (grace period, revocation) is governed by RFC 0002. |
-| RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. |
+| RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_us` and `SessionEstablished.compositor_wallclock_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. |
 | RFC 0004 (Input Model) | `InputEvent` messages delivered over the session stream follow the routing and dispatch rules of RFC 0004. |
 
 ---
