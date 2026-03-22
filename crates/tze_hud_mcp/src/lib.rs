@@ -20,8 +20,10 @@
 //! | `create_tab`      | Create a new tab in the scene            |
 //! | `create_tile`     | Create a tile within a tab               |
 //! | `set_content`     | Set markdown content on a tile's node    |
+//! | `dismiss`         | Delete a tile and release its lease      |
 //! | `publish_to_zone` | Publish content to a named zone          |
 //! | `list_zones`      | List available zones and their state     |
+//! | `list_scene`      | List tabs and zones (guest-restricted)   |
 
 pub mod error;
 pub mod server;
