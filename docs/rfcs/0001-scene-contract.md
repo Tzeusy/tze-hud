@@ -310,11 +310,22 @@ pub enum ImageFit {
 ```rust
 pub struct HitRegionNode {
     pub bounds: Rect,               // Relative to tile origin; the interactive area
-    pub interaction_id: String,     // Agent-defined identifier; forwarded in events
+    pub interaction_id: String,     // Agent-defined identifier; forwarded in input events
     pub accepts_focus: bool,        // Whether keyboard focus can land here
     pub accepts_pointer: bool,      // Whether pointer events are captured here
+
+    // Input-model fields (see RFC 0004 §7.1 for full behavioral contract):
+    pub auto_capture: bool,         // Acquire pointer capture automatically on PointerDown
+    pub release_on_up: bool,        // Release capture on PointerUp (default: true)
+    pub cursor_style: CursorStyle,  // Pointer cursor when hovering
+    pub tooltip: Option<String>,    // Tooltip text shown after 500ms hover
+    pub event_mask: EventMask,      // Which events this node receives
+    pub accessibility: AccessibilityMetadata, // Agent-declared a11y properties
+    pub local_style: LocalFeedbackStyle,      // Customizes press/hover/focus visuals
 }
 ```
+
+> **Note:** The four base fields (`bounds`, `interaction_id`, `accepts_focus`, `accepts_pointer`) are the scene-contract concern. The remaining fields are defined by RFC 0004 and are only relevant to the input subsystem. Implementations must treat all fields as part of the same message; the split is doctrinal, not structural.
 
 `HitRegionNode` is the sole V1 interactive primitive. It has local state tracked by the compositor:
 
@@ -981,11 +992,21 @@ message StaticImageNode {
   uint64     present_at_ms = 4; // 0 = use tile-level present_at
 }
 
+// HitRegionNode: base fields defined here; input-model fields defined in RFC 0004.
+// Implementations use a single unified message with all fields populated.
 message HitRegionNode {
   Rect   bounds          = 1;
-  string interaction_id  = 2;
+  string interaction_id  = 2;  // Forwarded in input events for agent correlation
   bool   accepts_focus   = 3;
   bool   accepts_pointer = 4;
+  // Fields 5–11: see RFC 0004 §9.1 HitRegionConfig (merged here at implementation time)
+  bool                auto_capture    = 5;
+  bool                release_on_up   = 6;
+  CursorStyle         cursor_style    = 7;
+  string              tooltip         = 8;
+  EventMaskConfig     event_mask      = 9;
+  AccessibilityConfig accessibility   = 10;
+  LocalStyleConfig    local_style     = 11;
 }
 
 message Node {
