@@ -1814,7 +1814,7 @@ message CommandInputEvent {
 
 **CANCEL handling:** Delivered to the focused node/tile as-is. If there is an active IME composition, the runtime cancels it first (same sequence as §4.5 focus-loss behavior) before delivering `CANCEL`.
 
-**SCROLL_UP / SCROLL_DOWN handling:** Delivered to the focused tile. Scroll feedback is local (§11.2).
+**SCROLL_UP / SCROLL_DOWN handling:** Delivered to the focused tile. Scroll feedback is local (§6.7).
 
 ### 10.4 Input Capability Negotiation
 
