@@ -206,10 +206,10 @@ pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicy
         font_size_px: rp.font_size_px.unwrap_or(0.0),
         backdrop: rp.backdrop.map(|c| proto::Rgba { r: c.r, g: c.g, b: c.b, a: c.a }),
         text_align: rp.text_align.map(|ta| match ta {
-            TextAlign::Start => 1,
-            TextAlign::Center => 2,
-            TextAlign::End => 3,
-        }).unwrap_or(0),
+            TextAlign::Start => proto::TextAlignProto::Start as i32,
+            TextAlign::Center => proto::TextAlignProto::Center as i32,
+            TextAlign::End => proto::TextAlignProto::End as i32,
+        }).unwrap_or(proto::TextAlignProto::Unspecified as i32),
         margin_px: rp.margin_px.unwrap_or(0.0),
     }
 }

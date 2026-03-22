@@ -171,13 +171,21 @@ message GeometryPolicyProto {
   }
 }
 
+// Text alignment for zone content.
+enum TextAlignProto {
+  TEXT_ALIGN_PROTO_UNSPECIFIED = 0;
+  TEXT_ALIGN_PROTO_START       = 1;
+  TEXT_ALIGN_PROTO_CENTER      = 2;
+  TEXT_ALIGN_PROTO_END         = 3;
+}
+
 // Rendering policy for zone content presentation.
 // All fields optional; absent = compositor default.
 message RenderingPolicyProto {
-  float  font_size_px = 1;   // 0.0 = not set
-  Rgba   backdrop     = 2;   // Zero alpha = not set
-  uint32 text_align   = 3;   // 0=unspecified, 1=start, 2=center, 3=end
-  float  margin_px    = 4;   // 0.0 = not set
+  float         font_size_px = 1;   // 0.0 = not set
+  Rgba          backdrop     = 2;   // Zero alpha = not set
+  TextAlignProto text_align  = 3;   // UNSPECIFIED = compositor default
+  float         margin_px    = 4;   // 0.0 = not set
 }
 
 // Contention policy values (used as enum int in ZoneDefinitionProto).

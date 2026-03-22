@@ -489,7 +489,7 @@ impl SceneGraph {
                 } else {
                     // Check key count limit
                     if publishes.len() >= max_keys as usize {
-                        return Err(ValidationError::ZoneMaxPublishersReached {
+                        return Err(ValidationError::ZoneMaxKeysReached {
                             zone: zone_name.to_string(),
                             max: max_keys as u32,
                         });
