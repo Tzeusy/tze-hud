@@ -8,6 +8,65 @@
 
 ---
 
+## Review History
+
+### Round 1 — Doctrinal Alignment Deep-Dive (rig-5vq.35)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, security.md, failure.md, privacy.md, v1.md
+
+#### Doctrinal Alignment: 4/5
+Chrome layer, human override, failure indicators, and privacy isolation all align with doctrine. The following doctrinal gaps were found and fixed:
+
+- **[MUST-FIX → FIXED]** §2.3: Wrong cross-ref RFC 0004 §4 (IME) → RFC 0004 §8 (Event Dispatch Protocol).
+- **[MUST-FIX → FIXED]** §4.1: Replace undefined `LeaseRevoked` event with correct RFC 0005 `LeaseResponse` / `lease_changes` subscription category.
+- **[MUST-FIX → FIXED]** §4.2, §5.2, §5.5: Flag `SessionSuspended` / `SessionResumed` as undefined in RFC 0005; added inline notes and explicit protocol-gap entry in §8.
+- **[SHOULD-FIX → FIXED]** §7.5: Clarify `SafeModePhase` enum has only NORMAL/ACTIVE (not EMERGENCY_FALLBACK) with comment explaining why the diagram's third state is outside this machine.
+- **[SHOULD-FIX → FIXED]** §7.2: Clarify `budget_warning` renders as a border (§3.5), NOT a stacked badge icon.
+- **[SHOULD-FIX → FIXED]** §2.5: Add Dismiss All affordance to system status indicator description to match §4.2.
+- **[CONSIDER → APPLIED]** §8: Add RFC 0005 row to interaction table documenting the protocol gap.
+
+#### Technical Robustness: 4/5
+Safe mode scene-graph independence solid; ChromeState atomic read clear.
+
+#### Cross-RFC Consistency: 3/5
+RFC 0005 gap flagged and documented; §8 table now complete.
+
+**No dimension below 3. Round 1 findings addressed. Ready for Round 2 (Technical Architecture Scrutiny).**
+
+---
+
+### Round 2 — Technical Architecture Scrutiny (rig-5vq.36)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, security.md, failure.md, v1.md
+
+#### Doctrinal Alignment: 4/5
+
+The RFC continues to align well with core doctrine. Chrome sovereignty, safe mode as last resort, human override at priority 1, and agent isolation for viewer state are all correctly specified. No new doctrinal gaps were found in this round.
+
+#### Technical Robustness: 4/5
+
+Four correctness gaps found and fixed in this round:
+
+- **[MUST-FIX → FIXED]** §7.1: `ChromeState` atomicity is asserted ("read atomically") but the synchronization mechanism is not specified. The control plane (network thread) writes `ChromeState`; the compositor thread reads it. Without a defined primitive this is a data race. Added §7.1 note specifying `Arc<RwLock<ChromeState>>` as the required synchronization contract, with a note on the write side being limited to the network/control thread.
+- **[MUST-FIX → FIXED]** §4.3: Freeze queue overflow drops "older mutations" — but RFC 0005 §5.1 establishes that transactional mutations are *never dropped*. Dropping a `CreateTile` or `LeaseRequest` silently violates the delivery guarantee. Fixed with traffic-class-aware overflow: transactional mutations are never dropped; ephemeral/state-stream mutations are dropped oldest-first under overflow.
+- **[MUST-FIX → FIXED]** §5.3/§5.6 (new): The safe mode state machine had no specified behavior when `Freeze` is active at the time of safe mode entry, or when the viewer attempts to freeze while already in safe mode. Added §5.6 specifying the interaction.
+- **[MUST-FIX → FIXED]** §4.1: Dismiss-tile action did not specify behavior when the target tile's agent is already in `Disconnecting` or `Closed` session state. Added a note: the tile and resources are still cleared; the `LeaseResponse` notification is best-effort (silently dropped if the session is already closed).
+
+#### Cross-RFC Consistency: 4/5
+
+- **[SHOULD-FIX → FIXED]** §7.4 (`ViewerPromptState.timeout_at_us`): Used `int64` but RFC 0003 §1.1 establishes `uint64` as the canonical type for monotonic timestamps in µs. Fixed to `uint64`.
+- **[SHOULD-FIX → FIXED]** §7.3: `OverrideEvent.trigger` was an unvalidated `string`. Valid values are a closed set; replaced with `OverrideTrigger` enum for type safety and audit-log correctness. Similarly, `SafeModeEntryEvent.reason` was an unvalidated `string`; replaced with `SafeModeEntryReason` enum.
+- **[CONSIDER]** §4.1: Dismiss swipe threshold (40% of tile width) is not configurable. On small tiles this risks accidental dismissals. Acceptable for v1 but worth making configurable in a future revision.
+- **[CONSIDER]** §7.6: `SafeModeOverlayCmd.banner_text` and `resume_button_label` carry string literals rather than localization keys. Acceptable for v1 English-only deployments but creates a future I18N regression point.
+
+**Post-fix scores: Doctrinal Alignment 4, Technical Robustness 4, Cross-RFC Consistency 4. No dimension below 3. Round 2 complete.**
+
+---
+
 ## Summary
 
 This RFC defines the System Shell — the runtime-owned chrome layer that guarantees viewer sovereignty. It specifies the composition rules that place the chrome above all agent content, the layout and behavior of every chrome element (tab bar, tile badges, override controls, safe mode overlay, and privacy indicator), the internal state machines and event types governing these elements, and the protobuf types used to drive them. The chrome layer is not an agent feature — it is the human's permanent contract with the runtime.
@@ -261,6 +320,14 @@ Override controls are the viewer's direct intervention surface. They are always 
 
 The agent may re-request a lease. The runtime does not permanently block an agent that was dismissed — viewer dismissal is a momentary choice, not a permanent ban. Permanent capability revocation is a separate administrative action.
 
+**Behavior when the owning agent is already disconnected or closing:**
+If `DismissTileEvent` arrives for a tile whose agent session is in `Disconnecting`, `Closed`, or orphaned state (lease already in grace period), the runtime still:
+1. Cancels the grace period immediately (the tile is not waiting for reconnection).
+2. Clears the tile from the scene and frees its resources.
+3. Skips the `LeaseResponse` notification — the session is not active to receive it. The notification is silently dropped (best-effort delivery applies to notifications for already-closed sessions; attempting to write to a closed gRPC stream is an error, not a protocol violation).
+
+This ensures dismiss always has the effect the viewer expects, regardless of the agent's current session state.
+
 **Swipe gesture:** On touch displays, a left-to-right or right-to-left swipe across a tile activates the dismiss action directly (no button required). The swipe threshold is 40% of tile width.
 
 ### 4.2 Dismiss All / Safe Mode
@@ -285,7 +352,10 @@ This is the "emergency stop" for the entire display. It is not reversible by age
 **Behavior:**
 - While frozen, tile content does not update. Badges continue to render (a frozen tile can still show a disconnection badge from before freeze).
 - The freeze indicator appears in the system status area (a pause icon).
-- Queue limit: 1000 mutations per session (configurable). If the queue overflows, older mutations are dropped.
+- Queue limit: 1000 mutations per session (configurable). Overflow behavior is **traffic-class-aware** — not a blanket "drop oldest":
+  - **Transactional mutations** (RFC 0005 §5.1: "never dropped") are **never evicted** from the freeze queue. If the transactional portion of the queue is full, the runtime applies backpressure to that agent's session via gRPC flow control (same mechanism as the `MutationBatch` channel — see RFC 0002 §2.6). The agent's mutations accumulate in the gRPC send buffer until either the freeze ends or the agent's buffer fills and it observes backpressure. Agents are not informed the scene is frozen; they only observe reduced throughput.
+  - **State-stream mutations** (coalescing allowed): when the per-session queue is full, state-stream mutations from the same agent are coalesced (latest wins per coalesce key) before older entries are evicted. This matches normal backpressure behavior (RFC 0005 §2.4).
+  - **Ephemeral realtime mutations**: dropped without delay when the queue is full, identical to normal backpressure behavior.
 - Unfreeze is triggered by the same shortcut (`Ctrl+Shift+F`) or via the freeze indicator in the status bar.
 - On unfreeze, queued mutations are applied in submission order in the next available frame batch.
 
@@ -386,6 +456,24 @@ On exit:
 4. The compositor resumes applying pending scene mutations from the queue (if any were queued during suspension).
 5. The scene renders with current tile state (which may differ from pre-safe-mode state if agents continued submitting mutations during suspension — those mutations were queued, not discarded).
 
+### 5.6 Safe Mode and Freeze Interaction
+
+The safe mode and freeze states (§4.3) may be simultaneously requested. The following rules govern their interaction:
+
+**Freeze active → Safe mode entry triggered:**
+1. Safe mode entry takes priority unconditionally (human override is highest priority per architecture.md §Policy arbitration).
+2. The freeze state is **cancelled** on safe mode entry. The freeze queue is discarded — pending mutations that were queued during freeze are dropped (all classes, including transactional). Agents are not notified about the dropped mutations; they will see their sessions suspended by `SessionSuspended` and must reconcile state when they resume.
+3. The freeze indicator is removed from the system status area as part of the safe mode overlay rendering (the overlay replaces all normal chrome elements).
+4. `OverrideState.freeze_active` is set to `false` as part of the safe mode entry transition.
+
+**Freeze shortcut triggered while already in safe mode:**
+- The freeze shortcut (`Ctrl+Shift+F`) is ignored while safe mode is active. The safe mode overlay captures all input (§5.2, point 4), and the freeze action is not applicable to a suspended session set. The shortcut produces no effect and is not logged as an override event.
+
+**Safe mode exit with prior freeze:**
+- After safe mode exit, the freeze state is inactive (it was cancelled on entry). The viewer must explicitly re-trigger freeze if desired. The freeze queue is empty; agents start fresh with normal mutation delivery.
+
+This interaction is reflected in the `OverrideState` type (§7.4): `freeze_active` will always be `false` when `SafeModeState.phase == SAFE_MODE_PHASE_ACTIVE`.
+
 ---
 
 ## 6. Privacy / Viewer State UX
@@ -449,6 +537,14 @@ The types in this section define the internal state and render commands for the 
 ### 7.1 ChromeState
 
 `ChromeState` is the single source of truth for all chrome rendering decisions. It is maintained by the control plane and read atomically by the compositor thread.
+
+**Synchronization contract.** `ChromeState` crosses a thread boundary: the control plane (running on the network/Tokio thread) writes it; the compositor thread reads it each frame. In Rust, this is expressed as `Arc<RwLock<ChromeState>>`:
+
+- **Writers (control plane):** Acquire a write lock, update the relevant fields (e.g., update a badge, transition safe mode phase), then release. Write operations on `ChromeState` are infrequent (driven by agent events, not by the frame loop) and should be short-lived — never hold the write lock across I/O or agent callbacks.
+- **Readers (compositor thread):** Acquire a read lock at the start of the chrome render pass (Stage 6, RFC 0002 §3.1). Hold it only for the duration of command generation from `ChromeState` — do not hold it during GPU submit. Multiple compositor frames may read concurrently only if a future design introduces parallel render passes; for v1 the compositor thread is the sole reader.
+- **Write priority.** If write latency becomes a bottleneck (unlikely — writes are sparse events), consider `arc-swap` crate's `ArcSwap<ChromeState>` for zero-contention reads: the control plane atomically swaps the pointer to a new `ChromeState` value without blocking readers. The compositor thread always reads the latest fully-committed snapshot.
+
+The compositor must never read `ChromeState` fields directly from a raw pointer or non-synchronized reference. The `Arc<RwLock<>>` (or `ArcSwap`) wrapper is the mandatory access path. This is a correctness invariant, not a performance suggestion — violation is a data race.
 
 ```protobuf
 // Internal — not agent-accessible.
@@ -514,7 +610,14 @@ message OverrideEvent {
     SafeModeExitEvent safe_mode_exit = 6;
   }
   int64 timestamp_us = 10;   // Monotonic microseconds (RFC 0003 §1.1).
-  string trigger = 11;       // "keyboard_shortcut" | "pointer_gesture" | "auto_critical_error"
+  OverrideTrigger trigger = 11;
+}
+
+enum OverrideTrigger {
+  OVERRIDE_TRIGGER_UNSPECIFIED = 0;
+  KEYBOARD_SHORTCUT = 1;      // User pressed a keyboard shortcut (Ctrl+Shift+Escape, etc.)
+  POINTER_GESTURE = 2;        // User clicked/tapped/swiped a chrome control
+  AUTO_CRITICAL_ERROR = 3;    // Runtime entered safe mode automatically on critical failure
 }
 
 message DismissTileEvent {
@@ -533,8 +636,14 @@ message MuteToggleEvent {
 }
 
 message SafeModeEntryEvent {
-  string reason = 1;  // "viewer_action" | "critical_error"
-  optional string error_detail = 2;  // populated for critical_error trigger.
+  SafeModeEntryReason reason = 1;
+  optional string error_detail = 2;  // populated for CRITICAL_ERROR trigger.
+}
+
+enum SafeModeEntryReason {
+  SAFE_MODE_ENTRY_REASON_UNSPECIFIED = 0;
+  VIEWER_ACTION = 1;      // User triggered safe mode via shortcut or chrome control
+  CRITICAL_ERROR = 2;     // Runtime auto-entered safe mode on unrecoverable error
 }
 
 message SafeModeExitEvent {}
@@ -559,7 +668,7 @@ message OverrideState {
 // Internal — not agent-accessible.
 message ViewerPromptState {
   repeated ViewerIdentityChoice choices = 1;  // Selectable identities.
-  int64 timeout_at_us = 2;  // Monotonic timestamp; prompt auto-dismisses at this time.
+  uint64 timeout_at_us = 2;  // Monotonic timestamp (RFC 0003 §1.1 uint64 µs); prompt auto-dismisses at this time.
 }
 
 message ViewerIdentityChoice {
