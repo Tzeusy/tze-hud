@@ -54,6 +54,36 @@ RFC 0005 gap flagged and documented; §8 table now complete.
 
 ---
 
+### Round 3 — Cross-RFC Consistency and Integration (rig-5vq.37)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+**Doctrine files reviewed:** architecture.md, security.md, failure.md, presence.md
+**Cross-RFC documents reviewed:** RFC 0002, RFC 0005, RFC 0008 (full, including §11 errata), RFC 0009 (full, including §5 conflict resolution)
+
+#### Doctrinal Alignment: 4/5
+
+No new doctrinal violations found. The RFC continues to faithfully implement doctrine across all reviewed soul files. Human override at position 1 (architecture.md §"Policy arbitration"), screen sovereignty, safe mode reversibility (security.md §"Human override"), and lease governance (presence.md §"Leases: presence requires governance") are all correctly expressed.
+
+The sole remaining doctrinal gap is the RFC 0005 `SessionSuspended`/`SessionResumed` protocol gap (§8), which is correctly documented as a known gap. No doctrine point is silently dropped.
+
+#### Technical Robustness: 4/5
+
+No new technical gaps found in this round. Prior rounds addressed synchronization, freeze-queue overflow, safe mode / freeze interaction, and dismiss behavior on closing sessions.
+
+#### Cross-RFC Consistency: 4/5
+
+Two MUST-FIX items found and resolved in this round:
+
+- **[MUST-FIX → FIXED]** §4.2: RFC 0008 §11 errata mandates that "All active leases are revoked simultaneously" be corrected to "suspended simultaneously." Safe mode is a pause, not a purge. The revoke/suspend contradiction is resolved by RFC 0008 §3.4 (DR-LG7). Applied.
+- **[MUST-FIX → FIXED]** §8 (RFC 0002 row): RFC 0009 §5.2 resolves the conflict between RFC 0002 §7.3 ("trigger graceful shutdown" on GPU device loss) and RFC 0007 §5.1 ("enter safe mode" on GPU device loss). The §8 interaction table for RFC 0002 did not reference this resolution. Updated to note that RFC 0009 §5 is the authoritative two-phase GPU failure response (safe mode entry before shutdown).
+- **[SHOULD-FIX → NOTED]** RFC 0009 §2.2 uses kebab-case capability names (`create-tiles`, `zone-publish`) while RFC 0006 §6.3 and RFC 0005 §7 use snake_case (`create_tiles`, `zone_publish`). RFC 0007 does not directly expose capability names in its protobuf types, so there is no fix to make here — but the naming inconsistency between RFC 0009 and RFC 0006 is a cross-RFC issue that RFC 0009 must resolve. Noted for RFC 0009's next revision.
+- **[CONSIDER]** RFC 0008 §11 also notes a required addition to RFC 0005: `SessionSuspended` / `SessionResumed` must be added to `SessionMessage` oneof. RFC 0007 §8 already documents this as a "Protocol gap." No change needed; existing documentation is accurate.
+
+**Post-fix scores: Doctrinal Alignment 4, Technical Robustness 4, Cross-RFC Consistency 4. No dimension below 3. Round 3 complete.**
+
+---
+
 ### Round 2 — Technical Architecture Scrutiny (rig-5vq.36)
 
 **Reviewer:** Beads worker agent
@@ -369,8 +399,8 @@ This ensures dismiss always has the effect the viewer expects, regardless of the
 **Secondary:** A "Dismiss All" control in the system status area (accessible via keyboard focus traversal through the chrome layer).
 
 **Action:**
-1. All active leases are suspended simultaneously. Sessions are not terminated; agents receive `SessionSuspended`. Leases transition to `SUSPENDED` state (RFC 0008 §3.3) and are restored to `ACTIVE` on safe mode exit without requiring the agent to re-request a lease.
-2. All agent sessions receive `SessionSuspended` with reason `viewer_safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale). **Note:** `SessionSuspended` is a new server→client message type that must be added to RFC 0005 §2 / §3.2 and the `SessionMessage` envelope's `oneof` block.
+1. All active leases are suspended simultaneously. Sessions are not terminated; leases transition to `SUSPENDED` state (RFC 0008 §3.3) and are restored to `ACTIVE` on safe mode exit without requiring agents to re-request leases. (Correction per RFC 0008 §11 errata: the prior text incorrectly stated "revoked." Safe mode is a pause, not a purge — see RFC 0008 §3.4 for the canonical resolution of this revoke/suspend contradiction.)
+2. All agent sessions receive `SessionSuspended` with reason `safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale). **Note:** `SessionSuspended` is a new server→client message type that must be added to RFC 0005 §2 / §3.2 and the `SessionMessage` envelope's `oneof` block.
 3. The runtime enters safe mode (see §5).
 
 This is the "emergency stop" for the entire display. It is not reversible by agents — they cannot reinstate their sessions in response to this event. The viewer must explicitly exit safe mode.
@@ -803,10 +833,12 @@ message TabEntry {
 | RFC | Relationship |
 |-----|-------------|
 | RFC 0001 (Scene Contract) | Chrome renders above the scene graph. `SceneId` is used to key `TileBadgeState`. Chrome elements are not `SceneId`-addressable. |
-| RFC 0002 (Runtime Kernel) | Chrome render pass executes as the final stage in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read atomically from the same shared state the control plane writes. |
+| RFC 0002 (Runtime Kernel) | Chrome render pass executes as the final stage in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read atomically from the same shared state the control plane writes. **GPU failure path:** RFC 0002 §7.3 and this RFC §5.1 previously conflicted on GPU device loss response (RFC 0002 said graceful shutdown; RFC 0007 said safe mode entry). RFC 0009 §5 resolves this: Phase 1 attempts surface reconfiguration (RFC 0002 §7.3 steps 1–3); Phase 2 enters safe mode before shutdown if reconfiguration fails. RFC 0002 §7.3 step 4 must be updated per RFC 0009 §5.3. |
 | RFC 0003 (Timing Model) | Override events carry `timestamp_us` using the monotonic clock (RFC 0003 §1.1). Override execution is frame-bounded — effects appear within one frame of the event. |
 | RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0001 §5.2 traversal order: chrome always wins). Chrome shortcuts are evaluated before tile hit-testing by RFC 0004 §8 (Event Dispatch Protocol). In safe mode, the input model routes all events to the chrome layer exclusively. |
-| RFC 0005 (Session Protocol) | **Protocol gap:** `SessionSuspended` and `SessionResumed` server→client messages referenced in §4.2, §5.2, and §5.5 are not currently defined in RFC 0005's `SessionMessage` envelope or §3.2 message table. RFC 0005 must be updated to add these message types before this RFC can be fully implemented. Lease revocation on tile dismiss uses the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). |
+| RFC 0005 (Session Protocol) | **Protocol gap:** `SessionSuspended` and `SessionResumed` server→client messages referenced in §4.2, §5.2, and §5.5 are not currently defined in RFC 0005's `SessionMessage` envelope or §3.2 message table. RFC 0008 §11 mandates these be added. RFC 0005 must be updated before this RFC can be fully implemented. Lease suspension on safe mode entry and lease revocation on tile dismiss both use the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). |
+| RFC 0008 (Lease Governance) | Authoritative specification for lease lifecycle during safe mode. Safe mode entry suspends all `ACTIVE` leases (not revokes them — see §4.2 and RFC 0008 §3.4). Tile dismiss (§4.1) transitions a lease to `REVOKED`. TTL clock pauses during suspension (RFC 0008 §3.6). The revoke/suspend distinction is load-bearing: suspended leases survive safe mode exit intact. |
+| RFC 0009 (Policy Arbitration) | Human override (§4, §5) implements Step 1 of RFC 0009's seven-step arbitration stack — unconditional, preempts all other policy steps. RFC 0009 §5 resolves the GPU failure path conflict with RFC 0002 (see RFC 0002 row above). RFC 0009 §2.1 specifies the `OverrideCommandQueue` contract for how override actions preempt in-flight mutation intake. |
 
 ---
 
