@@ -99,6 +99,22 @@ No new doctrinal gaps. Round 1 fixes held. Score unchanged.
 
 ---
 
+### Normative Spec Pass — AllOrDefer Force-Commit (rig-9se)
+
+**Reviewer:** Beads worker agent
+**Date:** 2026-03-22
+
+#### Changes Applied
+
+- **[MUST-FIX → FIXED]** `max_defer_frames` was referenced only implicitly in §2.4 prose ("Maximum deferral: configurable, default 3 frames"). Added a normative paragraph to §2.3 naming `SyncGroupConfig.max_defer_frames` explicitly and documenting its semantics, default, and the meaning of 0.
+- **[MUST-FIX → FIXED]** §2.4 referenced `SyncGroupForceCommitEvent` and described the force-commit trigger in a single sentence but provided no normative state machine. Added §2.4.1 "Force-Commit Semantics" specifying: trigger condition, member partitioning (present-and-ready vs absent), mutation disposition (present applied, absent discarded), `deferred_frames_count` increment rule, temporary policy transition, and `SyncGroupForceCommitEvent` contract.
+- **[MUST-FIX → FIXED]** The prose in §2.4 stated "transitions to `AvailableMembers` policy for that commit cycle only" but the proto and Rust model had no mechanism to track this. Clarified in §2.4.1 that this is not stored as an enum state: it is the natural result of the force-commit procedure, with `deferred_frames_count` as the sole required tracking field.
+- **[MUST-FIX → FIXED]** `SyncGroupForceCommitEvent` proto had only 3 fields (`id`, `defer_frames_used`, `frame_number`). Added `present_member_ids`, `absent_member_ids`, and `mutations_discarded` to make the event actionable for consumers diagnosing split-brain state.
+- **[MUST-FIX → FIXED]** `SyncGroup` Rust struct had no field to track deferral state. Added `deferred_frames_count: u32` with a normative doc comment specifying increment/reset rules.
+- **[MUST-FIX → FIXED]** §8.2 (Test Coverage) had only a single line about force-commit. Expanded to cover: mutation disposition (present applied, absent discarded), policy recovery after force-commit, counter increment rule, custom `max_defer_frames` values (including 0 = runtime default).
+
+---
+
 ## Summary
 
 This RFC defines the Timing Model for tze_hud — the authoritative specification for how time flows through the compositor, how it is expressed in the API, and how the system behaves when timing constraints are violated. It covers clock domains, sync groups, timestamp semantics, drift rules, deadline behavior, and the protobuf schema for timing-related messages.
@@ -230,6 +246,14 @@ pub struct SyncGroup {
     pub members: BTreeSet<SceneId>,     // TileIds currently in the group
     pub created_at_us: u64,             // UTC microseconds
     pub commit_policy: SyncCommitPolicy,
+    /// For AllOrDefer groups: counts consecutive frames during which the group
+    /// was deferred because at least one member had a pending mutation but at
+    /// least one other member was absent. Incremented at Stage 4 on each
+    /// incomplete-deferral frame; reset to 0 on normal commit or force-commit.
+    /// Has no meaning for AvailableMembers groups (always 0).
+    /// When this value reaches max_defer_frames(G), the Stage 4 evaluation
+    /// for the current frame triggers a force-commit (see §2.4.1).
+    pub deferred_frames_count: u32,
 }
 
 pub enum SyncCommitPolicy {
@@ -259,13 +283,15 @@ pub enum SyncCommitPolicy {
 
 **Cross-agent sync groups.** Multiple agents can place tiles into the same sync group. The group does not belong to any single agent's mutation batch — it is a scene-graph object. When Agent A and Agent B both have tiles in the same sync group, their mutations are held in a pending queue until the commit policy's condition is satisfied. The compositor evaluates this at Stage 4 (Scene Commit) of the frame pipeline.
 
+**`max_defer_frames` (AllOrDefer only).** For `AllOrDefer` groups, `SyncGroupConfig.max_defer_frames` is the maximum number of consecutive frames the compositor will defer a group before triggering a force-commit. The default is 3 frames (≈50ms at 60fps). Agents SHOULD set this to the smallest value that tolerates their expected network jitter. The value 0 means "use the runtime default" (`timing.sync_group_max_defer_frames` in `TimingConfig`). See §2.4 and §2.4.1 for the timing contract and normative force-commit semantics.
+
 ### 2.4 Timing Contract
 
 **Atomicity window:** one display frame (16.6ms at 60Hz). All pending mutations for all members of a sync group are applied in the same stage-4 execution. The compositor does not split sync group commits across frames.
 
 **Deadline:** a sync group's pending mutations must arrive before the frame's mutation intake cutoff (end of Stage 3, see §5). Mutations arriving after the cutoff for a frame are held for the next frame.
 
-**AllOrDefer policy:** if the policy is `AllOrDefer` and at least one member has no pending mutation at the time of Stage 4, the entire group is deferred to the next frame. This can cascade: if the group is still incomplete at the next frame, it defers again. Maximum deferral: configurable, default 3 frames (50ms at 60fps). If the group is still incomplete after max deferral, the available members' mutations are force-applied and the group transitions to `AvailableMembers` policy for that commit cycle only. A `sync_group_force_commit` event is emitted to telemetry.
+**AllOrDefer policy:** if the policy is `AllOrDefer` and at least one member has no pending mutation at the time of Stage 4, the entire group is deferred to the next frame. This can cascade: if the group is still incomplete at the next frame, it defers again. Maximum deferral is `max_defer_frames` (configured in `SyncGroupConfig.max_defer_frames`; default 3 frames = 50ms at 60fps; 0 means use the runtime default `timing.sync_group_max_defer_frames`). If the group is still incomplete after `max_defer_frames` consecutive deferrals, a force-commit is triggered. See §2.4.1 for the full force-commit state machine and its normative contract.
 
 **AvailableMembers policy:** mutations from members with pending work are applied. Members without pending work remain unchanged. No deferral.
 
@@ -306,6 +332,109 @@ Sync Group Commit Flow (AllOrDefer, cross-agent)
   If frame N+2 is also incomplete → defer again (max 3 frames)
   If frame N+3 is incomplete → force commit with warning in telemetry
 ```
+
+### 2.4.1 Force-Commit Semantics
+
+A force-commit is triggered when an `AllOrDefer` sync group has been deferred for `max_defer_frames` consecutive frames and is still not complete. This subsection specifies the force-commit state machine normatively.
+
+#### Trigger Condition
+
+At Stage 4 of frame F, an `AllOrDefer` group G triggers a force-commit if and only if **all** of the following hold:
+
+1. `G.commit_policy == AllOrDefer`
+2. `G.deferred_frames_count >= max_defer_frames(G)` (i.e., the group has already been deferred the maximum allowed number of times)
+3. At least one member of G has a pending mutation (the group is non-empty of work)
+4. At least one member of G has **no** pending mutation (the group is still incomplete)
+
+Where `max_defer_frames(G)` is `G.config.max_defer_frames` if non-zero, else `timing.sync_group_max_defer_frames` (the runtime-wide default, default value 3).
+
+Note: a group that is deferred but has **no** pending mutations for any member does not trigger force-commit (no work is ready; the group is simply idle). The deferral counter is only incremented when at least one member has a pending mutation but the group is blocked waiting for other members.
+
+#### Force-Commit Procedure
+
+When a force-commit is triggered at Stage 4 of frame F:
+
+1. **Partition members.** Classify each member tile of G as either:
+   - **Present-and-ready**: has a pending mutation in the current frame's intake queue.
+   - **Absent**: has no pending mutation.
+
+2. **Apply present-and-ready mutations.** All pending mutations from present-and-ready members are applied atomically in frame F's Stage 4, exactly as they would be in a normal `AvailableMembers` commit. The scene is updated for these tiles.
+
+3. **Discard absent-member deferred state.** Any pending mutations that were held over from previous deferral cycles for absent members are **discarded** (not applied). The absent members retain their last committed scene state. Absent members do NOT carry their deferred mutations into frame F+1; the deferral queue for the group is cleared entirely after the force-commit.
+
+   **Rationale:** Carrying over absent-member mutations would create a split-brain state — the present members' mutations were just applied in frame F, so applying absent members' mutations one frame later would produce an incoherent transition. The force-commit is an escape hatch from a stuck state, not a guaranteed delivery mechanism.
+
+4. **Reset deferral counter.** `G.deferred_frames_count` is reset to 0.
+
+5. **Emit `SyncGroupForceCommitEvent`.** The compositor emits this telemetry event (see §7.1) at Stage 8 of frame F, containing: the group ID, the number of deferral frames used, the frame number, the IDs of present-and-ready members, and the IDs of absent members.
+
+6. **Temporary policy transition.** The group's commit policy transitions to `AvailableMembers` **for the current frame's commit cycle only** (i.e., the force-commit is itself an `AvailableMembers`-style operation). The group's configured policy remains `AllOrDefer`; this is not a permanent policy change. At Stage 4 of frame F+1 and beyond, the group returns to evaluating with `AllOrDefer` semantics.
+
+   Implementation note: this transition is not stored as a new enum value. It is the natural result of the force-commit procedure — present-and-ready mutations are applied and absent mutations are discarded — without changing `SyncGroup.commit_policy`. No separate "forced-commit mode" field is required; the `deferred_frames_count` reaching the threshold and then being reset to 0 is the complete state machine.
+
+#### State Machine Diagram
+
+```
+AllOrDefer group G with max_defer_frames = N
+
+  Stage 4, frame F:
+  ┌─────────────────────────────────────────────────────────────┐
+  │ Is G complete? (all members have pending mutations)         │
+  └───────────────────────────────┬─────────────────────────────┘
+                                  │
+             ┌────────────────────┴───────────────────┐
+             │ YES                                    │ NO
+             ▼                                        ▼
+  ┌────────────────────────┐           ┌──────────────────────────────┐
+  │ Apply all mutations    │           │ G.deferred_frames_count >= N? │
+  │ atomically.            │           └───────────────────┬──────────┘
+  │ Reset deferred_frames  │                               │
+  │ counter to 0.          │          ┌────────────────────┴──────────┐
+  └────────────────────────┘          │ YES (force-commit)            │ NO
+                                      ▼                               ▼
+                           ┌────────────────────────┐   ┌────────────────────────┐
+                           │ Apply present-and-ready│   │ Defer entire group to  │
+                           │ mutations.             │   │ frame F+1.             │
+                           │ Discard absent-member  │   │ Increment              │
+                           │ deferred mutations.    │   │ deferred_frames_count. │
+                           │ Emit ForceCommitEvent. │   └────────────────────────┘
+                           │ Reset counter to 0.    │
+                           └────────────────────────┘
+```
+
+#### Deferred_frames_count Increment Rule
+
+`deferred_frames_count` is incremented at Stage 4 **only when** the group is deferred because it is incomplete (condition: at least one member has a pending mutation and at least one member is absent). It is NOT incremented when:
+
+- The group is complete and commits normally (counter is reset to 0 instead).
+- The group has no pending mutations for any member (idle; counter is unchanged).
+- A force-commit fires (counter is reset to 0 instead).
+
+This ensures the counter accurately tracks "how many consecutive frames have been lost to incomplete group state."
+
+#### Group Returns to Normal AllOrDefer Evaluation
+
+After a force-commit, `G.deferred_frames_count == 0` and `G.commit_policy` is still `AllOrDefer`. Frame F+1 evaluates the group from scratch:
+
+- If all members have pending mutations → commit normally.
+- If the group is again incomplete → begin a new deferral cycle (counter starts at 0, increments toward `max_defer_frames` again).
+
+The force-commit does not "punish" the group or permanently weaken its atomicity guarantee. It is a bounded recovery mechanism, not a policy downgrade.
+
+#### `SyncGroupForceCommitEvent` Contract
+
+The event (see §7.1 for the proto) is emitted at telemetry Stage 8 of the frame in which the force-commit fires. Guaranteed fields:
+
+| Field | Meaning |
+|-------|---------|
+| `id` | The `SyncGroupId` of the group that was force-committed. |
+| `defer_frames_used` | Equal to `max_defer_frames(G)` at the time of force-commit. |
+| `frame_number` | The display frame number in which the force-commit occurred. |
+| `present_member_ids` | All `TileId`s (as `SceneId`s) that had pending mutations and were applied. |
+| `absent_member_ids` | All `TileId`s that had no pending mutations; their deferred state was discarded. |
+| `mutations_discarded` | Count of pending mutations from absent members that were discarded. |
+
+Consumers of this event MUST NOT assume that all group members' mutations were applied. The `absent_member_ids` field identifies tiles whose state may be out of sync with the intended coordinated update.
 
 ### 2.5 Resource Governance
 
@@ -684,10 +813,18 @@ message DeleteSyncGroupMutation {
 }
 
 /// Event: emitted when a sync group is force-committed after max deferral.
+/// See §2.4.1 for the full normative contract.
+///
+/// Emitted at telemetry Stage 8 of the frame in which the force-commit fired.
+/// Consumers MUST NOT assume all members' mutations were applied; check
+/// absent_member_ids for tiles whose deferred mutations were discarded.
 message SyncGroupForceCommitEvent {
-  SceneId id               = 1; // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7
-  uint32  defer_frames_used = 2;
-  uint64  frame_number      = 3;
+  SceneId         id                   = 1; // SyncGroupId (RFC 0001 §1.1): 16-byte UUIDv7
+  uint32          defer_frames_used    = 2; // Equals max_defer_frames(G) at trigger time
+  uint64          frame_number         = 3; // Display frame number of the force-commit
+  repeated SceneId present_member_ids  = 4; // TileIds whose pending mutations WERE applied
+  repeated SceneId absent_member_ids   = 5; // TileIds with no pending mutation; deferred state discarded
+  uint32          mutations_discarded  = 6; // Count of discarded pending mutations from absent members
 }
 
 // ─── Clock Sync ──────────────────────────────────────────────────────────────
@@ -829,7 +966,11 @@ The following behaviors must be covered by Layer 0 (scene graph assertion) tests
 - `expires_at_us` reached: tile is removed at the correct frame, expiry event emitted.
 - `expires_at_us <= present_at_us`: mutation is rejected with `TIMESTAMP_EXPIRY_BEFORE_PRESENT`.
 - `AllOrDefer` sync group with one member late: group defers; no partial apply.
-- `AllOrDefer` sync group max deferral: force commit after N frames, event emitted.
+- `AllOrDefer` sync group max deferral: force commit after `max_defer_frames` consecutive incomplete frames; `SyncGroupForceCommitEvent` emitted with correct `present_member_ids`, `absent_member_ids`, and `mutations_discarded`.
+- `AllOrDefer` force-commit mutation disposition: present-and-ready mutations applied; absent-member deferred mutations discarded (NOT carried to frame F+1).
+- `AllOrDefer` force-commit policy recovery: after force-commit, group re-evaluates with `AllOrDefer` semantics on the next frame; `deferred_frames_count` is 0.
+- `AllOrDefer` `deferred_frames_count` increment rule: counter increments only when ≥1 member is pending and ≥1 member is absent; not incremented when group is idle (no pending mutations for any member).
+- `AllOrDefer` custom `max_defer_frames`: a group configured with `max_defer_frames=1` force-commits after 1 deferral frame; a group with `max_defer_frames=0` uses the runtime default.
 - `AvailableMembers` sync group: applies available members, ignores absent.
 - Clock skew > tolerance: rejection with structured error.
 - Clock skew within tolerance: correction applied transparently.
