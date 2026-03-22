@@ -285,6 +285,7 @@ The compositor applies these validation rules to all agent-supplied timestamps:
 | `present_at_us < session_open_at_us - 60_000_000` (> 60s in the past) | Reject: mutation too stale. Structured error `TIMESTAMP_TOO_OLD`. |
 | `present_at_us > current_wallclock_us + max_future_schedule_us` | Reject: timestamp too far in future. Structured error `TIMESTAMP_TOO_FUTURE`. Default `max_future_schedule_us`: 300_000_000 (5 minutes). |
 | `expires_at_us <= present_at_us` (expiry before or at presentation) | Reject: inconsistent timestamps. Structured error `TIMESTAMP_EXPIRY_BEFORE_PRESENT`. |
+| `delivery_policy == "drop_if_late"` and `message_class != "ephemeral_realtime"` | Reject: `drop_if_late` is only valid for the `ephemeral_realtime` message class. Structured error `INVALID_DELIVERY_POLICY`. |
 | Clock skew > 100ms (see §4.2) | Warning in telemetry; apply timestamps with skew correction. |
 | Clock skew > 1s | Reject with structured error `CLOCK_SKEW_EXCESSIVE`. |
 
@@ -497,6 +498,7 @@ message SyncGroupConfig {
   string      name            = 2; // Optional; max 128 UTF-8 bytes
   SyncCommitPolicy commit_policy = 3;
   uint32      max_defer_frames = 4; // Default 3; 0 = use default
+  uint64      created_at_us   = 5; // Agent-supplied creation time (UTC μs); advisory — compositor may overwrite
 }
 
 enum SyncCommitPolicy {
@@ -561,7 +563,11 @@ message FrameTimingRecord {
   uint32 tiles_expired            = 17; // Tiles removed by expires_at this frame
   uint32 sync_groups_deferred     = 18; // AllOrDefer groups that did not commit
   uint32 sync_groups_force_committed = 19;
-  uint64 sync_group_max_drift_us  = 20; // Worst drift among sync group members this frame
+  uint64 sync_group_max_drift_us  = 20; // Worst mutation-arrival spread within any single sync group this frame:
+                                        // max over all committed sync groups of
+                                        // (latest_member_arrival_us - earliest_member_arrival_us).
+                                        // Zero if no sync group committed this frame.
+                                        // Expressed in microseconds (monotonic clock domain).
 }
 
 // ─── Timing Config ───────────────────────────────────────────────────────────
@@ -581,10 +587,12 @@ message TimingConfig {
 
 ### 7.2 Integration with `scene.proto`
 
+**Timestamp unit migration (RFC 0001 → RFC 0003):** RFC 0001 used millisecond-resolution (`_ms`) timestamp fields throughout `scene.proto` and the Rust data model (e.g., `present_at_ms`, `expires_at_ms`, `committed_at_ms`). RFC 0003 establishes microsecond resolution (`_us`) as the authoritative standard, consistent with the architecture doctrine (CLAUDE.md: "μs resolution"). RFC 0001 must be updated in a follow-on amendment to rename all `_ms` timestamp fields to `_us` and change the units to UTC microseconds since Unix epoch. Until that amendment lands, `timing.proto` uses `_us` exclusively; implementors should treat the RFC 0001 `_ms` fields as pending migration.
+
 The fields in `timing.proto` supplement the scene contract defined in RFC 0001. Key cross-references:
 
-- `CreateSyncGroupMutation` and `DeleteSyncGroupMutation` are new variants in the `SceneMutation` oneof (RFC 0001 §8, field numbers 20 and 21 respectively).
-- `SyncGroupConfig` replaces the implicit sync group creation implied by `UpdateTileSyncGroupMutation`. Sync groups are now explicit scene objects, not implicit side effects of tile mutations.
+- `CreateSyncGroupMutation` and `DeleteSyncGroupMutation` are new variants in the `SceneMutation` oneof (RFC 0001 §8, field numbers **21 and 22** respectively). Field 20 is already occupied by `ClearZoneMutation` (RFC 0001 §8).
+- `SyncGroupConfig` supplements `UpdateTileSyncGroupMutation` (RFC 0001 field 11): sync group creation is now an explicit, separate operation rather than an implicit side effect of assigning a tile to a group ID. `UpdateTileSyncGroupMutation` continues to handle tile membership changes; `CreateSyncGroupMutation` / `DeleteSyncGroupMutation` handle group lifecycle.
 - `FrameTimingRecord` is embedded in `TelemetryRecord` (RFC 0002 §3.2, Stage 8).
 - The `ClockSyncRequest`/`ClockSyncResponse` pair is a unary RPC on the session service, separate from the bidirectional mutation stream.
 
