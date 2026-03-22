@@ -461,7 +461,7 @@ impl SceneGraph {
             });
         }
 
-        let now_ms = now_millis();
+        let now_ms = self.clock.now_millis();
         let record = ZonePublishRecord {
             zone_name: zone_name.to_string(),
             publisher_namespace: publisher_namespace.to_string(),
