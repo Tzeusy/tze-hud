@@ -47,7 +47,7 @@ Agents are isolated by default:
 - An agent cannot access another agent's media streams.
 - An agent cannot modify another agent's leases or resources.
 
-Agents can see the scene topology (which tiles exist, who holds them, what tabs are active) because this is necessary for spatial awareness. They cannot see through the tiles.
+Topology visibility is policy-driven (see privacy.md). By default, agents see only their own leases and the public scene structure (tab names, tile geometry). Agents with explicit topology-read capability can see the full topology. This is more restrictive than "agents see everything" because on a household surface, even knowing which agents hold leases can leak sensitive context.
 
 Cross-agent data sharing is opt-in: an agent can publish state to a shared namespace that other agents can read. The runtime mediates this — agents do not have direct access to each other's memory or streams.
 

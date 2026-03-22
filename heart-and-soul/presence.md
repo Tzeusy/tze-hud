@@ -37,9 +37,36 @@ Tiles are the low-level primitive: an agent requests a lease, specifies geometry
 
 LLM interactivity is the core directive of this project. That means the common path — the path an LLM takes to put content on screen — must be as simple as possible. Zones are that path.
 
+### Definition
+
+A zone is a named, schema-typed, runtime-owned publishing surface that the compositor realizes using one or more managed surfaces and optional adjunct effects (sound, haptics).
+
+Zones are more than rectangles. A notification zone may play a sound on urgent publishes. A subtitle zone on smart glasses may be audio-only with a minimal visual flash. An alert-banner may trigger a haptic pulse. These adjunct effects are part of the zone's rendering policy, not separate systems. The visual surface is the primary output; adjunct effects are policy-governed extensions of it.
+
+### Zone anatomy
+
+A zone has four distinct layers of definition:
+
+- **Zone type.** The schema: accepted media/payload types, contention policy, default rendering policy, default privacy classification ceiling, default interruption class, and whether adjunct effects are available. "Subtitle" and "notification" are zone types.
+- **Zone instance.** A zone type bound into a specific tab with a geometry policy and a layer attachment (see below). A "Morning" tab might have an instance of the "notification" zone type anchored to the top-right of the content layer.
+- **Publication.** One publish event into a zone instance: content payload, TTL, key (for merge-by-key zones), priority, privacy classification, and optional stream/session identity for ongoing content.
+- **Occupancy.** The runtime's resolved current state of a zone instance: what content is visible, which publications are active, what the effective geometry is after layout resolution. Agents can query occupancy but cannot set it directly.
+
+This four-level structure prevents the common confusion of "is a zone the schema or the instance or the content?" The answer is: a zone type defines the schema, a zone instance is placed in a tab, publications push content into instances, and occupancy is what the runtime renders.
+
+### Layer attachment
+
+Every zone instance attaches to a specific compositor layer (see architecture.md, "Compositing model"):
+
+- **Background layer.** ambient-background attaches here. Lowest z-order, behind all tiles. Runtime-owned; agents publish content but do not control positioning.
+- **Content layer.** Most zones attach here: subtitle, notification, pip. They are realized as runtime-managed tiles within the content layer's z-order.
+- **Chrome layer.** alert-banner and status-bar attach here. They render above all agent content. Agents can publish content to chrome-layer zones, but the content is rendered by the runtime — agents do not "render into chrome." The zone is the mediation layer: the agent publishes data, the runtime renders it in chrome using the zone's rendering policy.
+
+This resolves the apparent contradiction "agents cannot render into chrome" vs "alert-banner renders in chrome." Agents publish to the zone; the runtime renders in chrome. The agent never touches the chrome layer directly.
+
 ### What zones are
 
-A zone is a named, pre-defined publishing surface with:
+A zone instance is a named publishing surface with:
 
 - **A name and description.** Human-readable, discoverable by agents. "subtitle", "notification", "status-bar", "picture-in-picture", "ambient-background".
 - **A geometry policy.** The zone knows where it goes on screen. The agent does not need to compute coordinates, margins, or aspect ratios. The runtime resolves the zone's geometry based on the current display profile, tab layout, and active zones.
@@ -123,21 +150,26 @@ The expectation is that most agents use zones for most of their output, and only
 
 These are illustrative, not exhaustive. The actual zone registry is defined per deployment.
 
-**subtitle** — Bottom of screen, ~5% height, centered, semi-transparent backdrop. Accepts stream-text with breakpoints. Ephemeral-realtime delivery. Auto-clears after timeout. Syncs to media clock if in a sync group.
+**subtitle** — Content layer. Bottom of screen, ~5% height, centered, semi-transparent backdrop. Accepts stream-text with breakpoints. Ephemeral-realtime delivery. Auto-clears after timeout. Syncs to media clock if in a sync group. Contention: latest-wins.
 
-**notification** — Top-right corner, stacks vertically, auto-dismisses after timeout. Accepts short text + optional icon + urgency level. Urgent notifications override quiet hours. Critical notifications also play a sound.
+**notification** — Content layer. Top-right corner, stacks vertically, auto-dismisses after timeout. Accepts short text + optional icon + urgency level. Adjunct: urgent notifications play a sound; critical notifications play a louder sound. Contention: stack.
 
-**status-bar** — Thin strip at top or bottom. Accepts key-value pairs rendered as a horizontal row. Coalesced updates (state-stream class). Always visible, never occluded by agent tiles.
+**status-bar** — Chrome layer. Thin strip at top or bottom. Accepts key-value pairs rendered as a horizontal row. Coalesced updates (state-stream class). Always visible, never occluded by agent tiles. Contention: merge-by-key.
 
-**pip** (picture-in-picture) — Corner-anchored, draggable, resizable within bounds. Accepts a video surface reference. One pip per tab (additional requests queue or replace).
+**pip** (picture-in-picture) — Content layer. Corner-anchored, draggable, resizable within bounds. Accepts a video surface reference. One pip per tab. Contention: replace (displaced agent notified).
 
-**ambient-background** — Full-screen behind all tiles. Accepts a static image, color, or slow-cycling gallery. Lowest z-order in the content layer. Purely decorative — no input, no interaction.
+**ambient-background** — Background layer. Full-screen behind all tiles. Accepts a static image, color, or slow-cycling gallery. Purely decorative — no input, no interaction. Contention: latest-wins.
 
-**alert-banner** — Full-width horizontal bar that pushes content down. Accepts text + severity level. Used for system-level alerts, weather warnings, security events. Renders in the chrome layer (above all agent content).
+**alert-banner** — Chrome layer. Full-width horizontal bar that pushes content down. Accepts text + severity level. Adjunct: critical alerts trigger haptic pulse if available. Used for system-level alerts, weather warnings, security events. Contention: stack by severity.
 
 ## Presence levels
 
-Not every agent needs the same degree of embodiment.
+Not every agent needs the same degree of embodiment. Presence level and agent role are orthogonal axes:
+
+- **Presence level** (guest / resident / embodied) governs trust, transport, and resource access.
+- **Agent role** (publisher, orchestrator, sensor-producer, interactive-app, etc.) governs what the agent is trying to do.
+
+A resident agent can be a zone publisher, an orchestrator, or a dashboard producer. An embodied agent might only publish to a single zone. The capability system grants permissions; presence level determines the trust ceiling and available transport. Do not conflate them.
 
 ### Guest presence
 
@@ -174,7 +206,7 @@ A presence engine that hosts multiple agents is not just "multiple tenants on a 
 
 ### Visibility
 
-By default, agents can see the structure of the scene — which tabs exist, which tiles are occupied, which agents hold which leases — but not the content of other agents' tiles or their event streams. This is a read-only view of the scene topology, not a window into other agents' state.
+Topology visibility is policy-driven (see privacy.md for the canonical rule). By default, agents see only their own leases and the public structure of the scene (tab names, tile geometry) — not which other agents hold which leases. Agents with an explicit topology-read capability grant can see the full scene topology including other agents' lease metadata. No agent can see the content of another agent's tiles or event streams regardless of capability level.
 
 An agent can publish selected state to a shared namespace if it chooses. This is opt-in, not default.
 

@@ -196,6 +196,8 @@ Initial corpus:
 - `zone_orchestrate_then_publish` — static zone configuration loaded, agent queries zone registry, publishes to discovered zone. Tests the full orchestrate→discover→publish flow end-to-end
 - `zone_geometry_adapts_profile` — same zone definition rendered at two display resolutions, validates geometry policy produces different but correct layout for each
 - `zone_disconnect_cleanup` — agent publishes to subtitle zone then disconnects. Validates subtitle auto-clears after timeout. Separate case: agent publishes to status-bar then disconnects. Validates status-bar persists until replaced
+- `policy_matrix_basic` — viewer class × content classification × interruption class: guest viewer, private tile, urgent notification. Validates redaction applies to tile while urgent notification passes through quiet hours. Tests the policy priority order end-to-end
+- `policy_arbitration_collision` — guest agent publishes urgent notification to chrome-layer zone during degradation. Validates: capability checked first, privacy redaction applied, interruption passes quiet hours, zone contention resolved, degradation budget respected — in the canonical order
 
 ## Additional test categories
 
