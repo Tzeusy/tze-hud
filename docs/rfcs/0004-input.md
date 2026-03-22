@@ -13,6 +13,7 @@
 | 1 | 2026-03-22 | rig-5vq.23 | Doctrinal alignment deep-dive | DR table: added DR-I3/I4 (input_to_scene_commit, input_to_next_present) from validation.md §3; added DR-I11 (headless testability). §6.1a: new headless testability section. §7.1: fixed `interaction_id` comment (now consistent with RFC 0001 §2.4 "forwarded in events"). §7.3/§9.1: added `interaction_id` field to PointerDownEvent, PointerUpEvent, ClickEvent, DoubleClickEvent. §9.1: removed `HitRegionConfig` (replaced with canonical `HitRegionNode` reference to RFC 0001 §9). §11.2: scroll deferral reframed as requiring pre-implementation resolution (local-first scroll is a doctrine commitment). RFC 0001 §2.4 and §9: unified `HitRegionNode` to include all input-model fields with cross-reference to RFC 0004. |
 | 2 | 2026-03-22 | rig-5vq.24 | Technical architecture scrutiny | §10.3: fixed gesture threshold diagram (5px → 10px, consistent with §3.4 state machine). §8.3: corrected `SessionEnvelope` → `SessionMessage` (aligns with RFC 0005 §2.2 naming). §8.3.1 (new): documented agent-to-runtime input control request transport gap; specifies required RFC 0005 `SessionMessage` payload field additions for FocusRequest, CaptureRequest, CaptureReleaseRequest, SetImePositionRequest. §4.5 (new, renamed §4.5+): added IME active-composition-on-focus-loss behavior spec (cancel before FocusLost, ordering guarantee, capture-theft case). §1.4/§9.1: added `AGENT_DISCONNECTED = 6` to `FocusLostReason`. §7.3/§9.1: added `device_id` field to `ContextMenuEvent`. §9.1: added `interaction_id` field to `GestureEvent`. §8.5: resolved transactional-event drop contradiction (transactional events never dropped; only non-transactional dropped beyond hard cap). §8.3.1 follow-up (rig-k0d): clarified that CaptureReleaseRequest uses async CaptureReleasedEvent confirmation and SetImePositionRequest is fire-and-forget; removed misleading "runtime responds with corresponding response" blanket claim. §8.5 follow-up (rig-k0d): fixed contradictory "without bound, up to a hard cap" phrasing (now: "grows as needed to accommodate transactional events, which are never dropped"). |
 | 3 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification | §9.1 (input.proto): added `import "scene.proto"`; replaced all `string tile_id` and `string node_id` with `SceneId tile_id` / `SceneId node_id` across all proto messages (FocusRequest, FocusGainedEvent, FocusLostEvent, CaptureRequest, CaptureReleaseRequest, CaptureReleasedEvent, SetImePositionRequest, and all pointer/keyboard/gesture/IME event types). Non-scene identifiers (`session_id`, `device_id`, `interaction_id`) remain `string` — they are not scene-object addresses. Inline narrative proto snippets in §1.2, §1.4, §2.3, §4.3, §4.4 also updated to match. |
+| 4 | 2026-03-22 | rig-5vq.25 | Cross-RFC consistency and integration | §4.6 (second): renumbered duplicate `§4.6` to `§4.7 Input Method Support`. §8.3: corrected Note — RFC 0005 field 34 carries type `InputEvent` (from `scene_service.proto`), not `InputEnvelope`; specified that RFC 0005 must rename field 34 type to `EventBatch`; noted RFC 0005 §7.1 uses `InputMessage` (also needs alignment to `EventBatch`). §12: corrected RFC 0003 label from "Lease Model" → "Timing Model"; added RFC 0005 (Session Protocol) and RFC 0008 (Lease & Resource Governance) dependency entries with section references. §1.4: updated `FocusGainedEvent`/`FocusLostEvent` narrative snippet to use nested enum syntax matching §9.1 (removed standalone `FocusSource`/`FocusLostReason` enums). §2.3: updated `CaptureReleasedEvent` narrative snippet to use nested `enum Reason` matching §9.1 (removed standalone `CaptureReleaseReason` enum). All input event `timestamp_us` fields renamed to `timestamp_hw_us` to follow RFC 0003/RFC 0005 clock-domain naming convention; added clock-domain annotation ("OS hardware event timestamp, monotonic domain"); `batch_ts_us` in `EventBatch` annotated as wall-clock domain. |
 
 ---
 
@@ -151,29 +152,23 @@ The runtime dispatches these events to the owning agent when focus changes:
 message FocusGainedEvent {
   SceneId tile_id  = 1;
   SceneId node_id  = 2;   // zero value = tile-level focus
-  FocusSource source = 3;
+  enum Source { CLICK = 0; TAB_KEY = 1; PROGRAMMATIC = 2; }
+  Source source    = 3;
 }
 
 message FocusLostEvent {
   SceneId tile_id  = 1;
   SceneId node_id  = 2;
-  FocusLostReason reason = 3;
-}
-
-enum FocusSource {
-  CLICK      = 0;
-  TAB_KEY    = 1;
-  PROGRAMMATIC = 2;
-}
-
-enum FocusLostReason {
-  CLICK_ELSEWHERE      = 0;
-  TAB_KEY              = 1;
-  PROGRAMMATIC         = 2;
-  TILE_DESTROYED       = 3;
-  TAB_SWITCHED         = 4;
-  LEASE_REVOKED        = 5;
-  AGENT_DISCONNECTED   = 6;  // Owning agent's session ended; focus cleared
+  enum Reason {
+    CLICK_ELSEWHERE    = 0;
+    TAB_KEY            = 1;
+    PROGRAMMATIC       = 2;
+    TILE_DESTROYED     = 3;
+    TAB_SWITCHED       = 4;
+    LEASE_REVOKED      = 5;
+    AGENT_DISCONNECTED = 6;  // Owning agent's session ended; focus cleared
+  }
+  Reason reason    = 3;
 }
 ```
 
@@ -229,14 +224,13 @@ message CaptureReleasedEvent {
   SceneId tile_id   = 1;
   SceneId node_id   = 2;
   string  device_id = 3;
-  CaptureReleaseReason reason = 4;
-}
-
-enum CaptureReleaseReason {
-  AGENT_RELEASED    = 0;
-  POINTER_UP        = 1;
-  RUNTIME_REVOKED   = 2;
-  LEASE_REVOKED     = 3;
+  enum Reason {
+    AGENT_RELEASED  = 0;
+    POINTER_UP      = 1;
+    RUNTIME_REVOKED = 2;
+    LEASE_REVOKED   = 3;
+  }
+  Reason reason     = 4;
 }
 ```
 
@@ -460,7 +454,7 @@ The IME candidate list (the popup showing input alternatives) is **rendered by t
 
 In overlay (HUD) mode, the OS IME candidate window renders above the tze_hud overlay window (OS IME windows are always topmost). No special z-order handling is needed.
 
-### 4.6 Input Method Support
+### 4.7 Input Method Support
 
 | Method | Platform | Notes |
 |--------|----------|-------|
@@ -755,7 +749,7 @@ message PointerDownEvent {
   float  display_x        = 7;   // display-space coordinates
   float  display_y        = 8;
   Modifiers modifiers     = 9;
-  int64  timestamp_us     = 10;  // hardware timestamp (microseconds)
+  int64  timestamp_hw_us     = 10;  // OS hardware event timestamp (monotonic domain, µs); see RFC 0003 §1.1
   string interaction_id   = 11;  // Agent-defined (from HitRegionNode); forwarded for semantic correlation
 }
 
@@ -769,7 +763,7 @@ message PointerUpEvent {
   float  display_x       = 7;
   float  display_y       = 8;
   Modifiers modifiers    = 9;
-  int64  timestamp_us    = 10;
+  int64  timestamp_hw_us    = 10;
   string interaction_id  = 11;  // Agent-defined; forwarded for semantic correlation
 }
 
@@ -784,7 +778,7 @@ message PointerMoveEvent {
   float  dx            = 8;   // delta from last move event
   float  dy            = 9;
   Modifiers modifiers  = 10;
-  int64  timestamp_us  = 11;
+  int64  timestamp_hw_us  = 11;
 }
 
 message PointerEnterEvent {
@@ -793,7 +787,7 @@ message PointerEnterEvent {
   string  device_id    = 3;
   float  x             = 4;
   float  y             = 5;
-  int64  timestamp_us  = 6;
+  int64  timestamp_hw_us  = 6;
 }
 
 message PointerLeaveEvent {
@@ -802,7 +796,7 @@ message PointerLeaveEvent {
   string  device_id    = 3;
   float  x             = 4;
   float  y             = 5;
-  int64  timestamp_us  = 6;
+  int64  timestamp_hw_us  = 6;
 }
 
 message ClickEvent {
@@ -813,7 +807,7 @@ message ClickEvent {
   float  x               = 5;
   float  y               = 6;
   Modifiers modifiers    = 7;
-  int64  timestamp_us    = 8;
+  int64  timestamp_hw_us    = 8;
   string interaction_id  = 9;   // Agent-defined; forwarded for semantic correlation
 }
 
@@ -825,7 +819,7 @@ message DoubleClickEvent {
   float  x               = 5;
   float  y               = 6;
   Modifiers modifiers    = 7;
-  int64  timestamp_us    = 8;
+  int64  timestamp_hw_us    = 8;
   string interaction_id  = 9;   // Agent-defined; forwarded for semantic correlation
 }
 
@@ -834,7 +828,7 @@ message ContextMenuEvent {
   SceneId node_id      = 2;
   float  x             = 3;
   float  y             = 4;
-  int64  timestamp_us  = 5;
+  int64  timestamp_hw_us  = 5;
   string device_id     = 6;   // Device that triggered the context menu (for multi-pointer disambiguation)
 }
 
@@ -842,7 +836,7 @@ message PointerCancelEvent {
   SceneId tile_id      = 1;
   SceneId node_id      = 2;
   string  device_id    = 3;
-  int64   timestamp_us = 4;
+  int64   timestamp_hw_us = 4;
 }
 
 enum PointerButton {
@@ -871,7 +865,7 @@ message KeyDownEvent {
   string  key          = 4;   // Logical key value: "a", "A", "ArrowLeft" (DOM KeyboardEvent.key)
   Modifiers modifiers  = 5;
   bool    repeat       = 6;   // true = key is held (auto-repeat)
-  int64   timestamp_us = 7;
+  int64   timestamp_hw_us = 7;
 }
 
 message KeyUpEvent {
@@ -880,14 +874,14 @@ message KeyUpEvent {
   string  key_code     = 3;
   string  key          = 4;
   Modifiers modifiers  = 5;
-  int64   timestamp_us = 6;
+  int64   timestamp_hw_us = 6;
 }
 
 message CharacterEvent {
   SceneId tile_id      = 1;
   SceneId node_id      = 2;
   string  character    = 3;   // Unicode character(s) produced by the key press (post-IME)
-  int64   timestamp_us = 4;
+  int64   timestamp_hw_us = 4;
 }
 ```
 
@@ -958,15 +952,15 @@ The event router resolves the owning agent for each input event:
 
 ### 8.3 Event Serialization
 
-Events are serialized as protobuf messages and multiplexed over the agent's existing gRPC session stream (from RFC 0002 §1). The session stream uses the `SessionMessage` envelope defined in RFC 0005 §2.2. Input events travel **runtime → agent** as `SessionMessage` messages carrying an `input_event` payload (field 34), which wraps an `InputEnvelope`. Multiple input events for the same agent in a single frame are assembled into an `EventBatch` by the runtime and delivered as a single `SessionMessage` with the `EventBatch` carried inside the `input_event` field.
+Events are serialized as protobuf messages and multiplexed over the agent's existing gRPC session stream (from RFC 0002 §1). The session stream uses the `SessionMessage` envelope defined in RFC 0005 §2.2. Input events travel **runtime → agent** as `SessionMessage` messages carrying an `input_event` payload (field 34). Multiple input events for the same agent in a single frame are assembled into an `EventBatch` by the runtime and delivered as a single `SessionMessage` with the `EventBatch` carried inside the `input_event` field.
 
-> **Note:** RFC 0005 §2.2 currently defines `input_event` as a single `InputEnvelope`. The batching described here requires RFC 0005 to update field 34 to carry `EventBatch` (a `repeated InputEnvelope` with frame metadata). See §8.3.1 for the agent-to-runtime request transport gap.
+> **Note:** RFC 0005 §2.2 currently defines field 34 with type `InputEvent` (a legacy name imported from `scene_service.proto`). The batching described here requires RFC 0005 to change field 34's type to `EventBatch` (defined in `input.proto` — a `repeated InputEnvelope` with frame metadata). RFC 0005 §7.1 narrative also uses the term `InputMessage` for the same concept; that name should be aligned to `EventBatch`. Both RFCs must be updated together before implementation. See §8.3.1 for the agent-to-runtime request transport gap.
 
 ```protobuf
 // Multiplexed on the session stream (runtime → agent direction)
 message EventBatch {
   int64             frame_number = 1;
-  int64             batch_ts_us  = 2;   // Timestamp when batch was assembled
+  int64             batch_ts_us  = 2;   // Compositor wall-clock when batch was assembled (UTC µs; _wall_us domain per RFC 0003 §1.1)
   repeated InputEnvelope events  = 3;
 }
 
@@ -1003,15 +997,18 @@ message InputEnvelope {
 RFC 0005 §2.2 defines agent→runtime payload variants at fields 20–25 of `SessionMessage`. The current RFC 0005 schema does not include payload variants for input control requests. RFC 0005 must be extended with the following additions before the input subsystem can be implemented:
 
 ```
-// To be added to RFC 0005 SessionMessage.payload (agent → runtime, fields 26–29):
+// To be added to RFC 0005 SessionMessage.payload (agent → runtime):
+// NOTE: Fields 26–29 are still unallocated in RFC 0005 as of this writing. Assign from that range.
 //   InputFocusRequest     input_focus_request     = 26;  // maps to FocusRequest (§1.2)
 //   InputCaptureRequest   input_capture_request   = 27;  // maps to CaptureRequest (§2.3)
 //   InputCaptureRelease   input_capture_release   = 28;  // maps to CaptureReleaseRequest (§2.3)
 //   SetImePosition        set_ime_position        = 29;  // maps to SetImePositionRequest (§4.3)
 
-// To be added to RFC 0005 SessionMessage.payload (runtime → agent, fields 39–40):
-//   InputFocusResponse    input_focus_response    = 39;  // maps to FocusResponse (§1.2)
-//   InputCaptureResponse  input_capture_response  = 40;  // maps to CaptureResponse (§2.3)
+// To be added to RFC 0005 SessionMessage.payload (runtime → agent):
+// NOTE: Fields 39 and 40 are ALREADY ALLOCATED in RFC 0005 (SubscriptionChangeResult = 39,
+// ZonePublishResult = 40). Use unallocated fields from the reserved range (50+) instead.
+//   InputFocusResponse    input_focus_response    = 50;  // maps to FocusResponse (§1.2)
+//   InputCaptureResponse  input_capture_response  = 51;  // maps to CaptureResponse (§2.3)
 //
 // Note: CaptureReleaseRequest and SetImePositionRequest do not use synchronous responses:
 //   - CaptureReleaseRequest is confirmed by the CaptureReleasedEvent (§2.3), which is an
@@ -1033,7 +1030,7 @@ Events that occur within the same frame are batched into a single `EventBatch` m
 - Multiple `PointerMoveEvent` for the same node in the same frame are coalesced to the final position (latest-wins for moves).
 - `PointerDownEvent`, `PointerUpEvent`, `ClickEvent`, `KeyDownEvent`, `KeyUpEvent`, and all transactional events (focus, capture, IME) are never coalesced — all are delivered in chronological order.
 
-**Ordering guarantee:** Within a batch, events are ordered by `timestamp_us` (hardware timestamp, ascending). Events from different devices are interleaved by timestamp. An agent receiving an `EventBatch` can reconstruct the chronological event sequence by sorting on `timestamp_us`.
+**Ordering guarantee:** Within a batch, events are ordered by `timestamp_hw_us` (hardware timestamp, ascending). Events from different devices are interleaved by timestamp. An agent receiving an `EventBatch` can reconstruct the chronological event sequence by sorting on `timestamp_hw_us`.
 
 ### 8.5 Backpressure and Coalescing
 
@@ -1139,7 +1136,7 @@ message PointerDownEvent {
   SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; float display_x = 7; float display_y = 8;
-  Modifiers modifiers = 9; int64 timestamp_us = 10;
+  Modifiers modifiers = 9; int64 timestamp_hw_us = 10;
   string interaction_id = 11;  // Forwarded from HitRegionNode for agent correlation
 }
 
@@ -1147,7 +1144,7 @@ message PointerUpEvent {
   SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
   float x = 5; float y = 6; float display_x = 7; float display_y = 8;
-  Modifiers modifiers = 9; int64 timestamp_us = 10;
+  Modifiers modifiers = 9; int64 timestamp_hw_us = 10;
   string interaction_id = 11;  // Forwarded from HitRegionNode for agent correlation
 }
 
@@ -1155,42 +1152,42 @@ message PointerMoveEvent {
   SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   float x = 4; float y = 5; float display_x = 6; float display_y = 7;
   float dx = 8; float dy = 9;
-  Modifiers modifiers = 10; int64 timestamp_us = 11;
+  Modifiers modifiers = 10; int64 timestamp_hw_us = 11;
 }
 
 message PointerEnterEvent {
   SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
-  float x = 4; float y = 5; int64 timestamp_us = 6;
+  float x = 4; float y = 5; int64 timestamp_hw_us = 6;
 }
 
 message PointerLeaveEvent {
   SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
-  float x = 4; float y = 5; int64 timestamp_us = 6;
+  float x = 4; float y = 5; int64 timestamp_hw_us = 6;
 }
 
 message ClickEvent {
   SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
-  float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_us = 8;
+  float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_hw_us = 8;
   string interaction_id = 9;   // Forwarded from HitRegionNode for agent correlation
 }
 
 message DoubleClickEvent {
   SceneId tile_id = 1; SceneId node_id = 2; string device_id = 3;
   PointerButton button = 4;
-  float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_us = 8;
+  float x = 5; float y = 6; Modifiers modifiers = 7; int64 timestamp_hw_us = 8;
   string interaction_id = 9;   // Forwarded from HitRegionNode for agent correlation
 }
 
 message ContextMenuEvent {
   SceneId tile_id = 1; SceneId node_id = 2;
-  float x = 3; float y = 4; int64 timestamp_us = 5;
+  float x = 3; float y = 4; int64 timestamp_hw_us = 5;
   string device_id = 6;  // Device that triggered the context menu (for multi-pointer disambiguation)
 }
 
 message PointerCancelEvent {
   SceneId tile_id = 1; SceneId node_id = 2;
-  string device_id = 3; int64 timestamp_us = 4;
+  string device_id = 3; int64 timestamp_hw_us = 4;
 }
 
 // ─── Keyboard events ──────────────────────────────────────────────────────
@@ -1198,18 +1195,18 @@ message PointerCancelEvent {
 message KeyDownEvent {
   SceneId tile_id = 1; SceneId node_id = 2;
   string key_code = 3; string key = 4;
-  Modifiers modifiers = 5; bool repeat = 6; int64 timestamp_us = 7;
+  Modifiers modifiers = 5; bool repeat = 6; int64 timestamp_hw_us = 7;
 }
 
 message KeyUpEvent {
   SceneId tile_id = 1; SceneId node_id = 2;
   string key_code = 3; string key = 4;
-  Modifiers modifiers = 5; int64 timestamp_us = 6;
+  Modifiers modifiers = 5; int64 timestamp_hw_us = 6;
 }
 
 message CharacterEvent {
   SceneId tile_id = 1; SceneId node_id = 2;
-  string character = 3; int64 timestamp_us = 4;
+  string character = 3; int64 timestamp_hw_us = 4;
 }
 
 // ─── Gesture events ───────────────────────────────────────────────────────
@@ -1218,7 +1215,7 @@ message GestureEvent {
   SceneId tile_id        = 1;
   SceneId node_id        = 2;
   string  device_id      = 3;
-  int64   timestamp_us   = 4;
+  int64   timestamp_hw_us   = 4;
   string  interaction_id = 5;  // Forwarded from HitRegionNode for agent correlation (same as pointer events)
 
   oneof gesture {
@@ -1328,7 +1325,7 @@ message InputEnvelope {
 
 message EventBatch {
   int64                    frame_number = 1;
-  int64                    batch_ts_us  = 2;
+  int64                    batch_ts_us  = 2;   // Compositor wall-clock when batch was assembled (UTC µs)
   repeated InputEnvelope   events       = 3;
 }
 
@@ -1455,7 +1452,7 @@ enum CursorStyle {
               ┌──────────────────────────────────────┐
               │  Network Thread                      │
               │  • gRPC stream write (agent session) │
-              │  • Ordered by timestamp_us           │
+              │  • Ordered by timestamp_hw_us           │
               └────────────────┬─────────────────────┘
                                │ gRPC EventBatch
                                ▼
@@ -1640,14 +1637,28 @@ The a11y tree is currently specified as in-memory only. For headless test enviro
 RFC 0001 (Scene Contract)
   └── §2.4 HitRegionNode definition
   └── §5   Hit-testing algorithm and performance requirement
+  └── §7.1 SceneId — authoritative definition used for tile_id / node_id in all input proto messages
 
 RFC 0002 (Runtime Kernel)
   └── §3.2 Stage 1 (Input Drain) and Stage 2 (Local Feedback) specifications
   └── §2   Thread model (main thread vs compositor thread)
+  └── §3.2 InputEvent internal struct (timestamp_hw, timestamp_arrival fields)
 
-RFC 0003 (Lease Model)
-  └── Lease ownership → event routing (who owns the tile = who receives events)
-  └── Lease revocation → capture release, focus loss
+RFC 0003 (Timing Model)
+  └── §1.1 Clock domains — hardware timestamp (monotonic) used in input events
+  └── §3   Lease TTL / watchdog timer referenced in §8.5 overflow contract
+
+RFC 0005 (Session Protocol)
+  └── §2.2 SessionMessage envelope — field 34 (input_event) carries EventBatch
+  └── §5.2 At-least-once semantics — FocusRequest / CaptureRequest use sequence-correlated ack
+  └── §8.3.1 Agent→runtime input control requests (FocusRequest, CaptureRequest, etc.) require
+           RFC 0005 SessionMessage extensions (see §8.3.1)
+
+RFC 0008 (Lease & Resource Governance)
+  └── Lease ownership → event routing (tile's lease owner receives its input events)
+  └── Lease revocation → capture release (CaptureReleasedEvent reason LEASE_REVOKED),
+           focus loss (FocusLostEvent reason LEASE_REVOKED)
+  └── §3.3 Agent stall detection — referenced in §8.5 overflow contract
 
 RFC 0004 (this)
   └── Input model: focus, capture, gestures, IME, a11y, local feedback,
