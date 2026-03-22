@@ -36,6 +36,33 @@ pub mod nsaccessibility;
 use serde::{Deserialize, Serialize};
 use tze_hud_scene::{SceneId, SceneGraph};
 
+// ─── Shared stub helper ───────────────────────────────────────────────────────
+
+/// One-shot warning emitter for stub platform bridges.
+///
+/// Each platform stub carries one `WarnOnce` instance and calls `call()` with
+/// its own message on the first operation. Subsequent calls are no-ops.
+/// This removes the duplicated `warned: bool` + `warn_once()` pattern from
+/// every platform module.
+pub struct WarnOnce {
+    warned: bool,
+}
+
+impl WarnOnce {
+    pub const fn new() -> Self {
+        Self { warned: false }
+    }
+
+    /// Emit `message` via `tracing::warn!` exactly once. Subsequent calls are
+    /// no-ops.
+    pub fn call(&mut self, message: &str) {
+        if !self.warned {
+            tracing::warn!("{}", message);
+            self.warned = true;
+        }
+    }
+}
+
 // ─── Accessibility Metadata ───────────────────────────────────────────────────
 
 /// Per-node and per-tile accessibility metadata declared by agents.

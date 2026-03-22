@@ -19,33 +19,25 @@
 
 #![cfg(target_os = "windows")]
 
-use tracing::warn;
 use tze_hud_scene::{SceneId, SceneGraph};
 
-use crate::{AccessibilityTree, LivePoliteness};
+use crate::{AccessibilityTree, LivePoliteness, WarnOnce};
+
+const STUB_MSG: &str = "tze_hud_a11y: Windows UI Automation bridge is a stub — accessibility \
+    features are not functional. Implement crates/tze_hud_a11y/src/uia.rs \
+    to enable Windows screen reader support (Narrator, NVDA, JAWS).";
 
 /// Windows UI Automation accessibility bridge.
 ///
 /// Stub implementation. Emits a warning on first use.
 pub struct UiaAccessibility {
-    warned: bool,
+    warner: WarnOnce,
 }
 
 impl UiaAccessibility {
     /// Create a new UIA bridge stub.
     pub fn new() -> Self {
-        Self { warned: false }
-    }
-
-    fn warn_once(&mut self) {
-        if !self.warned {
-            warn!(
-                "tze_hud_a11y: Windows UI Automation bridge is a stub — accessibility \
-                 features are not functional. Implement crates/tze_hud_a11y/src/uia.rs \
-                 to enable Windows screen reader support (Narrator, NVDA, JAWS)."
-            );
-            self.warned = true;
-        }
+        Self { warner: WarnOnce::new() }
     }
 }
 
@@ -57,18 +49,18 @@ impl Default for UiaAccessibility {
 
 impl AccessibilityTree for UiaAccessibility {
     fn update_from_scene(&mut self, _scene: &SceneGraph) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: rebuild COM element tree from scene graph, raise
         //       UIA_StructureChangedEventId as needed
     }
 
     fn announce(&mut self, _message: &str, _politeness: LivePoliteness) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: raise UIA_LiveRegionChangedEventId on the appropriate provider
     }
 
     fn focus_changed(&mut self, _node_id: SceneId) {
-        self.warn_once();
+        self.warner.call(STUB_MSG);
         // TODO: raise UIA_AutomationFocusChangedEventId on the focused element's provider
     }
 }
