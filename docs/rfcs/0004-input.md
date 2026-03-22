@@ -15,6 +15,7 @@
 | 3 | 2026-03-22 | rig-6k5 | Cross-RFC ID type unification | §9.1 (input.proto): added `import "scene.proto"`; replaced all `string tile_id` and `string node_id` with `SceneId tile_id` / `SceneId node_id` across all proto messages (FocusRequest, FocusGainedEvent, FocusLostEvent, CaptureRequest, CaptureReleaseRequest, CaptureReleasedEvent, SetImePositionRequest, and all pointer/keyboard/gesture/IME event types). Non-scene identifiers (`session_id`, `device_id`, `interaction_id`) remain `string` — they are not scene-object addresses. Inline narrative proto snippets in §1.2, §1.4, §2.3, §4.3, §4.4 also updated to match. |
 | 4 | 2026-03-22 | rig-5vq.25 | Cross-RFC consistency and integration | §4.6 (second): renumbered duplicate `§4.6` to `§4.7 Input Method Support`. §8.3: corrected Note — RFC 0005 field 34 carries type `InputEvent` (from `scene_service.proto`), not `InputEnvelope`; specified that RFC 0005 must rename field 34 type to `EventBatch`; noted RFC 0005 §7.1 uses `InputMessage` (also needs alignment to `EventBatch`). §12: corrected RFC 0003 label from "Lease Model" → "Timing Model"; added RFC 0005 (Session Protocol) and RFC 0008 (Lease & Resource Governance) dependency entries with section references. §1.4: updated `FocusGainedEvent`/`FocusLostEvent` narrative snippet to use nested enum syntax matching §9.1 (removed standalone `FocusSource`/`FocusLostReason` enums). §2.3: updated `CaptureReleasedEvent` narrative snippet to use nested `enum Reason` matching §9.1 (removed standalone `CaptureReleaseReason` enum). All input event `timestamp_us` fields renamed to `timestamp_hw_us` to follow RFC 0003/RFC 0005 clock-domain naming convention; added clock-domain annotation ("OS hardware event timestamp, monotonic domain"); `batch_ts_us` in `EventBatch` annotated as wall-clock domain. |
 | 5 | 2026-03-22 | rig-5vq.26 | Final hardening and quantitative verification | §3.2: added ContextMenu dispatch note clarifying it is dispatched as `ContextMenuEvent` (not `GestureEvent`) and does not run through the recognizer pipeline. §3.3: added DoubleTap and Swipe recognizer boxes to pipeline diagram; added ContextMenu preprocessor note. §3.4: expanded recognizer state machines to cover all 6 gesture types (added DoubleTap, Swipe, Pinch machines alongside Tap, LongPress, Drag); added Swipe velocity threshold (≥ 400 px/s, duration < 300ms) and Swipe/Drag disambiguation rule. §3.5: removed `ContextMenu` from gesture conflict priority list (it is not a competing gesture); replaced with `Swipe` at position 3; added note explaining ContextMenu dispatch path. §3.6: rewrote to remove non-existent `GestureBeganEvent` / `GestureCancelledEvent` references; narrative now correctly describes phased gestures using `GestureEvent { phase = BEGAN/CHANGED/ENDED/CANCELLED }` and point gestures as terminal single events; added implementation note. |
+| 6 | 2026-03-22 | rig-khj | Resolve §11.2 scroll feedback (pre-implementation required) | §6.3: updated scroll row — removed "V1 deferred" annotation; row now references §6.7 and `ScrollOffsetChangedEvent`. §6.5: extended `SceneLocalPatch` with `scroll_offset_updates: Vec<ScrollOffsetUpdate>` and added `ScrollOffsetUpdate` struct. §6.7 (new): complete Scroll Feedback specification — `ScrollConfig` (scrollable_x/y, content size, `SnapMode`, `OverscrollMode`), `ScrollOffsetUpdate`, momentum model (OS-provided + Wayland fallback exponential-decay §6.7.2a), snap point mechanics (Mandatory/Proximity, 100ms ease-out animation), rubber-band overscroll with tension coefficient, agent notification semantics (`ScrollOffsetChangedEvent`, non-transactional/coalesced), programmatic `SetScrollOffsetRequest`, local feedback contract integration. §8.3: added `scroll_offset_changed = 21` to `InputEnvelope` oneof. §8.4: added coalescing rule for `ScrollOffsetChangedEvent` (latest-wins per tile). §8.5: added `ScrollOffsetChangedEvent` to non-transactional coalescing rules (step 3); updated step 6 to list scroll offset change as droppable at hard cap. §9.1: added `ScrollEvent` (internal pipeline message) and `ScrollOffsetChangedEvent` (agent-facing) proto definitions; added `scroll_offset_changed = 21` to `InputEnvelope` oneof in §9.1. §11.2: resolved — marked RESOLVED with full decision log. §13: removed "Scroll events and momentum physics (§11.2)"; replaced with "Custom scroll physics / agent-defined momentum curves" noting scroll local feedback is V1. |
 
 ---
 
@@ -674,7 +675,7 @@ The runtime updates these states immediately, without agent involvement:
 | `HitRegionLocalState.pressed` | `PointerDownEvent` | Pressed visual (darkening, inset shadow) |
 | `HitRegionLocalState.hovered` | `PointerEnterEvent` / `PointerLeaveEvent` | Hover highlight |
 | `HitRegionLocalState.focused` | Focus transfer | Focus ring |
-| Scroll position (V1 deferred) | Scroll event | Scroll offset |
+| Tile scroll offset | `ScrollEvent` (wheel / touchpad / touch) | Scroll position updated in compositor; `ScrollOffsetChangedEvent` delivered to agent (§6.7) |
 | Drag ghost (V1 deferred) | Drag gesture | Translucent drag image |
 
 Visual representations of local state are rendered by the runtime's compositor, not by agent content. The hit region node type includes a `local_style` configuration that specifies how local states appear visually, allowing agents to customize while keeping rendering fully local.
@@ -696,6 +697,7 @@ Local state is encoded in `SceneLocalPatch`, produced in Stage 2:
 pub struct SceneLocalPatch {
     pub timestamp: Instant,
     pub local_state_updates: Vec<LocalStateUpdate>,
+    pub scroll_offset_updates: Vec<ScrollOffsetUpdate>,
 }
 
 pub struct LocalStateUpdate {
@@ -703,6 +705,14 @@ pub struct LocalStateUpdate {
     pub pressed: Option<bool>,
     pub hovered: Option<bool>,
     pub focused: Option<bool>,
+}
+
+/// Scroll offset update produced in Stage 2 for tiles that declare scrollable content.
+/// Carried in SceneLocalPatch and applied by the compositor in Stage 4.
+pub struct ScrollOffsetUpdate {
+    pub tile_id: SceneId,
+    pub offset_x: f32,   // horizontal scroll offset in logical pixels
+    pub offset_y: f32,   // vertical scroll offset in logical pixels
 }
 ```
 
@@ -735,6 +745,142 @@ Timeline:
   t=30ms  Agent returns rejection { reason: "disabled" }
   t=30ms  pressed=false + rollback animation (100ms)
 ```
+
+### 6.7 Scroll Feedback
+
+Scroll is a local-first operation. The compositor maintains a scroll offset per scrollable tile and updates it in the same frame the scroll event arrives, without an agent roundtrip. The agent learns the new scroll position via a `ScrollOffsetChangedEvent` delivered asynchronously, but it does **not** drive or veto the scroll position.
+
+**Scrollable tile declaration.** A tile opts in to runtime-managed scroll by including a `ScrollConfig` in its tile definition (RFC 0001 §2). Non-scrollable tiles discard scroll events.
+
+```rust
+pub struct ScrollConfig {
+    pub scrollable_x: bool,          // horizontal scroll enabled
+    pub scrollable_y: bool,          // vertical scroll enabled
+    pub content_width: f32,          // logical pixels (>= tile width to enable h-scroll)
+    pub content_height: f32,         // logical pixels (>= tile height to enable v-scroll)
+    pub snap_mode: SnapMode,
+    pub overscroll_mode: OverscrollMode,
+}
+
+pub enum SnapMode {
+    None,                            // Free scroll, no snapping (default)
+    Mandatory { interval_px: f32 }, // Snap to grid at interval_px increments
+    Proximity { snap_points: Vec<f32>, proximity_px: f32 },  // Snap when within proximity_px of a declared snap point (logical pixels on the scroll axis)
+}
+
+pub enum OverscrollMode {
+    None,                            // Hard stop at content boundary (default)
+    RubberBand { tension: f32 },     // Elastic overscroll (iOS-style); tension controls the rubber-band resistance coefficient (0.0–1.0, default 0.55)
+}
+```
+
+**Scroll offset state.** The compositor maintains `(offset_x, offset_y)` per scrollable tile, clamped to `[0, content_width - tile_width]` × `[0, content_height - tile_height]` after momentum settles. During rubber-band overscroll, the offset may transiently exceed these bounds.
+
+#### 6.7.1 ScrollEvent: Input Sources
+
+```
+OS scroll input sources → ScrollEvent
+  • Mouse wheel:       discrete delta per notch (typically 120 units = 1 notch)
+  • Touchpad scroll:   continuous smooth delta from OS gesture subsystem
+  • Touchpad momentum: OS-provided post-lift kinetic phase (see §6.7.2)
+  • Touch (2-finger):  mapped through the Swipe recognizer (axis-aligned) or
+                       direct scroll if Swipe recognizer is not active
+  • Keyboard:          Arrow keys / Page Up / Page Down when tile has focus
+                       (routed as synthetic ScrollEvents with discrete step sizes)
+```
+
+The `ScrollEvent` proto message (defined in §9.1) carries raw deltas. The compositor accumulates and applies them; agents receive only the resulting `ScrollOffsetChangedEvent`.
+
+#### 6.7.2 Momentum Model: OS-Provided
+
+The runtime uses **OS-provided momentum** rather than implementing its own physics. This decision avoids duplicating platform-specific acceleration curves, deceleration profiles, and accessibility settings (reduced motion).
+
+**Platform mapping:**
+
+| Platform | Mechanism |
+|----------|-----------|
+| macOS | `NSEvent.scrollingDeltaX/Y` with `hasPreciseScrollingDeltas`; momentum phase delivered by OS as `NSEventPhase.momentum` |
+| Windows | `WM_MOUSEWHEEL` (discrete) + `WM_GESTURE` / DirectManipulation for touchpad momentum |
+| Linux Wayland | `wl_pointer.axis_source` + `axis_stop` event signals end of physical scroll; no OS momentum — runtime applies a simple exponential decay (see §6.7.2a) |
+| Linux X11 | Button 4/5 discrete wheel events only; no momentum |
+
+**Phase tracking.** winit exposes `TouchPhase` and scroll `MouseScrollDelta` variants. The runtime distinguishes:
+- `Line` deltas (mouse wheel, keyboard) — discrete, no momentum
+- `Pixel` deltas (touchpad precision, touch) — continuous; OS signals phase end
+
+On Linux Wayland where the OS does not provide momentum, the runtime applies a fallback: **§6.7.2a Fallback Exponential Decay.** At the final `axis_stop` event, the runtime records the last pixel-delta velocity and applies an exponential decay with a fixed half-life of 80ms, advancing the scroll offset each compositor frame until velocity drops below 0.5 px/frame. This is the only runtime-implemented physics; it is disabled when OS momentum is available.
+
+#### 6.7.3 Snap Points
+
+When `SnapMode::Mandatory` or `SnapMode::Proximity` is set, the compositor applies snapping after momentum settles:
+
+- **Mandatory:** After each scroll delta application (during active scroll), the target offset is rounded to the nearest `interval_px` multiple. No free-float between snap positions.
+- **Proximity:** During active scroll, offsets float freely. When the final velocity drops below 50 px/s (or on a discrete wheel event), the compositor checks proximity to declared snap points. If the settling offset is within `proximity_px` of a snap point, the compositor animates (100ms ease-out) to the snap point.
+
+**Snap animation.** Snap-to-point animation runs entirely in the compositor. The agent receives one `ScrollOffsetChangedEvent` with `is_settling: true` when animation begins and one with `is_settling: false` when it completes (or a single event if the offset is already snapped).
+
+#### 6.7.4 Rubber-Band Overscroll
+
+When `OverscrollMode::RubberBand` is active and a scroll gesture attempts to push past a content boundary, the offset is allowed to exceed the boundary by a damped amount:
+
+```
+overscroll_amount = raw_excess * (1.0 - tension)
+
+// where tension is the ScrollConfig.overscroll_mode.tension coefficient.
+// At tension=0.55 (default), a 100px raw excess yields ~45px visual overscroll.
+```
+
+On pointer lift (or `axis_stop`), the compositor animates the offset back to the boundary using a spring with the same tension coefficient (200ms ease-in-out). This animation runs locally; the agent receives `ScrollOffsetChangedEvent` updates during the spring-back.
+
+**Hard stop** (`OverscrollMode::None`): scroll delta is clamped at the content boundary. No spring-back.
+
+#### 6.7.5 Agent Notification Semantics
+
+The agent does **not** drive scroll position. The agent learns about scroll through `ScrollOffsetChangedEvent`:
+
+```protobuf
+message ScrollOffsetChangedEvent {
+  SceneId tile_id     = 1;
+  float   offset_x    = 2;   // current horizontal offset in logical pixels
+  float   offset_y    = 3;   // current vertical offset in logical pixels
+  bool    is_settling = 4;   // true during snap or rubber-band spring-back animation
+}
+```
+
+**Delivery semantics:** `ScrollOffsetChangedEvent` is **non-transactional** (ephemeral). During active scrolling, events are coalesced in the agent's event queue (latest-wins, same as `PointerMoveEvent`). The agent always receives the final settled offset. The agent never receives a scroll offset event for tiles it does not own.
+
+**Agent use cases:** Agents use `ScrollOffsetChangedEvent` to:
+- Update lazy-loaded content: request more content when offset approaches `content_height - tile_height`.
+- Synchronize scroll-linked visual effects (parallax, sticky headers) in their next `MutationBatch`.
+- Persist scroll position across sessions.
+
+The agent may **not** use `ScrollOffsetChangedEvent` to drive or intercept scroll in the same-frame path. If an agent needs to programmatically set scroll position (e.g., jump to a section), it submits a `SetScrollOffsetRequest` (see §6.7.6), which is applied as the next frame's initial offset before any incoming scroll deltas.
+
+#### 6.7.6 Agent-Controlled Scroll Position
+
+An agent may programmatically set the scroll offset via a scene mutation (RFC 0001 §6). This is a state-stream operation (coalesced, not transactional). The runtime applies the requested offset at the next Stage 4 (Scene Commit) and produces a `ScrollOffsetChangedEvent` confirming the new offset.
+
+```protobuf
+// Carried in RFC 0001 MutationBatch as a tile-level property update
+message SetScrollOffsetRequest {
+  SceneId tile_id   = 1;
+  float   offset_x  = 2;
+  float   offset_y  = 3;
+  bool    animated  = 4;   // if true, smooth scroll; if false, instant jump
+}
+```
+
+If both an agent-set offset and an in-flight user scroll arrive in the same frame, the user scroll takes priority and the agent request is discarded. User input is never blocked by agent scroll requests.
+
+#### 6.7.7 Scroll and the Local Feedback Contract
+
+Scroll fits the existing local feedback model without exception:
+
+- **Stage 2 (Local Feedback):** The compositor applies the raw scroll delta to the tile's `ScrollOffsetUpdate` in `SceneLocalPatch`. The visual scroll position updates in the same frame as the input event.
+- **Stage 4 (Scene Commit):** `ScrollOffsetUpdate` is applied to render state; the updated tile content offset is used in the next frame encode.
+- **Agent notification:** `ScrollOffsetChangedEvent` is enqueued in the agent's `EventBatch` on the compositor thread, delivered asynchronously via gRPC.
+
+The latency budget for scroll visual feedback is the same as for press state: `input_to_local_ack` p99 < 4ms. Scroll position must be visually updated within one frame of the scroll event arriving.
 
 ---
 
@@ -1051,7 +1197,8 @@ message InputEnvelope {
     ImeCompositionUpdatedEvent   ime_updated   = 17;
     ImeCompositionCommittedEvent ime_committed = 18;
     ImeCompositionCancelledEvent ime_cancelled = 19;
-    CaptureReleasedEvent capture_released  = 20;
+    CaptureReleasedEvent         capture_released       = 20;
+    ScrollOffsetChangedEvent     scroll_offset_changed  = 21;
   }
 }
 ```
@@ -1094,6 +1241,7 @@ Events that occur within the same frame are batched into a single `EventBatch` m
 **Batching rules:**
 - Events with the same `tile_id` and `node_id` in the same frame are grouped.
 - Multiple `PointerMoveEvent` for the same node in the same frame are coalesced to the final position (latest-wins for moves).
+- Multiple `ScrollOffsetChangedEvent` for the same tile in the same frame are coalesced to the latest offset (latest-wins). Scroll notification is non-transactional; the agent always receives the settled position.
 - `PointerDownEvent`, `PointerUpEvent`, `ClickEvent`, `KeyDownEvent`, `KeyUpEvent`, and all transactional events (focus, capture, IME) are never coalesced — all are delivered in chronological order.
 
 **Ordering guarantee:** Within a batch, events are ordered by `timestamp_hw_us` (hardware timestamp, ascending). Events from different devices are interleaved by timestamp. An agent receiving an `EventBatch` can reconstruct the chronological event sequence by sorting on `timestamp_hw_us`.
@@ -1104,9 +1252,10 @@ If an agent's event queue is full (the agent is slow to consume events):
 
 1. **PointerMove events** are coalesced: only the latest position is retained.
 2. **Hover state changes** (enter/leave) are coalesced: only the net state (currently inside or outside) is emitted.
-3. **Transactional events** (down, up, click, key, focus, capture, IME) are never dropped. If the queue is full and a transactional event arrives, the oldest coalesced event is removed to make room.
-4. If the queue remains full after coalescing, the oldest coalesced (non-transactional) event is removed to make room. The queue grows as needed to accommodate transactional events, which are never dropped.
-5. Beyond the hard cap, **transactional events** (down, up, click, key, focus, capture, IME) continue to be enqueued — they are never dropped. **Non-transactional events** (PointerMove, hover enter/leave) that cannot be coalesced further are dropped at the hard cap, and `telemetry_overflow_count` is incremented.
+3. **ScrollOffsetChangedEvent** is coalesced per tile: only the latest offset is retained. Scroll notification is non-transactional and may be dropped under extreme backpressure.
+4. **Transactional events** (down, up, click, key, focus, capture, IME) are never dropped. If the queue is full and a transactional event arrives, the oldest coalesced event is removed to make room.
+5. If the queue remains full after coalescing, the oldest coalesced (non-transactional) event is removed to make room. The queue grows as needed to accommodate transactional events, which are never dropped.
+6. Beyond the hard cap, **transactional events** (down, up, click, key, focus, capture, IME) continue to be enqueued — they are never dropped. **Non-transactional events** (PointerMove, hover enter/leave, scroll offset change) that cannot be coalesced further are dropped at the hard cap, and `telemetry_overflow_count` is incremented.
 
 > **Overflow contract:** The hard cap ensures memory is bounded. In practice, a queue exceeding 4096 events indicates the agent has stalled; the runtime should log this as a health incident and the agent's lease watchdog timer (RFC 0003 §lease TTL) will eventually reclaim the session if the agent does not recover.
 
@@ -1362,6 +1511,35 @@ message ImeCompositionCancelledEvent {
   SceneId tile_id = 1; SceneId node_id = 2;
 }
 
+// ─── Scroll events ────────────────────────────────────────────────────────
+
+/// Raw scroll input delivered by the OS (runtime → internal pipeline only).
+/// Agents never see ScrollEvent directly; they receive ScrollOffsetChangedEvent.
+message ScrollEvent {
+  SceneId tile_id          = 1;   // Tile under the pointer at scroll time
+  float   delta_x          = 2;   // Horizontal delta (logical pixels; negative = scroll left)
+  float   delta_y          = 3;   // Vertical delta (logical pixels; negative = scroll up)
+  enum Source {
+    WHEEL     = 0;  // Mouse wheel (discrete line delta)
+    TOUCHPAD  = 1;  // Touchpad precision scroll (continuous pixel delta)
+    MOMENTUM  = 2;  // OS-provided post-lift kinetic phase (touchpad momentum)
+    TOUCH     = 3;  // Direct touch two-finger scroll
+    KEYBOARD  = 4;  // Arrow keys / Page Up-Down synthetic scroll
+  }
+  Source source            = 4;
+  bool   is_momentum_end   = 5;   // true on the final momentum event (velocity ≈ 0)
+  int64  timestamp_hw_us   = 6;   // OS hardware event timestamp (monotonic domain)
+}
+
+/// Delivered to agents when the tile's compositor-managed scroll offset changes.
+/// Non-transactional: coalesced to latest value per tile per EventBatch (§8.4).
+message ScrollOffsetChangedEvent {
+  SceneId tile_id     = 1;
+  float   offset_x    = 2;   // current horizontal offset in logical pixels
+  float   offset_y    = 3;   // current vertical offset in logical pixels
+  bool    is_settling = 4;   // true during snap-to-point or rubber-band spring-back animation
+}
+
 // ─── Dispatch batch ───────────────────────────────────────────────────────
 
 message InputEnvelope {
@@ -1385,7 +1563,8 @@ message InputEnvelope {
     ImeCompositionUpdatedEvent   ime_updated   = 17;
     ImeCompositionCommittedEvent ime_committed = 18;
     ImeCompositionCancelledEvent ime_cancelled = 19;
-    CaptureReleasedEvent capture_released  = 20;
+    CaptureReleasedEvent         capture_released       = 20;
+    ScrollOffsetChangedEvent     scroll_offset_changed  = 21;
   }
 }
 
@@ -1671,13 +1850,19 @@ These questions require decisions before implementation of the input subsystem b
 
 V1 does not specify drag-and-drop between tiles or agents. The `DragGesture` event covers single-tile drag interactions. Cross-tile and cross-agent DnD requires a separate protocol (drag offer, drop target negotiation) and is deferred post-V1. If a tile needs drag-and-drop in V1, it must implement a custom protocol over pointer events.
 
-### 11.2 Scroll Events
+### 11.2 Scroll Events — RESOLVED
 
-Scroll (mouse wheel, touchpad two-finger swipe, touchpad momentum) is not fully specified in this RFC, but it is **not optional**: failure.md §"What the user always sees" lists "screen responsive to touch/input within 4ms" as an invariant, and presence.md §Interaction establishes local-first scroll feedback as a core commitment.
+Scroll feedback has been fully specified in §6.7. The decisions made are:
 
-**Scope decision:** Scroll position update and visual scroll feedback are local-only operations (no agent roundtrip) and therefore fall under the local feedback contract (§6). They must be added before implementation begins. The open questions are the mechanics: snap points, momentum physics, scroll boundary behavior (rubber-band vs hard stop), and whether scroll offset is exposed to agents as a scene mutation or inferred from content height.
+- **Scope:** Scroll position is a local-only operation under the local feedback contract (§6). No agent roundtrip is involved in the visual scroll update path.
+- **Momentum:** OS-provided momentum is used on platforms that supply it (macOS, Windows touchpad). On Linux Wayland (no OS momentum), the runtime applies a simple exponential-decay fallback (§6.7.2a). No runtime-implemented physics beyond the Wayland fallback.
+- **Snap points:** Supported via `SnapMode::Mandatory` (grid) and `SnapMode::Proximity` (declared snap-point list). Snap animation runs in the compositor (100ms ease-out). Deferred snap configuration is a state-stream mutation from the agent via RFC 0001 MutationBatch.
+- **Boundary behavior:** Configurable per tile: `OverscrollMode::None` (hard stop, default) or `OverscrollMode::RubberBand` (elastic, tension-parameterized).
+- **Agent notification:** Agent receives `ScrollOffsetChangedEvent` (non-transactional, coalesced) with the current offset. Agent does not drive scroll in the live input path. Agent may set scroll offset programmatically via `SetScrollOffsetRequest` in a MutationBatch (§6.7.6); user input takes priority if both arrive in the same frame.
+- **Proto:** `ScrollEvent` (internal pipeline) and `ScrollOffsetChangedEvent` (agent-facing) defined in §9.1. `ScrollOffsetChangedEvent` added to `InputEnvelope` field 21.
+- **`SceneLocalPatch`:** Extended with `scroll_offset_updates: Vec<ScrollOffsetUpdate>` (§6.5).
 
-**Action required before implementation:** Add §6.x Scroll Feedback to this RFC defining: scroll offset as compositor-managed local state per tile, `ScrollEvent` proto message, momentum model (OS-provided vs runtime-implemented), and agent notification semantics (agent learns the current scroll offset via an event, but does not drive it).
+The contradiction between §11.2 and §13 is resolved: scroll local feedback is V1 (§6.7); scroll momentum snap-configuration beyond the built-in modes (custom physics, agent-defined momentum curves) remains post-V1.
 
 ### 11.3 Gamepad / Controller Input
 
@@ -1738,7 +1923,7 @@ RFC 0004 (this)
 The following are explicitly deferred to post-V1:
 
 - Drag-and-drop between tiles or agents (§11.1)
-- Scroll events and momentum physics (§11.2)
+- Custom scroll physics / agent-defined momentum curves (scroll local feedback is V1 — see §6.7; only custom physics beyond the built-in modes is deferred)
 - Gamepad/controller input (§11.3)
 - Stylus/pressure input (§11.4)
 - Multi-pointer hover (distinct hover states for multiple cursors simultaneously)
