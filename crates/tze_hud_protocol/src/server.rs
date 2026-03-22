@@ -3,9 +3,9 @@
 use crate::convert;
 use crate::proto::scene_service_server::SceneService;
 use crate::proto::*;
-use crate::session::SessionRegistry;
+use crate::session::{SessionRegistry, SESSION_EVENT_CHANNEL_CAPACITY};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
@@ -15,7 +15,6 @@ use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation
 pub struct SharedState {
     pub scene: SceneGraph,
     pub sessions: SessionRegistry,
-    pub event_tx: broadcast::Sender<SceneEvent>,
 }
 
 /// The gRPC service implementation.
@@ -25,16 +24,25 @@ pub struct SceneServiceImpl {
 
 impl SceneServiceImpl {
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
-        let (event_tx, _) = broadcast::channel(1024);
         Self {
             state: Arc::new(Mutex::new(SharedState {
                 scene,
                 sessions: SessionRegistry::new(psk),
-                event_tx,
             })),
         }
     }
 }
+
+// ─── Helper ────────────────────────────────────────────────────────────────
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+// ─── Service impl ──────────────────────────────────────────────────────────
 
 #[tonic::async_trait]
 impl SceneService for SceneServiceImpl {
@@ -103,6 +111,18 @@ impl SceneService for SceneServiceImpl {
             session.lease_ids.push(lease_id);
         }
 
+        // Notify agent of lease_granted
+        let event = SceneEvent {
+            timestamp_ms: now_ms(),
+            event: Some(scene_event::Event::Lease(LeaseEvent {
+                lease_id: lease_id.to_string(),
+                namespace: namespace.clone(),
+                kind: LeaseEventKind::LeaseGranted as i32,
+                timestamp_ms: now_ms(),
+            })),
+        };
+        state.sessions.dispatch_to_namespace(&namespace, event);
+
         Ok(Response::new(LeaseResponse {
             lease_id: lease_id.to_string(),
             granted_ttl_ms: ttl,
@@ -118,19 +138,33 @@ impl SceneService for SceneServiceImpl {
         let mut state = self.state.lock().await;
 
         // Validate session
-        let _session = state
+        let session = state
             .sessions
             .get_session(&req.session_id)
             .ok_or_else(|| Status::unauthenticated("invalid session"))?;
+        let namespace = session.namespace.clone();
 
         let lease_id = parse_scene_id(&req.lease_id)?;
         let ttl = if req.new_ttl_ms > 0 { req.new_ttl_ms } else { 60_000 };
 
         match state.scene.renew_lease(lease_id, ttl) {
-            Ok(()) => Ok(Response::new(LeaseRenewResponse {
-                success: true,
-                error: String::new(),
-            })),
+            Ok(()) => {
+                let event = SceneEvent {
+                    timestamp_ms: now_ms(),
+                    event: Some(scene_event::Event::Lease(LeaseEvent {
+                        lease_id: lease_id.to_string(),
+                        namespace: namespace.clone(),
+                        kind: LeaseEventKind::LeaseRenewed as i32,
+                        timestamp_ms: now_ms(),
+                    })),
+                };
+                state.sessions.dispatch_to_namespace(&namespace, event);
+
+                Ok(Response::new(LeaseRenewResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
             Err(e) => Ok(Response::new(LeaseRenewResponse {
                 success: false,
                 error: e.to_string(),
@@ -145,18 +179,32 @@ impl SceneService for SceneServiceImpl {
         let req = request.into_inner();
         let mut state = self.state.lock().await;
 
-        let _session = state
+        let session = state
             .sessions
             .get_session(&req.session_id)
             .ok_or_else(|| Status::unauthenticated("invalid session"))?;
+        let namespace = session.namespace.clone();
 
         let lease_id = parse_scene_id(&req.lease_id)?;
 
         match state.scene.revoke_lease(lease_id) {
-            Ok(()) => Ok(Response::new(LeaseRevokeResponse {
-                success: true,
-                error: String::new(),
-            })),
+            Ok(()) => {
+                let event = SceneEvent {
+                    timestamp_ms: now_ms(),
+                    event: Some(scene_event::Event::Lease(LeaseEvent {
+                        lease_id: lease_id.to_string(),
+                        namespace: namespace.clone(),
+                        kind: LeaseEventKind::LeaseRevoked as i32,
+                        timestamp_ms: now_ms(),
+                    })),
+                };
+                state.sessions.dispatch_to_namespace(&namespace, event);
+
+                Ok(Response::new(LeaseRevokeResponse {
+                    success: true,
+                    error: String::new(),
+                }))
+            }
             Err(e) => Ok(Response::new(LeaseRevokeResponse {
                 success: false,
                 error: e.to_string(),
@@ -265,19 +313,18 @@ impl SceneService for SceneServiceImpl {
         let result = state.scene.apply_batch(&batch);
 
         if result.applied {
-            // Broadcast events for created IDs
+            let ts = now_ms();
+            // Dispatch tile_created events to the owning agent for each new tile.
             for id in &result.created_ids {
-                let _ = state.event_tx.send(SceneEvent {
-                    event_type: "mutation_applied".to_string(),
-                    tile_id: id.to_string(),
-                    node_id: String::new(),
-                    interaction_id: String::new(),
-                    details: format!("batch applied by {namespace}"),
-                    timestamp_ms: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64,
-                });
+                let event = SceneEvent {
+                    timestamp_ms: ts,
+                    event: Some(scene_event::Event::TileCreated(TileCreatedEvent {
+                        tile_id: id.to_string(),
+                        namespace: namespace.clone(),
+                        timestamp_ms: ts,
+                    })),
+                };
+                state.sessions.dispatch_to_namespace(&namespace, event);
             }
 
             Ok(Response::new(MutationBatchResponse {
@@ -345,6 +392,11 @@ impl SceneService for SceneServiceImpl {
     type SubscribeEventsStream =
         std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<SceneEvent, Status>> + Send>>;
 
+    /// Subscribe to per-session events.
+    ///
+    /// Creates a bounded mpsc channel and stores the sender in the session.
+    /// All subsequent server-side dispatches (scene mutations, input events,
+    /// lease lifecycle) use that channel to push events to this specific agent.
     async fn subscribe_events(
         &self,
         request: Request<EventSubscribeRequest>,
@@ -357,20 +409,230 @@ impl SceneService for SceneServiceImpl {
             .sessions
             .get_session_mut(&req.session_id)
             .ok_or_else(|| Status::unauthenticated("invalid session"))?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(SESSION_EVENT_CHANNEL_CAPACITY);
+        session.event_tx = Some(tx);
         session.event_subscribed = true;
 
-        let rx = state.event_tx.subscribe();
-        let stream = tokio_stream::wrappers::BroadcastStream::new(rx);
-        let mapped = tokio_stream::StreamExt::map(stream, |item| {
-            item.map_err(|e| Status::internal(e.to_string()))
-        });
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mapped = tokio_stream::StreamExt::map(stream, Ok);
 
         Ok(Response::new(Box::pin(mapped)))
     }
+}
+
+// ─── Public dispatch helpers ───────────────────────────────────────────────
+
+/// Dispatch an input event from the input pipeline to the agent that owns
+/// the given namespace.  Called from tze_hud_input after hit-testing.
+pub fn dispatch_input_event(
+    state: &mut SharedState,
+    namespace: &str,
+    tile_id: tze_hud_scene::SceneId,
+    node_id: tze_hud_scene::SceneId,
+    interaction_id: &str,
+    display_x: f32,
+    display_y: f32,
+    local_x: f32,
+    local_y: f32,
+    kind: InputEventKind,
+) {
+    let ts = now_ms();
+    let event = SceneEvent {
+        timestamp_ms: ts,
+        event: Some(scene_event::Event::Input(InputEvent {
+            tile_id: tile_id.to_string(),
+            node_id: node_id.to_string(),
+            interaction_id: interaction_id.to_string(),
+            local_x,
+            local_y,
+            display_x,
+            display_y,
+            kind: kind as i32,
+            timestamp_ms: ts,
+        })),
+    };
+    state.sessions.dispatch_to_namespace(namespace, event);
 }
 
 fn parse_scene_id(s: &str) -> Result<tze_hud_scene::SceneId, Status> {
     uuid::Uuid::parse_str(s)
         .map(tze_hud_scene::SceneId::from_uuid)
         .map_err(|e| Status::invalid_argument(format!("invalid scene ID '{s}': {e}")))
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::*;
+    use crate::session::SessionRegistry;
+    use tze_hud_scene::graph::SceneGraph;
+
+    fn make_state(psk: &str) -> SharedState {
+        let scene = SceneGraph::new(1920.0, 1080.0);
+        SharedState {
+            scene,
+            sessions: SessionRegistry::new(psk),
+        }
+    }
+
+    /// Authenticate a test agent and return (session_id, namespace).
+    fn authenticate(state: &mut SharedState, agent: &str, psk: &str) -> String {
+        state
+            .sessions
+            .authenticate(agent, psk, &["receive_input".to_string()])
+            .unwrap()
+            .session_id
+    }
+
+    // ── Session event channel tests ────────────────────────────────────
+
+    #[test]
+    fn test_subscribe_creates_per_session_channel() {
+        let mut state = make_state("key");
+        let session_id = authenticate(&mut state, "agent-a", "key");
+
+        // Simulate what subscribe_events does: install a channel in the session
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        state
+            .sessions
+            .get_session_mut(&session_id)
+            .unwrap()
+            .event_tx = Some(tx);
+
+        // Dispatch an event via the session registry
+        let dispatched = state.sessions.dispatch_to_namespace("agent-a", SceneEvent {
+            timestamp_ms: 1,
+            event: Some(scene_event::Event::TileCreated(TileCreatedEvent {
+                tile_id: "tile-1".to_string(),
+                namespace: "agent-a".to_string(),
+                timestamp_ms: 1,
+            })),
+        });
+        assert!(dispatched, "event should be enqueued");
+
+        // Verify it's in the channel
+        let received = rx.try_recv().expect("event should be in channel");
+        assert_eq!(received.timestamp_ms, 1);
+        match received.event {
+            Some(scene_event::Event::TileCreated(e)) => assert_eq!(e.tile_id, "tile-1"),
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_dispatch_does_not_cross_session_boundary() {
+        let mut state = make_state("key");
+        authenticate(&mut state, "agent-a", "key");
+        let session_b = authenticate(&mut state, "agent-b", "key");
+
+        // Only subscribe agent-b
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(256);
+        state
+            .sessions
+            .get_session_mut(&session_b)
+            .unwrap()
+            .event_tx = Some(tx_b);
+
+        // Dispatch to agent-a (not subscribed)
+        let dispatched = state.sessions.dispatch_to_namespace("agent-a", SceneEvent {
+            timestamp_ms: 42,
+            event: Some(scene_event::Event::TileCreated(TileCreatedEvent {
+                tile_id: "x".to_string(),
+                namespace: "agent-a".to_string(),
+                timestamp_ms: 42,
+            })),
+        });
+        assert!(!dispatched, "agent-a has no channel, should return false");
+
+        // agent-b's channel must be empty
+        assert!(rx_b.try_recv().is_err(), "agent-b must not receive agent-a events");
+    }
+
+    #[test]
+    fn test_dispatch_input_event_reaches_agent() {
+        let mut state = make_state("key");
+        let session_id = authenticate(&mut state, "my-agent", "key");
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        state
+            .sessions
+            .get_session_mut(&session_id)
+            .unwrap()
+            .event_tx = Some(tx);
+
+        let fake_tile = tze_hud_scene::SceneId::new();
+        let fake_node = tze_hud_scene::SceneId::new();
+
+        dispatch_input_event(
+            &mut state,
+            "my-agent",
+            fake_tile,
+            fake_node,
+            "btn-1",
+            500.0,
+            300.0,
+            100.0,
+            80.0,
+            InputEventKind::Activated,
+        );
+
+        let event = rx.try_recv().expect("input event should be in channel");
+        match event.event {
+            Some(scene_event::Event::Input(ie)) => {
+                assert_eq!(ie.interaction_id, "btn-1");
+                assert_eq!(ie.kind, InputEventKind::Activated as i32);
+                assert!((ie.display_x - 500.0).abs() < 0.01);
+                assert!((ie.local_x - 100.0).abs() < 0.01);
+                assert!((ie.local_y - 80.0).abs() < 0.01);
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_lease_event_dispatched_on_acquire() {
+        let mut state = make_state("key");
+        let session_id = authenticate(&mut state, "lessee", "key");
+        state.scene.create_tab("Main", 0).unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(256);
+        state
+            .sessions
+            .get_session_mut(&session_id)
+            .unwrap()
+            .event_tx = Some(tx);
+
+        // Grant a lease directly — mirrors what acquire_lease does
+        let lease_id = state.scene.grant_lease("lessee", 60_000, vec![]);
+        state
+            .sessions
+            .get_session_mut(&session_id)
+            .unwrap()
+            .lease_ids
+            .push(lease_id);
+
+        let event = SceneEvent {
+            timestamp_ms: now_ms(),
+            event: Some(scene_event::Event::Lease(LeaseEvent {
+                lease_id: lease_id.to_string(),
+                namespace: "lessee".to_string(),
+                kind: LeaseEventKind::LeaseGranted as i32,
+                timestamp_ms: now_ms(),
+            })),
+        };
+        let dispatched = state.sessions.dispatch_to_namespace("lessee", event);
+        assert!(dispatched);
+
+        let received = rx.try_recv().expect("lease event should arrive");
+        match received.event {
+            Some(scene_event::Event::Lease(le)) => {
+                assert_eq!(le.kind, LeaseEventKind::LeaseGranted as i32);
+                assert_eq!(le.namespace, "lessee");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
 }
