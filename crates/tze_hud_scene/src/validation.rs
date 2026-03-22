@@ -43,4 +43,7 @@ pub enum ValidationError {
 
     #[error("zone '{zone}' has reached max publishers ({max})")]
     ZoneMaxPublishersReached { zone: String, max: u32 },
+
+    #[error("zone '{zone}' has reached max keys ({max})")]
+    ZoneMaxKeysReached { zone: String, max: u32 },
 }
