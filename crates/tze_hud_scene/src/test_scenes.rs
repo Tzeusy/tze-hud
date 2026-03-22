@@ -26,8 +26,9 @@
 
 use crate::graph::SceneGraph;
 use crate::types::{
-    Capability, FontFamily, HitRegionNode, Node, NodeData, Rect, Rgba, SceneId,
-    SolidColorNode, TextAlign, TextMarkdownNode, TextOverflow, ZoneDefinition,
+    Capability, ContentionPolicy, DisplayEdge, FontFamily, GeometryPolicy, HitRegionNode,
+    Node, NodeData, Rect, RenderingPolicy, Rgba, SceneId, SolidColorNode, TextAlign,
+    TextMarkdownNode, TextOverflow, ZoneDefinition, ZoneMediaType,
 };
 
 // ─── Clock injection ─────────────────────────────────────────────────────────
@@ -397,6 +398,18 @@ impl TestSceneRegistry {
                 id: SceneId::new(),
                 name: "subtitle".to_string(),
                 description: "Centered subtitle overlay at the bottom of the screen.".to_string(),
+                geometry_policy: GeometryPolicy::EdgeAnchored {
+                    edge: DisplayEdge::Bottom,
+                    height_pct: 0.10,
+                    width_pct: 0.80,
+                    margin_px: 48.0,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
             },
         );
         graph.zone_registry.zones.insert(
@@ -405,6 +418,18 @@ impl TestSceneRegistry {
                 id: SceneId::new(),
                 name: "status_bar".to_string(),
                 description: "Persistent status bar at the top of the screen.".to_string(),
+                geometry_policy: GeometryPolicy::EdgeAnchored {
+                    edge: DisplayEdge::Bottom,
+                    height_pct: 0.04,
+                    width_pct: 1.0,
+                    margin_px: 0.0,
+                },
+                accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::MergeByKey { max_keys: 32 },
+                max_publishers: 16,
+                transport_constraint: None,
+                auto_clear_ms: None,
             },
         );
 
@@ -1179,6 +1204,18 @@ mod tests {
                 id: SceneId::new(),
                 name: "correct_name".to_string(),
                 description: "Intentionally mismatched key/name.".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 1.0,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
             },
         );
 

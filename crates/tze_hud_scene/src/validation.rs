@@ -31,4 +31,19 @@ pub enum ValidationError {
 
     #[error("capability missing: {capability}")]
     CapabilityMissing { capability: String },
+
+    #[error("zone not found: {name}")]
+    ZoneNotFound { name: String },
+
+    #[error("zone publish token invalid for zone '{zone}'")]
+    ZonePublishTokenInvalid { zone: String },
+
+    #[error("zone media type mismatch for zone '{zone}'")]
+    ZoneMediaTypeMismatch { zone: String },
+
+    #[error("zone '{zone}' has reached max publishers ({max})")]
+    ZoneMaxPublishersReached { zone: String, max: u32 },
+
+    #[error("zone '{zone}' has reached max keys ({max})")]
+    ZoneMaxKeysReached { zone: String, max: u32 },
 }

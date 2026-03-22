@@ -212,6 +212,45 @@ impl SceneService for SceneServiceImpl {
                         }
                     }
                 }
+                Some(mutation_proto::Mutation::PublishToZone(pz)) => {
+                    let content = pz
+                        .content
+                        .as_ref()
+                        .and_then(convert::proto_zone_content_to_scene);
+                    if let Some(content) = content {
+                        let token = tze_hud_scene::types::ZonePublishToken {
+                            token: pz
+                                .publish_token
+                                .as_ref()
+                                .map(|t| t.token.clone())
+                                .unwrap_or_default(),
+                        };
+                        let merge_key = if pz.merge_key.is_empty() {
+                            None
+                        } else {
+                            Some(pz.merge_key.clone())
+                        };
+                        scene_mutations.push(SceneMutation::PublishToZone {
+                            zone_name: pz.zone_name.clone(),
+                            content,
+                            publish_token: token,
+                            merge_key,
+                        });
+                    }
+                }
+                Some(mutation_proto::Mutation::ClearZone(cz)) => {
+                    let token = tze_hud_scene::types::ZonePublishToken {
+                        token: cz
+                            .publish_token
+                            .as_ref()
+                            .map(|t| t.token.clone())
+                            .unwrap_or_default(),
+                    };
+                    scene_mutations.push(SceneMutation::ClearZone {
+                        zone_name: cz.zone_name.clone(),
+                        publish_token: token,
+                    });
+                }
                 None => {}
             }
         }
@@ -279,6 +318,27 @@ impl SceneService for SceneServiceImpl {
         Ok(Response::new(SceneQueryResponse {
             scene_json: json,
             version: state.scene.version,
+        }))
+    }
+
+    async fn query_zone_registry(
+        &self,
+        request: Request<ZoneRegistryRequest>,
+    ) -> Result<Response<ZoneRegistryResponse>, Status> {
+        let req = request.into_inner();
+        let state = self.state.lock().await;
+
+        let _session = state
+            .sessions
+            .get_session(&req.session_id)
+            .ok_or_else(|| Status::unauthenticated("invalid session"))?;
+
+        let snapshot = state.scene.zone_registry.snapshot();
+        let registry_proto = convert::zone_registry_snapshot_to_proto(&snapshot);
+
+        Ok(Response::new(ZoneRegistryResponse {
+            registry: Some(registry_proto),
+            error: String::new(),
         }))
     }
 
