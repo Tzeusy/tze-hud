@@ -480,9 +480,9 @@ pub struct AgentResourceState {
     pub session_id: SceneId,
     pub namespace: String,
 
-    // Per-frame tracking
-    pub update_count_this_second: u32,  // For Hz limit enforcement
-    pub last_update_ts: Instant,
+    // Per-frame tracking: sliding window for Hz limit enforcement (T-5).
+    // See §5.3 for eviction and comparison logic.
+    pub update_timestamps: VecDeque<Instant>,
 
     // Cumulative tracking
     pub texture_bytes_used: u64,
