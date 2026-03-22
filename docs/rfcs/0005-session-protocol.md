@@ -189,6 +189,8 @@ message SessionError {
     SESSION_GRACE_EXPIRED                   = 6;   // Resume: too late
     DUPLICATE_AGENT_ID                      = 7;   // Another session with same agent_id is active
     INVALID_PRESENCE_LEVEL                  = 8;
+    SEQUENCE_GAP_EXCEEDED                   = 9;   // Client sequence gap > max_sequence_gap (§5.4)
+    SEQUENCE_REGRESSION                     = 10;  // Client sent a sequence number lower than previously seen (§5.4)
   }
 }
 ```
@@ -544,7 +546,7 @@ enum SubscriptionCategory {
 }
 ```
 
-The runtime acknowledges via `MutationResult` (using the same `sequence` correlation). The new subscription set takes effect immediately after the ack is sent — events generated after that point use the new filter.
+The runtime acknowledges via a `MutationResult` with an empty `batch_id`, correlated by `sequence` number (the same `sequence` as the `SubscriptionChange` envelope). This follows the sequence-correlation pattern for non-batch transactional messages described in §5.3. The new subscription set takes effect immediately after the ack is sent — events generated after that point use the new filter.
 
 ### 7.4 Mobile Reduced Granularity
 
@@ -721,6 +723,8 @@ message SessionError {
     SESSION_GRACE_EXPIRED          = 6;
     DUPLICATE_AGENT_ID             = 7;
     INVALID_PRESENCE_LEVEL         = 8;
+    SEQUENCE_GAP_EXCEEDED          = 9;
+    SEQUENCE_REGRESSION            = 10;
   }
 }
 
@@ -855,7 +859,7 @@ message SessionMessage {
     SceneEvent           scene_event           = 33;  // Reuse from scene_service.proto
     InputEvent           input_event           = 34;  // Reuse from scene_service.proto
     DegradationNotice    degradation_notice    = 35;
-    RuntimeError         runtime_error         = 36;  // Reuse from scene_service.proto
+    RuntimeError         runtime_error         = 36;  // Defined in session.proto (§3.5)
     CapabilityNotice     capability_notice     = 37;
   }
 }
@@ -873,9 +877,10 @@ service SessionService {
 
 ```
 session.proto
+  ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages
   └── imports scene_service.proto
         └── defines: MutationProto, ZoneContent, SceneEvent, InputEvent,
-                     LeaseRequest, LeaseResponse, RuntimeError
+                     LeaseRequest, LeaseResponse
 ```
 
 `timing.proto` (RFC 0003) is imported for `TimingHints` in the full implementation; the inline definition above is provided for completeness during the pre-code draft phase.
