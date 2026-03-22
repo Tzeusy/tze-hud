@@ -89,7 +89,7 @@ Runtime
 1. A `TileId` belongs to exactly one namespace. Agents cannot reference tiles they do not own.
 2. A `NodeId` belongs to exactly one `TileId`. Node IDs are unique scene-globally (not just within a tile) to support efficient diff addressing.
 3. `ResourceId` is namespace-agnostic: resources are shared read-only across namespaces. An agent may reference a resource it did not upload if the runtime's sharing policy permits it (default: read-allowed, write-disallowed).
-4. `ZoneId` is runtime-owned; agents do not create zones (in v1 — zone orchestration is a post-v1 feature). Agents hold `ZonePublishToken` grants that permit publishing to a specific zone.
+4. `ZoneId` is runtime-owned; agents do not create zones (in v1 — zone orchestration is a post-v1 feature). Both zone types and zone instances have `SceneId`s assigned by the runtime. Agents hold `ZonePublishToken` grants that permit publishing to a specific zone instance.
 5. `LeaseId` scopes mutation rights to tiles. No tile operation is valid without a current lease on that tile's namespace.
 
 ### 1.3 ID Namespacing Diagram
@@ -113,7 +113,8 @@ Runtime
 │                                                          │
 │  ┌────────────────────────────────────────────┐         │
 │  │  Zone registry (runtime-owned)             │         │
-│  │  zone-subtitle, zone-notification, ...     │         │
+│  │  types: subtitle, notification, …          │         │
+│  │  instances: morning/subtitle, work/notif…  │         │
 │  └────────────────────────────────────────────┘         │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -387,22 +388,62 @@ This local state drives immediate visual feedback (press states, focus rings) wi
 
 The zone registry is runtime-owned and loaded from configuration at startup. Agents cannot create zones in v1.
 
+Zones have a **four-level ontology** (presence.md §"Zone anatomy") that prevents the common confusion of "is a zone the schema or the instance or the content?":
+
+1. **Zone type** — the schema (accepted media types, contention policy, rendering policy defaults, privacy ceiling, interruption class, adjunct effects). Types are named identifiers, e.g. `"subtitle"`, `"notification"`.
+2. **Zone instance** — a zone type bound into a specific tab with a geometry policy and a layer attachment. A "Morning" tab might have an instance of the `"notification"` type anchored to the top-right of the content layer. The same zone type can appear as multiple instances across different tabs.
+3. **Publication** — one publish event into a zone instance: content payload, TTL, key (for merge-by-key zones), priority, privacy classification.
+4. **Occupancy** — the runtime's resolved current state of a zone instance: what content is visible, which publications are active, what the effective geometry is after layout resolution. Agents can query occupancy but cannot set it directly.
+
 ```rust
 pub struct ZoneRegistry {
-    pub zones: HashMap<String, ZoneDefinition>,  // key = zone name (e.g., "subtitle")
+    pub zone_types: HashMap<String, ZoneType>,      // key = type name (e.g., "subtitle")
+    pub zone_instances: Vec<ZoneInstance>,           // All instances across all tabs
 }
 
-pub struct ZoneDefinition {
+/// Zone type — the schema layer of the four-level zone ontology.
+/// Defines accepted media, contention policy, rendering policy defaults, etc.
+/// The same type can be instantiated multiple times across different tabs.
+pub struct ZoneType {
     pub id: SceneId,
-    pub name: String,
+    pub name: String,                                // Stable identifier, e.g. "subtitle"
     pub description: String,
-    pub layer_attachment: ZoneLayerAttachment,  // Which compositor layer this zone attaches to
-    pub geometry_policy: GeometryPolicy,
     pub accepted_media_types: Vec<ZoneMediaType>,
     pub rendering_policy: RenderingPolicy,
     pub contention_policy: ContentionPolicy,
     pub transport_constraint: Option<TransportConstraint>,
-    pub auto_clear_us: Option<u64>,  // Auto-clear timeout (μs duration); None = no auto-clear
+    pub auto_clear_us: Option<u64>,                  // Auto-clear timeout (μs duration); None = no auto-clear
+    pub default_privacy: Option<ContentClassification>, // Default if publication omits classification
+}
+
+/// Zone instance — a zone type bound into a specific tab.
+/// Carries the geometry policy and layer attachment for this placement.
+/// Multiple instances of the same zone type may exist in different tabs.
+pub struct ZoneInstance {
+    pub id: SceneId,
+    pub zone_type_name: String,                      // References ZoneType by name
+    pub tab_id: SceneId,                             // The tab this instance belongs to
+    pub layer_attachment: ZoneLayerAttachment,       // Which compositor layer this instance attaches to
+    pub geometry_policy: GeometryPolicy,
+}
+
+/// Zone occupancy — the runtime's resolved current state of a zone instance.
+/// Read-only from the agent's perspective. Produced by the runtime after applying
+/// contention policy to all active publications for this instance.
+/// Agents can query occupancy but cannot set it directly (presence.md §"Zone anatomy").
+pub struct ZoneOccupancy {
+    pub instance_id: SceneId,                        // References ZoneInstance
+    pub active_publications: Vec<ZonePublishRecord>, // Publications currently active
+    pub effective_geometry: Option<ResolvedGeometry>, // Geometry after display-profile layout resolution
+}
+
+/// Resolved geometry — the runtime's concrete pixel-level placement for a zone instance
+/// after the display profile and tab layout have been applied.
+pub struct ResolvedGeometry {
+    pub x_px: f32,
+    pub y_px: f32,
+    pub width_px: f32,
+    pub height_px: f32,
 }
 
 /// Minimum z_order value reserved for runtime-managed zone tiles in the content layer.
@@ -497,7 +538,9 @@ pub enum ContentClassification {
 }
 ```
 
-**Zone-to-tile mapping:** The runtime creates and manages internal tiles for each active zone. Zone tiles are in a runtime-owned namespace. The `layer_attachment` field on `ZoneDefinition` (see §2.5 struct) determines which compositor layer the zone's tile occupies. This RFC uses the three-layer model defined in architecture.md §"Layer stack" (background / content / chrome) — no fourth layer is introduced:
+**V1 scope note:** In v1, zone instances are static — loaded from configuration at startup, one instance per tab per zone type. The `ZoneOccupancy` struct and the `effective_geometry` field are defined here for full ontological correctness but their query API is deferred to post-v1. The runtime maintains occupancy state internally; v1 snapshots include active publications per instance (see §4.1) but do not expose `effective_geometry`.
+
+**Zone-to-tile mapping:** The runtime creates and manages internal tiles for each active zone instance. Zone tiles are in a runtime-owned namespace. The `layer_attachment` field on `ZoneInstance` (see §2.5 struct) determines which compositor layer the zone's tile occupies. This RFC uses the three-layer model defined in architecture.md §"Layer stack" (background / content / chrome) — no fourth layer is introduced:
 - `Background` zones render behind all agent tiles (ambient-background).
 - `Content` zones are realized as runtime-managed tiles **within the content layer's z-order space**. Zone tiles occupy a reserved upper z-order band: `z_order >= ZONE_TILE_Z_MIN` where `ZONE_TILE_Z_MIN = 0x8000_0000`. Agent-assigned z_order values must remain below this threshold (enforced at transaction validation time, §3.3 Budget Check). Zone tiles therefore appear above all agent tiles in the content layer's traversal without requiring a separate sub-layer (subtitle, notification, pip).
 - `Chrome` zones render above all content; agents publish data but the runtime renders it (alert-banner, status-bar).
@@ -559,6 +602,10 @@ pub enum SceneMutation {
 
     // Zone publishing
     PublishToZone {
+        // zone_name identifies the zone type name (e.g. "subtitle"). The runtime resolves
+        // this to the ZoneInstance for the publishing agent's active tab. Per presence.md
+        // §"Two APIs", agents publish by zone type name with minimal context; the runtime
+        // resolves the type name to the correct ZoneInstance internally.
         zone_name: String,
         content: ZoneContent,
         publish_token: ZonePublishToken,
@@ -653,7 +700,7 @@ mutation targets tile T
 
 `CreateTile` also requires the `create_tiles` capability in addition to `modify_own_tiles`.
 
-Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `zone_publish:<zone_name>` capability (RFC 0006 §6.3).
+Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `zone_publish:<zone_name>` capability (RFC 0006 §6.3). The runtime resolves `zone_name` (a zone type name) to the `ZoneInstance` for the agent's active tab; the mutation is rejected with `ZoneNotFound` if no such instance exists in the active tab.
 
 Sync group mutations (`CreateSyncGroup`, `DeleteSyncGroup`) require the `manage_sync_groups` capability. A sync group is a scene-level object not tied to a specific tile, so it is capability-gated rather than lease-gated.
 
@@ -779,18 +826,25 @@ pub struct SceneSnapshot {
     pub checksum: [u8; 32],                 // BLAKE3 of canonical serialization
 }
 
+/// Zone registry snapshot — captures all four levels of the zone ontology.
+/// Zone types and instances are stable (loaded from config in v1).
+/// Active publications and occupancy reflect live runtime state.
 pub struct ZoneRegistrySnapshot {
-    pub zones: Vec<ZoneDefinition>,
-    pub active_publishes: Vec<ZonePublishRecord>,
+    pub zone_types: Vec<ZoneType>,             // All zone type schemas
+    pub zone_instances: Vec<ZoneInstance>,     // All zone instances across all tabs
+    pub active_publishes: Vec<ZonePublishRecord>, // Active publications, keyed by instance_id
+    // Note: ZoneOccupancy.effective_geometry is internal in v1; occupancy is reconstructable
+    // from active_publishes grouped by instance_id.
 }
 
 pub struct ZonePublishRecord {
-    pub zone_name: String,
+    pub instance_id: SceneId,                  // References ZoneInstance.id
+    pub zone_type_name: String,                // Zone type name (for readability; resolved via instance)
     pub publisher_namespace: String,
     pub content: ZoneContent,
-    pub published_at_us: u64,               // UTC microseconds since Unix epoch (RFC 0003 §3.1)
-    pub expires_at_us: Option<u64>,          // Publication TTL (μs, UTC); None = governed by zone auto_clear_us
-    pub publish_key: Option<String>,         // Key for MergeByKey zones; None for other contention policies
+    pub published_at_us: u64,                  // UTC microseconds since Unix epoch (RFC 0003 §3.1)
+    pub expires_at_us: Option<u64>,            // Publication TTL (μs, UTC); None = governed by zone auto_clear_us
+    pub publish_key: Option<String>,           // Key for MergeByKey zones; None for other contention policies
     // Per-publication privacy classification (presence.md §"Zone anatomy"; RFC 0009 §2.3).
     // Preserved in snapshot so that reconnecting agents and the privacy gate can reconstruct
     // the effective classification of each active zone publication after reconnect.
@@ -936,7 +990,7 @@ Durable state is stored on disk and reloaded at runtime startup.
 |----------|----------|---------|
 | Agent registrations | Agent identity, auth credentials (hashed), default capability grants | Config file |
 | Tab configuration | Tab names, display order, default layouts | Config file |
-| Zone registry | Zone definitions, geometry/rendering/contention policies | Config file |
+| Zone registry | Zone types (schemas) and zone instances (tab bindings, geometry, layer attachment) | Config file |
 | User preferences | Quiet hours, safe mode config, display profiles | Config file |
 | Capability grants | Per-agent capability scope definitions | Config file |
 | Uploaded resources | Image, font, buffer resources (content-addressed) | Blob store (filesystem) |
@@ -951,7 +1005,7 @@ Ephemeral state lives entirely in memory. After a restart, agents must re-establ
 |----------|-------|
 | Scene graph | All tabs, tiles, nodes are recreated by agents after reconnect |
 | Active leases | All leases expire on restart; agents re-request |
-| Live zone publishes | Zone content is cleared on restart (tabs and zone definitions persist) |
+| Live zone publishes | Zone content is cleared on restart (tabs, zone types, and zone instances persist) |
 | gRPC sessions | All sessions disconnected; agents must reconnect |
 | Hit-region local state | Hover/press/focus state is reset |
 | WAL / diff history | Lost on restart (no durable replay) |
@@ -1248,17 +1302,20 @@ enum ContentClassification {
   CONTENT_CLASSIFICATION_SENSITIVE   = 4;   // Owner only; higher-sensitivity signal
 }
 
+// zone_name is a zone type name (e.g. "subtitle"). The runtime resolves it to the
+// ZoneInstance for the publishing agent's active tab (see §2.5 and §3.1 comments).
+// Rejected with ZoneNotFound if no instance for this type exists in the active tab.
 message PublishToZoneMutation {
-  string                  zone_name              = 1;
+  string                  zone_name              = 1;   // Zone type name; resolved to ZoneInstance by runtime
   ZoneContent             content                = 2;
   ZonePublishToken        publish_token          = 3;
   uint64                  expires_at_us          = 4;   // UTC μs; 0 = use zone auto_clear_us; >0 = per-publish TTL (RFC 0003 §3.1)
   string                  publish_key            = 5;   // Non-empty only for MergeByKey zones
-  ContentClassification   content_classification = 6;   // UNSPECIFIED = inherit zone default (see §2.5)
+  ContentClassification   content_classification = 6;   // UNSPECIFIED = inherit zone type default (see §2.5)
 }
 
 message ClearZoneMutation {
-  string           zone_name     = 1;
+  string           zone_name     = 1;   // Zone type name; resolved to ZoneInstance by runtime
   ZonePublishToken publish_token = 2;
 }
 
@@ -1429,35 +1486,71 @@ enum ZoneLayerAttachment {
   ZONE_LAYER_CHROME      = 3;   // Above all agent tiles; runtime-rendered
 }
 
-message ZoneDefinitionProto {
+// Zone type — the schema layer of the four-level zone ontology (presence.md §"Zone anatomy").
+// Defines accepted media, contention policy, rendering defaults.
+// Corresponds to the ZoneType Rust struct in §2.5.
+message ZoneTypeProto {
   SceneId                    id                   = 1;
-  string                     name                 = 2;
+  string                     name                 = 2;   // Stable type name, e.g. "subtitle"
   string                     description          = 3;
-  GeometryPolicyProto        geometry_policy      = 4;
-  repeated ZoneMediaType     accepted_media_types = 5;
-  RenderingPolicyProto       rendering_policy     = 6;
-  ContentionPolicy           contention_policy    = 7;
-  uint64                     auto_clear_us        = 8;   // μs duration; 0 = no auto-clear
-  ZoneLayerAttachment        layer_attachment     = 9;   // Which compositor layer this zone attaches to
+  repeated ZoneMediaType     accepted_media_types = 4;
+  RenderingPolicyProto       rendering_policy     = 5;
+  ContentionPolicy           contention_policy    = 6;
+  uint64                     auto_clear_us        = 7;   // μs duration; 0 = no auto-clear
+  ContentClassification      default_privacy      = 8;   // UNSPECIFIED = no default (publication must declare)
+}
+
+// Zone instance — a zone type bound into a specific tab (presence.md §"Zone anatomy").
+// Multiple instances of the same zone type may exist across different tabs.
+// Corresponds to the ZoneInstance Rust struct in §2.5.
+message ZoneInstanceProto {
+  SceneId                    id               = 1;
+  string                     zone_type_name   = 2;   // References ZoneTypeProto.name
+  SceneId                    tab_id           = 3;   // The tab this instance belongs to
+  ZoneLayerAttachment        layer_attachment = 4;   // Which compositor layer this instance attaches to
+  GeometryPolicyProto        geometry_policy  = 5;
+}
+
+// Zone occupancy — the runtime's resolved current state of a zone instance.
+// Read-only from the agent's perspective (presence.md §"Zone anatomy").
+// Corresponds to the ZoneOccupancy Rust struct in §2.5.
+// In v1, effective_geometry is not included in snapshots (deferred to post-v1 query API).
+message ZoneOccupancyProto {
+  SceneId                         instance_id          = 1;   // References ZoneInstanceProto.id
+  repeated ZonePublishRecordProto active_publications  = 2;   // Currently active publications
+  // effective_geometry: deferred to post-v1 occupancy query API
+}
+
+// Resolved pixel-level geometry for a zone instance (post-v1 occupancy query API).
+message ResolvedGeometryProto {
+  float x_px      = 1;
+  float y_px      = 2;
+  float width_px  = 3;
+  float height_px = 4;
 }
 
 message ZonePublishRecordProto {
-  string                  zone_name              = 1;
-  string                  publisher_namespace    = 2;
-  ZoneContent             content                = 3;
-  uint64                  published_at_us        = 4;   // UTC μs since Unix epoch (RFC 0003 §3.1)
-  uint64                  expires_at_us          = 5;   // UTC μs; 0 = governed by zone auto_clear_us (RFC 0003 §3.1)
-  string                  publish_key            = 6;   // Non-empty only for MergeByKey zones
-  ContentClassification   content_classification = 7;   // UNSPECIFIED = publication inherited zone default
-  // Field 7 added in Round 4: propagates per-publication privacy classification from
-  // PublishToZoneMutation into the snapshot record so that reconnecting agents and the
-  // privacy gate can reconstruct effective classification state after reconnect.
+  SceneId                 instance_id            = 1;   // References ZoneInstanceProto.id
+  string                  zone_type_name         = 2;   // Zone type name (readability; resolved via instance)
+  string                  publisher_namespace    = 3;
+  ZoneContent             content                = 4;
+  uint64                  published_at_us        = 5;   // UTC μs since Unix epoch (RFC 0003 §3.1)
+  uint64                  expires_at_us          = 6;   // UTC μs; 0 = governed by zone auto_clear_us (RFC 0003 §3.1)
+  string                  publish_key            = 7;   // Non-empty only for MergeByKey zones
+  ContentClassification   content_classification = 8;   // UNSPECIFIED = publication inherited zone default
+  // Field 8 propagates per-publication privacy classification from PublishToZoneMutation
+  // into the snapshot record so that reconnecting agents and the privacy gate can
+  // reconstruct effective classification state after reconnect.
   // Reference: presence.md §"Zone anatomy"; RFC 0009 §2.3.
 }
 
+// Zone registry snapshot — all four levels of the zone ontology.
+// Zone types and instances are stable (config-loaded in v1).
+// Active publications reflect live runtime state.
 message ZoneRegistrySnapshot {
-  repeated ZoneDefinitionProto    zones           = 1;
-  repeated ZonePublishRecordProto active_publishes = 2;
+  repeated ZoneTypeProto          zone_types       = 1;
+  repeated ZoneInstanceProto      zone_instances   = 2;
+  repeated ZonePublishRecordProto active_publishes = 3;
 }
 
 // Typed partial-update messages for incremental diff ops.
@@ -1511,8 +1604,8 @@ message NodeAddedDiff {
 }
 
 message ZonePublishChanged {
-  string                  zone_name = 1;
-  ZonePublishRecordProto  record    = 2;   // Empty = zone cleared
+  SceneId                 instance_id = 1;   // References ZoneInstanceProto.id
+  ZonePublishRecordProto  record      = 2;   // Empty = zone instance cleared
 }
 
 message SceneDiff {
@@ -1635,7 +1728,7 @@ These are independent budgets: an empty tile costs ~200 bytes; each additional n
 ║  │                             │                                  ║
 ║  │  ┌────────────────────────────────┐                            ║
 ║  │  │ ZONE TILE (runtime-owned)      │  ← auto-managed by runtime ║
-║  │  │ zone: "subtitle"               │                            ║
+║  │  │ instance: "Morning"/"subtitle" │  ← ZoneInstance (tab+type) ║
 ║  │  │ z=0x8000_0000 (reserved band)  │  ← within content layer   ║
 ║  │  │ bounds: 0,540,800,60           │                            ║
 ║  │  │  [NODE: TextMd (zone content)] │                            ║
@@ -1823,13 +1916,13 @@ Hardware reference: single core at 3GHz equivalent (normalized; see validation.m
 
 2. **WAL retention policy (post-v1):** 1000 batches or 60s, whichever is smaller, is a starting point for the deferred incremental diff extension. In v1, the WAL is used only for sequence ordering within the commit pipeline; agents reconnect via full snapshot and the WAL does not need to be queried externally. Revisit when incremental diff is implemented.
 
-3. **Snapshot checksum coverage:** ~~Recommendation~~ **Normative decision (Round 4):** `SceneSnapshot.checksum` covers the full serialization — tabs, tiles, nodes, zone registry (zone definitions + active publishes) — in that canonical order, excluding only `timestamp_us` and `checksum` itself. The canonical serialization uses protobuf binary encoding with fields in tag-ascending order. This is normative: implementations that compute the checksum differently will produce divergent values and fail reconnect validation. The checksum is computed over the same proto binary that would be transmitted on the wire.
+3. **Snapshot checksum coverage:** ~~Recommendation~~ **Normative decision (Round 4):** `SceneSnapshot.checksum` covers the full serialization — tabs, tiles, nodes, zone registry (zone types + zone instances + active publishes) — in that canonical order, excluding only `timestamp_us` and `checksum` itself. The canonical serialization uses protobuf binary encoding with fields in tag-ascending order. This is normative: implementations that compute the checksum differently will produce divergent values and fail reconnect validation. The checksum is computed over the same proto binary that would be transmitted on the wire.
 
 4. **`#[no_std]` compatibility:** The `SceneId` (UUIDv7) constructor requires a clock source not available in no_std. Options: (a) accept that scene graph construction requires std, (b) inject a clock trait, (c) make `new()` require a timestamp argument. Recommendation: (b) inject a clock trait for test/embedded flexibility.
 
 5. **Tile bounds reference frame:** The spec says tile bounds are in "logical pixels relative to the tab's display area." The compositor must define what "logical pixel" means across display profiles (HiDPI, scaling). The Compositor RFC must define the coordinate space and DPI contract.
 
-6. **Zone publish token wire format:** The `ZonePublishToken` is an opaque bytes field intentionally. The Session/Protocol RFC (RFC 0005) defines how tokens are issued during session auth and their expiry semantics. **Normative expectation for RFC 0001 (Round 4):** A `ZonePublishToken` is issued by the runtime as part of capability grants at session authentication time (RFC 0006 §6.3 grants `zone_publish:<zone_name>`, which causes the runtime to issue a token for that zone). The token is bound to the session: it is invalidated when the session ends or when the `zone_publish:<zone_name>` capability is revoked mid-session. Tokens are not transferable between sessions. RFC 0005 must define the token issuance protocol; this RFC provides the contract: the token embeds a session-scoped, zone-scoped authorization proof that the runtime can verify without a round-trip. The exact encoding (HMAC, JWT, or opaque blob) is an RFC 0005 implementation decision.
+6. **Zone publish token wire format:** The `ZonePublishToken` is an opaque bytes field intentionally. The Session/Protocol RFC (RFC 0005) defines how tokens are issued during session auth and their expiry semantics. **Normative expectation for RFC 0001 (Round 4):** A `ZonePublishToken` is issued by the runtime as part of capability grants at session authentication time (RFC 0006 §6.3 grants `zone_publish:<zone_name>`, where `zone_name` is a zone type name, which causes the runtime to issue a token for publications to instances of that zone type). The token is bound to the session: it is invalidated when the session ends or when the `zone_publish:<zone_name>` capability is revoked mid-session. Tokens are not transferable between sessions. RFC 0005 must define the token issuance protocol; this RFC provides the contract: the token embeds a session-scoped, zone-type-scoped authorization proof that the runtime can verify without a round-trip. The exact encoding (HMAC, JWT, or opaque blob) is an RFC 0005 implementation decision.
 
 ---
 
@@ -1844,7 +1937,7 @@ crate: tze_scene (no GPU dependency)
 ├── mod tab        — Tab
 ├── mod tile       — Tile, ResourceBudget, InputMode
 ├── mod node       — Node, NodeData, all node type structs
-├── mod zone       — ZoneDefinition, ZoneRegistry, ZoneContent
+├── mod zone       — ZoneType, ZoneInstance, ZoneOccupancy, ZoneRegistry, ZoneContent
 ├── mod mutation   — SceneMutation, MutationBatch
 ├── mod validate   — Validator, ValidationError, all rule checks
 ├── mod scene      — Scene (root), transaction pipeline, WAL
@@ -2191,5 +2284,39 @@ All dimensions ≥ 4. All dimensions ≥ 3. Round 4 (final) is complete. The Sce
 ---
 
 *Review round 4 complete. All MUST-FIX and SHOULD-FIX items addressed. All dimensions scored ≥ 4. RFC is implementation-ready.*
+
+---
+
+### Zone Ontology Alignment — rig-cu4 (2026-03-22)
+
+**Context:** External review (Round 4, scored 8.1/10) identified that RFC 0001's zone model was thinner than presence.md §"Zone anatomy" specifies. `ZoneDefinition` conflated the type-schema and the instance-placement layers, and occupancy had no data structure.
+
+**Changes made:**
+
+- **§1.2 Namespace Isolation:** Updated `ZoneId` note to distinguish zone types vs zone instances; tokens are now described as scoped to zone type name with instance resolution by the runtime.
+- **§1.3 ID Namespacing Diagram:** Updated zone registry label to show types and instances separately.
+- **§2.5 Zone Registry:** Split `ZoneDefinition` into three new structs following the four-level ontology:
+  - `ZoneType` — schema layer: accepted media types, contention policy, rendering defaults, privacy ceiling, transport constraint.
+  - `ZoneInstance` — placement layer: type reference, tab binding, layer attachment, geometry policy. Multiple instances of the same type can exist across different tabs.
+  - `ZoneOccupancy` — resolved state layer: active publications, effective geometry. Agents can query but cannot set occupancy. Query API deferred to post-v1; struct defined now for ontological completeness.
+  - `ZoneRegistry` updated to `HashMap<String, ZoneType>` + `Vec<ZoneInstance>`.
+  - Added `ResolvedGeometry` for future occupancy query support.
+  - Added V1 scope note: instances are static (config-loaded), occupancy query deferred.
+- **§2.5 Zone-to-tile mapping:** Updated to reference `ZoneInstance.layer_attachment` rather than `ZoneDefinition`.
+- **§3.1 PublishToZone mutation:** Added comment clarifying `zone_name` is a zone type name that the runtime resolves to the active tab's `ZoneInstance`.
+- **§3.3 Lease Check:** Added note that `PublishToZone` is rejected with `ZoneNotFound` if no instance of the named type exists in the active tab.
+- **§4.1 `ZoneRegistrySnapshot`:** Expanded to include `zone_types: Vec<ZoneType>`, `zone_instances: Vec<ZoneInstance>`, and `active_publishes: Vec<ZonePublishRecord>`. `ZonePublishRecord` updated: `zone_name` field replaced by `instance_id: SceneId` + `zone_type_name: String` (for readability).
+- **§6.1 Durable State:** Updated zone registry description to "zone types and zone instances."
+- **§6.2 Ephemeral State:** Updated to clarify zone types and instances persist; only publications are cleared.
+- **§7.1 Protobuf:** Replaced `ZoneDefinitionProto` with `ZoneTypeProto` + `ZoneInstanceProto` + `ZoneOccupancyProto` + `ResolvedGeometryProto`. Updated `ZonePublishRecordProto` (`instance_id` field 1, `zone_type_name` field 2; renumbered content fields accordingly). Updated `ZoneRegistrySnapshot` to include `zone_types`, `zone_instances`, `active_publishes`. Updated `ZonePublishChanged` diff op to use `instance_id` instead of `zone_name`. Updated `PublishToZoneMutation` and `ClearZoneMutation` comments.
+- **§9.1 Diagram:** Updated zone tile label to show `ZoneInstance` (tab + type).
+- **§11 Open Questions:** Updated checksum coverage (§11.3) and zone token note (§11.6) to reference new type/instance terminology.
+- **§12 Module Structure:** Updated `mod zone` export list.
+
+**Invariants preserved:**
+- Agents still publish by zone type name (present.md §"Two APIs" — publish by name, no scene context needed). The runtime resolves the type name to the correct `ZoneInstance` for the agent's active tab.
+- The three-layer compositor model (background/content/chrome) is unchanged.
+- The z-order reservation (`ZONE_TILE_Z_MIN = 0x8000_0000`) is unchanged.
+- All v1 scope constraints preserved; `ZoneOccupancy` is defined but its query API is explicitly deferred.
 
 *End of RFC 0001.*
