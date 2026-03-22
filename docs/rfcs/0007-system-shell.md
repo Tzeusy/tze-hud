@@ -147,7 +147,7 @@ All tab navigation is available without mouse/touch:
 | Switch to tab N | `Ctrl+1` through `Ctrl+8` |
 | Switch to last tab | `Ctrl+9` (always the last tab, regardless of count — matches browser convention) |
 
-Shortcuts are configurable in `config.toml`. They are handled by the input model's chrome shortcut layer (RFC 0004 §4), not routed to any agent.
+Shortcuts are configurable in `config.toml`. They are handled by the input model's event dispatch protocol (RFC 0004 §8), which evaluates chrome shortcuts before tile hit-testing. Shortcut events are never routed to any agent.
 
 ### 2.4 Overflow Handling
 
@@ -164,6 +164,7 @@ The tab bar's trailing end (opposite the overflow indicator) contains a system s
 - A green/amber/red dot indicating overall session health (all agents connected / some degraded / all disconnected or safe mode).
 - Active agent count (e.g., `3 agents`).
 - Current viewer class icon (see §6.1).
+- A "Dismiss All" affordance (e.g., a subtle button or long-press target) that triggers the override action defined in §4.2. This affordance is accessible via keyboard focus traversal through the chrome layer.
 
 The system status indicator does not expose agent identities or names.
 
@@ -256,7 +257,7 @@ Override controls are the viewer's direct intervention surface. They are always 
 1. Immediately revokes the tile's lease.
 2. Removes the tile from the scene.
 3. Frees the tile's resources.
-4. Sends a `LeaseRevoked` event to the owning agent with reason `viewer_dismissed`.
+4. Sends a lease revocation notification to the owning agent via the `LeaseResponse` message (RFC 0005 §3.2, `lease_changes` subscription category) with reason `viewer_dismissed`.
 
 The agent may re-request a lease. The runtime does not permanently block an agent that was dismissed — viewer dismissal is a momentary choice, not a permanent ban. Permanent capability revocation is a separate administrative action.
 
@@ -270,7 +271,7 @@ The agent may re-request a lease. The runtime does not permanently block an agen
 
 **Action:**
 1. All active leases are revoked simultaneously.
-2. All agent sessions receive `SessionSuspended` with reason `viewer_safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale).
+2. All agent sessions receive `SessionSuspended` with reason `viewer_safe_mode` (sessions are suspended, not terminated — see §5.2 for rationale). **Note:** `SessionSuspended` is a new server→client message type that must be added to RFC 0005 §2 / §3.2 and the `SessionMessage` envelope's `oneof` block.
 3. The runtime enters safe mode (see §5).
 
 This is the "emergency stop" for the entire display. It is not reversible by agents — they cannot reinstate their sessions in response to this event. The viewer must explicitly exit safe mode.
@@ -325,7 +326,7 @@ Automatic entry logs the triggering condition to the runtime's structured error 
 ### 5.2 Safe Mode Behavior
 
 On safe mode entry:
-1. **Session suspension.** All agent gRPC sessions receive `SessionSuspended` with reason `safe_mode`. Sessions are not terminated — their network connections are maintained, but all mutations are rejected with `SAFE_MODE_ACTIVE` until safe mode exits.
+1. **Session suspension.** All agent gRPC sessions receive `SessionSuspended` with reason `safe_mode`. Sessions are not terminated — their network connections are maintained, but all mutations are rejected with `SAFE_MODE_ACTIVE` until safe mode exits. (See §8 for the RFC 0005 protocol gap this creates.)
 2. **Scene replacement.** Agent tiles are replaced with neutral placeholders. The placeholder appearance matches the redaction placeholder (§3.4) — a subtle neutral pattern — but covers the full tile bounds with a "Session Paused" label in the center.
 3. **Safe mode overlay.** A full-viewport overlay is rendered with:
    - A centered banner: "Safe Mode — All agent sessions paused."
@@ -380,7 +381,7 @@ Safe mode exits only by explicit viewer action:
 
 On exit:
 1. The safe mode overlay is dismissed.
-2. Sessions transition from suspended to active. Agents receive `SessionResumed`.
+2. Sessions transition from suspended to active. Agents receive `SessionResumed`. (`SessionResumed` must be added to RFC 0005 alongside `SessionSuspended` — see §8.)
 3. Agent mutations are accepted again.
 4. The compositor resumes applying pending scene mutations from the queue (if any were queued during suspension).
 5. The scene renders with current tile state (which may differ from pre-safe-mode state if agents continued submitting mutations during suspension — those mutations were queued, not discarded).
@@ -481,8 +482,10 @@ message TileBadgeState {
   bool staleness_badge = 2;           // Content not updated beyond threshold.
   bool redaction_active = 3;          // Content replaced by placeholder.
   bool budget_warning = 4;            // Agent approaching resource limit.
-  // Stack order for rendering follows: disconnection > staleness > budget_warning.
-  // redaction_active drives a full content replacement, not a badge icon.
+  // Stack order for badge icons: disconnection > staleness (top-right corner, §3.1).
+  // budget_warning renders as an amber border highlight (§3.5), NOT as a stacked badge icon;
+  //   it does not occupy the top-right badge position.
+  // redaction_active drives a full content replacement, not a badge icon (§3.4).
 }
 
 enum ViewerClass {
@@ -578,6 +581,11 @@ message SafeModeState {
 enum SafeModePhase {
   SAFE_MODE_PHASE_NORMAL = 0;
   SAFE_MODE_PHASE_ACTIVE = 1;
+  // EMERGENCY_FALLBACK is shown in §5.3 state diagram as the terminal state when
+  // safe mode itself cannot render (GPU loss). It is not represented here because
+  // the runtime cannot maintain `ChromeState` in that condition — it degrades to
+  // an OS-level signal (blank screen or OS notification) outside this state machine.
+  // The protobuf state machine therefore has only NORMAL and ACTIVE.
 }
 ```
 
@@ -646,7 +654,8 @@ message TabEntry {
 | RFC 0001 (Scene Contract) | Chrome renders above the scene graph. `SceneId` is used to key `TileBadgeState`. Chrome elements are not `SceneId`-addressable. |
 | RFC 0002 (Runtime Kernel) | Chrome render pass executes as the final stage in the compositor thread's per-frame pipeline (after content tile compositing). `ChromeState` is read atomically from the same shared state the control plane writes. |
 | RFC 0003 (Timing Model) | Override events carry `timestamp_us` using the monotonic clock (RFC 0003 §1.1). Override execution is frame-bounded — effects appear within one frame of the event. |
-| RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0001 §5.2 traversal order: chrome always wins). Chrome shortcuts are registered in the input model's shortcut table and evaluated before tile hit-testing. In safe mode, the input model routes all events to the chrome layer exclusively. |
+| RFC 0004 (Input Model) | Chrome elements are the highest-priority hit-test layer (RFC 0001 §5.2 traversal order: chrome always wins). Chrome shortcuts are evaluated before tile hit-testing by RFC 0004 §8 (Event Dispatch Protocol). In safe mode, the input model routes all events to the chrome layer exclusively. |
+| RFC 0005 (Session Protocol) | **Protocol gap:** `SessionSuspended` and `SessionResumed` server→client messages referenced in §4.2, §5.2, and §5.5 are not currently defined in RFC 0005's `SessionMessage` envelope or §3.2 message table. RFC 0005 must be updated to add these message types before this RFC can be fully implemented. Lease revocation on tile dismiss uses the existing `LeaseResponse` / `lease_changes` subscription category (RFC 0005 §3.2, §7.1). |
 
 ---
 
