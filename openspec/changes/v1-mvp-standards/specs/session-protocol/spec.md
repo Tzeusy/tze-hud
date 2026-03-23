@@ -381,8 +381,8 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Subscription Management
-Agents SHALL declare initial subscriptions in SessionInit.initial_subscriptions. The runtime SHALL filter each category by the agent's granted capabilities. The available SubscriptionCategory values SHALL be: SCENE_TOPOLOGY (requires read_scene_topology), INPUT_EVENTS (requires access_input_events), FOCUS_EVENTS (requires access_input_events), DEGRADATION_NOTICES (always subscribed, not filterable), LEASE_CHANGES (always subscribed, not filterable), ZONE_EVENTS (requires publish_zone:<zone>), and TELEMETRY_FRAMES (requires read_telemetry). Emitting events to unsubscribed agents SHALL be a protocol violation.
-Source: RFC 0005 §7.1, §7.2, DR-SP8
+Agents SHALL declare initial subscriptions in SessionInit.initial_subscriptions. The runtime SHALL filter each category by the agent's granted capabilities. The available SubscriptionCategory values SHALL be: SCENE_TOPOLOGY (requires read_scene_topology), INPUT_EVENTS (requires access_input_events), FOCUS_EVENTS (requires access_input_events), DEGRADATION_NOTICES (always subscribed, not filterable), LEASE_CHANGES (always subscribed, not filterable), ZONE_EVENTS (requires publish_zone:<zone>), TELEMETRY_FRAMES (requires read_telemetry), ATTENTION_EVENTS (requires read_scene_topology; enum value 8, added by RFC 0010), and AGENT_EVENTS (requires subscribe_scene_events; enum value 9, added by RFC 0010). Emitting events to unsubscribed agents SHALL be a protocol violation.
+Source: RFC 0005 §7.1, §7.2, RFC 0010 §1.2, DR-SP8
 Scope: v1-mandatory
 
 #### Scenario: Subscription denied for missing capability

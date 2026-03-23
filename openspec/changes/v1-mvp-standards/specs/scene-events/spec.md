@@ -33,7 +33,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Event Type Naming Convention
-Event types SHALL use a dotted namespace hierarchy: scene events as `scene.<object>.<action>`, agent events as `agent.<namespace>.<category>.<action>`, and system events as `system.<action>`. All segments SHALL use only lowercase letters, digits, and underscores. The prefixes `system.` and `scene.` SHALL be reserved for runtime-generated events; agents MUST NOT emit events with these prefixes.
+Event types SHALL use a dotted namespace hierarchy: scene events as `scene.<object>.<action>`, agent events as `agent.<namespace>.<category>.<action>`, and system events as `system.<action>`. All segments SHALL use only lowercase letters, digits, and underscores. The prefixes `system.` and `scene.` SHALL be reserved for runtime-generated events; agents MUST NOT emit events with these prefixes. Input event type naming is governed by RFC 0004 and is outside the scope of this requirement.
 Source: RFC 0010 §2.2
 Scope: v1-mandatory
 
@@ -105,7 +105,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Agent Event Emission Protocol
-Agents SHALL emit scene events via the EmitSceneEvent message on the session stream. Emission SHALL require the `emit_scene_event:<name>` capability for the specific event name. The runtime SHALL namespace-prefix agent events as `agent.<namespace>.<category>.<action>` before delivery. Agent event payload SHALL be limited to 4KB maximum.
+Agents SHALL emit scene events via the EmitSceneEvent message on the session stream. Emission SHALL require the `emit_scene_event:<event_name>` capability, where `<event_name>` is the agent-supplied `<category>.<action>` suffix (e.g., `emit_scene_event:doorbell.ring`), not the fully-prefixed delivered event_type. The runtime SHALL namespace-prefix agent events as `agent.<namespace>.<category>.<action>` before delivery. Agent event payload SHALL be limited to 4KB maximum.
 Source: RFC 0010 §5.1, §5.2
 Scope: v1-mandatory
 
@@ -159,14 +159,14 @@ Agents SHALL subscribe to event categories via SubscriptionChange messages. The 
 | Subscription Category (SHOUTY_SNAKE_CASE) | Event Type Prefix Pattern |
 |-------------------------------------------|--------------------------|
 | SCENE_TOPOLOGY | `scene.*` |
-| LEASE_CHANGES | `system.lease.*` |
-| DEGRADATION_NOTICES | `system.degradation.*` |
+| LEASE_CHANGES | `system.lease_*` |
+| DEGRADATION_NOTICES | `system.degradation_*` |
 | ZONE_EVENTS | `scene.zone.*` |
 | FOCUS_EVENTS | `scene.focus.*` |
-| INPUT_EVENTS | `input.*` |
+| INPUT_EVENTS | `input.*` (governed by RFC 0004) |
 | AGENT_EVENTS | `agent.*` |
-| TELEMETRY_FRAMES | `system.telemetry.*` |
-| ATTENTION_EVENTS | `system.attention.*` |
+| TELEMETRY_FRAMES | `system.telemetry_*` |
+| ATTENTION_EVENTS | `system.attention_*` |
 Source: RFC 0010 §7.1, §7.2, §7.3
 Scope: v1-mandatory
 
