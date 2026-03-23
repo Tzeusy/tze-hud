@@ -70,15 +70,14 @@ message ServerMessage {
 
   oneof payload {
     // Session lifecycle
-    SessionAccepted       session_accepted       = 10;
-    SessionDenied         session_denied         = 11;
+    SessionEstablished    session_established    = 10;
+    SessionError          session_error          = 11;
 
     // Mutation responses
     MutationResult        mutation_result        = 20;
 
     // Lease lifecycle (RFC 0008)
-    LeaseGrant            lease_grant            = 21;
-    LeaseDenial           lease_denial           = 22;
+    LeaseResponse         lease_response         = 21;
     LeaseStateChange      lease_state_change     = 23;
 
     // Scene state
@@ -131,7 +130,7 @@ message SessionInit {
 // Alternative to SessionInit when agent has a valid resume token.
 message SessionResume {
   string agent_id                   = 1;
-  bytes  resume_token               = 2;  // Token from previous SessionAccepted
+  bytes  resume_token               = 2;  // Token from previous SessionEstablished
   uint64 last_seen_server_sequence  = 3;  // Last server sequence the client processed
   string pre_shared_key             = 4;  // Re-authenticate on resume
 }
@@ -142,9 +141,9 @@ message SessionClose {
   bool   expect_resume = 2;  // Hint: agent intends to reconnect shortly
 }
 
-// Server response: session accepted.
+// Server response: session established (handshake accepted).
 // Followed immediately by a SceneSnapshot.
-message SessionAccepted {
+message SessionEstablished {
   bytes  session_id               = 1;  // Opaque session identifier (UUIDv7)
   string namespace                = 2;  // Agent's namespace in the scene (RFC 0001 SS1.2)
   repeated string granted_capabilities = 3;  // Capabilities actually granted
@@ -162,8 +161,8 @@ message SessionAccepted {
   repeated string denied_subscriptions = 10;
 }
 
-// Server response: session denied (auth failure, version mismatch, etc.)
-message SessionDenied {
+// Server response: session error (auth failure, version mismatch, protocol violation, etc.)
+message SessionError {
   string code    = 1;  // Error code (e.g. "AUTH_FAILED", "DUPLICATE_AGENT_ID")
   string message = 2;  // Human-readable explanation
   string hint    = 3;  // Machine-readable correction suggestion
@@ -208,18 +207,20 @@ message LeaseRelease {
   bytes lease_id = 1;  // Lease to release
 }
 
-// Server grants a lease.
-message LeaseGrant {
-  bytes  lease_id       = 1;  // Granted lease ID (UUIDv7)
-  uint64 granted_ttl_ms = 2;  // Actual TTL granted
-  uint32 granted_priority = 3;
-  repeated string granted_capabilities = 4;
-}
+// Server response to a lease request (grant or denial unified per v1 vocabulary).
+message LeaseResponse {
+  // Whether the lease was granted or denied.
+  bool   granted              = 1;
 
-// Server denies a lease request.
-message LeaseDenial {
-  string reason = 1;  // Why the lease was denied
-  string code   = 2;  // Machine-readable denial code
+  // Populated when granted = true.
+  bytes  lease_id             = 2;  // Granted lease ID (UUIDv7)
+  uint64 granted_ttl_ms       = 3;  // Actual TTL granted
+  uint32 granted_priority     = 4;
+  repeated string granted_capabilities = 5;
+
+  // Populated when granted = false.
+  string deny_reason          = 6;  // Human-readable denial reason
+  string deny_code            = 7;  // Machine-readable denial code
 }
 
 // Server notifies of lease state change (revocation, expiry, suspension, etc.)

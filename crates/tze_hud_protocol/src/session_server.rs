@@ -146,7 +146,7 @@ impl HudSession for HudSessionImpl {
                         .send(Ok(ServerMessage {
                             sequence: 1,
                             timestamp_wall_us: now_wall_us(),
-                            payload: Some(ServerPayload::SessionDenied(SessionDenied {
+                            payload: Some(ServerPayload::SessionError(SessionError {
                                 code: "HANDSHAKE_TIMEOUT".to_string(),
                                 message: "Stream closed before handshake".to_string(),
                                 hint: String::new(),
@@ -160,7 +160,7 @@ impl HudSession for HudSessionImpl {
                         .send(Ok(ServerMessage {
                             sequence: 1,
                             timestamp_wall_us: now_wall_us(),
-                            payload: Some(ServerPayload::SessionDenied(SessionDenied {
+                            payload: Some(ServerPayload::SessionError(SessionError {
                                 code: "HANDSHAKE_ERROR".to_string(),
                                 message: format!("Error receiving handshake: {e}"),
                                 hint: String::new(),
@@ -174,7 +174,7 @@ impl HudSession for HudSessionImpl {
                         .send(Ok(ServerMessage {
                             sequence: 1,
                             timestamp_wall_us: now_wall_us(),
-                            payload: Some(ServerPayload::SessionDenied(SessionDenied {
+                            payload: Some(ServerPayload::SessionError(SessionError {
                                 code: "HANDSHAKE_TIMEOUT".to_string(),
                                 message: "Handshake timed out (5000ms)".to_string(),
                                 hint: "Send SessionInit as the first message".to_string(),
@@ -198,7 +198,7 @@ impl HudSession for HudSessionImpl {
                         .send(Ok(ServerMessage {
                             sequence: 1,
                             timestamp_wall_us: now_wall_us(),
-                            payload: Some(ServerPayload::SessionDenied(SessionDenied {
+                            payload: Some(ServerPayload::SessionError(SessionError {
                                 code: "INVALID_HANDSHAKE".to_string(),
                                 message: "First message must be SessionInit or SessionResume"
                                     .to_string(),
@@ -285,7 +285,7 @@ async fn handle_session_init(
             .send(Ok(ServerMessage {
                 sequence: 1,
                 timestamp_wall_us: now_wall_us(),
-                payload: Some(ServerPayload::SessionDenied(SessionDenied {
+                payload: Some(ServerPayload::SessionError(SessionError {
                     code: "AUTH_FAILED".to_string(),
                     message: "Invalid pre-shared key".to_string(),
                     hint: String::new(),
@@ -338,7 +338,7 @@ async fn handle_session_init(
         .send(Ok(ServerMessage {
             sequence: seq,
             timestamp_wall_us: compositor_ts,
-            payload: Some(ServerPayload::SessionAccepted(SessionAccepted {
+            payload: Some(ServerPayload::SessionEstablished(SessionEstablished {
                 session_id: uuid::Uuid::parse_str(&session_id)
                     .unwrap()
                     .as_bytes()
@@ -371,7 +371,7 @@ async fn handle_session_resume(
             .send(Ok(ServerMessage {
                 sequence: 1,
                 timestamp_wall_us: now_wall_us(),
-                payload: Some(ServerPayload::SessionDenied(SessionDenied {
+                payload: Some(ServerPayload::SessionError(SessionError {
                     code: "AUTH_FAILED".to_string(),
                     message: "Invalid pre-shared key on resume".to_string(),
                     hint: String::new(),
@@ -414,7 +414,7 @@ async fn handle_session_resume(
         .send(Ok(ServerMessage {
             sequence: seq,
             timestamp_wall_us: compositor_ts,
-            payload: Some(ServerPayload::SessionAccepted(SessionAccepted {
+            payload: Some(ServerPayload::SessionEstablished(SessionEstablished {
                 session_id: uuid::Uuid::parse_str(&session_id)
                     .unwrap()
                     .as_bytes()
@@ -696,11 +696,14 @@ async fn handle_lease_request(
         .send(Ok(ServerMessage {
             sequence: seq,
             timestamp_wall_us: now_wall_us(),
-            payload: Some(ServerPayload::LeaseGrant(LeaseGrant {
+            payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                granted: true,
                 lease_id: scene_id_to_bytes(lease_id),
                 granted_ttl_ms: ttl,
                 granted_priority: req.lease_priority.max(2), // Default to normal priority
                 granted_capabilities: req.capabilities.clone(),
+                deny_reason: String::new(),
+                deny_code: String::new(),
             })),
         }))
         .await;
@@ -720,9 +723,14 @@ async fn handle_lease_renew(
                 .send(Ok(ServerMessage {
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::LeaseDenial(LeaseDenial {
-                        reason: "Invalid lease_id bytes".to_string(),
-                        code: "INVALID_ARGUMENT".to_string(),
+                    payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: "Invalid lease_id bytes".to_string(),
+                        deny_code: "INVALID_ARGUMENT".to_string(),
                     })),
                 }))
                 .await;
@@ -759,9 +767,14 @@ async fn handle_lease_renew(
                 .send(Ok(ServerMessage {
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::LeaseDenial(LeaseDenial {
-                        reason: e.to_string(),
-                        code: "LEASE_NOT_FOUND".to_string(),
+                    payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: e.to_string(),
+                        deny_code: "LEASE_NOT_FOUND".to_string(),
                     })),
                 }))
                 .await;
@@ -809,9 +822,14 @@ async fn handle_lease_release(
                 .send(Ok(ServerMessage {
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::LeaseDenial(LeaseDenial {
-                        reason: e.to_string(),
-                        code: "LEASE_NOT_FOUND".to_string(),
+                    payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: e.to_string(),
+                        deny_code: "LEASE_NOT_FOUND".to_string(),
                     })),
                 }))
                 .await;
@@ -911,7 +929,7 @@ mod tests {
     }
 
     /// Helper: create a bidirectional stream and perform handshake.
-    /// Returns (sender, first few server messages including SessionAccepted + SceneSnapshot).
+    /// Returns (sender, first few server messages including SessionEstablished + SceneSnapshot).
     async fn handshake(
         client: &mut HudSessionClient<tonic::transport::Channel>,
         agent_id: &str,
@@ -946,9 +964,9 @@ mod tests {
 
         let mut response_stream = client.session(stream).await.unwrap().into_inner();
 
-        // Collect SessionAccepted and SceneSnapshot
+        // Collect SessionEstablished and SceneSnapshot
         let mut messages = Vec::new();
-        // We expect exactly 2 messages: SessionAccepted and SceneSnapshot
+        // We expect exactly 2 messages: SessionEstablished and SceneSnapshot
         for _ in 0..2 {
             if let Some(msg) = response_stream.next().await {
                 messages.push(msg.unwrap());
@@ -959,24 +977,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handshake_init_accepted_and_snapshot() {
+    async fn test_handshake_init_established_and_snapshot() {
         let (mut client, _server) = setup_test().await;
         let (_tx, messages, _stream) = handshake(&mut client, "test-agent", "test-key").await;
 
         assert_eq!(messages.len(), 2);
 
-        // First message: SessionAccepted
+        // First message: SessionEstablished
         match &messages[0].payload {
-            Some(ServerPayload::SessionAccepted(accepted)) => {
-                assert!(!accepted.session_id.is_empty());
-                assert_eq!(accepted.namespace, "test-agent");
-                assert!(accepted.granted_capabilities.contains(&"create_tile".to_string()));
-                assert!(accepted.granted_capabilities.contains(&"receive_input".to_string()));
-                assert!(!accepted.resume_token.is_empty());
-                assert_eq!(accepted.heartbeat_interval_ms, DEFAULT_HEARTBEAT_INTERVAL_MS);
-                assert!(accepted.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()));
+            Some(ServerPayload::SessionEstablished(established)) => {
+                assert!(!established.session_id.is_empty());
+                assert_eq!(established.namespace, "test-agent");
+                assert!(established.granted_capabilities.contains(&"create_tile".to_string()));
+                assert!(established.granted_capabilities.contains(&"receive_input".to_string()));
+                assert!(!established.resume_token.is_empty());
+                assert_eq!(established.heartbeat_interval_ms, DEFAULT_HEARTBEAT_INTERVAL_MS);
+                assert!(established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()));
             }
-            other => panic!("Expected SessionAccepted, got: {other:?}"),
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
         }
 
         // Second message: SceneSnapshot
@@ -1018,10 +1036,10 @@ mod tests {
         let msg = response_stream.next().await.unwrap().unwrap();
 
         match &msg.payload {
-            Some(ServerPayload::SessionDenied(denied)) => {
-                assert_eq!(denied.code, "AUTH_FAILED");
+            Some(ServerPayload::SessionError(error)) => {
+                assert_eq!(error.code, "AUTH_FAILED");
             }
-            other => panic!("Expected SessionDenied, got: {other:?}"),
+            other => panic!("Expected SessionError, got: {other:?}"),
         }
 
         drop(_tx);
@@ -1049,8 +1067,8 @@ mod tests {
 
         let lease_msg = stream.next().await.unwrap().unwrap();
         let lease_id = match &lease_msg.payload {
-            Some(ServerPayload::LeaseGrant(grant)) => grant.lease_id.clone(),
-            other => panic!("Expected LeaseGrant, got: {other:?}"),
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
         };
 
         // Create a tab in the scene (needed for mutations)
@@ -1121,13 +1139,14 @@ mod tests {
 
         let msg = stream.next().await.unwrap().unwrap();
         match &msg.payload {
-            Some(ServerPayload::LeaseGrant(grant)) => {
-                assert!(!grant.lease_id.is_empty());
-                assert_eq!(grant.lease_id.len(), 16);
-                assert_eq!(grant.granted_ttl_ms, 30_000);
-                assert!(grant.granted_capabilities.contains(&"create_tile".to_string()));
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(resp.granted, "expected lease to be granted");
+                assert!(!resp.lease_id.is_empty());
+                assert_eq!(resp.lease_id.len(), 16);
+                assert_eq!(resp.granted_ttl_ms, 30_000);
+                assert!(resp.granted_capabilities.contains(&"create_tile".to_string()));
             }
-            other => panic!("Expected LeaseGrant, got: {other:?}"),
+            other => panic!("Expected LeaseResponse, got: {other:?}"),
         }
     }
 
@@ -1172,8 +1191,8 @@ mod tests {
 
         // Now resume with the token
         let resume_token = match &init_messages[0].payload {
-            Some(ServerPayload::SessionAccepted(accepted)) => accepted.resume_token.clone(),
-            _ => panic!("Expected SessionAccepted"),
+            Some(ServerPayload::SessionEstablished(established)) => established.resume_token.clone(),
+            _ => panic!("Expected SessionEstablished"),
         };
 
         let (resume_tx, resume_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
@@ -1195,13 +1214,13 @@ mod tests {
 
         let mut response_stream = client.session(resume_stream).await.unwrap().into_inner();
 
-        // Should get SessionAccepted + SceneSnapshot
+        // Should get SessionEstablished + SceneSnapshot
         let msg1 = response_stream.next().await.unwrap().unwrap();
         match &msg1.payload {
-            Some(ServerPayload::SessionAccepted(accepted)) => {
-                assert_eq!(accepted.namespace, "resumable");
+            Some(ServerPayload::SessionEstablished(established)) => {
+                assert_eq!(established.namespace, "resumable");
             }
-            other => panic!("Expected SessionAccepted on resume, got: {other:?}"),
+            other => panic!("Expected SessionEstablished on resume, got: {other:?}"),
         }
 
         let msg2 = response_stream.next().await.unwrap().unwrap();
