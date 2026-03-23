@@ -484,7 +484,23 @@ async fn handle_client_message(
             // Client initiated graceful close; the main loop will break on stream end
         }
         ClientPayload::CapabilityRequest(_req) => {
-            // Capability grant/revocation deferred to post-v1; silently accepted
+            // Capability management is deferred to post-v1.
+            // Respond explicitly so the client does not wait indefinitely or retransmit.
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                        error_code: "PERMISSION_DENIED".to_string(),
+                        message: "Capability management is not supported in v1; request denied."
+                            .to_string(),
+                        context: String::new(),
+                        hint: r#"{"post_v1": true}"#.to_string(),
+                        error_code_enum: ErrorCode::PermissionDenied as i32,
+                    })),
+                }))
+                .await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {

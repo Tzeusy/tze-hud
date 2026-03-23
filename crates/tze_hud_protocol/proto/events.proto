@@ -83,9 +83,12 @@ message SceneEvent {
 
 // ─── Input Event Types (RFC 0004) ─────────────────────────────────────────────
 //
-// All tile_id and node_id fields use SceneId (16-byte little-endian UUIDv7,
-// imported from types.proto). All hardware timestamps use _mono_us suffix
-// (monotonic domain per RFC 0005 §2.4).
+// The RFC 0004 input event messages below encode tile_id and node_id as raw 16-byte
+// UUIDv7 (bytes). This diverges from the older InputEvent/SceneEvent messages above,
+// which use string IDs. The bytes encoding matches RFC 0006 §9.1 and the SceneId
+// convention in types.proto.
+//
+// All hardware timestamps use the _mono_us suffix (monotonic domain per RFC 0005 §2.4).
 
 // Pointer move event (ephemeral realtime — may be coalesced/dropped under backpressure).
 message PointerMoveEvent {
@@ -337,48 +340,56 @@ message CommandInputEvent {
 
 // ─── Input Envelope and Event Batch (RFC 0004 §8.3, §8.4, §9.1) ───────────────
 //
-// InputEnvelope is a 22-variant oneof covering all input event types.
+// InputEnvelope is a 19-variant oneof covering all V1-mandatory input event types.
 // EventBatch groups per-frame events for a single agent on ServerMessage field 34.
 // Multiple input events within a single compositor frame are batched into a single
 // EventBatch and delivered as a single ServerMessage. Within a batch, events are
 // ordered by timestamp_mono_us ascending (RFC 0004 §8.4).
+//
+// NOTE: RFC 0004 §9.1 specifies a 22-variant InputEnvelope including DoubleClickEvent
+// (field 7), ContextMenuEvent (field 8), and ImeCompositionCancelledEvent (field 19).
+// Those variants and their field numbers are reserved for a future PR that adds the
+// corresponding message definitions; field numbers below skip these slots to preserve
+// alignment with the RFC's fixed assignments once the messages are defined.
 
 message InputEnvelope {
   oneof event {
-    // Pointer events
-    PointerMoveEvent        pointer_move         = 1;   // ephemeral realtime
-    PointerEnterEvent       pointer_enter        = 2;   // ephemeral realtime
-    PointerLeaveEvent       pointer_leave        = 3;   // ephemeral realtime
-    PointerDownEvent        pointer_down         = 4;   // transactional
-    PointerUpEvent          pointer_up           = 5;   // transactional
+    // Pointer events (RFC 0004 §9.1 field assignments)
+    PointerDownEvent        pointer_down         = 1;   // transactional
+    PointerUpEvent          pointer_up           = 2;   // transactional
+    PointerMoveEvent        pointer_move         = 3;   // ephemeral realtime
+    PointerEnterEvent       pointer_enter        = 4;   // ephemeral realtime
+    PointerLeaveEvent       pointer_leave        = 5;   // ephemeral realtime
     ClickEvent              click                = 6;   // transactional
-    PointerCancelEvent      pointer_cancel       = 7;   // transactional
+    // fields 7-8: DoubleClickEvent and ContextMenuEvent — reserved; messages not yet defined
+    PointerCancelEvent      pointer_cancel       = 9;   // transactional
 
     // Keyboard events
-    KeyDownEvent            key_down             = 8;   // transactional
-    KeyUpEvent              key_up               = 9;   // transactional
-    CharacterEvent          character            = 10;  // transactional
+    KeyDownEvent            key_down             = 10;  // transactional
+    KeyUpEvent              key_up               = 11;  // transactional
+    CharacterEvent          character            = 12;  // transactional
 
     // Focus events (FOCUS_EVENTS subscription category)
-    FocusGainedEvent        focus_gained         = 11;  // transactional
-    FocusLostEvent          focus_lost           = 12;  // transactional
-
-    // Capture events (FOCUS_EVENTS subscription category)
-    CaptureReleasedEvent    capture_released     = 13;  // transactional (field 20 per RFC 0004 §8.3.1)
-
-    // IME events (FOCUS_EVENTS subscription category)
-    ImeCompositionStartEvent  ime_composition_start  = 14;  // transactional
-    ImeCompositionUpdateEvent ime_composition_update = 15;  // transactional
-    ImeCompositionEndEvent    ime_composition_end    = 16;  // transactional
+    FocusGainedEvent        focus_gained         = 13;  // transactional
+    FocusLostEvent          focus_lost           = 14;  // transactional
 
     // Gesture events
-    GestureEvent            gesture              = 17;  // ephemeral realtime
+    GestureEvent            gesture              = 15;  // ephemeral realtime
+
+    // IME events (FOCUS_EVENTS subscription category; RFC 0004 §4.0 V1 fallback)
+    ImeCompositionStartEvent  ime_composition_start  = 16;  // transactional
+    ImeCompositionUpdateEvent ime_composition_update = 17;  // transactional
+    ImeCompositionEndEvent    ime_composition_end    = 18;  // transactional
+    // field 19: ImeCompositionCancelledEvent — reserved; message not yet defined
+
+    // Capture events (FOCUS_EVENTS subscription category; RFC 0004 §8.3.1)
+    CaptureReleasedEvent    capture_released     = 20;  // transactional
 
     // Scroll events
-    ScrollOffsetChangedEvent scroll_offset_changed = 18;  // ephemeral realtime
+    ScrollOffsetChangedEvent scroll_offset_changed = 21;  // ephemeral realtime
 
     // Command input (abstract navigation/activation)
-    CommandInputEvent       command_input        = 19;  // transactional
+    CommandInputEvent       command_input        = 22;  // transactional
   }
 }
 
@@ -388,6 +399,6 @@ message InputEnvelope {
 // subscription categories).
 message EventBatch {
   uint64                  frame_number = 1;  // Compositor frame number (monotonically increasing)
-  uint64                  batch_ts_us  = 2;  // Batch assembly timestamp (monotonic us)
+  uint64                  batch_ts_us  = 2;  // Batch assembly timestamp (wall-clock UTC µs; RFC 0003 §1.1)
   repeated InputEnvelope  events       = 3;  // Ordered by timestamp_mono_us ascending
 }

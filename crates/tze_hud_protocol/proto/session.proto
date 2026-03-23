@@ -250,22 +250,23 @@ message SessionResumed {
 // Sent as RuntimeError.error_code_enum alongside the string error_code.
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED         = 0;
-  LEASE_EXPIRED                  = 1;
-  LEASE_NOT_FOUND                = 2;
-  ZONE_TYPE_MISMATCH             = 3;
-  ZONE_NOT_FOUND                 = 4;
-  BUDGET_EXCEEDED                = 5;
-  MUTATION_REJECTED              = 6;
-  PERMISSION_DENIED              = 7;
-  RATE_LIMITED                   = 8;
-  INVALID_ARGUMENT               = 9;
-  SESSION_EXPIRED                = 10;
-  CLOCK_SKEW_HIGH                = 11;
-  CLOCK_SKEW_EXCESSIVE           = 12;
-  SAFE_MODE_ACTIVE               = 13;
-  TIMESTAMP_TOO_OLD              = 14;
-  TIMESTAMP_TOO_FUTURE           = 15;
-  TIMESTAMP_EXPIRY_BEFORE_PRESENT = 16;
+  ERROR_CODE_UNKNOWN             = 1;  // Code not in this enum version; inspect string error_code
+  LEASE_EXPIRED                  = 2;
+  LEASE_NOT_FOUND                = 3;
+  ZONE_TYPE_MISMATCH             = 4;
+  ZONE_NOT_FOUND                 = 5;
+  BUDGET_EXCEEDED                = 6;
+  MUTATION_REJECTED              = 7;
+  PERMISSION_DENIED              = 8;
+  RATE_LIMITED                   = 9;
+  INVALID_ARGUMENT               = 10;
+  SESSION_EXPIRED                = 11;
+  CLOCK_SKEW_HIGH                = 12;
+  CLOCK_SKEW_EXCESSIVE           = 13;
+  SAFE_MODE_ACTIVE               = 14;
+  TIMESTAMP_TOO_OLD              = 15;
+  TIMESTAMP_TOO_FUTURE           = 16;
+  TIMESTAMP_EXPIRY_BEFORE_PRESENT = 17;
 }
 
 // Structured error response following the common error model (RFC 0005 §3.5).
@@ -276,7 +277,7 @@ message RuntimeError {
   string    message         = 2;  // Human-readable explanation
   string    context         = 3;  // Invalid field/value context (e.g. "lease_id=<id>")
   string    hint            = 4;  // Machine-readable correction suggestion as JSON
-  ErrorCode error_code_enum = 5;  // Typed enum for well-known codes; 0 if unknown
+  ErrorCode error_code_enum = 5;  // Typed enum for well-known codes; ERROR_CODE_UNKNOWN if not in enum
 }
 
 // ─── Capability management messages (RFC 0005 §5.3) ───────────────────────────
@@ -293,8 +294,8 @@ message CapabilityRequest {
 // Also sent spontaneously when the runtime revokes capabilities.
 // On full denial the runtime sends RuntimeError(PERMISSION_DENIED) instead of this message.
 message CapabilityNotice {
-  repeated string granted_capabilities  = 1;  // Capabilities newly granted
-  repeated string revoked_capabilities  = 2;  // Capabilities being revoked (spontaneous notice)
+  repeated string granted               = 1;  // Capabilities newly granted (RFC 0005 §5.3, §9)
+  repeated string revoked               = 2;  // Capabilities being revoked (spontaneous notice)
   string          reason                = 3;  // Human-readable reason
   uint64          effective_at_server_seq = 4; // Server sequence at which change takes effect
 }
