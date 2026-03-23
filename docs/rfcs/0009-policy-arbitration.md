@@ -626,16 +626,16 @@ Capabilities are granted per-session at handshake (RFC 0005 Section 1.3) and may
 
 The attention level manages interruption flow to prevent notification fatigue and respect quiet hours.
 
-**Interruption classes** (from privacy.md):
-- `Silent` -- always passes. No display disruption. Not counted against budget.
-- `Gentle` -- passes unless quiet hours active. Counted against budget.
-- `Normal` -- passes unless quiet hours active. Counted against budget.
-- `Urgent` -- passes through quiet hours. Subject to attention budget.
-- `Critical` -- always passes. Bypasses both quiet hours and attention budget.
+**Interruption classes** (RFC 0010 §3.2):
+- `SILENT` -- always passes. No display disruption. Not counted against budget.
+- `LOW` -- batched/deferred. Counted against budget. Blocked during quiet hours.
+- `NORMAL` -- standard agent activity. Counted against budget. Blocked during quiet hours if configured.
+- `HIGH` -- passes through quiet hours. Subject to attention budget.
+- `CRITICAL` -- always passes. Bypasses both quiet hours and attention budget.
 
-**Quiet hours:** During quiet hours, `Gentle` and `Normal` interruptions are queued. `Silent` continues (invisible by definition). `Urgent` and `Critical` pass through. Queued mutations are delivered when quiet hours end, in FIFO order per zone.
+**Quiet hours:** During quiet hours, `LOW` and `NORMAL` interruptions are queued. `SILENT` continues (invisible by definition). `HIGH` and `CRITICAL` pass through. Queued mutations are delivered when quiet hours end, in FIFO order per zone.
 
-**Attention budget:** Rolling per-agent and per-zone counters track non-silent interruptions over the last 60 seconds. Configurable limits: `max_interruptions_per_agent_per_minute` (default: 6) and `max_interruptions_per_zone_per_minute` (default: 12). When exhausted, mutations are coalesced (latest-wins within agent+zone key). Budget refills continuously. `Critical` interruptions are exempt.
+**Attention budget:** Rolling per-agent and per-zone counters track non-silent interruptions over the last 60 seconds. Configurable limits: `max_interruptions_per_agent_per_minute` (default: 20) and `max_interruptions_per_zone_per_minute` (default: 10). When exhausted, mutations are coalesced (latest-wins within agent+zone key). Budget refills continuously. `CRITICAL` interruptions are exempt.
 
 ### 11.6 Level 5 -- Resource
 
