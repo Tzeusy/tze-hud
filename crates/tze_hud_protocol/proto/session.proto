@@ -67,6 +67,10 @@ message ClientMessage {
     // Both the name "heartbeat" and the number 25 are being actively reused, so no
     // proto `reserved` declaration is possible here. Document in changelog instead.
     Heartbeat         heartbeat          = 31;
+
+    // Capability management (RFC 0005 §5.3)
+    // At most one CapabilityRequest SHOULD be in flight per session at a time.
+    CapabilityRequest capability_request = 32;
   }
 }
 
@@ -84,12 +88,24 @@ message ServerMessage {
     // Server response to SessionResume (RFC 0005 §6.3)
     SessionResumeResult   session_resume_result  = 12;
 
+    // Safe-mode lifecycle notifications (RFC 0005 §3.7)
+    // Both are transactional (never dropped).
+    SessionSuspended      session_suspended      = 13;
+    SessionResumed        session_resumed        = 14;
+
+    // Structured runtime error (RFC 0005 §3.5)
+    // Sent in response to any operation that fails with a well-known error condition.
+    RuntimeError          runtime_error          = 15;
+
     // Mutation responses
     MutationResult        mutation_result        = 20;
 
     // Lease lifecycle (RFC 0008)
     LeaseResponse         lease_response         = 21;
     LeaseStateChange      lease_state_change     = 23;
+
+    // Capability grant/revocation notice (RFC 0005 §5.3)
+    CapabilityNotice      capability_notice      = 25;
 
     // Scene state
     SceneSnapshot         scene_snapshot         = 30;
@@ -98,8 +114,10 @@ message ServerMessage {
     // Keepalive
     Heartbeat             heartbeat              = 33;
 
-    // Input (defined in events.proto)
-    tze_hud.protocol.v1.InputEvent input_event   = 34;
+    // Event batch (defined in events.proto; RFC 0004 §8.3, §8.4, RFC 0005 §3.1)
+    // Carries per-frame InputEnvelope variants (pointer, keyboard, focus, capture, gesture,
+    // IME, scroll, command events). Variants are filtered per RFC 0005 §7.1 before delivery.
+    tze_hud.protocol.v1.EventBatch event_batch   = 34;
 
     // Backpressure
     BackpressureSignal    backpressure_signal    = 35;
@@ -207,6 +225,78 @@ message SessionResumeResult {
   // Confirmed subscription state after resume. Agents MUST use these values.
   repeated string active_subscriptions   = 7;   // Confirmed active subscription set
   repeated string denied_subscriptions   = 8;   // Denied (missing capability)
+}
+
+// ─── Safe-mode lifecycle messages (RFC 0005 §3.7) ─────────────────────────────
+
+// Runtime notifies all active sessions that safe mode has been entered.
+// After delivery, all MutationBatch messages from suspended sessions SHALL be
+// rejected with RuntimeError(error_code="SAFE_MODE_ACTIVE"). The session remains
+// open and Heartbeat keepalives continue. Transactional — never dropped.
+message SessionSuspended {
+  string reason          = 1;  // Human-readable reason (e.g. "safe_mode_entered")
+  uint64 timestamp_wall_us = 2; // Wall-clock time of suspension (UTC us since epoch)
+}
+
+// Runtime notifies all previously suspended sessions that safe mode has exited.
+// After delivery, mutation submission is permitted again. Transactional — never dropped.
+message SessionResumed {
+  uint64 timestamp_wall_us = 1; // Wall-clock time of resumption (UTC us since epoch)
+}
+
+// ─── Runtime error messages (RFC 0005 §3.5) ───────────────────────────────────
+
+// Typed error codes for well-known runtime error conditions (RFC 0005 §3.5, DR-SP5).
+// Sent as RuntimeError.error_code_enum alongside the string error_code.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED         = 0;
+  LEASE_EXPIRED                  = 1;
+  LEASE_NOT_FOUND                = 2;
+  ZONE_TYPE_MISMATCH             = 3;
+  ZONE_NOT_FOUND                 = 4;
+  BUDGET_EXCEEDED                = 5;
+  MUTATION_REJECTED              = 6;
+  PERMISSION_DENIED              = 7;
+  RATE_LIMITED                   = 8;
+  INVALID_ARGUMENT               = 9;
+  SESSION_EXPIRED                = 10;
+  CLOCK_SKEW_HIGH                = 11;
+  CLOCK_SKEW_EXCESSIVE           = 12;
+  SAFE_MODE_ACTIVE               = 13;
+  TIMESTAMP_TOO_OLD              = 14;
+  TIMESTAMP_TOO_FUTURE           = 15;
+  TIMESTAMP_EXPIRY_BEFORE_PRESENT = 16;
+}
+
+// Structured error response following the common error model (RFC 0005 §3.5).
+// Sent in response to any operation that fails with a well-known error condition.
+// Also used as the error shape for MCP JSON-RPC error.data (RFC 0005 §8.5).
+message RuntimeError {
+  string    error_code      = 1;  // Canonical, stable string code (e.g. "LEASE_EXPIRED")
+  string    message         = 2;  // Human-readable explanation
+  string    context         = 3;  // Invalid field/value context (e.g. "lease_id=<id>")
+  string    hint            = 4;  // Machine-readable correction suggestion as JSON
+  ErrorCode error_code_enum = 5;  // Typed enum for well-known codes; 0 if unknown
+}
+
+// ─── Capability management messages (RFC 0005 §5.3) ───────────────────────────
+
+// Client requests additional capabilities mid-session.
+// At most one CapabilityRequest SHOULD be in flight per session at a time.
+// Re-uses retransmit semantics (sequence as correlation key) per RFC 0005 §5.3.
+message CapabilityRequest {
+  repeated string capabilities = 1;  // Capabilities being requested
+  string          reason       = 2;  // Human-readable rationale for audit/logging
+}
+
+// Server response to a CapabilityRequest (RFC 0005 §5.3).
+// Also sent spontaneously when the runtime revokes capabilities.
+// On full denial the runtime sends RuntimeError(PERMISSION_DENIED) instead of this message.
+message CapabilityNotice {
+  repeated string granted_capabilities  = 1;  // Capabilities newly granted
+  repeated string revoked_capabilities  = 2;  // Capabilities being revoked (spontaneous notice)
+  string          reason                = 3;  // Human-readable reason
+  uint64          effective_at_server_seq = 4; // Server sequence at which change takes effect
 }
 
 // ─── Mutation messages ────────────────────────────────────────────────────────

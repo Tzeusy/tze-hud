@@ -483,6 +483,9 @@ async fn handle_client_message(
         ClientPayload::SessionClose(_close) => {
             // Client initiated graceful close; the main loop will break on stream end
         }
+        ClientPayload::CapabilityRequest(_req) => {
+            // Capability grant/revocation deferred to post-v1; silently accepted
+        }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
             // Protocol violation: ignore (or could send RuntimeError)
