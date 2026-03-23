@@ -53,6 +53,12 @@ message ClientMessage {
 
     // Telemetry
     TelemetryFrame    telemetry_frame    = 26;
+
+    // Input control (RFC 0004 §8.3.1, RFC 0005 §3.8)
+    InputFocusRequest    input_focus_request    = 27;
+    InputCaptureRequest  input_capture_request  = 28;
+    InputCaptureRelease  input_capture_release  = 29;
+    SetImePosition       set_ime_position       = 30;
   }
 }
 
@@ -90,6 +96,10 @@ message ServerMessage {
 
     // Backpressure
     BackpressureSignal    backpressure_signal    = 35;
+
+    // Input control responses (RFC 0004 §8.3.1, RFC 0005 §3.8)
+    InputFocusResponse    input_focus_response    = 43;
+    InputCaptureResponse  input_capture_response  = 44;
   }
 }
 
@@ -270,6 +280,51 @@ message SceneDelta {
     tze_hud.protocol.v1.TileUpdatedEvent tile_updated = 3;
     tze_hud.protocol.v1.LeaseEvent       lease_event  = 4;
   }
+}
+
+// ─── Input control messages (RFC 0004 §8.3.1, RFC 0005 §3.8) ─────────────────
+
+// Client requests keyboard focus for one of its tiles.
+// Synchronous: runtime responds with InputFocusResponse correlated by sequence.
+message InputFocusRequest {
+  bytes tile_id  = 1;  // Target tile (16-byte UUIDv7); empty = release focus
+}
+
+// Server response to InputFocusRequest.
+message InputFocusResponse {
+  bytes  tile_id = 1;  // Tile the focus decision applies to
+  bool   granted = 2;  // true = focus granted; false = denied or released
+  string reason  = 3;  // Human-readable reason on denial
+}
+
+// Client requests exclusive capture of an input device (e.g. pointer, keyboard).
+// Synchronous: runtime responds with InputCaptureResponse correlated by sequence.
+message InputCaptureRequest {
+  bytes  tile_id     = 1;  // Tile requesting capture (16-byte UUIDv7)
+  string device_kind = 2;  // "pointer" | "keyboard" | "touch"
+}
+
+// Server response to InputCaptureRequest.
+message InputCaptureResponse {
+  bytes  tile_id     = 1;  // Tile the capture decision applies to
+  string device_kind = 2;  // Mirrors InputCaptureRequest.device_kind
+  bool   granted     = 3;  // true = capture granted; false = denied
+  string reason      = 4;  // Human-readable reason on denial
+}
+
+// Client voluntarily releases a previously captured input device.
+// Asynchronous: confirmed by CaptureReleasedEvent in the next EventBatch (field 34).
+message InputCaptureRelease {
+  bytes  tile_id     = 1;  // Tile releasing capture (16-byte UUIDv7)
+  string device_kind = 2;  // "pointer" | "keyboard" | "touch"
+}
+
+// Client repositions the IME (Input Method Editor) candidate window.
+// Fire-and-forget: no response sent by the runtime.
+message SetImePosition {
+  bytes tile_id = 1;  // Tile context for the IME (16-byte UUIDv7)
+  float x       = 2;  // Display-space X coordinate (pixels)
+  float y       = 3;  // Display-space Y coordinate (pixels)
 }
 
 // ─── Backpressure ─────────────────────────────────────────────────────────────

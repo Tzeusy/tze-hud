@@ -555,7 +555,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Input Control Request Transport
-FocusRequest, CaptureRequest, CaptureReleaseRequest, and SetImePositionRequest from RFC 0004 SHALL travel agent-to-runtime on the session stream as ClientMessage payload variants at fields 26-29 (InputFocusRequest=26, InputCaptureRequest=27, InputCaptureRelease=28, SetImePosition=29). FocusResponse and CaptureResponse SHALL travel runtime-to-agent as ServerMessage payload variants at fields 43-44 (InputFocusResponse=43, InputCaptureResponse=44). FocusRequest and CaptureRequest SHALL use synchronous request/response semantics correlated by sequence number. CaptureReleaseRequest SHALL be confirmed asynchronously by CaptureReleasedEvent (RFC 0004 InputEnvelope field 20) delivered in the EventBatch on field 34. SetImePosition SHALL be fire-and-forget with no response.
+FocusRequest, CaptureRequest, CaptureReleaseRequest, and SetImePositionRequest from RFC 0004 SHALL travel agent-to-runtime on the session stream as ClientMessage payload variants at fields 27-30 (InputFocusRequest=27, InputCaptureRequest=28, InputCaptureRelease=29, SetImePosition=30). Field 26 is occupied by TelemetryFrame. FocusResponse and CaptureResponse SHALL travel runtime-to-agent as ServerMessage payload variants at fields 43-44 (InputFocusResponse=43, InputCaptureResponse=44). FocusRequest and CaptureRequest SHALL use synchronous request/response semantics correlated by sequence number. CaptureReleaseRequest SHALL be confirmed asynchronously by CaptureReleasedEvent (RFC 0004 InputEnvelope field 20) delivered in the EventBatch on field 34. SetImePosition SHALL be fire-and-forget with no response.
 Source: RFC 0005 §3.8, RFC 0004 §8.3.1
 Scope: v1-mandatory
 
@@ -564,7 +564,7 @@ Scope: v1-mandatory
 - **THEN** the runtime SHALL respond with InputFocusResponse correlated to the request by server response sequence
 
 #### Scenario: CaptureRelease confirmed asynchronously
-- **WHEN** an agent sends InputCaptureRelease (field 28) for a captured device
+- **WHEN** an agent sends InputCaptureRelease (field 29) for a captured device
 - **THEN** the runtime SHALL deliver CaptureReleasedEvent in the next EventBatch (field 34), with reason=AGENT_RELEASED; no synchronous response is sent
 
 ---
