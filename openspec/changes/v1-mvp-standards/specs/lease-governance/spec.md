@@ -47,8 +47,8 @@ Scope: v1-mandatory
 - **THEN** the publish succeeds without requiring a lease
 
 ### Requirement: Priority Assignment
-Every lease MUST carry a `lease_priority: u8` field. Priority 0 MUST be reserved for system/chrome (runtime-internal only; agents MUST NOT request priority 0). Priority 1 MUST require the `lease:priority:1` capability (from the canonical capability vocabulary). Priority 2 MUST be the default. An agent requesting priority 0 MUST receive priority 2. An agent requesting priority 1 without the capability MUST receive priority 2. The runtime MAY downgrade priority at any time via `LeaseStateChange`.
-Source: RFC 0008 §2.1
+Every lease MUST carry a `lease_priority: u8` field. Priority 0 MUST be reserved for system/chrome (runtime-internal only; agents MUST NOT request priority 0). Priority 1 MUST require the `lease:priority:1` capability (from the canonical capability vocabulary per RFC 0006 §6.3 and RFC 0009 §8.1). Priority 2 MUST be the default. An agent requesting priority 0 MUST receive priority 2. An agent requesting priority 1 without the capability MUST receive priority 2. The runtime MAY downgrade priority at any time via `LeaseStateChange`. Note: RFC 0008 §2.1 uses the older name `lease_priority_high` for this capability; the canonical name is `lease:priority:1` per the RFC 0009 §8.1 capability registry and RFC 0006 §6.3 vocabulary.
+Source: RFC 0008 §2.1, RFC 0009 §8.1, RFC 0006 §6.3
 Scope: v1-mandatory
 
 #### Scenario: Priority 0 request downgraded
@@ -69,8 +69,8 @@ Scope: v1-mandatory
 - **THEN** tiles with the highest lease_priority values (least important) and lowest z_order values are shed first
 
 ### Requirement: Auto-Renewal Policy
-Each lease MUST support three renewal policies: MANUAL (default, agent must explicitly renew), AUTO_RENEW (runtime auto-renews at 75% TTL elapsed if session is Active and no budget violations pending), ONE_SHOT (expires at TTL, no renewal). Auto-renewal MUST be disabled when the agent enters budget warning state, the session enters Disconnecting state, or safe mode is entered (TTL clock paused).
-Source: RFC 0008 §1.4
+Each lease MUST support three renewal policies: MANUAL (default: agent must explicitly send `LeaseRequest` with `operation = RENEW` before TTL expires), AUTO_RENEW (runtime auto-renews at 75% TTL elapsed if session is Active and no budget violations pending; agent receives `LeaseResponse` with `result = GRANTED` on each auto-renewal), ONE_SHOT (expires at TTL without renewal option; agent must request a new lease to continue). "Auto-renewal disabled" means the 75%-elapsed renewal timer is NOT armed for that lease; no renewal event is generated. The lease continues to age toward expiry at its current TTL. Auto-renewal MUST be disabled (timer not armed) when: (1) the agent enters budget warning state — resuming if warning clears before TTL expires; (2) the session enters `Disconnecting` state; (3) safe mode is entered (TTL clock paused per RFC 0008 §4.3; timer is also paused and resumes with the TTL clock on safe mode exit). ONE_SHOT leases are not subject to auto-renewal; however, their TTL clock IS paused during suspension, so they do not expire during safe mode (a ONE_SHOT lease suspended during safe mode still transitions normally to ACTIVE on safe mode exit with remaining TTL adjusted).
+Source: RFC 0008 §1.4, §4.3
 Scope: v1-mandatory
 
 #### Scenario: Auto-renewal at 75% TTL
@@ -79,11 +79,15 @@ Scope: v1-mandatory
 
 #### Scenario: Auto-renewal disabled during budget warning
 - **WHEN** a lease with AUTO_RENEW policy enters budget warning state
-- **THEN** auto-renewal is disabled until the warning is resolved
+- **THEN** the auto-renewal timer is disarmed; the lease continues aging toward expiry and the agent must renew manually or resolve the budget warning before TTL elapses
 
 #### Scenario: ONE_SHOT lease expires
 - **WHEN** a ONE_SHOT lease reaches its TTL
 - **THEN** the lease transitions to EXPIRED without renewal option
+
+#### Scenario: ONE_SHOT lease suspended during safe mode
+- **WHEN** a ONE_SHOT lease is active when safe mode is entered
+- **THEN** the TTL clock pauses during suspension; on safe mode exit the lease transitions back to ACTIVE with adjusted expiry and can serve its full remaining TTL
 
 ### Requirement: Safe Mode Suspends Leases
 On safe mode entry, all ACTIVE leases MUST transition to SUSPENDED (NOT REVOKED). Agent sessions MUST receive `SessionSuspended` with `reason = "viewer_safe_mode"`. `LeaseSuspend` MUST be sent for each lease. Mutations MUST be rejected with `SAFE_MODE_ACTIVE`. TTL clock MUST be paused. Auto-renewal MUST be suspended. This suspension MUST complete within 1 frame (16.6ms).
@@ -127,6 +131,8 @@ Scope: v1-mandatory
 
 ### Requirement: Orphan Handling Grace Period
 On agent disconnect, all ACTIVE leases MUST transition to ORPHANED. The reconnect grace period (default 30,000ms) MUST start. Tiles MUST be frozen at last known state. Disconnection badge MUST appear within 1 frame. TTL clock MUST continue running during the grace period. If the agent reconnects within the grace period, leases MUST transition back to ACTIVE and badges MUST clear within 1 frame.
+
+Note: Disconnect *detection* uses the heartbeat timeout (default 15,000ms = 3 × 5,000ms per RFC 0005 §4). The reconnect grace *window* is a separate 30,000ms period that starts after detection. These are two distinct timers: detection (15s) determines when orphaning begins; grace (30s) determines how long the agent has to reclaim before leases expire.
 Source: RFC 0008 §5.1, §5.2, §5.4
 Scope: v1-mandatory
 

@@ -69,13 +69,17 @@ Scope: v1-mandatory
 - **THEN** startup fails with `CONFIG_HEADLESS_NOT_EXTENDABLE` structured error
 
 ### Requirement: Mobile Profile Schema-Reserved
-The `mobile` profile MUST be schema-reserved. Setting `profile = "mobile"` at runtime MUST produce the structured error `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` and the runtime MUST refuse to start. This is a hard startup error distinct from `CONFIG_UNKNOWN_PROFILE`.
-Source: RFC 0006 §3.3
+The `mobile` profile MUST be schema-reserved. Setting `profile = "mobile"` at runtime MUST produce the structured error `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` and the runtime MUST refuse to start. This is a hard startup error distinct from `CONFIG_UNKNOWN_PROFILE`. Setting `[display_profile].extends = "mobile"` MUST be syntactically valid (not a startup error) but MUST NOT activate any mobile runtime paths in v1; a custom profile that extends `mobile` produces a custom profile using the mobile budget values, but the Mobile Presence Node (MPN) display path is not exercised. Mobile capability negotiation is designed into the API (v1.md §"Mobile") but exercised post-v1 only.
+Source: RFC 0006 §3.3, §3.6
 Scope: v1-mandatory
 
 #### Scenario: Mobile profile rejected at startup
 - **WHEN** a config file sets `profile = "mobile"`
 - **THEN** startup fails with `CONFIG_MOBILE_PROFILE_NOT_EXERCISED` (not `CONFIG_UNKNOWN_PROFILE`) and a hint directing the operator to use `full-display` or `headless`
+
+#### Scenario: Extends mobile is valid but post-v1
+- **WHEN** a config file sets `[display_profile].extends = "mobile"` and `[runtime].profile = "custom"`
+- **THEN** the configuration is accepted with the custom profile using mobile budget values, but no mobile-specific runtime paths are activated
 
 ### Requirement: Profile Auto-Detection
 When `profile = "auto"`, the runtime MUST detect the environment in the following order: (1) headless if `$DISPLAY`/`$WAYLAND_DISPLAY` are unset, `/.dockerenv` exists, or wgpu reports software-only rendering; (2) `full-display` if VRAM > 4GB and refresh >= 60Hz; (3) abort with a structured error if neither condition matches. The `mobile` profile MUST never be selected by auto-detection in v1. An INFO log entry MUST name the detected signal for step 1.
@@ -143,8 +147,8 @@ Scope: v1-mandatory
 - **THEN** startup fails with `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE` identifying the agent, field, and ceiling
 
 ### Requirement: Capability Vocabulary
-Capability identifiers in agent grants MUST use the canonical `snake_case` wire-format names. The capability vocabulary defined in this specification is CANONICAL — all other specs, protocol handlers, example code, and MCP tool implementations MUST use these exact names when referencing capabilities. No synonyms, aliases, or legacy names are permitted in v1. The runtime MUST recognize all v1 capabilities: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, and `lease:priority:<N>`. Any capability name not in this canonical list (including misspellings, camelCase variants, or legacy names) MUST be rejected. Parameterized capability grants using the `system.` or `scene.` prefix for `emit_scene_event` MUST be rejected with `CONFIG_RESERVED_EVENT_PREFIX`.
-Source: RFC 0006 §6.3
+Capability identifiers in agent grants MUST use the canonical `snake_case` wire-format names. The capability vocabulary defined in this specification is CANONICAL — all other specs, protocol handlers, example code, and MCP tool implementations MUST use these exact names when referencing capabilities. No synonyms, aliases, or legacy names are permitted in v1. The runtime MUST recognize all v1 capabilities: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, and `lease:priority:<N>`. Any capability name not in this canonical list (including misspellings, camelCase variants, or legacy names) MUST be rejected. Parameterized capability grants using the `system.` or `scene.` prefix for `emit_scene_event` MUST be rejected with `CONFIG_RESERVED_EVENT_PREFIX`. Note: RFC 0009 §8.1 contains older names (`read_scene`, `receive_input`, `zone_publish`) superseded by RFC 0005 Round 14 (rig-b2s); RFC 0006 §6.3 (this requirement) is the canonical authority.
+Source: RFC 0006 §6.3, RFC 0005 Round 14
 Scope: v1-mandatory
 
 #### Scenario: Valid capability grants accepted
@@ -220,6 +224,19 @@ Scope: v1-mandatory
 #### Scenario: Unknown viewer class rejected
 - **WHEN** `default_viewer_class = "admin"`
 - **THEN** startup fails with `CONFIG_UNKNOWN_VIEWER_CLASS`
+
+### Requirement: Quiet Hours Configuration
+The `[privacy.quiet_hours]` section MUST support `enabled` (default: `false`), a `[[privacy.quiet_hours.schedule]]` array of time ranges with `start` (HH:MM 24-hour), `end` (HH:MM 24-hour, wraps midnight), and optional `days` (array of `"mon"`..`"sun"`; default: all days), `pass_through_class` (one of `CRITICAL`, `HIGH`, `NORMAL`, `LOW`, `SILENT`; default: `HIGH`; values use the canonical `InterruptionClass` enum from RFC 0010 §3.1), and `quiet_mode_display` (one of `"dim"`, `"clock_only"`, `"off"`; default: `"dim"`). `pass_through_class` specifies the minimum interruption class that passes through immediately during quiet hours. `CRITICAL` always passes through regardless of this setting; specifying `CRITICAL` as the threshold is valid (meaning only CRITICAL passes — all others queued or discarded). Classes below the configured threshold are deferred: NORMAL is queued and delivered when quiet hours end; LOW is discarded (too stale to be useful); SILENT is unaffected (invisible by definition). Invalid `pass_through_class` values MUST produce `CONFIG_UNKNOWN_INTERRUPTION_CLASS`. Note: RFC 0006 originally used doctrine names (`urgent`, `gentle`) for `pass_through_class`; the canonical wire values are the InterruptionClass enum names (`CRITICAL`, `HIGH`, `LOW`, etc.) as established by RFC 0010 §3.1.
+Source: RFC 0006 §7.1, RFC 0010 §3.1, §4.2
+Scope: v1-mandatory
+
+#### Scenario: Quiet hours enabled with HIGH pass-through
+- **WHEN** `[privacy.quiet_hours] enabled = true` and `pass_through_class = "HIGH"`
+- **THEN** during quiet hours: CRITICAL and HIGH interruptions pass through immediately; NORMAL interruptions are queued until quiet hours end; LOW interruptions are discarded; SILENT interruptions are unaffected (not queued)
+
+#### Scenario: Invalid pass_through_class rejected
+- **WHEN** `pass_through_class = "urgent"` (doctrine name, not canonical enum name)
+- **THEN** startup fails with `CONFIG_UNKNOWN_INTERRUPTION_CLASS` with a hint suggesting the canonical name `HIGH`
 
 ### Requirement: Schema Export
 The runtime MUST support `--print-schema` CLI flag which prints the full configuration JSON Schema to stdout and exits immediately without starting the runtime. The runtime MUST also support `emit_schema = true` in `[runtime]` which writes the schema at startup and continues running. `--print-schema` MUST take precedence when both are set.
