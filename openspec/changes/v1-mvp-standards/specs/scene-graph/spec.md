@@ -322,8 +322,8 @@ Scope: v1-mandatory
 - **THEN** the rejection MUST include the mutation_index, code=BoundsOutOfRange, a human-readable message, and a context JSON object identifying the field, value, and constraint
 
 ### Requirement: Ephemeral Scene State
-The scene graph (tabs, tiles, nodes), active leases, live zone publishes, gRPC sessions, hit-region local state, and performance telemetry MUST be ephemeral (lost on restart). After restart, agents MUST re-establish sessions and re-create scene content. Durable resources (images, fonts) SHALL survive restart because they are content-addressed and independent of scene graph state.
-Source: RFC 0001 §6
+The scene graph (tabs, tiles, nodes), active leases, live zone publishes, gRPC sessions, hit-region local state, and performance telemetry MUST be ephemeral (lost on restart). After restart, agents MUST re-establish sessions and re-create scene content. Resources (images, fonts) are also ephemeral in v1: they are content-addressed and deduplicated by BLAKE3 hash, but all stored resources are lost on restart. Persistence of resources is deferred to post-v1 (see Resource Store RFC 0011 §4.1).
+Source: RFC 0001 §6; RFC 0011 §4.1
 Scope: v1-mandatory
 
 #### Scenario: Scene lost on restart
