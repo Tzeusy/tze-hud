@@ -184,7 +184,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Traffic Class Routing
-Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (HeartbeatPing, SetImePosition; and EventBatch variants pointer/touch/key/gesture events, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The distinction between transactional and ephemeral input variants applies within the EventBatch carried in field 34 of SessionMessage.
+Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (HeartbeatPing, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The EventBatch traffic-class distinction between transactional and ephemeral variants is governed by RFC 0004 §8.5 and applies within the EventBatch carried in field 34 of SessionMessage.
 Source: RFC 0005 §3.1, §3.2, §5.1, RFC 0004 §8.5
 Scope: v1-mandatory
 
@@ -193,8 +193,8 @@ Scope: v1-mandatory
 - **THEN** the runtime SHALL respond with a MutationResult (accepted or rejected); if no response arrives within retransmit_timeout_ms, the agent SHALL retransmit
 
 #### Scenario: Input events droppable under backpressure
-- **WHEN** pointer/key input events (ephemeral realtime class) are in the agent's EventBatch queue and the buffer is full
-- **THEN** the oldest ephemeral input events MAY be dropped; focus/IME/capture events (transactional class) SHALL NOT be dropped
+- **WHEN** the agent's EventBatch queue is full and non-transactional input variants (PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, ScrollOffsetChangedEvent) are queued
+- **THEN** the oldest non-transactional input events MAY be coalesced or dropped; transactional variants (PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent, focus/IME/capture events) SHALL NOT be dropped per RFC 0004 §8.5
 
 ---
 
@@ -407,8 +407,8 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: EventBatch Variant Filtering
-EventBatch messages (field 34, carrying RFC 0004 InputEnvelope variants) SHALL be filtered by subscription category at the variant level before delivery. Focus variants (FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events) SHALL be filtered by the focus_events subscription. All other variants (pointer, touch, key, gesture, scroll, command_input) SHALL be filtered by the input_events subscription. An agent subscribed to input_events but not focus_events SHALL receive pointer/key events but not focus/IME events. This filtering is applied per-variant within the EventBatch; an EventBatch with mixed variants is split at the subscription boundary before delivery.
-Source: RFC 0005 §7.1, RFC 0004 §8.3
+EventBatch messages (field 34, carrying RFC 0004 InputEnvelope variants) SHALL be filtered by subscription category at the variant level before delivery. Focus variants (FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events) SHALL be filtered by the focus_events subscription. All other variants (pointer, touch, key, gesture, scroll, command_input) SHALL be filtered by the input_events subscription. An agent subscribed to input_events but not focus_events SHALL receive pointer/key events but not focus/IME events. This filtering is applied per-variant within a single EventBatch: variants not matching any active subscription for the agent SHALL be omitted from delivery, preserving a single EventBatch per agent per frame and the within-batch ordering guarantee (RFC 0004 §8.4).
+Source: RFC 0005 §7.1, RFC 0004 §8.3, §8.4
 Scope: v1-mandatory
 
 #### Scenario: Focus events filtered separately
@@ -508,7 +508,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: TimingHints on Mutations
-MutationBatch SHALL support optional TimingHints containing present_at_wall_us (wall-clock UTC microseconds; 0 = present immediately) and expires_at_wall_us (wall-clock UTC microseconds; 0 = no expiry). These fields SHALL follow RFC 0003 timing semantics: present_at_wall_us > 60 seconds in the past SHALL be rejected with TIMESTAMP_TOO_OLD; present_at_wall_us beyond max_future_schedule_us in the future SHALL be rejected with TIMESTAMP_TOO_FUTURE; expires_at_wall_us <= present_at_wall_us SHALL be rejected with TIMESTAMP_EXPIRY_BEFORE_PRESENT. The clock domain for both fields is wall-clock (RFC 0003 §1.1 "Network clock domain", UTC µs since Unix epoch). Agents SHOULD use the estimated_skew_us from SessionEstablished to validate their timestamps before sending the first mutation.
+MutationBatch SHALL support optional TimingHints containing present_at_wall_us (wall-clock UTC microseconds; 0 = present immediately) and expires_at_wall_us (wall-clock UTC microseconds; 0 = no expiry). These fields SHALL follow RFC 0003 timing semantics: present_at_wall_us < session_open_at_wall_us - 60_000_000μs (more than 60 seconds before session open, per RFC 0003 §3.5) SHALL be rejected with TIMESTAMP_TOO_OLD; present_at_wall_us beyond max_future_schedule_us in the future SHALL be rejected with TIMESTAMP_TOO_FUTURE; expires_at_wall_us <= present_at_wall_us SHALL be rejected with TIMESTAMP_EXPIRY_BEFORE_PRESENT. The clock domain for both fields is wall-clock (RFC 0003 §1.1 "Network clock domain", UTC µs since Unix epoch). Agents SHOULD use the estimated_skew_us from SessionEstablished to validate their timestamps before sending the first mutation.
 Source: RFC 0005 §3.3, RFC 0003 §3.5, §4.5
 Scope: v1-mandatory
 
@@ -517,7 +517,7 @@ Scope: v1-mandatory
 - **THEN** the runtime SHALL defer applying the mutations until the specified wall-clock time
 
 #### Scenario: Stale timestamp rejected
-- **WHEN** an agent sends MutationBatch with TimingHints.present_at_wall_us set to 70 seconds in the past
+- **WHEN** an agent sends MutationBatch with TimingHints.present_at_wall_us set to more than 60 seconds before the session_open_at_wall_us timestamp
 - **THEN** the runtime SHALL reject the batch with RuntimeError(error_code="TIMESTAMP_TOO_OLD")
 
 ---
