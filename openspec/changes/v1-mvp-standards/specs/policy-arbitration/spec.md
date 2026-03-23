@@ -129,7 +129,7 @@ Scope: v1-mandatory
 - **THEN** it completes in < 5us
 
 ### Requirement: Level 4 Attention Management
-The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in scene-events: SILENT (always passes, not counted), LOW (blocked during quiet hours, counted), NORMAL (blocked during quiet hours, counted), HIGH (passes through quiet hours, subject to budget), CRITICAL (always passes, bypasses both quiet hours and budget). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us.
+The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in scene-events: SILENT (always passes, not counted), GENTLE (blocked during quiet hours, subtle indicators only, counted), NORMAL (blocked during quiet hours, counted), URGENT (passes through quiet hours, subject to budget), CRITICAL (always passes, bypasses both quiet hours and budget). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us.
 Source: RFC 0009 §11.5
 Scope: v1-mandatory
 
@@ -137,8 +137,8 @@ Scope: v1-mandatory
 - **WHEN** quiet hours are active and a mutation with NORMAL interruption class arrives
 - **THEN** the mutation is queued until quiet hours end
 
-#### Scenario: HIGH passes quiet hours
-- **WHEN** quiet hours are active and a mutation with HIGH interruption class arrives
+#### Scenario: URGENT passes quiet hours
+- **WHEN** quiet hours are active and a mutation with URGENT interruption class arrives
 - **THEN** the mutation passes through quiet hours
 
 #### Scenario: CRITICAL bypasses everything
