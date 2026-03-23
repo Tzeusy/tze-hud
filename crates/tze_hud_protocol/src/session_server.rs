@@ -414,18 +414,13 @@ async fn handle_session_resume(
         .send(Ok(ServerMessage {
             sequence: seq,
             timestamp_wall_us: compositor_ts,
-            payload: Some(ServerPayload::SessionEstablished(SessionEstablished {
-                session_id: uuid::Uuid::parse_str(&session_id)
-                    .unwrap()
-                    .as_bytes()
-                    .to_vec(),
-                namespace,
+            payload: Some(ServerPayload::SessionResumeResult(SessionResumeResult {
+                accepted: true,
+                new_session_token: new_resume_token.clone(),
+                new_server_sequence: seq,
+                negotiated_protocol_version: 1,
                 granted_capabilities: Vec::new(),
-                resume_token: new_resume_token,
-                heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
-                server_sequence: seq,
-                compositor_timestamp_wall_us: compositor_ts,
-                estimated_skew_us: 0,
+                error: String::new(),
                 active_subscriptions: Vec::new(),
                 denied_subscriptions: Vec::new(),
             })),
@@ -443,6 +438,7 @@ async fn handle_client_message(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     msg: ClientMessage,
 ) {
+    let client_sequence = msg.sequence;
     let Some(payload) = msg.payload else {
         return;
     };
@@ -462,6 +458,9 @@ async fn handle_client_message(
         }
         ClientPayload::SubscriptionChange(change) => {
             handle_subscription_change(session, tx, change).await;
+        }
+        ClientPayload::ZonePublish(publish) => {
+            handle_zone_publish(state, session, tx, client_sequence, publish).await;
         }
         ClientPayload::Heartbeat(hb) => {
             handle_heartbeat(session, tx, hb).await;
@@ -861,9 +860,103 @@ async fn handle_subscription_change(
         .send(Ok(ServerMessage {
             sequence: seq,
             timestamp_wall_us: now_wall_us(),
-            payload: Some(ServerPayload::SubscriptionAck(SubscriptionAck {
+            payload: Some(ServerPayload::SubscriptionChangeResult(SubscriptionChangeResult {
                 active_subscriptions: session.subscriptions.clone(),
                 denied_subscriptions: Vec::new(),
+            })),
+        }))
+        .await;
+}
+
+/// Handle a ZonePublish from the client (RFC 0005 §3.1, §8.6).
+///
+/// Durable-zone publishes are transactional and receive a ZonePublishResult.
+/// Ephemeral-zone publishes are fire-and-forget; no result is sent.
+///
+/// V1 implementation: zone durability detection is deferred; all session-stream
+/// ZonePublish messages are treated as durable and forwarded through the
+/// mutation path, receiving a ZonePublishResult ack.
+async fn handle_zone_publish(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    publish: ZonePublish,
+) {
+
+    // Apply the zone publish through the scene graph mutation path
+    let (accepted, error_code, error_message) = {
+        let mut st = state.lock().await;
+        let content = publish
+            .content
+            .as_ref()
+            .and_then(crate::convert::proto_zone_content_to_scene);
+
+        if let Some(content) = content {
+            let merge_key = if publish.merge_key.is_empty() {
+                None
+            } else {
+                Some(publish.merge_key.clone())
+            };
+
+            let mutation = tze_hud_scene::mutation::SceneMutation::PublishToZone {
+                zone_name: publish.zone_name.clone(),
+                content,
+                publish_token: tze_hud_scene::types::ZonePublishToken {
+                    token: Vec::new(),
+                },
+                merge_key,
+            };
+
+            // Apply as a single-mutation batch
+            let batch = tze_hud_scene::mutation::MutationBatch {
+                batch_id: tze_hud_scene::SceneId::new(),
+                agent_namespace: session.namespace.clone(),
+                mutations: vec![mutation],
+            };
+            let result = st.scene.apply_batch(&batch);
+            if result.applied {
+                (true, String::new(), String::new())
+            } else {
+                let (code, msg) = match &result.error {
+                    Some(tze_hud_scene::ValidationError::ZoneNotFound { name }) => (
+                        "ZONE_NOT_FOUND".to_string(),
+                        format!("Zone not found: {name}"),
+                    ),
+                    Some(tze_hud_scene::ValidationError::ZonePublishTokenInvalid { zone }) => (
+                        "TOKEN_INVALID".to_string(),
+                        format!("Publish token invalid for zone '{zone}'"),
+                    ),
+                    Some(tze_hud_scene::ValidationError::BudgetExceeded { resource }) => (
+                        "BUDGET_EXCEEDED".to_string(),
+                        format!("Budget exceeded: {resource}"),
+                    ),
+                    Some(tze_hud_scene::ValidationError::CapabilityMissing { capability }) => (
+                        "CAPABILITY_MISSING".to_string(),
+                        format!("Capability missing: {capability}"),
+                    ),
+                    Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
+                    None => ("ZONE_PUBLISH_FAILED".to_string(), "Zone publish failed".to_string()),
+                };
+                (false, code, msg)
+            }
+        } else {
+            (false, "INVALID_CONTENT".to_string(), "Missing or invalid zone content".to_string())
+        }
+    };
+
+    // Send ZonePublishResult (v1 treats all session-stream zone publishes as durable)
+    let seq = session.next_server_seq();
+
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::ZonePublishResult(ZonePublishResult {
+                request_sequence,
+                accepted,
+                error_code,
+                error_message,
             })),
         }))
         .await;
@@ -1217,19 +1310,100 @@ mod tests {
 
         let mut response_stream = client.session(resume_stream).await.unwrap().into_inner();
 
-        // Should get SessionEstablished + SceneSnapshot
+        // Should get SessionResumeResult + SceneSnapshot (not SessionEstablished)
         let msg1 = response_stream.next().await.unwrap().unwrap();
         match &msg1.payload {
-            Some(ServerPayload::SessionEstablished(established)) => {
-                assert_eq!(established.namespace, "resumable");
+            Some(ServerPayload::SessionResumeResult(result)) => {
+                assert!(result.accepted, "expected resume to be accepted");
+                assert!(!result.new_session_token.is_empty());
+                assert_eq!(result.negotiated_protocol_version, 1);
             }
-            other => panic!("Expected SessionEstablished on resume, got: {other:?}"),
+            other => panic!("Expected SessionResumeResult on resume, got: {other:?}"),
         }
 
         let msg2 = response_stream.next().await.unwrap().unwrap();
         match &msg2.payload {
             Some(ServerPayload::SceneSnapshot(_)) => {}
             other => panic!("Expected SceneSnapshot on resume, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_zone_publish_result() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "zone-publisher", "test-key").await;
+
+        // Send a ZonePublish — expect ZonePublishResult correlated by client sequence
+        let client_seq: u64 = 2;
+        tx.send(ClientMessage {
+            sequence: client_seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ZonePublish(ZonePublish {
+                zone_name: "status".to_string(),
+                content: Some(crate::proto::ZoneContent {
+                    payload: Some(crate::proto::zone_content::Payload::StreamText(
+                        "hello zone".to_string(),
+                    )),
+                }),
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::ZonePublishResult(result)) => {
+                // request_sequence must echo the client envelope sequence
+                assert_eq!(
+                    result.request_sequence, client_seq,
+                    "ZonePublishResult.request_sequence must correlate with client ZonePublish sequence"
+                );
+                // Zone "status" doesn't exist in the default scene graph so it
+                // will be rejected; we just verify the sequence correlation and
+                // that error_code is populated on rejection.
+                if !result.accepted {
+                    assert!(!result.error_code.is_empty(), "rejected result must carry an error_code");
+                }
+            }
+            other => panic!("Expected ZonePublishResult, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_subscription_change_result() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "subscriber", "test-key").await;
+
+        // Send a SubscriptionChange
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
+                subscribe: vec!["INPUT_EVENTS".to_string()],
+                unsubscribe: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SubscriptionChangeResult(result)) => {
+                assert!(
+                    result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "initial subscription should still be active"
+                );
+                assert!(
+                    result.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    "newly added subscription should be active"
+                );
+                assert!(result.denied_subscriptions.is_empty());
+            }
+            other => panic!("Expected SubscriptionChangeResult, got: {other:?}"),
         }
     }
 }
