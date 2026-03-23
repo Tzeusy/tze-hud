@@ -112,7 +112,7 @@ Scope: v1-mandatory
 - **THEN** Level 2 (Privacy) produces the redaction flag and the chrome render pass draws the placeholder (pattern or blank, per `PrivacyConfig.redaction_style`)
 
 ### Requirement: Level 3 Security Enforcement
-The security level MUST enforce capability scopes, lease validity, and namespace isolation. All required capabilities MUST pass (security is conjunctive -- a single failing check rejects the mutation). Capability checks MUST be hash-table lookups; their latency MUST be negligible relative to the per-mutation budget. The check MUST produce `Reject(CapabilityDenied)`, `Reject(CapabilityScopeInsufficient)`, or `Reject(NamespaceViolation)` with the missing capability named in the `hint` field.
+The security level MUST enforce capability scopes, lease validity, and namespace isolation. All required capabilities MUST pass (security is conjunctive -- a single failing check rejects the mutation). Capability checks MUST be hash-table lookups; each individual check MUST complete in < 5us under nominal load. The check MUST produce `Reject(CapabilityDenied)`, `Reject(CapabilityScopeInsufficient)`, or `Reject(NamespaceViolation)` with the missing capability named in the `hint` field.
 Source: RFC 0009 §11.4
 Scope: v1-mandatory
 
@@ -126,10 +126,10 @@ Scope: v1-mandatory
 
 #### Scenario: Capability check latency
 - **WHEN** a single capability check is performed
-- **THEN** it MUST complete in a small fraction of the per-mutation budget (< 50us)
+- **THEN** it MUST complete in < 5us under nominal load
 
 ### Requirement: Level 4 Attention Management
-The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in scene-events: SILENT (always passes, not counted), GENTLE (blocked during quiet hours, subtle indicators only, counted), NORMAL (blocked during quiet hours, counted), URGENT (passes through quiet hours, subject to budget), CRITICAL (always passes, bypasses both quiet hours and budget). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST be negligible relative to the per-mutation budget.
+The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in scene-events: SILENT (always passes, not counted), GENTLE (blocked during quiet hours, subtle indicators only, counted), NORMAL (blocked during quiet hours, counted), URGENT (passes through quiet hours, subject to budget), CRITICAL (always passes, bypasses both quiet hours and budget). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us under nominal load.
 Source: RFC 0009 §11.5
 Scope: v1-mandatory
 
@@ -163,7 +163,7 @@ Scope: v1-mandatory
 - **THEN** the mutation is NOT shed; it passes through to scene commit
 
 ### Requirement: Level 6 Content Resolution
-The content level MUST resolve zone contention using the zone's `ContentionPolicy`: LatestWins (new replaces previous), Stack (new stacks, auto-dismiss after timeout), MergeByKey (same key replaces, different keys coexist), Replace (single occupant, eviction by equal-or-higher lease priority). Same-frame contention MUST be resolved in arrival order. Cross-tab zone isolation MUST be enforced (zones are scoped to their tab). Zone contention resolution MUST be negligible relative to the per-mutation budget.
+The content level MUST resolve zone contention using the zone's `ContentionPolicy`: LatestWins (new replaces previous), Stack (new stacks, auto-dismiss after timeout), MergeByKey (same key replaces, different keys coexist), Replace (single occupant, eviction by equal-or-higher lease priority). Same-frame contention MUST be resolved in arrival order. Cross-tab zone isolation MUST be enforced (zones are scoped to their tab). Zone contention resolution MUST complete in < 20us under nominal load.
 Source: RFC 0009 §11.7
 Scope: v1-mandatory
 
@@ -272,7 +272,7 @@ Scope: v1-mandatory
 - **THEN** it uses `snake_case` canonical names (e.g., `create_tiles`, not `CREATE_TILE` or `create-tiles`)
 
 ### Requirement: Policy Evaluation Latency Budgets
-The runtime MUST meet the following latency budgets: full per-frame evaluation < 200us, per-mutation policy check < 50us, human override response < 1 frame (16.6ms), privacy transition < 2 frames (33.2ms). Individual sub-checks (capability lookup, attention budget check, zone contention resolution) MUST each consume only a small fraction of the per-mutation budget; their relative ordering by cost MUST be: capability lookup fastest, then attention check, then zone contention resolution.
+The runtime MUST meet the following latency budgets: full per-frame evaluation < 200us, per-mutation policy check < 50us, human override response < 1 frame (16.6ms), privacy transition < 2 frames (33.2ms). Individual sub-checks MUST each consume no more than 20us; their measured mean latencies MUST be ordered by cost as follows: capability lookup fastest (< 5us), then attention check (< 10us), then zone contention resolution (< 20us).
 Source: RFC 0009 §9.1
 Scope: v1-mandatory
 
@@ -374,15 +374,15 @@ Scope: v1-reserved
 
 This appendix collects tunable defaults and implementation guidance that inform but do not constitute normative requirements. Implementations MAY differ from these notes provided all normative requirements above are satisfied.
 
-### Sub-Lookup Latency Targets
+### Sub-Lookup Implementation Guidance
 
-Individual policy sub-checks should be implemented using O(1) data structures. Suggested reference targets (not normative thresholds):
+Individual policy sub-checks should be implemented using O(1) data structures to meet the normative latency bounds (capability < 5us, attention < 10us, zone contention < 20us):
 
-- **Capability check** (Level 3): single hash-table lookup, targeting < 5us. This is the least expensive check and should execute first.
-- **Attention budget check** (Level 4): rolling counter read, targeting < 10us.
-- **Zone contention resolution** (Level 6): policy dispatch, targeting < 20us.
+- **Capability check** (Level 3): single hash-table lookup. Execute first since it is the fastest and most likely to reject early.
+- **Attention budget check** (Level 4): rolling counter read over an in-memory circular buffer.
+- **Zone contention resolution** (Level 6): policy dispatch via a small match/switch on the ContentionPolicy variant.
 
-These targets reflect the relative ordering requirement: capability lookup must be fastest, followed by attention check, then zone resolution. The per-mutation budget of < 50us is the normative constraint; individual sub-checks should be sized to sum well within that bound.
+All three sub-checks together must comfortably fit within the 50us per-mutation budget; 35us of headroom should be reserved for remaining pipeline overhead.
 
 ### Freeze Duration Default
 

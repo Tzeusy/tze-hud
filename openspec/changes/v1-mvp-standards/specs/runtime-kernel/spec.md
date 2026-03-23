@@ -30,7 +30,7 @@ Scope: v1-mandatory
 - **THEN** no new OS threads SHALL be spawned beyond the threads created at startup
 
 ### Requirement: Main Thread Responsibilities
-The main thread MUST run the winit event loop. It SHALL drain OS input events, apply press/hover local feedback, call surface.present() when signaled by the compositor thread, handle resize events, and initiate shutdown. The main thread MUST NOT encode render commands or submit GPU work. Main thread SHALL be elevated to high priority at startup using platform-appropriate mechanisms; failure to elevate MUST fall back silently with a warning.
+The main thread MUST run the winit event loop. It SHALL drain OS input events, apply press/hover local feedback, call surface.present() when signaled by the compositor thread, handle resize events, and initiate shutdown. The main thread MUST NOT encode render commands or submit GPU work. Main thread SHALL be elevated to high priority at startup using platform-appropriate mechanisms; failure to elevate MUST NOT fail startup, and the runtime MUST log a warning and continue at normal OS-default priority.
 Source: RFC 0002 §2.2
 Scope: v1-mandatory
 
@@ -214,11 +214,11 @@ Source: RFC 0002 §8.3
 Scope: v1-mandatory
 
 #### Scenario: Software GPU in CI
-- **WHEN** software GPU fallback is enabled via the force-software environment variable
+- **WHEN** software GPU fallback is enabled via the configured environment variable (see Implementation Notes for the conventional variable name)
 - **THEN** the runtime MUST use the available software GPU fallback regardless of hardware GPU availability
 
 ### Requirement: Degradation Ladder
-The runtime MUST implement a 5-level degradation ladder: Level 0 Normal, Level 1 Coalesce (reduce outbound SceneEvent frequency for state-stream tiles by a configurable ratio), Level 2 ReduceTextureQuality (scale down large textures by a configurable factor), Level 3 DisableTransparency (force semi-transparent tiles to opaque, skip alpha-blend passes), Level 4 ShedTiles (remove lowest-priority tiles from render pass sorted by lease_priority ASC, z_order DESC), Level 5 Emergency (render only chrome layer + highest-priority single tile).
+The runtime MUST implement a 6-level degradation ladder: Level 0 Normal, Level 1 Coalesce (reduce outbound SceneEvent frequency for state-stream tiles by a configurable ratio), Level 2 ReduceTextureQuality (scale down large textures by a configurable factor), Level 3 DisableTransparency (force semi-transparent tiles to opaque, skip alpha-blend passes), Level 4 ShedTiles (remove lowest-priority tiles from render pass sorted by lease_priority ASC, z_order DESC), Level 5 Emergency (render only chrome layer + highest-priority single tile).
 Source: RFC 0002 §6.2
 Scope: v1-mandatory
 
@@ -328,10 +328,10 @@ Scope: v1-mandatory
 
 #### Scenario: Post-revocation cleanup
 - **WHEN** a session is revoked
-- **THEN** the runtime MUST free all agent-owned textures and node data after a bounded, configurable post-revocation delay, reducing the agent's resource footprint to zero
+- **THEN** the runtime MUST free all agent-owned textures and node data after a configurable post-revocation delay in the range [0ms, 5000ms] (see Implementation Notes for default), reducing the agent's resource footprint to zero
 
 ### Requirement: Graceful Shutdown
-Shutdown MUST follow an ordered sequence: (1) stop accepting new connections, (2) drain active mutations (wait up to a configurable drain timeout for compositor thread to finish current frame), (3) revoke all leases without waiting for acknowledgement, (4) flush telemetry with a configurable grace period, (5) terminate agent sessions, (6) GPU drain via device.poll(Wait), (7) release resources with reference counts reaching zero, (8) exit process (code 0 for clean, non-zero for error).
+Shutdown MUST follow an ordered sequence: (1) stop accepting new connections, (2) drain active mutations (wait up to a configurable drain timeout in the range [0ms, 60000ms] for compositor thread to finish current frame), (3) revoke all leases without waiting for acknowledgement, (4) flush telemetry with a configurable grace period in the range [0ms, 10000ms], (5) terminate agent sessions, (6) GPU drain via device.poll(Wait), (7) release resources with reference counts reaching zero, (8) exit process (code 0 for clean, non-zero for error). See Implementation Notes for suggested defaults.
 Source: RFC 0002 §1.4
 Scope: v1-mandatory
 
@@ -410,13 +410,13 @@ The force-software environment variable is conventionally named `HEADLESS_FORCE_
 
 ### Degradation Ladder Ratios
 
-Suggested default ratios for the degradation levels. These are tunable via configuration:
+Suggested default ratios for the degradation levels. Implementations MAY expose configuration options to adjust these values:
 
 - **Level 1 Coalesce**: reduce outbound state-stream SceneEvent frequency by 2x (one notification per two frames)
 - **Level 2 ReduceTextureQuality**: scale down textures whose linear dimensions exceed 512px to 50% of their original linear dimensions
 - **Level 3 DisableTransparency**: force all semi-transparent tiles to opaque; skip alpha-blend render passes entirely
 
-These ratios represent validated defaults. Operators with specialized hardware profiles may tune them within the configuration schema.
+These ratios represent validated defaults. Operators with specialized hardware profiles MAY override them using implementation-defined configuration mechanisms.
 
 ### Post-Revocation Cleanup Delay
 
