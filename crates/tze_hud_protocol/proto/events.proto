@@ -80,3 +80,325 @@ message SceneEvent {
     LeaseEvent       lease        = 30;
   }
 }
+
+// ─── Input Event Types (RFC 0004) ─────────────────────────────────────────────
+//
+// The RFC 0004 input event messages below encode tile_id and node_id as raw 16-byte
+// UUIDv7 (bytes). This diverges from the older InputEvent/SceneEvent messages above,
+// which use string IDs. The bytes encoding matches RFC 0006 §9.1 and the SceneId
+// convention in types.proto.
+//
+// All hardware timestamps use the _mono_us suffix (monotonic domain per RFC 0005 §2.4).
+
+// Pointer move event (ephemeral realtime — may be coalesced/dropped under backpressure).
+message PointerMoveEvent {
+  bytes  tile_id         = 1;  // 16-byte UUIDv7
+  bytes  node_id         = 2;  // 16-byte UUIDv7; empty if not on a node
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+  float  local_x         = 6;  // Coordinates relative to tile origin
+  float  local_y         = 7;
+  float  display_x       = 8;  // Raw display-space coordinates
+  float  display_y       = 9;
+}
+
+// Pointer enter event (ephemeral realtime).
+message PointerEnterEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+  float  local_x         = 6;
+  float  local_y         = 7;
+}
+
+// Pointer leave event (ephemeral realtime).
+message PointerLeaveEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+}
+
+// Pointer down event (transactional — never dropped).
+message PointerDownEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+  float  local_x         = 6;
+  float  local_y         = 7;
+  float  display_x       = 8;
+  float  display_y       = 9;
+  uint32 button          = 10; // 0=primary, 1=secondary, 2=middle
+}
+
+// Pointer up event (transactional — never dropped).
+message PointerUpEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+  float  local_x         = 6;
+  float  local_y         = 7;
+  float  display_x       = 8;
+  float  display_y       = 9;
+  uint32 button          = 10; // 0=primary, 1=secondary, 2=middle
+}
+
+// Click event — press and release on the same hit region (transactional — never dropped).
+message ClickEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+  float  local_x         = 6;
+  float  local_y         = 7;
+  uint32 button          = 8;
+}
+
+// Pointer cancel event — terminal event when capture is stolen (transactional).
+message PointerCancelEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+}
+
+// Key down event (transactional — never dropped).
+message KeyDownEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  uint64 timestamp_mono_us = 3;
+  string key_code        = 4;  // DOM-standard code (e.g. "KeyA", "ArrowLeft")
+  string key             = 5;  // Rendered character or key name (e.g. "a", "ArrowLeft")
+  bool   repeat          = 6;  // true if this is an auto-repeat event
+  bool   ctrl            = 7;
+  bool   shift           = 8;
+  bool   alt             = 9;
+  bool   meta            = 10;
+}
+
+// Key up event (transactional — never dropped).
+message KeyUpEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  uint64 timestamp_mono_us = 3;
+  string key_code        = 4;
+  string key             = 5;
+  bool   ctrl            = 6;
+  bool   shift           = 7;
+  bool   alt             = 8;
+  bool   meta            = 9;
+}
+
+// Character input event for composed text (transactional — never dropped).
+message CharacterEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  uint64 timestamp_mono_us = 3;
+  string character       = 4;  // Composed character string
+}
+
+// Focus gained event (transactional — never dropped).
+enum FocusSource {
+  FOCUS_SOURCE_UNSPECIFIED  = 0;
+  FOCUS_SOURCE_CLICK        = 1;
+  FOCUS_SOURCE_TAB_KEY      = 2;
+  FOCUS_SOURCE_PROGRAMMATIC = 3;
+  FOCUS_SOURCE_COMMAND_INPUT = 4;
+}
+
+message FocusGainedEvent {
+  bytes       tile_id         = 1;
+  bytes       node_id         = 2;  // Empty if tile-level focus
+  uint64      timestamp_mono_us = 3;
+  FocusSource source          = 4;
+}
+
+// Focus lost event (transactional — never dropped).
+enum FocusLostReason {
+  FOCUS_LOST_REASON_UNSPECIFIED        = 0;
+  FOCUS_LOST_REASON_CLICK_ELSEWHERE    = 1;
+  FOCUS_LOST_REASON_TAB_KEY            = 2;
+  FOCUS_LOST_REASON_PROGRAMMATIC       = 3;
+  FOCUS_LOST_REASON_TILE_DESTROYED     = 4;
+  FOCUS_LOST_REASON_TAB_SWITCHED       = 5;
+  FOCUS_LOST_REASON_LEASE_REVOKED      = 6;
+  FOCUS_LOST_REASON_AGENT_DISCONNECTED = 7;
+  FOCUS_LOST_REASON_COMMAND_INPUT      = 8;
+}
+
+message FocusLostEvent {
+  bytes          tile_id         = 1;
+  bytes          node_id         = 2;  // Empty if tile-level focus
+  uint64         timestamp_mono_us = 3;
+  FocusLostReason reason         = 4;
+}
+
+// Capture released event — confirms async InputCaptureRelease (transactional).
+enum CaptureReleasedReason {
+  CAPTURE_RELEASED_REASON_UNSPECIFIED   = 0;
+  CAPTURE_RELEASED_REASON_AGENT_RELEASED = 1;
+  CAPTURE_RELEASED_REASON_POINTER_UP    = 2;
+  CAPTURE_RELEASED_REASON_RUNTIME_REVOKED = 3;
+  CAPTURE_RELEASED_REASON_LEASE_REVOKED = 4;
+}
+
+message CaptureReleasedEvent {
+  bytes               tile_id         = 1;
+  bytes               node_id         = 2;
+  uint64              timestamp_mono_us = 3;
+  string              device_id       = 4;
+  CaptureReleasedReason reason        = 5;
+}
+
+// IME composition started event (transactional).
+message ImeCompositionStartEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  uint64 timestamp_mono_us = 3;
+}
+
+// IME composition updated event (transactional).
+message ImeCompositionUpdateEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  uint64 timestamp_mono_us = 3;
+  string composition_text = 4;  // Current preedit string
+}
+
+// IME composition ended event (transactional).
+message ImeCompositionEndEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  uint64 timestamp_mono_us = 3;
+  string committed_text  = 4;  // Final committed text (empty if cancelled)
+}
+
+// Gesture event (e.g. pinch, swipe) — ephemeral realtime.
+message GestureEvent {
+  bytes  tile_id         = 1;
+  bytes  node_id         = 2;
+  string interaction_id  = 3;
+  uint64 timestamp_mono_us = 4;
+  string device_id       = 5;
+  string gesture_kind    = 6;  // "pinch", "swipe", "rotate", etc.
+  float  scale           = 7;  // For pinch: cumulative scale factor
+  float  rotation        = 8;  // For rotate: cumulative angle in radians
+  float  delta_x         = 9;  // For swipe: delta in display-space pixels
+  float  delta_y         = 10;
+}
+
+// Scroll offset changed event — ephemeral realtime (coalesced to latest per tile).
+message ScrollOffsetChangedEvent {
+  bytes  tile_id         = 1;
+  uint64 timestamp_mono_us = 2;
+  float  offset_x        = 3;  // New cumulative scroll offset (pixels)
+  float  offset_y        = 4;
+}
+
+// Abstract command input event — transactional (never coalesced or dropped).
+// Delivers abstract navigational and activation commands per RFC 0004 §10.
+enum CommandAction {
+  COMMAND_ACTION_UNSPECIFIED  = 0;
+  COMMAND_ACTION_NAVIGATE_NEXT  = 1;
+  COMMAND_ACTION_NAVIGATE_PREV  = 2;
+  COMMAND_ACTION_ACTIVATE       = 3;
+  COMMAND_ACTION_CANCEL         = 4;
+  COMMAND_ACTION_CONTEXT        = 5;
+  COMMAND_ACTION_SCROLL_UP      = 6;
+  COMMAND_ACTION_SCROLL_DOWN    = 7;
+}
+
+enum CommandSource {
+  COMMAND_SOURCE_UNSPECIFIED    = 0;
+  COMMAND_SOURCE_KEYBOARD       = 1;
+  COMMAND_SOURCE_DPAD           = 2;
+  COMMAND_SOURCE_VOICE          = 3;
+  COMMAND_SOURCE_REMOTE_CLICKER = 4;
+  COMMAND_SOURCE_ROTARY_DIAL    = 5;
+  COMMAND_SOURCE_PROGRAMMATIC   = 6;
+}
+
+message CommandInputEvent {
+  bytes         tile_id         = 1;
+  bytes         node_id         = 2;
+  string        interaction_id  = 3;
+  uint64        timestamp_mono_us = 4;
+  string        device_id       = 5;
+  CommandAction action          = 6;
+  CommandSource source          = 7;
+}
+
+// ─── Input Envelope and Event Batch (RFC 0004 §8.3, §8.4, §9.1) ───────────────
+//
+// InputEnvelope is a 19-variant oneof covering all V1-mandatory input event types.
+// EventBatch groups per-frame events for a single agent on ServerMessage field 34.
+// Multiple input events within a single compositor frame are batched into a single
+// EventBatch and delivered as a single ServerMessage. Within a batch, events are
+// ordered by timestamp_mono_us ascending (RFC 0004 §8.4).
+//
+// NOTE: RFC 0004 §9.1 specifies a 22-variant InputEnvelope including DoubleClickEvent
+// (field 7), ContextMenuEvent (field 8), and ImeCompositionCancelledEvent (field 19).
+// Those variants and their field numbers are reserved for a future PR that adds the
+// corresponding message definitions; field numbers below skip these slots to preserve
+// alignment with the RFC's fixed assignments once the messages are defined.
+
+message InputEnvelope {
+  oneof event {
+    // Pointer events (RFC 0004 §9.1 field assignments)
+    PointerDownEvent        pointer_down         = 1;   // transactional
+    PointerUpEvent          pointer_up           = 2;   // transactional
+    PointerMoveEvent        pointer_move         = 3;   // ephemeral realtime
+    PointerEnterEvent       pointer_enter        = 4;   // ephemeral realtime
+    PointerLeaveEvent       pointer_leave        = 5;   // ephemeral realtime
+    ClickEvent              click                = 6;   // transactional
+    // fields 7-8: DoubleClickEvent and ContextMenuEvent — reserved; messages not yet defined
+    PointerCancelEvent      pointer_cancel       = 9;   // transactional
+
+    // Keyboard events
+    KeyDownEvent            key_down             = 10;  // transactional
+    KeyUpEvent              key_up               = 11;  // transactional
+    CharacterEvent          character            = 12;  // transactional
+
+    // Focus events (FOCUS_EVENTS subscription category)
+    FocusGainedEvent        focus_gained         = 13;  // transactional
+    FocusLostEvent          focus_lost           = 14;  // transactional
+
+    // Gesture events
+    GestureEvent            gesture              = 15;  // ephemeral realtime
+
+    // IME events (FOCUS_EVENTS subscription category; RFC 0004 §4.0 V1 fallback)
+    ImeCompositionStartEvent  ime_composition_start  = 16;  // transactional
+    ImeCompositionUpdateEvent ime_composition_update = 17;  // transactional
+    ImeCompositionEndEvent    ime_composition_end    = 18;  // transactional
+    // field 19: ImeCompositionCancelledEvent — reserved; message not yet defined
+
+    // Capture events (FOCUS_EVENTS subscription category; RFC 0004 §8.3.1)
+    CaptureReleasedEvent    capture_released     = 20;  // transactional
+
+    // Scroll events
+    ScrollOffsetChangedEvent scroll_offset_changed = 21;  // ephemeral realtime
+
+    // Command input (abstract navigation/activation)
+    CommandInputEvent       command_input        = 22;  // transactional
+  }
+}
+
+// Per-frame event batch delivered on ServerMessage field 34 (RFC 0004 §8.4, RFC 0005 §3.1).
+// All events in a batch are for the same agent session and frame.
+// Variants are filtered per RFC 0005 §7.1 before delivery (input_events vs. focus_events
+// subscription categories).
+message EventBatch {
+  uint64                  frame_number = 1;  // Compositor frame number (monotonically increasing)
+  uint64                  batch_ts_us  = 2;  // Batch assembly timestamp (wall-clock UTC µs; RFC 0003 §1.1)
+  repeated InputEnvelope  events       = 3;  // Ordered by timestamp_mono_us ascending
+}
