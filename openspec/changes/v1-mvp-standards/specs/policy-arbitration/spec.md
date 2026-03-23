@@ -362,7 +362,7 @@ Scope: v1-mandatory
 - **THEN** it has already passed Level 3 (capability), Level 2 (privacy), and Level 4 (attention) checks
 
 ### Cross-Reference: Freeze and Safe Mode State Transitions
-Freeze/safe-mode state transitions are governed exclusively by the system shell. See system-shell spec: "Requirement: Safe Mode and Freeze Interaction (Shell State Invariant)." Policy evaluation is a pure function; it does not produce state-transition side effects on `OverrideState`.
+Freeze/safe-mode state transitions are governed exclusively by the system shell. See system-shell spec: "Requirement: Safe Mode and Freeze Interaction (Shell State Invariant)." Policy arbitration and evaluation MUST NOT write `OverrideState` or perform freeze/safe-mode override state transitions.
 
 ### Requirement: Dynamic Policy Rules
 Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules are static (derived from configuration at load time).
