@@ -10,9 +10,7 @@ use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::*;
 use crate::proto::session::client_message::Payload as ClientPayload;
 use crate::proto::session::server_message::Payload as ServerPayload;
-#[allow(deprecated)]
-use crate::server::SharedState;
-use crate::session::SESSION_EVENT_CHANNEL_CAPACITY;
+use crate::session::{SharedState, SESSION_EVENT_CHANNEL_CAPACITY};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -90,7 +88,6 @@ impl StreamSession {
 /// Holds shared state (scene graph + session registry) and implements the
 /// `HudSession` trait generated from `session.proto`.
 pub struct HudSessionImpl {
-    #[allow(deprecated)]
     pub state: Arc<Mutex<SharedState>>,
     psk: String,
 }
@@ -99,8 +96,7 @@ impl HudSessionImpl {
     /// Create a new session service with the given scene graph and PSK.
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         Self {
-            #[allow(deprecated)]
-            state: Arc::new(Mutex::new(SharedState {
+                    state: Arc::new(Mutex::new(SharedState {
                 scene,
                 sessions: crate::session::SessionRegistry::new(psk),
             })),
@@ -108,8 +104,7 @@ impl HudSessionImpl {
         }
     }
 
-    /// Create from existing shared state (for co-hosting with old SceneService).
-    #[allow(deprecated)]
+    /// Create from existing shared state.
     pub fn from_shared_state(state: Arc<Mutex<SharedState>>, psk: &str) -> Self {
         Self {
             state,
@@ -278,7 +273,6 @@ impl HudSession for HudSessionImpl {
 
 // ─── Handshake handlers ─────────────────────────────────────────────────────
 
-#[allow(deprecated)]
 async fn handle_session_init(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,
@@ -305,7 +299,7 @@ async fn handle_session_init(
     let namespace = init.agent_id.clone();
     let resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
 
-    // Register session in the legacy registry (for shared state compatibility)
+    // Register session in the session registry
     {
         let mut st = state.lock().await;
         let _ = st.sessions.authenticate(
@@ -365,7 +359,6 @@ async fn handle_session_init(
     Some(session)
 }
 
-#[allow(deprecated)]
 async fn handle_session_resume(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,
@@ -444,7 +437,6 @@ async fn handle_session_resume(
 
 // ─── Message handlers ───────────────────────────────────────────────────────
 
-#[allow(deprecated)]
 async fn handle_client_message(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -487,7 +479,6 @@ async fn handle_client_message(
     }
 }
 
-#[allow(deprecated)]
 async fn handle_mutation_batch(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -660,7 +651,6 @@ async fn handle_mutation_batch(
     }
 }
 
-#[allow(deprecated)]
 async fn handle_lease_request(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -704,7 +694,6 @@ async fn handle_lease_request(
         .await;
 }
 
-#[allow(deprecated)]
 async fn handle_lease_renew(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -768,7 +757,6 @@ async fn handle_lease_renew(
     }
 }
 
-#[allow(deprecated)]
 async fn handle_lease_release(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,

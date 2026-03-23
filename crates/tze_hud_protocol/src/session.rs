@@ -3,8 +3,15 @@
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tze_hud_scene::SceneId;
+use tze_hud_scene::graph::SceneGraph;
 
 use crate::proto::SceneEvent;
+
+/// Shared state between the gRPC server and the compositor.
+pub struct SharedState {
+    pub scene: SceneGraph,
+    pub sessions: SessionRegistry,
+}
 
 /// Bounded per-session event channel capacity (events).
 pub const SESSION_EVENT_CHANNEL_CAPACITY: usize = 256;
