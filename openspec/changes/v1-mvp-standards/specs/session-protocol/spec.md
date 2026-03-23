@@ -38,6 +38,68 @@ Scope: v1-mandatory
 
 ---
 
+### Requirement: Proto File Layout
+The v1 protobuf definitions SHALL be organized into exactly three files under `crates/tze_hud_protocol/proto/`:
+
+**`types.proto`** (`package tze_hud.protocol.v1`) — Geometry primitives, scene node types, mutation types, and zone types. SHALL contain:
+- Geometry: `Rect`, `Rgba`
+- Node types: `NodeProto`, `SolidColorNodeProto`, `TextMarkdownNodeProto`, `HitRegionNodeProto`, `StaticImageNodeProto`, `ImageFitModeProto`
+- Mutation types: `MutationProto`, `CreateTileMutation`, `SetTileRootMutation`, `MutationBatchRequest`, `MutationBatchResponse`
+- Zone types: `ZoneContent`, `ZonePublishToken`, `ZoneDefinitionProto`, `ZoneRegistrySnapshotProto`, `ZonePublishRecordProto`, `NotificationPayload`, `StatusBarPayload`, `GeometryPolicyProto`, `RelativeGeometryPolicy`, `EdgeAnchoredGeometryPolicy`, `RenderingPolicyProto`, `DisplayEdge`, `TextAlignProto`, `ContentionPolicyProto`
+- Zone mutation types: `PublishToZoneMutation`, `ClearZoneMutation`
+- Zone query types: `ZoneRegistryRequest`, `ZoneRegistryResponse`
+
+**`events.proto`** (`package tze_hud.protocol.v1`) — Event types dispatched from runtime to agents. SHALL import `types.proto`. SHALL contain:
+- Input events: `InputEvent`, `InputEventKind`
+- Scene lifecycle events: `TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`
+- Lease events: `LeaseEvent`, `LeaseEventKind`
+- Event envelope: `SceneEvent`
+
+**`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, and backpressure. SHALL import `types.proto` and `events.proto`. SHALL contain:
+- gRPC service: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`
+- Client/server envelopes: `ClientMessage`, `ServerMessage`
+- Session lifecycle: `SessionInit`, `SessionResume`, `SessionClose`, `SessionAccepted`, `SessionDenied`
+- Lease messages: `LeaseRequest`, `LeaseRenew`, `LeaseRelease`, `LeaseGrant`, `LeaseDenial`, `LeaseStateChange`
+- Mutation messages: `MutationBatch`, `MutationResult`
+- Subscription messages: `SubscriptionChange`, `SubscriptionAck`
+- Scene state: `SceneSnapshot`, `SceneDelta`
+- Keepalive: `Heartbeat`
+- Telemetry: `TelemetryFrame`
+- Backpressure: `BackpressureSignal`
+
+**Deleted — no new home:** The following MUST be removed from the v1 protobuf definitions and SHALL NOT be assigned to any of the three target files:
+- `SceneService` service definition (all unary RPCs: `Authenticate`, `AcquireLease`, `RenewLease`, `RevokeLease`, `ApplyMutations`, `QueryScene`, `QueryZoneRegistry`, `SubscribeEvents`)
+- Legacy request/response wrappers: `ConnectRequest`, `ConnectResponse`, `LeaseRequest` (unary form), `LeaseResponse` (unary form), `LeaseRenewRequest`, `LeaseRenewResponse`, `LeaseRevokeRequest`, `LeaseRevokeResponse`, `MutationBatchRequest`, `MutationBatchResponse` (unary form), `EventSubscribeRequest`, `SceneQueryRequest`, `SceneQueryResponse`
+
+Source: proto file layout is part of the wire protocol contract; determines import paths and package namespaces
+Scope: v1-mandatory
+
+#### Scenario: types.proto contains all shared primitives
+- **WHEN** building the v1 protobuf package
+- **THEN** geometry primitives (`Rect`, `Rgba`), node types, mutation types, and zone types SHALL all be defined in `types.proto`; no other v1 proto file SHALL re-define these types
+
+#### Scenario: events.proto imports types.proto and contains all event types
+- **WHEN** building the v1 protobuf package
+- **THEN** `events.proto` SHALL import `types.proto` and SHALL define `InputEvent`, `InputEventKind`, `TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`, `LeaseEvent`, `LeaseEventKind`, and `SceneEvent`; no other proto file SHALL re-define these event types
+
+#### Scenario: session.proto imports events.proto and types.proto
+- **WHEN** an agent SDK generates client code from the v1 proto package
+- **THEN** `session.proto` SHALL import both `types.proto` and `events.proto`; there SHALL be no circular imports among the three files
+
+#### Scenario: No scene_service.proto in v1 build
+- **WHEN** building the v1 protobuf definitions
+- **THEN** `scene_service.proto` SHALL NOT be present or compiled; all types it contained SHALL have migrated to `types.proto` or `events.proto`, and `SceneService` SHALL have been deleted entirely
+
+#### Scenario: Legacy wrappers absent from v1 wire format
+- **WHEN** an agent SDK generates client code from the v1 proto package
+- **THEN** the generated code SHALL NOT contain `ConnectRequest`, `ConnectResponse`, `EventSubscribeRequest`, `SceneQueryRequest`, `SceneQueryResponse`, or any unary-RPC request/response pair from the former `SceneService`
+
+#### Scenario: Import paths are stable within v1
+- **WHEN** a worker writes a Rust or TypeScript agent that imports session protocol types
+- **THEN** all geometry types SHALL be imported from `tze_hud.protocol.v1` (defined in `types.proto`), all event types SHALL be imported from `tze_hud.protocol.v1` (defined in `events.proto`), and all session/service types SHALL be imported from `tze_hud.protocol.v1.session` (defined in `session.proto`)
+
+---
+
 ### Requirement: Session Lifecycle State Machine
 The session SHALL progress through six states: Connecting, Handshaking, Active, Disconnecting, Closed, and Resuming. Connecting SHALL represent TCP/TLS establishment. Handshaking SHALL represent SessionInit validation. Active SHALL represent the open bidirectional stream. Disconnecting SHALL represent graceful close. Closed SHALL represent stream termination (with orphaned leases if previously Active). Resuming SHALL represent reconnection within the grace period. Valid transitions SHALL include: Connecting to Handshaking, Handshaking to Active or Closed (on auth failure), Active to Disconnecting or Closed (on ungraceful disconnect), Disconnecting to Closed, Closed to Resuming (within grace period), Resuming to Active (accepted) or Closed (token expired/invalid).
 Source: RFC 0005 §1.1
