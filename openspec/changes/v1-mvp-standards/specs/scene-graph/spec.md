@@ -21,7 +21,7 @@ Scope: v1-mandatory
 - **THEN** the runtime MUST interpret it as "absent/null" (e.g., no root node, no sync group membership)
 
 ### Requirement: ResourceId Identity
-Immutable uploaded resources (images, fonts, raw buffers) SHALL be identified by a `ResourceId`, which MUST be a BLAKE3 content hash (32 bytes, hex-encoded). Two agents uploading the same content MUST receive the same ResourceId; the runtime SHALL store the resource once.
+Immutable uploaded resources (images, fonts, raw buffers) SHALL be identified by a `ResourceId`, which MUST be a BLAKE3 content hash stored as raw 32 bytes (256-bit binary). Two agents uploading the same content MUST receive the same ResourceId; the runtime SHALL store the resource once. Hex encoding is a display/debug concern only and MUST NOT appear on the wire or in storage.
 Source: RFC 0001 §1.1
 Scope: v1-mandatory
 
@@ -274,7 +274,7 @@ Scope: v1-mandatory
 - **THEN** the query MUST complete in less than 100us on reference hardware (single core at 3GHz equivalent)
 
 ### Requirement: Scene Snapshot Serialization
-A full scene snapshot MUST be a complete, deterministic serialization of the scene graph at a specific sequence number. It MUST include: sequence, timestamp_us, all tabs (ordered by display_order), all tiles, all nodes, zone_registry (types, instances, active publishes), active_tab, and a BLAKE3 checksum. Fields MUST be serialized in deterministic order (BTreeMap, not HashMap). Serialization MUST complete in < 1ms for a 100-tile scene with 1000 nodes total.
+A full scene snapshot MUST be a complete, deterministic serialization of the scene graph at a specific sequence number. It MUST include: sequence, snapshot_wall_us (UTC wall-clock timestamp of the snapshot), snapshot_mono_us (monotonic timestamp of the snapshot), all tabs (ordered by display_order), all tiles, all nodes, zone_registry (types, instances, active publishes), active_tab, and a BLAKE3 checksum. Fields MUST be serialized in deterministic order (BTreeMap, not HashMap). Serialization MUST complete in < 1ms for a 100-tile scene with 1000 nodes total.
 Source: RFC 0001 §4.1, §10
 Scope: v1-mandatory
 

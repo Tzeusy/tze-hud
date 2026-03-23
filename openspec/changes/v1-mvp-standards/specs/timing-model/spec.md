@@ -92,7 +92,7 @@ Scope: v1-mandatory
 - **THEN** the node MUST use T1 for its presentation scheduling, ignoring T2
 
 ### Requirement: Frame Quantization
-A present_at_us timestamp T is "in scope" for frame F if and only if T <= frame_F_vsync_us. This is a strict no-earlier-than rule: content MUST never be presented before its declared present_at_us. A timestamp falling between two vsync times MUST be held until the next frame whose vsync is at or after T.
+A present_at_us timestamp T is "in scope" for frame F if and only if T <= frame_F_vsync_wall_us. This is a strict no-earlier-than rule: content MUST never be presented before its declared present_at_us. A timestamp falling between two vsync times MUST be held until the next frame whose vsync is at or after T.
 Source: RFC 0003 §3.3
 Scope: v1-mandatory
 
@@ -110,7 +110,7 @@ Source: RFC 0003 §3.5
 Scope: v1-mandatory
 
 #### Scenario: Stale timestamp rejection
-- **WHEN** an agent submits a mutation with present_at_us more than 60 seconds before session_open_at_us
+- **WHEN** an agent submits a mutation with present_at_us more than 60 seconds before session_open_wall_us
 - **THEN** the compositor MUST reject with TIMESTAMP_TOO_OLD
 
 #### Scenario: Future timestamp rejection
@@ -234,7 +234,7 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST reject new mutation batches with CLOCK_SKEW_EXCESSIVE
 
 ### Requirement: Presentation Deadline
-Mutations with present_at_us = T MUST be held in a per-agent pending queue (sorted by present_at_us ascending, max depth 256 per agent) until frame F where frame_F_vsync_us >= T. The drain condition MUST enforce the no-earlier-than guarantee directly. Late arrivals (after Stage 3 closes) MUST be deferred to the next frame by default. EphemeralRealtime class with DROP_IF_LATE delivery_policy MAY be dropped instead of deferred.
+Mutations with present_at_us = T MUST be held in a per-agent pending queue (sorted by present_at_us ascending, max depth 256 per agent) until frame F where frame_F_vsync_wall_us >= T. The drain condition MUST enforce the no-earlier-than guarantee directly. Late arrivals (after Stage 3 closes) MUST be deferred to the next frame by default. EphemeralRealtime class with DROP_IF_LATE delivery_policy MAY be dropped instead of deferred.
 Source: RFC 0003 §5.1, §5.2, §5.3
 Scope: v1-mandatory
 
@@ -251,7 +251,7 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST discard it rather than deferring to the next frame
 
 ### Requirement: Expiration Policy
-A tile with expires_at_us = T MUST be automatically removed at the first frame F where frame_F_vsync_us >= T. Expiry evaluation MUST happen at Stage 4 using a min-heap (O(expired_items) per frame). Expiry MUST be non-negotiable under load: it MUST run even during degradation Level 4 or 5. Expiry and sync groups: an expiring tile MUST be removed from its sync group before deletion.
+A tile with expires_at_us = T MUST be automatically removed at the first frame F where frame_F_vsync_wall_us >= T. Expiry evaluation MUST happen at Stage 4 using a min-heap (O(expired_items) per frame). Expiry MUST be non-negotiable under load: it MUST run even during degradation Level 4 or 5. Expiry and sync groups: an expiring tile MUST be removed from its sync group before deletion.
 Source: RFC 0003 §5.4
 Scope: v1-mandatory
 
@@ -380,7 +380,7 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST reject with INVALID_DELIVERY_POLICY
 
 ### Requirement: ClockSync RPC
-The compositor MUST provide a ClockSync unary RPC for agents to align their clocks. The request carries agent_timestamp_us; the response provides compositor_mono_us, compositor_wall_us, estimated_skew_us (signed int64), skew_within_tolerance, and optional warning. Agents SHOULD call ClockSync at session start and after receiving CLOCK_SKEW_HIGH events.
+The compositor MUST provide a ClockSync unary RPC for agents to align their clocks. The request carries agent_timestamp_wall_us; the response provides compositor_mono_us, compositor_wall_us, estimated_skew_us (signed int64), skew_within_tolerance, and optional warning. Agents SHOULD call ClockSync at session start and after receiving CLOCK_SKEW_HIGH events.
 Source: RFC 0003 §7.1, §4.5
 Scope: v1-mandatory
 
