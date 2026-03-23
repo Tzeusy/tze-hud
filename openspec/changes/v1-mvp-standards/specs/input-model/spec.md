@@ -276,18 +276,18 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Pointer Event Types
-The runtime SHALL support the following pointer event types: PointerDownEvent, PointerUpEvent, PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, ClickEvent, DoubleClickEvent, ContextMenuEvent, and PointerCancelEvent. All pointer events SHALL carry appropriate fields including tile_id, node_id, device_id, coordinates (node-local and display-space), modifiers, and timestamp_hw_us (OS hardware event timestamp, monotonic domain).
+The runtime SHALL support the following pointer event types: PointerDownEvent, PointerUpEvent, PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, ClickEvent, DoubleClickEvent, ContextMenuEvent, and PointerCancelEvent. All pointer events SHALL carry appropriate fields including tile_id, node_id, device_id, coordinates (node-local and display-space), modifiers, and timestamp_mono_us (OS hardware event timestamp, monotonic domain).
 Source: RFC 0004 §7.3
 Scope: v1-mandatory
 
 #### Scenario: PointerDownEvent carries all required fields
 - **WHEN** the user presses the left mouse button on a HitRegionNode
-- **THEN** the dispatched PointerDownEvent SHALL include tile_id, node_id, device_id, button=PRIMARY, node-local x/y, display-space x/y, modifiers, timestamp_hw_us, and interaction_id
+- **THEN** the dispatched PointerDownEvent SHALL include tile_id, node_id, device_id, button=PRIMARY, node-local x/y, display-space x/y, modifiers, timestamp_mono_us, and interaction_id
 
 ---
 
 ### Requirement: Keyboard Event Types
-The runtime SHALL support KeyDownEvent, KeyUpEvent, and CharacterEvent for focused nodes. KeyDownEvent SHALL carry physical key_code (DOM KeyboardEvent.code), logical key value (DOM KeyboardEvent.key), modifiers, repeat flag, and timestamp_hw_us. CharacterEvent SHALL carry post-IME committed Unicode characters. Keyboard events SHALL target the focused node first, then bubble to the tile if the node does not consume them.
+The runtime SHALL support KeyDownEvent, KeyUpEvent, and CharacterEvent for focused nodes. KeyDownEvent SHALL carry physical key_code (DOM KeyboardEvent.code), logical key value (DOM KeyboardEvent.key), modifiers, repeat flag, and timestamp_mono_us. CharacterEvent SHALL carry post-IME committed Unicode characters. Keyboard events SHALL target the focused node first, then bubble to the tile if the node does not consume them.
 Source: RFC 0004 §7.4
 Scope: v1-mandatory
 
@@ -328,13 +328,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Event Serialization and Batching
-Events SHALL be serialized as protobuf messages in InputEnvelope wrapped in EventBatch. Multiple input events for the same agent within a single frame SHALL be batched into a single EventBatch and delivered as a single SessionMessage (field 34). Within a batch, events SHALL be ordered by timestamp_hw_us ascending.
+Events SHALL be serialized as protobuf messages in InputEnvelope wrapped in EventBatch. Multiple input events for the same agent within a single frame SHALL be batched into a single EventBatch and delivered as a single SessionMessage (field 34). Within a batch, events SHALL be ordered by timestamp_mono_us ascending.
 Source: RFC 0004 §8.3, §8.4
 Scope: v1-mandatory
 
 #### Scenario: Same-frame events batched
 - **WHEN** two pointer events for the same agent occur within the same frame
-- **THEN** they SHALL be delivered in a single EventBatch with events ordered by timestamp_hw_us
+- **THEN** they SHALL be delivered in a single EventBatch with events ordered by timestamp_mono_us
 
 ---
 
@@ -365,7 +365,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Protobuf Schema for Input Events
-The input event system SHALL define its wire format in input.proto (package tze_hud.input.v1). The schema SHALL include: InputEnvelope (22-variant oneof covering all pointer, keyboard, focus, capture, gesture, IME, scroll, and command events), EventBatch (frame_number, batch_ts_us, repeated InputEnvelope), and all individual event messages. All tile_id and node_id fields SHALL use SceneId (imported from scene.proto). All timestamp fields SHALL use the _hw_us suffix for hardware timestamps (monotonic domain).
+The input event system wire format is defined in events.proto (package tze_hud.protocol.v1) per the normative three-file proto layout mandated by session-protocol. There is no separate input.proto package. The schema SHALL include: InputEnvelope (22-variant oneof covering all pointer, keyboard, focus, capture, gesture, IME, scroll, and command events), EventBatch (frame_number, batch_ts_us, repeated InputEnvelope), and all individual event messages. All tile_id and node_id fields SHALL use SceneId (imported from types.proto). All timestamp fields SHALL use the _mono_us suffix for hardware timestamps (monotonic domain).
 Source: RFC 0004 §9.1
 Scope: v1-mandatory
 
@@ -376,7 +376,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Command Input Model
-The runtime SHALL support seven abstract command actions: NAVIGATE_NEXT, NAVIGATE_PREV, ACTIVATE, CANCEL, CONTEXT, SCROLL_UP, SCROLL_DOWN. These commands SHALL be delivered via CommandInputEvent in the EventBatch pipeline. CommandInputEvent SHALL carry tile_id, node_id, interaction_id, timestamp_hw_us, device_id, action, and source (KEYBOARD, DPAD, VOICE, REMOTE_CLICKER, ROTARY_DIAL, PROGRAMMATIC). CommandInputEvent SHALL be a transactional event (never coalesced or dropped).
+The runtime SHALL support seven abstract command actions: NAVIGATE_NEXT, NAVIGATE_PREV, ACTIVATE, CANCEL, CONTEXT, SCROLL_UP, SCROLL_DOWN. These commands SHALL be delivered via CommandInputEvent in the EventBatch pipeline. CommandInputEvent SHALL carry tile_id, node_id, interaction_id, timestamp_mono_us, device_id, action, and source (KEYBOARD, DPAD, VOICE, REMOTE_CLICKER, ROTARY_DIAL, PROGRAMMATIC). CommandInputEvent SHALL be a transactional event (never coalesced or dropped).
 Source: RFC 0004 §10
 Scope: v1-mandatory
 
@@ -464,7 +464,7 @@ Scope: v1-reserved
 ---
 
 ### Requirement: IME V1 Fallback
-V1 MAY ship without active IME composition support. Direct ASCII and basic Unicode keyboard input via KeyDownEvent and CharacterEvent SHALL be v1-mandatory. The full IME composition protocol (ImeCompositionStarted, Updated, Committed, Cancelled) is v1-reserved with stable schema defined in input.proto.
+V1 MAY ship without active IME composition support. Direct ASCII and basic Unicode keyboard input via KeyDownEvent and CharacterEvent SHALL be v1-mandatory. The full IME composition protocol (ImeCompositionStarted, Updated, Committed, Cancelled) is v1-reserved with stable schema defined in events.proto.
 Source: RFC 0004 §4.0
 Scope: v1-reserved
 
