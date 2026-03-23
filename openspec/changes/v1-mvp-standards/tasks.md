@@ -6,7 +6,7 @@
 - [ ] 1.4 Implement atomic batch mutation pipeline (stage → validate → commit or reject all)
 - [ ] 1.5 Implement tile CRUD operations with z-order management and field invariants
 - [ ] 1.6 Implement tab CRUD operations with active tab switching
-- [ ] 1.7 Implement static zone registry loaded from configuration (subtitle, notification, status_bar, ambient_background)
+- [ ] 1.7 Implement static zone registry loaded from configuration (subtitle, notification, status_bar, pip, ambient_background, alert_banner)
 - [ ] 1.8 Implement zone publishing mutations with contention policies (latest-wins, stack, merge-by-key, replace)
 - [ ] 1.9 Implement hit-testing pipeline with layer ordering (chrome → content z-order → background)
 - [ ] 1.10 Implement scene snapshot serialization and full-snapshot delivery for reconnection
@@ -114,7 +114,7 @@
 ## 10. Scene Events
 
 - [ ] 10.1 Implement event taxonomy: input events, scene events, system events with SceneEvent envelope
-- [ ] 10.2 Implement interruption classification (CRITICAL, HIGH, NORMAL, LOW, SILENT)
+- [ ] 10.2 Implement interruption classification (CRITICAL/HIGH/NORMAL/LOW/SILENT)
 - [ ] 10.3 Implement quiet hours enforcement with queue semantics
 - [ ] 10.4 Implement subscription model with 9 category types and prefix filtering
 - [ ] 10.5 Implement event bus pipeline: classify → filter → coalesce → deliver
