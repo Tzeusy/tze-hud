@@ -55,10 +55,10 @@ The v1 protobuf definitions SHALL be organized into exactly three files under `c
 - Lease events: `LeaseEvent`, `LeaseEventKind`
 - Event envelope: `SceneEvent`
 
-**`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, and backpressure. SHALL import `types.proto` and `events.proto`. SHALL contain:
+**`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, backpressure, input control, capability management, and runtime errors. SHALL import `types.proto` and `events.proto`. SHALL contain:
 - gRPC service: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`
 - Client/server envelopes: `ClientMessage`, `ServerMessage`
-- Session lifecycle: `SessionInit`, `SessionResume`, `SessionResumeResult`, `SessionClose`, `SessionEstablished`, `SessionError`
+- Session lifecycle: `SessionInit`, `SessionResume`, `SessionResumeResult`, `SessionClose`, `SessionEstablished`, `SessionError`, `SessionSuspended`, `SessionResumed`
 - Lease messages: `LeaseRequest`, `LeaseRenew`, `LeaseRelease`, `LeaseResponse`, `LeaseStateChange`
 - Mutation messages: `MutationBatch`, `MutationResult`
 - Subscription messages: `SubscriptionChange`, `SubscriptionChangeResult`
@@ -67,6 +67,10 @@ The v1 protobuf definitions SHALL be organized into exactly three files under `c
 - Keepalive: `Heartbeat`
 - Telemetry: `TelemetryFrame`
 - Backpressure: `BackpressureSignal`
+- Input control: `InputFocusRequest`, `InputFocusResponse`, `InputCaptureRequest`, `InputCaptureResponse`, `InputCaptureRelease`, `SetImePosition`
+- Capability management: `CapabilityRequest`, `CapabilityNotice`
+- Runtime errors: `RuntimeError`
+- Event delivery: `EventBatch` (carries `InputEvent` variants from `events.proto` on `ServerMessage` field 34)
 
 **Deleted — no new home:** The following MUST be removed from the v1 protobuf definitions and SHALL NOT be assigned to any of the three target files:
 - `SceneService` service definition (all unary RPCs: `Authenticate`, `AcquireLease`, `RenewLease`, `RevokeLease`, `ApplyMutations`, `QueryScene`, `QueryZoneRegistry`, `SubscribeEvents`)
@@ -185,7 +189,7 @@ Source: RFC 0005 §1.6, DR-SP2
 Scope: v1-mandatory
 
 #### Scenario: Heartbeat timeout triggers disconnect
-- **WHEN** the runtime does not receive a HeartbeatPing for 15 seconds (3 x 5000ms)
+- **WHEN** the runtime does not receive a Heartbeat for 15 seconds (3 x 5000ms)
 - **THEN** the session SHALL be marked as ungracefully disconnected, leases SHALL enter orphaned state, and a disconnection badge SHALL appear on affected tiles
 
 ---
@@ -247,7 +251,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Traffic Class Routing
-Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (HeartbeatPing, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
+Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (Heartbeat, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
 Source: RFC 0005 §3.1, §3.2, §5.1, RFC 0004 §8.5
 Scope: v1-mandatory
 
@@ -262,16 +266,16 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Heartbeat Protocol
-The agent SHALL send HeartbeatPing at the interval specified in SessionEstablished.heartbeat_interval_ms (default: 5000ms). The runtime SHALL respond with HeartbeatPong echoing the client's monotonic timestamp and including the server's wall-clock timestamp. The runtime SHALL treat the session as ungracefully disconnected when heartbeat_missed_threshold (default: 3) consecutive pings are missed, resulting in a 15000ms grace window.
+The agent SHALL send Heartbeat (ClientMessage field 31) at the interval specified in SessionEstablished.heartbeat_interval_ms (default: 5000ms). The runtime SHALL echo a Heartbeat (ServerMessage field 33) back with the same timestamp_mono_us value for RTT measurement. Both directions use the same `Heartbeat` message type (a single bidirectional message, not separate ping/pong types). The runtime SHALL treat the session as ungracefully disconnected when heartbeat_missed_threshold (default: 3) consecutive client Heartbeats are missed, resulting in a 15000ms grace window.
 Source: RFC 0005 §3.6
 Scope: v1-mandatory
 
 #### Scenario: Heartbeat exchange
-- **WHEN** the agent sends HeartbeatPing(client_timestamp_mono_us=12345)
-- **THEN** the runtime SHALL respond with HeartbeatPong(client_timestamp_mono_us=12345, server_timestamp_wall_us=<current_wall_time>)
+- **WHEN** the agent sends Heartbeat(timestamp_mono_us=12345) as ClientMessage field 31
+- **THEN** the runtime SHALL respond with Heartbeat(timestamp_mono_us=12345) as ServerMessage field 33, and the agent SHALL compute RTT as current_monotonic - echoed_value
 
 #### Scenario: Missed heartbeats trigger disconnect
-- **WHEN** 3 consecutive heartbeat intervals pass without a HeartbeatPing from the agent
+- **WHEN** 3 consecutive heartbeat intervals pass without a client Heartbeat from the agent
 - **THEN** the runtime SHALL declare the session ungracefully disconnected and begin the reconnection grace period
 
 ---
@@ -541,7 +545,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: SessionSuspended and SessionResumed Messages
-The runtime SHALL send SessionSuspended to all active sessions when safe mode is entered (RFC 0007 §5.2). After delivery, all MutationBatch messages from suspended sessions SHALL be rejected with RuntimeError error_code="SAFE_MODE_ACTIVE". The agent's session SHALL remain open and HeartbeatPing/HeartbeatPong SHALL continue. The runtime SHALL send SessionResumed to all suspended sessions when safe mode exits. After delivery, mutation submission SHALL be permitted again. Both messages SHALL be transactional (never dropped).
+The runtime SHALL send SessionSuspended to all active sessions when safe mode is entered (RFC 0007 §5.2). After delivery, all MutationBatch messages from suspended sessions SHALL be rejected with RuntimeError error_code="SAFE_MODE_ACTIVE". The agent's session SHALL remain open and Heartbeat keepalives SHALL continue. The runtime SHALL send SessionResumed to all suspended sessions when safe mode exits. After delivery, mutation submission SHALL be permitted again. Both messages SHALL be transactional (never dropped).
 Source: RFC 0005 §3.7
 Scope: v1-mandatory
 
