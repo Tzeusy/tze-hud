@@ -270,7 +270,7 @@ The per-event evaluation runs on the main thread during Stage 1 (Input Drain) an
 
 1. **Human Override check.** Override commands (dismiss, freeze, safe mode, mute) are recognized and placed in the `OverrideCommandQueue` (bounded, capacity: 16, SPSC). Override commands are delivered to the compositor thread before any `MutationBatch` intake for that frame.
 2. **Attention check.** For input events that trigger agent-visible content changes (e.g., tab switch events configured in `tab_switch_on_event`), evaluate the interruption class. This check determines whether the resulting scene change is permitted under current quiet hours and attention budget.
-3. **Security check.** Input events are routed only to agents with `receive_input` capability. Input destined for agents without this capability is silently dropped.
+3. **Security check.** Input events are routed only to agents with `access_input_events` capability. Input destined for agents without this capability is silently dropped.
 
 **Short-circuit rule:** If Level 0 triggers safe mode, Level 4 and Level 3 event processing stops. All input routes to the chrome layer exclusively.
 
@@ -447,25 +447,25 @@ This table is THE authority for capability identifiers. Both RFC 0005 (session h
 |------------|-------------|--------------|-------|---------------------|
 | `create_tiles` | May request tile leases. | Not granted | Session | RFC 0005, RFC 0008 Section 3.3 |
 | `modify_own_tiles` | May mutate content on tiles owned by this session. | Not granted | Session | RFC 0005 |
-| `read_scene` | May query the full scene topology, including other agents' lease metadata. Without this, agent sees only its own leases and public structure. | Not granted | Session | RFC 0005 Section 7.1 |
+| `read_scene_topology` | May query the full scene topology, including other agents' lease metadata. Without this, agent sees only its own leases and public structure. | Not granted | Session | RFC 0005 Section 7.1 |
 | `subscribe_scene_events` | May subscribe to the scene-event bus (system events, topology events, agent-emittable named events per RFC 0006 Section 5.5). NOT input events. | Not granted | Session | RFC 0005 Section 7.1 |
-| `receive_input` | May receive pointer, touch, keyboard, and gesture input events forwarded from the runtime (RFC 0004). NOT scene-event bus. | Not granted | Session | RFC 0005 Section 7.1 |
+| `access_input_events` | May receive pointer, touch, keyboard, and gesture input events forwarded from the runtime (RFC 0004). NOT scene-event bus. | Not granted | Session | RFC 0005 Section 7.1 |
 | `overlay_privileges` | May request tiles with overlay-level z-order positions. | Not granted | Session | RFC 0005 |
 | `high_priority_z_order` | May request z-order values in the top quartile. | Not granted | Session | RFC 0005 |
 | `exceed_default_budgets` | May request budget overrides at session time. Requires user prompt. | Not granted | Session | RFC 0005 |
 | `read_telemetry` | May subscribe to `telemetry_frames` events (runtime performance samples). | Not granted | Session | RFC 0005 Section 7.1 |
 | `stream_media` | May negotiate WebRTC media sessions. | Not granted | Session | RFC 0005 (post-v1) |
 | `resident_mcp` | May use resident-level MCP tools (`create_tab`, `create_tile`, `set_content`, `dismiss`). Without this, only guest tools (`publish_to_zone`, `list_zones`, restricted `list_scene`). | Not granted | Session | RFC 0005 Section 8.3 |
-| `zone_publish:<zone_name>` | May publish to the named zone instance. One grant per zone. | Not granted | Zone instance | RFC 0005 Section 7.1 |
-| `zone_publish:*` | May publish to all zones. Wildcard form. | Not granted | All zones | RFC 0005 Section 7.1 |
+| `publish_zone:<zone_name>` | May publish to the named zone instance. One grant per zone. | Not granted | Zone instance | RFC 0005 Section 7.1 |
+| `publish_zone:*` | May publish to all zones. Wildcard form. | Not granted | All zones | RFC 0005 Section 7.1 |
 | `emit_scene_event:<event_name>` | May fire the named scene event on the scene-event bus. The `<event_name>` must follow `<source>.<action>` naming (RFC 0006 Section 5.5). Must not use `system.` or `scene.` prefix. | Not granted | Named event | RFC 0005 |
 | `lease:priority:<N>` | May request lease priority N or lower (0=Critical, 1=High, 2=Standard, 3=Low, 4=Speculative). | `lease:priority:2` | Lease | RFC 0008 Section 2.1 |
 
 ### 8.2 Naming Convention
 
 - All identifiers: `snake_case`.
-- Sub-scoped identifiers: colon-separated (`zone_publish:notification`).
-- Wildcard: only `zone_publish:*` is supported. No other capability supports wildcards.
+- Sub-scoped identifiers: colon-separated (`publish_zone:notification`).
+- Wildcard: only `publish_zone:*` is supported. No other capability supports wildcards.
 - Older uppercase forms (`CREATE_TILE`, `WRITE_SCENE`) and kebab-case forms (`create-tiles`, `zone-publish`) appearing in RFC 0001 diagrams and earlier drafts of this RFC are superseded. The `snake_case` forms in Section 8.1 are canonical.
 
 ### 8.3 Resolution Statement
@@ -542,7 +542,7 @@ This section lists every cross-RFC contradiction resolved by this RFC. Each entr
 
 ### 10.6 rig-vbi: Capability Name Format Inconsistency
 
-**Conflict:** RFC 0005 and RFC 0006 Section 6.3 use `snake_case` capability names (`create_tiles`, `zone_publish`). Earlier drafts of RFC 0009 used kebab-case (`create-tiles`, `zone-publish`). RFC 0001 diagrams use uppercase (`CREATE_TILE`). Three naming conventions for the same identifiers.
+**Conflict:** RFC 0005 and RFC 0006 Section 6.3 use `snake_case` capability names (`create_tiles`, `publish_zone`). Earlier drafts of RFC 0009 used kebab-case (`create-tiles`, `zone-publish`). RFC 0001 diagrams use uppercase (`CREATE_TILE`). Three naming conventions for the same identifiers.
 
 **Resolution:** Section 8 of this RFC establishes the canonical capability registry. All identifiers use `snake_case` as defined by RFC 0005 (wire-format authority). Kebab-case and uppercase forms are superseded and must not be used in new code or documentation.
 
@@ -604,15 +604,15 @@ The security level enforces capability scopes, lease validity, and namespace iso
 
 | Operation | Required capability |
 |-----------|-------------------|
-| Publish to a zone | `zone_publish:<zone_name>` or `zone_publish:*` |
+| Publish to a zone | `publish_zone:<zone_name>` or `publish_zone:*` |
 | Create a tile | `create_tiles` |
 | Modify own tiles | `modify_own_tiles` |
 | Request overlay z-order | `overlay_privileges` |
 | Request high z-order | `high_priority_z_order` |
 | Subscribe to scene events | `subscribe_scene_events` |
-| Access input events | `receive_input` |
+| Access input events | `access_input_events` |
 | Stream media | `stream_media` |
-| Read full topology | `read_scene` |
+| Read full topology | `read_scene_topology` |
 | Read telemetry | `read_telemetry` |
 | Use resident MCP tools | `resident_mcp` |
 | Request lease priority N | `lease:priority:<N>` |
@@ -710,7 +710,7 @@ Every Level 3 rejection and every Level 5 shed emits a telemetry record:
   "code": "CAPABILITY_DENIED",
   "agent_id": "agent-abc",
   "mutation_ref": "mut-xyz",
-  "capability_required": "zone_publish:notification",
+  "capability_required": "publish_zone:notification",
   "timestamp_us": 1234567890000
 }
 ```
@@ -741,7 +741,7 @@ Every capability grant and revocation is logged (security.md, "Capability scopes
 {
   "event": "capability_grant",
   "agent_id": "agent-abc",
-  "capability": "zone_publish:notification",
+  "capability": "publish_zone:notification",
   "granted_at_us": 1234567890000,
   "granted_by": "session_handshake"
 }
@@ -751,7 +751,7 @@ Every capability grant and revocation is logged (security.md, "Capability scopes
 {
   "event": "capability_revoke",
   "agent_id": "agent-abc",
-  "capability": "zone_publish:notification",
+  "capability": "publish_zone:notification",
   "revoked_at_us": 1234567891000,
   "reason": "admin_action"
 }
