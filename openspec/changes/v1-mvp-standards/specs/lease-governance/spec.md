@@ -281,7 +281,7 @@ Scope: v1-mandatory
 - **THEN** the degradation ladder advances and tile shedding begins
 
 ### Requirement: TTL Accounting Precision
-TTL accounting during suspension MUST be accurate to +/- 100ms. The effective lease expiry MUST be calculated as `granted_at_wall_us + ttl_ms + suspension_duration_us`.
+TTL accounting during suspension MUST be accurate to +/- 100ms. The effective lease expiry MUST be calculated as `granted_at_wall_us + (ttl_ms * 1000) + suspension_duration_us`.
 Source: RFC 0008 §4.3, §12
 Scope: v1-mandatory
 

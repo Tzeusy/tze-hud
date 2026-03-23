@@ -98,7 +98,7 @@ Scope: v1-mandatory
 
 #### Scenario: No-earlier-than guarantee
 - **WHEN** a mutation has present_at_wall_us = V + 1ms (where V is vsync time of frame F)
-- **THEN** the mutation MUST NOT be applied at frame F; it MUST wait until frame F+1 whose vsync >= present_at_wall_us
+- **THEN** the mutation MUST NOT be applied at frame F; it MUST wait until frame F+1 whose frame_F_vsync_wall_us >= present_at_wall_us
 
 #### Scenario: Presentation accuracy
 - **WHEN** a mutation has present_at_wall_us = T
@@ -110,7 +110,7 @@ Source: RFC 0003 §3.5
 Scope: v1-mandatory
 
 #### Scenario: Stale timestamp rejection
-- **WHEN** an agent submits a mutation with present_at_wall_us more than 60 seconds before session_open_at_wall_us
+- **WHEN** an agent submits a mutation with present_at_wall_us more than 60 seconds before session_open_wall_us
 - **THEN** the compositor MUST reject with TIMESTAMP_TOO_OLD
 
 #### Scenario: Future timestamp rejection
