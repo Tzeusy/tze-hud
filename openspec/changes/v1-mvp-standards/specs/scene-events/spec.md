@@ -48,17 +48,17 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Interruption Classification
-Every event that produces visible output or demands viewer attention SHALL carry an effective InterruptionClass. The five classes SHALL use the canonical names from privacy.md doctrine: CRITICAL (overrides everything, bypasses quiet hours and budget), URGENT (may override quiet hours, subject to budget), NORMAL (standard, filtered by attention budget), GENTLE (blocked during quiet hours, subtle indicators only, counted), and SILENT (never interrupts, always passes quiet hours). Lower numeric value SHALL represent higher urgency. The runtime SHALL always apply the more restrictive of the agent-declared class and the zone's ceiling class.
+Every event that produces visible output or demands viewer attention SHALL carry an effective InterruptionClass. The five wire-level classes are: CRITICAL (overrides everything, bypasses quiet hours and budget), HIGH (may override quiet hours depending on pass_through_class, subject to budget; maps to "Urgent" in privacy.md doctrine), NORMAL (standard, filtered by attention budget), LOW (batched/deferred, blocked during quiet hours, subtle indicators only, counted; maps to "Gentle" in privacy.md doctrine), and SILENT (never interrupts, always passes quiet hours). Lower numeric value SHALL represent higher urgency. The runtime SHALL always apply the more restrictive of the agent-declared class and the zone's ceiling class.
 Source: RFC 0010 §3.1, §3.2
 Scope: v1-mandatory
 
 #### Scenario: Ceiling enforcement
-- **WHEN** an agent declares InterruptionClass URGENT on a zone whose ceiling_interruption_class is NORMAL
+- **WHEN** an agent declares InterruptionClass HIGH on a zone whose ceiling_interruption_class is NORMAL
 - **THEN** the effective interruption class MUST be NORMAL (the more restrictive of the two)
 
 #### Scenario: CRITICAL agent restriction
 - **WHEN** an agent requests CRITICAL interruption class on an emitted event
-- **THEN** the runtime MUST downgrade the effective class to URGENT, since only the runtime can emit CRITICAL events
+- **THEN** the runtime MUST downgrade the effective class to HIGH, since only the runtime can emit CRITICAL events
 
 #### Scenario: SILENT always passes
 - **WHEN** quiet hours are active and an event has InterruptionClass SILENT
@@ -67,7 +67,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Quiet Hours Enforcement
-During configured quiet hours, the interruption gate SHALL evaluate each event's interruption class against the pass_through_class threshold. CRITICAL events SHALL always be delivered and never queued. URGENT events SHALL pass through quiet hours (per privacy.md doctrine). NORMAL and GENTLE events SHALL be queued and delivered when quiet hours end. SILENT events SHALL be unaffected. Quiet hours SHALL affect delivery, not generation; events SHALL still be created, logged, and counted for telemetry.
+During configured quiet hours, the interruption gate SHALL evaluate each event's interruption class against the pass_through_class threshold. CRITICAL events SHALL always be delivered and never queued. HIGH events SHALL pass through quiet hours when pass_through_class is HIGH or lower (this is the default configuration); otherwise HIGH events are deferred to the queue. NORMAL events SHALL be queued and delivered when quiet hours end. LOW events SHALL be discarded (they are too stale by quiet hours exit to be useful). SILENT events SHALL be unaffected. Quiet hours SHALL affect delivery, not generation; events SHALL still be created, logged, and counted for telemetry.
 Source: RFC 0010 §4.1, §4.2, §4.3
 Scope: v1-mandatory
 
@@ -75,17 +75,17 @@ Scope: v1-mandatory
 - **WHEN** quiet hours are active and a CRITICAL event (e.g., safe mode) is generated
 - **THEN** the event MUST be delivered immediately without queuing
 
-#### Scenario: URGENT passes quiet hours
-- **WHEN** quiet hours are active and an URGENT event (e.g., doorbell) is generated
-- **THEN** the event MUST be delivered immediately (URGENT overrides quiet hours per doctrine)
+#### Scenario: HIGH passes quiet hours (default configuration)
+- **WHEN** quiet hours are active with default pass_through_class=HIGH, and a HIGH event (e.g., doorbell) is generated
+- **THEN** the event MUST be delivered immediately (HIGH passes through quiet hours when pass_through_class <= HIGH)
 
 #### Scenario: NORMAL deferred during quiet hours
 - **WHEN** quiet hours are active and a NORMAL zone update event occurs
 - **THEN** the event's visual change MUST be queued and delivered when quiet hours end
 
-#### Scenario: GENTLE deferred during quiet hours
-- **WHEN** quiet hours are active and a GENTLE-class event is generated
-- **THEN** the event MUST be queued and delivered when quiet hours end
+#### Scenario: LOW discarded during quiet hours
+- **WHEN** quiet hours are active and a LOW-class event is generated
+- **THEN** the event MUST be discarded (not queued); LOW events are too stale by quiet hours exit to be useful
 
 ---
 
@@ -135,7 +135,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Attention Budget Enforcement
-The runtime SHALL maintain per-agent and per-zone attention budgets as rolling counts of non-silent interruptions. Per-agent default: 20 interruptions per minute. Per-zone default: 10 per minute (30 for Stack-policy zones). CRITICAL interruptions SHALL be exempt from budget. URGENT interruptions SHALL pass through quiet hours but remain subject to budget (per architecture.md: "even valid urgent interruptions may be coalesced or deferred if the attention budget is exhausted"). When either counter reaches 80% of its limit, the runtime SHALL emit AttentionBudgetWarningEvent. When budget is exhausted, mutations SHALL proceed but their visual presentation SHALL be coalesced (latest-wins within the coalesce buffer). SILENT mutations SHALL carry zero interruption cost.
+The runtime SHALL maintain per-agent and per-zone attention budgets as rolling counts of non-silent interruptions. Per-agent default: 20 interruptions per minute. Per-zone default: 10 per minute (30 for Stack-policy zones). CRITICAL interruptions SHALL be exempt from budget. HIGH interruptions SHALL pass through quiet hours (by default) but remain subject to budget (even valid HIGH-class interruptions may be coalesced or deferred if the attention budget is exhausted). When either counter reaches 80% of its limit, the runtime SHALL emit AttentionBudgetWarningEvent. When budget is exhausted, mutations SHALL proceed but their visual presentation SHALL be coalesced (latest-wins within the coalesce buffer). SILENT mutations SHALL carry zero interruption cost.
 Source: RFC 0010 §6.1, §6.2, §6.3
 Scope: v1-mandatory
 
@@ -176,7 +176,7 @@ Scope: v1-mandatory
 
 #### Scenario: Event filter prefix matching
 - **WHEN** an agent subscribes to scene_topology with filter "scene.zone.*"
-- **THEN** the agent MUST receive ZoneOccupancyChanged events but MUST NOT receive TileCreated or TabSwitched events
+- **THEN** the agent MUST receive ZoneOccupancyChanged events but MUST NOT receive TileCreated or ActiveTabChanged events
 
 #### Scenario: Subscription limit
 - **WHEN** an agent attempts to create a 33rd subscription (exceeding the limit of 32)
@@ -315,13 +315,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Earned Urgency Tracking
-The runtime SHALL track per-agent URGENT-class event rates. When the rate exceeds the configurable threshold (default: 4 URGENT per agent per minute), the runtime SHALL log a warning. This implements the "earned urgency" principle from attention.md: "an agent that escalates everything is an agent that means nothing." Per-URGENT-class budget enforcement is deferred to post-v1.
+The runtime SHALL track per-agent HIGH-class event rates. When the rate exceeds the configurable threshold (default: 4 HIGH per agent per minute), the runtime SHALL log a warning. This implements the "earned urgency" principle from attention.md: "an agent that escalates everything is an agent that means nothing." Per-HIGH-class budget enforcement is deferred to post-v1.
 Source: RFC 0010 §3.3
 Scope: v1-mandatory
 
-#### Scenario: URGENT-class rate warning
-- **WHEN** an agent emits 5 URGENT-class events within one minute (exceeding default threshold of 4)
-- **THEN** the runtime MUST log a warning about the agent's disproportionate URGENT-class usage
+#### Scenario: HIGH-class rate warning
+- **WHEN** an agent emits 5 HIGH-class events within one minute (exceeding default threshold of 4)
+- **THEN** the runtime MUST log a warning about the agent's disproportionate HIGH-class usage
 
 ---
 
