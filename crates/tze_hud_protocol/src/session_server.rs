@@ -96,7 +96,7 @@ impl HudSessionImpl {
     /// Create a new session service with the given scene graph and PSK.
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         Self {
-                    state: Arc::new(Mutex::new(SharedState {
+            state: Arc::new(Mutex::new(SharedState {
                 scene,
                 sessions: crate::session::SessionRegistry::new(psk),
             })),
