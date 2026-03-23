@@ -30,7 +30,7 @@ Scope: v1-mandatory
 - **THEN** no new OS threads SHALL be spawned beyond the threads created at startup
 
 ### Requirement: Main Thread Responsibilities
-The main thread MUST run the winit event loop. It SHALL drain OS input events, apply press/hover local feedback, call surface.present() when signaled by the compositor thread, handle resize events, and initiate shutdown. The main thread MUST NOT encode render commands or submit GPU work. Main thread SHALL be elevated to high priority at startup (platform-specific: SCHED_RR on Linux, QOS_CLASS_USER_INTERACTIVE on macOS, THREAD_PRIORITY_TIME_CRITICAL on Windows); failure to elevate MUST fall back silently with a warning.
+The main thread MUST run the winit event loop. It SHALL drain OS input events, apply press/hover local feedback, call surface.present() when signaled by the compositor thread, handle resize events, and initiate shutdown. The main thread MUST NOT encode render commands or submit GPU work. Main thread SHALL be elevated to high priority at startup using platform-appropriate mechanisms; failure to elevate MUST fall back silently with a warning.
 Source: RFC 0002 §2.2
 Scope: v1-mandatory
 
@@ -209,22 +209,22 @@ Scope: v1-mandatory
 - **THEN** the runtime MUST return the last rendered frame's pixel data via copy_texture_to_buffer
 
 ### Requirement: Headless Software GPU
-The headless mode MUST support the HEADLESS_FORCE_SOFTWARE environment variable. When set, the wgpu adapter selection MUST request a software fallback (force_fallback_adapter = true). Software backends: llvmpipe (Linux), WARP (Windows). In CI, HEADLESS_FORCE_SOFTWARE=1 MUST be set.
+The headless mode MUST support a configurable environment variable to force software GPU fallback. When set, the wgpu adapter selection MUST request a software fallback (force_fallback_adapter = true). Software fallback MUST be available when the platform provides one. In CI, software fallback MUST be enabled.
 Source: RFC 0002 §8.3
 Scope: v1-mandatory
 
 #### Scenario: Software GPU in CI
-- **WHEN** HEADLESS_FORCE_SOFTWARE=1 is set
-- **THEN** the runtime MUST use llvmpipe (Linux) or WARP (Windows) regardless of hardware GPU availability
+- **WHEN** software GPU fallback is enabled via the force-software environment variable
+- **THEN** the runtime MUST use the available software GPU fallback regardless of hardware GPU availability
 
 ### Requirement: Degradation Ladder
-The runtime MUST implement a 5-level degradation ladder: Level 0 Normal, Level 1 Coalesce (reduce outbound SceneEvent frequency for state-stream tiles, 2x ratio), Level 2 ReduceTextureQuality (scale down textures > 512x512 to 50% linear dimensions), Level 3 DisableTransparency (force semi-transparent tiles to opaque, skip alpha-blend passes), Level 4 ShedTiles (remove lowest-priority tiles from render pass sorted by lease_priority ASC, z_order DESC), Level 5 Emergency (render only chrome layer + highest-priority single tile).
+The runtime MUST implement a 5-level degradation ladder: Level 0 Normal, Level 1 Coalesce (reduce outbound SceneEvent frequency for state-stream tiles by a configurable ratio), Level 2 ReduceTextureQuality (scale down large textures by a configurable factor), Level 3 DisableTransparency (force semi-transparent tiles to opaque, skip alpha-blend passes), Level 4 ShedTiles (remove lowest-priority tiles from render pass sorted by lease_priority ASC, z_order DESC), Level 5 Emergency (render only chrome layer + highest-priority single tile).
 Source: RFC 0002 §6.2
 Scope: v1-mandatory
 
 #### Scenario: Level 1 coalescing
 - **WHEN** frame_time_p95 > 14ms over 10 frames and the runtime is at Normal
-- **THEN** the runtime MUST transition to Level 1 and reduce outbound state-stream notification frequency by 2x
+- **THEN** the runtime MUST transition to Level 1 and reduce outbound state-stream notification frequency
 
 #### Scenario: Level 4 tile shedding
 - **WHEN** the runtime reaches Level 4
@@ -328,10 +328,10 @@ Scope: v1-mandatory
 
 #### Scenario: Post-revocation cleanup
 - **WHEN** a session is revoked
-- **THEN** the runtime MUST free all agent-owned textures and node data after a 100ms post-revocation delay, reducing the agent's resource footprint to zero
+- **THEN** the runtime MUST free all agent-owned textures and node data after a bounded, configurable post-revocation delay, reducing the agent's resource footprint to zero
 
 ### Requirement: Graceful Shutdown
-Shutdown MUST follow an ordered sequence: (1) stop accepting new connections, (2) drain active mutations (wait up to 500ms for compositor thread to finish current frame), (3) revoke all leases without waiting for acknowledgement, (4) flush telemetry with up to 200ms grace, (5) terminate agent sessions, (6) GPU drain via device.poll(Wait), (7) release resources with reference counts reaching zero, (8) exit process (code 0 for clean, non-zero for error).
+Shutdown MUST follow an ordered sequence: (1) stop accepting new connections, (2) drain active mutations (wait up to a configurable drain timeout for compositor thread to finish current frame), (3) revoke all leases without waiting for acknowledgement, (4) flush telemetry with a configurable grace period, (5) terminate agent sessions, (6) GPU drain via device.poll(Wait), (7) release resources with reference counts reaching zero, (8) exit process (code 0 for clean, non-zero for error).
 Source: RFC 0002 §1.4
 Scope: v1-mandatory
 
@@ -387,3 +387,46 @@ Scope: post-v1
 #### Scenario: Single-threaded render encoding
 - **WHEN** Stage 6 executes in v1
 - **THEN** render encoding MUST be single-threaded on the compositor thread
+
+---
+
+## Appendix: Implementation Notes
+
+This appendix collects platform-specific implementation details and tunable defaults that inform but do not constitute normative requirements. Implementations MAY differ from these notes provided all normative requirements above are satisfied.
+
+### Thread Priority Elevation
+
+The main thread should be elevated to high priority at startup using platform-appropriate OS mechanisms. Suggested platform mappings:
+
+- **Linux**: `SCHED_RR` real-time scheduling policy via `pthread_setschedparam`
+- **macOS**: `QOS_CLASS_USER_INTERACTIVE` quality-of-service class
+- **Windows**: `THREAD_PRIORITY_TIME_CRITICAL` thread priority
+
+Elevation failure is non-fatal; the thread continues at normal OS-default priority with a warning logged.
+
+### Headless Software GPU Fallback
+
+The force-software environment variable is conventionally named `HEADLESS_FORCE_SOFTWARE`. When set to `1`, the wgpu adapter selection uses `force_fallback_adapter = true`. Platform-provided software GPU backends include llvmpipe on Linux and WARP on Windows. CI pipelines should set this variable to guarantee reproducible rendering without hardware GPU.
+
+### Degradation Ladder Ratios
+
+Suggested default ratios for the degradation levels. These are tunable via configuration:
+
+- **Level 1 Coalesce**: reduce outbound state-stream SceneEvent frequency by 2x (one notification per two frames)
+- **Level 2 ReduceTextureQuality**: scale down textures whose linear dimensions exceed 512px to 50% of their original linear dimensions
+- **Level 3 DisableTransparency**: force all semi-transparent tiles to opaque; skip alpha-blend render passes entirely
+
+These ratios represent validated defaults. Operators with specialized hardware profiles may tune them within the configuration schema.
+
+### Post-Revocation Cleanup Delay
+
+The bounded delay between session revocation and resource release is configurable. Suggested default: 100ms. This window allows in-flight GPU commands referencing agent textures to drain before the backing memory is freed. Setting this value to zero is permitted for environments where GPU drain is guaranteed by other means.
+
+### Graceful Shutdown Timeouts
+
+Suggested defaults for the configurable shutdown grace periods:
+
+- **Mutation drain timeout** (step 2): 500ms — allows the compositor thread to finish its current frame before shutdown proceeds
+- **Telemetry flush grace** (step 4): 200ms — allows queued telemetry records to be emitted before process exit
+
+These timeouts may be shortened in test environments or lengthened on slow hardware.
