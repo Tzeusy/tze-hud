@@ -33,6 +33,18 @@ Scope: v1-mandatory
 - **WHEN** Level 3 (Security) denies a capability
 - **THEN** Level 5 (Resource) and Level 6 (Content) are never evaluated for that mutation
 
+#### Scenario: Safety clears attention queue
+- **WHEN** Level 1 (Safety) enters safe mode while Level 4 (Attention) has queued notifications
+- **THEN** the queued notifications MUST be discarded; safe mode overrides the delivery queue
+
+#### Scenario: Privacy redaction plus quiet hours
+- **WHEN** Level 2 (Privacy) would redact a tile AND Level 4 (Attention) would queue it for quiet hours
+- **THEN** the mutation IS committed with redaction (privacy transform applies) AND quiet hours evaluation still runs for presentation scheduling; the mutation is queued-with-redaction, not suppressed
+
+#### Scenario: Human dismisses tile with valid lease
+- **WHEN** the viewer dismisses a tile whose agent holds a valid ACTIVE lease
+- **THEN** the lease is revoked immediately (Level 0 wins over Level 3 Security); the agent receives `LeaseResponse` with `REVOKED` and `revoke_reason = VIEWER_DISMISSED`
+
 ### Requirement: Level 0 Human Override
 Human override actions (dismiss, safe mode, freeze, mute) MUST be local, instant, and MUST NOT be intercepted, delayed, or vetoed by any agent or policy level. Override commands MUST be placed in a dedicated `OverrideCommandQueue` (bounded, capacity 16, SPSC) read by the compositor thread before any `MutationBatch` intake. Override MUST complete within one frame (16.6ms).
 Source: RFC 0009 §1.1, §11.1
@@ -129,17 +141,21 @@ Scope: v1-mandatory
 - **THEN** it MUST complete in < 5us under nominal load
 
 ### Requirement: Level 4 Attention Management
-The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in scene-events: SILENT (always passes, not counted), GENTLE (blocked during quiet hours, subtle indicators only, counted), NORMAL (blocked during quiet hours, counted), URGENT (passes through quiet hours, subject to budget), CRITICAL (always passes, bypasses both quiet hours and budget). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us under nominal load.
-Source: RFC 0009 §11.5
+The attention level MUST manage interruption flow with five classes matching the InterruptionClass enum defined in RFC 0010 §3.1: SILENT (always passes, never counted against budget), LOW (discarded during quiet hours; too stale by quiet hours exit to be useful), NORMAL (queued during quiet hours; delivered when quiet hours end), HIGH (passes through quiet hours unless `pass_through_class` raises the threshold; subject to attention budget), CRITICAL (always passes, bypasses both quiet hours and attention budget; only the runtime may emit CRITICAL). Attention budget MUST track rolling per-agent and per-zone counters over the last 60 seconds with configurable limits (defaults: 20 per agent per minute, 10 per zone per minute; 30 per zone per minute for Stack-policy zones per RFC 0010 §7). When budget is exhausted, mutations MUST be coalesced (latest-wins within agent+zone key). Attention budget check MUST complete in < 10us. Note: RFC 0009 §11.5 uses the older doctrine names (Gentle/Normal/Urgent) and older default values (6/12); RFC 0010 §3.1 is authoritative for both the enum names and the default budgets.
+Source: RFC 0010 §3.1, §7, RFC 0009 §11.5
 Scope: v1-mandatory
 
-#### Scenario: Quiet hours block NORMAL interruptions
+#### Scenario: Quiet hours queue NORMAL interruptions
 - **WHEN** quiet hours are active and a mutation with NORMAL interruption class arrives
-- **THEN** the mutation is queued until quiet hours end
+- **THEN** the mutation is queued until quiet hours end and then delivered in FIFO order
 
-#### Scenario: URGENT passes quiet hours
-- **WHEN** quiet hours are active and a mutation with URGENT interruption class arrives
-- **THEN** the mutation passes through quiet hours
+#### Scenario: Quiet hours discard LOW interruptions
+- **WHEN** quiet hours are active and a mutation with LOW interruption class arrives
+- **THEN** the mutation is discarded (not queued) because LOW content (background sync, telemetry, status refreshes) is too stale by quiet hours exit to be useful
+
+#### Scenario: HIGH passes quiet hours
+- **WHEN** quiet hours are active and a mutation with HIGH interruption class arrives
+- **THEN** the mutation passes through quiet hours (unless `pass_through_class` is set higher than HIGH)
 
 #### Scenario: CRITICAL bypasses everything
 - **WHEN** a CRITICAL interruption arrives during quiet hours with an exhausted attention budget
@@ -263,13 +279,17 @@ Scope: v1-mandatory
 - **THEN** the scene auto-unfreezes with a `DegradationNotice` advisory to all agents
 
 ### Requirement: Capability Registry Canonical Names
-The capability registry MUST use `snake_case` naming convention. All identifiers MUST match the table in RFC 0009 §8.1. Sub-scoped identifiers MUST use colon separation (`publish_zone:notification`). Only `publish_zone:*` is supported as a wildcard form. Older uppercase forms (`CREATE_TILE`) and kebab-case forms (`create-tiles`) MUST be treated as superseded and MUST NOT be used.
-Source: RFC 0009 §8.1, §8.2
+The capability registry MUST use `snake_case` naming convention. All identifiers MUST match the table in RFC 0009 §8.1 AS AMENDED by RFC 0005 Round 14 (rig-b2s): the three capability names revised in that round are `read_scene_topology` (not `read_scene`), `access_input_events` (not `receive_input`), and `publish_zone:<zone>` (not `zone_publish:<zone>`). Sub-scoped identifiers MUST use colon separation (`publish_zone:notification`). Only `publish_zone:*` is supported as a wildcard form. Older uppercase forms (`CREATE_TILE`), kebab-case forms (`create-tiles`), and the pre-Round-14 names (`read_scene`, `receive_input`, `zone_publish`) MUST be treated as superseded and MUST NOT be used. The canonical source of truth for all capability names is RFC 0006 §6.3 (which references RFC 0005 as the wire-format authority).
+Source: RFC 0009 §8.1, §8.2, RFC 0005 Round 14, RFC 0006 §6.3
 Scope: v1-mandatory
 
 #### Scenario: Snake case enforced
 - **WHEN** the runtime evaluates a capability check
 - **THEN** it uses `snake_case` canonical names (e.g., `create_tiles`, not `CREATE_TILE` or `create-tiles`)
+
+#### Scenario: Pre-Round-14 names rejected
+- **WHEN** a capability grant uses `read_scene`, `receive_input`, or `zone_publish:subtitle`
+- **THEN** startup fails with `CONFIG_UNKNOWN_CAPABILITY` with a hint naming the canonical replacement (`read_scene_topology`, `access_input_events`, `publish_zone:subtitle`)
 
 ### Requirement: Policy Evaluation Latency Budgets
 The runtime MUST meet the following latency budgets: full per-frame evaluation < 200us, per-mutation policy check < 50us, human override response < 1 frame (16.6ms), privacy transition < 2 frames (33.2ms). Individual sub-checks MUST each consume no more than 20us; their measured mean latencies MUST be ordered by cost as follows: capability lookup fastest (< 5us), then attention check (< 10us), then zone contention resolution (< 20us).
@@ -342,13 +362,19 @@ Scope: v1-mandatory
 - **THEN** it has already passed Level 3 (capability), Level 2 (privacy), and Level 4 (attention) checks
 
 ### Requirement: Freeze and Safe Mode Interaction
-Per RFC 0007 §5.6: if freeze is active when safe mode triggers, safe mode MUST win (Level 1 overrides Level 0 freeze). Freeze MUST be cancelled, freeze queue discarded, `OverrideState.freeze_active` set to `false`. Freeze attempted during safe mode MUST be ignored. After safe mode exit, freeze MUST be inactive.
-Source: RFC 0009 §6.5
+Per RFC 0007 §5.6: if freeze is active when safe mode triggers (Level 1 Safety), safe mode MUST win. Freeze MUST be cancelled, freeze queue discarded, `OverrideState.freeze_active` set to `false`. Freeze attempted during safe mode MUST be ignored. After safe mode exit, freeze MUST be inactive.
+
+Note on apparent Level 1 vs Level 0 ordering: freeze is a Level 0 (Human Override) action, but when Level 1 (Safety) automatically enters safe mode, Level 1 prevails because the safety trigger is an *automatic* runtime response to a critical condition (GPU failure, scene corruption), not a competing human intent. The general rule "higher level always wins" applies: Level 1 > Level 0. This is distinct from a human manually triggering both freeze and safe mode — in that case, safe mode cancels freeze because safe mode is the stronger human override intent (security.md: "safe mode as last resort, quickly reversible").
+Source: RFC 0009 §6.5, RFC 0007 §5.6
 Scope: v1-mandatory
 
 #### Scenario: Safety overrides freeze
 - **WHEN** the scene is frozen and a GPU failure triggers safe mode
 - **THEN** freeze is cancelled, safe mode overlay appears, and freeze queue is discarded
+
+#### Scenario: Manual safe mode cancels freeze
+- **WHEN** the scene is frozen and the viewer manually triggers safe mode via `Ctrl+Shift+Escape`
+- **THEN** freeze is cancelled, the freeze queue is discarded, and safe mode overlay appears
 
 ### Requirement: Dynamic Policy Rules
 Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules are static (derived from configuration at load time).

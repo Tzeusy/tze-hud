@@ -113,13 +113,13 @@ Scope: v1-mandatory
 - **THEN** the safe mode overlay still renders correctly because it does not depend on the scene graph
 
 ### Requirement: Safe Mode Exit
-Safe mode MUST exit only by explicit viewer action: clicking/tapping "Resume", pressing `Enter`/`Space` (resume button has focus by default), or `Ctrl+Shift+Escape` (toggle). On exit: the overlay MUST be dismissed, sessions MUST receive `SessionResumed`, agent mutations MUST be accepted again, and the compositor MUST resume rendering from the current scene state.
-Source: RFC 0007 §5.5
+Safe mode MUST exit only by explicit viewer action: clicking/tapping "Resume", pressing `Enter`/`Space` (resume button has focus by default), or `Ctrl+Shift+Escape` (toggle). On exit: the overlay MUST be dismissed, all SUSPENDED leases MUST transition back to ACTIVE (RFC 0008 §3.3), sessions MUST receive `SessionResumed` with `adjusted_expires_at_us` and `suspension_duration_us`, TTL clocks MUST resume with elapsed suspension time excluded, staleness badges MUST clear within 1 frame, agent mutations MUST be accepted again, and the compositor MUST resume rendering from the current scene state. Agents MUST NOT re-request leases — lease identity, capability scope, and resource budget are preserved across the ACTIVE → SUSPENDED → ACTIVE cycle.
+Source: RFC 0007 §5.5, RFC 0008 §3.3
 Scope: v1-mandatory
 
 #### Scenario: Resume from safe mode
 - **WHEN** the viewer clicks the "Resume" button
-- **THEN** the safe mode overlay is dismissed, agents receive `SessionResumed`, and mutations are accepted again without agents needing to re-request leases
+- **THEN** the safe mode overlay is dismissed, SUSPENDED leases transition to ACTIVE, agents receive `SessionResumed` with TTL adjustment, staleness badges clear within 1 frame, and mutations are accepted again without agents needing to re-request leases
 
 ### Requirement: Safe Mode and Freeze Interaction
 If freeze is active when safe mode is triggered, safe mode MUST take priority. The freeze state MUST be cancelled, the freeze queue MUST be discarded, and `OverrideState.freeze_active` MUST be set to `false`. If freeze is attempted during safe mode, it MUST be ignored. After safe mode exit, freeze MUST be inactive.
