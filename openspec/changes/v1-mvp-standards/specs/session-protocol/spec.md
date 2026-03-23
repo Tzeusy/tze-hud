@@ -9,17 +9,17 @@ Depends on: scene-graph, runtime-kernel, timing-model, input-model
 ## ADDED Requirements
 
 ### Requirement: Single Bidirectional Stream Per Agent
-Each resident agent SHALL hold exactly one primary bidirectional gRPC stream of type `stream SessionMessage / stream SessionMessage`. All scene mutations, event subscriptions, lease management, heartbeats, and telemetry SHALL be multiplexed over this single stream. The runtime SHALL NOT proliferate per-concern streams.
+Each resident agent SHALL hold exactly one primary bidirectional gRPC stream of type `stream ClientMessage / stream ServerMessage`. All scene mutations, event subscriptions, lease management, heartbeats, and telemetry SHALL be multiplexed over this single stream. The runtime SHALL NOT proliferate per-concern streams.
 Source: RFC 0005 §2.1, DR-SP1
 Scope: v1-mandatory
 
 #### Scenario: All traffic on one stream
 - **WHEN** a resident agent establishes a session
-- **THEN** mutations, lease requests, heartbeats, input events, scene events, and subscription changes SHALL all be delivered on the single bidirectional SessionMessage stream
+- **THEN** mutations, lease requests, heartbeats, input events, scene events, and subscription changes SHALL all be delivered on the single bidirectional stream (ClientMessage client-to-server, ServerMessage server-to-client)
 
 #### Scenario: No additional streams per concern
-- **WHEN** an agent needs to send both MutationBatch and HeartbeatPing messages
-- **THEN** both SHALL be sent as SessionMessage payloads on the same gRPC stream, not on separate streams
+- **WHEN** an agent needs to send both MutationBatch and Heartbeat messages
+- **THEN** both SHALL be sent as ClientMessage payloads on the same gRPC stream, not on separate streams
 
 ---
 
@@ -189,18 +189,18 @@ Scope: v1-mandatory
 
 ---
 
-### Requirement: SessionMessage Envelope
-Every message on the session stream SHALL be wrapped in a SessionMessage envelope containing: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. Client-to-server fields SHALL be allocated at 10-29 (lifecycle at 10-15, agent operations at 20-29). Server-to-client fields SHALL be allocated at 30-46 (responses and events). Fields 47-49 SHALL be reserved for future server-to-client messages. Fields 50-99 SHALL be reserved for post-v1 use.
+### Requirement: ClientMessage and ServerMessage Envelopes
+Every client-to-server message on the session stream SHALL be wrapped in a ClientMessage envelope, and every server-to-client message SHALL be wrapped in a ServerMessage envelope. Both envelopes SHALL contain: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. ClientMessage oneof payload fields SHALL be allocated at 10-29 (session lifecycle at 10-12, agent operations at 20-29). ServerMessage oneof payload fields SHALL be allocated at 10-35 (session lifecycle responses at 10-11, mutation/lease responses at 20-23, scene state and events at 30-35). Fields 36-49 in ServerMessage SHALL be reserved for future server-to-client messages. Fields 50-99 in both envelopes SHALL be reserved for post-v1 use.
 Source: RFC 0005 §2.2, §9.2
 Scope: v1-mandatory
 
 #### Scenario: Sequence numbers monotonically increase
-- **WHEN** an agent sends three SessionMessages
+- **WHEN** an agent sends three ClientMessages
 - **THEN** the sequence numbers SHALL be 1, 2, 3 respectively
 
 #### Scenario: All payloads fit the envelope
 - **WHEN** a MutationBatch needs to be sent
-- **THEN** it SHALL be wrapped in a SessionMessage with a sequence number, timestamp_wall_us, and the mutation_batch field (20) set
+- **THEN** it SHALL be wrapped in a ClientMessage with a sequence number, timestamp_wall_us, and the mutation_batch field (20) set
 
 ---
 
@@ -220,13 +220,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Clock Domain Naming Convention
-All timestamp fields in the session protocol SHALL encode their clock domain explicitly via suffix: _wall_us for wall-clock (UTC microseconds since Unix epoch) and _mono_us for monotonic system clock (microseconds since arbitrary epoch). This convention SHALL be consistent across all session messages including SessionMessage.timestamp_wall_us, SessionInit.agent_timestamp_wall_us, HeartbeatPing.client_timestamp_mono_us, HeartbeatPong.server_timestamp_wall_us, and TimingHints.present_at_wall_us/expires_at_wall_us.
+All timestamp fields in the session protocol SHALL encode their clock domain explicitly via suffix: _wall_us for wall-clock (UTC microseconds since Unix epoch) and _mono_us for monotonic system clock (microseconds since arbitrary epoch). This convention SHALL be consistent across all session messages including ClientMessage.timestamp_wall_us, ServerMessage.timestamp_wall_us, SessionInit.agent_timestamp_wall_us, Heartbeat.timestamp_mono_us, and TimingHints.present_at_wall_us/expires_at_wall_us.
 Source: RFC 0005 §2.4
 Scope: v1-mandatory
 
 #### Scenario: RTT measurement uses monotonic clock
-- **WHEN** the agent sends HeartbeatPing with client_timestamp_mono_us
-- **THEN** the HeartbeatPong SHALL echo the same client_timestamp_mono_us value (monotonic), and the agent SHALL compute RTT as current_monotonic - echoed_value, not using wall-clock fields
+- **WHEN** the agent sends a Heartbeat (ClientMessage.heartbeat=25) with timestamp_mono_us
+- **THEN** the runtime SHALL respond with a Heartbeat (ServerMessage.heartbeat=33) echoing the same timestamp_mono_us value (monotonic), and the agent SHALL compute RTT as current_monotonic - echoed_value, not using wall-clock fields
 
 ---
 
@@ -246,7 +246,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Traffic Class Routing
-Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (HeartbeatPing, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The EventBatch traffic-class distinction between transactional and ephemeral variants is governed by RFC 0004 §8.5 and applies within the EventBatch carried in field 34 of SessionMessage.
+Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (HeartbeatPing, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
 Source: RFC 0005 §3.1, §3.2, §5.1, RFC 0004 §8.5
 Scope: v1-mandatory
 
@@ -555,7 +555,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Input Control Request Transport
-FocusRequest, CaptureRequest, CaptureReleaseRequest, and SetImePositionRequest from RFC 0004 SHALL travel agent-to-runtime on the session stream as SessionMessage payload variants at fields 26-29 (InputFocusRequest=26, InputCaptureRequest=27, InputCaptureRelease=28, SetImePosition=29). FocusResponse and CaptureResponse SHALL travel runtime-to-agent at fields 43-44 (InputFocusResponse=43, InputCaptureResponse=44). FocusRequest and CaptureRequest SHALL use synchronous request/response semantics correlated by sequence number. CaptureReleaseRequest SHALL be confirmed asynchronously by CaptureReleasedEvent (RFC 0004 InputEnvelope field 20) delivered in the EventBatch on field 34. SetImePosition SHALL be fire-and-forget with no response.
+FocusRequest, CaptureRequest, CaptureReleaseRequest, and SetImePositionRequest from RFC 0004 SHALL travel agent-to-runtime on the session stream as ClientMessage payload variants at fields 26-29 (InputFocusRequest=26, InputCaptureRequest=27, InputCaptureRelease=28, SetImePosition=29). FocusResponse and CaptureResponse SHALL travel runtime-to-agent as ServerMessage payload variants at fields 43-44 (InputFocusResponse=43, InputCaptureResponse=44). FocusRequest and CaptureRequest SHALL use synchronous request/response semantics correlated by sequence number. CaptureReleaseRequest SHALL be confirmed asynchronously by CaptureReleasedEvent (RFC 0004 InputEnvelope field 20) delivered in the EventBatch on field 34. SetImePosition SHALL be fire-and-forget with no response.
 Source: RFC 0005 §3.8, RFC 0004 §8.3.1
 Scope: v1-mandatory
 
@@ -656,7 +656,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Incremental Delta Replay (Post-v1)
-Incremental delta replay on reconnect (WAL-based event replay using last_seen_server_sequence) is explicitly deferred to post-v1. V1 SHALL use full SceneSnapshot on all reconnects. Field 38 (StateDeltaComplete) in SessionMessage SHALL be reserved for future delta replay.
+Incremental delta replay on reconnect (WAL-based event replay using last_seen_server_sequence) is explicitly deferred to post-v1. V1 SHALL use full SceneSnapshot on all reconnects. Field 38 (StateDeltaComplete) in ServerMessage SHALL be reserved for future delta replay.
 Source: RFC 0005 §6.4
 Scope: post-v1
 
@@ -667,7 +667,7 @@ Scope: post-v1
 ---
 
 ### Requirement: Embodied Presence Stream (Post-v1)
-Embodied agents (EMBODIED presence level) and their separate WebRTC media signaling stream are explicitly deferred to post-v1. EMBODIED=3 in PresenceLevel SHALL be reserved. Fields 50-99 in SessionMessage SHALL be reserved for post-v1 embodied presence and media signaling.
+Embodied agents (EMBODIED presence level) and their separate WebRTC media signaling stream are explicitly deferred to post-v1. EMBODIED=3 in PresenceLevel SHALL be reserved. Fields 50-99 in both ClientMessage and ServerMessage SHALL be reserved for post-v1 embodied presence and media signaling.
 Source: RFC 0005 §12.5
 Scope: post-v1
 
