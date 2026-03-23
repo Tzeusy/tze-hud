@@ -48,16 +48,16 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST record session_open_mono_us and session_open_wall_us and compute the initial clock-skew estimate for that session
 
 ### Requirement: Arrival Time Is Not Presentation Time
-Every payload with timing significance MUST carry explicit timestamp fields. The compositor MUST never infer "show this now" from "this just arrived." Mutations with present_at_us in the future MUST be held in a pending queue until the target frame. Mutations without present_at_us (or present_at_us = 0) SHALL be applied at the earliest available frame.
+Every payload with timing significance MUST carry explicit timestamp fields. The compositor MUST never infer "show this now" from "this just arrived." Mutations with present_at_wall_us in the future MUST be held in a pending queue until the target frame. Mutations without present_at_wall_us (or present_at_wall_us = 0) SHALL be applied at the earliest available frame.
 Source: RFC 0003 §3.1
 Scope: v1-mandatory
 
 #### Scenario: Future-scheduled mutation
-- **WHEN** an agent submits a MutationBatch with present_at_us = T+500ms
+- **WHEN** an agent submits a MutationBatch with present_at_wall_us = T+500ms
 - **THEN** the compositor MUST store the mutation and NOT apply it until a frame whose vsync_wall_us >= T+500ms
 
 #### Scenario: Immediate mutation
-- **WHEN** an agent submits a MutationBatch with present_at_us = 0
+- **WHEN** an agent submits a MutationBatch with present_at_wall_us = 0
 - **THEN** the compositor MUST apply the mutation at the earliest available frame (current frame if before Stage 3 cutoff, otherwise next frame)
 
 ### Requirement: Timestamp Resolution and Format
@@ -67,58 +67,58 @@ Scope: v1-mandatory
 
 #### Scenario: Zero timestamp semantics
 - **WHEN** a timestamp field contains value 0
-- **THEN** the runtime MUST interpret it as "not set" (e.g., present_at_us=0 means immediate, expires_at_us=0 means no expiry)
+- **THEN** the runtime MUST interpret it as "not set" (e.g., present_at_wall_us=0 means immediate, expires_at_wall_us=0 means no expiry)
 
 ### Requirement: Timing Fields on Payloads
-All meaningful realtime payloads MUST carry the following timing fields as applicable: present_at_us (or relative scheduling alternative), expires_at_us, created_at_us, sequence (monotonic per-source ordering), priority (shedding priority under load), coalesce_key (for state-stream dedup), and sync_group. The oneof schedule (present_at_us, after_us, frames_from_now, next_frame) MUST be mutually exclusive; setting more than one MUST be rejected with RELATIVE_SCHEDULE_CONFLICT.
+All meaningful realtime payloads MUST carry the following timing fields as applicable: present_at_wall_us (or relative scheduling alternative), expires_at_wall_us, created_at_wall_us, sequence (monotonic per-source ordering), priority (shedding priority under load), coalesce_key (for state-stream dedup), and sync_group. The oneof schedule (present_at_wall_us, after_us, frames_from_now, next_frame) MUST be mutually exclusive; setting more than one MUST be rejected with RELATIVE_SCHEDULE_CONFLICT.
 Source: RFC 0003 §3.2
 Scope: v1-mandatory
 
 #### Scenario: Timing hints on MutationBatch
 - **WHEN** an agent submits a MutationBatch
-- **THEN** it MAY set present_at_us (or a relative scheduling field), expires_at_us, sequence, priority, coalesce_key, and sync_group; the compositor MUST interpret and enforce each field's semantics
+- **THEN** it MAY set present_at_wall_us (or a relative scheduling field), expires_at_wall_us, sequence, priority, coalesce_key, and sync_group; the compositor MUST interpret and enforce each field's semantics
 
 #### Scenario: Mutual exclusivity of schedule fields
-- **WHEN** an agent sets both present_at_us and after_us in the same message
+- **WHEN** an agent sets both present_at_wall_us and after_us in the same message
 - **THEN** the compositor MUST reject the batch with RELATIVE_SCHEDULE_CONFLICT
 
 ### Requirement: Timestamp Precedence
-present_at_us (or its relative scheduling equivalent) MUST follow a precedence hierarchy: node-level overrides tile-level, tile-level overrides batch-level, batch-level is the default for items that do not set their own.
+present_at_wall_us (or its relative scheduling equivalent) MUST follow a precedence hierarchy: node-level overrides tile-level, tile-level overrides batch-level, batch-level is the default for items that do not set their own.
 Source: RFC 0003 §3.2
 Scope: v1-mandatory
 
 #### Scenario: Node-level override
-- **WHEN** a TextMarkdownNode has present_at_us = T1 and its parent tile has present_at_us = T2
+- **WHEN** a TextMarkdownNode has present_at_wall_us = T1 and its parent tile has present_at_wall_us = T2
 - **THEN** the node MUST use T1 for its presentation scheduling, ignoring T2
 
 ### Requirement: Frame Quantization
-A present_at_us timestamp T is "in scope" for frame F if and only if T <= frame_F_vsync_wall_us. This is a strict no-earlier-than rule: content MUST never be presented before its declared present_at_us. A timestamp falling between two vsync times MUST be held until the next frame whose vsync is at or after T.
+A present_at_wall_us timestamp T is "in scope" for frame F if and only if T <= frame_F_vsync_wall_us. This is a strict no-earlier-than rule: content MUST never be presented before its declared present_at_wall_us. A timestamp falling between two vsync times MUST be held until the next frame whose vsync is at or after T.
 Source: RFC 0003 §3.3
 Scope: v1-mandatory
 
 #### Scenario: No-earlier-than guarantee
-- **WHEN** a mutation has present_at_us = V + 1ms (where V is vsync time of frame F)
-- **THEN** the mutation MUST NOT be applied at frame F; it MUST wait until frame F+1 whose vsync >= present_at_us
+- **WHEN** a mutation has present_at_wall_us = V + 1ms (where V is vsync time of frame F)
+- **THEN** the mutation MUST NOT be applied at frame F; it MUST wait until frame F+1 whose frame_F_vsync_wall_us >= present_at_wall_us
 
 #### Scenario: Presentation accuracy
-- **WHEN** a mutation has present_at_us = T
+- **WHEN** a mutation has present_at_wall_us = T
 - **THEN** it MUST be applied no earlier than T and no later than T + one frame period (16.6ms at 60fps)
 
 ### Requirement: Timestamp Validation
-The compositor MUST apply validation rules to all agent-supplied timestamps: present_at_us more than 60 seconds in the past MUST be rejected with TIMESTAMP_TOO_OLD; present_at_us more than max_future_schedule_us (default 300,000,000 us = 5 minutes) in the future MUST be rejected with TIMESTAMP_TOO_FUTURE; expires_at_us <= present_at_us MUST be rejected with TIMESTAMP_EXPIRY_BEFORE_PRESENT; DROP_IF_LATE with non-EPHEMERAL_REALTIME class MUST be rejected with INVALID_DELIVERY_POLICY; clock skew > 1s MUST be rejected with CLOCK_SKEW_EXCESSIVE.
+The compositor MUST apply validation rules to all agent-supplied timestamps: present_at_wall_us more than 60 seconds in the past MUST be rejected with TIMESTAMP_TOO_OLD; present_at_wall_us more than max_future_schedule_us (default 300,000,000 us = 5 minutes) in the future MUST be rejected with TIMESTAMP_TOO_FUTURE; expires_at_wall_us <= present_at_wall_us MUST be rejected with TIMESTAMP_EXPIRY_BEFORE_PRESENT; DROP_IF_LATE with non-EPHEMERAL_REALTIME class MUST be rejected with INVALID_DELIVERY_POLICY; clock skew > 1s MUST be rejected with CLOCK_SKEW_EXCESSIVE.
 Source: RFC 0003 §3.5
 Scope: v1-mandatory
 
 #### Scenario: Stale timestamp rejection
-- **WHEN** an agent submits a mutation with present_at_us more than 60 seconds before session_open_wall_us
+- **WHEN** an agent submits a mutation with present_at_wall_us more than 60 seconds before session_open_wall_us
 - **THEN** the compositor MUST reject with TIMESTAMP_TOO_OLD
 
 #### Scenario: Future timestamp rejection
-- **WHEN** an agent submits a mutation with present_at_us more than 5 minutes in the future
+- **WHEN** an agent submits a mutation with present_at_wall_us more than 5 minutes in the future
 - **THEN** the compositor MUST reject with TIMESTAMP_TOO_FUTURE
 
 #### Scenario: Expiry before presentation
-- **WHEN** an agent submits a tile with expires_at_us <= present_at_us
+- **WHEN** an agent submits a tile with expires_at_wall_us <= present_at_wall_us
 - **THEN** the compositor MUST reject with TIMESTAMP_EXPIRY_BEFORE_PRESENT
 
 ### Requirement: Sync Group Membership and Lifecycle
@@ -234,12 +234,12 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST reject new mutation batches with CLOCK_SKEW_EXCESSIVE
 
 ### Requirement: Presentation Deadline
-Mutations with present_at_us = T MUST be held in a per-agent pending queue (sorted by present_at_us ascending, max depth 256 per agent) until frame F where frame_F_vsync_wall_us >= T. The drain condition MUST enforce the no-earlier-than guarantee directly. Late arrivals (after Stage 3 closes) MUST be deferred to the next frame by default. EphemeralRealtime class with DROP_IF_LATE delivery_policy MAY be dropped instead of deferred.
+Mutations with present_at_wall_us = T MUST be held in a per-agent pending queue (sorted by present_at_wall_us ascending, max depth 256 per agent) until frame F where frame_F_vsync_wall_us >= T. The drain condition MUST enforce the no-earlier-than guarantee directly. Late arrivals (after Stage 3 closes) MUST be deferred to the next frame by default. EphemeralRealtime class with DROP_IF_LATE delivery_policy MAY be dropped instead of deferred.
 Source: RFC 0003 §5.1, §5.2, §5.3
 Scope: v1-mandatory
 
 #### Scenario: Pending queue drain
-- **WHEN** a frame's vsync_wall_us >= a mutation's present_at_us
+- **WHEN** a frame's vsync_wall_us >= a mutation's present_at_wall_us
 - **THEN** the mutation MUST be extracted from the pending queue and forwarded to Stage 4
 
 #### Scenario: Pending queue full
@@ -251,12 +251,12 @@ Scope: v1-mandatory
 - **THEN** the compositor MUST discard it rather than deferring to the next frame
 
 ### Requirement: Expiration Policy
-A tile with expires_at_us = T MUST be automatically removed at the first frame F where frame_F_vsync_wall_us >= T. Expiry evaluation MUST happen at Stage 4 using a min-heap (O(expired_items) per frame). Expiry MUST be non-negotiable under load: it MUST run even during degradation Level 4 or 5. Expiry and sync groups: an expiring tile MUST be removed from its sync group before deletion.
+A tile with expires_at_wall_us = T MUST be automatically removed at the first frame F where frame_F_vsync_wall_us >= T. Expiry evaluation MUST happen at Stage 4 using a min-heap (O(expired_items) per frame). Expiry MUST be non-negotiable under load: it MUST run even during degradation Level 4 or 5. Expiry and sync groups: an expiring tile MUST be removed from its sync group before deletion.
 Source: RFC 0003 §5.4
 Scope: v1-mandatory
 
 #### Scenario: Tile expiry
-- **WHEN** a tile's expires_at_us has been reached
+- **WHEN** a tile's expires_at_wall_us has been reached
 - **THEN** the compositor MUST remove the tile from the scene at Stage 4 and emit a TileExpired event
 
 #### Scenario: Expiry during degradation
@@ -268,24 +268,24 @@ Scope: v1-mandatory
 - **THEN** the expiry evaluation MUST touch only the 2 expired tiles (O(expired_items))
 
 ### Requirement: Relative Scheduling Primitives
-The compositor MUST support three relative scheduling fields as wire-level convenience sugar: after_us (N microseconds from compositor monotonic clock at Stage 3 intake), frames_from_now (N display frames from current frame), and next_frame (sugar for frames_from_now = 1). These MUST be converted to absolute present_at_us at Stage 3 intake and MUST never be stored in the scene graph, telemetry, or internal state.
+The compositor MUST support three relative scheduling fields as wire-level convenience sugar: after_us (N microseconds from compositor monotonic clock at Stage 3 intake), frames_from_now (N display frames from current frame), and next_frame (sugar for frames_from_now = 1). These MUST be converted to absolute present_at_wall_us at Stage 3 intake and MUST never be stored in the scene graph, telemetry, or internal state.
 Source: RFC 0003 §5.3.1
 Scope: v1-mandatory
 
 #### Scenario: after_us conversion
 - **WHEN** an agent submits a mutation with after_us = 500,000 (500ms)
-- **THEN** the compositor MUST compute target_mono_us = monotonic_us_at_intake + 500,000, convert to wall-clock via the session clock-skew estimate (present_at_us = target_mono_us + skew_us), and enter the mutation into the pending queue at Stage 3 intake
+- **THEN** the compositor MUST compute target_mono_us = monotonic_us_at_intake + 500,000, convert to wall-clock via the session clock-skew estimate (present_at_wall_us = target_mono_us + skew_us), and enter the mutation into the pending queue at Stage 3 intake
 
 #### Scenario: frames_from_now conversion
 - **WHEN** an agent submits a mutation with frames_from_now = 3 at frame N
-- **THEN** the compositor MUST convert it to present_at_us corresponding to frame N+3 vsync and apply at that frame
+- **THEN** the compositor MUST convert it to present_at_wall_us corresponding to frame N+3 vsync and apply at that frame
 
 #### Scenario: next_frame equivalence
 - **WHEN** an agent submits next_frame = true
 - **THEN** it MUST be treated identically to frames_from_now = 1; the mutation MUST NOT be applied in the current frame
 
 #### Scenario: Relative fields never stored
-- **WHEN** a relative scheduling field is converted to present_at_us
+- **WHEN** a relative scheduling field is converted to present_at_wall_us
 - **THEN** the raw relative value MUST NOT appear in any scene graph state, telemetry record, or stored mutation
 
 ### Requirement: Session Close Pending Queue Flush
@@ -324,12 +324,12 @@ Scope: v1-mandatory
 - **THEN** it MUST only provide now_us() and monotonic_us(); no mutation methods
 
 ### Requirement: Freeze Override Timing Behavior
-During freeze (RFC 0007 section 4.3): present_at pending queue drain MUST be suspended; expires_at expiry heap evaluation MUST be suspended; sync group deferred_frames_count MUST NOT increment; tile_stale_threshold_ms timer MUST be suspended; clock-skew estimation window MUST continue updating. On unfreeze: all queued mutations whose present_at_us has passed MUST be applied immediately; all expired tiles MUST be expired immediately; staleness timers MUST resume from pre-freeze values; ephemeral DROP_IF_LATE mutations whose present_at_us has passed MUST be dropped.
+During freeze (RFC 0007 section 4.3): present_at pending queue drain MUST be suspended; expires_at expiry heap evaluation MUST be suspended; sync group deferred_frames_count MUST NOT increment; tile_stale_threshold_ms timer MUST be suspended; clock-skew estimation window MUST continue updating. On unfreeze: all queued mutations whose present_at_wall_us has passed MUST be applied immediately; all expired tiles MUST be expired immediately; staleness timers MUST resume from pre-freeze values; ephemeral DROP_IF_LATE mutations whose present_at_wall_us has passed MUST be dropped.
 Source: RFC 0003 §5.6.1
 Scope: v1-mandatory
 
 #### Scenario: Freeze suspends expiry
-- **WHEN** the scene is frozen and a tile's expires_at_us passes
+- **WHEN** the scene is frozen and a tile's expires_at_wall_us passes
 - **THEN** the tile MUST NOT be expired during freeze; it MUST be expired in the first post-unfreeze Stage 4
 
 #### Scenario: Freeze suspends staleness timer
@@ -337,7 +337,7 @@ Scope: v1-mandatory
 - **THEN** the tile MUST NOT become stale until 200ms after unfreeze (not immediately after unfreeze)
 
 #### Scenario: Unfreeze pending queue flush
-- **WHEN** the scene unfreezes and mutations in the queue have present_at_us in the past
+- **WHEN** the scene unfreezes and mutations in the queue have present_at_wall_us in the past
 - **THEN** all such mutations MUST be applied in the first post-unfreeze Stage 3/4
 
 ### Requirement: Safe Mode Timing Behavior
@@ -346,7 +346,7 @@ Source: RFC 0003 §5.6.2
 Scope: v1-mandatory
 
 #### Scenario: Safe mode expiry continues
-- **WHEN** safe mode is active and a tile's expires_at_us is reached
+- **WHEN** safe mode is active and a tile's expires_at_wall_us is reached
 - **THEN** the tile MUST be expired on schedule; safe mode does not pause expiry
 
 #### Scenario: Safe mode staleness suppressed

@@ -25,7 +25,7 @@ Scope: v1-mandatory
 - **THEN** no further transitions are possible (terminal state)
 
 ### Requirement: Lease Identity
-Each lease MUST have: a `LeaseId` (UUIDv7, time-ordered, SceneId type), a `namespace` (agent identity string), a `session_id` (parent session), `granted_at_us` (UTC microseconds), `ttl_ms` (0 = indefinite), `renewal_policy`, `capability_scope`, `resource_budget`, and `lease_priority`.
+Each lease MUST have: a `LeaseId` (UUIDv7, time-ordered, SceneId type), a `namespace` (agent identity string), a `session_id` (parent session), `granted_at_wall_us` (UTC microseconds), `ttl_ms` (0 = indefinite), `renewal_policy`, `capability_scope`, `resource_budget`, and `lease_priority`.
 Source: RFC 0008 §1.3
 Scope: v1-mandatory
 
@@ -103,7 +103,7 @@ Scope: v1-mandatory
 - **THEN** the effective TTL does not count the 2 minutes of suspension time
 
 ### Requirement: Safe Mode Resume
-On safe mode exit, all SUSPENDED leases MUST transition back to ACTIVE. Agents MUST receive `SessionResumed`. `LeaseResume` MUST be sent for each lease with `adjusted_expires_at_us` and `suspension_duration_us`. Staleness badges MUST clear within 1 frame. Tiles MUST render from last-committed scene state. Resume MUST complete within 2 frames (33.2ms). The agent MUST NOT re-request a lease.
+On safe mode exit, all SUSPENDED leases MUST transition back to ACTIVE. Agents MUST receive `SessionResumed`. `LeaseResume` MUST be sent for each lease with `adjusted_expires_at_wall_us` and `suspension_duration_us`. Staleness badges MUST clear within 1 frame. Tiles MUST render from last-committed scene state. Resume MUST complete within 2 frames (33.2ms). The agent MUST NOT re-request a lease.
 Source: RFC 0008 §3.3, §4.5
 Scope: v1-mandatory
 
@@ -287,7 +287,7 @@ Scope: v1-mandatory
 - **THEN** the degradation ladder advances and tile shedding begins
 
 ### Requirement: TTL Accounting Precision
-TTL accounting during suspension MUST be accurate to +/- 100ms. The effective lease expiry MUST be calculated as `granted_at_us + ttl_ms + suspension_duration_us`.
+TTL accounting during suspension MUST be accurate to +/- 100ms. The effective lease expiry MUST be calculated as `granted_at_wall_us + (ttl_ms * 1000) + suspension_duration_us`.
 Source: RFC 0008 §4.3, §12
 Scope: v1-mandatory
 

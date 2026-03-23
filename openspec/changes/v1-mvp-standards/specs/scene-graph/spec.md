@@ -196,7 +196,7 @@ Scope: v1-mandatory
 - **THEN** the runtime MUST reject the operation (no mutation exists for zone creation in v1)
 
 ### Requirement: Zone Publishing
-Agents MUST publish to zones via PublishToZoneMutation, specifying a zone_name (type name), content, publish_token, optional expires_at_us, optional publish_key (for MergeByKey zones), and optional content_classification. The runtime MUST resolve zone_name to the ZoneInstance for the agent's active tab. Publication MUST require `publish_zone:<zone_name>` capability (RFC 0006 §6.3 canonical wire-format name) and a valid ZonePublishToken. ClearZone MUST clear all publications by the agent in the specified zone.
+Agents MUST publish to zones via PublishToZoneMutation, specifying a zone_name (type name), content, publish_token, optional expires_at_wall_us, optional publish_key (for MergeByKey zones), and optional content_classification. The runtime MUST resolve zone_name to the ZoneInstance for the agent's active tab. Publication MUST require `publish_zone:<zone_name>` capability (RFC 0006 §6.3 canonical wire-format name) and a valid ZonePublishToken. ClearZone MUST clear all publications by the agent in the specified zone.
 Source: RFC 0001 §3.1, §3.3
 Scope: v1-mandatory
 
