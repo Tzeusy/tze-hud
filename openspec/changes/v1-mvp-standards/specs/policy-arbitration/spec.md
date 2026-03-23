@@ -361,20 +361,8 @@ Scope: v1-mandatory
 - **WHEN** a mutation is shed at Level 5
 - **THEN** it has already passed Level 3 (capability), Level 2 (privacy), and Level 4 (attention) checks
 
-### Requirement: Freeze and Safe Mode Interaction
-Per RFC 0007 §5.6: if freeze is active when safe mode triggers (Level 1 Safety), safe mode MUST win. Freeze MUST be cancelled, freeze queue discarded, `OverrideState.freeze_active` set to `false`. Freeze attempted during safe mode MUST be ignored. After safe mode exit, freeze MUST be inactive.
-
-Note on apparent Level 1 vs Level 0 ordering: freeze is a Level 0 (Human Override) action, but when Level 1 (Safety) automatically enters safe mode, Level 1 prevails because the safety trigger is an *automatic* runtime response to a critical condition (GPU failure, scene corruption), not a competing human intent. The general rule "higher level always wins" applies: Level 1 > Level 0. This is distinct from a human manually triggering both freeze and safe mode — in that case, safe mode cancels freeze because safe mode is the stronger human override intent (security.md: "safe mode as last resort, quickly reversible").
-Source: RFC 0009 §6.5, RFC 0007 §5.6
-Scope: v1-mandatory
-
-#### Scenario: Safety overrides freeze
-- **WHEN** the scene is frozen and a GPU failure triggers safe mode
-- **THEN** freeze is cancelled, safe mode overlay appears, and freeze queue is discarded
-
-#### Scenario: Manual safe mode cancels freeze
-- **WHEN** the scene is frozen and the viewer manually triggers safe mode via `Ctrl+Shift+Escape`
-- **THEN** freeze is cancelled, the freeze queue is discarded, and safe mode overlay appears
+### Cross-Reference: Freeze and Safe Mode State Transitions
+Freeze/safe-mode state transitions are governed exclusively by the system shell. See system-shell spec: "Requirement: Safe Mode and Freeze Interaction (Shell State Invariant)." Policy evaluation is a pure function; it does not produce state-transition side effects on `OverrideState`.
 
 ### Requirement: Dynamic Policy Rules
 Dynamic policy rules that can be loaded or modified at runtime are deferred to post-v1. V1 policy rules are static (derived from configuration at load time).

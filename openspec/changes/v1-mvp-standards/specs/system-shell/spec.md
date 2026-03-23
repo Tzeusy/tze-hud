@@ -121,14 +121,18 @@ Scope: v1-mandatory
 - **WHEN** the viewer clicks the "Resume" button
 - **THEN** the safe mode overlay is dismissed, SUSPENDED leases transition to ACTIVE, each session receives `SessionResumed` (empty), each lease receives `LeaseResume` with adjusted expiry, staleness badges clear within 1 frame, and mutations are accepted again without agents needing to re-request leases
 
-### Requirement: Safe Mode and Freeze Interaction
-If freeze is active when safe mode is triggered, safe mode MUST take priority. The freeze state MUST be cancelled, the freeze queue MUST be discarded, and `OverrideState.freeze_active` MUST be set to `false`. If freeze is attempted during safe mode, it MUST be ignored. After safe mode exit, freeze MUST be inactive.
+### Requirement: Safe Mode and Freeze Interaction (Shell State Invariant)
+The shell MUST enforce the following state-transition invariant: `safe_mode = true` implies `freeze_active = false`. This invariant holds regardless of the trigger that caused safe mode to activate (explicit viewer action, automatic runtime error, or any other cause). The shell is the sole author of `OverrideState`; no other subsystem (including policy arbitration) may write `OverrideState.freeze_active`. On any safe mode activation: the freeze state MUST be cancelled, the freeze queue MUST be discarded, and `OverrideState.freeze_active` MUST be set to `false` before any other safe mode entry steps execute. If freeze is attempted during safe mode, it MUST be ignored. After safe mode exit, freeze MUST be inactive.
 Source: RFC 0007 §5.6
 Scope: v1-mandatory
 
-#### Scenario: Safe mode cancels freeze
-- **WHEN** the scene is frozen and the viewer triggers safe mode
-- **THEN** freeze is cancelled, the freeze queue is discarded, and safe mode overlay appears
+#### Scenario: Safe mode cancels freeze (automatic trigger)
+- **WHEN** the scene is frozen and a GPU failure triggers safe mode automatically
+- **THEN** freeze is cancelled, the freeze queue is discarded, `OverrideState.freeze_active` is set to `false`, and safe mode overlay appears
+
+#### Scenario: Safe mode cancels freeze (manual trigger)
+- **WHEN** the scene is frozen and the viewer manually triggers safe mode via `Ctrl+Shift+Escape`
+- **THEN** freeze is cancelled, the freeze queue is discarded, `OverrideState.freeze_active` is set to `false`, and safe mode overlay appears
 
 #### Scenario: Freeze ignored during safe mode
 - **WHEN** the viewer presses `Ctrl+Shift+F` while safe mode is active
