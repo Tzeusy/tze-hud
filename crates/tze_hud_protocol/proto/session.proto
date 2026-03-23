@@ -48,10 +48,11 @@ message ClientMessage {
     // Subscriptions
     SubscriptionChange subscription_change = 24;
 
-    // Keepalive
-    Heartbeat         heartbeat          = 25;
+    // Zone publishing (RFC 0005 §3.1, §8.6)
+    // Durable-zone publishes receive ZonePublishResult; ephemeral are fire-and-forget.
+    ZonePublish       zone_publish        = 25;
 
-    // Telemetry
+    // Telemetry (RFC 0005 §3.8: field 26)
     TelemetryFrame    telemetry_frame    = 26;
 
     // Input control (RFC 0004 §8.3.1, RFC 0005 §3.8)
@@ -59,6 +60,9 @@ message ClientMessage {
     InputCaptureRequest  input_capture_request  = 28;
     InputCaptureRelease  input_capture_release  = 29;
     SetImePosition       set_ime_position       = 30;
+
+    // Keepalive (moved from field 25 to make room for ZonePublish)
+    Heartbeat         heartbeat          = 31;
   }
 }
 
@@ -73,6 +77,9 @@ message ServerMessage {
     SessionEstablished    session_established    = 10;
     SessionError          session_error          = 11;
 
+    // Server response to SessionResume (RFC 0005 §6.3)
+    SessionResumeResult   session_resume_result  = 12;
+
     // Mutation responses
     MutationResult        mutation_result        = 20;
 
@@ -84,9 +91,6 @@ message ServerMessage {
     SceneSnapshot         scene_snapshot         = 30;
     SceneDelta            scene_delta            = 31;
 
-    // Subscriptions
-    SubscriptionAck       subscription_ack       = 32;
-
     // Keepalive
     Heartbeat             heartbeat              = 33;
 
@@ -95,6 +99,13 @@ message ServerMessage {
 
     // Backpressure
     BackpressureSignal    backpressure_signal    = 35;
+
+    // Subscription acknowledgement (RFC 0005 §7.3)
+    SubscriptionChangeResult subscription_change_result = 39;
+
+    // Zone publish result (RFC 0005 §3.1): sent only for durable-zone publishes.
+    // Ephemeral-zone publishes are fire-and-forget; no ZonePublishResult is sent.
+    ZonePublishResult     zone_publish_result    = 40;
 
     // Input control responses (RFC 0004 §8.3.1, RFC 0005 §3.8)
     InputFocusResponse    input_focus_response    = 43;
@@ -105,6 +116,11 @@ message ServerMessage {
   // Reserved to prevent accidental reuse and wire-format incompatibilities.
   reserved 22;
   reserved "lease_denial";
+
+  // Field 32 (subscription_ack) was renamed to subscription_change_result (field 39)
+  // to align with the spec. Reserved to prevent accidental reuse.
+  reserved 32;
+  reserved "subscription_ack";
 }
 
 // ─── Session lifecycle messages ───────────────────────────────────────────────
@@ -171,6 +187,22 @@ message SessionError {
   string code    = 1;  // Error code (e.g. "AUTH_FAILED", "DUPLICATE_AGENT_ID")
   string message = 2;  // Human-readable explanation
   string hint    = 3;  // Machine-readable correction suggestion
+}
+
+// Server response to a valid SessionResume (RFC 0005 §6.3).
+// Followed immediately by a SceneSnapshot (full snapshot; no delta replay in v1).
+// Agents MUST use the subscription state from this message rather than assuming
+// their pre-disconnect subscription set is intact.
+message SessionResumeResult {
+  bool   accepted                        = 1;   // true = resume accepted; false = rejected
+  string new_session_token               = 2;   // New token for this resumed session
+  uint64 new_server_sequence             = 3;   // Current server-side sequence
+  uint32 negotiated_protocol_version     = 4;   // Protocol version in use
+  repeated string granted_capabilities   = 5;   // Capabilities confirmed for resumed session
+  string error                           = 6;   // Human-readable rejection reason (if accepted=false)
+  // Confirmed subscription state after resume. Agents MUST use these values.
+  repeated string active_subscriptions   = 7;   // Confirmed active subscription set
+  repeated string denied_subscriptions   = 8;   // Denied (missing capability)
 }
 
 // ─── Mutation messages ────────────────────────────────────────────────────────
@@ -246,10 +278,35 @@ message SubscriptionChange {
   repeated string unsubscribe = 2;  // Categories to remove
 }
 
-// Server acknowledges subscription change.
-message SubscriptionAck {
+// Server acknowledges subscription change (RFC 0005 §7.3).
+// Echoes the full active subscription set after the change.
+// Denied additions (missing capability) appear in denied_subscriptions.
+// SHALL NOT reuse MutationResult; this is a dedicated ack type.
+message SubscriptionChangeResult {
   repeated string active_subscriptions = 1;  // Full active set after change
   repeated string denied_subscriptions = 2;  // Requested but denied (missing capability)
+}
+
+// ─── Zone publishing messages ──────────────────────────────────────────────────
+
+// Client publishes content to a named zone (RFC 0005 §3.1, §8.6).
+// Distinct from mutation-based PublishToZoneMutation path.
+// Durable-zone publishes receive ZonePublishResult; ephemeral are fire-and-forget.
+message ZonePublish {
+  string                         zone_name  = 1;  // Name of the target zone
+  tze_hud.protocol.v1.ZoneContent content   = 2;  // Content to publish
+  uint64                         ttl_us     = 3;  // Duration in µs; 0 = zone default
+  string                         merge_key  = 4;  // For MergeByKey contention policy; empty otherwise
+}
+
+// Server response to a durable-zone ZonePublish (RFC 0005 §3.1).
+// Correlated by request_sequence matching the ZonePublish envelope's sequence.
+// NOT sent for ephemeral-zone publishes (those are fire-and-forget).
+message ZonePublishResult {
+  uint64 request_sequence = 1;  // Sequence of the ZonePublish that triggered this
+  bool   accepted         = 2;  // true = published; false = rejected
+  string error_code       = 3;  // Machine-readable error code (if accepted=false)
+  string error_message    = 4;  // Human-readable reason (if accepted=false)
 }
 
 // ─── Heartbeat ────────────────────────────────────────────────────────────────
