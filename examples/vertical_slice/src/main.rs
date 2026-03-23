@@ -101,20 +101,20 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut response_stream = session_client.session(stream).await?.into_inner();
 
-    // Read SessionAccepted
+    // Read SessionEstablished
     use tokio_stream::StreamExt;
     let msg = response_stream.next().await.unwrap()?;
     let namespace = match &msg.payload {
-        Some(session_proto::server_message::Payload::SessionAccepted(accepted)) => {
-            println!("  Session accepted:");
-            println!("    namespace       = {}", accepted.namespace);
-            println!("    heartbeat_ms    = {}", accepted.heartbeat_interval_ms);
-            println!("    capabilities    = {:?}", accepted.granted_capabilities);
-            println!("    clock_skew      = {}us", accepted.estimated_skew_us);
-            accepted.namespace.clone()
+        Some(session_proto::server_message::Payload::SessionEstablished(established)) => {
+            println!("  Session established:");
+            println!("    namespace       = {}", established.namespace);
+            println!("    heartbeat_ms    = {}", established.heartbeat_interval_ms);
+            println!("    capabilities    = {:?}", established.granted_capabilities);
+            println!("    clock_skew      = {}us", established.estimated_skew_us);
+            established.namespace.clone()
         }
         other => {
-            return Err(format!("Expected SessionAccepted, got: {other:?}").into());
+            return Err(format!("Expected SessionEstablished, got: {other:?}").into());
         }
     };
 
@@ -150,12 +150,12 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
 
     let msg = response_stream.next().await.unwrap()?;
     let _lease_id_bytes = match &msg.payload {
-        Some(session_proto::server_message::Payload::LeaseGrant(grant)) => {
-            println!("  Lease granted: ttl={}ms, priority={}", grant.granted_ttl_ms, grant.granted_priority);
-            grant.lease_id.clone()
+        Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
+            println!("  Lease granted: ttl={}ms, priority={}", resp.granted_ttl_ms, resp.granted_priority);
+            resp.lease_id.clone()
         }
         other => {
-            return Err(format!("Expected LeaseGrant, got: {other:?}").into());
+            return Err(format!("Expected LeaseResponse (granted), got: {other:?}").into());
         }
     };
 
@@ -785,12 +785,12 @@ mod tests {
 
         let mut response = client.session(stream).await.unwrap().into_inner();
 
-        // SessionAccepted
+        // SessionEstablished
         use tokio_stream::StreamExt;
         let msg = response.next().await.unwrap().unwrap();
         assert!(matches!(
             msg.payload,
-            Some(session_proto::server_message::Payload::SessionAccepted(_))
+            Some(session_proto::server_message::Payload::SessionEstablished(_))
         ));
 
         // SceneSnapshot
