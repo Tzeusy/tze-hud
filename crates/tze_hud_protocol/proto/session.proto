@@ -100,6 +100,11 @@ message ServerMessage {
     InputFocusResponse    input_focus_response    = 43;
     InputCaptureResponse  input_capture_response  = 44;
   }
+
+  // Field 22 (lease_denial) was removed in the v1 vocabulary rename.
+  // Reserved to prevent accidental reuse and wire-format incompatibilities.
+  reserved 22;
+  reserved "lease_denial";
 }
 
 // ─── Session lifecycle messages ───────────────────────────────────────────────
@@ -207,7 +212,8 @@ message LeaseRelease {
   bytes lease_id = 1;  // Lease to release
 }
 
-// Server response to a lease request (grant or denial unified per v1 vocabulary).
+// Server response to a lease operation (request, renew, or release).
+// Unified grant/denial response per v1 vocabulary.
 message LeaseResponse {
   // Whether the lease was granted or denied.
   bool   granted              = 1;

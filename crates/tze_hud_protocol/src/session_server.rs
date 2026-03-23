@@ -702,8 +702,7 @@ async fn handle_lease_request(
                 granted_ttl_ms: ttl,
                 granted_priority: req.lease_priority.max(2), // Default to normal priority
                 granted_capabilities: req.capabilities.clone(),
-                deny_reason: String::new(),
-                deny_code: String::new(),
+                ..Default::default()
             })),
         }))
         .await;
@@ -725,12 +724,9 @@ async fn handle_lease_renew(
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
                         granted: false,
-                        lease_id: Vec::new(),
-                        granted_ttl_ms: 0,
-                        granted_priority: 0,
-                        granted_capabilities: Vec::new(),
                         deny_reason: "Invalid lease_id bytes".to_string(),
                         deny_code: "INVALID_ARGUMENT".to_string(),
+                        ..Default::default()
                     })),
                 }))
                 .await;
@@ -769,12 +765,9 @@ async fn handle_lease_renew(
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
                         granted: false,
-                        lease_id: Vec::new(),
-                        granted_ttl_ms: 0,
-                        granted_priority: 0,
-                        granted_capabilities: Vec::new(),
                         deny_reason: e.to_string(),
                         deny_code: "LEASE_NOT_FOUND".to_string(),
+                        ..Default::default()
                     })),
                 }))
                 .await;
@@ -791,6 +784,19 @@ async fn handle_lease_release(
     let lease_id = match bytes_to_scene_id(&release.lease_id) {
         Ok(id) => id,
         Err(_) => {
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                        granted: false,
+                        deny_reason: "Invalid lease_id bytes".to_string(),
+                        deny_code: "INVALID_ARGUMENT".to_string(),
+                        ..Default::default()
+                    })),
+                }))
+                .await;
             return;
         }
     };
@@ -824,12 +830,9 @@ async fn handle_lease_release(
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
                         granted: false,
-                        lease_id: Vec::new(),
-                        granted_ttl_ms: 0,
-                        granted_priority: 0,
-                        granted_capabilities: Vec::new(),
                         deny_reason: e.to_string(),
                         deny_code: "LEASE_NOT_FOUND".to_string(),
+                        ..Default::default()
                     })),
                 }))
                 .await;
