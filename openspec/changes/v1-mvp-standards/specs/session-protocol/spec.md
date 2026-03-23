@@ -608,7 +608,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Zone Publishing via Session Stream
-ZonePublish SHALL carry zone_name, content (ZoneContent from scene_service.proto), ttl_us (0 = zone default), and merge_key. Durable-zone publishes SHALL be transactional and receive ZonePublishResult acknowledgement. Ephemeral-zone publishes SHALL be fire-and-forget (no ZonePublishResult sent).
+ZonePublish SHALL carry zone_name, content (ZoneContent from types.proto), ttl_us (0 = zone default), and merge_key. Durable-zone publishes SHALL be transactional and receive ZonePublishResult acknowledgement. Ephemeral-zone publishes SHALL be fire-and-forget (no ZonePublishResult sent).
 Source: RFC 0005 §3.1, §8.6
 Scope: v1-mandatory
 
@@ -634,7 +634,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: SceneId for Scene-Object Identifiers
-All scene-object identifiers (batch_id, lease_id, created_ids in MutationBatch/MutationResult) SHALL use SceneId (16-byte little-endian UUIDv7, imported from scene.proto). Session-level identifiers (agent_id, session_token, namespace) SHALL remain string.
+All scene-object identifiers (batch_id, lease_id, created_ids in MutationBatch/MutationResult) SHALL use SceneId (16-byte little-endian UUIDv7, defined in types.proto). Session-level identifiers (agent_id, session_token, namespace) SHALL remain string.
 Source: RFC 0005 §3.3, §9.1
 Scope: v1-mandatory
 
@@ -645,13 +645,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Protobuf Schema in session.proto
-The session protocol SHALL be defined in session.proto (package tze_hud.protocol.v1). It SHALL import scene_service.proto for MutationProto, SceneEvent, InputEvent, LeaseRequest, LeaseResponse, SceneSnapshot, and zone types. It SHALL import scene.proto for SceneId. RuntimeError SHALL be defined in session.proto itself. The gRPC service SHALL define: rpc Session(stream SessionMessage) returns (stream SessionMessage) for the primary bidirectional stream, and rpc ClockSync(ClockSyncRequest) returns (ClockSyncResponse) for ongoing clock re-synchronization.
+The session protocol SHALL be defined in session.proto (package tze_hud.protocol.v1.session). It SHALL import types.proto for MutationProto, zone types (ZoneContent, ZoneDefinitionProto, etc.), and SceneId. It SHALL import events.proto for SceneEvent, InputEvent, LeaseEvent, and related event types. RuntimeError SHALL be defined in session.proto itself. The gRPC service SHALL define: rpc Session(stream ClientMessage) returns (stream ServerMessage) for the primary bidirectional stream via the HudSession service, and rpc ClockSync(ClockSyncRequest) returns (ClockSyncResponse) for ongoing clock re-synchronization.
 Source: RFC 0005 §9, §9.1
 Scope: v1-mandatory
 
 #### Scenario: Single gRPC service definition
 - **WHEN** an agent connects to the runtime
-- **THEN** it SHALL use the SessionService with the Session RPC for all bidirectional communication
+- **THEN** it SHALL use the HudSession service with the Session RPC for all bidirectional communication
 
 ---
 
