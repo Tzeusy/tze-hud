@@ -2,7 +2,8 @@ syntax = "proto3";
 
 package tze_hud.protocol.v1.session;
 
-import "scene_service.proto";
+import "types.proto";
+import "events.proto";
 
 // ─── Session Protocol ─────────────────────────────────────────────────────────
 //
@@ -84,7 +85,7 @@ message ServerMessage {
     // Keepalive
     Heartbeat             heartbeat              = 33;
 
-    // Input (reuses InputEvent from scene_service.proto)
+    // Input (defined in events.proto)
     tze_hud.protocol.v1.InputEvent input_event   = 34;
 
     // Backpressure
