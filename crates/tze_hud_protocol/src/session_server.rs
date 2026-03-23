@@ -469,6 +469,18 @@ async fn handle_client_message(
         ClientPayload::TelemetryFrame(_tf) => {
             // Accept telemetry frames silently (logging/storage deferred to post-v1)
         }
+        ClientPayload::InputFocusRequest(_req) => {
+            // Input focus arbitration deferred to post-v1; silently accepted
+        }
+        ClientPayload::InputCaptureRequest(_req) => {
+            // Input capture arbitration deferred to post-v1; silently accepted
+        }
+        ClientPayload::InputCaptureRelease(_rel) => {
+            // Input capture release deferred to post-v1; silently accepted
+        }
+        ClientPayload::SetImePosition(_pos) => {
+            // IME position hint deferred to post-v1; fire-and-forget, no response needed
+        }
         ClientPayload::SessionClose(_close) => {
             // Client initiated graceful close; the main loop will break on stream end
         }
