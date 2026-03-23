@@ -6,7 +6,7 @@
 - [ ] 1.4 Implement atomic batch mutation pipeline (stage → validate → commit or reject all)
 - [ ] 1.5 Implement tile CRUD operations with z-order management and field invariants
 - [ ] 1.6 Implement tab CRUD operations with active tab switching
-- [ ] 1.7 Implement static zone registry loaded from configuration (subtitle, notification, status-bar, ambient-background)
+- [ ] 1.7 Implement static zone registry loaded from configuration (subtitle, notification, status_bar, pip, ambient_background, alert_banner)
 - [ ] 1.8 Implement zone publishing mutations with contention policies (latest-wins, stack, merge-by-key, replace)
 - [ ] 1.9 Implement hit-testing pipeline with layer ordering (chrome → content z-order → background)
 - [ ] 1.10 Implement scene snapshot serialization and full-snapshot delivery for reconnection
@@ -114,7 +114,7 @@
 ## 10. Scene Events
 
 - [ ] 10.1 Implement event taxonomy: input events, scene events, system events with SceneEvent envelope
-- [ ] 10.2 Implement interruption classification (ambient, passive, active, urgent, critical)
+- [ ] 10.2 Implement interruption classification (CRITICAL/HIGH/NORMAL/LOW/SILENT)
 - [ ] 10.3 Implement quiet hours enforcement with queue semantics
 - [ ] 10.4 Implement subscription model with 9 category types and prefix filtering
 - [ ] 10.5 Implement event bus pipeline: classify → filter → coalesce → deliver
@@ -142,7 +142,7 @@
 - [ ] 12.4 Implement Layer 2 test infrastructure: SSIM visual regression (0.995 layout, 0.99 composition) with golden reference management
 - [ ] 12.5 Implement Layer 3 benchmark binary: per-frame structured telemetry, JSON emission, split latency budget validation
 - [ ] 12.6 Implement Layer 4 developer visibility artifacts: index.html gallery, manifest.json, per-scene outputs, CI integration
-- [ ] 12.7 Create initial test scene registry (21+ named scenes from validation.md)
+- [ ] 12.7 Create initial test scene registry (25 named scenes per validation-framework spec)
 - [ ] 12.8 Implement protocol conformance test suite
 - [ ] 12.9 Implement record/replay trace infrastructure for debugging and regression
 - [ ] 12.10 Implement soak/leak test harness (5% tolerance at hour N vs hour 1)
