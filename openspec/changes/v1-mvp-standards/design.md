@@ -69,14 +69,6 @@ resource-store (orthogonal)
 validation-framework (cross-cutting, references all specs)
 ```
 
-### D6: Subagent-per-domain authoring strategy
-
-Each spec requires deep reading of its source RFC (2000–6000 lines). Four domain-specialized subagents author specs in parallel:
-- **Foundation:** scene-graph, runtime-kernel, timing-model (RFCs 0001–0003)
-- **Hot path:** input-model, session-protocol (RFCs 0004–0005)
-- **Governance:** configuration, system-shell, lease-governance, policy-arbitration (RFCs 0006–0009)
-- **Events/Storage/Validation:** scene-events, resource-store, validation-framework (RFCs 0010–0011, validation.md)
-
 ## Risks / Trade-offs
 
 - **[Spec drift from RFCs]** → Mitigation: Every requirement includes `Source: RFC NNNN §X.Y` traceability. Three-pass review validates adherence to law-and-lore contracts.

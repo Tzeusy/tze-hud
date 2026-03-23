@@ -41,3 +41,12 @@ This change creates the complete v1 MVP specification set: one spec per subsyste
 - **Dependencies**: wgpu, winit, tonic, tokio, GStreamer bindings (post-v1 only), platform windowing APIs.
 - **Systems**: CI pipeline (headless rendering on llvmpipe/WARP/Metal), test scene registry, developer visibility artifact generation.
 - **Doctrine alignment**: Every spec must trace requirements to heart-and-soul doctrine and respect the v1 scope boundary. The seven non-negotiable rules from the soul (LLMs never in frame loop, screen is sovereign, arrival ≠ presentation, local feedback first, presence requires governance, tests measure spirit, human always overrides) are load-bearing constraints across all specs.
+
+## Known Non-Definitive Areas
+
+The following areas are documented in these specs or referenced standards but are not yet fully resolved or are explicitly deferred:
+
+- **Protocol cutover**: The legacy unary scene service is still compiled alongside the new bidirectional gRPC session protocol. Standards require removal of the legacy service in v1-final.
+- **Capability vocabulary convergence**: The vertical_slice implementation still uses legacy names (e.g., `create_tile` in some contexts) that differ from the normalized vocabulary defined in the configuration spec. These will be converged during the capability standardization pass.
+- **Calibration harness**: The validation spec references a hardware-normalized calibration harness for SSIM-based visual regression. The harness implementation itself is not yet landed; validation scenarios remain pending its completion.
+- **Mobile profile**: The schema reserves fields and capability scopes for a Mobile Presence Node profile (smaller screen, touch-first interaction model). This profile is deferred post-v1; it fails at startup if attempted in v1 and will be fully specified and implemented in a subsequent release.
