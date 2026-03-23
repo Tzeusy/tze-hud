@@ -738,7 +738,7 @@ Agents declare which event categories they want to receive. Receiving events for
 
 `degradation_notices` and `lease_changes` are delivered unconditionally to all active sessions — they are not filterable because agents must react to them.
 
-**InputMessage variant routing:** `InputEvent` messages (field 34 in `SessionMessage`) carry an RFC 0004 `InputMessage` envelope. The runtime inspects the `InputMessage.event` oneof variant to determine which subscription filter applies:
+**EventBatch variant routing:** `InputEvent` messages (field 34 in `SessionMessage`) carry an RFC 0004 `EventBatch` envelope. The runtime inspects the `EventBatch.envelope` oneof variant to determine which subscription filter applies:
 - Focus variants (`FocusGainedEvent`, `FocusLostEvent`, `CaptureReleasedEvent`, IME events) are filtered by the `focus_events` subscription.
 - All other variants (pointer, touch, key, gesture) are filtered by the `input_events` subscription.
 
