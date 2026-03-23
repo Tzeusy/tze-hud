@@ -44,7 +44,7 @@ The v1 protobuf definitions SHALL be organized into exactly three files under `c
 **`types.proto`** (`package tze_hud.protocol.v1`) — Geometry primitives, scene node types, mutation types, and zone types. SHALL contain:
 - Geometry: `Rect`, `Rgba`
 - Node types: `NodeProto`, `SolidColorNodeProto`, `TextMarkdownNodeProto`, `HitRegionNodeProto`, `StaticImageNodeProto`, `ImageFitModeProto`
-- Mutation types: `MutationProto`, `CreateTileMutation`, `SetTileRootMutation`, `MutationBatchRequest`, `MutationBatchResponse`
+- Mutation types: `MutationProto`, `CreateTileMutation`, `SetTileRootMutation`
 - Zone types: `ZoneContent`, `ZonePublishToken`, `ZoneDefinitionProto`, `ZoneRegistrySnapshotProto`, `ZonePublishRecordProto`, `NotificationPayload`, `StatusBarPayload`, `GeometryPolicyProto`, `RelativeGeometryPolicy`, `EdgeAnchoredGeometryPolicy`, `RenderingPolicyProto`, `DisplayEdge`, `TextAlignProto`, `ContentionPolicyProto`
 - Zone mutation types: `PublishToZoneMutation`, `ClearZoneMutation`
 - Zone query types: `ZoneRegistryRequest`, `ZoneRegistryResponse`
@@ -58,8 +58,8 @@ The v1 protobuf definitions SHALL be organized into exactly three files under `c
 **`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, and backpressure. SHALL import `types.proto` and `events.proto`. SHALL contain:
 - gRPC service: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`
 - Client/server envelopes: `ClientMessage`, `ServerMessage`
-- Session lifecycle: `SessionInit`, `SessionResume`, `SessionClose`, `SessionAccepted`, `SessionDenied`
-- Lease messages: `LeaseRequest`, `LeaseRenew`, `LeaseRelease`, `LeaseGrant`, `LeaseDenial`, `LeaseStateChange`
+- Session lifecycle: `SessionInit`, `SessionResume`, `SessionClose`, `SessionEstablished`, `SessionError`
+- Lease messages: `LeaseRequest`, `LeaseRenew`, `LeaseRelease`, `LeaseResponse`, `LeaseStateChange`
 - Mutation messages: `MutationBatch`, `MutationResult`
 - Subscription messages: `SubscriptionChange`, `SubscriptionAck`
 - Scene state: `SceneSnapshot`, `SceneDelta`
