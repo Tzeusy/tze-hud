@@ -169,8 +169,8 @@ Every scene event shares a common envelope structure that carries identity, clas
 message SceneEvent {
   bytes  event_id           = 1;  // Unique event ID (UUID v7, 16 bytes).
   string event_type         = 2;  // Namespaced event type string.
-                                  // Scene events: "zone.published", "tile.created", "tab.switched"
-                                  // Agent events: "agent.<namespace>.<event_name>"
+                                  // Scene events: "scene.zone.published", "scene.tile.created", "scene.tab.switched"
+                                  // Agent events: "agent.<namespace>.<category>.<action>"
                                   // System events: "system.safe_mode_entered", "system.degradation_changed"
   InterruptionClass interruption_class = 3;  // Effective interruption class after ceiling enforcement.
   uint64 timestamp_wall_us  = 4;  // Wall-clock UTC (us since epoch, RFC 0003 3.1).
@@ -196,11 +196,11 @@ message SceneEvent {
 
 Event types use a dotted namespace hierarchy consistent with RFC 0006 5.5:
 
-- **Scene events:** `<object>.<action>` -- e.g., `zone.published`, `tile.created`, `tab.switched`
-- **Agent events:** `agent.<namespace>.<event_name>` -- e.g., `agent.doorbell_agent.doorbell.ring`
+- **Scene events:** `scene.<object>.<action>` -- e.g., `scene.zone.published`, `scene.tile.created`, `scene.tab.switched`
+- **Agent events:** `agent.<namespace>.<category>.<action>` -- e.g., `agent.doorbell_agent.doorbell.ring`
 - **System events:** `system.<action>` -- e.g., `system.safe_mode_entered`, `system.degradation_changed`
 
-Both segments use lowercase letters, digits, and underscores. No whitespace, no uppercase. The `system.` and `scene.` prefixes are reserved for runtime-generated events; agents cannot emit events with these prefixes (RFC 0006 5.5).
+All segments use lowercase letters, digits, and underscores. No whitespace, no uppercase. The `system.` and `scene.` prefixes are reserved for runtime-generated events; agents cannot emit events with these prefixes (RFC 0006 5.5).
 
 ---
 
@@ -509,10 +509,10 @@ message SubscriptionChange {
 
 message EventFilter {
   // Event type prefix to match. Supports:
-  //   "zone.*"                    -- all zone events
-  //   "zone.published"            -- specific zone event
-  //   "tile.*"                    -- tile lifecycle events
-  //   "tab.*"                     -- tab events
+  //   "scene.zone.*"              -- all zone events
+  //   "scene.zone.published"      -- specific zone event
+  //   "scene.tile.*"              -- tile lifecycle events
+  //   "scene.tab.*"               -- tab events
   //   "agent.<namespace>.*"       -- another agent's events (requires capability)
   //   "system.lease"              -- own lease state changes
   //   "system.degradation"        -- degradation events
@@ -520,7 +520,7 @@ message EventFilter {
 }
 ```
 
-**Wildcard semantics:** The `*` character matches any suffix. Only trailing wildcards are supported (no infix wildcards). A filter of `"zone.*"` matches `zone.published`, `zone.cleared`, etc. A filter of `"agent.doorbell_agent.*"` matches all events from the doorbell agent.
+**Wildcard semantics:** The `*` character matches any suffix. Only trailing wildcards are supported (no infix wildcards). A filter of `"scene.zone.*"` matches `scene.zone.published`, `scene.zone.cleared`, etc. A filter of `"agent.doorbell_agent.*"` matches all events from the doorbell agent.
 
 **Capability enforcement:** Subscription filters are checked against the agent's capabilities. An agent cannot subscribe to `agent.<namespace>.*` for another agent's events unless it holds `subscribe_scene_events` capability. An agent without `read_scene_topology` capability cannot subscribe to `scene_topology` events regardless of filter.
 
@@ -655,7 +655,7 @@ When an event fires, the runtime checks all tabs' `tab_switch_on_event` values:
 
 1. **Agent events:** The match is against the bare event name (e.g., `doorbell.ring`), not the fully qualified `agent.<namespace>.doorbell.ring`. This allows the tab configuration to be agent-independent -- any agent that can emit `doorbell.ring` can trigger the tab switch.
 
-2. **Scene events:** The match is against the scene event type (e.g., `zone.published`, `tab.switched`). In practice, using scene events as tab switch triggers is uncommon because they represent state changes that have already happened.
+2. **Scene events:** The match is against the scene event type (e.g., `scene.zone.published`, `scene.tab.switched`). In practice, using scene events as tab switch triggers is uncommon because they represent state changes that have already happened.
 
 3. **System events:** System events **cannot** trigger tab switches. The `system.*` prefix is excluded from `tab_switch_on_event` matching. Tab switches driven by system state (e.g., safe mode) are handled directly by the runtime (RFC 0007 5).
 
@@ -925,7 +925,7 @@ enum PresenceLevel {
 
 message SceneEvent {
   bytes  event_id            = 1;   // Unique event ID (UUID v7, 16 bytes).
-  string event_type          = 2;   // Namespaced: "zone.published", "tile.created",
+  string event_type          = 2;   // Namespaced: "scene.zone.published", "scene.tile.created",
                                     //             "agent.doorbell_agent.doorbell.ring",
                                     //             "system.degradation_changed"
   InterruptionClass interruption_class = 3;  // Effective class after ceiling enforcement.
@@ -1096,7 +1096,7 @@ message EmitSceneEventResult {
 // ── Event subscription filter ───────────────────────────────────────────────
 
 message EventFilter {
-  string event_type_prefix = 1;  // Trailing wildcard: "zone.*", "agent.foo.*"
+  string event_type_prefix = 1;  // Trailing wildcard: "scene.zone.*", "agent.foo.*"
 }
 ```
 
