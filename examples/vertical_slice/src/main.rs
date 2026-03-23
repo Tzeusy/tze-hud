@@ -49,7 +49,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-#[allow(deprecated)]
 async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== tze_hud vertical slice (full contract path) ===\n");
 
