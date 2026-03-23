@@ -121,13 +121,13 @@ Every lease carries a `lease_priority: u8` field. Priority determines shedding o
 | Value | Priority Class | Assignment Rule |
 |-------|---------------|-----------------|
 | 0 | System/Chrome | Runtime-internal only. Used for chrome layer tiles, safe-mode overlays, system indicators. Agents may **not** request priority 0; it is reserved for runtime-owned surfaces. Never shed under any degradation level. |
-| 1 | High | Agent-assigned. Requires `lease_priority_high` capability. Granted to primary interactive agents, embodied sessions with media access, or agents operating in `exclusive` zones (RFC 0001 SS2.5). |
+| 1 | High | Agent-assigned. Requires `lease:priority:1` capability. Granted to primary interactive agents, embodied sessions with media access, or agents operating in `exclusive` zones (RFC 0001 SS2.5). |
 | 2 | Normal (default) | Agent-assigned. Any agent may request priority 2. This is the default if no priority is specified in the `LeaseRequest`. Standard resident agents receive this priority. |
 | 3 | Low | Agent-assigned. Explicitly requested for background/ambient content: weather widgets, status dashboards, decorative overlays. May also be assigned by the runtime when downgrading an agent's requested priority due to capability constraints. |
 | 4+ | Background/Speculative | Agent-assigned. Best-effort rendering. First to be shed under any degradation pressure. Suitable for pre-fetched content, speculative overlays, or content that the agent acknowledges may not be rendered. |
 
 **Runtime override:** The runtime always grants the **effective** priority, which may differ from the agent's request:
-- An agent requesting priority 1 without `lease_priority_high` capability receives priority 2.
+- An agent requesting priority 1 without `lease:priority:1` capability receives priority 2.
 - An agent requesting priority 0 always receives priority 2 (or whatever its capability ceiling permits).
 - The runtime may downgrade priority at any time via `LeaseStateChange` (SS7.3) if policy conditions change.
 
