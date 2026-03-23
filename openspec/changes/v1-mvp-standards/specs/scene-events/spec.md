@@ -24,7 +24,7 @@ Scope: v1-mandatory
 
 #### Scenario: Event envelope fields populated
 - **WHEN** the runtime generates a TileCreated scene event
-- **THEN** the SceneEvent envelope MUST contain a non-zero UUID v7 event_id, event_type "tile.created", a valid InterruptionClass, both wall and monotonic timestamps, the source lease_id, the source agent namespace, and a monotonically increasing sequence number
+- **THEN** the SceneEvent envelope MUST contain a non-zero UUID v7 event_id, event_type "scene.tile.created", a valid InterruptionClass, both wall and monotonic timestamps, the source lease_id, the source agent namespace, and a monotonically increasing sequence number
 
 #### Scenario: System event source fields
 - **WHEN** a system event (e.g., degradation_changed) is generated
@@ -33,7 +33,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Event Type Naming Convention
-Event types SHALL use a dotted namespace hierarchy: scene events as `<object>.<action>`, agent events as `agent.<namespace>.<event_name>`, and system events as `system.<action>`. Both segments SHALL use only lowercase letters, digits, and underscores. The prefixes `system.` and `scene.` SHALL be reserved for runtime-generated events; agents MUST NOT emit events with these prefixes.
+Event types SHALL use a dotted namespace hierarchy: scene events as `scene.<object>.<action>`, agent events as `agent.<namespace>.<category>.<action>`, and system events as `system.<action>`. All segments SHALL use only lowercase letters, digits, and underscores. The prefixes `system.` and `scene.` SHALL be reserved for runtime-generated events; agents MUST NOT emit events with these prefixes. Input event type naming is governed by RFC 0004 and is outside the scope of this requirement.
 Source: RFC 0010 §2.2
 Scope: v1-mandatory
 
@@ -105,7 +105,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Agent Event Emission Protocol
-Agents SHALL emit scene events via the EmitSceneEvent message on the session stream. Emission SHALL require the `emit_scene_event:<name>` capability for the specific event name. The runtime SHALL namespace-prefix agent events as `agent.<namespace>.<event_name>` before delivery. Agent event payload SHALL be limited to 4KB maximum.
+Agents SHALL emit scene events via the EmitSceneEvent message on the session stream. Emission SHALL require the `emit_scene_event:<event_name>` capability, where `<event_name>` is the agent-supplied `<category>.<action>` suffix (e.g., `emit_scene_event:doorbell.ring`), not the fully-prefixed delivered event_type. The runtime SHALL namespace-prefix agent events as `agent.<namespace>.<category>.<action>` before delivery. Agent event payload SHALL be limited to 4KB maximum.
 Source: RFC 0010 §5.1, §5.2
 Scope: v1-mandatory
 
@@ -154,7 +154,19 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Subscription Model with Category Filtering
-Agents SHALL subscribe to event categories via SubscriptionChange messages. The complete category set SHALL include: SCENE_TOPOLOGY, INPUT_EVENTS, FOCUS_EVENTS, DEGRADATION_NOTICES (cannot opt out), LEASE_CHANGES (cannot opt out), ZONE_EVENTS, TELEMETRY_FRAMES, ATTENTION_EVENTS, and AGENT_EVENTS. Within each category, agents MAY apply finer-grained filters using event type prefix matching with trailing wildcards (e.g., "zone.*"). Maximum subscriptions per agent SHALL be 32.
+Agents SHALL subscribe to event categories via SubscriptionChange messages. The complete category set SHALL include: SCENE_TOPOLOGY, INPUT_EVENTS, FOCUS_EVENTS, DEGRADATION_NOTICES (cannot opt out), LEASE_CHANGES (cannot opt out), ZONE_EVENTS, TELEMETRY_FRAMES, ATTENTION_EVENTS, and AGENT_EVENTS. Within each category, agents MAY apply finer-grained filters using event type prefix matching with trailing wildcards (e.g., "scene.*"). Maximum subscriptions per agent SHALL be 32. The runtime SHALL use the following mapping between subscription category names and event type prefix patterns:
+
+| Subscription Category (SHOUTY_SNAKE_CASE) | Event Type Prefix Pattern |
+|-------------------------------------------|--------------------------|
+| SCENE_TOPOLOGY | `scene.*` |
+| LEASE_CHANGES | `system.lease_*` |
+| DEGRADATION_NOTICES | `system.degradation_*` |
+| ZONE_EVENTS | `scene.zone.*` |
+| FOCUS_EVENTS | `scene.focus.*` |
+| INPUT_EVENTS | `input.*` (governed by RFC 0004) |
+| AGENT_EVENTS | `agent.*` |
+| TELEMETRY_FRAMES | `system.telemetry_*` |
+| ATTENTION_EVENTS | `system.attention_*` |
 Source: RFC 0010 §7.1, §7.2, §7.3
 Scope: v1-mandatory
 
@@ -163,7 +175,7 @@ Scope: v1-mandatory
 - **THEN** the runtime MUST reject the unsubscription; these categories cannot be opted out of
 
 #### Scenario: Event filter prefix matching
-- **WHEN** an agent subscribes to scene_topology with filter "zone.*"
+- **WHEN** an agent subscribes to scene_topology with filter "scene.zone.*"
 - **THEN** the agent MUST receive ZoneOccupancyChanged events but MUST NOT receive TileCreated or TabSwitched events
 
 #### Scenario: Subscription limit
