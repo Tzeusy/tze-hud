@@ -18,7 +18,7 @@ Scope: v1-mandatory
 - **THEN** mutations, lease requests, heartbeats, input events, scene events, and subscription changes SHALL all be delivered on the single bidirectional stream (ClientMessage client-to-server, ServerMessage server-to-client)
 
 #### Scenario: No additional streams per concern
-- **WHEN** an agent needs to send both MutationBatch and HeartbeatPing messages
+- **WHEN** an agent needs to send both MutationBatch and Heartbeat messages
 - **THEN** both SHALL be sent as ClientMessage payloads on the same gRPC stream, not on separate streams
 
 ---
@@ -220,13 +220,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Clock Domain Naming Convention
-All timestamp fields in the session protocol SHALL encode their clock domain explicitly via suffix: _wall_us for wall-clock (UTC microseconds since Unix epoch) and _mono_us for monotonic system clock (microseconds since arbitrary epoch). This convention SHALL be consistent across all session messages including ClientMessage.timestamp_wall_us, ServerMessage.timestamp_wall_us, SessionInit.agent_timestamp_wall_us, HeartbeatPing.client_timestamp_mono_us, HeartbeatPong.server_timestamp_wall_us, and TimingHints.present_at_wall_us/expires_at_wall_us.
+All timestamp fields in the session protocol SHALL encode their clock domain explicitly via suffix: _wall_us for wall-clock (UTC microseconds since Unix epoch) and _mono_us for monotonic system clock (microseconds since arbitrary epoch). This convention SHALL be consistent across all session messages including ClientMessage.timestamp_wall_us, ServerMessage.timestamp_wall_us, SessionInit.agent_timestamp_wall_us, Heartbeat.timestamp_mono_us, and TimingHints.present_at_wall_us/expires_at_wall_us.
 Source: RFC 0005 §2.4
 Scope: v1-mandatory
 
 #### Scenario: RTT measurement uses monotonic clock
-- **WHEN** the agent sends HeartbeatPing with client_timestamp_mono_us
-- **THEN** the HeartbeatPong SHALL echo the same client_timestamp_mono_us value (monotonic), and the agent SHALL compute RTT as current_monotonic - echoed_value, not using wall-clock fields
+- **WHEN** the agent sends a Heartbeat (ClientMessage.heartbeat=25) with timestamp_mono_us
+- **THEN** the runtime SHALL respond with a Heartbeat (ServerMessage.heartbeat=33) echoing the same timestamp_mono_us value (monotonic), and the agent SHALL compute RTT as current_monotonic - echoed_value, not using wall-clock fields
 
 ---
 
@@ -246,7 +246,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Traffic Class Routing
-Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (HeartbeatPing, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The EventBatch traffic-class distinction between transactional and ephemeral variants is governed by RFC 0004 §8.5 and applies within the EventBatch carried in field 34 of ServerMessage.
+Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (HeartbeatPing, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
 Source: RFC 0005 §3.1, §3.2, §5.1, RFC 0004 §8.5
 Scope: v1-mandatory
 
