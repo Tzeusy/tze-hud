@@ -61,7 +61,11 @@ message ClientMessage {
     InputCaptureRelease  input_capture_release  = 29;
     SetImePosition       set_ime_position       = 30;
 
-    // Keepalive (moved from field 25 to make room for ZonePublish)
+    // Keepalive (moved from field 25 to field 31 to align with spec §3.8; field 25 reallocated to zone_publish)
+    // NOTE: This is a deliberate wire-breaking change from the pre-spec layout.
+    // Any client built against the old field assignment (heartbeat=25) is incompatible.
+    // Both the name "heartbeat" and the number 25 are being actively reused, so no
+    // proto `reserved` declaration is possible here. Document in changelog instead.
     Heartbeat         heartbeat          = 31;
   }
 }
@@ -195,7 +199,7 @@ message SessionError {
 // their pre-disconnect subscription set is intact.
 message SessionResumeResult {
   bool   accepted                        = 1;   // true = resume accepted; false = rejected
-  string new_session_token               = 2;   // New token for this resumed session
+  bytes  new_session_token               = 2;   // New token for this resumed session (opaque bytes, e.g. UUIDv7)
   uint64 new_server_sequence             = 3;   // Current server-side sequence
   uint32 negotiated_protocol_version     = 4;   // Protocol version in use
   repeated string granted_capabilities   = 5;   // Capabilities confirmed for resumed session
