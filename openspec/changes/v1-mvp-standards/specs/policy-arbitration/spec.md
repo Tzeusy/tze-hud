@@ -109,7 +109,7 @@ Scope: v1-mandatory
 
 #### Scenario: Privacy decides, chrome renders
 - **WHEN** a tile needs redaction
-- **THEN** Level 2 (Privacy) produces the redaction flag and the chrome render pass draws the placeholder pattern from `PrivacyConfig.redaction_style`
+- **THEN** Level 2 (Privacy) produces the redaction flag and the chrome render pass draws the placeholder (pattern or blank, per `PrivacyConfig.redaction_style`)
 
 ### Requirement: Level 3 Security Enforcement
 The security level MUST enforce capability scopes, lease validity, and namespace isolation. All required capabilities MUST pass (security is conjunctive -- a single failing check rejects the mutation). Capability checks MUST be hash-table lookups completing in < 5us. The check MUST produce `Reject(CapabilityDenied)`, `Reject(CapabilityScopeInsufficient)`, or `Reject(NamespaceViolation)` with the missing capability named in the `hint` field.
