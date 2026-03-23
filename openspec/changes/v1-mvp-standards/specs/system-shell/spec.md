@@ -178,13 +178,13 @@ Scope: v1-mandatory
 - **THEN** the disconnection badge is removed immediately
 
 ### Requirement: Redaction Placeholder
-When a tile's content is redacted due to viewer context, the tile's content area MUST be filled with a neutral pattern (configurable via `[privacy].redaction_style`). No agent name, content hint, or icon MUST be shown. Interactive affordances (hit regions) MUST be disabled while redacted. The agent MUST NOT be notified that its tile is redacted. When the viewer context changes to permit the content, the placeholder MUST be removed and tile content composited normally.
+When a tile's content is redacted due to viewer context, the tile's content area MUST be filled with a neutral placeholder (configurable via `[privacy].redaction_style`; allowed values: `pattern`, `blank`). No agent name, content hint, or icon MUST be shown. Interactive affordances (hit regions) MUST be disabled while redacted. The agent MUST NOT be notified that its tile is redacted. When the viewer context changes to permit the content, the placeholder MUST be removed and tile content composited normally.
 Source: RFC 0007 §3.4
 Scope: v1-mandatory
 
 #### Scenario: Tile redacted for guest viewer
 - **WHEN** a tile with `private` classification is displayed to a viewer with `unknown` class
-- **THEN** the tile's content is replaced with a neutral pattern, hit regions are disabled, and the agent is not notified
+- **THEN** the tile's content is replaced with a neutral placeholder (pattern or blank, per `[privacy].redaction_style`), hit regions are disabled, and the agent is not notified
 
 #### Scenario: Redaction removed on viewer change
 - **WHEN** the viewer context changes from `unknown` to `owner`

@@ -209,7 +209,7 @@ Scope: v1-mandatory
 - **THEN** startup fails with `CONFIG_DEGRADATION_THRESHOLD_ORDER` identifying the pair that is out of order
 
 ### Requirement: Privacy Configuration Defaults
-The `[privacy]` section MUST support `default_classification` (one of `public`, `household`, `private`, `sensitive`; default: `private`), `default_viewer_class` (one of `owner`, `household_member`, `known_guest`, `unknown`, `nobody`; default: `unknown`), `viewer_id_method` (default: `none`), `redaction_style` (one of `pattern`, `agent_name`, `icon`, `blank`; default: `pattern`), and `multi_viewer_policy` (one of `most_restrictive`, `least_restrictive`; default: `most_restrictive`). Invalid values MUST produce the appropriate `CONFIG_UNKNOWN_*` error code.
+The `[privacy]` section MUST support `default_classification` (one of `public`, `household`, `private`, `sensitive`; default: `private`), `default_viewer_class` (one of `owner`, `household_member`, `known_guest`, `unknown`, `nobody`; default: `unknown`), `viewer_id_method` (default: `none`), `redaction_style` (one of `pattern`, `blank`; default: `pattern`), and `multi_viewer_policy` (one of `most_restrictive`, `least_restrictive`; default: `most_restrictive`). Invalid values MUST produce the appropriate `CONFIG_UNKNOWN_*` error code.
 Source: RFC 0006 §7.1
 Scope: v1-mandatory
 
