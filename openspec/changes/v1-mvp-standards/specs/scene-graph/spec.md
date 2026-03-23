@@ -230,7 +230,7 @@ Scope: v1-mandatory
 - **THEN** the oldest publication MUST be evicted
 
 ### Requirement: Zone Media Types V1
-The runtime MUST support six zone media types: StreamText, ShortTextWithIcon, KeyValuePairs, StaticImage, SolidColor (all v1-mandatory), and VideoSurfaceRef (post-v1 media layer). Zone publish content MUST match one of the zone type's accepted_media_types.
+The runtime MUST support six zone media types: five v1-mandatory (StreamText, ShortTextWithIcon, KeyValuePairs, StaticImage, SolidColor) and one post-v1 (VideoSurfaceRef, deferred to post-v1 media layer). Zone publish content MUST match one of the zone type's accepted_media_types.
 Source: RFC 0001 §2.5
 Scope: v1-mandatory
 
