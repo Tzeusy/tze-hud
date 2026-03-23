@@ -322,13 +322,13 @@ Scope: v1-mandatory
 - **THEN** a warning is logged and the agent cannot authenticate
 
 ### Requirement: Layered Config Composition
-Layered configuration composition via an `includes` field is schema-reserved for post-v1. V1 MUST use the single-file model. Any `includes` field present in a v1 config MUST be silently ignored or produce a warning.
+Layered configuration composition via an `includes` field is schema-reserved for post-v1. V1 MUST use the single-file model. Any `includes` field present in a v1 config MUST produce a startup error with a message indicating that layered composition is reserved for post-v1.
 Source: RFC 0006 §1.4
 Scope: v1-reserved
 
 #### Scenario: Includes field in v1
 - **WHEN** a v1 config file contains `includes = "/etc/tze_hud/base.toml"`
-- **THEN** the field is ignored or a warning is logged; single-file config loading proceeds
+- **THEN** the runtime produces a startup error indicating that layered composition is reserved for post-v1
 
 ### Requirement: Viewer Identification Pipeline
 The viewer identification pipeline (`[[privacy.viewer_detectors]]`) is a post-v1 design direction. V1 MUST use the single `viewer_id_method` string form. The pipeline syntax MUST NOT be exercised in v1.
