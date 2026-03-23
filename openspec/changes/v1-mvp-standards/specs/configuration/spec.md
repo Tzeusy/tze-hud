@@ -226,13 +226,13 @@ Scope: v1-mandatory
 - **THEN** startup fails with `CONFIG_UNKNOWN_VIEWER_CLASS`
 
 ### Requirement: Quiet Hours Configuration
-The `[privacy.quiet_hours]` section MUST support `enabled` (default: `false`), a `[[privacy.quiet_hours.schedule]]` array of time ranges with `start` (HH:MM 24-hour), `end` (HH:MM 24-hour, wraps midnight), and optional `days` (array of `"mon"`..`"sun"`; default: all days), `pass_through_class` (one of `HIGH`, `NORMAL`, `LOW`, `SILENT`; default: `HIGH`; values use the canonical `InterruptionClass` enum from RFC 0010 §3.1), and `quiet_mode_display` (one of `"dim"`, `"clock_only"`, `"off"`; default: `"dim"`). `pass_through_class` specifies the minimum interruption class that passes through immediately during quiet hours; classes below the threshold are queued. `CRITICAL` events always pass through regardless of this setting. Invalid `pass_through_class` values MUST produce `CONFIG_UNKNOWN_INTERRUPTION_CLASS`. Note: RFC 0006 originally used doctrine names (`urgent`, `gentle`) for `pass_through_class`; the canonical wire values are the InterruptionClass enum names (`HIGH`, `LOW`, etc.) as established by RFC 0010 §3.1.
-Source: RFC 0006 §7.1, RFC 0010 §3.1
+The `[privacy.quiet_hours]` section MUST support `enabled` (default: `false`), a `[[privacy.quiet_hours.schedule]]` array of time ranges with `start` (HH:MM 24-hour), `end` (HH:MM 24-hour, wraps midnight), and optional `days` (array of `"mon"`..`"sun"`; default: all days), `pass_through_class` (one of `CRITICAL`, `HIGH`, `NORMAL`, `LOW`, `SILENT`; default: `HIGH`; values use the canonical `InterruptionClass` enum from RFC 0010 §3.1), and `quiet_mode_display` (one of `"dim"`, `"clock_only"`, `"off"`; default: `"dim"`). `pass_through_class` specifies the minimum interruption class that passes through immediately during quiet hours. `CRITICAL` always passes through regardless of this setting; specifying `CRITICAL` as the threshold is valid (meaning only CRITICAL passes — all others queued or discarded). Classes below the configured threshold are deferred: NORMAL is queued and delivered when quiet hours end; LOW is discarded (too stale to be useful); SILENT is unaffected (invisible by definition). Invalid `pass_through_class` values MUST produce `CONFIG_UNKNOWN_INTERRUPTION_CLASS`. Note: RFC 0006 originally used doctrine names (`urgent`, `gentle`) for `pass_through_class`; the canonical wire values are the InterruptionClass enum names (`CRITICAL`, `HIGH`, `LOW`, etc.) as established by RFC 0010 §3.1.
+Source: RFC 0006 §7.1, RFC 0010 §3.1, §4.2
 Scope: v1-mandatory
 
 #### Scenario: Quiet hours enabled with HIGH pass-through
 - **WHEN** `[privacy.quiet_hours] enabled = true` and `pass_through_class = "HIGH"`
-- **THEN** during quiet hours, CRITICAL and HIGH interruptions pass through immediately; NORMAL, LOW, and SILENT are queued or discarded per policy
+- **THEN** during quiet hours: CRITICAL and HIGH interruptions pass through immediately; NORMAL interruptions are queued until quiet hours end; LOW interruptions are discarded; SILENT interruptions are unaffected (not queued)
 
 #### Scenario: Invalid pass_through_class rejected
 - **WHEN** `pass_through_class = "urgent"` (doctrine name, not canonical enum name)

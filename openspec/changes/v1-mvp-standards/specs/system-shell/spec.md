@@ -74,7 +74,7 @@ Scope: v1-mandatory
 - **THEN** the active tab switches to the next tab and no agent receives the keyboard event
 
 ### Requirement: Dismiss Tile Override
-The dismiss tile control MUST appear as an X button in the top-right corner of a tile on hover (or on touch-hold). Activating it MUST: (1) immediately revoke the tile's lease, (2) remove the tile from the scene, (3) free the tile's resources, (4) send a lease revocation notification to the owning agent via `LeaseResponse` with reason `viewer_dismissed`. The dismiss MUST work even if the owning agent is disconnected or closing. The agent MAY re-request a lease afterwards (dismissal is not a permanent ban).
+The dismiss tile control MUST appear as an X button in the top-right corner of a tile on hover (or on touch-hold). Activating it MUST: (1) immediately revoke the tile's lease, (2) remove the tile from the scene, (3) free the tile's resources, (4) send a lease revocation notification to the owning agent via `LeaseResponse` with `result = REVOKED` and `revoke_reason = VIEWER_DISMISSED` (RFC 0008 `RevokeReason` enum). The dismiss MUST work even if the owning agent is disconnected or closing. The agent MAY re-request a lease afterwards (dismissal is not a permanent ban).
 Source: RFC 0007 §4.1
 Scope: v1-mandatory
 
@@ -113,13 +113,13 @@ Scope: v1-mandatory
 - **THEN** the safe mode overlay still renders correctly because it does not depend on the scene graph
 
 ### Requirement: Safe Mode Exit
-Safe mode MUST exit only by explicit viewer action: clicking/tapping "Resume", pressing `Enter`/`Space` (resume button has focus by default), or `Ctrl+Shift+Escape` (toggle). On exit: the overlay MUST be dismissed, all SUSPENDED leases MUST transition back to ACTIVE (RFC 0008 §3.3), sessions MUST receive `SessionResumed` with `adjusted_expires_at_us` and `suspension_duration_us`, TTL clocks MUST resume with elapsed suspension time excluded, staleness badges MUST clear within 1 frame, agent mutations MUST be accepted again, and the compositor MUST resume rendering from the current scene state. Agents MUST NOT re-request leases — lease identity, capability scope, and resource budget are preserved across the ACTIVE → SUSPENDED → ACTIVE cycle.
-Source: RFC 0007 §5.5, RFC 0008 §3.3
+Safe mode MUST exit only by explicit viewer action: clicking/tapping "Resume", pressing `Enter`/`Space` (resume button has focus by default), or `Ctrl+Shift+Escape` (toggle). On exit: the overlay MUST be dismissed, all SUSPENDED leases MUST transition back to ACTIVE (RFC 0008 §3.3), each session MUST receive `SessionResumed` (RFC 0005 §3.7; empty message — receipt is the signal to resume mutations), each affected lease MUST receive `LeaseResume` (RFC 0008 §7.3) with `adjusted_expires_at_us` and `suspension_duration_us`, TTL clocks MUST resume with elapsed suspension time excluded, staleness badges MUST clear within 1 frame, agent mutations MUST be accepted again, and the compositor MUST resume rendering from the current scene state. Agents MUST NOT re-request leases — lease identity, capability scope, and resource budget are preserved across the ACTIVE → SUSPENDED → ACTIVE cycle. Note: `SessionResumed` and `LeaseResume` are separate messages: `SessionResumed` is a session-level signal (no payload); `LeaseResume` is per-lease and carries TTL adjustment fields.
+Source: RFC 0007 §5.5, RFC 0008 §3.3, RFC 0005 §3.7
 Scope: v1-mandatory
 
 #### Scenario: Resume from safe mode
 - **WHEN** the viewer clicks the "Resume" button
-- **THEN** the safe mode overlay is dismissed, SUSPENDED leases transition to ACTIVE, agents receive `SessionResumed` with TTL adjustment, staleness badges clear within 1 frame, and mutations are accepted again without agents needing to re-request leases
+- **THEN** the safe mode overlay is dismissed, SUSPENDED leases transition to ACTIVE, each session receives `SessionResumed` (empty), each lease receives `LeaseResume` with adjusted expiry, staleness badges clear within 1 frame, and mutations are accepted again without agents needing to re-request leases
 
 ### Requirement: Safe Mode and Freeze Interaction
 If freeze is active when safe mode is triggered, safe mode MUST take priority. The freeze state MUST be cancelled, the freeze queue MUST be discarded, and `OverrideState.freeze_active` MUST be set to `false`. If freeze is attempted during safe mode, it MUST be ignored. After safe mode exit, freeze MUST be inactive.
