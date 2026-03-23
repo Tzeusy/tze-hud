@@ -76,13 +76,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Focus Cycling
-Focus cycling SHALL follow the NAVIGATE_NEXT and NAVIGATE_PREV abstract commands. Traversal order SHALL follow tile z-order (lowest z first) and within each tile, depth-first left-to-right tree order of HitRegionNode elements with accepts_focus=true. Tiles with input_mode=Passthrough SHALL be excluded from traversal. After the last focusable element, focus SHALL wrap to the first. The chrome layer tab bar SHALL be excluded from the content focus cycle.
+Focus cycling SHALL follow the NAVIGATE_NEXT and NAVIGATE_PREV abstract commands. Traversal order SHALL follow tile z-order (lowest z first) and within each tile, depth-first left-to-right tree order of HitRegionNode elements with accepts_focus=true. Tiles with input_mode=Passthrough SHALL be excluded from traversal. A non-Passthrough tile with no focusable HitRegionNodes SHALL receive tile-level focus (FocusOwner::Tile) as a single step in the cycle. After the last focusable element, focus SHALL wrap to the first. The chrome layer tab bar SHALL be excluded from the content focus cycle.
 Source: RFC 0004 §1.3
 Scope: v1-mandatory
 
 #### Scenario: Tab key cycles focus in z-order
 - **WHEN** the scene has Tile(z=1) with nodes N1,N2, Tile(z=3) with node N3, and Tile(z=8) with no focusable nodes, and focus is on N2
-- **THEN** pressing Tab SHALL move focus to N3, and pressing Tab again SHALL move focus to Tile(z=8) at tile level, and pressing Tab again SHALL wrap to N1
+- **THEN** pressing Tab SHALL move focus to N3, and pressing Tab again SHALL move focus to Tile(z=8) at tile level (FocusOwner::Tile), and pressing Tab again SHALL wrap to N1
 
 #### Scenario: Passthrough tile excluded from cycle
 - **WHEN** focus cycling encounters a tile with input_mode=Passthrough
@@ -150,13 +150,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Local Feedback Latency — input_to_local_ack
-The runtime SHALL update local visual state (pressed, hovered, focused) within p99 < 4ms of input event arrival. This is a non-negotiable doctrinal rule. The local feedback path (Stages 1+2) SHALL execute entirely on the main thread with no locks on the mutable scene graph, using an atomic snapshot of tile bounds, with a combined Stage 1+2 budget of < 1ms.
-Source: RFC 0004 §6.2, validation.md §3, DR-I1
+The runtime SHALL update local visual state (pressed, hovered, focused) at p99 < 4ms of input event arrival. This is a non-negotiable doctrinal rule, not an aspirational target — any interaction model where local feedback waits for an agent roundtrip is wrong by definition. The local feedback path (Stages 1+2) SHALL execute entirely on the main thread with no locks on the mutable scene graph, using an atomic snapshot of tile bounds, with a combined Stage 1+2 budget of < 1ms.
+Source: RFC 0004 §6.1, §6.2, validation.md §3, DR-I1
 Scope: v1-mandatory
 
-#### Scenario: Press state within 4ms
+#### Scenario: Press state within 4ms p99
 - **WHEN** a PointerDownEvent arrives at the main thread
-- **THEN** HitRegionLocalState.pressed SHALL be set to true within 4ms (p99) of event arrival, and the SceneLocalPatch SHALL be produced and forwarded to the compositor thread
+- **THEN** HitRegionLocalState.pressed SHALL be set to true at p99 < 4ms of event arrival, and the SceneLocalPatch SHALL be produced and forwarded to the compositor thread
 
 ---
 
@@ -302,13 +302,13 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Event Dispatch Flow
-Event dispatch SHALL follow a four-stage pipeline: Stage 1 (Input Drain, < 500 microseconds p99) attaches timestamps and enqueues; Stage 2 (Local Feedback, < 500 microseconds p99) performs hit-testing, updates local state, and produces SceneLocalPatch; the compositor thread applies SceneLocalPatch and routes events; the event router resolves owning agents (< 2ms from Stage 2 completion) and serializes to protobuf.
+Event dispatch SHALL follow a five-phase pipeline (RFC 0004 §8.1): Stage 1 (Input Drain, < 500 microseconds p99) attaches hardware and arrival timestamps and enqueues the raw input; Stage 2 (Local Feedback, < 500 microseconds p99) performs hit-testing against the bounds snapshot, updates HitRegionLocalState, and produces SceneLocalPatch; the compositor thread (Stage 3-4) applies SceneLocalPatch to render state and forwards events to the event router; the event router resolves owning agents (< 2ms from Stage 2 completion) and serializes events to protobuf per-agent EventBatch; the network thread delivers EventBatch on the agent's gRPC session stream. Stages 1 and 2 execute entirely on the main thread; Stage 3-4 and the event router run on the compositor thread.
 Source: RFC 0004 §8.1
 Scope: v1-mandatory
 
 #### Scenario: End-to-end dispatch within budget
 - **WHEN** a PointerDownEvent enters Stage 1
-- **THEN** local feedback SHALL be complete within 1ms (Stages 1+2 combined), and event routing to the agent's gRPC stream SHALL complete within 2ms of Stage 2 completion
+- **THEN** local feedback SHALL be complete within 1ms (Stages 1+2 combined, p99), and event routing to the agent's gRPC stream SHALL complete within 2ms of Stage 2 completion (p99)
 
 ---
 
