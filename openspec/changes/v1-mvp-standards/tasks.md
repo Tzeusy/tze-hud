@@ -82,7 +82,7 @@
 - [ ] 7.3 Implement auto-renewal policies (MANUAL, AUTO_RENEW at 75% TTL, ONE_SHOT)
 - [ ] 7.4 Implement disconnect grace period (15s) with orphan → revoke transition
 - [ ] 7.5 Implement resource budget enforcement: soft warning at 80%, hard reject at 100%, three-tier enforcement ladder
-- [ ] 7.6 Implement capability scope enforcement (create_tiles, modify_own_tiles, manage_tabs, publish_zone:<type>, read_scene, resident_mcp)
+- [ ] 7.6 Implement capability scope enforcement (create_tiles, modify_own_tiles, manage_tabs, publish_zone:<type>, read_scene_topology, resident_mcp)
 - [ ] 7.7 Implement zone interaction: guest publishing does not acquire leases
 - [ ] 7.8 Write Layer 0 tests: lease state machine transitions, budget enforcement, capability gating
 
