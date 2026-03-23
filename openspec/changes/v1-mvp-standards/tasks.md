@@ -46,7 +46,7 @@
 - [ ] 4.5 Implement local feedback guarantee: runtime-owned visual state, SceneLocalPatch rendering, rollback on agent rejection
 - [ ] 4.6 Implement event dispatch pipeline: capture → hit-test → route → deliver with bubbling (node → tile → tab → runtime)
 - [ ] 4.7 Implement event serialization, batching, coalescing, and backpressure
-- [ ] 4.8 Implement command input model (7 operator actions: dismiss, safe-mode, freeze, mute, tab-switch, focus-cycle, quit)
+- [ ] 4.8 Implement abstract command input model: CommandInputEvent with 7 actions (NAVIGATE_NEXT, NAVIGATE_PREV, ACTIVATE, CANCEL, CONTEXT, SCROLL_UP, SCROLL_DOWN), sources (KEYBOARD, DPAD, VOICE, REMOTE_CLICKER, ROTARY_DIAL, PROGRAMMATIC), transactional delivery, and routing to focused session (RFC 0004 §10)
 - [ ] 4.9 Write Layer 0 tests: focus tree invariants, hit-test correctness, event routing
 
 ## 5. Session Protocol
@@ -91,6 +91,7 @@
 - [ ] 8.1 Implement chrome layer (always on top, independent of agent state)
 - [ ] 8.2 Implement safe mode protocol: entry suspends (not revokes) agent leases, overlay indicator
 - [ ] 8.3 Implement freeze, mute, dismiss-all override controls
+- [ ] 8.3a Implement operator override input bindings for system-shell actions: dismiss, safe-mode, freeze, mute, tab-switch, focus-cycle, quit — these are local operator hotkeys that bypass the agent event pipeline and execute instantly (Level 0 arbitration)
 - [ ] 8.4 Implement disconnection badges and budget warning badges
 - [ ] 8.5 Implement tab bar rendering with keyboard shortcuts
 - [ ] 8.6 Implement backpressure signals to agents
