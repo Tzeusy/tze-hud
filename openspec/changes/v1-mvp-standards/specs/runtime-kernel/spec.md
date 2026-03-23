@@ -153,7 +153,7 @@ Scope: v1-mandatory
 - **THEN** the compositor thread MUST drop the oldest record and continue without blocking; telemetry_overflow_count MUST be incremented
 
 ### Requirement: Frame Pipeline Total Budget
-The total frame pipeline (Stage 1 start through Stage 7 end) MUST complete in p99 < 16.6ms (normalized to reference hardware) at 60fps. The combined Stages 1+2 MUST complete in p99 < 1ms. The input_to_local_ack latency MUST be p99 < 4ms. The input_to_next_present latency MUST be p99 < 33ms.
+The total frame pipeline (Stage 1 start through Stage 7 end) MUST complete in p99 < 16.6ms (normalized to reference hardware) at 60fps. The combined Stages 1+2 MUST complete in p99 < 1ms. The input_to_local_ack latency MUST be p99 < 4ms. The input_to_scene_commit latency MUST be p99 < 50ms for local agents (covering network round-trip through agent response). The input_to_next_present latency MUST be p99 < 33ms.
 Source: RFC 0002 §9
 Scope: v1-mandatory
 
@@ -164,6 +164,10 @@ Scope: v1-mandatory
 #### Scenario: Input to local acknowledgement
 - **WHEN** an input event arrives
 - **THEN** local visual feedback MUST be provided within 4ms p99
+
+#### Scenario: Input to scene commit
+- **WHEN** an input event arrives and is processed by a local agent
+- **THEN** the agent's response mutation MUST be applied to the scene graph within 50ms p99 of the original input event (input_to_scene_commit, covering full network round-trip)
 
 ### Requirement: Window Modes
 The runtime MUST support two window modes configured at startup: Fullscreen (compositor owns entire display, all input captured, all platforms) and Overlay/HUD (transparent borderless always-on-top window, per-region input passthrough, platform-specific). Runtime mode switching MUST be supported but is a disruptive operation requiring surface recreation.
@@ -249,12 +253,12 @@ Source: RFC 0002 §6.3
 Scope: v1-mandatory
 
 #### Scenario: Recovery threshold
-- **WHEN** the runtime is at Level 2 and frame_time_p95 < 12ms for 30 consecutive frames
+- **WHEN** the runtime is at Level 2 and frame_time_p95 < 12ms sustained over a 30-frame rolling window (500ms at 60fps)
 - **THEN** the runtime MUST recover one level to Level 1
 
 #### Scenario: Full recovery time
 - **WHEN** the runtime is at Level 5
-- **THEN** reaching Normal MUST require 5 x 30 frames of clean performance (frame_time_p95 < 12ms)
+- **THEN** reaching Normal MUST require 5 successive 30-frame windows of clean performance (frame_time_p95 < 12ms per window), recovering one level per window (~2.5 seconds total at 60fps)
 
 ### Requirement: Tile Shedding Order
 When shedding tiles (Level 4 or frame-time guardian), the runtime MUST sort tiles by (lease_priority ASC, z_order DESC). Lower lease_priority values (0 = highest priority) SHALL be preserved first; within the same priority class, higher z_order wins. Tiles with the highest lease_priority values and lowest z_order SHALL be shed first.

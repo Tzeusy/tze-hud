@@ -8,8 +8,8 @@ Source RFC: 0001 (Scene Contract)
 ## ADDED Requirements
 
 ### Requirement: SceneId Identity
-All live scene objects (tabs, tiles, nodes, leases, zones, sync groups) SHALL be identified by a `SceneId`, which MUST be a UUIDv7 (time-ordered, 16-byte little-endian binary representation). SceneId provides lexicographic sortability by creation time for sequence ordering and log correlation.
-Source: RFC 0001 §1.1
+All live scene objects (tabs, tiles, nodes, leases, zones, sync groups) SHALL be identified by a `SceneId`, which MUST be a UUIDv7 (time-ordered). SceneId provides lexicographic sortability by creation time for sequence ordering and log correlation. When serialized, SceneId MUST be encoded as a 16-byte little-endian binary representation.
+Source: RFC 0001 §1.1, §4.1
 Scope: v1-mandatory
 
 #### Scenario: SceneId generation
@@ -120,7 +120,7 @@ Scope: v1-mandatory
 
 #### Scenario: Z-order in reserved zone band
 - **WHEN** an agent submits CreateTile with z_order = 0x8000_0000
-- **THEN** the runtime MUST reject the mutation with `INVALID_Z_ORDER`
+- **THEN** the runtime MUST reject the mutation with `VALIDATION_ERROR_INVALID_FIELD_VALUE` (z_order >= ZONE_TILE_Z_MIN is reserved for runtime-managed zone tiles)
 
 ### Requirement: V1 Node Types
 The runtime MUST support four node types: SolidColorNode (with color and bounds), TextMarkdownNode (with CommonMark content up to 65535 UTF-8 bytes, font_size_px > 0.0, font family, color, alignment, overflow), StaticImageNode (with ResourceId, bounds, fit mode), and HitRegionNode (with bounds, interaction_id, accepts_focus, accepts_pointer). Each node MUST have a SceneId and an ordered list of child SceneIds.
@@ -196,12 +196,12 @@ Scope: v1-mandatory
 - **THEN** the runtime MUST reject the operation (no mutation exists for zone creation in v1)
 
 ### Requirement: Zone Publishing
-Agents MUST publish to zones via PublishToZoneMutation, specifying a zone_name (type name), content, publish_token, optional expires_at_us, optional publish_key (for MergeByKey zones), and optional content_classification. The runtime MUST resolve zone_name to the ZoneInstance for the agent's active tab. Publication MUST require `publish_zone:<zone_name>` capability and a valid ZonePublishToken. ClearZone MUST clear all publications by the agent in the specified zone.
+Agents MUST publish to zones via PublishToZoneMutation, specifying a zone_name (type name), content, publish_token, optional expires_at_us, optional publish_key (for MergeByKey zones), and optional content_classification. The runtime MUST resolve zone_name to the ZoneInstance for the agent's active tab. Publication MUST require `zone_publish:<zone_name>` capability (RFC 0006 §6.3 canonical snake_case) and a valid ZonePublishToken. ClearZone MUST clear all publications by the agent in the specified zone.
 Source: RFC 0001 §3.1, §3.3
 Scope: v1-mandatory
 
 #### Scenario: Publish to subtitle zone
-- **WHEN** an agent with `publish_zone:subtitle` capability and a valid ZonePublishToken submits PublishToZoneMutation with zone_name="subtitle"
+- **WHEN** an agent with `zone_publish:subtitle` capability and a valid ZonePublishToken submits PublishToZoneMutation with zone_name="subtitle"
 - **THEN** the runtime MUST resolve the zone type to the subtitle ZoneInstance in the agent's active tab and publish the content
 
 #### Scenario: Zone not found

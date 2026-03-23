@@ -274,7 +274,7 @@ Scope: v1-mandatory
 
 #### Scenario: after_us conversion
 - **WHEN** an agent submits a mutation with after_us = 500,000 (500ms)
-- **THEN** the compositor MUST convert it to present_at_us = current_wallclock_us + 500,000 at Stage 3 intake and enter it into the pending queue
+- **THEN** the compositor MUST compute target_mono_us = monotonic_us_at_intake + 500,000, convert to wall-clock via the session clock-skew estimate (present_at_us = target_mono_us + skew_us), and enter the mutation into the pending queue at Stage 3 intake
 
 #### Scenario: frames_from_now conversion
 - **WHEN** an agent submits a mutation with frames_from_now = 3 at frame N
