@@ -58,11 +58,12 @@ The v1 protobuf definitions SHALL be organized into exactly three files under `c
 **`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, and backpressure. SHALL import `types.proto` and `events.proto`. SHALL contain:
 - gRPC service: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`
 - Client/server envelopes: `ClientMessage`, `ServerMessage`
-- Session lifecycle: `SessionInit`, `SessionResume`, `SessionClose`, `SessionEstablished`, `SessionError`
+- Session lifecycle: `SessionInit`, `SessionResume`, `SessionResumeResult`, `SessionClose`, `SessionEstablished`, `SessionError`
 - Lease messages: `LeaseRequest`, `LeaseRenew`, `LeaseRelease`, `LeaseResponse`, `LeaseStateChange`
 - Mutation messages: `MutationBatch`, `MutationResult`
-- Subscription messages: `SubscriptionChange`, `SubscriptionAck`
+- Subscription messages: `SubscriptionChange`, `SubscriptionChangeResult`
 - Scene state: `SceneSnapshot`, `SceneDelta`
+- Zone publishing: `ZonePublish`, `ZonePublishResult`
 - Keepalive: `Heartbeat`
 - Telemetry: `TelemetryFrame`
 - Backpressure: `BackpressureSignal`
