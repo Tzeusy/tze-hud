@@ -15,7 +15,7 @@
 ## 2. Timing Model
 
 - [ ] 2.1 Implement clock domain types with _wall_us and _mono_us naming convention and type safety
-- [ ] 2.2 Implement TimingHints struct (present_at, expires_at, sequence, priority, coalesce_key, sync_group)
+- [ ] 2.2 Implement TimingHints struct (present_at_wall_us, expires_at_wall_us, sequence, priority, coalesce_key, sync_group)
 - [ ] 2.3 Implement frame deadline and presentation scheduling (strict no-earlier-than)
 - [ ] 2.4 Implement sync group membership, lifecycle, and AllOrDefer/AvailableMembers commit policies
 - [ ] 2.5 Implement injectable Clock trait for deterministic testing and headless virtual clock
