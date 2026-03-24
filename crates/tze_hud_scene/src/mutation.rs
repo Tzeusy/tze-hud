@@ -167,8 +167,15 @@ pub enum SceneMutation {
         publish_token: ZonePublishToken,
         /// For MergeByKey contention: the key under which content is stored.
         merge_key: Option<String>,
+        /// Optional wall-clock expiry timestamp (microseconds since epoch).
+        /// When set, the runtime clears this publication at or before expiry.
+        expires_at_wall_us: Option<u64>,
+        /// Optional opaque content classification tag (e.g., "public", "pii").
+        content_classification: Option<String>,
     },
-    /// Clear all active publishes for a zone.
+    /// Clear all publications by this agent in the specified zone.
+    ///
+    /// Per spec: "ClearZone clears all publications by the agent in the specified zone."
     ClearZone {
         zone_name: String,
         publish_token: ZonePublishToken,
@@ -617,15 +624,25 @@ impl SceneGraph {
                 content,
                 publish_token: _publish_token, // token validated by the gRPC layer
                 merge_key,
+                expires_at_wall_us,
+                content_classification,
             } => {
-                self.publish_to_zone(zone_name, content.clone(), namespace, merge_key.clone())?;
+                self.publish_to_zone(
+                    zone_name,
+                    content.clone(),
+                    namespace,
+                    merge_key.clone(),
+                    *expires_at_wall_us,
+                    content_classification.clone(),
+                )?;
                 Ok(vec![])
             }
             SceneMutation::ClearZone {
                 zone_name,
                 publish_token: _publish_token, // token validated by the gRPC layer
             } => {
-                self.clear_zone(zone_name)?;
+                // Per spec: ClearZone clears publications by THIS agent in the zone.
+                self.clear_zone_for_publisher(zone_name, namespace)?;
                 Ok(vec![])
             }
             // ── Sync group mutations ──────────────────────────────────────────

@@ -581,7 +581,7 @@ mod tests {
     use tokio::sync::Mutex;
     use tze_hud_scene::graph::SceneGraph;
     use tze_hud_scene::types::LeaseState;
-    use tze_hud_protocol::session::{SessionRegistry, SharedState};
+    use tze_hud_protocol::session::{RuntimeDegradationLevel, SessionRegistry, SharedState};
     use tze_hud_protocol::token::TokenStore;
     use super::super::chrome::{
         AuditPayload, ChromeState, CollectingAuditSink, SafeModeEntryReason,

@@ -433,7 +433,7 @@ impl McpServer {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy}, SceneId};
+    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy, LayerAttachment}, SceneId};
 
     async fn server_with_tab() -> (McpServer, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -579,6 +579,7 @@ mod tests {
                     transport_constraint: None,
                     auto_clear_ms: None,
                     ephemeral: false,
+                    layer_attachment: LayerAttachment::Content,
                 },
             );
         }
@@ -629,6 +630,7 @@ mod tests {
                     transport_constraint: None,
                     auto_clear_ms: None,
                     ephemeral: false,
+                    layer_attachment: LayerAttachment::Content,
                 },
             );
         }
