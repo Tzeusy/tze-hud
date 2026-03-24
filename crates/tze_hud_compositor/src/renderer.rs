@@ -3,6 +3,15 @@
 //! For the vertical slice, this renders tiles as colored rectangles
 //! with hit-region highlighting for local feedback.
 //!
+//! The frame pipeline is **surface-agnostic**: it renders through the
+//! `CompositorSurface` trait, which is implemented by both `HeadlessSurface`
+//! (offscreen) and `WindowSurface` (display-connected).  No conditional
+//! compilation exists in the render path — only the surface implementation
+//! differs between modes.
+//!
+//! Per runtime-kernel/spec.md Requirement: Headless Mode (line 198):
+//! "No conditional compilation for the render path."
+//!
 //! ## Two-pass rendering (content → chrome)
 //!
 //! [`Compositor::render_frame_with_chrome`] implements the three-layer ordering required by
@@ -14,7 +23,7 @@
 //! (capture-safe architecture): the content and chrome passes are structurally independent.
 
 use crate::pipeline::{rect_vertices, ChromeDrawCmd, RectVertex, RECT_SHADER};
-use crate::surface::HeadlessSurface;
+use crate::surface::{CompositorSurface, HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::FrameTelemetry;
@@ -31,7 +40,21 @@ pub struct Compositor {
 
 impl Compositor {
     /// Create a new headless compositor.
+    ///
+    /// Checks the `HEADLESS_FORCE_SOFTWARE` environment variable.  When set to
+    /// `1`, wgpu adapter selection uses `force_fallback_adapter = true`, which
+    /// selects llvmpipe on Linux or WARP on Windows.
+    ///
+    /// Per runtime-kernel/spec.md Requirement: Headless Software GPU (line 211):
+    /// "When set, the wgpu adapter selection MUST request a software fallback
+    /// (force_fallback_adapter = true)."
     pub async fn new_headless(width: u32, height: u32) -> Result<Self, CompositorError> {
+        // Check HEADLESS_FORCE_SOFTWARE env var (spec line 409: "conventionally
+        // named HEADLESS_FORCE_SOFTWARE").
+        let force_software = std::env::var("HEADLESS_FORCE_SOFTWARE")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false);
+
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
@@ -41,7 +64,7 @@ impl Compositor {
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: None,
-                force_fallback_adapter: false,
+                force_fallback_adapter: force_software,
             })
             .await
             .ok_or(CompositorError::NoAdapter)?;
@@ -115,12 +138,26 @@ impl Compositor {
         })
     }
 
-    /// Render one frame of the scene to the headless surface.
+    /// Render one frame of the scene to the surface.
+    ///
+    /// This method is surface-agnostic: it works with any type implementing
+    /// `CompositorSurface`.  The same code path executes in headless and windowed
+    /// modes — only the surface implementation differs.
+    ///
+    /// Per runtime-kernel/spec.md Requirement: Headless Mode (line 198):
+    /// "No conditional compilation for the render path."
+    ///
+    /// For headless pixel readback, use `render_frame_headless()` instead,
+    /// which includes the `copy_to_buffer` step internally so that
+    /// `surface.read_pixels()` returns the current frame's data.
+    /// `render_frame()` does NOT copy pixels to the readback buffer — the
+    /// encoder is created and consumed internally and is not exposed.
+    ///
     /// Returns telemetry for this frame.
     pub fn render_frame(
         &mut self,
         scene: &SceneGraph,
-        surface: &HeadlessSurface,
+        surface: &dyn CompositorSurface,
     ) -> FrameTelemetry {
         let frame_start = std::time::Instant::now();
         self.frame_number += 1;
@@ -135,8 +172,10 @@ impl Compositor {
 
         // Build vertex buffer from scene
         let mut vertices: Vec<RectVertex> = Vec::new();
-        let sw = self.width as f32;
-        let sh = self.height as f32;
+        let (sw, sh) = {
+            let (w, h) = surface.size();
+            (w as f32, h as f32)
+        };
 
         for tile in &tiles {
             // Render tile background
@@ -172,6 +211,10 @@ impl Compositor {
             Some(buffer)
         };
 
+        // Acquire frame through the surface trait (surface-agnostic).
+        // The CompositorFrame._guard keeps the backing resource alive until drop.
+        let frame = surface.acquire_frame();
+
         // Encode render pass
         let mut encoder = self
             .device
@@ -183,7 +226,7 @@ impl Compositor {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("frame_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface.view,
+                    view: &frame.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -210,11 +253,138 @@ impl Compositor {
 
         telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
 
-        // Copy to readback buffer
+        let submit_start = std::time::Instant::now();
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // present() is surface-specific: no-op for headless, swap-chain flip for windowed.
+        // Drop frame guard AFTER present() so the backing resource stays alive.
+        surface.present();
+        drop(frame);
+
+        self.device.poll(wgpu::Maintain::Wait);
+        telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+
+        telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
+        telemetry
+    }
+
+    /// Render one frame and copy pixel data into the headless readback buffer.
+    ///
+    /// This is a convenience method for testing/CI that handles the extra
+    /// `copy_to_buffer` step required for headless pixel readback.
+    ///
+    /// The `copy_to_buffer` call must happen before `queue.submit()`, which
+    /// means it cannot be cleanly extracted into a post-render callback without
+    /// breaking the submit boundary.  This method intentionally duplicates the
+    /// render pipeline for that reason.  A follow-up refactor should extract a
+    /// shared internal `encode_frame` helper that accepts an optional readback
+    /// callback, eliminating this duplication.
+    ///
+    /// Returns telemetry for this frame.
+    pub fn render_frame_headless(
+        &mut self,
+        scene: &SceneGraph,
+        surface: &HeadlessSurface,
+    ) -> FrameTelemetry {
+        let frame_start = std::time::Instant::now();
+        self.frame_number += 1;
+
+        let mut telemetry = FrameTelemetry::new(self.frame_number);
+
+        // Collect visible tiles
+        let tiles = scene.visible_tiles();
+        telemetry.tile_count = tiles.len() as u32;
+        telemetry.node_count = scene.node_count() as u32;
+        telemetry.active_leases = scene.leases.len() as u32;
+
+        // Build vertex buffer from scene.
+        // Use surface.size() — not self.width/self.height — so that vertex
+        // normalization is correct even if the HeadlessSurface was created with
+        // different dimensions than the compositor's stored width/height.
+        let mut vertices: Vec<RectVertex> = Vec::new();
+        let (sw, sh) = {
+            let (w, h) = surface.size();
+            (w as f32, h as f32)
+        };
+
+        for tile in &tiles {
+            let bg_color = self.tile_background_color(tile, scene);
+            let verts = rect_vertices(
+                tile.bounds.x,
+                tile.bounds.y,
+                tile.bounds.width,
+                tile.bounds.height,
+                sw,
+                sh,
+                bg_color,
+            );
+            vertices.extend_from_slice(&verts);
+
+            if let Some(root_id) = tile.root_node {
+                self.render_node(root_id, tile, scene, &mut vertices, sw, sh);
+            }
+        }
+
+        let encode_start = std::time::Instant::now();
+
+        let vertex_buffer = if vertices.is_empty() {
+            None
+        } else {
+            let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vertex_buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            Some(buffer)
+        };
+
+        // Acquire frame via trait — same code path as render_frame().
+        let frame = surface.acquire_frame();
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame_encoder"),
+            });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.05,
+                            g: 0.05,
+                            b: 0.1,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            render_pass.set_pipeline(&self.pipeline);
+
+            if let Some(ref buffer) = vertex_buffer {
+                render_pass.set_vertex_buffer(0, buffer.slice(..));
+                render_pass.draw(0..vertices.len() as u32, 0..1);
+            }
+        }
+
+        telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
+
+        // Headless-specific: copy rendered texture to readback buffer.
         surface.copy_to_buffer(&mut encoder);
 
         let submit_start = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
+        surface.present(); // no-op for headless
+        drop(frame);
         self.device.poll(wgpu::Maintain::Wait);
         telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
 
@@ -557,6 +727,12 @@ mod tests {
     use crate::surface::HeadlessSurface;
     use tze_hud_scene::graph::SceneGraph;
 
+    /// Mutex to serialize tests that mutate `HEADLESS_FORCE_SOFTWARE`, a
+    /// global environment variable.  Rust tests run in parallel by default,
+    /// so concurrent mutations would cause races.  This is an in-process lock;
+    /// it does not protect against separate test binary runs.
+    static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Convenience: build a minimal scene with one tile containing the given node.
     fn scene_with_node(node: Node) -> SceneGraph {
         let mut scene = SceneGraph::new(256.0, 256.0);
@@ -599,9 +775,7 @@ mod tests {
         };
 
         let scene = scene_with_node(node);
-        compositor.render_frame(&scene, &surface);
-        compositor.queue.submit(std::iter::empty());
-        compositor.device.poll(wgpu::Maintain::Wait);
+        compositor.render_frame_headless(&scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
         // The background clear color is ~[0.05, 0.05, 0.1] in linear; tile bg is [0.05,0.05,0.05].
@@ -654,8 +828,7 @@ mod tests {
             }),
         }).unwrap();
 
-        compositor.render_frame(&scene, &surface);
-        compositor.device.poll(wgpu::Maintain::Wait);
+        compositor.render_frame_headless(&scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 512 * 256 * 4, "pixel buffer size mismatch");
@@ -811,5 +984,48 @@ mod tests {
         compositor.device.poll(wgpu::Maintain::Wait);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 256 * 256 * 4);
+    }
+
+    // ── Headless parity tests ─────────────────────────────────────────────────
+
+    /// Verify that `render_frame` (surface-agnostic) works with a `HeadlessSurface`
+    /// as a `&dyn CompositorSurface`.  This is the core headless parity assertion:
+    /// the same method that would be used with a windowed surface works headlessly.
+    #[tokio::test]
+    async fn test_render_frame_via_compositor_surface_trait() {
+        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let scene = SceneGraph::new(256.0, 256.0);
+
+        // render_frame takes &dyn CompositorSurface — no special headless branch.
+        let telemetry = compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
+        assert!(telemetry.frame_time_us > 0, "frame time must be non-zero");
+        assert_eq!(telemetry.tile_count, 0, "empty scene has no tiles");
+    }
+
+    /// Verify that HEADLESS_FORCE_SOFTWARE env-var path is exercised in the
+    /// adapter-selection code.  We cannot assert the adapter backend in a unit
+    /// test (it's opaque), so we just verify that creating a compositor with
+    /// the env var set does not crash.
+    #[tokio::test]
+    async fn test_new_headless_with_force_software_env_var() {
+        // Serialize all env-var-mutating tests via a process-wide mutex.
+        // Rust tests run in parallel by default; without serialization,
+        // a concurrent test could observe or overwrite HEADLESS_FORCE_SOFTWARE.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+
+        // Safety: single-threaded within the mutex guard; no other test
+        // touches HEADLESS_FORCE_SOFTWARE while _guard is held.
+        unsafe { std::env::set_var("HEADLESS_FORCE_SOFTWARE", "1"); }
+        let result = Compositor::new_headless(64, 64).await;
+        unsafe { std::env::remove_var("HEADLESS_FORCE_SOFTWARE"); }
+        drop(_guard);
+
+        // Either Ok (software GPU found) or Err(NoAdapter) (no software GPU
+        // installed in this CI environment) are acceptable.  A panic would not be.
+        match result {
+            Ok(_) => {}
+            Err(CompositorError::NoAdapter) => {}
+            Err(e) => panic!("unexpected error with HEADLESS_FORCE_SOFTWARE=1: {e}"),
+        }
     }
 }

@@ -563,3 +563,267 @@ async fn test_layer1_pixel_readback_z_order() {
 //
 // Unit tests for HeadlessSurface::assert_pixel_color live in
 // crates/tze_hud_compositor/src/surface.rs.
+
+// ─── Layer 1: 25-scene pixel readback assertions ──────────────────────────────
+//
+// Per validation-framework/spec.md Requirement: DR-V2 (line 186):
+// "Compositor MUST render complete frame to offscreen texture with no window,
+// no display server, no user interaction. Feature-equivalent to windowed for
+// scene composition."
+//
+// Per validation-framework/spec.md Requirement: DR-V5 (line 228):
+// "`cargo test --features headless` SHALL run full test suite (Layers 0-2)."
+//
+// These tests cover all 25 scenes in TestSceneRegistry.  For each scene:
+// - Pixel buffer size is correct (width × height × 4).
+// - The render completed: at least some pixels have been written.
+// - For scenes with tiles, tile pixels differ from the pure-black default.
+//
+// For specific scenes (empty_scene, overlapping_tiles_zorder) more precise
+// per-pixel color assertions are made.
+
+use tze_hud_scene::test_scenes::{ClockMs, TestSceneRegistry};
+
+// ─── Display dimensions used for all 25-scene tests ──────────────────────────
+// 800×600: fast to render on llvmpipe/WARP, matches existing pixel tests.
+const SCENE_W: u32 = 800;
+const SCENE_H: u32 = 600;
+
+/// Helper: build a HeadlessRuntime sized for the 25-scene tests.
+async fn make_scene_runtime() -> tze_hud_runtime::HeadlessRuntime {
+    HeadlessRuntime::new(HeadlessConfig {
+        width: SCENE_W,
+        height: SCENE_H,
+        grpc_port: 0,
+        psk: "test".to_string(),
+    })
+    .await
+    .expect("HeadlessRuntime::new failed")
+}
+
+/// Run one frame with the given scene, then return the pixel buffer.
+/// The runtime's scene is replaced via shared_state before rendering.
+async fn render_scene_pixels(
+    runtime: &mut tze_hud_runtime::HeadlessRuntime,
+    scene: tze_hud_scene::graph::SceneGraph,
+) -> Vec<u8> {
+    {
+        let mut state = runtime.shared_state().lock().await;
+        state.scene = scene;
+    }
+    runtime.render_frame().await;
+    runtime.read_pixels()
+}
+
+/// Background clear color in sRGB (compositor clears to linear [0.05, 0.05, 0.10, 1.0]).
+/// sRGB ≈ [64, 64, 89, 255].  Tolerance ±8 for llvmpipe/SwiftShader.
+const BG_SRGB: [u8; 4] = [64, 64, 89, 255];
+const BG_TOLERANCE: u8 = 8;
+
+// ─── empty_scene ─────────────────────────────────────────────────────────────
+
+/// empty_scene: no tabs, no tiles — every pixel is the background clear color.
+///
+/// DR-V2: headless compositor renders a complete frame with no scene content.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scene_empty_scene_pixels() {
+    let mut runtime = make_scene_runtime().await;
+    let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+    let (scene, _spec) = registry.build("empty_scene", ClockMs::FIXED).expect("build failed");
+
+    let pixels = render_scene_pixels(&mut runtime, scene).await;
+    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+
+    // Sample every 50th pixel — all should be the background clear color (no tiles).
+    for i in (0..SCENE_W * SCENE_H).step_by(50) {
+        let x = i % SCENE_W;
+        let y = i / SCENE_W;
+        HeadlessSurface::assert_pixel_color(
+            &pixels,
+            SCENE_W,
+            x,
+            y,
+            BG_SRGB,
+            BG_TOLERANCE,
+            "empty_scene background",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    }
+}
+
+// ─── single_tile_solid ────────────────────────────────────────────────────────
+
+/// single_tile_solid: one tile with TextMarkdown content.
+/// Background (0.08, 0.08, 0.15) linear → sRGB ≈ (75, 75, 106).
+/// The tile occupies (100, 100, 900, 500) on an 800×600 surface, so we clip to
+/// the visible portion.  Sampling the tile center (400, 300) should give the
+/// tile background color, not the compositor clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scene_single_tile_solid_pixels() {
+    let mut runtime = make_scene_runtime().await;
+    let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+    let (scene, _spec) = registry.build("single_tile_solid", ClockMs::FIXED).expect("build failed");
+
+    let pixels = render_scene_pixels(&mut runtime, scene).await;
+    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+
+    // Tile background (0.08, 0.08, 0.15) linear → sRGB ≈ (75, 75, 106)
+    // We use a wide tolerance because the tile color is close to the background.
+    // The center of the tile (400, 300) should definitely not be pure-BG.
+    let tile_center = HeadlessSurface::pixel_at(&pixels, SCENE_W, 400, 300);
+    assert_ne!(
+        tile_center, [0u8, 0, 0, 0],
+        "tile center must not be all-zero — compositor must render something"
+    );
+    // The tile background is darker than the compositor clear blue (89 on channel 2).
+    // The exact sRGB value of 0.15 linear ≈ 106 on channel B.
+    // We just check that the frame has non-clear pixels in the tile region.
+    let non_bg = pixels.chunks(4).any(|p| {
+        // Differs from background by more than tolerance on any channel
+        let r_diff = (p[0] as i16 - BG_SRGB[0] as i16).unsigned_abs();
+        let g_diff = (p[1] as i16 - BG_SRGB[1] as i16).unsigned_abs();
+        let b_diff = (p[2] as i16 - BG_SRGB[2] as i16).unsigned_abs();
+        r_diff > 10 || g_diff > 10 || b_diff > 10
+    });
+    assert!(non_bg, "single_tile_solid: tile pixels must differ from background");
+}
+
+// ─── three_tiles_no_overlap ───────────────────────────────────────────────────
+
+/// three_tiles_no_overlap: three non-overlapping tiles — text, hit-region, solid.
+/// Just verifies the pixel buffer is correct size and rendering completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scene_three_tiles_no_overlap_pixels() {
+    let mut runtime = make_scene_runtime().await;
+    let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+    let (scene, _spec) = registry.build("three_tiles_no_overlap", ClockMs::FIXED).expect("build failed");
+
+    let pixels = render_scene_pixels(&mut runtime, scene).await;
+    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert_eq!(pixels.len() % 4, 0, "pixel buffer must be RGBA8 aligned");
+}
+
+// ─── max_tiles_stress ────────────────────────────────────────────────────────
+
+/// max_tiles_stress: many tiles — validates that the compositor handles high
+/// tile counts headlessly (no OOM, no crash).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scene_max_tiles_stress_pixels() {
+    let mut runtime = make_scene_runtime().await;
+    let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+    let (scene, _spec) = registry.build("max_tiles_stress", ClockMs::FIXED).expect("build failed");
+
+    let pixels = render_scene_pixels(&mut runtime, scene).await;
+    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert!(
+        pixels.iter().any(|&b| b > 0),
+        "max_tiles_stress: frame must not be all-zero"
+    );
+}
+
+// ─── overlapping_tiles_zorder ────────────────────────────────────────────────
+
+/// overlapping_tiles_zorder: three tiles at z=1 (red), z=2 (green), z=3 (blue),
+/// overlapping.  The top tile (z=3, blue) must appear at the overlap region.
+///
+/// Blue (0.2, 0.2, 0.8) linear → sRGB ≈ (124, 124, 226).
+/// The top tile occupies (300, 200, 600, 400) — center at (600, 400) but
+/// on 800×600 display the tile is bounded to the display.
+/// We sample (400, 250) which is inside all three tiles; z=3 (blue) must win.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scene_overlapping_tiles_zorder_pixels() {
+    let mut runtime = make_scene_runtime().await;
+    let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+    let (scene, _spec) = registry.build("overlapping_tiles_zorder", ClockMs::FIXED).expect("build failed");
+
+    let pixels = render_scene_pixels(&mut runtime, scene).await;
+    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+
+    // At the overlap region (400, 250), the z=3 tile (blue 0.2, 0.2, 0.8) should dominate.
+    // sRGB ≈ (124, 124, 226).  Tolerance ±10 for software GPU variance.
+    // The important assertion is: blue channel is significantly larger than red/green.
+    let overlap_px = HeadlessSurface::pixel_at(&pixels, SCENE_W, 400, 250);
+    assert!(
+        overlap_px[2] > overlap_px[0] + 50 && overlap_px[2] > overlap_px[1] + 50,
+        "z=3 (blue) tile must dominate at overlap: pixel={overlap_px:?}"
+    );
+}
+
+// ─── overlay_transparency ────────────────────────────────────────────────────
+
+/// overlay_transparency: chrome overlay with alpha blending.
+/// Verifies that alpha blending produces non-trivial output.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_scene_overlay_transparency_pixels() {
+    let mut runtime = make_scene_runtime().await;
+    let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+    let (scene, _spec) = registry.build("overlay_transparency", ClockMs::FIXED).expect("build failed");
+
+    let pixels = render_scene_pixels(&mut runtime, scene).await;
+    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert!(
+        pixels.iter().any(|&b| b > 10),
+        "overlay_transparency: frame must not be near-zero"
+    );
+}
+
+// ─── Batch test for remaining 19 scenes ──────────────────────────────────────
+//
+// For the remaining scenes (tab_switch, lease_expiry, mobile_degraded,
+// sync_group_media, input_highlight, coalesced_dashboard, three_agents_contention,
+// overlay_passthrough_regions, disconnect_reclaim_multiagent, privacy_redaction_mode,
+// chatty_dashboard_touch, zone_publish_subtitle, zone_reject_wrong_type,
+// zone_conflict_two_publishers, zone_orchestrate_then_publish,
+// zone_geometry_adapts_profile, zone_disconnect_cleanup, policy_matrix_basic,
+// policy_arbitration_collision) the assertion is:
+//   - Pixel buffer size matches SCENE_W × SCENE_H × 4.
+//   - At least one pixel is non-zero (compositor rendered something).
+//
+// These are structural validity tests — they confirm the headless pipeline
+// completes for every scene without crash or OOM.
+
+macro_rules! scene_render_test {
+    ($test_name:ident, $scene_name:literal) => {
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn $test_name() {
+            let mut runtime = make_scene_runtime().await;
+            let registry =
+                TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+            let (scene, _spec) = registry
+                .build($scene_name, ClockMs::FIXED)
+                .expect(concat!("build failed for ", $scene_name));
+            let pixels = render_scene_pixels(&mut runtime, scene).await;
+            assert_eq!(
+                pixels.len(),
+                (SCENE_W * SCENE_H * 4) as usize,
+                concat!($scene_name, ": pixel buffer size mismatch")
+            );
+            // A frame with content should produce at least some non-zero pixels.
+            // Note: empty_scene has its own test above that checks all pixels are BG.
+            assert!(
+                pixels.iter().any(|&b| b > 0),
+                concat!($scene_name, ": frame must not be all-zero")
+            );
+        }
+    };
+}
+
+scene_render_test!(test_scene_tab_switch_pixels, "tab_switch");
+scene_render_test!(test_scene_lease_expiry_pixels, "lease_expiry");
+scene_render_test!(test_scene_mobile_degraded_pixels, "mobile_degraded");
+scene_render_test!(test_scene_sync_group_media_pixels, "sync_group_media");
+scene_render_test!(test_scene_input_highlight_pixels, "input_highlight");
+scene_render_test!(test_scene_coalesced_dashboard_pixels, "coalesced_dashboard");
+scene_render_test!(test_scene_three_agents_contention_pixels, "three_agents_contention");
+scene_render_test!(test_scene_overlay_passthrough_regions_pixels, "overlay_passthrough_regions");
+scene_render_test!(test_scene_disconnect_reclaim_multiagent_pixels, "disconnect_reclaim_multiagent");
+scene_render_test!(test_scene_privacy_redaction_mode_pixels, "privacy_redaction_mode");
+scene_render_test!(test_scene_chatty_dashboard_touch_pixels, "chatty_dashboard_touch");
+scene_render_test!(test_scene_zone_publish_subtitle_pixels, "zone_publish_subtitle");
+scene_render_test!(test_scene_zone_reject_wrong_type_pixels, "zone_reject_wrong_type");
+scene_render_test!(test_scene_zone_conflict_two_publishers_pixels, "zone_conflict_two_publishers");
+scene_render_test!(test_scene_zone_orchestrate_then_publish_pixels, "zone_orchestrate_then_publish");
+scene_render_test!(test_scene_zone_geometry_adapts_profile_pixels, "zone_geometry_adapts_profile");
+scene_render_test!(test_scene_zone_disconnect_cleanup_pixels, "zone_disconnect_cleanup");
+scene_render_test!(test_scene_policy_matrix_basic_pixels, "policy_matrix_basic");
+scene_render_test!(test_scene_policy_arbitration_collision_pixels, "policy_arbitration_collision");

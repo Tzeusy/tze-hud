@@ -26,6 +26,6 @@ pub mod surface;
 pub mod pipeline;
 
 pub use adapter::{select_gpu_adapter, AdapterSelectionError, PlatformBackends};
-pub use renderer::Compositor;
+pub use renderer::{Compositor, CompositorError};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use pipeline::ChromeDrawCmd;
