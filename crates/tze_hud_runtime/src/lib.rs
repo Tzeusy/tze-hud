@@ -57,6 +57,10 @@ pub use shell::chrome::{
     ViewerClass, ViewerClassTransition, collect_diagnostic, handle_shortcut,
     strip_chrome_from_topology,
 };
+pub use shell::safe_mode::{
+    classify_safe_mode_input, LeaseResumeInfo, SafeModeController, SafeModeEntryResult,
+    SafeModeExitResult, SafeModeInput, SafeModeInputResult, ShellOverrideState,
+};
 // ChromeDrawCmd is defined in tze_hud_compositor to avoid circular deps.
 pub use tze_hud_compositor::ChromeDrawCmd;
 pub use tab_switch_trigger::{
