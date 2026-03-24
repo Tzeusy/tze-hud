@@ -125,8 +125,8 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     let msg = response_stream.next().await.unwrap()?;
     match &msg.payload {
         Some(session_proto::server_message::Payload::SceneSnapshot(snapshot)) => {
-            println!("  Scene snapshot: version={}, json_len={}",
-                snapshot.version, snapshot.scene_json.len());
+            println!("  Scene snapshot: sequence={}, json_len={}, checksum={}",
+                snapshot.sequence, snapshot.snapshot_json.len(), &snapshot.blake3_checksum[..8.min(snapshot.blake3_checksum.len())]);
         }
         other => {
             return Err(format!("Expected SceneSnapshot, got: {other:?}").into());

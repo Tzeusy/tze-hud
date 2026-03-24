@@ -1547,6 +1547,128 @@ pub struct ZoneRegistrySnapshot {
     pub active_publishes: Vec<ZonePublishRecord>,
 }
 
+// ─── Scene Snapshot ──────────────────────────────────────────────────────────
+
+/// Deterministic snapshot of the zone registry for inclusion in SceneGraphSnapshot.
+///
+/// Uses BTreeMap/sorted Vec for deterministic iteration order per RFC 0001 §4.1.
+/// MUST NOT include effective_geometry (post-v1 per spec line 360).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneGraphZoneRegistry {
+    /// Zone definitions sorted by zone name for deterministic serialization.
+    pub zone_types: std::collections::BTreeMap<String, ZoneDefinition>,
+    /// Zone instances sorted by zone_type_name then tab_id for determinism.
+    pub zone_instances: Vec<ZoneInstance>,
+    /// Active publications sorted by zone name then publisher_namespace for determinism.
+    /// Includes zone publications but MUST NOT include effective_geometry (post-v1).
+    pub active_publications: std::collections::BTreeMap<String, Vec<ZonePublishRecord>>,
+}
+
+/// Full deterministic scene snapshot at a specific sequence number.
+///
+/// Implements the v1 snapshot semantics from RFC 0001 §4.1 and §4.2:
+/// - Complete, deterministic serialization at a single point in time
+/// - All maps use BTreeMap for deterministic iteration order
+/// - BLAKE3 checksum over the canonical serialized content (excluding the
+///   checksum field itself, see [`SceneGraphSnapshot::compute_checksum`])
+///
+/// # Determinism
+/// Given identical scene state, two calls to [`SceneGraph::take_snapshot`]
+/// at the same sequence number MUST produce byte-identical output.
+///
+/// # v1 Scope Constraints
+/// - Resources are ephemeral: snapshot references ResourceIds but MUST NOT
+///   embed blob data (resource-store/spec.md §Requirement: Ephemeral Storage)
+/// - effective_geometry is NOT included (post-v1, spec line 360)
+/// - Incremental diff is NOT available (post-v1, spec line 342)
+///
+/// # Reconnection
+/// When an agent reconnects, the runtime MUST send a full SceneGraphSnapshot.
+/// The agent discards prior state and resumes from `sequence`.
+///
+/// Source: RFC 0001 §4.1, §4.2, §6, §10.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneGraphSnapshot {
+    /// Sequence number at the time this snapshot was taken (RFC 0001 §3.5).
+    pub sequence: u64,
+
+    /// UTC wall-clock at snapshot time, microseconds since Unix epoch.
+    pub snapshot_wall_us: i64,
+
+    /// Monotonic timestamp at snapshot time, microseconds since process start.
+    pub snapshot_mono_us: u64,
+
+    /// All tabs, ordered by display_order (BTreeMap keyed by display_order for
+    /// stable iteration; value is the Tab with its SceneId).
+    pub tabs: std::collections::BTreeMap<u32, Tab>,
+
+    /// All tiles, keyed by SceneId (BTreeMap for deterministic iteration order).
+    pub tiles: std::collections::BTreeMap<SceneId, Tile>,
+
+    /// All nodes, keyed by SceneId (BTreeMap for deterministic iteration order).
+    pub nodes: std::collections::BTreeMap<SceneId, Node>,
+
+    /// Zone registry snapshot: types, instances, active publications.
+    /// Does NOT include effective_geometry (post-v1, spec line 360).
+    pub zone_registry: SceneGraphZoneRegistry,
+
+    /// The currently active tab, or None if no tab is active.
+    pub active_tab: Option<SceneId>,
+
+    /// BLAKE3 checksum (32 bytes as hex) of the canonical serialized content.
+    ///
+    /// Computed over the JSON-serialized bytes of this struct with the
+    /// `checksum` field set to the empty string. See [`SceneGraphSnapshot::verify_checksum`].
+    pub checksum: String,
+}
+
+impl SceneGraphSnapshot {
+    /// Compute the BLAKE3 checksum of the canonical snapshot content.
+    ///
+    /// The checksum is computed over the JSON-serialized bytes of this snapshot
+    /// with the `checksum` field set to the empty string `""`. This ensures the
+    /// checksum is computed over the content, not over itself.
+    ///
+    /// The returned value is a 64-character lowercase hex string.
+    ///
+    /// # Protocol
+    /// 1. Clone this snapshot with `checksum = String::new()`.
+    /// 2. Serialize to compact JSON (no pretty-printing for byte stability).
+    /// 3. Compute BLAKE3 hash of the UTF-8 bytes.
+    /// 4. Encode as lowercase hex.
+    pub fn compute_checksum(&self) -> String {
+        // Build a version with empty checksum to hash
+        let mut canonical = self.clone();
+        canonical.checksum = String::new();
+        let json = serde_json::to_string(&canonical)
+            .expect("SceneGraphSnapshot serialization must not fail");
+        let hash = blake3::hash(json.as_bytes());
+        hash.to_hex().to_string()
+    }
+
+    /// Verify the embedded checksum matches the snapshot content.
+    ///
+    /// Returns `true` if the stored `checksum` matches the result of
+    /// [`Self::compute_checksum`].
+    pub fn verify_checksum(&self) -> bool {
+        let expected = self.compute_checksum();
+        self.checksum == expected
+    }
+
+    /// Serialize this snapshot to compact JSON.
+    ///
+    /// Uses compact (non-pretty) JSON for byte stability. The same scene state
+    /// will always produce the same bytes.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    /// Deserialize a snapshot from JSON.
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
+    }
+}
+
 /// Runtime-owned zone registry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ZoneRegistry {

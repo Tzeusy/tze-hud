@@ -876,18 +876,27 @@ impl HudSession for HudSessionImpl {
             // Send SceneSnapshot after successful handshake (RFC 0005 §1.3, §6.4)
             {
                 let st = state.lock().await;
-                let json = st
-                    .scene
-                    .snapshot_json()
+                let wall_us = now_wall_us() as i64;
+                let mono_us: u64 = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros() as u64;
+                let graph_snap = st.scene.take_snapshot(wall_us, mono_us);
+                let snap_json = graph_snap
+                    .to_json()
                     .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
+                let checksum = graph_snap.checksum.clone();
                 let seq = session.next_server_seq();
                 let _ = tx
                     .send(Ok(ServerMessage {
                         sequence: seq,
                         timestamp_wall_us: now_wall_us(),
                         payload: Some(ServerPayload::SceneSnapshot(SceneSnapshot {
-                            scene_json: json,
-                            version: st.scene.version,
+                            snapshot_json: snap_json,
+                            sequence: st.scene.sequence_number,
+                            snapshot_wall_us: wall_us,
+                            snapshot_mono_us: mono_us,
+                            blake3_checksum: checksum,
                         })),
                     }))
                     .await;
@@ -3197,7 +3206,7 @@ mod tests {
         // Second message: SceneSnapshot
         match &messages[1].payload {
             Some(ServerPayload::SceneSnapshot(snapshot)) => {
-                assert!(!snapshot.scene_json.is_empty());
+                assert!(!snapshot.snapshot_json.is_empty());
             }
             other => panic!("Expected SceneSnapshot, got: {other:?}"),
         }

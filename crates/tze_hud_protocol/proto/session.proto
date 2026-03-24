@@ -542,11 +542,55 @@ message RuntimeTelemetryFrame {
 
 // ─── Scene state messages ─────────────────────────────────────────────────────
 
-// Full scene state sent on connect/reconnect.
-// Agents MUST process this before issuing mutations.
+// Full deterministic scene snapshot sent on connect/reconnect (RFC 0001 §4.1, §4.2).
+//
+// The runtime MUST send this after SessionEstablished (new session) and
+// SessionResumeResult (reconnect). Agents MUST discard prior state and apply
+// this snapshot before issuing mutations. Sequence-number resumption starts
+// from the `sequence` field value.
+//
+// Encoding: snapshot_json carries a JSON-serialized SceneSnapshot struct
+// (defined in tze_hud_scene::types). The JSON uses compact (non-pretty)
+// encoding for byte stability and must include all fields from the struct,
+// including tabs (ordered by display_order), tiles, nodes, zone_registry
+// (zone types, instances, active publications — no effective_geometry),
+// and active_tab. BTreeMap iteration order guarantees determinism.
+//
+// Checksum: blake3_checksum (hex) is carried separately for fast validation
+// without deserializing the full JSON payload. The checksum is computed over
+// the JSON bytes with the checksum field set to "". Agents SHOULD verify the
+// checksum before applying the snapshot.
+//
+// V1 constraints (RFC 0001 §4.2, §6, spec lines 324, 342, 360):
+//   - Resources are ephemeral: snapshot references ResourceIds, no blob data.
+//   - Incremental diff is NOT available; snapshot-only reconnect in v1.
+//   - effective_geometry is NOT included (post-v1 per spec line 360).
 message SceneSnapshot {
-  string scene_json = 1;  // Full scene topology as JSON (same as SceneQueryResponse)
-  uint64 version    = 2;  // Scene version at snapshot time
+  // Full scene topology as canonical compact JSON (SceneSnapshot struct).
+  // Includes: sequence, snapshot_wall_us, snapshot_mono_us, tabs, tiles,
+  // nodes, zone_registry, active_tab, checksum.
+  string snapshot_json  = 1;
+
+  // Sequence number at snapshot time (RFC 0001 §3.5).
+  // Agents resume mutation submission from this sequence number.
+  uint64 sequence       = 2;
+
+  // UTC wall-clock at snapshot time (microseconds since Unix epoch, signed).
+  sint64 snapshot_wall_us = 3;
+
+  // Monotonic timestamp at snapshot time (microseconds since process start).
+  uint64 snapshot_mono_us = 4;
+
+  // BLAKE3 checksum of the snapshot_json content (64-char lowercase hex).
+  // Computed with checksum="" in the JSON payload.
+  // Agents SHOULD verify before applying. Mismatch indicates corruption.
+  string blake3_checksum = 5;
+
+  // Deprecated field (pre-spec SceneGraph JSON) — kept for backward compat.
+  // New implementations MUST use snapshot_json (field 1) instead.
+  // Field 6 was previously `version` (uint64) — reserved; do not reuse.
+  reserved 6;
+  reserved "version";
 }
 
 // Incremental scene update for subscribed events.
