@@ -47,10 +47,6 @@ fn is_valid_event_name(name: &str) -> bool {
         // Empty string is explicitly valid (no auto-switch).
         return true;
     }
-    let parts: Vec<&str> = name.splitn(2, '.').collect();
-    if parts.len() != 2 {
-        return false;
-    }
     fn valid_segment(s: &str) -> bool {
         if s.is_empty() {
             return false;
@@ -62,7 +58,12 @@ fn is_valid_event_name(name: &str) -> bool {
         }
         chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     }
-    valid_segment(parts[0]) && valid_segment(parts[1])
+    // Use split_once to avoid a Vec allocation; the second part must not contain
+    // a dot (valid_segment rejects it since '.' is not in [a-z0-9_]).
+    match name.split_once('.') {
+        Some((source, action)) => valid_segment(source) && valid_segment(action),
+        None => false,
+    }
 }
 
 // ─── TzeHudConfig ─────────────────────────────────────────────────────────────
@@ -120,11 +121,33 @@ impl ConfigLoader for TzeHudConfig {
         }
 
         // ── (2) [runtime] present and profile set ─────────────────────────────
-        let profile_str = self
-            .raw
-            .runtime
-            .as_ref()
-            .and_then(|r| r.profile.as_deref());
+        // Spec §Minimal Valid Configuration: a minimal valid config MUST have
+        // a [runtime] section with a `profile` field (RFC 0006 §2.1, §2.4).
+        let profile_str = match self.raw.runtime.as_ref() {
+            None => {
+                errors.push(ConfigError {
+                    code: ConfigErrorCode::Other("CONFIG_MISSING_RUNTIME_SECTION".into()),
+                    field_path: "runtime".into(),
+                    expected: "[runtime] table must be present".into(),
+                    got: "runtime table missing".into(),
+                    hint: "add a [runtime] table with a `profile` field, e.g.:\n[runtime]\nprofile = \"full-display\"".into(),
+                });
+                None
+            }
+            Some(runtime) => match runtime.profile.as_deref() {
+                None => {
+                    errors.push(ConfigError {
+                        code: ConfigErrorCode::Other("CONFIG_MISSING_RUNTIME_PROFILE".into()),
+                        field_path: "runtime.profile".into(),
+                        expected: "non-empty profile name (e.g. \"full-display\")".into(),
+                        got: "profile field missing".into(),
+                        hint: "add `profile = \"full-display\"` (or another valid profile) under [runtime]".into(),
+                    });
+                    None
+                }
+                Some(p) => Some(p),
+            },
+        };
 
         // Validate profile value if present.
         if let Some(p) = profile_str {
@@ -222,8 +245,17 @@ impl ConfigLoader for TzeHudConfig {
         }
 
         // Resolve effective profile.
-        // For freeze() we use a default GPU capability (full-display path for non-auto).
-        // The real runtime should call profile::resolve_profile() with actual GPU params.
+        //
+        // DESIGN NOTE: `ConfigLoader::freeze()` is a trait method that cannot accept
+        // runtime GPU parameters. We use synthetic values (8192 MB VRAM / 60 Hz) so that
+        // `profile = "auto"` resolves to `full-display` rather than `Ambiguous` in test
+        // and validation contexts. The env-var-based headless signals ($DISPLAY, /.dockerenv)
+        // still take precedence and are checked by `auto_detect_profile()` first.
+        //
+        // Production runtimes that need accurate auto-detection MUST call
+        // `profile::resolve_profile(&raw, actual_gpu_vram_mb, actual_refresh_hz)` directly
+        // before calling `freeze()`, and use the resulting `DisplayProfile` instead of the one
+        // embedded in `ResolvedConfig` when `profile = "auto"`.
         let profile = profile::resolve_profile(
             &self.raw,
             /*gpu_vram_mb=*/ 8192,
@@ -330,7 +362,7 @@ fn validate_profile(profile: &str, errors: &mut Vec<ConfigError>) {
                 expected: "\"full-display\", \"headless\", \"auto\", \"custom\", or \"mobile\"".into(),
                 got: format!("{other:?}"),
                 hint: format!(
-                    "unknown profile {:?}; valid built-ins: full-display, headless, auto",
+                    "unknown profile {:?}; valid values: full-display, headless, auto, custom (mobile is schema-reserved)",
                     other
                 ),
             });

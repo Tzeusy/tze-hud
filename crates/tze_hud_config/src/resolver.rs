@@ -30,8 +30,8 @@ pub fn resolve_config_path(cli_path: Option<&str>) -> Result<String, Vec<String>
             return Ok(s);
         }
         searched.push(s);
-        // CLI path was explicitly given but not found — still fall through to
-        // report all searched paths in the error.
+        // CLI path was explicitly given but not found — return immediately with
+        // only that path. When --config is explicit, no other locations are tried.
         return Err(searched);
     }
 

@@ -12,7 +12,6 @@ members = [
     "crates/tze_hud_policy",
     "crates/tze_hud_config",
     "crates/tze_hud_resource",
-    "crates/tze_hud_config",
     "examples/vertical_slice",
     "tests/integration",
 ]
@@ -57,10 +56,6 @@ thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 blake3 = "1"
 arc-swap = "1"
-
-# Config
-toml = "0.8"
-schemars = { version = "0.8", features = ["derive"] }
 
 [profile.release]
 lto = true

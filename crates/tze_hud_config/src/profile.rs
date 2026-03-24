@@ -313,9 +313,23 @@ pub fn resolve_profile(
 
         "custom" => resolve_custom_profile(raw),
 
-        // "mobile" and unknown profiles are rejected in validate_profile() before freeze().
-        // By the time we reach here, only valid profiles remain.
-        _ => Ok(DisplayProfile::full_display()),
+        // "mobile" and unknown profiles are rejected by validate_profile() before freeze().
+        // If we reach here, it means resolve_profile() was called without prior validation —
+        // this is a programming error. Panic in debug builds; return a structured error in release.
+        other => {
+            debug_assert!(
+                false,
+                "resolve_profile() called with unvalidated profile {:?}; run validate() first",
+                other
+            );
+            Err(vec![ConfigError {
+                code: ConfigErrorCode::Other("CONFIG_UNVALIDATED_PROFILE".into()),
+                field_path: "runtime.profile".into(),
+                expected: "a validated profile (run TzeHudConfig::validate() before resolve_profile)".into(),
+                got: format!("{other:?}"),
+                hint: "call TzeHudConfig::freeze() which validates before resolving".into(),
+            }])
+        }
     }
 }
 
@@ -633,19 +647,8 @@ mod tests {
     /// WHEN custom profile sets max_texture_mb > base THEN CONFIG_PROFILE_BUDGET_ESCALATION.
     #[test]
     fn spec_budget_escalation_max_texture_mb_rejected() {
+        // Use full-display as base (headless is not extendable and would produce a different error).
         let raw = RawConfig {
-            runtime: Some(RawRuntime {
-                profile: Some("custom".into()),
-                ..Default::default()
-            }),
-            display_profile: Some(RawDisplayProfile {
-                extends: Some("headless".into()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        // headless is not extendable — different check. Use full-display.
-        let raw2 = RawConfig {
             runtime: Some(RawRuntime {
                 profile: Some("custom".into()),
                 ..Default::default()
@@ -658,12 +661,11 @@ mod tests {
             ..Default::default()
         };
         let mut errors = Vec::new();
-        validate_display_profile(&raw2, &mut errors);
+        validate_display_profile(&raw, &mut errors);
         assert!(
             errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
             "max_texture_mb escalation must produce CONFIG_PROFILE_BUDGET_ESCALATION"
         );
-        let _ = raw; // silence unused warning
     }
 
     /// WHEN custom profile sets allow_background_zones = true over headless base (false)
