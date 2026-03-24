@@ -6,7 +6,18 @@ use uuid::Uuid;
 
 // ─── IDs ────────────────────────────────────────────────────────────────────
 
-/// Scene object ID — UUIDv7 (time-ordered).
+/// Scene object ID — UUIDv7 (time-ordered, 16 bytes).
+///
+/// # Wire format
+/// Serialized as 16 raw bytes in little-endian UUID byte order (as returned by
+/// [`Uuid::to_bytes_le`]). The all-zero value (`[0u8; 16]`) is the null/absent
+/// sentinel per RFC 0001 §1.1.
+///
+/// # Invariants
+/// - `size_of::<SceneId>() == 16`
+/// - Lexicographic sort order == creation-time order (UUIDv7 property)
+/// - `SceneId::null().is_null() == true`
+/// - `SceneId::new().is_null() == false` (freshly-generated IDs are never null)
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SceneId(Uuid);
 
@@ -24,13 +35,52 @@ impl SceneId {
         &self.0
     }
 
-    /// Nil/zero ID used as "none" sentinel in protobuf.
-    pub fn nil() -> Self {
+    /// Null/zero ID used as the "absent" sentinel (RFC 0001 §1.1).
+    ///
+    /// When encoded as a protobuf `bytes` field, this value serializes to 16
+    /// zero bytes. Note that in proto3 an unset `bytes` field defaults to an
+    /// empty vector (length 0), not 16 zero bytes; callers must explicitly
+    /// handle the empty-bytes case (e.g., `proto_to_scene_id` returns `None`
+    /// for empty input) and decide whether to treat it as this sentinel.
+    pub fn null() -> Self {
         SceneId(Uuid::nil())
     }
 
-    pub fn is_nil(&self) -> bool {
+    /// Returns `true` if this is the null/absent sentinel (`[0u8; 16]`).
+    pub fn is_null(&self) -> bool {
         self.0.is_nil()
+    }
+
+    /// Nil/zero ID used as "none" sentinel in protobuf.
+    ///
+    /// Alias for [`Self::null`]; prefer `null()`/`is_null()` in new code.
+    #[inline]
+    pub fn nil() -> Self {
+        Self::null()
+    }
+
+    /// Returns `true` if this is the nil/zero sentinel.
+    ///
+    /// Alias for [`Self::is_null`]; prefer `is_null()` in new code.
+    #[inline]
+    pub fn is_nil(&self) -> bool {
+        self.is_null()
+    }
+
+    /// Serialize to 16 bytes in little-endian UUID byte order.
+    ///
+    /// Used for protobuf `bytes` fields. The encoding is stable and matches
+    /// the wire contract from RFC 0001 §4.1.
+    pub fn to_bytes_le(&self) -> [u8; 16] {
+        self.0.to_bytes_le()
+    }
+
+    /// Deserialize from 16 bytes in little-endian UUID byte order.
+    ///
+    /// Returns `None` if the slice is not exactly 16 bytes.
+    pub fn from_bytes_le(bytes: &[u8]) -> Option<Self> {
+        let arr: [u8; 16] = bytes.try_into().ok()?;
+        Some(SceneId(Uuid::from_bytes_le(arr)))
     }
 }
 
@@ -43,6 +93,63 @@ impl Default for SceneId {
 impl std::fmt::Display for SceneId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+// ─── ResourceId ──────────────────────────────────────────────────────────────
+
+/// Content-addressed resource identity — 32-byte BLAKE3 hash.
+///
+/// Two agents uploading identical content MUST receive the same `ResourceId`;
+/// the runtime stores the resource once (RFC 0001 §1.1).
+///
+/// # Wire format
+/// Stored and transmitted as raw 32 bytes. Hex encoding is a display/debug
+/// concern only and MUST NOT appear on the wire or in storage.
+///
+/// # Invariants
+/// - `size_of::<ResourceId>() == 32`
+/// - Equality is byte equality — no normalisation
+/// - `ResourceId::of(bytes) == ResourceId::of(same_bytes)` always
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ResourceId([u8; 32]);
+
+impl ResourceId {
+    /// Compute the `ResourceId` for a byte payload using BLAKE3.
+    pub fn of(data: &[u8]) -> Self {
+        let hash = blake3::hash(data);
+        ResourceId(*hash.as_bytes())
+    }
+
+    /// Wrap a raw 32-byte array directly (for deserialization / testing).
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        ResourceId(bytes)
+    }
+
+    /// Return the raw 32-byte hash.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Try to construct from a byte slice.
+    ///
+    /// Returns `None` if the slice is not exactly 32 bytes.
+    pub fn from_slice(slice: &[u8]) -> Option<Self> {
+        let arr: [u8; 32] = slice.try_into().ok()?;
+        Some(ResourceId(arr))
+    }
+
+    /// Return a lowercase hex string for display / logging only.
+    ///
+    /// MUST NOT be used on the wire or in storage.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+impl std::fmt::Display for ResourceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_hex())
     }
 }
 
@@ -1019,5 +1126,245 @@ impl ZoneRegistry {
 impl Default for ZoneRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    // ── SceneId size invariant ────────────────────────────────────────────────
+
+    #[test]
+    fn scene_id_size_is_16_bytes() {
+        assert_eq!(size_of::<SceneId>(), 16, "SceneId must be exactly 16 bytes");
+    }
+
+    // ── SceneId null sentinel ─────────────────────────────────────────────────
+
+    #[test]
+    fn scene_id_null_is_all_zeros() {
+        let null = SceneId::null();
+        assert!(null.is_null(), "SceneId::null() must report is_null() == true");
+        assert_eq!(null.to_bytes_le(), [0u8; 16], "null SceneId must serialize to 16 zero bytes");
+    }
+
+    #[test]
+    fn scene_id_new_is_never_null() {
+        let id = SceneId::new();
+        assert!(!id.is_null(), "freshly-generated SceneId must not be null");
+    }
+
+    #[test]
+    fn scene_id_nil_aliases_null() {
+        assert_eq!(SceneId::nil(), SceneId::null());
+        assert!(SceneId::nil().is_nil());
+    }
+
+    // ── SceneId byte round-trip ───────────────────────────────────────────────
+
+    #[test]
+    fn scene_id_bytes_le_round_trip() {
+        let id = SceneId::new();
+        let bytes = id.to_bytes_le();
+        let restored = SceneId::from_bytes_le(&bytes).expect("must decode 16 bytes");
+        assert_eq!(id, restored, "SceneId bytes LE round-trip must be lossless");
+    }
+
+    #[test]
+    fn scene_id_from_bytes_le_rejects_wrong_length() {
+        assert!(SceneId::from_bytes_le(&[0u8; 15]).is_none());
+        assert!(SceneId::from_bytes_le(&[0u8; 17]).is_none());
+        assert!(SceneId::from_bytes_le(&[]).is_none());
+    }
+
+    #[test]
+    fn scene_id_null_round_trips_via_bytes() {
+        let null = SceneId::null();
+        let bytes = null.to_bytes_le();
+        let restored = SceneId::from_bytes_le(&bytes).unwrap();
+        assert!(restored.is_null());
+    }
+
+    // ── SceneId lexicographic / monotonicity ─────────────────────────────────
+
+    #[test]
+    fn scene_id_monotonic_small_batch() {
+        // Generate a small batch synchronously and verify they're non-decreasing.
+        // (A full 10,000-ID property test is in the proptest suite below.)
+        let ids: Vec<SceneId> = (0..64).map(|_| SceneId::new()).collect();
+        for w in ids.windows(2) {
+            assert!(
+                w[0] <= w[1],
+                "SceneId sequence must be non-decreasing: {:?} > {:?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    // ── ResourceId size invariant ─────────────────────────────────────────────
+
+    #[test]
+    fn resource_id_size_is_32_bytes() {
+        assert_eq!(size_of::<ResourceId>(), 32, "ResourceId must be exactly 32 bytes");
+    }
+
+    // ── ResourceId content deduplication ─────────────────────────────────────
+
+    #[test]
+    fn resource_id_same_content_same_id() {
+        let data = b"hello world";
+        let id1 = ResourceId::of(data);
+        let id2 = ResourceId::of(data);
+        assert_eq!(id1, id2, "identical content must produce the same ResourceId");
+    }
+
+    #[test]
+    fn resource_id_different_content_different_id() {
+        let id1 = ResourceId::of(b"foo");
+        let id2 = ResourceId::of(b"bar");
+        assert_ne!(id1, id2, "different content must produce different ResourceIds");
+    }
+
+    #[test]
+    fn resource_id_empty_content() {
+        let id = ResourceId::of(b"");
+        assert_eq!(id.as_bytes().len(), 32);
+    }
+
+    // ── ResourceId byte round-trip ────────────────────────────────────────────
+
+    #[test]
+    fn resource_id_from_bytes_round_trip() {
+        let id = ResourceId::of(b"round-trip test payload");
+        let bytes = *id.as_bytes();
+        let restored = ResourceId::from_bytes(bytes);
+        assert_eq!(id, restored);
+    }
+
+    #[test]
+    fn resource_id_from_slice_round_trip() {
+        let id = ResourceId::of(b"slice round-trip");
+        let restored = ResourceId::from_slice(id.as_bytes()).expect("must accept 32-byte slice");
+        assert_eq!(id, restored);
+    }
+
+    #[test]
+    fn resource_id_from_slice_rejects_wrong_length() {
+        assert!(ResourceId::from_slice(&[0u8; 31]).is_none());
+        assert!(ResourceId::from_slice(&[0u8; 33]).is_none());
+        assert!(ResourceId::from_slice(&[]).is_none());
+    }
+
+    // ── ResourceId display / hex is debug-only ────────────────────────────────
+
+    #[test]
+    fn resource_id_to_hex_is_64_chars() {
+        let id = ResourceId::of(b"hex display test");
+        let hex = id.to_hex();
+        assert_eq!(hex.len(), 64, "hex of 32-byte hash must be 64 chars");
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "must be valid hex");
+    }
+
+    // ── Layer 0 identity invariant check helper ───────────────────────────────
+
+    /// Validates the core Layer 0 identity invariants for `SceneId` and `ResourceId`.
+    /// This function mirrors what `assert_layer0_invariants` checks at the graph level
+    /// but focuses on the type-level contracts.
+    pub fn assert_identity_invariants() -> Vec<String> {
+        let mut violations = Vec::new();
+
+        if size_of::<SceneId>() != 16 {
+            violations.push(format!("SceneId size {} != 16", size_of::<SceneId>()));
+        }
+        if size_of::<ResourceId>() != 32 {
+            violations.push(format!("ResourceId size {} != 32", size_of::<ResourceId>()));
+        }
+        if !SceneId::null().is_null() {
+            violations.push("SceneId::null() does not report is_null()".into());
+        }
+        if SceneId::new().is_null() {
+            violations.push("freshly-generated SceneId reports is_null()".into());
+        }
+        let id = ResourceId::of(b"test");
+        if ResourceId::of(b"test") != id {
+            violations.push("ResourceId deduplication failed".into());
+        }
+
+        violations
+    }
+
+    #[test]
+    fn layer0_identity_invariants_pass() {
+        let violations = assert_identity_invariants();
+        assert!(violations.is_empty(), "Layer 0 identity violations: {:?}", violations);
+    }
+}
+
+// ─── Property tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Generates 10,000 SceneIds and asserts they are monotonically non-decreasing.
+    ///
+    /// UUIDv7 guarantees creation-time ordering via a monotonic counter within the
+    /// same millisecond, so lexicographic sort == chronological sort.
+    #[test]
+    fn scene_id_monotonic_10k() {
+        let ids: Vec<SceneId> = (0..10_000).map(|_| SceneId::new()).collect();
+        for w in ids.windows(2) {
+            assert!(
+                w[0] <= w[1],
+                "SceneId not monotonically non-decreasing: {:?} > {:?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    proptest! {
+        /// Verifies that any 16-byte input round-trips through SceneId bytes LE encoding.
+        #[test]
+        fn scene_id_bytes_le_roundtrip_arb(raw in proptest::array::uniform16(0u8..)) {
+            // from_bytes_le -> to_bytes_le must be identity
+            let id = SceneId::from_bytes_le(&raw).expect("uniform16 is always 16 bytes");
+            prop_assert_eq!(id.to_bytes_le(), raw);
+        }
+
+        /// Verifies that any 32-byte slice round-trips through ResourceId.
+        #[test]
+        fn resource_id_bytes_roundtrip_arb(raw in proptest::array::uniform32(0u8..)) {
+            let id = ResourceId::from_bytes(raw);
+            prop_assert_eq!(*id.as_bytes(), raw);
+        }
+
+        /// Verifies BLAKE3 determinism: same input always produces the same ResourceId.
+        #[test]
+        fn resource_id_deterministic(data in proptest::collection::vec(0u8.., 0..1024)) {
+            let id1 = ResourceId::of(&data);
+            let id2 = ResourceId::of(&data);
+            prop_assert_eq!(id1, id2);
+        }
+
+        /// Verifies that distinct inputs produce distinct ResourceIds (collision resistance).
+        #[test]
+        fn resource_id_distinct_inputs_distinct_ids(
+            a in proptest::collection::vec(0u8.., 1..512),
+            b in proptest::collection::vec(0u8.., 1..512),
+        ) {
+            // Only assert when inputs differ
+            if a != b {
+                let id_a = ResourceId::of(&a);
+                let id_b = ResourceId::of(&b);
+                prop_assert_ne!(id_a, id_b, "distinct content must yield distinct ResourceIds");
+            }
+        }
     }
 }
