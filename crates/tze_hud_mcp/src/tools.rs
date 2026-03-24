@@ -352,7 +352,7 @@ pub fn handle_dismiss(params: Value, scene: &mut SceneGraph) -> McpResult<Dismis
 #[derive(Debug, Deserialize)]
 pub struct PublishToZoneParams {
     /// Name of the target zone (must exist in the zone registry).
-    pub zone: String,
+    pub zone_name: String,
     /// Markdown content to publish.
     pub content: String,
     /// Optional namespace for the lease. Defaults to "mcp".
@@ -361,9 +361,13 @@ pub struct PublishToZoneParams {
     /// Font size in pixels. Defaults to 16.
     #[serde(default = "default_font_size")]
     pub font_size_px: f32,
-    /// Lease TTL in milliseconds. Defaults to 60 000 (1 minute).
-    #[serde(default = "default_ttl_ms")]
-    pub ttl_ms: u64,
+    /// TTL in microseconds. A value of 0 selects the built-in default of
+    /// 60_000 ms (60_000_000 µs). Defaults to 0.
+    #[serde(default)]
+    pub ttl_us: u64,
+    /// Merge key for idempotent zone publishes (optional).
+    #[serde(default)]
+    pub merge_key: Option<String>,
 }
 
 fn default_mcp_namespace() -> String {
@@ -374,26 +378,32 @@ fn default_mcp_namespace() -> String {
 #[derive(Debug, Serialize)]
 pub struct PublishToZoneResult {
     /// The zone name content was published to.
-    pub zone: String,
+    pub zone_name: String,
     /// UUID of the tab used (active tab or first available).
     pub tab_id: String,
     /// UUID of the tile created for the zone content.
     pub tile_id: String,
     /// UUID of the node holding the content.
     pub node_id: String,
+    /// Effective TTL in microseconds applied to the lease (never 0 in response).
+    pub ttl_us: u64,
+    /// Echo of the merge key, if provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_key: Option<String>,
 }
 
 /// Publish markdown content to a named zone.
 ///
 /// This is the primary LLM-first tool: a single call with zero scene context
-/// required. It looks up the zone by name, creates a tile, and sets the
-/// markdown content.
+/// required. It looks up the zone by name, creates a new tile in the active
+/// tab, and sets the markdown content.
 ///
-/// If the zone already has a tile associated, it updates that tile's content.
-/// Otherwise, a new tile is created in the active tab at default bounds.
+/// Each call always creates a new tile. Update-in-place semantics (via
+/// `merge_key`) are reserved for a future version. For now, `merge_key` is
+/// accepted and echoed but does not affect scene mutation behavior.
 ///
 /// # Errors
-/// - `invalid_params` if `zone` or `content` is empty.
+/// - `invalid_params` if `zone_name` or `content` is empty.
 /// - `zone_not_found` if the zone name is not registered.
 /// - `no_active_tab` if no tab exists in the scene.
 pub fn handle_publish_to_zone(
@@ -402,25 +412,34 @@ pub fn handle_publish_to_zone(
 ) -> McpResult<PublishToZoneResult> {
     let p: PublishToZoneParams = parse_params(params)?;
 
-    if p.zone.trim().is_empty() {
-        return Err(McpError::InvalidParams("zone must be non-empty".to_string()));
+    if p.zone_name.trim().is_empty() {
+        return Err(McpError::InvalidParams("zone_name must be non-empty".to_string()));
     }
     if p.content.is_empty() {
         return Err(McpError::InvalidParams("content must be non-empty".to_string()));
     }
 
     // Validate zone exists
-    if !scene.zone_registry.zones.contains_key(&p.zone) {
-        return Err(McpError::ZoneNotFound(p.zone));
+    if !scene.zone_registry.zones.contains_key(&p.zone_name) {
+        return Err(McpError::ZoneNotFound(p.zone_name));
     }
 
     // Require an active tab
     let tab_id = scene.active_tab.ok_or(McpError::NoActiveTab)?;
 
+    // Convert ttl_us to ttl_ms for lease grant; 0 means use a sensible default.
+    // Use div_ceil to ensure any positive sub-millisecond TTL rounds up to at
+    // least 1 ms, preventing an unintended indefinite lease (ttl_ms == 0).
+    let ttl_ms = if p.ttl_us == 0 {
+        60_000u64 // 1 minute default
+    } else {
+        p.ttl_us.div_ceil(1_000)
+    };
+
     // Grant lease
     let lease_id = scene.grant_lease(
         &p.namespace,
-        p.ttl_ms,
+        ttl_ms,
         vec![
             Capability::CreateTile,
             Capability::UpdateTile,
@@ -454,10 +473,14 @@ pub fn handle_publish_to_zone(
     scene.set_tile_root(tile_id, node)?;
 
     Ok(PublishToZoneResult {
-        zone: p.zone,
+        zone_name: p.zone_name,
         tab_id: tab_id.to_string(),
         tile_id: tile_id.to_string(),
         node_id: node_id.to_string(),
+        // Return the effective TTL used for the lease (ttl_ms converted back to
+        // microseconds), not the raw request value, so callers know what was applied.
+        ttl_us: ttl_ms * 1_000,
+        merge_key: p.merge_key,
     })
 }
 
@@ -880,20 +903,42 @@ mod tests {
     fn test_publish_to_zone_basic() {
         let (mut scene, _, zone) = scene_with_zone();
         let result = handle_publish_to_zone(
-            json!({"zone": zone, "content": "## Status: OK"}),
+            json!({"zone_name": zone, "content": "## Status: OK"}),
             &mut scene,
         )
         .unwrap();
-        assert_eq!(result.zone, zone);
+        assert_eq!(result.zone_name, zone);
         assert_eq!(scene.tile_count(), 1);
         assert_eq!(scene.node_count(), 1);
+    }
+
+    #[test]
+    fn test_publish_to_zone_with_ttl_us() {
+        let (mut scene, _, zone) = scene_with_zone();
+        let result = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "hello", "ttl_us": 120_000_000u64}),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(result.ttl_us, 120_000_000u64);
+    }
+
+    #[test]
+    fn test_publish_to_zone_with_merge_key() {
+        let (mut scene, _, zone) = scene_with_zone();
+        let result = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "hello", "merge_key": "subtitle-main"}),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(result.merge_key.as_deref(), Some("subtitle-main"));
     }
 
     #[test]
     fn test_publish_to_zone_unknown_zone_fails() {
         let (mut scene, _, _) = scene_with_zone();
         let err = handle_publish_to_zone(
-            json!({"zone": "does-not-exist", "content": "hi"}),
+            json!({"zone_name": "does-not-exist", "content": "hi"}),
             &mut scene,
         )
         .unwrap_err();
@@ -921,7 +966,7 @@ mod tests {
             },
         );
         let err =
-            handle_publish_to_zone(json!({"zone": zone_name, "content": "hi"}), &mut scene)
+            handle_publish_to_zone(json!({"zone_name": zone_name, "content": "hi"}), &mut scene)
                 .unwrap_err();
         assert!(matches!(err, McpError::NoActiveTab));
     }
@@ -930,7 +975,7 @@ mod tests {
     fn test_publish_to_zone_empty_content_fails() {
         let (mut scene, _, zone) = scene_with_zone();
         let err = handle_publish_to_zone(
-            json!({"zone": zone, "content": ""}),
+            json!({"zone_name": zone, "content": ""}),
             &mut scene,
         )
         .unwrap_err();
@@ -964,7 +1009,7 @@ mod tests {
 
         // After publishing: has_content = true
         handle_publish_to_zone(
-            json!({"zone": zone.clone(), "content": "hi", "namespace": zone.clone()}),
+            json!({"zone_name": zone.clone(), "content": "hi", "namespace": zone.clone()}),
             &mut scene,
         )
         .unwrap();

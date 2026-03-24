@@ -44,6 +44,7 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 proptest = "1"
 
 # Misc
+subtle = "2.5"
 thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 blake3 = "1"

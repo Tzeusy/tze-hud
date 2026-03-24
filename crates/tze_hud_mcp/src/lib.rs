@@ -31,5 +31,5 @@ pub mod tools;
 pub mod types;
 
 pub use error::McpError;
-pub use server::McpServer;
+pub use server::{CallerContext, McpConfig, McpServer};
 pub use types::{McpRequest, McpResponse, McpResult};
