@@ -130,12 +130,87 @@ impl SceneGraph {
     /// Budget soft-limit threshold (80% of hard limit).
     pub const BUDGET_SOFT_LIMIT_PCT: f64 = 0.80;
 
+    /// Maximum leases across all agents in the entire runtime (spec §Lease Caps).
+    pub const MAX_RUNTIME_LEASES: usize = 64;
+
+    /// Default maximum leases per session (spec §Lease Caps).
+    pub const DEFAULT_MAX_LEASES_PER_SESSION: usize = 8;
+
+    /// Hard maximum leases per session (spec §Lease Caps).
+    pub const MAX_LEASES_PER_SESSION: usize = 64;
+
+    /// Maximum tiles per lease (spec §Lease Caps).
+    pub const MAX_TILES_PER_LEASE: u32 = 64;
+
+    /// Maximum nodes per tile (spec §Lease Caps).
+    pub const MAX_NODES_PER_TILE: u32 = 64;
+
+    /// Grant a lease with a default (nil) session_id.
+    ///
+    /// Convenience wrapper; real callers should use `grant_lease_for_session`.
     pub fn grant_lease(
         &mut self,
         namespace: &str,
         ttl_ms: u64,
         capabilities: Vec<Capability>,
     ) -> SceneId {
+        self.grant_lease_for_session(namespace, SceneId::nil(), ttl_ms, capabilities)
+    }
+
+    /// Grant a lease, enforcing runtime-wide and per-session caps.
+    ///
+    /// Panics if caps are exceeded (use `try_grant_lease` for graceful errors).
+    pub fn grant_lease_for_session(
+        &mut self,
+        namespace: &str,
+        session_id: SceneId,
+        ttl_ms: u64,
+        capabilities: Vec<Capability>,
+    ) -> SceneId {
+        self.try_grant_lease_for_session(namespace, session_id, ttl_ms, capabilities)
+            .expect("lease grant failed cap check")
+    }
+
+    /// Try to grant a lease, returning an error if runtime or session caps are exceeded.
+    ///
+    /// Enforces (spec §Requirement: Lease Caps):
+    /// - Max 64 leases per runtime across all agents.
+    /// - Max 64 (hard) leases per session by default.
+    pub fn try_grant_lease_for_session(
+        &mut self,
+        namespace: &str,
+        session_id: SceneId,
+        ttl_ms: u64,
+        capabilities: Vec<Capability>,
+    ) -> Result<SceneId, LeaseError> {
+        // Check runtime-wide cap
+        let non_terminal_count = self
+            .leases
+            .values()
+            .filter(|l| !l.state.is_terminal())
+            .count();
+        if non_terminal_count >= Self::MAX_RUNTIME_LEASES {
+            return Err(LeaseError::CapsExceeded(CapsError::MaxRuntimeLeasesExceeded {
+                current: non_terminal_count,
+                limit: Self::MAX_RUNTIME_LEASES,
+            }));
+        }
+
+        // Check per-session cap (if session_id is non-nil)
+        if !session_id.is_nil() {
+            let session_count = self
+                .leases
+                .values()
+                .filter(|l| l.session_id == session_id && !l.state.is_terminal())
+                .count();
+            if session_count >= Self::MAX_LEASES_PER_SESSION {
+                return Err(LeaseError::CapsExceeded(CapsError::MaxSessionLeasesExceeded {
+                    current: session_count,
+                    limit: Self::MAX_LEASES_PER_SESSION,
+                }));
+            }
+        }
+
         let id = SceneId::new();
         let now_ms = self.clock.now_millis();
         self.leases.insert(
@@ -143,6 +218,7 @@ impl SceneGraph {
             Lease {
                 id,
                 namespace: namespace.to_string(),
+                session_id,
                 state: LeaseState::Active,
                 priority: 2, // Normal (default) per RFC 0008 SS2.1
                 granted_at_ms: now_ms,
@@ -157,7 +233,7 @@ impl SceneGraph {
             },
         );
         self.version += 1;
-        id
+        Ok(id)
     }
 
     pub fn revoke_lease(&mut self, lease_id: SceneId) -> Result<(), ValidationError> {
@@ -291,14 +367,18 @@ impl SceneGraph {
             .leases
             .values()
             .filter_map(|l| {
-                // TTL-expired active/disconnected leases
-                if (l.state == LeaseState::Active || l.state == LeaseState::Disconnected)
+                // TTL-expired active/orphaned/disconnected leases
+                if (l.state == LeaseState::Active
+                    || l.state == LeaseState::Orphaned
+                    || l.state == LeaseState::Disconnected)
                     && l.is_expired(now)
                 {
                     return Some((l.id, LeaseState::Expired));
                 }
-                // Grace-period-expired disconnected leases
-                if l.state == LeaseState::Disconnected && l.check_grace_expired(now) {
+                // Grace-period-expired orphaned/disconnected leases
+                if (l.state == LeaseState::Orphaned || l.state == LeaseState::Disconnected)
+                    && l.check_grace_expired(now)
+                {
                     return Some((l.id, LeaseState::Expired));
                 }
                 // Suspension-timeout leases
@@ -2187,7 +2267,7 @@ mod tests {
         scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
 
         let lease = &scene.leases[&lease_id];
-        assert_eq!(lease.state, LeaseState::Disconnected);
+        assert_eq!(lease.state, LeaseState::Orphaned);
         assert!(!lease.is_mutations_allowed());
         assert_eq!(lease.disconnected_at_ms, Some(6_000)); // 1000 start + 5000
     }
@@ -2201,7 +2281,7 @@ mod tests {
         let err = scene.disconnect_lease(&lease_id, 2000).unwrap_err();
         assert!(matches!(err, LeaseError::InvalidTransition {
             from: LeaseState::Suspended,
-            to: LeaseState::Disconnected,
+            to: LeaseState::Orphaned,
         }));
     }
 
@@ -2601,7 +2681,7 @@ mod tests {
         scene.suspend_all_leases(clock.now_millis());
 
         assert_eq!(scene.leases[&l1].state, LeaseState::Suspended);
-        assert_eq!(scene.leases[&l2].state, LeaseState::Disconnected); // Unchanged
+        assert_eq!(scene.leases[&l2].state, LeaseState::Orphaned); // Unchanged (was Disconnected)
     }
 
     #[test]
@@ -2623,7 +2703,7 @@ mod tests {
         scene.resume_all_leases(clock.now_millis());
 
         assert_eq!(scene.leases[&l1].state, LeaseState::Active);
-        assert_eq!(scene.leases[&l2].state, LeaseState::Disconnected); // Unchanged
+        assert_eq!(scene.leases[&l2].state, LeaseState::Orphaned); // Unchanged (was Disconnected)
     }
 
     #[test]

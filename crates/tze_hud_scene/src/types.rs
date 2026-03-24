@@ -442,30 +442,41 @@ impl HitRegionLocalState {
 
 /// Lease lifecycle state per RFC 0008 SS3.
 ///
-/// Terminal states: `Revoked`, `Expired`, `Released`.
-/// Non-terminal: `Requested`, `Active`, `Suspended`, `Disconnected`.
+/// All 8 canonical states from the spec are present.
+/// Terminal states (no further transitions): `Denied`, `Revoked`, `Expired`, `Released`.
+/// Non-terminal: `Requested`, `Active`, `Suspended`, `Orphaned`.
+///
+/// `Disconnected` is a deprecated alias for `Orphaned`; new code should use `Orphaned`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeaseState {
-    /// Lease requested but not yet granted.
+    /// Lease request received; runtime evaluating. No mutations allowed.
     Requested,
-    /// Lease is active — mutations allowed.
+    /// Lease valid — agent holds mutation rights.
     Active,
-    /// Lease suspended (safe mode, freeze) — mutations blocked, state preserved.
+    /// Lease suspended (safe mode) — mutations blocked, state and tiles preserved.
     Suspended,
-    /// Agent disconnected — in grace period before cleanup.
+    /// Session disconnected — within reconnect grace period. Tiles frozen.
+    /// Canonical name per spec. Replaces `Disconnected`.
+    Orphaned,
+    /// Agent disconnected — legacy alias for `Orphaned`. Kept for backward compat.
     Disconnected,
-    /// Lease revoked — state destroyed.
+    /// Lease request rejected — terminal; agent must submit a new request.
+    Denied,
+    /// Lease revoked — state destroyed. Terminal.
     Revoked,
-    /// Lease expired (TTL exceeded) — state destroyed.
+    /// Lease expired (TTL exceeded) — state destroyed. Terminal.
     Expired,
-    /// Agent voluntarily released lease — state destroyed.
+    /// Agent voluntarily released lease — state destroyed. Terminal.
     Released,
 }
 
 impl LeaseState {
     /// Whether this state is terminal (no further transitions possible).
     pub fn is_terminal(self) -> bool {
-        matches!(self, LeaseState::Revoked | LeaseState::Expired | LeaseState::Released)
+        matches!(
+            self,
+            LeaseState::Denied | LeaseState::Revoked | LeaseState::Expired | LeaseState::Released
+        )
     }
 }
 
@@ -486,6 +497,38 @@ impl Default for RenewalPolicy {
     }
 }
 
+/// Lease caps violation error.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CapsError {
+    /// Runtime-wide lease limit (64) exceeded — spec §Requirement: Lease Caps.
+    MaxRuntimeLeasesExceeded { current: usize, limit: usize },
+    /// Per-session lease hard limit (64) exceeded — spec §Requirement: Lease Caps.
+    MaxSessionLeasesExceeded { current: usize, limit: usize },
+    /// Tile-per-lease limit (64) exceeded — spec §Requirement: Lease Caps.
+    MaxTilesPerLeaseExceeded { current: u32, limit: u32 },
+    /// Node-per-tile limit (64) exceeded — spec §Requirement: Lease Caps.
+    MaxNodesPerTileExceeded { current: u32, limit: u32 },
+}
+
+impl std::fmt::Display for CapsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CapsError::MaxRuntimeLeasesExceeded { current, limit } => {
+                write!(f, "MAX_RUNTIME_LEASES_EXCEEDED: {} / {}", current, limit)
+            }
+            CapsError::MaxSessionLeasesExceeded { current, limit } => {
+                write!(f, "MAX_SESSION_LEASES_EXCEEDED: {} / {}", current, limit)
+            }
+            CapsError::MaxTilesPerLeaseExceeded { current, limit } => {
+                write!(f, "MAX_TILES_PER_LEASE_EXCEEDED: {} / {}", current, limit)
+            }
+            CapsError::MaxNodesPerTileExceeded { current, limit } => {
+                write!(f, "MAX_NODES_PER_TILE_EXCEEDED: {} / {}", current, limit)
+            }
+        }
+    }
+}
+
 /// Error type for lease state transitions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LeaseError {
@@ -497,6 +540,8 @@ pub enum LeaseError {
     LeaseNotActive(SceneId),
     /// Mutation would exceed the lease's resource budget.
     BudgetExceeded(BudgetError),
+    /// Lease caps exceeded (runtime-wide or per-session).
+    CapsExceeded(CapsError),
 }
 
 impl std::fmt::Display for LeaseError {
@@ -508,6 +553,7 @@ impl std::fmt::Display for LeaseError {
             LeaseError::LeaseNotFound(id) => write!(f, "lease not found: {}", id),
             LeaseError::LeaseNotActive(id) => write!(f, "lease not active: {}", id),
             LeaseError::BudgetExceeded(e) => write!(f, "budget exceeded: {}", e),
+            LeaseError::CapsExceeded(e) => write!(f, "caps exceeded: {}", e),
         }
     }
 }
@@ -563,11 +609,18 @@ pub struct LeaseExpiry {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Lease {
+    /// UUIDv7 lease identifier (time-ordered, SceneId type). Assigned at grant time.
     pub id: SceneId,
+    /// Agent identity string (namespace). Established at session auth.
     pub namespace: String,
+    /// Parent session identifier. Lease is invalidated if session is revoked.
+    pub session_id: SceneId,
     pub state: LeaseState,
-    /// Priority: 0=system/chrome, 1-3=agent, 4+=background (RFC 0008 SS2).
-    pub priority: u32,
+    /// Priority: 0=system/chrome (reserved), 1=high, 2=normal (default), 3=low, 4+=background.
+    /// Per RFC 0008 SS2.
+    pub priority: u8,
+    /// Wall-clock grant timestamp in milliseconds since Unix epoch (RFC 0003 wall-clock domain).
+    /// Corresponds to `granted_at_wall_us / 1000` in the wire protocol.
     pub granted_at_ms: u64,
     pub ttl_ms: u64,
     pub renewal_policy: RenewalPolicy,
@@ -578,10 +631,10 @@ pub struct Lease {
     pub suspended_at_ms: Option<u64>,
     /// TTL remaining at the moment of suspension (ms).
     pub ttl_remaining_at_suspend_ms: Option<u64>,
-    // Disconnect tracking
+    // Orphan/disconnect tracking
     /// Timestamp when the agent disconnected (ms since epoch).
     pub disconnected_at_ms: Option<u64>,
-    /// Grace period before a disconnected lease is cleaned up (ms). Default 30_000.
+    /// Grace period before an orphaned lease is cleaned up (ms). Default 30_000.
     pub grace_period_ms: u64,
 }
 
@@ -604,12 +657,15 @@ impl Lease {
     pub fn is_expired(&self, now_ms: u64) -> bool {
         match self.state {
             // Terminal states are already past expiry semantics.
-            LeaseState::Revoked | LeaseState::Expired | LeaseState::Released => true,
+            LeaseState::Denied | LeaseState::Revoked | LeaseState::Expired | LeaseState::Released => true,
             // When suspended, TTL clock is paused — not expired.
             LeaseState::Suspended => false,
-            // When disconnected, TTL continues from disconnected_at_ms.
+            // When orphaned/disconnected, TTL continues.
             // (Grace period handles cleanup separately.)
-            LeaseState::Disconnected | LeaseState::Active | LeaseState::Requested => {
+            LeaseState::Orphaned
+            | LeaseState::Disconnected
+            | LeaseState::Active
+            | LeaseState::Requested => {
                 self.effective_remaining_ms(now_ms) == 0
             }
         }
@@ -683,24 +739,25 @@ impl Lease {
         Ok(())
     }
 
-    /// Transition Active -> Disconnected (agent disconnect).
+    /// Transition Active -> Orphaned (agent disconnect).
     ///
     /// Starts the grace period. TTL continues running.
+    /// Also accepts `Disconnected` as the source state for backward compat.
     pub fn disconnect(&mut self, now_ms: u64) -> Result<(), LeaseError> {
         if self.state != LeaseState::Active {
             return Err(LeaseError::InvalidTransition {
                 from: self.state,
-                to: LeaseState::Disconnected,
+                to: LeaseState::Orphaned,
             });
         }
         self.disconnected_at_ms = Some(now_ms);
-        self.state = LeaseState::Disconnected;
+        self.state = LeaseState::Orphaned;
         Ok(())
     }
 
-    /// Transition Disconnected -> Active (agent reconnect within grace period).
+    /// Transition Orphaned (or legacy Disconnected) -> Active (agent reconnect within grace period).
     pub fn reconnect(&mut self, now_ms: u64) -> Result<(), LeaseError> {
-        if self.state != LeaseState::Disconnected {
+        if self.state != LeaseState::Orphaned && self.state != LeaseState::Disconnected {
             return Err(LeaseError::InvalidTransition {
                 from: self.state,
                 to: LeaseState::Active,
@@ -740,10 +797,11 @@ impl Lease {
         self.state == LeaseState::Active
     }
 
-    /// Check if the grace period has expired for a disconnected lease.
+    /// Check if the grace period has expired for an orphaned/disconnected lease.
     pub fn check_grace_expired(&self, now_ms: u64) -> bool {
         match (self.state, self.disconnected_at_ms) {
-            (LeaseState::Disconnected, Some(disc_at)) => {
+            (LeaseState::Orphaned, Some(disc_at))
+            | (LeaseState::Disconnected, Some(disc_at)) => {
                 now_ms >= disc_at + self.grace_period_ms
             }
             _ => false,

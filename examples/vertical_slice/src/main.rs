@@ -824,12 +824,12 @@ mod tests {
         scene.resume_lease(&lease_id, now).unwrap();
         assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
 
-        // Active -> Disconnected
+        // Active -> Orphaned (disconnect)
         let now = now_ms();
         scene.disconnect_lease(&lease_id, now).unwrap();
-        assert_eq!(scene.leases[&lease_id].state, LeaseState::Disconnected);
+        assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
-        // Disconnected -> Active (reconnect)
+        // Orphaned -> Active (reconnect)
         let now = now_ms();
         scene.reconnect_lease(&lease_id, now).unwrap();
         assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
