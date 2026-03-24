@@ -2355,6 +2355,107 @@ impl SceneGraph {
         serde_json::from_str(json)
     }
 
+    /// Take a deterministic full scene snapshot at the current sequence number.
+    ///
+    /// Implements RFC 0001 §4.1 — produces a complete, deterministic serialization
+    /// of the scene graph. All maps use BTreeMap for deterministic iteration.
+    ///
+    /// # Checksum
+    /// The returned `SceneGraphSnapshot.checksum` is a BLAKE3 hash (hex-encoded) computed
+    /// over the canonical JSON of the snapshot with the checksum field set to `""`.
+    /// Use [`SceneGraphSnapshot::verify_checksum`] to verify after deserialization.
+    ///
+    /// # Clock arguments
+    /// `wall_us` is UTC wall-clock microseconds since epoch (u64). `mono_us` is
+    /// monotonic microseconds since process start.
+    ///
+    /// # v1 Constraints
+    /// - Resources are referenced by ResourceId only; no blob data is included.
+    /// - effective_geometry is NOT included (post-v1 per spec line 360).
+    /// - Incremental diff is NOT available (snapshot-only reconnect in v1).
+    pub fn take_snapshot(&self, wall_us: u64, mono_us: u64) -> SceneGraphSnapshot {
+        // Tabs: keyed by display_order for deterministic ordering.
+        let tabs: std::collections::BTreeMap<u32, Tab> = self
+            .tabs
+            .values()
+            .map(|t| (t.display_order, t.clone()))
+            .collect();
+
+        // Tiles: keyed by SceneId (BTreeMap — SceneId implements Ord).
+        let tiles: std::collections::BTreeMap<SceneId, Tile> = self
+            .tiles
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
+        // Nodes: keyed by SceneId.
+        let nodes: std::collections::BTreeMap<SceneId, Node> = self
+            .nodes
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+
+        // Zone registry: BTreeMap for both zone_types and active_publications.
+        let zone_types: std::collections::BTreeMap<String, ZoneDefinition> = self
+            .zone_registry
+            .zones
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Zone instances: intentionally empty in v1.
+        // In v1 the zone_registry does not store ZoneInstance directly —
+        // instance binding is implicit (one per tab per zone type when a zone is loaded).
+        // Consumers of this snapshot MUST NOT rely on zone_instances being populated;
+        // any instance bindings must be derived from zone_types and current tab/node state.
+        // Post-v1: explicit ZoneInstance tracking will populate this field.
+        let zone_instances: Vec<ZoneInstance> = Vec::new();
+
+        // Active publications: BTreeMap keyed by zone name; each Vec is already
+        // ordered by insertion (policy-enforced). Sort each Vec with a total order
+        // to guarantee determinism: published_at_ms → publisher_namespace → merge_key.
+        // The merge_key tie-breaker ensures records that share a timestamp and namespace
+        // (e.g., MergeByKey records) are still ordered deterministically.
+        let active_publications: std::collections::BTreeMap<String, Vec<ZonePublishRecord>> = self
+            .zone_registry
+            .active_publishes
+            .iter()
+            .map(|(zone_name, records)| {
+                let mut sorted = records.clone();
+                sorted.sort_by(|a, b| {
+                    a.published_at_ms
+                        .cmp(&b.published_at_ms)
+                        .then_with(|| a.publisher_namespace.cmp(&b.publisher_namespace))
+                        .then_with(|| a.merge_key.cmp(&b.merge_key))
+                });
+                (zone_name.clone(), sorted)
+            })
+            .collect();
+
+        let zone_registry = SceneGraphZoneRegistry {
+            zone_types,
+            zone_instances,
+            active_publications,
+        };
+
+        // Build the snapshot with a placeholder checksum first.
+        let mut snapshot = SceneGraphSnapshot {
+            sequence: self.sequence_number,
+            snapshot_wall_us: wall_us,
+            snapshot_mono_us: mono_us,
+            tabs,
+            tiles,
+            nodes,
+            zone_registry,
+            active_tab: self.active_tab,
+            checksum: String::new(),
+        };
+
+        // Compute and assign the checksum over the canonical content.
+        snapshot.checksum = snapshot.compute_checksum();
+        snapshot
+    }
+
     /// Count total nodes in the graph.
     pub fn node_count(&self) -> usize {
         self.nodes.len()

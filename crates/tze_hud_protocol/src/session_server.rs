@@ -484,6 +484,26 @@ const DEFAULT_EPHEMERAL_BUFFER_MAX: usize = 16;
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
+/// Process-start instant used as the base for monotonic timestamps.
+///
+/// Initialized on first access. All `_mono_us` timestamps are microseconds
+/// elapsed since this point, giving true monotonic semantics independent of
+/// wall-clock adjustments.
+static PROCESS_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Returns the process-start `Instant`, initializing it on first call.
+fn process_start() -> std::time::Instant {
+    *PROCESS_START.get_or_init(std::time::Instant::now)
+}
+
+/// Returns monotonic microseconds elapsed since process start.
+///
+/// Uses `std::time::Instant` so the value is immune to wall-clock adjustments
+/// (NTP steps, leap seconds, user clock changes). Suitable for `_mono_us` fields.
+fn now_mono_us() -> u64 {
+    process_start().elapsed().as_micros() as u64
+}
+
 fn now_wall_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -876,18 +896,24 @@ impl HudSession for HudSessionImpl {
             // Send SceneSnapshot after successful handshake (RFC 0005 §1.3, §6.4)
             {
                 let st = state.lock().await;
-                let json = st
-                    .scene
-                    .snapshot_json()
+                let wall_us = now_wall_us();
+                let mono_us: u64 = now_mono_us();
+                let graph_snap = st.scene.take_snapshot(wall_us, mono_us);
+                let snap_json = graph_snap
+                    .to_json()
                     .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
+                let checksum = graph_snap.checksum.clone();
                 let seq = session.next_server_seq();
                 let _ = tx
                     .send(Ok(ServerMessage {
                         sequence: seq,
                         timestamp_wall_us: now_wall_us(),
                         payload: Some(ServerPayload::SceneSnapshot(SceneSnapshot {
-                            scene_json: json,
-                            version: st.scene.version,
+                            snapshot_json: snap_json,
+                            sequence: st.scene.sequence_number,
+                            snapshot_wall_us: wall_us,
+                            snapshot_mono_us: mono_us,
+                            blake3_checksum: checksum,
                         })),
                     }))
                     .await;
@@ -3197,7 +3223,7 @@ mod tests {
         // Second message: SceneSnapshot
         match &messages[1].payload {
             Some(ServerPayload::SceneSnapshot(snapshot)) => {
-                assert!(!snapshot.scene_json.is_empty());
+                assert!(!snapshot.snapshot_json.is_empty());
             }
             other => panic!("Expected SceneSnapshot, got: {other:?}"),
         }
