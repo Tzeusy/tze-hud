@@ -162,6 +162,16 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Drain the LeaseStateChange(REQUESTED→ACTIVE) notification that follows every
+    // lease grant (per spec §Lease Management RPCs / lease-governance §State Machine).
+    let msg = response_stream.next().await.unwrap()?;
+    match &msg.payload {
+        Some(session_proto::server_message::Payload::LeaseStateChange(_)) => {}
+        other => {
+            return Err(format!("Expected LeaseStateChange after lease grant, got: {other:?}").into());
+        }
+    }
+
     // Heartbeat round-trip
     let hb_mono = 999_000u64;
     tx.send(session_proto::ClientMessage {
