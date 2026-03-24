@@ -19,6 +19,8 @@
 //!   period (default 60 s) with 5 ms per-cycle budget.
 //! - **Per-agent budget accounting**: `BudgetRegistry` charges decoded bytes per
 //!   agent node reference (full decoded size, double-counted across agents).
+//! - **Cross-agent sharing**: `SharingContext` provides capability-free referencing
+//!   (hash knowledge is the capability) and no enumeration API.
 //! - **Font cache**: LRU cache with permanent system/bundled holds.
 //! - **V1 ephemerality**: all resources stored in memory only; lost on restart.
 //!
@@ -34,6 +36,7 @@
 //! | [`refcount`] | Scene-graph-level reference counting and GC candidacy |
 //! | [`gc`] | GC runner: grace period, cycle timing, frame-render isolation |
 //! | [`budget`] | Per-agent decoded-byte budget accounting |
+//! | [`sharing`] | Cross-agent sharing semantics: cap-free reference, double-counted budget |
 //! | [`font_cache`] | LRU font cache with permanent system/bundled holds |
 //! | [`store`] | V1 ephemerality contract (`EphemeralStore`) |
 
@@ -43,6 +46,7 @@ pub mod dedup;
 pub mod font_cache;
 pub mod gc;
 pub mod refcount;
+pub mod sharing;
 pub mod store;
 pub mod types;
 pub mod upload;
@@ -61,5 +65,6 @@ pub use types::{
     DEFAULT_MAX_TOTAL_TEXTURE_BYTES, INLINE_SIZE_LIMIT, MAX_CONCURRENT_UPLOADS_PER_AGENT,
     MAX_TEXTURE_DIMENSION_PX,
 };
+pub use sharing::{check_reference_policy, RefResult, SharingContext};
 pub use upload::{ResourceStore, UploadId, UploadStartRequest};
 pub use validation::{AgentBudget, check_capability, check_hash, CAPABILITY_UPLOAD_RESOURCE};
