@@ -8,6 +8,9 @@ pub mod types;
 pub mod state_machine;
 pub mod ttl;
 pub mod suspension;
+pub mod priority;
+pub mod capability;
+pub mod degradation;
 
 pub use types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
 pub use state_machine::LeaseImpl;
