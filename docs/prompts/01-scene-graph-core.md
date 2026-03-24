@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **scene graph core implementation** — the foundation data model that all other v1 subsystems build on. This epic implements the scene-graph spec against the test infrastructure from Epic 0.
 
 ### Context
@@ -19,11 +21,13 @@ Create an epic with **6 implementation beads** as children:
 
 #### 1. SceneId and ResourceId identity types (no internal dependencies)
 Implement the binary identity contract per `scene-graph/spec.md` Requirement: SceneId Identity and Requirement: ResourceId Identity.
-- SceneId: 16-byte little-endian UUIDv7, monotonically increasing, unique within runtime lifetime
+- SceneId: 16-byte little-endian UUIDv7, monotonically increasing, unique within runtime lifetime. All-zero SceneId (`[0u8; 16]`) means null/absent (no root node, no sync group membership).
 - ResourceId: 32-byte raw BLAKE3 content hash (NOT hex-encoded), equality by byte comparison
 - Both must implement `Eq`, `Hash`, `Ord`, `Clone`, `Copy`, serialization to/from protobuf `bytes`
-- **Acceptance:** All Layer 0 identity invariant checks from Epic 0 pass. SceneId generation is monotonic. ResourceId deduplication works by byte equality.
-- **Spec refs:** `scene-graph/spec.md` lines 23-30, `resource-store/spec.md` lines 5-16
+- Zone publication requires both `publish_zone:<zone_name>` capability AND a valid `ZonePublishToken`
+- Zone registry is runtime-owned and static from configuration; agents cannot create or modify zone definitions
+- **Acceptance:** All Layer 0 identity invariant checks from Epic 0 pass. SceneId generation is monotonic. All-zero SceneId treated as null. ResourceId deduplication works by byte equality.
+- **Spec refs:** `scene-graph/spec.md` Requirement: SceneId Identity, Requirement: ResourceId Identity, Requirement: Zone Publishing
 
 #### 2. Scene hierarchy: Scene→Tab→Tile→Node (depends on #1)
 Implement the four-level hierarchy per `scene-graph/spec.md` Requirement: Scene Graph Hierarchy.

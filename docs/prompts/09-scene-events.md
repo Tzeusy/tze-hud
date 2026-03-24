@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **scene events** — the event taxonomy, dispatch, and delivery system that makes the platform observable and interactive for agents.
 
 ### Context
@@ -38,10 +40,15 @@ Implement subscription-based event delivery per `scene-events/spec.md` Requireme
 #### 3. Interruption classification and quiet hours (depends on #1, Epic 8 attention)
 Implement interruption handling per `scene-events/spec.md` Requirement: Interruption Classification, Requirement: Quiet Hours.
 - 5 classes: CRITICAL, HIGH, NORMAL, LOW, SILENT
+- **CRITICAL restriction:** only the runtime can emit CRITICAL events. Agent-requested CRITICAL is downgraded to HIGH.
 - Zone ceiling: runtime applies the more restrictive of agent-declared class and zone's ceiling
-- Quiet hours: CRITICAL/HIGH pass through; NORMAL/LOW queued until quiet hours end
-- Queued events delivered in original order when quiet hours end
-- **Acceptance:** Classification matches zone ceiling. Quiet hours queue/deliver behavior verified. CRITICAL bypasses everything.
+- Quiet hours behavior differs by class:
+  - CRITICAL: always passes (bypasses quiet hours and budget)
+  - HIGH: passes through quiet hours (subject to `pass_through_class` config), subject to attention budget
+  - NORMAL: queued in per-zone FIFO until quiet hours end, then delivered in original order
+  - LOW: **discarded** during quiet hours (not queued — too stale by quiet hours exit to be useful)
+  - SILENT: always passes (never interrupts)
+- **Acceptance:** Agent CRITICAL downgraded to HIGH. Zone ceiling applied correctly. NORMAL queued during quiet hours. LOW discarded during quiet hours. CRITICAL bypasses everything.
 - **Spec refs:** `scene-events/spec.md` Requirement: Interruption Classification, Requirement: Quiet Hours
 
 #### 4. tab_switch_on_event and agent event emission (depends on #1, #2)

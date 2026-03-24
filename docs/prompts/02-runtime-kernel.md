@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **runtime kernel and compositor** — the sovereign single-process execution model that owns the frame pipeline, thread architecture, degradation ladder, and headless rendering path.
 
 ### Context

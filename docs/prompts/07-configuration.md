@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **configuration and profiles** — the TOML-based configuration system that owns the canonical capability vocabulary, display profile resolution, and runtime parameter governance.
 
 ### Context

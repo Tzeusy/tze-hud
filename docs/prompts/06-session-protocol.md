@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **session protocol** — the bidirectional gRPC streaming protocol that is the single authoritative resident control path. This is the largest and most complex spec in the package.
 
 ### Context

@@ -2,6 +2,8 @@
 
 Each file is a self-contained prompt for creating a `/beads-writer` epic. The epic numbering reflects the dependency order.
 
+**Start every epic creation session by reading `PREAMBLE.md`** — it contains authority rules, doctrine guardrails, v1 scope tagging, and terminology locking that apply to all beads across all epics.
+
 ## Epic Dependency Graph
 
 ```
@@ -61,7 +63,7 @@ Epic 0: Test Infrastructure ─────────────────�
 | `runtime-kernel/spec.md` | 2 | 5 beads |
 | `timing-model/spec.md` | 3 | 4 beads |
 | `lease-governance/spec.md` | 4 | 5 beads |
-| `input-model/spec.md` | 5 | 5 beads |
+| `input-model/spec.md` | 5 | 6 beads |
 | `session-protocol/spec.md` | 6 | 7 beads |
 | `configuration/spec.md` | 7 | 4 beads |
 | `policy-arbitration/spec.md` | 8 | 4 beads |
@@ -70,7 +72,7 @@ Epic 0: Test Infrastructure ─────────────────�
 | `system-shell/spec.md` | 11 | 5 beads |
 | Cross-subsystem integration | 12 | 6 beads |
 
-**Total: 13 epics, 64 sub-beads**
+**Total: 13 epics, 65 sub-beads**
 
 ## How to Use
 

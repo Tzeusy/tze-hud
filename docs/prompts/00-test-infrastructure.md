@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **test-driven validation infrastructure** — the prerequisite layer that must exist before implementation workers can begin building v1 subsystems against `openspec/changes/v1-mvp-standards`.
 
 ### Context

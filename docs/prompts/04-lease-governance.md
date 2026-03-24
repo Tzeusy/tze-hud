@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **lease governance** — the state machine that governs every agent's presence on screen. No agent can mutate the scene without a valid lease; leases have TTL, priority, capability scope, and revocation semantics.
 
 ### Context
@@ -56,7 +58,8 @@ Implement per-agent resource governance per `lease-governance/spec.md` Requireme
 - Three-tier ladder: Warning (limit exceeded) → Throttle (unresolved 5s, reduce update rate 50%) → Revocation (sustained 30s)
 - Per-agent budgets: max_tiles, max_texture_bytes, max_update_rate_hz, max_nodes_per_tile
 - Shared resources double-counted per agent (anti-collusion)
-- **Acceptance:** Three-tier ladder transitions verified with time injection. Budget violations produce correct warnings/throttles/revocations. Budget tests from `budget.rs` pass.
+- **Note:** Guest MCP zone publishing does NOT require a lease — guests publish to zones without lease acquisition per `session-protocol/spec.md` Requirement: MCP Bridge Guest Tools
+- **Acceptance:** Three-tier ladder transitions verified with time injection. Budget violations produce correct warnings/throttles/revocations. Budget tests from `budget.rs` pass. Guest zone publishing verified lease-free.
 - **Spec refs:** `lease-governance/spec.md` Requirement: Resource Budget Enforcement, `runtime-kernel/spec.md` Requirement: Per-Agent Resource Budgets
 
 ### Requirements for every sub-bead

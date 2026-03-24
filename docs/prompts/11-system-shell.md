@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **system shell** — the chrome layer that provides human override controls, safe mode, freeze, privacy redaction, and disconnection badges. The shell is sovereign: agents cannot occlude chrome, steal focus from chrome, or prevent human overrides.
 
 ### Context

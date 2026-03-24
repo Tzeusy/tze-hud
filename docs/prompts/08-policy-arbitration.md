@@ -7,6 +7,8 @@
 
 ## Prompt
 
+> **Before starting:** Read `docs/prompts/PREAMBLE.md` for authority rules, doctrine guardrails, and v1 scope tagging requirements that apply to every bead.
+
 Create a `/beads-writer` epic for **policy arbitration** — the fixed 7-level precedence stack that resolves conflicts between human overrides, safety, privacy, security, attention, resources, and content.
 
 ### Context
