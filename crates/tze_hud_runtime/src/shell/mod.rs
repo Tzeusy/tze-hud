@@ -20,9 +20,18 @@
 //! Privacy redaction is handled by [`redaction`]. The shell is the sole owner of
 //! redaction rendering decisions. Agents are never notified. See `redaction.rs`.
 //!
+//! # Badges (Shell #5)
+//!
+//! Disconnection badges and backpressure signals are handled by [`badges`]. The
+//! shell is the sole owner of badge rendering. Badge state is owned by the
+//! `badges` subsystem (per-tile [`badges::TileBadgeState`] and frame-level
+//! [`badges::BadgeFrame`]) and consumed by the chrome render pass.
+//! Agents are never notified of badge state. See `badges.rs`.
+//!
 //! See `chrome.rs` for chrome layer implementation.
 //! See `freeze.rs` for freeze semantics.
 
+pub mod badges;
 pub mod chrome;
 pub mod freeze;
 pub mod redaction;
@@ -90,4 +99,26 @@ pub use redaction::{
     REDACTION_BLANK_COLOR,
     REDACTION_PATTERN_BASE,
     REDACTION_PATTERN_ACCENT,
+};
+
+pub use badges::{
+    // Per-tile badge state (written by control plane, read by chrome render pass)
+    TileBadgeState,
+    // Draw command builder
+    build_badge_cmds,
+    // Frame-level badge snapshot
+    BadgeFrame,
+    // Backpressure signals
+    BackpressureSignal,
+    // Rendering constants
+    DISCONNECTED_CONTENT_OPACITY,
+    DISCONNECTED_BADGE_OPACITY,
+    BUDGET_WARNING_BORDER_PX,
+    BUDGET_WARNING_BORDER_OPACITY,
+    BUDGET_WARNING_AMBER_COLOR,
+    DISCONNECTION_BADGE_SIZE_PX,
+    DISCONNECTION_BADGE_OFFSET_PX,
+    DISCONNECTION_BADGE_BG_COLOR,
+    DISCONNECTION_BADGE_ICON_COLOR,
+    DISCONNECTION_CONTENT_SCRIM_COLOR,
 };
