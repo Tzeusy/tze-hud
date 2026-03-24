@@ -1,8 +1,21 @@
 //! # tze_hud_input
 //!
 //! Input pipeline for tze_hud. Processes pointer events, performs hit-testing,
-//! updates local feedback state (hover/pressed), and dispatches events to agents.
-//! Local feedback happens synchronously in < 4ms — no agent roundtrip.
+//! updates local feedback state (hover/pressed/focused), and dispatches events
+//! to agents. Local feedback happens synchronously in < 4ms — no agent roundtrip.
+//!
+//! ## Modules
+//! - `focus_tree` — per-tab focus tree data structure and history
+//! - `focus`      — focus manager (lifecycle, cycling, events, ring metadata)
+
+pub mod focus_tree;
+pub mod focus;
+
+pub use focus_tree::{FocusOwner, FocusTree};
+pub use focus::{
+    FocusManager, FocusGainedEvent, FocusLostEvent, FocusRequest, FocusResult,
+    FocusSource, FocusLostReason, FocusRingUpdate, FocusRingBounds, FocusTransition,
+};
 
 use tze_hud_scene::{SceneId, NodeData, HitResult};
 use tze_hud_scene::graph::SceneGraph;
@@ -90,6 +103,60 @@ impl InputProcessor {
             current_hover: None,
             current_press: None,
         }
+    }
+
+    /// Process a pointer event against the scene graph.
+    ///
+    /// Updates hit-region local state for immediate visual feedback.
+    /// Returns the result including timing measurements and an optional
+    /// `AgentDispatch` descriptor for forwarding the event to the owning agent.
+    ///
+    /// In this variant, click-to-focus is applied **before** the pointer
+    /// event is forwarded to the agent, using the provided `focus_manager`
+    /// and `tab_id`, per spec §1.2 (lines 27-29). The returned
+    /// `FocusTransition` (if any) must be dispatched to agents before the
+    /// `AgentDispatch` payload.
+    pub fn process_with_focus(
+        &mut self,
+        event: &PointerEvent,
+        scene: &mut SceneGraph,
+        focus_manager: &mut FocusManager,
+        tab_id: SceneId,
+    ) -> (InputResult, Option<FocusTransition>) {
+        let focus_transition = if event.kind == PointerEventKind::Down {
+            let hit = scene.hit_test(event.x, event.y);
+            if let HitResult::NodeHit { tile_id, node_id, .. } = hit {
+                let transition = focus_manager.on_click(tab_id, tile_id, Some(node_id), scene);
+                // Update focused local state in hit_region_states based on transition.
+                // Clear the node that lost focus (if any) and set the one that gained.
+                if let Some((lost_ev, _)) = &transition.lost {
+                    if let Some(lost_node_id) = lost_ev.node_id {
+                        if let Some(state) = scene.hit_region_states.get_mut(&lost_node_id) {
+                            state.focused = false;
+                        }
+                    }
+                }
+                if let Some((gained_ev, _)) = &transition.gained {
+                    if let Some(gained_node_id) = gained_ev.node_id {
+                        if let Some(state) = scene.hit_region_states.get_mut(&gained_node_id) {
+                            state.focused = true;
+                        }
+                    }
+                }
+                if transition.gained.is_some() || transition.lost.is_some() {
+                    Some(transition)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let result = self.process(event, scene);
+        (result, focus_transition)
     }
 
     /// Process a pointer event against the scene graph.
