@@ -99,7 +99,12 @@ struct RingBufferInner<T> {
 
 impl<T: Send + 'static> RingBuffer<T> {
     /// Create a new ring buffer with the given capacity.
+    ///
+    /// # Panics
+    /// Panics if `capacity == 0`. A zero-capacity ring buffer would drop every
+    /// element immediately, violating the bounded-channel guarantee.
     pub fn new(capacity: usize, overflow: Arc<AtomicU64>) -> Self {
+        assert!(capacity > 0, "RingBuffer capacity must be > 0");
         Self {
             inner: Arc::new(Mutex::new(RingBufferInner {
                 buf: VecDeque::with_capacity(capacity),
@@ -325,9 +330,14 @@ impl<T: CoalesceKeyed + Send + 'static> CoalesceKeyReceiver<T> {
 }
 
 /// Create a coalesce-key channel with the given capacity (max distinct keys).
+///
+/// # Panics
+/// Panics if `capacity == 0`. A zero-capacity channel cannot hold any pending
+/// entries, so every `send()` would evict the entry it just inserted.
 pub fn coalesce_key_channel<T: CoalesceKeyed + Send + 'static>(
     capacity: usize,
 ) -> (CoalesceKeySender<T>, CoalesceKeyReceiver<T>) {
+    assert!(capacity > 0, "coalesce_key_channel capacity must be > 0");
     let inner = Arc::new(Mutex::new(CoalesceKeyInner {
         map: HashMap::with_capacity(capacity),
         order: VecDeque::with_capacity(capacity),
@@ -369,7 +379,9 @@ pub fn frame_ready_channel() -> (FrameReadyTx, FrameReadyRx) {
 /// An OS input event drained from the winit event loop.
 #[derive(Debug, Clone)]
 pub struct InputEvent {
-    /// Monotonic timestamp of when the event was received (ns since epoch).
+    /// Monotonic timestamp of when the event was received (nanoseconds from
+    /// an arbitrary, stable origin — typically process start or OS boot).
+    /// Not wall-clock time; suitable only for measuring elapsed intervals.
     pub timestamp_ns: u64,
     /// Raw event kind (simplified for the topology scaffold).
     pub kind: InputEventKind,

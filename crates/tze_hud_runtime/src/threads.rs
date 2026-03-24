@@ -86,8 +86,8 @@ impl ShutdownConfig {
 
 /// Broadcast a shutdown signal to all threads.
 ///
-/// Every long-running loop should select on `token.receiver()` and exit
-/// cleanly when the signal arrives.
+/// Every long-running loop should listen on a `broadcast::Receiver` obtained
+/// from `token.subscribe()` and exit cleanly when the signal arrives.
 #[derive(Clone)]
 pub struct ShutdownToken {
     tx: broadcast::Sender<ShutdownReason>,

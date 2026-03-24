@@ -95,17 +95,24 @@ pub enum AdapterSelectionError {
 
 /// Select a GPU adapter with platform-mandated backends.
 ///
-/// This is the function windowed startup should call. On success it returns a
-/// `wgpu::Adapter` that matches the platform backend requirements. On failure
-/// it returns a structured `AdapterSelectionError` — callers must treat this
-/// as fatal.
+/// Returns a `(wgpu::Instance, wgpu::Adapter)` pair. Callers MUST use the
+/// returned `Instance` for all subsequent wgpu operations (surface creation,
+/// device creation). A `wgpu::Surface` MUST be created from the same
+/// `Instance` as the `Adapter` used for device creation; mixing instances
+/// produces undefined behaviour at the wgpu level.
 ///
-/// The `compatible_surface` parameter should be `Some(&surface)` for windowed
-/// mode and `None` for headless (though headless should use
-/// `Compositor::new_headless` directly).
+/// The `compatible_surface` parameter, when `Some`, must have been created
+/// from the same `Instance` that will be returned (i.e. callers should pass
+/// `None` for a first-pass probe, then re-create the surface from the
+/// returned instance and call `device` on the adapter). Pass `None` to skip
+/// surface compatibility checking (headless or pre-surface selection).
+///
+/// # Fatal on failure
+/// Returns a structured `AdapterSelectionError` that callers MUST treat as a
+/// fatal startup error (spec line 195).
 pub async fn select_gpu_adapter(
     compatible_surface: Option<&wgpu::Surface<'_>>,
-) -> Result<Adapter, AdapterSelectionError> {
+) -> Result<(Instance, Adapter), AdapterSelectionError> {
     let pb = platform_backends();
 
     let instance = Instance::new(&InstanceDescriptor {
@@ -130,7 +137,7 @@ pub async fn select_gpu_adapter(
                 vendor = info.vendor,
                 "GPU adapter selected"
             );
-            Ok(a)
+            Ok((instance, a))
         }
         None => {
             let err = AdapterSelectionError::NoAdapter {
