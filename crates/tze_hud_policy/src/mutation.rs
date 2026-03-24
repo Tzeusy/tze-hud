@@ -39,15 +39,16 @@
 //!
 //! Per-mutation policy check MUST complete in < 50us.
 
+use crate::content::{content_decision_to_outcome, evaluate_content};
 use crate::privacy::{apply_zone_ceiling, evaluate_privacy, PrivacyDecision};
+use crate::resource::{evaluate_resource, resource_decision_to_outcome, ResourceDecision};
 use crate::telemetry::{ArbitrationTelemetryEvent, PolicyTelemetry};
 use crate::types::{
     ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, AttentionContext,
-    BlockReason, ContentContext, InterruptionClass, MutationKind, PolicyContext,
+    BlockReason, InterruptionClass, MutationKind, PolicyContext,
     QueueReason, VisibilityClassification,
 };
 use tze_hud_scene::SceneId;
-use tze_hud_scene::types::ContentionPolicy;
 
 // ─── Per-mutation input ───────────────────────────────────────────────────────
 
@@ -97,7 +98,12 @@ pub struct MutationEvalOutput {
     /// The caller is responsible for forwarding these to the telemetry subsystem.
     pub events: Vec<ArbitrationTelemetryEvent>,
 
-    /// Per-mutation evaluation time in microseconds (measured by the pipeline).
+    /// Per-mutation evaluation time in microseconds.
+    ///
+    /// Always `0` from `evaluate_mutation` — the pipeline is a pure function and
+    /// does not call the system clock. The **caller** must wrap the call with a timer,
+    /// measure the elapsed time, and write it into this field before forwarding to
+    /// `MutationLatencyAccumulator::record`.
     pub eval_us: u64,
 }
 
@@ -132,12 +138,20 @@ pub fn evaluate_mutation(input: &MutationEvalInput<'_>) -> MutationEvalOutput {
     // We report eval_us = 0 here; callers should wrap with a timer and populate.
     let mut events: Vec<ArbitrationTelemetryEvent> = Vec::new();
 
+    // Build capability set once per mutation (not once per path function).
+    // This avoids redundant HashSet allocation if the same capability set
+    // is used in both security checks of zone publication and tile mutation paths.
+    let cap_set =
+        crate::security::CapabilitySet::new(
+            input.ctx.security_context.granted_capabilities.iter().map(|s| s.as_str())
+        );
+
     let outcome = match input.kind {
         MutationKind::ZonePublication => {
-            evaluate_zone_publication(input, &mut events)
+            evaluate_zone_publication(input, &cap_set, &mut events)
         }
         MutationKind::TileMutation | MutationKind::Transactional => {
-            evaluate_tile_mutation(input, &mut events)
+            evaluate_tile_mutation(input, &cap_set, &mut events)
         }
     };
 
@@ -149,6 +163,7 @@ pub fn evaluate_mutation(input: &MutationEvalInput<'_>) -> MutationEvalOutput {
 /// Evaluate a zone publication: L0 → L3 → L2(decor) → L4 → L5 → L6.
 fn evaluate_zone_publication(
     input: &MutationEvalInput<'_>,
+    cap_set: &crate::security::CapabilitySet,
     events: &mut Vec<ArbitrationTelemetryEvent>,
 ) -> ArbitrationOutcome {
     let ctx = input.ctx;
@@ -159,7 +174,7 @@ fn evaluate_zone_publication(
     }
 
     // ── Level 3: Security gate ────────────────────────────────────────────────
-    let cap_set = CapabilitySetHelper::from_vec(&ctx.security_context.granted_capabilities);
+    // cap_set is pre-built by evaluate_mutation to avoid per-call allocation.
 
     // Lease validity
     if !ctx.security_context.lease_valid {
@@ -255,41 +270,45 @@ fn evaluate_zone_publication(
         None => {}
     }
 
-    // ── Level 5: Resource gate ─────────────────────────────────────────────────
-    if ctx.resource_context.budgets_paused {
-        // Budgets paused; skip Level 5 enforcement
-    } else if ctx.resource_context.budget_exceeded {
-        let rejection = ArbitrationOutcome::Reject(ArbitrationError {
-            code: ArbitrationErrorCode::TileBudgetExceeded,
-            agent_id: input.agent_id.to_string(),
-            mutation_ref: input.mutation_ref,
-            message: "Per-agent tile budget exceeded; batch rejected atomically".to_string(),
-            hint: Some("Reduce tile count or wait for budget refill".to_string()),
-            level: ArbitrationLevel::Resource.index(),
-        });
-        events.push(ArbitrationTelemetryEvent::reject(
-            ArbitrationLevel::Resource.index(),
-            "TILE_BUDGET_EXCEEDED",
-            input.agent_id,
-            input.mutation_ref,
-            input.timestamp_us,
-        ));
-        return rejection;
-    } else if ctx.resource_context.should_shed && input.kind != MutationKind::Transactional {
-        // Shed: zone state updated, render output omitted, no error to agent
-        events.push(ArbitrationTelemetryEvent::shed(
-            input.agent_id,
-            input.mutation_ref,
-            input.timestamp_us,
-        ));
-        return ArbitrationOutcome::Shed {
-            degradation_level: ctx.resource_context.degradation_level,
-        };
+    // ── Level 5: Resource gate (delegate to resource module) ──────────────────
+    // Populate is_transactional from the mutation kind so resource module has a
+    // single source of truth (no separate kind parameter).
+    let resource_ctx_for_zone = crate::types::ResourceContext {
+        is_transactional: input.kind == MutationKind::Transactional,
+        ..ctx.resource_context.clone()
+    };
+    let resource_decision = evaluate_resource(&resource_ctx_for_zone, input.mutation_ref);
+    match &resource_decision {
+        ResourceDecision::Shed { .. } => {
+            events.push(ArbitrationTelemetryEvent::shed(
+                input.agent_id,
+                input.mutation_ref,
+                input.timestamp_us,
+            ));
+        }
+        ResourceDecision::BudgetExceeded => {
+            events.push(ArbitrationTelemetryEvent::reject(
+                ArbitrationLevel::Resource.index(),
+                "TILE_BUDGET_EXCEEDED",
+                input.agent_id,
+                input.mutation_ref,
+                input.timestamp_us,
+            ));
+        }
+        ResourceDecision::Pass | ResourceDecision::BudgetsPaused => {}
+    }
+    if let Some(outcome) =
+        resource_decision_to_outcome(resource_decision, input.agent_id, input.mutation_ref)
+    {
+        return outcome;
     }
 
-    // ── Level 6: Content resolution ───────────────────────────────────────────
-    if let Some(rejection) = evaluate_content_zone(&ctx.content_context, input) {
-        return rejection;
+    // ── Level 6: Content resolution (delegate to content module) ──────────────
+    let content_decision = evaluate_content(&ctx.content_context, input.mutation_ref);
+    if let Some(outcome) =
+        content_decision_to_outcome(content_decision, input.agent_id, input.mutation_ref)
+    {
+        return outcome;
     }
 
     // All levels passed.
@@ -315,12 +334,13 @@ fn evaluate_zone_publication(
 /// Evaluate a tile mutation: L3 → L5 → L6.
 fn evaluate_tile_mutation(
     input: &MutationEvalInput<'_>,
+    cap_set: &crate::security::CapabilitySet,
     events: &mut Vec<ArbitrationTelemetryEvent>,
 ) -> ArbitrationOutcome {
     let ctx = input.ctx;
 
     // ── Level 3: Security gate ────────────────────────────────────────────────
-    let cap_set = CapabilitySetHelper::from_vec(&ctx.security_context.granted_capabilities);
+    // cap_set is pre-built by evaluate_mutation to avoid per-call allocation.
 
     // Lease validity
     if !ctx.security_context.lease_valid {
@@ -388,17 +408,23 @@ fn evaluate_tile_mutation(
         return rejection;
     }
 
-    // ── Level 5: Resource gate ─────────────────────────────────────────────────
-    if !ctx.resource_context.budgets_paused {
-        if ctx.resource_context.budget_exceeded {
-            let rejection = ArbitrationOutcome::Reject(ArbitrationError {
-                code: ArbitrationErrorCode::TileBudgetExceeded,
-                agent_id: input.agent_id.to_string(),
-                mutation_ref: input.mutation_ref,
-                message: "Per-agent tile budget exceeded; batch rejected atomically".to_string(),
-                hint: Some("Reduce tile count or wait for budget refill".to_string()),
-                level: ArbitrationLevel::Resource.index(),
-            });
+    // ── Level 5: Resource gate (delegate to resource module) ──────────────────
+    // Populate is_transactional from the mutation kind so resource module has a
+    // single source of truth (no separate kind parameter).
+    let resource_ctx_for_tile = crate::types::ResourceContext {
+        is_transactional: input.kind == MutationKind::Transactional,
+        ..ctx.resource_context.clone()
+    };
+    let resource_decision = evaluate_resource(&resource_ctx_for_tile, input.mutation_ref);
+    match &resource_decision {
+        ResourceDecision::Shed { .. } => {
+            events.push(ArbitrationTelemetryEvent::shed(
+                input.agent_id,
+                input.mutation_ref,
+                input.timestamp_us,
+            ));
+        }
+        ResourceDecision::BudgetExceeded => {
             events.push(ArbitrationTelemetryEvent::reject(
                 ArbitrationLevel::Resource.index(),
                 "TILE_BUDGET_EXCEEDED",
@@ -406,37 +432,24 @@ fn evaluate_tile_mutation(
                 input.mutation_ref,
                 input.timestamp_us,
             ));
-            return rejection;
         }
-        if ctx.resource_context.should_shed && input.kind != MutationKind::Transactional {
-            events.push(ArbitrationTelemetryEvent::shed(
-                input.agent_id,
-                input.mutation_ref,
-                input.timestamp_us,
-            ));
-            return ArbitrationOutcome::Shed {
-                degradation_level: ctx.resource_context.degradation_level,
-            };
-        }
+        ResourceDecision::Pass | ResourceDecision::BudgetsPaused => {}
+    }
+    if let Some(outcome) =
+        resource_decision_to_outcome(resource_decision, input.agent_id, input.mutation_ref)
+    {
+        return outcome;
     }
 
-    // ── Level 6: Content resolution ───────────────────────────────────────────
-    if let Some(rejection) = evaluate_content_zone(&ctx.content_context, input) {
-        return rejection;
+    // ── Level 6: Content resolution (delegate to content module) ──────────────
+    let content_decision = evaluate_content(&ctx.content_context, input.mutation_ref);
+    if let Some(outcome) =
+        content_decision_to_outcome(content_decision, input.agent_id, input.mutation_ref)
+    {
+        return outcome;
     }
 
     ArbitrationOutcome::Commit
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/// Thin wrapper around `CapabilitySet` that takes `&[String]` for convenience.
-struct CapabilitySetHelper;
-
-impl CapabilitySetHelper {
-    fn from_vec(caps: &[String]) -> crate::security::CapabilitySet {
-        crate::security::CapabilitySet::new(caps.iter().map(|s| s.as_str()))
-    }
 }
 
 /// Evaluate Level 4 attention for a zone publication.
@@ -498,50 +511,6 @@ fn evaluate_attention(
     }
 
     None
-}
-
-/// Evaluate Level 6 content zone contention and return a rejection if warranted.
-fn evaluate_content_zone(
-    ctx: &ContentContext,
-    input: &MutationEvalInput<'_>,
-) -> Option<ArbitrationOutcome> {
-    match &ctx.contention_policy {
-        Some(ContentionPolicy::Replace) => {
-            if let Some(occupant_priority) = ctx.occupant_lease_priority
-                && ctx.agent_lease_priority > occupant_priority
-            {
-                return Some(ArbitrationOutcome::Reject(ArbitrationError {
-                    code: ArbitrationErrorCode::ZoneEvictionDenied,
-                    agent_id: input.agent_id.to_string(),
-                    mutation_ref: input.mutation_ref,
-                    message: format!(
-                        "Zone eviction denied: agent priority {} < occupant priority {}",
-                        ctx.agent_lease_priority, occupant_priority
-                    ),
-                    hint: Some("Higher-priority occupant holds this Replace zone".to_string()),
-                    level: ArbitrationLevel::Content.index(),
-                }));
-            }
-            None
-        }
-        Some(ContentionPolicy::Stack { max_depth }) => {
-            if ctx.stack_depth >= u32::from(*max_depth) {
-                return Some(ArbitrationOutcome::Reject(ArbitrationError {
-                    code: ArbitrationErrorCode::ZoneEvictionDenied,
-                    agent_id: input.agent_id.to_string(),
-                    mutation_ref: input.mutation_ref,
-                    message: format!(
-                        "Stack zone at max depth {}/{}",
-                        ctx.stack_depth, max_depth
-                    ),
-                    hint: Some("Stack zone is full".to_string()),
-                    level: ArbitrationLevel::Content.index(),
-                }));
-            }
-            None
-        }
-        Some(ContentionPolicy::LatestWins) | Some(ContentionPolicy::MergeByKey { .. }) | None => None,
-    }
 }
 
 // ─── Batch evaluation ─────────────────────────────────────────────────────────

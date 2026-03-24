@@ -118,7 +118,6 @@ pub use resource::{
     ResourceDecision,
     evaluate_resource,
     resource_decision_to_outcome,
-    is_transactional,
 };
 
 pub use content::{

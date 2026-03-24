@@ -93,13 +93,14 @@ pub enum ArbitrationEventKind {
 /// Emitted for every Level 3 rejection, every Level 5 shed, and at a lower
 /// rate for Level 2 redactions and Level 4 queuing events.
 ///
-/// Field `event` is the human-readable/machine-readable event name:
+/// Field `event` is the machine-readable event name (static string constant):
 /// `"arbitration_reject"`, `"arbitration_shed"`, `"arbitration_redact"`,
-/// `"arbitration_queue"`.
+/// `"arbitration_queue"`. Stored as `&'static str` to avoid per-event allocations
+/// on the hot reject/shed path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ArbitrationTelemetryEvent {
-    /// Human-readable event name (`"arbitration_reject"` / `"arbitration_shed"` / etc.).
-    pub event: String,
+    /// Machine-readable event name (static; no allocation per event).
+    pub event: &'static str,
 
     /// Kind of the event.
     pub kind: ArbitrationEventKind,
@@ -131,7 +132,7 @@ impl ArbitrationTelemetryEvent {
         timestamp_us: u64,
     ) -> Self {
         Self {
-            event: "arbitration_reject".to_string(),
+            event: "arbitration_reject",
             kind: ArbitrationEventKind::Reject,
             level,
             code: Some(code.into()),
@@ -148,7 +149,7 @@ impl ArbitrationTelemetryEvent {
         timestamp_us: u64,
     ) -> Self {
         Self {
-            event: "arbitration_shed".to_string(),
+            event: "arbitration_shed",
             kind: ArbitrationEventKind::Shed,
             level: 5,
             code: None,
@@ -165,7 +166,7 @@ impl ArbitrationTelemetryEvent {
         timestamp_us: u64,
     ) -> Self {
         Self {
-            event: "arbitration_redact".to_string(),
+            event: "arbitration_redact",
             kind: ArbitrationEventKind::Redact,
             level: 2,
             code: None,
@@ -182,7 +183,7 @@ impl ArbitrationTelemetryEvent {
         timestamp_us: u64,
     ) -> Self {
         Self {
-            event: "arbitration_queue".to_string(),
+            event: "arbitration_queue",
             kind: ArbitrationEventKind::Queue,
             level: 4,
             code: None,
@@ -283,14 +284,20 @@ impl MutationLatencyAccumulator {
 
     /// Compute the p99 latency from the recorded samples.
     ///
+    /// Uses the nearest-rank method: `rank = ceil(0.99 * n)`, `idx = rank - 1`.
+    /// For n=100: rank=99, idx=98 (the 99th sample, not the 100th).
+    ///
     /// Returns 0 if no samples have been recorded.
     pub fn p99_us(&mut self) -> u64 {
         if self.samples.is_empty() {
             return 0;
         }
         self.samples.sort_unstable();
-        // p99 index: floor(0.99 * n), clamped to valid range
-        let idx = ((self.samples.len() as f64 * 0.99) as usize).min(self.samples.len() - 1);
+        let n = self.samples.len();
+        // Nearest-rank method: ceil(0.99 * n) using integer arithmetic.
+        // rank = ceil(99 * n / 100) = (99 * n + 99) / 100
+        let rank = (99 * n + 99) / 100;
+        let idx = (rank - 1).min(n - 1);
         self.samples[idx]
     }
 
@@ -414,8 +421,9 @@ mod telemetry_tests {
         }
         acc.record(100);
         let p99 = acc.p99_us();
-        // p99 with 100 samples: idx = floor(0.99 * 100) = 99 → the 100th sample (100us)
-        assert_eq!(p99, 100);
+        // p99 with 100 samples using nearest-rank: rank = ceil(0.99*100) = 99, idx = 98.
+        // Sorted samples[98] = 10us (the 99th of 100 values; samples[99] = 100us is p100).
+        assert_eq!(p99, 10);
     }
 
     #[test]

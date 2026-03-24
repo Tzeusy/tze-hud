@@ -70,7 +70,8 @@ pub fn evaluate_content(ctx: &ContentContext, _mutation_ref: SceneId) -> Content
                 // Agent has lower priority — cannot evict.
                 return ContentDecision::ZoneEvictionDenied {
                     message: format!(
-                        "Zone eviction denied: agent priority {} < occupant priority {}",
+                        "Zone eviction denied: agent lease priority {} is numerically greater \
+                         (lower effective priority) than occupant lease priority {}",
                         ctx.agent_lease_priority, occupant_priority
                     ),
                 };

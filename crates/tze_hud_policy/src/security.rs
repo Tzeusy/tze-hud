@@ -179,17 +179,29 @@ impl From<&[&str]> for CapabilitySet {
 pub struct ConfigUnknownCapability {
     /// The name that was used in the config.
     pub used: String,
-    /// The canonical replacement hint.
+    /// For superseded names: the canonical replacement (e.g. `"read_scene_topology"`).
+    /// For invalid names: an explanatory reason message.
     pub hint: String,
+    /// Whether this error is a superseded pre-Round-14 name (`true`) or an invalid
+    /// format / unknown name (`false`).
+    pub is_superseded: bool,
 }
 
 impl std::fmt::Display for ConfigUnknownCapability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "CONFIG_UNKNOWN_CAPABILITY: '{}' is superseded; use '{}' instead",
-            self.used, self.hint
-        )
+        if self.is_superseded {
+            write!(
+                f,
+                "CONFIG_UNKNOWN_CAPABILITY: '{}' is superseded; use '{}' instead",
+                self.used, self.hint
+            )
+        } else {
+            write!(
+                f,
+                "CONFIG_UNKNOWN_CAPABILITY: '{}' is invalid ({})",
+                self.used, self.hint
+            )
+        }
     }
 }
 
@@ -214,11 +226,12 @@ pub fn validate_capability_names(names: &[&str]) -> Result<(), Vec<ConfigUnknown
                 } else {
                     canonical.to_string()
                 };
-                Some(ConfigUnknownCapability { used: name.to_string(), hint })
+                Some(ConfigUnknownCapability { used: name.to_string(), hint, is_superseded: true })
             }
             CapabilityNameCheck::Invalid { reason } => Some(ConfigUnknownCapability {
                 used: name.to_string(),
                 hint: reason.to_string(),
+                is_superseded: false,
             }),
             CapabilityNameCheck::Valid => None,
         })
