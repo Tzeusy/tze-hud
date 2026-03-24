@@ -48,7 +48,7 @@ use crate::dedup::DedupIndex;
 use crate::refcount::{GcCandidateTable, RefcountError, RefcountLayer};
 use crate::types::ResourceId;
 
-// ─── CrossAgentRef result ────────────────────────────────────────────────────
+// ─── RefResult ───────────────────────────────────────────────────────────────
 
 /// Metadata returned to an agent when it creates a reference to a resource.
 ///
@@ -137,17 +137,12 @@ impl SharingContext {
         resource_id: ResourceId,
         now_ms: u64,
     ) -> Result<RefResult, RefcountError> {
-        // Retrieve decoded_bytes before incrementing the refcount so we can
-        // charge the budget even on first-reference.
-        let decoded_bytes = self
-            .refcount
-            .dedup_index()
-            .get(&resource_id)
-            .map(|r| r.decoded_bytes)
-            .ok_or(RefcountError::NotFound)?;
-
-        // Increment the global refcount (resurrects GC candidates).
-        let new_refcount = self.refcount.inc_ref(resource_id)?;
+        // Single dedup-index lookup: increments the global refcount and
+        // returns the decoded byte size in one operation, eliminating the
+        // double-lookup and the associated TOCTOU window on the hot mutation
+        // path.  Resurrects GC candidates automatically.
+        let (decoded_bytes, new_refcount) =
+            self.refcount.inc_ref_with_decoded_bytes(resource_id)?;
 
         // Charge the agent's budget (full decoded size per reference).
         self.budget.on_node_ref_added(agent_ns, resource_id, decoded_bytes);
@@ -257,12 +252,20 @@ impl SharingContext {
     // ── Internal access (for GcRunner, tests) ────────────────────────────────
 
     /// Access the inner `RefcountLayer` (for GC integration).
-    pub fn refcount_layer(&self) -> &RefcountLayer {
+    ///
+    /// Intentionally `pub(crate)` — external callers must not be able to
+    /// enumerate GC candidates via `candidates().snapshot()`, which would
+    /// violate the no-enumeration invariant (spec lines 175-177).
+    pub(crate) fn refcount_layer(&self) -> &RefcountLayer {
         &self.refcount
     }
 
     /// Access the inner `BudgetRegistry` (for diagnostics).
-    pub fn budget_registry(&self) -> &BudgetRegistry {
+    ///
+    /// Intentionally `pub(crate)` — exposes internal accounting state that
+    /// should not leak through the public API surface.
+    #[allow(dead_code)] // used by compositor diagnostics path; not yet wired up
+    pub(crate) fn budget_registry(&self) -> &BudgetRegistry {
         &self.budget
     }
 }
@@ -444,19 +447,18 @@ mod tests {
 
     // ── Acceptance: no resource enumeration ───────────────────────────────────
 
-    /// WHEN an agent attempts to enumerate all stored resources,
-    /// THEN no such operation SHALL exist.
+    /// WHEN an agent has a known ResourceId, `query_decoded_bytes` returns that
+    /// resource's metadata; for any other ResourceId the result is `None`.
     ///
-    /// This test verifies by attempting to call any enumeration method on
-    /// `SharingContext` — if the code compiles, enumeration is absent.
+    /// This verifies that the API only grants per-ResourceId access and does
+    /// not return a collection of all stored resources.  The no-enumeration
+    /// contract (spec lines 175-177) is enforced at the API design level:
+    /// `SharingContext` has no `list`, `enumerate`, `iter`, `keys`, or
+    /// `all_resource_ids` method.
     ///
     /// Source: spec lines 175-177.
-    ///
-    /// Note: this is a compile-time guarantee enforced by API design, not by
-    /// run-time logic.  The test below ensures that `SharingContext` has no
-    /// method named `list`, `enumerate`, `iter`, `keys`, or similar.
     #[test]
-    fn no_enumeration_api_exists() {
+    fn query_requires_known_resource_id_and_does_not_enumerate() {
         // The absence of an enumeration method is the invariant.  This test
         // demonstrates that `query_decoded_bytes` requires a specific ResourceId
         // and does not return all stored resources.
@@ -472,17 +474,6 @@ mod tests {
             ctx.query_decoded_bytes(unknown).is_none(),
             "query of unknown ResourceId must return None, not leak other resources"
         );
-
-        // Compile-time check: SharingContext must not have any of these methods.
-        //
-        // If any of the following lines were uncommented and compiled, they
-        // would produce a compiler error, confirming the API does not exist:
-        //
-        //   ctx.list_all_resources();     // must not compile
-        //   ctx.enumerate_resources();    // must not compile
-        //   ctx.iter_resources();         // must not compile
-        //   ctx.keys();                   // must not compile
-        //   ctx.all_resource_ids();       // must not compile
     }
 
     // ── Acceptance: upload capability gate ───────────────────────────────────
