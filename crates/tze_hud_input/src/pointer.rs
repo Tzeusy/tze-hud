@@ -55,13 +55,20 @@ impl Default for PointerButton {
 pub struct PointerFields {
     /// The tile that owns the hit node.
     pub tile_id: SceneId,
-    /// The specific HitRegionNode that was hit (null if tile-level hit only).
+    /// The specific HitRegionNode that was hit.
+    /// Use `SceneId::null()` when the event targets a tile but no HitRegionNode
+    /// (i.e., the dispatch resulted in a `TileHit`). Callers should check
+    /// `node_id.is_null()` before treating this as a node reference.
     pub node_id: SceneId,
     /// The agent-defined interaction_id of the hit node.
     pub interaction_id: String,
     /// Opaque device identifier (OS-assigned).
     pub device_id: u64,
-    /// Pointer position in node-local coordinates.
+    /// Pointer position in tile-local coordinates (display minus tile origin).
+    ///
+    /// Note: v1 delivers tile-local coordinates, not true node-local coordinates.
+    /// Agents that need coordinates relative to a specific node's bounds must
+    /// subtract the node's `HitRegionNode.bounds` origin themselves.
     pub local_x: f32,
     pub local_y: f32,
     /// Pointer position in display-space coordinates.

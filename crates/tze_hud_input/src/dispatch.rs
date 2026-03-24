@@ -483,11 +483,10 @@ fn interaction_id_for(scene: &SceneGraph, node_id: SceneId) -> String {
         .unwrap_or_default()
 }
 
-/// Check whether a node's event_mask allows a given event type.
+/// Check whether a node's `event_mask` allows a given event type.
 ///
-/// Uses `entry().or_insert_with()` to initialize local state for nodes that
-/// bypassed `set_tile_root` — avoids a missed state init for directly-inserted
-/// nodes (AGENTS.md note).
+/// Returns `false` if the node is not a `HitRegion` or does not exist.
+/// Takes an immutable reference to `SceneGraph` and does not modify any state.
 fn node_allows_event<F>(scene: &SceneGraph, node_id: SceneId, pred: F) -> bool
 where
     F: Fn(&tze_hud_scene::EventMask) -> bool,
