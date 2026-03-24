@@ -14,7 +14,7 @@
 //!
 //! | Variant | Rule |
 //! |---|---|
-//! | `AfterUs(d)` | `target_mono = intake_mono + d`; then `wall = target_mono + skew` |
+//! | `AfterUs(d)` | `target_mono = intake_mono + d`; then `wall = target_mono + clock_offset` |
 //! | `FramesFromNow(n)` | `wall = vsync_wall + n * frame_period_us` |
 //! | `NextFrame` | Identical to `FramesFromNow(1)` |
 //!
@@ -32,8 +32,8 @@
 //! [`TimingError::RelativeScheduleConflict`] before calling this module.
 
 use crate::timing::{
-    errors::TimingError,
     hints::Schedule,
+    domains::ClockOffset,
     DurationUs, MonoUs, WallUs,
 };
 
@@ -52,24 +52,29 @@ pub struct IntakeContext {
     /// Used by `AfterUs` conversion: `target_mono = intake_mono_us + after_us`.
     pub intake_mono_us: MonoUs,
 
-    /// Session clock-skew estimate (signed, in microseconds).
+    /// Compositor clock offset: `wall_us - mono_us` at the most recent
+    /// calibration point.
     ///
-    /// Positive = agent clock is ahead of compositor clock.
+    /// This is the compositor's own wall-vs-monotonic calibration offset, NOT
+    /// an agent-clock-skew measurement. A positive value means the compositor's
+    /// wall clock is ahead of its monotonic clock.
     ///
-    /// Computed as `wall_us - mono_us` at the most recent calibration point.
-    /// Used to convert target monotonic time to wall time:
-    /// `present_at_wall_us = target_mono_us + skew_us`.
-    pub skew_us: i64,
+    /// Used to convert a monotonic target time to an absolute wall timestamp:
+    /// `present_at_wall_us = target_mono_us + clock_offset.0`.
+    ///
+    /// Use the [`ClockOffset`] newtype to avoid accidentally passing an
+    /// agent-side skew value (a different concept) here.
+    pub clock_offset: ClockOffset,
 
     /// Wall-clock time of the current frame's vsync.
     ///
     /// Used as the base for `FramesFromNow` and `NextFrame` conversions.
     pub vsync_wall_us: WallUs,
 
-    /// Frame period in microseconds derived from `TimingConfig::target_fps`.
+    /// Frame period derived from `TimingConfig::target_fps`.
     ///
-    /// For 60fps: `1_000_000 / 60 = 16_666` µs.
-    pub frame_period_us: u64,
+    /// For 60 fps: `DurationUs(16_666)` µs.
+    pub frame_period_us: DurationUs,
 }
 
 // ─── Conversion functions ─────────────────────────────────────────────────────
@@ -86,15 +91,20 @@ pub struct IntakeContext {
 /// always preferable to a panic or wrap-around).
 pub fn resolve_after_us(after_us: DurationUs, ctx: &IntakeContext) -> WallUs {
     // target_mono = intake_mono + after_us (saturating)
-    let target_mono = ctx.intake_mono_us.0.saturating_add(after_us.as_u64());
+    let target_mono = MonoUs(ctx.intake_mono_us.0.saturating_add(after_us.as_u64()));
 
-    // present_at_wall = target_mono + skew_us (signed, saturating)
-    let wall = (target_mono as i128).saturating_add(ctx.skew_us as i128);
+    // present_at_wall = target_mono + clock_offset (signed, saturating via MonoUs::to_wall)
+    // MonoUs::to_wall saturates and returns WallUs; we additionally clamp to
+    // [1, u64::MAX] — zero is the "not set" sentinel.
+    let wall = target_mono.to_wall(ctx.clock_offset);
 
-    // Clamp to [1, u64::MAX] — zero is the "not set" sentinel; negative is
-    // impossible in any real deployment but we guard with max(1, ...).
-    let wall_u64 = wall.max(1).min(u64::MAX as i128) as u64;
-    WallUs(wall_u64)
+    // Guard: if the offset is extremely negative and pushes us to zero (NOT_SET
+    // sentinel), clamp to 1 so callers always receive a real timestamp.
+    if wall == WallUs::NOT_SET {
+        WallUs(1)
+    } else {
+        wall
+    }
 }
 
 /// Convert `frames_from_now = N` to an absolute `WallUs` presentation timestamp.
@@ -107,7 +117,7 @@ pub fn resolve_after_us(after_us: DurationUs, ctx: &IntakeContext) -> WallUs {
 /// `N == 0` maps to the current vsync (same as an immediate absolute timestamp
 /// at the current vsync time).
 pub fn resolve_frames_from_now(n_frames: u32, ctx: &IntakeContext) -> WallUs {
-    let offset = (n_frames as u64).saturating_mul(ctx.frame_period_us);
+    let offset = (n_frames as u64).saturating_mul(ctx.frame_period_us.as_u64());
     WallUs(ctx.vsync_wall_us.0.saturating_add(offset))
 }
 
@@ -130,32 +140,30 @@ pub fn resolve_next_frame(ctx: &IntakeContext) -> WallUs {
 /// - `AfterUs(d)` — converted via [`resolve_after_us`].
 /// - `FramesFromNow(n)` — converted via [`resolve_frames_from_now`].
 /// - `NextFrame` — converted via [`resolve_next_frame`].
+/// - `None` or `PresentAt(0)` — returns [`WallUs::NOT_SET`] (immediate).
 ///
-/// Returns `Err(TimingError::RelativeScheduleConflict)` only when called on a
-/// schedule value that could not be parsed as a single variant. In practice,
-/// this is unreachable through the Rust `enum` path; the error exists for the
-/// proto wire-decode path where a non-compliant client might set multiple
-/// `oneof` fields simultaneously (the caller should surface this before
-/// invoking `resolve_schedule`).
+/// This function is **infallible**: the [`Schedule`] enum enforces mutual
+/// exclusivity at the type level, so no conflict can occur here. Wire-level
+/// conflict detection (where a non-compliant proto client may set multiple
+/// `oneof` fields) MUST be performed by the deserializer before constructing
+/// a `Schedule` value — returning [`crate::timing::TimingError::RelativeScheduleConflict`]
+/// to the caller before this function is ever reached.
 ///
 /// # Post-conversion invariant
 ///
 /// The raw relative value MUST NOT appear in any scene graph state, telemetry
 /// record, or stored mutation after this call (spec lines 287-289).  Callers
 /// MUST discard the original [`Schedule`] and use only the returned `WallUs`.
-pub fn resolve_schedule(
-    schedule: Option<Schedule>,
-    ctx: &IntakeContext,
-) -> Result<WallUs, TimingError> {
+pub fn resolve_schedule(schedule: Option<Schedule>, ctx: &IntakeContext) -> WallUs {
     match schedule {
         None | Some(Schedule::PresentAt(WallUs(0))) => {
             // `None` or zero PresentAt → immediate (WallUs::NOT_SET).
-            Ok(WallUs::NOT_SET)
+            WallUs::NOT_SET
         }
-        Some(Schedule::PresentAt(t)) => Ok(t),
-        Some(Schedule::AfterUs(d)) => Ok(resolve_after_us(d, ctx)),
-        Some(Schedule::FramesFromNow(n)) => Ok(resolve_frames_from_now(n, ctx)),
-        Some(Schedule::NextFrame) => Ok(resolve_next_frame(ctx)),
+        Some(Schedule::PresentAt(t)) => t,
+        Some(Schedule::AfterUs(d)) => resolve_after_us(d, ctx),
+        Some(Schedule::FramesFromNow(n)) => resolve_frames_from_now(n, ctx),
+        Some(Schedule::NextFrame) => resolve_next_frame(ctx),
     }
 }
 
@@ -169,15 +177,15 @@ mod tests {
     ///
     /// Defaults:
     /// - `intake_mono_us = 10_000_000` (10 s)
-    /// - `skew_us = 0`
+    /// - `clock_offset = ClockOffset(0)` (wall == mono)
     /// - `vsync_wall_us = 10_000_000` (10 s)
-    /// - `frame_period_us = 16_666` (≈60 fps)
+    /// - `frame_period_us = DurationUs(16_666)` (≈60 fps)
     fn ctx() -> IntakeContext {
         IntakeContext {
             intake_mono_us: MonoUs(10_000_000),
-            skew_us: 0,
+            clock_offset: ClockOffset(0),
             vsync_wall_us: WallUs(10_000_000),
-            frame_period_us: 16_666,
+            frame_period_us: DurationUs(16_666),
         }
     }
 
@@ -194,22 +202,23 @@ mod tests {
         assert_eq!(wall, WallUs(10_500_000));
     }
 
-    /// WHEN skew is positive (agent ahead by 100ms) THEN wall time is
-    /// target_mono + skew (wall is higher than mono).
+    /// WHEN clock_offset is positive (wall ahead of mono by 100ms) THEN wall
+    /// time is target_mono + offset.
     #[test]
     fn after_us_positive_skew() {
         let mut ctx = ctx();
-        ctx.skew_us = 100_000; // agent is 100ms ahead
+        ctx.clock_offset = ClockOffset(100_000); // wall is 100ms ahead of mono
         let wall = resolve_after_us(DurationUs(0), &ctx);
         // target_mono = 10_000_000; wall = 10_000_000 + 100_000 = 10_100_000
         assert_eq!(wall, WallUs(10_100_000));
     }
 
-    /// WHEN skew is negative (agent behind by 200ms) THEN wall = mono - 200ms.
+    /// WHEN clock_offset is negative (mono ahead of wall by 200ms) THEN wall
+    /// = mono - 200ms.
     #[test]
     fn after_us_negative_skew() {
         let mut ctx = ctx();
-        ctx.skew_us = -200_000; // agent is 200ms behind
+        ctx.clock_offset = ClockOffset(-200_000); // mono is 200ms ahead of wall
         let wall = resolve_after_us(DurationUs(0), &ctx);
         // wall = 10_000_000 - 200_000 = 9_800_000
         assert_eq!(wall, WallUs(9_800_000));
@@ -224,13 +233,13 @@ mod tests {
         assert_eq!(wall, WallUs(u64::MAX));
     }
 
-    /// WHEN skew would push result below 1 THEN result is clamped to 1 (not
-    /// zero, which is the "not set" sentinel).
+    /// WHEN clock_offset would push result to zero (NOT_SET sentinel) THEN
+    /// result is clamped to 1.
     #[test]
     fn after_us_negative_skew_clamps_to_one() {
         let mut ctx = ctx();
         ctx.intake_mono_us = MonoUs(1); // near zero
-        ctx.skew_us = i64::MIN; // maximally negative
+        ctx.clock_offset = ClockOffset(i64::MIN); // maximally negative offset
         let wall = resolve_after_us(DurationUs(0), &ctx);
         assert_eq!(wall.0, 1, "must not return the NOT_SET sentinel (0)");
     }
@@ -266,7 +275,7 @@ mod tests {
         let mut ctx = ctx();
         // Make frame_period_us large enough that u32::MAX * frame_period_us
         // overflows u64.
-        ctx.frame_period_us = 5_000_000_000; // 5000 s per frame — pathological
+        ctx.frame_period_us = DurationUs(5_000_000_000); // 5000 s per frame — pathological
         let wall = resolve_frames_from_now(u32::MAX, &ctx);
         // (u32::MAX as u64).saturating_mul(5_000_000_000) overflows → u64::MAX
         // then vsync + u64::MAX saturates again → u64::MAX
@@ -299,7 +308,7 @@ mod tests {
     #[test]
     fn resolve_none_is_immediate() {
         let ctx = ctx();
-        let wall = resolve_schedule(None, &ctx).unwrap();
+        let wall = resolve_schedule(None, &ctx);
         assert_eq!(wall, WallUs::NOT_SET);
     }
 
@@ -307,7 +316,7 @@ mod tests {
     #[test]
     fn resolve_present_at_zero_is_immediate() {
         let ctx = ctx();
-        let wall = resolve_schedule(Some(Schedule::PresentAt(WallUs(0))), &ctx).unwrap();
+        let wall = resolve_schedule(Some(Schedule::PresentAt(WallUs(0))), &ctx);
         assert_eq!(wall, WallUs::NOT_SET);
     }
 
@@ -316,7 +325,7 @@ mod tests {
     fn resolve_present_at_passthrough() {
         let ctx = ctx();
         let t = WallUs(99_999_999);
-        let wall = resolve_schedule(Some(Schedule::PresentAt(t)), &ctx).unwrap();
+        let wall = resolve_schedule(Some(Schedule::PresentAt(t)), &ctx);
         assert_eq!(wall, t);
     }
 
@@ -326,7 +335,7 @@ mod tests {
         let ctx = ctx();
         let d = DurationUs(1_000_000);
         let expected = resolve_after_us(d, &ctx);
-        let got = resolve_schedule(Some(Schedule::AfterUs(d)), &ctx).unwrap();
+        let got = resolve_schedule(Some(Schedule::AfterUs(d)), &ctx);
         assert_eq!(got, expected);
     }
 
@@ -336,7 +345,7 @@ mod tests {
         let ctx = ctx();
         let n = 5u32;
         let expected = resolve_frames_from_now(n, &ctx);
-        let got = resolve_schedule(Some(Schedule::FramesFromNow(n)), &ctx).unwrap();
+        let got = resolve_schedule(Some(Schedule::FramesFromNow(n)), &ctx);
         assert_eq!(got, expected);
     }
 
@@ -345,7 +354,7 @@ mod tests {
     fn resolve_next_frame_delegates() {
         let ctx = ctx();
         let expected = resolve_next_frame(&ctx);
-        let got = resolve_schedule(Some(Schedule::NextFrame), &ctx).unwrap();
+        let got = resolve_schedule(Some(Schedule::NextFrame), &ctx);
         assert_eq!(got, expected);
     }
 
@@ -361,7 +370,7 @@ mod tests {
     #[test]
     fn after_us_yields_absolute_wall_time() {
         let ctx = ctx();
-        let wall = resolve_schedule(Some(Schedule::AfterUs(DurationUs(500_000))), &ctx).unwrap();
+        let wall = resolve_schedule(Some(Schedule::AfterUs(DurationUs(500_000))), &ctx);
         // Result is a WallUs — no relative info survives.
         assert!(wall.is_set(), "resolved value must be an absolute timestamp");
     }
@@ -370,7 +379,7 @@ mod tests {
     #[test]
     fn frames_from_now_yields_absolute_wall_time() {
         let ctx = ctx();
-        let wall = resolve_schedule(Some(Schedule::FramesFromNow(2)), &ctx).unwrap();
+        let wall = resolve_schedule(Some(Schedule::FramesFromNow(2)), &ctx);
         assert!(wall.is_set());
     }
 
@@ -378,7 +387,7 @@ mod tests {
     #[test]
     fn next_frame_yields_absolute_wall_time() {
         let ctx = ctx();
-        let wall = resolve_schedule(Some(Schedule::NextFrame), &ctx).unwrap();
+        let wall = resolve_schedule(Some(Schedule::NextFrame), &ctx);
         assert!(wall.is_set());
     }
 
