@@ -164,8 +164,12 @@ pub fn check_resource_type(resource_type: ResourceType) -> Result<(), ResourceEr
 /// Attempt to decode `data` as the given `resource_type`, producing
 /// `DecodedMeta`.
 ///
-/// For images: full decode to RGBA8 — validates pixel count and dimension
+/// For `IMAGE_RGBA8`: validates byte count against explicit `width`/`height`
+/// from upload metadata (per RFC 0011), enforces dimension limits.
+/// For PNG/JPEG: full decode to RGBA8 — validates pixel count and dimension
 /// limits.  For fonts: parse the font file (no full render).
+///
+/// `width` and `height` are only used for `IMAGE_RGBA8`; pass 0 for other types.
 ///
 /// # Decompression bomb defense
 ///
@@ -178,9 +182,11 @@ pub fn decode_and_validate(
     data: &[u8],
     resource_type: ResourceType,
     config: &ResourceStoreConfig,
+    width: u32,
+    height: u32,
 ) -> Result<DecodedMeta, ResourceError> {
     match resource_type {
-        ResourceType::ImageRgba8 => validate_raw_rgba8(data, config),
+        ResourceType::ImageRgba8 => validate_raw_rgba8(data, config, width, height),
         ResourceType::ImagePng => decode_image(data, resource_type, config),
         ResourceType::ImageJpeg => decode_image(data, resource_type, config),
         ResourceType::FontTtf | ResourceType::FontOtf => validate_font(data),
@@ -190,19 +196,39 @@ pub fn decode_and_validate(
 fn validate_raw_rgba8(
     data: &[u8],
     config: &ResourceStoreConfig,
+    width: u32,
+    height: u32,
 ) -> Result<DecodedMeta, ResourceError> {
-    // For raw RGBA8, the decoded size IS the input size.
-    // Require the byte count to be a multiple of 4.
-    if data.len() % 4 != 0 {
+    // For raw RGBA8, width and height are provided by the upload metadata
+    // (ResourceUploadStart.metadata.width/height per RFC 0011).
+    if width == 0 || height == 0 {
         return Err(ResourceError::DecodeError(
-            "IMAGE_RGBA8 byte count must be a multiple of 4".into(),
+            "IMAGE_RGBA8 requires non-zero width and height".into(),
         ));
     }
 
-    let pixel_count = data.len() / 4;
-    // Minimum degenerate check — cannot determine w/h from raw bytes alone;
-    // the protocol message carries width/height separately.  Here we just
-    // check the decoded size cap.
+    // Dimension check (spec lines 281-283, MAX_TEXTURE_DIMENSION_PX = 8192).
+    if width > MAX_TEXTURE_DIMENSION_PX || height > MAX_TEXTURE_DIMENSION_PX {
+        return Err(ResourceError::SizeExceeded {
+            detail: format!(
+                "IMAGE_RGBA8 dimensions {width}x{height} exceed maximum {MAX_TEXTURE_DIMENSION_PX}"
+            ),
+        });
+    }
+
+    // Byte count must exactly match declared dimensions.
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4));
+    if Some(data.len()) != expected_len {
+        return Err(ResourceError::DecodeError(format!(
+            "IMAGE_RGBA8 byte count {} does not match dimensions {width}x{height} \
+             (expected {} bytes)",
+            data.len(),
+            expected_len.unwrap_or(0)
+        )));
+    }
+
     if data.len() > config.max_decoded_texture_bytes {
         return Err(ResourceError::SizeExceeded {
             detail: format!(
@@ -213,14 +239,10 @@ fn validate_raw_rgba8(
         });
     }
 
-    // Infer dimensions from pixel count assuming square for validation purposes.
-    // Callers should pass explicit dimensions through the upload protocol fields;
-    // this fallback just provides a rough dimension estimate.
-    let side = (pixel_count as f64).sqrt() as u32;
     Ok(DecodedMeta {
         decoded_bytes: data.len(),
-        width_px: side,
-        height_px: side,
+        width_px: width,
+        height_px: height,
     })
 }
 
@@ -298,9 +320,12 @@ fn validate_font(data: &[u8]) -> Result<DecodedMeta, ResourceError> {
 
 /// Run all six validation steps for a completed upload and return `DecodedMeta`.
 ///
-/// Callers should run the hash check *before* calling this function when they
-/// want to validate the hash inline (e.g., after chunked upload completes).
-/// This function does *not* re-hash; pass `expected_hash` for the check.
+/// This function hashes `data` against `expected_hash` (step 2).  For the
+/// dedup-hit fast path (step 2 reveals the resource is already known),
+/// callers skip steps 3-6 entirely — no re-validation needed.
+///
+/// `width` and `height` are passed through to `decode_and_validate` for
+/// `IMAGE_RGBA8` dimension validation; pass 0 for other resource types.
 ///
 /// For the dedup-hit fast path (step 2 reveals the resource is already known),
 /// callers skip steps 3-6 entirely — no re-validation needed.
@@ -312,6 +337,8 @@ pub fn validate_upload(
     agent_budget: &AgentBudget,
     runtime_total_texture_bytes_used: usize,
     config: &ResourceStoreConfig,
+    width: u32,
+    height: u32,
 ) -> Result<DecodedMeta, ResourceError> {
     // 1. Capability gate.
     check_capability(agent_capabilities)?;
@@ -326,7 +353,7 @@ pub fn validate_upload(
     check_resource_type(resource_type)?;
 
     // 6. Decode validation (also validates decoded size limits).
-    let meta = decode_and_validate(data, resource_type, config)?;
+    let meta = decode_and_validate(data, resource_type, config, width, height)?;
 
     // 4. Budget check (after decode so we know the true decoded size).
     check_budget(
@@ -494,19 +521,39 @@ mod tests {
 
     #[test]
     fn decode_rgba8_valid() {
-        // 2×2 image = 16 bytes of RGBA8.
+        // 2×2 image = 16 bytes of RGBA8. width=2, height=2, 2*2*4=16.
         let data = vec![0u8; 16];
         let config = default_config();
-        let meta = decode_and_validate(&data, ResourceType::ImageRgba8, &config).unwrap();
+        let meta = decode_and_validate(&data, ResourceType::ImageRgba8, &config, 2, 2).unwrap();
         assert_eq!(meta.decoded_bytes, 16);
+        assert_eq!(meta.width_px, 2);
+        assert_eq!(meta.height_px, 2);
     }
 
     #[test]
-    fn decode_rgba8_non_multiple_of_4_rejected() {
-        let data = vec![0u8; 15]; // not divisible by 4
+    fn decode_rgba8_dimension_mismatch_rejected() {
+        // Byte count does not match declared 3×3 (should be 36 bytes, but we pass 16).
+        let data = vec![0u8; 16];
         let config = default_config();
-        let err = decode_and_validate(&data, ResourceType::ImageRgba8, &config).unwrap_err();
+        let err = decode_and_validate(&data, ResourceType::ImageRgba8, &config, 3, 3).unwrap_err();
         assert!(matches!(err, ResourceError::DecodeError(_)));
+    }
+
+    #[test]
+    fn decode_rgba8_zero_dimension_rejected() {
+        let data = vec![0u8; 0];
+        let config = default_config();
+        let err = decode_and_validate(&data, ResourceType::ImageRgba8, &config, 0, 1).unwrap_err();
+        assert!(matches!(err, ResourceError::DecodeError(_)));
+    }
+
+    #[test]
+    fn decode_rgba8_dimension_exceeds_max_rejected() {
+        // 9000 pixels wide exceeds MAX_TEXTURE_DIMENSION_PX (8192).
+        let config = default_config();
+        // data length doesn't matter here — dimension check fires first
+        let err = decode_and_validate(&vec![0u8; 4], ResourceType::ImageRgba8, &config, 9000, 1).unwrap_err();
+        assert!(matches!(err, ResourceError::SizeExceeded { .. }));
     }
 
     #[test]
@@ -515,7 +562,7 @@ mod tests {
         let corrupt_png = b"this is not a valid png";
         let config = default_config();
         let err =
-            decode_and_validate(corrupt_png, ResourceType::ImagePng, &config).unwrap_err();
+            decode_and_validate(corrupt_png, ResourceType::ImagePng, &config, 0, 0).unwrap_err();
         assert!(matches!(err, ResourceError::DecodeError(_)));
         assert_eq!(err.wire_code(), "RESOURCE_DECODE_ERROR");
     }
@@ -525,7 +572,7 @@ mod tests {
         let corrupt_jpeg = b"not a jpeg at all";
         let config = default_config();
         let err =
-            decode_and_validate(corrupt_jpeg, ResourceType::ImageJpeg, &config).unwrap_err();
+            decode_and_validate(corrupt_jpeg, ResourceType::ImageJpeg, &config, 0, 0).unwrap_err();
         assert!(matches!(err, ResourceError::DecodeError(_)));
     }
 
@@ -534,21 +581,22 @@ mod tests {
         let corrupt_font = b"not a valid font file";
         let config = default_config();
         let err =
-            decode_and_validate(corrupt_font, ResourceType::FontTtf, &config).unwrap_err();
+            decode_and_validate(corrupt_font, ResourceType::FontTtf, &config, 0, 0).unwrap_err();
         assert!(matches!(err, ResourceError::DecodeError(_)));
         assert_eq!(err.wire_code(), "RESOURCE_DECODE_ERROR");
     }
 
     #[test]
     fn decode_rgba8_size_exceeded() {
-        // Acceptance: decompression bomb defense (spec lines 290-292).
+        // Acceptance: decoded size exceeds budget (spec lines 290-292).
         let config = ResourceStoreConfig {
             max_decoded_texture_bytes: 8, // very small for test
             ..Default::default()
         };
-        let data = vec![0u8; 16]; // 16 > 8 limit
+        // 2×2 = 16 bytes RGBA8, which exceeds the 8-byte limit.
+        let data = vec![0u8; 16];
         let err =
-            decode_and_validate(&data, ResourceType::ImageRgba8, &config).unwrap_err();
+            decode_and_validate(&data, ResourceType::ImageRgba8, &config, 2, 2).unwrap_err();
         assert!(matches!(err, ResourceError::SizeExceeded { .. }));
     }
 
@@ -558,7 +606,7 @@ mod tests {
     fn decode_png_1x1_succeeds() {
         let config = default_config();
         let data = minimal_png_1x1();
-        let meta = decode_and_validate(&data, ResourceType::ImagePng, &config).unwrap();
+        let meta = decode_and_validate(&data, ResourceType::ImagePng, &config, 0, 0).unwrap();
         assert_eq!(meta.width_px, 1);
         assert_eq!(meta.height_px, 1);
         assert_eq!(meta.decoded_bytes, 4); // 1×1×4 bytes RGBA8

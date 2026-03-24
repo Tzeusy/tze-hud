@@ -67,24 +67,26 @@ struct InflightUpload {
     /// BLAKE3 hash the agent declared in `ResourceUploadStart.expected_hash`.
     expected_hash: [u8; 32],
     /// Total expected byte count declared in `ResourceUploadStart.total_size`.
+    /// 0 means "not declared"; accumulation is then capped by `config.max_resource_bytes`.
     total_size: usize,
     /// Accumulated chunks in arrival order; validated for monotonic chunk index.
     chunks: Vec<Vec<u8>>,
+    /// Running tally of accumulated bytes (avoids O(n²) sum-on-every-chunk).
+    accumulated_bytes: usize,
     /// Index of the next expected chunk (0-based).
     next_chunk_index: u32,
     /// Wall-clock time of upload start (for rate limiting accounting).
     #[allow(dead_code)]
     started_at: Instant,
+    /// Width in pixels (for IMAGE_RGBA8 dimension validation).
+    width: u32,
+    /// Height in pixels (for IMAGE_RGBA8 dimension validation).
+    height: u32,
 }
 
 impl InflightUpload {
-    fn accumulated_bytes(&self) -> usize {
-        self.chunks.iter().map(|c| c.len()).sum()
-    }
-
     fn assemble(&self) -> Vec<u8> {
-        let total = self.accumulated_bytes();
-        let mut buf = Vec::with_capacity(total);
+        let mut buf = Vec::with_capacity(self.accumulated_bytes);
         for chunk in &self.chunks {
             buf.extend_from_slice(chunk);
         }
@@ -187,19 +189,26 @@ impl ResourceStore {
 
         // Dedup fast path: check expected_hash against known resources.
         // Latency contract: < 100 µs (spec lines 112-113).
-        if self.dedup.contains(&ResourceId::from_bytes(req.expected_hash)) {
-            let resource_id = ResourceId::from_bytes(req.expected_hash);
-            let record = self.dedup.get(&resource_id).expect("just confirmed present");
-            tracing::debug!(
-                resource_id = %resource_id,
-                agent = %req.agent_namespace,
-                "dedup hit — skipping upload"
-            );
-            return Ok(Some(ResourceStored {
-                resource_id,
-                was_deduplicated: true,
-                decoded_bytes: record.decoded_bytes,
-            }));
+        // Only treat as a dedup hit if the stored resource_type matches the
+        // requested type — different types with the same hash bytes are a
+        // conflict (e.g. an IMAGE_RGBA8 that happens to be also valid PNG bytes).
+        let resource_id = ResourceId::from_bytes(req.expected_hash);
+        if let Some(record) = self.dedup.get(&resource_id) {
+            if record.resource_type == req.resource_type {
+                tracing::debug!(
+                    resource_id = %resource_id,
+                    agent = %req.agent_namespace,
+                    "dedup hit — skipping upload"
+                );
+                return Ok(Some(ResourceStored {
+                    resource_id,
+                    was_deduplicated: true,
+                    decoded_bytes: record.decoded_bytes,
+                }));
+            }
+            // Mismatched type for the same hash: fall through to re-upload/validate.
+            // The content-addressed identity is the bytes, not the type; if the
+            // hash matches but the type differs, re-validate as the new type.
         }
 
         // ── Inline fast path ───────────────────────────────────────────────
@@ -220,13 +229,18 @@ impl ResourceStore {
                     &req.agent_capabilities,
                     &req.agent_budget,
                     &req.agent_namespace,
+                    req.width,
+                    req.height,
                 )
                 .await
                 .map(Some);
         }
 
         // ── Chunked path: register in-flight upload ────────────────────────
-        check_raw_size(req.total_size, &self.config)?;
+        // Only pre-check total_size when it's declared (non-zero).
+        if req.total_size > 0 {
+            check_raw_size(req.total_size, &self.config)?;
+        }
 
         let upload_id = req.upload_id;
         let mut guard = self.agent_uploads.lock().await;
@@ -253,8 +267,11 @@ impl ResourceStore {
                 expected_hash: req.expected_hash,
                 total_size: req.total_size,
                 chunks: Vec::new(),
+                accumulated_bytes: 0,
                 next_chunk_index: 0,
                 started_at: Instant::now(),
+                width: req.width,
+                height: req.height,
             },
         );
 
@@ -309,18 +326,21 @@ impl ResourceStore {
             )));
         }
 
-        // Guard against exceeding declared total size.
-        let accumulated = inflight.accumulated_bytes() + data.len();
-        if accumulated > inflight.total_size {
+        // Guard against exceeding declared total size (if declared) or the
+        // max_resource_bytes limit (always).  Use the running counter to avoid
+        // O(n²) work summing all prior chunks on each call.
+        let new_accumulated = inflight.accumulated_bytes + data.len();
+        if inflight.total_size > 0 && new_accumulated > inflight.total_size {
             return Err(ResourceError::SizeExceeded {
                 detail: format!(
                     "accumulated chunk bytes {} exceed declared total_size {}",
-                    accumulated, inflight.total_size
+                    new_accumulated, inflight.total_size
                 ),
             });
         }
 
         inflight.chunks.push(data);
+        inflight.accumulated_bytes = new_accumulated;
         inflight.next_chunk_index += 1;
 
         Ok(())
@@ -345,7 +365,7 @@ impl ResourceStore {
         agent_budget: &AgentBudget,
     ) -> Result<ResourceStored, ResourceError> {
         // Extract the inflight state.
-        let (resource_type, expected_hash, assembled) = {
+        let (resource_type, expected_hash, assembled, width, height) = {
             let mut guard = self.agent_uploads.lock().await;
             let uploads = guard
                 .get_mut(agent_namespace)
@@ -361,7 +381,7 @@ impl ResourceStore {
                 )))?;
 
             let assembled = inflight.assemble();
-            (inflight.resource_type, inflight.expected_hash, assembled)
+            (inflight.resource_type, inflight.expected_hash, assembled, inflight.width, inflight.height)
         };
 
         self.complete_upload(
@@ -371,6 +391,8 @@ impl ResourceStore {
             agent_capabilities,
             agent_budget,
             agent_namespace,
+            width,
+            height,
         )
         .await
     }
@@ -413,6 +435,8 @@ impl ResourceStore {
         agent_capabilities: &[String],
         agent_budget: &AgentBudget,
         agent_namespace: &str,
+        width: u32,
+        height: u32,
     ) -> Result<ResourceStored, ResourceError> {
         // Check capability (may already be checked but re-check for inline/complete paths).
         check_capability(agent_capabilities)?;
@@ -427,7 +451,7 @@ impl ResourceStore {
         check_hash(&data, &expected_hash)?;
 
         // Decode validation (also checks decoded size limits).
-        let meta = decode_and_validate(&data, resource_type, &self.config)?;
+        let meta = decode_and_validate(&data, resource_type, &self.config, width, height)?;
 
         // Budget check.
         let runtime_used = self.dedup.total_decoded_bytes();
@@ -488,17 +512,23 @@ pub struct UploadStartRequest {
     pub agent_capabilities: Vec<String>,
     /// Agent's current budget state.
     pub agent_budget: AgentBudget,
-    /// Opaque upload ID (client-generated, scoped per agent).
+    /// Opaque upload ID assigned by the runtime and echoed by the agent on
+    /// subsequent chunk/complete messages.  Scoped per agent; typically a
+    /// UUIDv7 encoded as 16 bytes.
     pub upload_id: UploadId,
     /// Resource type.
     pub resource_type: ResourceType,
     /// Expected BLAKE3 hash of the complete content.
     pub expected_hash: [u8; 32],
     /// Total declared byte count (used for pre-flight size check on chunked path).
-    /// May be 0 if not declared; size is still checked after assembly.
+    /// May be 0 if not declared; accumulation is then capped by `max_resource_bytes`.
     pub total_size: usize,
     /// Inline data for the fast path (empty for chunked).
     pub inline_data: Vec<u8>,
+    /// Width in pixels from `ResourceMetadata` (required for `IMAGE_RGBA8`; 0 for other types).
+    pub width: u32,
+    /// Height in pixels from `ResourceMetadata` (required for `IMAGE_RGBA8`; 0 for other types).
+    pub height: u32,
 }
 
 #[cfg(test)]
@@ -546,6 +576,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: data.len(),
                 inline_data: data.clone(),
+                width: 0,
+                height: 0,
             })
             .await
             .unwrap()
@@ -573,6 +605,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: data.len(),
                 inline_data: data,
+                width: 0,
+                height: 0,
             })
             .await
             .unwrap();
@@ -601,6 +635,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: data.len(),
                 inline_data: data.clone(),
+                width: 0,
+                height: 0,
             })
             .await
             .unwrap()
@@ -619,6 +655,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: data.len(),
                 inline_data: data.clone(),
+                width: 0,
+                height: 0,
             })
             .await
             .unwrap()
@@ -644,6 +682,8 @@ mod tests {
             expected_hash: hash,
             total_size: data.len(),
             inline_data: data.clone(),
+            width: 0,
+            height: 0,
         };
 
         let r1 = store.handle_upload_start(req()).await.unwrap().unwrap();
@@ -667,6 +707,10 @@ mod tests {
         let raw_data: Vec<u8> = (0..total_size).map(|i| (i % 251) as u8).collect();
         let hash = *blake3::hash(&raw_data).as_bytes();
 
+        // 256×256 RGBA8 image = 262144 bytes, matching total_size = 4×64KiB.
+        let (img_width, img_height) = (256u32, 256u32);
+        assert_eq!(img_width as usize * img_height as usize * 4, total_size);
+
         // Start.
         let start_result = store
             .handle_upload_start(UploadStartRequest {
@@ -678,6 +722,8 @@ mod tests {
                 expected_hash: hash,
                 total_size,
                 inline_data: vec![],
+                width: img_width,
+                height: img_height,
             })
             .await
             .unwrap();
@@ -717,6 +763,7 @@ mod tests {
         let raw_data: Vec<u8> = vec![0xab; total_size];
         let wrong_hash = [0u8; 32]; // intentionally wrong
 
+        // 128×256 RGBA8 = 128*256*4 = 131072 bytes = 2×64KiB.
         store
             .handle_upload_start(UploadStartRequest {
                 agent_namespace: agent.into(),
@@ -727,6 +774,8 @@ mod tests {
                 expected_hash: wrong_hash,
                 total_size,
                 inline_data: vec![],
+                width: 128,
+                height: 256,
             })
             .await
             .unwrap();
@@ -768,6 +817,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: data.len(),
                 inline_data: data,
+                width: 0,
+                height: 0,
             })
             .await
             .unwrap_err();
@@ -798,6 +849,8 @@ mod tests {
                     expected_hash: hash,
                     total_size: 128 * 1024, // 128 KiB > inline limit
                     inline_data: vec![],
+                    width: 128,
+                    height: 256,
                 })
                 .await
                 .unwrap();
@@ -817,6 +870,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: 128 * 1024,
                 inline_data: vec![],
+                width: 128,
+                height: 256,
             })
             .await
             .unwrap_err();
@@ -844,6 +899,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: 128 * 1024,
                 inline_data: vec![],
+                width: 128,
+                height: 256,
             })
             .await
             .unwrap();
@@ -870,6 +927,8 @@ mod tests {
                     expected_hash: hash,
                     total_size: 128 * 1024,
                     inline_data: vec![],
+                    width: 128,
+                    height: 256,
                 })
                 .await
                 .unwrap();
@@ -899,6 +958,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: 256 * 1024,
                 inline_data: vec![],
+                width: 256,
+                height: 256,
             })
             .await
             .unwrap();
@@ -937,6 +998,8 @@ mod tests {
                 expected_hash: hash,
                 total_size: 128 * 1024,
                 inline_data: vec![],
+                width: 128,
+                height: 256,
             })
             .await
             .unwrap();
