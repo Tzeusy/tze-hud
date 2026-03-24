@@ -49,6 +49,11 @@ pub struct SceneGraph {
     pub display_area: Rect,
     /// Monotonic version counter, incremented on every mutation.
     pub version: u64,
+    /// Monotonically increasing sequence number assigned to each committed batch.
+    ///
+    /// Incremented by [`SceneGraph::next_sequence_number`] on every successful
+    /// [`crate::mutation::MutationBatch`] commit. Per RFC 0001 §3.5.
+    pub sequence_number: u64,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -94,6 +99,7 @@ impl SceneGraph {
             sync_groups: HashMap::new(),
             display_area: Rect::new(0.0, 0.0, width, height),
             version: 0,
+            sequence_number: 0,
         }
     }
 
@@ -1851,6 +1857,24 @@ impl SceneGraph {
     pub fn tile_count(&self) -> usize {
         self.tiles.len()
     }
+
+    // ─── Sequence number (RFC 0001 §3.5) ────────────────────────────────
+
+    /// Advance the sequence counter and return the new value.
+    ///
+    /// Called by the mutation pipeline on every successful batch commit.
+    /// Sequence numbers are strictly monotonically increasing u64 values.
+    pub(crate) fn next_sequence_number(&mut self) -> u64 {
+        self.sequence_number += 1;
+        self.sequence_number
+    }
+
+    // ─── Clock accessor ──────────────────────────────────────────────────
+
+    /// Return the current time in milliseconds from the injected clock.
+    pub(crate) fn now_millis(&self) -> u64 {
+        self.clock.now_millis()
+    }
 }
 
 
@@ -2546,6 +2570,8 @@ mod tests {
                     merge_key: None,
                 },
             ],
+            timing_hints: None,
+            lease_id: None,
         };
 
         let result = scene.apply_batch(&batch);
@@ -2572,6 +2598,8 @@ mod tests {
                     publish_token: dummy_token(),
                 },
             ],
+            timing_hints: None,
+            lease_id: None,
         };
 
         let result = scene.apply_batch(&batch);
@@ -3069,6 +3097,8 @@ mod tests {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 z_order: 1,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(result.applied);
@@ -3096,6 +3126,8 @@ mod tests {
                     bounds: Rect::new(i as f32 * 120.0, 0.0, 100.0, 100.0),
                     z_order: i + 1,
                 }],
+                timing_hints: None,
+                lease_id: None,
             };
             let result = scene.apply_batch(&batch);
             assert!(result.applied);
@@ -3112,6 +3144,8 @@ mod tests {
                 bounds: Rect::new(240.0, 0.0, 100.0, 100.0),
                 z_order: 3,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(!result.applied);
@@ -3140,6 +3174,8 @@ mod tests {
                     bounds: Rect::new(i as f32 * 120.0, 0.0, 100.0, 100.0),
                     z_order: i + 1,
                 }],
+                timing_hints: None,
+                lease_id: None,
             };
             scene.apply_batch(&batch);
         }
@@ -3157,6 +3193,8 @@ mod tests {
                 bounds: Rect::new(480.0, 0.0, 100.0, 100.0),
                 z_order: 5,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(result.applied);
@@ -3186,6 +3224,8 @@ mod tests {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 z_order: 1,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(!result.applied);
@@ -3215,6 +3255,8 @@ mod tests {
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 z_order: 1,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(result.applied);

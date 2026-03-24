@@ -272,6 +272,8 @@ fn run_scene_workload() -> f64 {
             batch_id: SceneId::new(),
             agent_namespace: "calibration".to_string(),
             mutations,
+            timing_hints: None,
+            lease_id: None,
         };
 
         let result = scene.apply_batch(&batch);

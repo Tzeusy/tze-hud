@@ -122,6 +122,8 @@ fn apply_create_tile(
             bounds,
             z_order,
         }],
+        timing_hints: None,
+        lease_id: None,
     };
     let result = scene.apply_batch(&batch);
     assert!(result.applied, "CreateTile should succeed");
@@ -134,6 +136,8 @@ fn apply_set_tile_root(scene: &mut SceneGraph, tile_id: SceneId, namespace: &str
         batch_id: SceneId::new(),
         agent_namespace: namespace.to_string(),
         mutations: vec![SceneMutation::SetTileRoot { tile_id, node }],
+        timing_hints: None,
+        lease_id: None,
     };
     let result = scene.apply_batch(&batch);
     assert!(result.applied, "SetTileRoot should succeed");
@@ -224,6 +228,8 @@ fn test_full_session_lifecycle_state_transitions() {
             bounds: Rect::new(100.0, 100.0, 200.0, 200.0),
             z_order: 2,
         }],
+        timing_hints: None,
+        lease_id: None,
     };
     let rejected = scene.apply_batch(&rejected_batch);
     assert!(!rejected.applied, "mutations must be rejected in safe mode");
@@ -429,6 +435,8 @@ fn test_safe_mode_suspends_all_leases() {
                 bounds: Rect::new(0.0, 500.0, 100.0, 100.0),
                 z_order: 10,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(!result.applied, "mutations for {ns} must be rejected in safe mode");
@@ -543,6 +551,8 @@ fn test_freeze_plus_safe_mode_interaction() {
                 bounds: Rect::new(0.0, 500.0, 100.0, 100.0),
                 z_order: 10,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         assert!(!scene.apply_batch(&batch).applied, "{ns} must not mutate during safe mode");
     }
@@ -647,6 +657,8 @@ fn test_disconnect_reclaim_multiagent_scene() {
                     .expect("tile must exist"),
                 bounds: Rect::new(0.0, 0.0, 300.0, 250.0),
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(result.applied, "{ns} must be able to mutate while agent.one is disconnected");
