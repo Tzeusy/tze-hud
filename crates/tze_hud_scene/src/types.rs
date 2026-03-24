@@ -638,8 +638,25 @@ pub struct Lease {
     pub grace_period_ms: u64,
 }
 
+/// Agent capabilities that govern what mutations are permitted.
+///
+/// RFC 0001 §3.1, §3.3 defines the canonical capability names.
+/// `manage_tabs`, `create_tiles`, and `modify_own_tiles` are the three
+/// v1-mandatory capability names for scene-hierarchy mutations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Capability {
+    /// `manage_tabs` — required for all Tab mutations (CreateTab, DeleteTab,
+    /// RenameTab, ReorderTab, SwitchActiveTab). RFC 0001 §2.2, §3.3.
+    ManageTabs,
+    /// `create_tiles` — required additionally for CreateTile. RFC 0001 §2.3, §3.3.
+    CreateTiles,
+    /// `modify_own_tiles` — required for all tile mutations (UpdateTileBounds,
+    /// UpdateTileZOrder, UpdateTileOpacity, UpdateTileInputMode,
+    /// UpdateTileSyncGroup, UpdateTileExpiry, DeleteTile, AddNode, SetTileRoot).
+    /// RFC 0001 §2.3, §3.3.
+    ModifyOwnTiles,
+    /// Legacy / broad capability variants retained for backward compatibility with
+    /// existing test code. Prefer the v1 canonical names above for new code.
     CreateTile,
     UpdateTile,
     DeleteTile,
