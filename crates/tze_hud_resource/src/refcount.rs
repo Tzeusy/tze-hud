@@ -174,6 +174,29 @@ impl RefcountLayer {
         Ok(new_count)
     }
 
+    /// Increment the refcount for `id` and return both the decoded byte size
+    /// and the new refcount in a single dedup-index lookup.
+    ///
+    /// Prefer this over calling `dedup_index().get()` + `inc_ref()` separately
+    /// to avoid the double lookup and the associated TOCTOU window on the
+    /// hot mutation path.
+    ///
+    /// # Errors
+    ///
+    /// - `RefcountError::NotFound` — `id` is not in the store.
+    pub fn inc_ref_with_decoded_bytes(
+        &self,
+        id: ResourceId,
+    ) -> Result<(usize, u32), RefcountError> {
+        let record = self.dedup.get(&id).ok_or(RefcountError::NotFound)?;
+        let decoded_bytes = record.decoded_bytes;
+        let new_count = record.inc_refcount();
+        if new_count == 1 {
+            self.candidates.remove(&id);
+        }
+        Ok((decoded_bytes, new_count))
+    }
+
     /// Decrement the refcount for `id`.
     ///
     /// If the refcount reaches 0, enters the resource into GC candidacy.
