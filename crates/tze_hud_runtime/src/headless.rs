@@ -48,7 +48,12 @@ impl HeadlessRuntime {
 
         let scene = SceneGraph::new(config.width as f32, config.height as f32);
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&config.psk);
-        let state = Arc::new(Mutex::new(SharedState { scene, sessions, safe_mode_active: false }));
+        let state = Arc::new(Mutex::new(SharedState {
+            scene,
+            sessions,
+            safe_mode_active: false,
+            token_store: tze_hud_protocol::token::TokenStore::new(),
+        }));
 
         Ok(Self {
             compositor,

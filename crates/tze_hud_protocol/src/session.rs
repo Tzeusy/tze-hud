@@ -6,6 +6,7 @@ use tze_hud_scene::SceneId;
 use tze_hud_scene::graph::SceneGraph;
 
 use crate::proto::SceneEvent;
+use crate::token::TokenStore;
 
 /// Shared state between the gRPC server and the compositor.
 pub struct SharedState {
@@ -14,6 +15,9 @@ pub struct SharedState {
     /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
     /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.
     pub safe_mode_active: bool,
+    /// In-memory resume token store (RFC 0005 §6.1).
+    /// Cleared on process restart; never persisted.
+    pub token_store: TokenStore,
 }
 
 /// Bounded per-session event channel capacity (events).
