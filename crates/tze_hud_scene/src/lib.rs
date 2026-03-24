@@ -44,6 +44,11 @@ pub use timing::{
     SessionClockSync, VsyncSyncPoint,
     // Timing configuration
     TimingConfig, TimingConfigError,
+    // Sync group coordination (rig-cruk)
+    CommitDecision, FrameSyncDriftRecord, OrphanReason, SyncDriftHighAlert, SyncGroupArrival,
+    SyncGroupEvent, SyncGroupOrphanState, TileArrival, DEFAULT_SYNC_DRIFT_BUDGET_US,
+    ORPHAN_GRACE_PERIOD_US, apply_decision, check_sync_group_ownership, compute_spread,
+    evaluate_commit, evaluate_frame_drift,
 };
 pub use types::*;
 pub use graph::{

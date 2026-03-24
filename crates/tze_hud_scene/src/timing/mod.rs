@@ -13,9 +13,19 @@
 //! | [`staleness`] | Staleness Indicators |
 //! | [`drift`] | Clock Drift Detection/Correction/Enforcement, ClockSync RPC |
 //! | [`config`] | Timing Configuration |
+//! | [`sync_group`] | Sync Group Membership and Lifecycle, Owner Disconnect |
+//! | [`sync_commit`] | Sync Group Commit Policies, AllOrDefer Force-Commit |
+//! | [`sync_drift`] | Sync Drift Budget |
 //!
 //! See [`domains`] for the primary clock-domain types: [`WallUs`], [`MonoUs`],
 //! [`DurationUs`], and [`ClockOffset`].
+//!
+//! Sub-modules implement sync group coordination per
+//! `timing-model/spec.md` §Sync Group requirements (lines 124–208):
+//!
+//! - [`sync_group`] — membership, lifecycle, orphan state, ownership checks
+//! - [`sync_commit`] — AllOrDefer / AvailableMembers evaluation, force-commit
+//! - [`sync_drift`] — drift budget tracking and telemetry
 
 pub mod domains;
 pub mod hints;
@@ -26,6 +36,9 @@ pub mod expiration;
 pub mod staleness;
 pub mod drift;
 pub mod config;
+pub mod sync_group;
+pub mod sync_commit;
+pub mod sync_drift;
 
 pub use domains::{ClockOffset, DurationUs, MonoUs, WallUs};
 pub use hints::{DeliveryPolicy, MessageClass, Schedule, TimingHints};
@@ -43,3 +56,12 @@ pub use drift::{
     SessionClockSync, VsyncSyncPoint, CLOCK_DRIFT_WINDOW_SIZE, DEFAULT_CLOCK_JUMP_DETECTION_US,
 };
 pub use config::{TimingConfig, TimingConfigError};
+pub use sync_group::{
+    OrphanReason, SyncGroupEvent, SyncGroupOrphanState, ORPHAN_GRACE_PERIOD_US,
+    check_sync_group_ownership,
+};
+pub use sync_commit::{CommitDecision, apply_decision, evaluate_commit};
+pub use sync_drift::{
+    DEFAULT_SYNC_DRIFT_BUDGET_US, FrameSyncDriftRecord, SyncDriftHighAlert, SyncGroupArrival,
+    TileArrival, compute_spread, evaluate_frame_drift,
+};
