@@ -11,6 +11,7 @@
 //! - [`quiet_hours`] — quiet-hours gate (deliver / queue / discard) and
 //!   per-zone FIFO queues with LatestWins coalescing.
 
+pub mod agent_events;
 pub mod budget;
 pub mod headless;
 pub mod subscriptions;
@@ -18,7 +19,13 @@ pub mod event_bus;
 pub mod quiet_hours;
 pub mod attention_budget;
 pub mod shell;
+pub mod tab_switch_trigger;
 
+pub use agent_events::{
+    AgentEventHandler, EmissionError, EmissionOutcome, EmissionResult,
+    MAX_PAYLOAD_BYTES, DEFAULT_MAX_EVENTS_PER_SECOND,
+};
+pub use agent_events::rate_limiter::AgentEventRateLimiter;
 pub use budget::{
     AgentResourceState, BudgetCheckOutcome, BudgetEnforcer, BudgetState,
     BudgetTelemetrySink, CollectingTelemetrySink, NoopTelemetrySink,
@@ -52,3 +59,7 @@ pub use shell::chrome::{
 };
 // ChromeDrawCmd is defined in tze_hud_compositor to avoid circular deps.
 pub use tze_hud_compositor::ChromeDrawCmd;
+pub use tab_switch_trigger::{
+    ACTIVE_TAB_CHANGED_EVENT_TYPE, AttentionGate, BlockingGate,
+    PermissiveGate, TabSwitchOutcome, TabSwitchTrigger,
+};
