@@ -63,3 +63,19 @@ pub use test_scenes::{
     assert_layer0_invariants,
 };
 pub use calibration::{test_budget, CalibrationResult};
+
+// ── Lease governance public API ───────────────────────────────────────────────
+pub use lease::priority::{
+    clamp_requested_priority, shed_count_for_level4, shedding_order,
+    TileSortKey, TileSheddingEntry,
+    PRIORITY_DEFAULT, PRIORITY_HIGH, PRIORITY_SYSTEM,
+};
+pub use lease::capability::{
+    check_zone_publish, has_publish_zone_capability, should_clear_on_revoke,
+    ZonePublishError,
+};
+pub use lease::degradation::{
+    DegradationLevel, DegradationTracker, FrameTimeWindow,
+    ENTRY_THRESHOLD_MS, ENTRY_WINDOW_FRAMES,
+    RECOVERY_THRESHOLD_MS, RECOVERY_WINDOW_FRAMES,
+};
