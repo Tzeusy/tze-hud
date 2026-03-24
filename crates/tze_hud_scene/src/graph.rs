@@ -1606,18 +1606,10 @@ impl SceneGraph {
     ) -> Result<(), ValidationError> {
         use crate::timing::sync_group::check_sync_group_ownership;
 
-        let tile_namespace = self
-            .tiles
-            .get(&tile_id)
-            .map(|t| t.namespace.clone())
-            .ok_or(ValidationError::TileNotFound { id: tile_id })?;
-        let group_namespace = self
-            .sync_groups
-            .get(&group_id)
-            .map(|g| g.owner_namespace.clone())
-            .ok_or(ValidationError::SyncGroupNotFound { id: group_id })?;
+        let tile = self.tiles.get(&tile_id).ok_or(ValidationError::TileNotFound { id: tile_id })?;
+        let group = self.sync_groups.get(&group_id).ok_or(ValidationError::SyncGroupNotFound { id: group_id })?;
 
-        check_sync_group_ownership(agent_namespace, &tile_namespace, &group_namespace)
+        check_sync_group_ownership(agent_namespace, &tile.namespace, &group.owner_namespace)
             .map_err(|reason| ValidationError::SyncGroupOwnershipViolation { reason })?;
 
         self.join_sync_group(tile_id, group_id)

@@ -12,8 +12,6 @@
 //!
 //! These are **Layer 0** tests: pure scene-graph logic, no GPU, no async.
 
-use std::sync::Arc;
-
 use tze_hud_scene::{
     CommitDecision, DEFAULT_SYNC_DRIFT_BUDGET_US, FrameSyncDriftRecord, ORPHAN_GRACE_PERIOD_US,
     OrphanReason, SyncDriftHighAlert, SyncGroupArrival, SyncGroupCommitDecision, SyncGroupEvent,
@@ -21,6 +19,7 @@ use tze_hud_scene::{
     evaluate_frame_drift,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants},
+    timing::{DurationUs, WallUs},
     types::{Capability, Rect, SceneId, SyncCommitPolicy},
 };
 
@@ -354,7 +353,25 @@ fn sync_group_namespace_limit_is_16() {
 /// Spec: timing-model/spec.md lines 188–189.
 #[test]
 fn sync_group_member_limit_is_64() {
-    let (mut scene, _tab, tiles) = make_scene(65);
+    // Create 65 tiles on a large canvas (each tile is 10x10, stacked in a column).
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Limit Test", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+    let tiles: Vec<SceneId> = (0..65_usize)
+        .map(|i| {
+            // Stack tiles vertically: each 10px tall with 1px gap, stays within 1080px for 65 tiles.
+            scene
+                .create_tile(
+                    tab_id,
+                    "agent",
+                    lease_id,
+                    Rect::new(0.0, i as f32 * 11.0, 10.0, 10.0),
+                    i as u32 + 1,
+                )
+                .unwrap()
+        })
+        .collect();
+
     let group_id = scene
         .create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3)
         .unwrap();
@@ -426,13 +443,13 @@ fn sync_drift_within_budget_not_exceeded() {
     let group = SyncGroupArrival {
         group_id: gid,
         tile_arrivals: vec![
-            TileArrival { tile_id: t1, arrival_wall_us: 1_000_000 },
-            TileArrival { tile_id: t2, arrival_wall_us: 1_000_499 }, // 499µs spread
+            TileArrival { tile_id: t1, arrival_wall_us: WallUs(1_000_000) },
+            TileArrival { tile_id: t2, arrival_wall_us: WallUs(1_000_499) }, // 499µs spread
         ],
     };
 
     let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
-    assert_eq!(record.sync_group_max_drift_us, 499);
+    assert_eq!(record.sync_group_max_drift_us, DurationUs(499));
     assert!(!record.sync_drift_budget_exceeded,
         "499µs < 500µs must not exceed budget");
     assert!(alerts.is_empty(), "no alert when within budget");
@@ -451,14 +468,14 @@ fn sync_drift_800us_exceeds_budget_and_marks_slow_tile_stale() {
     let group = SyncGroupArrival {
         group_id: gid,
         tile_arrivals: vec![
-            TileArrival { tile_id: t1, arrival_wall_us: 2_000_000 },      // fast
-            TileArrival { tile_id: t2, arrival_wall_us: 2_000_800 },      // slow (+800µs)
+            TileArrival { tile_id: t1, arrival_wall_us: WallUs(2_000_000) },      // fast
+            TileArrival { tile_id: t2, arrival_wall_us: WallUs(2_000_800) },      // slow (+800µs)
         ],
     };
 
     let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
 
-    assert_eq!(record.sync_group_max_drift_us, 800);
+    assert_eq!(record.sync_group_max_drift_us, DurationUs(800));
     assert!(record.sync_drift_budget_exceeded,
         "800µs > 500µs must exceed budget");
     assert!(record.stale_tiles.contains(&t2),
@@ -467,7 +484,7 @@ fn sync_drift_800us_exceeds_budget_and_marks_slow_tile_stale() {
         "fast tile (t1) must NOT be stale");
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0].group_id, gid);
-    assert_eq!(alerts[0].observed_drift_us, 800);
+    assert_eq!(alerts[0].observed_drift_us, DurationUs(800));
 }
 
 // ─── Owner Disconnect (orphan lifecycle types) ────────────────────────────────
@@ -478,7 +495,7 @@ fn sync_drift_800us_exceeds_budget_and_marks_slow_tile_stale() {
 #[test]
 fn orphan_state_created_with_5s_grace_period() {
     let group_id = SceneId::new();
-    let now = 10_000_000u64;
+    let now = WallUs(10_000_000);
 
     let orphan = SyncGroupOrphanState::new(
         group_id,
@@ -491,10 +508,10 @@ fn orphan_state_created_with_5s_grace_period() {
     assert_eq!(orphan.owner_namespace, "agent.gamma");
     assert_eq!(
         orphan.destroy_after_wall_us,
-        now + ORPHAN_GRACE_PERIOD_US,
+        WallUs(now.0 + ORPHAN_GRACE_PERIOD_US.0),
         "grace period deadline must be 5s after disconnect"
     );
-    assert_eq!(ORPHAN_GRACE_PERIOD_US, 5_000_000,
+    assert_eq!(ORPHAN_GRACE_PERIOD_US.0, 5_000_000,
         "grace period must be 5 seconds");
 }
 
@@ -507,7 +524,7 @@ fn orphan_state_created_with_5s_grace_period() {
 #[test]
 fn owner_reconnect_within_grace_cancels_destruction() {
     let group_id = SceneId::new();
-    let disconnected_at = 5_000_000u64;
+    let disconnected_at = WallUs(5_000_000);
 
     let orphan = SyncGroupOrphanState::new(
         group_id,
@@ -517,21 +534,21 @@ fn owner_reconnect_within_grace_cancels_destruction() {
     );
 
     // 4 seconds after disconnect (1 second before grace expires) — not expired
-    let reconnect_time = disconnected_at + 4_000_000;
+    let reconnect_time = WallUs(disconnected_at.0 + 4_000_000);
     assert!(
         !orphan.grace_expired(reconnect_time),
         "reconnect at 4s must not have expired grace period (5s grace)"
     );
 
     // Exactly at grace period boundary
-    assert!(orphan.grace_expired(disconnected_at + ORPHAN_GRACE_PERIOD_US));
+    assert!(orphan.grace_expired(WallUs(disconnected_at.0 + ORPHAN_GRACE_PERIOD_US.0)));
 }
 
 /// WHEN orphan grace expires, the group should be destroyed.
 #[test]
 fn orphan_grace_expired_after_5s() {
     let group_id = SceneId::new();
-    let disconnected_at = 1_000_000u64;
+    let disconnected_at = WallUs(1_000_000);
 
     let orphan = SyncGroupOrphanState::new(
         group_id,
@@ -541,7 +558,7 @@ fn orphan_grace_expired_after_5s() {
     );
 
     // 6 seconds later — expired
-    assert!(orphan.grace_expired(disconnected_at + 6_000_000));
+    assert!(orphan.grace_expired(WallUs(disconnected_at.0 + 6_000_000)));
 }
 
 // ─── SyncGroupForceCommitEvent emitted ────────────────────────────────────────

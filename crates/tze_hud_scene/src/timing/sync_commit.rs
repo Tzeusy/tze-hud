@@ -110,18 +110,11 @@ pub fn evaluate_commit(
                 CommitDecision::Defer
             } else {
                 // Exhausted max_deferrals — force-commit present members.
-                let committed: Vec<SceneId> = group
+                let (committed, discarded): (Vec<SceneId>, Vec<SceneId>) = group
                     .members
                     .iter()
-                    .filter(|id| tiles_with_pending.contains(id))
                     .copied()
-                    .collect();
-                let discarded: Vec<SceneId> = group
-                    .members
-                    .iter()
-                    .filter(|id| !tiles_with_pending.contains(id))
-                    .copied()
-                    .collect();
+                    .partition(|id| tiles_with_pending.contains(id));
                 let event = SyncGroupEvent::ForceCommit {
                     group_id: group.id,
                     committed_tiles: committed.clone(),

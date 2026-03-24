@@ -12,13 +12,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::timing::domains::{DurationUs, WallUs};
 use crate::types::SceneId;
 
 /// Grace period after an owner disconnect before a sync group is destroyed.
 ///
 /// Spec: timing-model/spec.md line 176 — "destroy the group after a 5-second
 /// grace period".
-pub const ORPHAN_GRACE_PERIOD_US: u64 = 5_000_000; // 5 seconds in microseconds
+pub const ORPHAN_GRACE_PERIOD_US: DurationUs = DurationUs(5_000_000); // 5 seconds
 
 /// Reasons a sync group can enter the orphaned state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,8 +42,8 @@ pub struct SyncGroupOrphanState {
     pub group_id: SceneId,
     /// Owner namespace (for reconnect matching).
     pub owner_namespace: String,
-    /// Wall-clock time (µs since Unix epoch) when the grace period expires.
-    pub destroy_after_wall_us: u64,
+    /// Wall-clock time when the grace period expires.
+    pub destroy_after_wall_us: WallUs,
     /// Why this group became orphaned.
     pub reason: OrphanReason,
 }
@@ -54,21 +55,21 @@ impl SyncGroupOrphanState {
     pub fn new(
         group_id: SceneId,
         owner_namespace: String,
-        orphaned_at_wall_us: u64,
+        orphaned_at_wall_us: WallUs,
         reason: OrphanReason,
     ) -> Self {
         Self {
             group_id,
             owner_namespace,
-            destroy_after_wall_us: orphaned_at_wall_us.saturating_add(ORPHAN_GRACE_PERIOD_US),
+            destroy_after_wall_us: ORPHAN_GRACE_PERIOD_US.after_wall(orphaned_at_wall_us),
             reason,
         }
     }
 
     /// Returns `true` if the grace period has elapsed.
     ///
-    /// `now_wall_us` — current wall-clock time in microseconds.
-    pub fn grace_expired(&self, now_wall_us: u64) -> bool {
+    /// `now_wall_us` — current wall-clock time.
+    pub fn grace_expired(&self, now_wall_us: WallUs) -> bool {
         now_wall_us >= self.destroy_after_wall_us
     }
 }
@@ -102,8 +103,8 @@ pub enum SyncGroupEvent {
         group_id: SceneId,
         /// Owner namespace that disconnected.
         owner_namespace: String,
-        /// Wall-clock time (µs) when the grace period ends.
-        destroy_after_wall_us: u64,
+        /// Wall-clock time when the grace period ends.
+        destroy_after_wall_us: WallUs,
     },
 
     /// Emitted when a previously orphaned sync group is reclaimed because the
@@ -162,7 +163,7 @@ mod tests {
 
     #[test]
     fn orphan_state_grace_not_expired_before_deadline() {
-        let orphaned_at = 10_000_000u64;
+        let orphaned_at = WallUs(10_000_000);
         let state = SyncGroupOrphanState::new(
             SceneId::new(),
             "agent.alpha".to_string(),
@@ -170,12 +171,12 @@ mod tests {
             OrphanReason::OwnerSessionClosed,
         );
         // 1 second into grace period — not yet expired
-        assert!(!state.grace_expired(orphaned_at + 1_000_000));
+        assert!(!state.grace_expired(WallUs(orphaned_at.0 + 1_000_000)));
     }
 
     #[test]
     fn orphan_state_grace_expired_at_deadline() {
-        let orphaned_at = 10_000_000u64;
+        let orphaned_at = WallUs(10_000_000);
         let state = SyncGroupOrphanState::new(
             SceneId::new(),
             "agent.alpha".to_string(),
@@ -183,24 +184,24 @@ mod tests {
             OrphanReason::OwnerSessionClosed,
         );
         // Exactly at the deadline
-        assert!(state.grace_expired(orphaned_at + ORPHAN_GRACE_PERIOD_US));
+        assert!(state.grace_expired(WallUs(orphaned_at.0 + ORPHAN_GRACE_PERIOD_US.0)));
     }
 
     #[test]
     fn orphan_state_grace_expired_after_deadline() {
-        let orphaned_at = 10_000_000u64;
+        let orphaned_at = WallUs(10_000_000);
         let state = SyncGroupOrphanState::new(
             SceneId::new(),
             "agent.beta".to_string(),
             orphaned_at,
             OrphanReason::OwnerSessionClosed,
         );
-        assert!(state.grace_expired(orphaned_at + ORPHAN_GRACE_PERIOD_US + 1));
+        assert!(state.grace_expired(WallUs(orphaned_at.0 + ORPHAN_GRACE_PERIOD_US.0 + 1)));
     }
 
     #[test]
     fn orphan_grace_period_is_5_seconds() {
-        assert_eq!(ORPHAN_GRACE_PERIOD_US, 5_000_000);
+        assert_eq!(ORPHAN_GRACE_PERIOD_US.0, 5_000_000);
     }
 
     // ── Ownership check ──────────────────────────────────────────────────────
@@ -258,7 +259,7 @@ mod tests {
         let ev = SyncGroupEvent::Orphaned {
             group_id: gid,
             owner_namespace: "agent.x".to_string(),
-            destroy_after_wall_us: 15_000_000,
+            destroy_after_wall_us: WallUs(15_000_000),
         };
         if let SyncGroupEvent::Orphaned {
             group_id,
@@ -268,7 +269,7 @@ mod tests {
         {
             assert_eq!(group_id, gid);
             assert_eq!(owner_namespace, "agent.x");
-            assert_eq!(destroy_after_wall_us, 15_000_000);
+            assert_eq!(destroy_after_wall_us, WallUs(15_000_000));
         } else {
             panic!("wrong variant");
         }
