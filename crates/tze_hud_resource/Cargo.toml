@@ -1,0 +1,28 @@
+[package]
+name = "tze_hud_resource"
+description = "Content-addressed resource store for tze_hud — upload, deduplication, validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# BLAKE3 content addressing (RFC 0011 §1.1, §12)
+blake3 = "1"
+
+# Image decode for validation (IMAGE_PNG, IMAGE_JPEG, IMAGE_RGBA8)
+# Only the specific formats needed for v1 are enabled.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Font parsing for validation (FONT_TTF, FONT_OTF)
+ttf-parser = "0.25"
+
+# Concurrent dedup index — lock-free reads on the hot path
+dashmap = "6"
+
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
