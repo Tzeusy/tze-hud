@@ -46,6 +46,12 @@
 
 pub mod types;
 pub mod stack;
+pub mod mutation;
+pub mod security;
+pub mod privacy;
+pub mod resource;
+pub mod content;
+pub mod telemetry;
 mod tests;
 
 // ─── Public API re-exports ────────────────────────────────────────────────────
@@ -81,3 +87,51 @@ pub use types::{
 };
 
 pub use stack::{ArbitrationStack, PolicyEvaluator};
+
+// ─── Per-mutation evaluation pipeline re-exports ──────────────────────────────
+
+pub use mutation::{
+    BatchEvalResult,
+    MutationEvalInput,
+    MutationEvalOutput,
+    evaluate_mutation,
+    evaluate_batch,
+};
+
+pub use security::{
+    CapabilityNameCheck,
+    CapabilitySet,
+    ConfigUnknownCapability,
+    check_canonical_capability_name,
+    superseded_canonical,
+    validate_capability_names,
+};
+
+pub use privacy::{
+    PrivacyDecision,
+    apply_zone_ceiling,
+    evaluate_privacy,
+    most_restrictive_viewer,
+};
+
+pub use resource::{
+    ResourceDecision,
+    evaluate_resource,
+    resource_decision_to_outcome,
+    is_transactional,
+};
+
+pub use content::{
+    ContentDecision,
+    evaluate_content,
+    content_decision_to_outcome,
+};
+
+pub use telemetry::{
+    ArbitrationEventKind,
+    ArbitrationTelemetryEvent,
+    CapabilityAuditEvent,
+    CapabilityAuditKind,
+    MutationLatencyAccumulator,
+    PolicyTelemetry,
+};
