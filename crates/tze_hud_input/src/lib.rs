@@ -4,7 +4,7 @@
 //! updates local feedback state (hover/pressed), and dispatches events to agents.
 //! Local feedback happens synchronously in < 4ms — no agent roundtrip.
 
-use tze_hud_scene::{SceneId, NodeData};
+use tze_hud_scene::{SceneId, NodeData, HitResult};
 use tze_hud_scene::graph::SceneGraph;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -30,8 +30,8 @@ pub enum PointerEventKind {
 /// Result of processing a pointer event — what changed locally.
 #[derive(Clone, Debug)]
 pub struct InputResult {
-    /// The tile and node that were hit (if any).
-    pub hit: Option<(SceneId, SceneId)>,
+    /// Full hit-test result for this event.
+    pub hit: HitResult,
     /// The interaction_id of the hit region (if a HitRegionNode was hit).
     pub interaction_id: Option<String>,
     /// Whether this was an activation (press then release on the same hit region).
@@ -109,19 +109,15 @@ impl InputProcessor {
         let mut activated = false;
         let mut dispatch: Option<AgentDispatch> = None;
 
-        // Determine the hit node (must be a HitRegionNode to produce interaction_id)
-        let hit_node_id: Option<SceneId> = hit.and_then(|(_, node_id)| {
-            scene.nodes.get(&node_id).and_then(|node| {
-                if let NodeData::HitRegion(hr) = &node.data {
-                    interaction_id = Some(hr.interaction_id.clone());
-                    Some(node_id)
-                } else {
-                    None
-                }
-            })
-        });
-
-        let hit_tile_id: Option<SceneId> = hit.map(|(tile_id, _)| tile_id);
+        // Decompose HitResult into (tile_id, node_id) where applicable.
+        let (hit_tile_id, hit_node_id): (Option<SceneId>, Option<SceneId>) = match &hit {
+            HitResult::NodeHit { tile_id, node_id, interaction_id: iid } => {
+                interaction_id = Some(iid.clone());
+                (Some(*tile_id), Some(*node_id))
+            }
+            HitResult::TileHit { tile_id } => (Some(*tile_id), None),
+            HitResult::Chrome { .. } | HitResult::Passthrough => (None, None),
+        };
 
         // ── Stage 2: Update hover state ───────────────────────────────────
         let prev_hover_node = self.current_hover.map(|(_, n)| n);
@@ -352,6 +348,7 @@ mod tests {
                 interaction_id: "test-button".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         scene.set_tile_root(tile_id, hit_node).unwrap();

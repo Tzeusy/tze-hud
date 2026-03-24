@@ -13,3 +13,8 @@ blake3 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "hit_test"
+harness = false

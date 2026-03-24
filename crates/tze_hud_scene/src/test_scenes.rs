@@ -336,6 +336,7 @@ impl TestSceneRegistry {
                 interaction_id: "btn-primary".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         graph.set_tile_root(hit_tile_id, hit_node).expect("set_tile_root failed");
@@ -983,6 +984,7 @@ impl TestSceneRegistry {
                         interaction_id: "primary-button".to_string(),
                         accepts_focus: true,
                         accepts_pointer: true,
+                        ..Default::default()
                     }),
                 },
             )
@@ -1229,6 +1231,7 @@ impl TestSceneRegistry {
                         interaction_id: "content-area".to_string(),
                         accepts_focus: false,
                         accepts_pointer: true,
+                        ..Default::default()
                     }),
                 },
             )
@@ -1281,6 +1284,7 @@ impl TestSceneRegistry {
                         interaction_id: "chrome-menu-button".to_string(),
                         accepts_focus: true,
                         accepts_pointer: true,
+                        ..Default::default()
                     }),
                 },
             )
@@ -1595,6 +1599,7 @@ impl TestSceneRegistry {
                                 interaction_id: format!("cell-{row}-{col}"),
                                 accepts_focus: false,
                                 accepts_pointer: true,
+                                ..Default::default()
                             }),
                         },
                     )
@@ -2397,6 +2402,7 @@ impl TestSceneRegistry {
                         interaction_id: "policy-dismiss-btn".to_string(),
                         accepts_focus: true,
                         accepts_pointer: true,
+                        ..Default::default()
                     }),
                 },
             )
@@ -4204,6 +4210,7 @@ mod tests {
                 interaction_id: "btn".into(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         let node_id = hr_node.id;

@@ -43,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 
 # Testing
 proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # Misc
 subtle = "2.5"
