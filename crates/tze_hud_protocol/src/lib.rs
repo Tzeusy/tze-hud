@@ -3,6 +3,7 @@
 //! gRPC protocol layer for tze_hud. Defines the service, server implementation,
 //! and client helpers for agent communication.
 
+pub mod auth;
 pub mod session;
 pub mod convert;
 pub mod session_server;

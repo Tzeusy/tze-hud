@@ -22,6 +22,10 @@
 //! - Resuming → Active (valid resume token)
 //! - Resuming → Closed (expired/invalid token)
 
+use crate::auth::{
+    authenticate_session_init, filter_subscriptions, negotiate_version, CapabilityPolicy,
+    AuthResult,
+};
 use crate::convert;
 use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::*;
@@ -277,7 +281,13 @@ struct StreamSession {
     session_id: String,
     namespace: String,
     agent_name: String,
+    /// Capabilities explicitly granted at handshake (from `requested_capabilities`).
     capabilities: Vec<String>,
+    /// Authorization scope for subscription and capability-request checks.
+    /// For unrestricted PSK sessions this is `vec!["*"]`; for restricted agents
+    /// it mirrors `capabilities`. Used for gating subscriptions and mid-session
+    /// CapabilityRequest evaluation.
+    policy_capabilities: Vec<String>,
     lease_ids: Vec<tze_hud_scene::SceneId>,
     subscriptions: Vec<String>,
     server_sequence: u64,
@@ -620,21 +630,98 @@ async fn handle_session_init(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     init: &SessionInit,
 ) -> Option<StreamSession> {
-    // Authenticate
-    if init.pre_shared_key != psk {
-        let _ = tx
-            .send(Ok(ServerMessage {
-                sequence: 1,
-                timestamp_wall_us: now_wall_us(),
-                payload: Some(ServerPayload::SessionError(SessionError {
-                    code: "AUTH_FAILED".to_string(),
-                    message: "Invalid pre-shared key".to_string(),
-                    hint: String::new(),
-                })),
-            }))
-            .await;
-        return None;
+    // ── Step 1: Version negotiation (RFC 0005 §4.1) ──────────────────────────
+    // Do this before authentication so agents can learn about version
+    // incompatibility even if they send a wrong key.
+    let negotiated_version = match negotiate_version(
+        init.min_protocol_version,
+        init.max_protocol_version,
+    ) {
+        Ok(v) => v,
+        Err(msg) => {
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: "UNSUPPORTED_PROTOCOL_VERSION".to_string(),
+                        message: msg,
+                        hint: format!(
+                            "{{\"runtime_min\": {}, \"runtime_max\": {}}}",
+                            crate::auth::RUNTIME_MIN_VERSION,
+                            crate::auth::RUNTIME_MAX_VERSION
+                        ),
+                    })),
+                }))
+                .await;
+            return None;
+        }
+    };
+
+    // ── Step 2: Authentication (RFC 0005 §1.4) ───────────────────────────────
+    // Authentication is evaluated synchronously before SessionEstablished is sent.
+    let auth_result = authenticate_session_init(
+        init.auth_credential.as_ref(),
+        &init.pre_shared_key,
+        psk,
+    );
+
+    match auth_result {
+        AuthResult::Accepted => {}
+        AuthResult::Failed(reason) => {
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: "AUTH_FAILED".to_string(),
+                        message: reason,
+                        hint: String::new(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
+        AuthResult::Unimplemented(reason) => {
+            // v1-reserved credential type — reject with AUTH_FAILED.
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: "AUTH_FAILED".to_string(),
+                        message: reason,
+                        hint: r#"{"supported_v1": ["PreSharedKeyCredential", "LocalSocketCredential"]}"#.to_string(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
     }
+
+    // ── Step 3: Capability negotiation (RFC 0005 §5.3) ───────────────────────
+    // Capabilities are gated against the agent's authorization policy.
+    // For PSK-authenticated agents in v1, the policy is unrestricted.
+    let policy = CapabilityPolicy::for_psk_agent();
+    let (granted_capabilities, _denied_caps) =
+        policy.partition_capabilities(&init.requested_capabilities);
+
+    // ── Step 4: Subscription filtering (RFC 0005 §7.1) ──────────────────────
+    // Initial subscriptions are filtered against the agent's AUTHORIZATION POLICY,
+    // not just the explicitly requested capabilities. An unrestricted PSK agent can
+    // subscribe to any category even if it didn't explicitly request the governing
+    // capability in `requested_capabilities`.
+    //
+    // We represent the policy's authorization scope: for unrestricted PSK agents
+    // we pass ["*"] as a sentinel to filter_subscriptions to allow everything.
+    // For restricted agents we would pass the granted_capabilities list.
+    let policy_caps = if policy.is_unrestricted() {
+        vec!["*".to_string()]
+    } else {
+        granted_capabilities.clone()
+    };
+    let (active_subscriptions, denied_subscriptions) =
+        filter_subscriptions(&init.initial_subscriptions, &policy_caps);
 
     let session_id = uuid::Uuid::now_v7().to_string();
     let namespace = init.agent_id.clone();
@@ -646,19 +733,16 @@ async fn handle_session_init(
         let _ = st.sessions.authenticate(
             &init.agent_id,
             psk,
-            &init.requested_capabilities,
+            &granted_capabilities,
         );
     }
-
-    // For v1, grant all requested capabilities
-    let granted_capabilities = init.requested_capabilities.clone();
-    let active_subscriptions = init.initial_subscriptions.clone();
 
     let mut session = StreamSession {
         session_id: session_id.clone(),
         namespace: namespace.clone(),
         agent_name: init.agent_id.clone(),
         capabilities: granted_capabilities.clone(),
+        policy_capabilities: policy_caps.clone(),
         lease_ids: Vec::new(),
         subscriptions: active_subscriptions.clone(),
         server_sequence: 0,
@@ -670,7 +754,7 @@ async fn handle_session_init(
         expect_resume: false,
     };
 
-    // Compute clock skew estimate
+    // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
     let compositor_ts = now_wall_us();
     let estimated_skew = if init.agent_timestamp_wall_us > 0 {
         init.agent_timestamp_wall_us as i64 - compositor_ts as i64
@@ -696,7 +780,8 @@ async fn handle_session_init(
                 compositor_timestamp_wall_us: compositor_ts,
                 estimated_skew_us: estimated_skew,
                 active_subscriptions,
-                denied_subscriptions: Vec::new(),
+                denied_subscriptions,
+                negotiated_protocol_version: negotiated_version,
             })),
         }))
         .await;
@@ -710,20 +795,28 @@ async fn handle_session_resume(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     resume: &SessionResume,
 ) -> Option<StreamSession> {
-    // Authenticate
-    if resume.pre_shared_key != psk {
-        let _ = tx
-            .send(Ok(ServerMessage {
-                sequence: 1,
-                timestamp_wall_us: now_wall_us(),
-                payload: Some(ServerPayload::SessionError(SessionError {
-                    code: "AUTH_FAILED".to_string(),
-                    message: "Invalid pre-shared key on resume".to_string(),
-                    hint: String::new(),
-                })),
-            }))
-            .await;
-        return None;
+    // Re-authentication is required on resume (RFC 0005 §6.2).
+    let auth_result = authenticate_session_init(
+        resume.auth_credential.as_ref(),
+        &resume.pre_shared_key,
+        psk,
+    );
+    match auth_result {
+        AuthResult::Accepted => {}
+        AuthResult::Failed(reason) | AuthResult::Unimplemented(reason) => {
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: "AUTH_FAILED".to_string(),
+                        message: reason,
+                        hint: String::new(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
     }
 
     // For v1, we don't have persistent resume state, so treat as new session
@@ -741,11 +834,14 @@ async fn handle_session_resume(
         );
     }
 
+    // Resume session with PSK-unrestricted policy (same as new session).
+    let resume_policy_caps = vec!["*".to_string()];
     let mut session = StreamSession {
         session_id: session_id.clone(),
         namespace: namespace.clone(),
         agent_name: resume.agent_id.clone(),
         capabilities: Vec::new(),
+        policy_capabilities: resume_policy_caps,
         lease_ids: Vec::new(),
         subscriptions: Vec::new(),
         server_sequence: 0,
@@ -767,7 +863,9 @@ async fn handle_session_resume(
                 accepted: true,
                 new_session_token: new_resume_token.clone(),
                 new_server_sequence: seq,
-                negotiated_protocol_version: 1,
+                // Resume always runs at the highest runtime-supported version.
+                // version = major * 1000 + minor; v1.1 = 1001.
+                negotiated_protocol_version: crate::auth::RUNTIME_MAX_VERSION,
                 granted_capabilities: Vec::new(),
                 error: String::new(),
                 active_subscriptions: Vec::new(),
@@ -834,24 +932,8 @@ async fn handle_client_message(
             // Record the expect_resume hint; the main loop transitions state after this returns.
             session.expect_resume = close.expect_resume;
         }
-        ClientPayload::CapabilityRequest(_req) => {
-            // Capability management is deferred to post-v1.
-            // Respond explicitly so the client does not wait indefinitely or retransmit.
-            let seq = session.next_server_seq();
-            let _ = tx
-                .send(Ok(ServerMessage {
-                    sequence: seq,
-                    timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
-                        error_code: "PERMISSION_DENIED".to_string(),
-                        message: "Capability management is not supported in v1; request denied."
-                            .to_string(),
-                        context: String::new(),
-                        hint: r#"{"post_v1": true}"#.to_string(),
-                        error_code_enum: ErrorCode::PermissionDenied as i32,
-                    })),
-                }))
-                .await;
+        ClientPayload::CapabilityRequest(req) => {
+            handle_capability_request(session, tx, req).await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
@@ -1241,8 +1323,15 @@ async fn handle_subscription_change(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     change: SubscriptionChange,
 ) {
-    // Add new subscriptions
-    for sub in &change.subscribe {
+    // Filter additions against the session's authorization policy (RFC 0005 §7.1).
+    // Uses `policy_capabilities` (e.g. ["*"] for unrestricted PSK sessions) rather
+    // than the explicitly requested `capabilities` list, so unrestricted agents can
+    // subscribe to any category regardless of what was in `requested_capabilities`.
+    let (allowed_additions, denied_additions) =
+        filter_subscriptions(&change.subscribe, &session.policy_capabilities);
+
+    // Add permitted subscriptions
+    for sub in &allowed_additions {
         if !session.subscriptions.contains(sub) {
             session.subscriptions.push(sub.clone());
         }
@@ -1259,10 +1348,85 @@ async fn handle_subscription_change(
             timestamp_wall_us: now_wall_us(),
             payload: Some(ServerPayload::SubscriptionChangeResult(SubscriptionChangeResult {
                 active_subscriptions: session.subscriptions.clone(),
-                denied_subscriptions: Vec::new(),
+                denied_subscriptions: denied_additions,
             })),
         }))
         .await;
+}
+
+/// Handle a mid-session CapabilityRequest (RFC 0005 §5.3).
+///
+/// Validates the request against the agent's authorization policy. If all
+/// requested capabilities are authorized, responds with CapabilityNotice.
+/// On partial failure or any denial, responds with RuntimeError(PERMISSION_DENIED)
+/// without granting any capabilities (RFC 0005 §5.3 scenario 4).
+///
+/// For PSK-authenticated agents in v1, the policy is unrestricted, so any
+/// capability not already held will be granted. Guest agents (no capabilities)
+/// will be denied any escalation attempt.
+async fn handle_capability_request(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    req: CapabilityRequest,
+) {
+    // Reconstruct the authorization policy from the session's `policy_capabilities`.
+    // For PSK-authenticated sessions, `policy_capabilities` contains ["*"] (unrestricted).
+    // For restricted agents, it contains the specific allowed capabilities.
+    //
+    // Post-v1: load per-agent policy from config; use session's auth identity.
+    let policy = CapabilityPolicy::new(session.policy_capabilities.clone());
+
+    match policy.evaluate_capability_request(&req.capabilities) {
+        Ok(granted) => {
+            // Compute newly granted capabilities (exclude those already held).
+            // CapabilityNotice.granted must contain only *newly* granted capabilities
+            // so clients don't misinterpret re-requests as fresh grants.
+            let seq = session.next_server_seq();
+            let mut newly_granted: Vec<String> = Vec::new();
+            for cap in &granted {
+                if !session.capabilities.contains(cap) {
+                    session.capabilities.push(cap.clone());
+                    newly_granted.push(cap.clone());
+                }
+            }
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::CapabilityNotice(CapabilityNotice {
+                        granted: newly_granted,
+                        revoked: Vec::new(),
+                        reason: req.reason.clone(),
+                        effective_at_server_seq: seq,
+                    })),
+                }))
+                .await;
+        }
+        Err(denied_caps) => {
+            // Deny the entire request (partial grants not allowed per RFC 0005 §5.3).
+            let context = denied_caps.join(", ");
+            let hint = serde_json::to_string(&serde_json::json!({
+                "unauthorized_capabilities": denied_caps
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                        error_code: "PERMISSION_DENIED".to_string(),
+                        message: format!(
+                            "Capability request denied: unauthorized capabilities: {context}"
+                        ),
+                        context,
+                        hint,
+                        error_code_enum: ErrorCode::PermissionDenied as i32,
+                    })),
+                }))
+                .await;
+        }
+    }
 }
 
 /// Handle a ZonePublish from the client (RFC 0005 §3.1, §8.6).
@@ -1450,6 +1614,9 @@ mod tests {
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
             })),
         })
         .await
@@ -1520,6 +1687,9 @@ mod tests {
                     initial_subscriptions: Vec::new(),
                     resume_token: Vec::new(),
                     agent_timestamp_wall_us: 0,
+                    min_protocol_version: 1000,
+                    max_protocol_version: 1001,
+                    auth_credential: None,
                 })),
             })
             .await
@@ -1700,6 +1870,7 @@ mod tests {
                     resume_token,
                     last_seen_server_sequence: 2,
                     pre_shared_key: "test-key".to_string(),
+                    auth_credential: None,
                 })),
             })
             .await
@@ -1713,7 +1884,8 @@ mod tests {
             Some(ServerPayload::SessionResumeResult(result)) => {
                 assert!(result.accepted, "expected resume to be accepted");
                 assert!(!result.new_session_token.is_empty());
-                assert_eq!(result.negotiated_protocol_version, 1);
+                // version = major * 1000 + minor; runtime max = v1.1 = 1001
+                assert_eq!(result.negotiated_protocol_version, crate::auth::RUNTIME_MAX_VERSION);
             }
             other => panic!("Expected SessionResumeResult on resume, got: {other:?}"),
         }
@@ -2106,6 +2278,9 @@ mod tests {
                     initial_subscriptions: Vec::new(),
                     resume_token: Vec::new(),
                     agent_timestamp_wall_us: 0,
+                    min_protocol_version: 1000,
+                    max_protocol_version: 1001,
+                    auth_credential: None,
                 })),
             })
             .await
@@ -2344,6 +2519,7 @@ mod tests {
             namespace: "test".to_string(),
             agent_name: "test".to_string(),
             capabilities: Vec::new(),
+            policy_capabilities: Vec::new(),
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
             server_sequence: 0,
@@ -2382,6 +2558,596 @@ mod tests {
         assert!(err.is_err());
         let (code, _) = err.unwrap_err();
         assert_eq!(code, "SEQUENCE_REGRESSION");
+    }
+
+    // ─── Handshake auth, version, capability, subscription tests (rig-8uqz) ──
+
+    /// Scenario: Structured AuthCredential (PSK) accepted (RFC 0005 §1.4)
+    /// WHEN agent sends SessionInit with a valid PreSharedKeyCredential in auth_credential,
+    /// THEN runtime authenticates and proceeds to SessionEstablished.
+    #[tokio::test]
+    async fn test_auth_structured_psk_credential_accepted() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "psk-agent".to_string(),
+                agent_display_name: "psk-agent".to_string(),
+                pre_shared_key: String::new(), // intentionally empty — use auth_credential
+                requested_capabilities: Vec::new(),
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: Some(crate::proto::session::AuthCredential {
+                    credential: Some(
+                        crate::proto::session::auth_credential::Credential::PreSharedKey(
+                            crate::proto::session::PreSharedKeyCredential {
+                                key: "test-key".to_string(),
+                            },
+                        ),
+                    ),
+                }),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionEstablished(_)) => {}
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Invalid structured PSK credential rejected with AUTH_FAILED (RFC 0005 §1.4)
+    /// WHEN agent sends SessionInit with a wrong PreSharedKeyCredential,
+    /// THEN runtime sends SessionError(AUTH_FAILED) and closes stream.
+    #[tokio::test]
+    async fn test_auth_structured_psk_credential_wrong_key() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "bad-psk-agent".to_string(),
+                agent_display_name: "bad-psk-agent".to_string(),
+                pre_shared_key: String::new(),
+                requested_capabilities: Vec::new(),
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: Some(crate::proto::session::AuthCredential {
+                    credential: Some(
+                        crate::proto::session::auth_credential::Credential::PreSharedKey(
+                            crate::proto::session::PreSharedKeyCredential {
+                                key: "wrong-key".to_string(),
+                            },
+                        ),
+                    ),
+                }),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(err.code, "AUTH_FAILED");
+            }
+            other => panic!("Expected SessionError(AUTH_FAILED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: LocalSocketCredential accepted (RFC 0005 §1.4)
+    /// WHEN agent sends SessionInit with a valid LocalSocketCredential,
+    /// THEN runtime authenticates and proceeds to SessionEstablished.
+    #[tokio::test]
+    async fn test_auth_local_socket_credential_accepted() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "local-agent".to_string(),
+                agent_display_name: "local-agent".to_string(),
+                pre_shared_key: String::new(),
+                requested_capabilities: Vec::new(),
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: Some(crate::proto::session::AuthCredential {
+                    credential: Some(
+                        crate::proto::session::auth_credential::Credential::LocalSocket(
+                            crate::proto::session::LocalSocketCredential {
+                                socket_path: "/run/tze_hud.sock".to_string(),
+                                pid_hint: "42".to_string(),
+                            },
+                        ),
+                    ),
+                }),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionEstablished(_)) => {}
+            other => panic!("Expected SessionEstablished with LocalSocket cred, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Version negotiated successfully (RFC 0005 §4.1)
+    /// WHEN agent declares min=1000, max=1001 and runtime supports 1000-1001,
+    /// THEN SessionEstablished contains negotiated_protocol_version=1001.
+    #[tokio::test]
+    async fn test_version_negotiation_success() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "version-agent".to_string(),
+                agent_display_name: "version-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: Vec::new(),
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionEstablished(established)) => {
+                assert_eq!(
+                    established.negotiated_protocol_version, 1001,
+                    "Should pick highest mutual version (1001)"
+                );
+            }
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Version negotiation failure — no mutual version (RFC 0005 §4.1)
+    /// WHEN agent declares min=2000, max=2001 and runtime only supports 1000-1001,
+    /// THEN runtime sends SessionError(code=UNSUPPORTED_PROTOCOL_VERSION) and closes stream.
+    #[tokio::test]
+    async fn test_version_negotiation_unsupported() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "old-agent".to_string(),
+                agent_display_name: "old-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: Vec::new(),
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 2000,
+                max_protocol_version: 2001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "UNSUPPORTED_PROTOCOL_VERSION",
+                    "Expected UNSUPPORTED_PROTOCOL_VERSION, got: {}",
+                    err.code
+                );
+                // Hint should include runtime's supported range
+                assert!(!err.hint.is_empty(), "Hint should contain runtime version range");
+            }
+            other => panic!("Expected SessionError(UNSUPPORTED_PROTOCOL_VERSION), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Clock sync — estimated_skew_us returned when agent_timestamp_wall_us is set
+    /// (RFC 0005 §1.2 / RFC 0003 §1.3)
+    /// WHEN agent includes agent_timestamp_wall_us in SessionInit,
+    /// THEN runtime computes initial clock-skew and returns estimated_skew_us in SessionEstablished.
+    #[tokio::test]
+    async fn test_clock_skew_estimation() {
+        let (mut client, _server) = setup_test().await;
+
+        let agent_ts = now_wall_us();
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "clock-agent".to_string(),
+                agent_display_name: "clock-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: Vec::new(),
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: agent_ts,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionEstablished(established)) => {
+                // estimated_skew_us should be set (may be near 0 or slightly negative
+                // due to timing between send and receive, but the field should exist
+                // and be plausible — within ±1s for a loopback test)
+                assert!(
+                    established.estimated_skew_us.abs() < 1_000_000,
+                    "Clock skew should be within ±1s on loopback, got: {}µs",
+                    established.estimated_skew_us
+                );
+            }
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: PSK (unrestricted) agent successfully subscribes to INPUT_EVENTS (RFC 0005 §7.1)
+    /// WHEN a PSK-authenticated agent requests INPUT_EVENTS subscription,
+    /// THEN SessionEstablished includes INPUT_EVENTS in active_subscriptions and
+    /// denied_subscriptions is empty.
+    ///
+    /// PSK sessions carry an unrestricted policy (policy_capabilities = ["*"]), so they
+    /// can subscribe to any category regardless of what was in requested_capabilities.
+    /// The denied-subscription path is exercised in auth module unit tests (filter_subscriptions).
+    #[tokio::test]
+    async fn test_psk_unrestricted_allows_input_events_subscription() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        // PSK agent requesting INPUT_EVENTS subscription (no specific capability needed
+        // since PSK is unrestricted)
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "sub-test-agent".to_string(),
+                agent_display_name: "sub-test-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: Vec::new(), // no capabilities requested
+                initial_subscriptions: vec!["INPUT_EVENTS".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionEstablished(established)) => {
+                // PSK agent (unrestricted policy) should be able to subscribe to INPUT_EVENTS
+                assert!(
+                    established.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    "PSK unrestricted agent should have INPUT_EVENTS in active_subscriptions; \
+                     active={:?}, denied={:?}",
+                    established.active_subscriptions,
+                    established.denied_subscriptions
+                );
+                assert!(
+                    established.denied_subscriptions.is_empty(),
+                    "PSK agent should have no denied subscriptions"
+                );
+            }
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Capability granted mid-session (RFC 0005 §5.3)
+    /// WHEN agent sends CapabilityRequest with authorized capabilities,
+    /// THEN runtime responds with CapabilityNotice(granted=requested_capabilities).
+    #[tokio::test]
+    async fn test_mid_session_capability_request_granted() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "cap-req-agent", "test-key").await;
+
+        // Request a capability mid-session (PSK agents can request any capability)
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::CapabilityRequest(CapabilityRequest {
+                capabilities: vec!["read_telemetry".to_string()],
+                reason: "monitoring".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::CapabilityNotice(notice)) => {
+                assert!(
+                    notice.granted.contains(&"read_telemetry".to_string()),
+                    "Expected read_telemetry to be granted; got: {:?}",
+                    notice.granted
+                );
+                assert!(notice.revoked.is_empty(), "No capabilities should be revoked");
+                assert!(
+                    notice.effective_at_server_seq > 0,
+                    "effective_at_server_seq must be non-zero"
+                );
+            }
+            other => panic!("Expected CapabilityNotice, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: PSK (unrestricted) agent receives CapabilityNotice for any capability (RFC 0005 §5.3)
+    /// WHEN a PSK-authenticated agent requests any capability mid-session,
+    /// THEN runtime responds with CapabilityNotice (not RuntimeError).
+    ///
+    /// PSK sessions in v1 carry an unrestricted policy, so no capability request
+    /// can be denied via this integration path. The denied path (PERMISSION_DENIED)
+    /// is exercised in test_capability_request_denied_for_guest_session and
+    /// test_capability_request_partial_grant_denied_entirely below.
+    #[tokio::test]
+    async fn test_mid_session_capability_request_unrestricted_succeeds() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "deny-test-agent", "test-key").await;
+
+        // PSK agent requesting a valid capability — should succeed (PSK is unrestricted).
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::CapabilityRequest(CapabilityRequest {
+                capabilities: vec!["overlay_privileges".to_string()],
+                reason: "test".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        // PSK agents (unrestricted) should get CapabilityNotice, not an error.
+        match &msg.payload {
+            Some(ServerPayload::CapabilityNotice(notice)) => {
+                assert!(
+                    notice.granted.contains(&"overlay_privileges".to_string()),
+                    "PSK unrestricted agent should get overlay_privileges granted"
+                );
+            }
+            other => panic!(
+                "Expected CapabilityNotice for unrestricted PSK agent, got: {other:?}"
+            ),
+        }
+    }
+
+    /// Unit test: handle_capability_request with guest (restricted) session
+    /// to verify RuntimeError(PERMISSION_DENIED) is returned for unauthorized caps.
+    ///
+    /// Scenario: Guest agent denied resident tools via capability escalation (RFC 0005 §5.3)
+    /// WHEN a guest-level agent sends CapabilityRequest for resident-level operations,
+    /// THEN runtime denies with RuntimeError(PERMISSION_DENIED).
+    #[tokio::test]
+    async fn test_capability_request_denied_for_guest_session() {
+        // Set up the outbound channel
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(16);
+
+        // Build a guest session (no policy capabilities = no authorization)
+        let mut session = StreamSession {
+            session_id: "guest-session".to_string(),
+            namespace: "guest".to_string(),
+            agent_name: "guest".to_string(),
+            capabilities: Vec::new(),
+            policy_capabilities: Vec::new(), // guest: no authorization
+            lease_ids: Vec::new(),
+            subscriptions: Vec::new(),
+            server_sequence: 0,
+            resume_token: Vec::new(),
+            last_heartbeat_ms: 0,
+            state: SessionState::Active,
+            last_client_sequence: 1,
+            safe_mode_active: false,
+            expect_resume: false,
+        };
+
+        handle_capability_request(
+            &mut session,
+            &tx,
+            CapabilityRequest {
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                reason: "escalation attempt".to_string(),
+            },
+        )
+        .await;
+
+        let msg = rx.recv().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "PERMISSION_DENIED");
+                assert_eq!(err.error_code_enum, ErrorCode::PermissionDenied as i32);
+                assert!(
+                    !err.context.is_empty(),
+                    "Context should list denied capabilities"
+                );
+                assert!(
+                    err.hint.contains("unauthorized_capabilities"),
+                    "Hint should contain unauthorized_capabilities: {}",
+                    err.hint
+                );
+            }
+            other => panic!("Expected RuntimeError(PERMISSION_DENIED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Partial grant of mixed capabilities is denied entirely (RFC 0005 §5.3)
+    /// WHEN agent requests capabilities=["read_telemetry", "overlay_privileges"] and is
+    /// authorized for only read_telemetry,
+    /// THEN runtime denies entire request with PERMISSION_DENIED.
+    #[tokio::test]
+    async fn test_capability_request_partial_grant_denied_entirely() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(16);
+
+        // Session with only read_telemetry authorized
+        let mut session = StreamSession {
+            session_id: "partial-grant-session".to_string(),
+            namespace: "restricted-agent".to_string(),
+            agent_name: "restricted-agent".to_string(),
+            capabilities: vec!["read_telemetry".to_string()],
+            policy_capabilities: vec!["read_telemetry".to_string()], // only read_telemetry
+            lease_ids: Vec::new(),
+            subscriptions: Vec::new(),
+            server_sequence: 0,
+            resume_token: Vec::new(),
+            last_heartbeat_ms: 0,
+            state: SessionState::Active,
+            last_client_sequence: 1,
+            safe_mode_active: false,
+            expect_resume: false,
+        };
+
+        // Request both an authorized and an unauthorized capability
+        handle_capability_request(
+            &mut session,
+            &tx,
+            CapabilityRequest {
+                capabilities: vec![
+                    "read_telemetry".to_string(),
+                    "overlay_privileges".to_string(),
+                ],
+                reason: "mixed request".to_string(),
+            },
+        )
+        .await;
+
+        let msg = rx.recv().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(
+                    err.error_code, "PERMISSION_DENIED",
+                    "Entire request should be denied, not just overlay_privileges"
+                );
+                assert_eq!(err.error_code_enum, ErrorCode::PermissionDenied as i32);
+                assert!(
+                    err.context.contains("overlay_privileges"),
+                    "Context should mention the unauthorized capability: {}",
+                    err.context
+                );
+                // read_telemetry should NOT have been granted
+                assert!(
+                    !session.capabilities.contains(&"overlay_privileges".to_string()),
+                    "overlay_privileges must not have been added to session capabilities"
+                );
+            }
+            other => panic!(
+                "Expected RuntimeError(PERMISSION_DENIED) for partial grant, got: {other:?}"
+            ),
+        }
+    }
+
+    /// Verify RuntimeError structure matches spec (RFC 0005 §3.5)
+    /// error_code, message, context, hint, error_code_enum all populated.
+    #[tokio::test]
+    async fn test_runtime_error_structure_complete() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(16);
+
+        let mut session = StreamSession {
+            session_id: "err-test".to_string(),
+            namespace: "err-agent".to_string(),
+            agent_name: "err-agent".to_string(),
+            capabilities: Vec::new(),
+            policy_capabilities: Vec::new(),
+            lease_ids: Vec::new(),
+            subscriptions: Vec::new(),
+            server_sequence: 0,
+            resume_token: Vec::new(),
+            last_heartbeat_ms: 0,
+            state: SessionState::Active,
+            last_client_sequence: 1,
+            safe_mode_active: false,
+            expect_resume: false,
+        };
+
+        handle_capability_request(
+            &mut session,
+            &tx,
+            CapabilityRequest {
+                capabilities: vec!["some_cap".to_string()],
+                reason: "test".to_string(),
+            },
+        )
+        .await;
+
+        let msg = rx.recv().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                // error_code: stable string
+                assert!(!err.error_code.is_empty(), "error_code must be set");
+                // message: human-readable
+                assert!(!err.message.is_empty(), "message must be set");
+                // error_code_enum: typed enum (non-zero for known codes)
+                assert!(err.error_code_enum != 0, "error_code_enum must be non-zero for known codes");
+                // hint: machine-readable JSON
+                if !err.hint.is_empty() {
+                    assert!(
+                        serde_json::from_str::<serde_json::Value>(&err.hint).is_ok(),
+                        "hint must be valid JSON: {}",
+                        err.hint
+                    );
+                }
+            }
+            other => panic!("Expected RuntimeError, got: {other:?}"),
+        }
     }
 
     /// Helper that returns the shared state alongside the client for state-manipulation tests.
