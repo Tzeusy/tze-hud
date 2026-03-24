@@ -37,7 +37,7 @@ Implement profile selection per `configuration/spec.md` Requirement: Display Pro
 
 #### 3. Capability vocabulary validation (depends on #1)
 Implement canonical capability enforcement per `configuration/spec.md` Requirement: Capability Vocabulary.
-- 19 canonical v1 capabilities in snake_case: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, `lease:priority:<N>`
+- 17 canonical v1 capabilities in snake_case: `create_tiles`, `modify_own_tiles`, `manage_tabs`, `manage_sync_groups`, `upload_resource`, `read_scene_topology`, `subscribe_scene_events`, `overlay_privileges`, `access_input_events`, `high_priority_z_order`, `exceed_default_budgets`, `read_telemetry`, `publish_zone:<zone_name>`, `publish_zone:*`, `emit_scene_event:<event_name>`, `resident_mcp`, `lease:priority:<N>`
 - Legacy names (`read_scene`, `receive_input`, `zone_publish`) rejected with `CONFIG_UNKNOWN_CAPABILITY` and hint
 - No synonyms, aliases, or camelCase permitted
 - **Acceptance:** All canonical capabilities accepted. Legacy names rejected with structured error and hint. Unknown capabilities rejected. Parameterized capabilities (publish_zone:subtitle) parsed correctly.

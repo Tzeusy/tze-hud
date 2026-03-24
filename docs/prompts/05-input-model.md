@@ -27,8 +27,8 @@ Implement the focus model per `input-model/spec.md` Requirement: Focus Tree.
 - **Spec refs:** `input-model/spec.md` Requirement: Focus Tree, Requirement: Focus Transitions
 
 #### 2. Pointer event dispatch pipeline (depends on #1, Epic 2 frame pipeline)
-Implement the 5-stage dispatch per `input-model/spec.md` Requirement: Pointer Event Dispatch Pipeline.
-- Stages: capture → hit-test → route → deliver → bubble
+Implement pointer event dispatch per `input-model/spec.md` Requirement: Event Dispatch Flow.
+- Thread-stage model: Stage 1 Input Drain (OS events collected) → Stage 2 Local Feedback (visual ack rendered) → compositor stages (scene applied) → Event Router (resolve owning agent via hit-test, z-order, namespace) → Network delivery (EventBatch to agent)
 - Chrome always wins hit-test (checked first)
 - Tiles in z-order, then nodes within tile
 - Pointer events: down, up, move, enter, leave, click, cancel

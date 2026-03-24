@@ -44,14 +44,14 @@ Implement the transactional mutation pipeline per `scene-graph/spec.md` Requirem
 - **Spec refs:** `scene-graph/spec.md` Requirement: Atomic Batch Mutations, `session-protocol/spec.md` Requirement: Mutation Transport
 
 #### 4. Zone ontology: type, instance, publication, occupancy (depends on #2)
-Implement the four-level zone model per `scene-graph/spec.md` Requirement: Zone Type Registry, Requirement: Zone Instance, Requirement: Zone Publication, Requirement: Zone Occupancy.
+Implement the four-level zone model per `scene-graph/spec.md` Requirement: Zone Registry (which defines the four-level ontology: type, instance, publication, occupancy), Requirement: Zone Publishing, Requirement: Zone Contention Policies, Requirement: Zone Media Types V1, Requirement: Zone Layer Attachment.
 - Zone types: subtitle, notification, status-bar, pip, ambient-background, alert-banner (v1 set)
 - Zone instances: type bound to specific tab with geometry policy, created from configuration
 - Publications: single publish event with content, TTL, key, priority, classification
 - Occupancy: runtime's resolved current state after contention resolution
 - Contention policies: latest-wins, stack, merge-by-key, replace
 - **Acceptance:** Zone test scenes from Epic 0 pass (`zone_publish_subtitle`, `zone_reject_wrong_type`, `zone_conflict_two_publishers`, etc.). Contention policy property tests pass.
-- **Spec refs:** `scene-graph/spec.md` Requirement: Zone Type Registry through Requirement: Zone Occupancy Resolution
+- **Spec refs:** `scene-graph/spec.md` Requirement: Zone Registry, Requirement: Zone Publishing, Requirement: Zone Contention Policies, Requirement: Zone Media Types V1, Requirement: Zone Layer Attachment
 
 #### 5. Hit-test data model (depends on #2)
 Implement hit-test region tracking per `scene-graph/spec.md` Requirement: Hit-Test Pipeline and `input-model/spec.md` Requirement: HitRegionNode.

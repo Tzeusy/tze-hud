@@ -18,25 +18,24 @@ The timing model defines clock domains, presentation scheduling, sync groups, ex
 Create an epic with **4 implementation beads**:
 
 #### 1. Clock domain types and validation (depends on Epic 1 identity types)
-Implement strong timestamp types per `timing-model/spec.md` Requirement: Clock Domain Naming Convention.
-- `WallUs` and `MonoUs` wrapper types — prevent accidental mixing of clock domains
-- All public API timestamp fields must use typed wrappers, not raw `u64`
+Implement the clock domain naming convention per `timing-model/spec.md` Requirement: Clock Domain Naming Convention.
+- The spec mandates: all timestamp fields MUST encode their clock domain via `_wall_us` (UTC wall clock) or `_mono_us` (monotonic system clock) suffixes. Fields without a clock-domain suffix are deltas or frame-relative values, not timestamps.
+- Recommended implementation: `WallUs` and `MonoUs` newtype wrappers over `u64` to enforce the convention at compile time; `DurationUs` for deltas. This goes beyond what the spec literally requires (naming convention only) but prevents the class of bugs the convention targets.
 - Conversion between domains is explicit and requires a calibration offset
-- `DurationUs` for deltas and frame-relative values (no clock domain)
-- **Acceptance:** Compile-time enforcement: passing `WallUs` where `MonoUs` is expected fails to compile. All existing timestamp fields in scene/protocol crates migrated to typed wrappers.
+- **Acceptance:** All timestamp fields in scene/protocol/session crates use correct `_wall_us`/`_mono_us` suffixes. If wrapper types are used: passing `WallUs` where `MonoUs` is expected fails to compile.
 - **Spec refs:** `timing-model/spec.md` Requirement: Clock Domain Naming Convention, lines 23-30
 
 #### 2. TimingHints and presentation scheduling (depends on #1)
-Implement the TimingHints struct and no-earlier-than scheduling per `timing-model/spec.md` Requirement: TimingHints, Requirement: No-Earlier-Than Scheduling.
+Implement the TimingHints struct and presentation scheduling per `timing-model/spec.md` Requirement: Timing Fields on Payloads, Requirement: Frame Quantization.
 - TimingHints: `present_at_wall_us`, `expires_at_wall_us`, `sequence`, `priority`, `coalesce_key`, `sync_group`
-- No-earlier-than: content with `present_at_wall_us` in the future is held, not displayed early
+- No-earlier-than (doctrine: "arrival time ≠ presentation time"): content with `present_at_wall_us` in the future is held, not displayed early
 - Expiration: content past `expires_at_wall_us` is removed within one frame
-- Stale/future rejection: mutations with timestamps > 60s before session open or > 10s in the future are rejected
-- **Acceptance:** Presentation scheduling scenarios from spec pass. Expiration enforcement verified with `TestClock` time injection. Stale/future rejection produces structured errors.
-- **Spec refs:** `timing-model/spec.md` Requirement: TimingHints, Requirement: No-Earlier-Than Scheduling, Requirement: Expiration Enforcement
+- Stale/future rejection: mutations with `present_at_wall_us` > 60s before session open are rejected with TIMESTAMP_TOO_OLD; mutations > 5 minutes (300,000,000µs, the `max_future_schedule_us` default) in the future are rejected with TIMESTAMP_TOO_FUTURE
+- **Acceptance:** Presentation scheduling scenarios from spec pass. Expiration enforcement verified with `TestClock` time injection. Stale/future rejection produces structured errors with correct codes.
+- **Spec refs:** `timing-model/spec.md` Requirement: Timing Fields on Payloads, Requirement: Arrival Time Is Not Presentation Time, Requirement: Expiration Enforcement
 
 #### 3. Sync groups (depends on #2)
-Implement sync group coordination per `timing-model/spec.md` Requirement: Sync Groups.
+Implement sync group coordination per `timing-model/spec.md` Requirement: Sync Group Membership and Lifecycle, Requirement: Sync Group Commit Policies.
 - Sync group: named set of tiles that present together
 - Policies: AllOrDefer (all members ready or none present), AvailableMembers (present what's ready)
 - Force-commit after sync_group_timeout to prevent indefinite blocking

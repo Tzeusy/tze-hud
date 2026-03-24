@@ -19,7 +19,7 @@ Create an epic with **5 implementation beads**:
 
 #### 1. Lease state machine (depends on Epic 0 trait contract, Epic 1 identity types)
 Implement the core state machine per `lease-governance/spec.md` Requirement: Lease State Machine.
-- States: REQUESTED → ACTIVE → {EXPIRED, ORPHANED, RECLAIMED, REVOKED, SUSPENDED}
+- States: REQUESTED, ACTIVE, SUSPENDED, ORPHANED, REVOKED, EXPIRED, DENIED, RELEASED
 - Valid transitions enumerated in spec; all others rejected
 - Each transition produces an auditable event
 - **Acceptance:** All `LeaseStateMachine` trait contract tests from Epic 0 pass. Every valid transition verified. Every invalid transition rejected with structured error. `lease_expiry` test scene passes.

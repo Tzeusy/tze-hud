@@ -19,7 +19,7 @@ Create an epic with **5 implementation beads**:
 
 #### 1. 8-stage frame pipeline (depends on Epic 1 scene hierarchy)
 Implement the staged frame pipeline per `runtime-kernel/spec.md` Requirement: Frame Pipeline.
-- Stages: input drain → scene commit → layout → render encode → GPU submit → present → telemetry → idle
+- Stages: Stage 1 Input Drain → Stage 2 Local Feedback → Stage 3 Mutation Intake → Stage 4 Scene Commit → Stage 5 Layout Resolve → Stage 6 Render Encode → Stage 7 GPU Submit and Present → Stage 8 Telemetry Emit
 - Per-stage budget tracking with `FrameTelemetry` emission
 - Total pipeline p99 < 16.6ms (normalized to reference hardware) at 60fps
 - **Acceptance:** `test_frame_time_p99_within_budget()` from Epic 0 passes. Per-stage telemetry emitted for every frame. Stage ordering is enforced.
