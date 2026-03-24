@@ -4,7 +4,9 @@
 //! updates local feedback state (hover/pressed/focused), and dispatches events
 //! to agents. Local feedback happens synchronously in < 4ms — no agent roundtrip.
 //!
-//! ## Modules
+//! ## Module structure
+//!
+//! - `lib.rs` — `InputProcessor`, pointer event processing, `AgentDispatch`
 //! - `focus_tree` — per-tab focus tree data structure and history
 //! - `focus`      — focus manager (lifecycle, cycling, events, ring metadata)
 //! - `keyboard`   — keyboard event types and dispatch (KeyDownEvent, KeyUpEvent,
@@ -15,11 +17,15 @@
 //! - [`events`] — HitTestResult, RouteTarget, SceneLocalPatch, InputEnvelope, EventBatch
 //! - [`hit_test`] — headless-testable hit-test pipeline
 //! - [`dispatch`] — Stage 1+2 dispatch pipeline (DispatchProcessor)
+//! - `local_feedback` — `LocalFeedbackStyle`, `ResolvedFeedbackStyle`, rollback tracker
+//! - `scroll` — `ScrollConfig`, `ScrollState`, scroll-local-first processing
 
 pub mod pointer;
 pub mod events;
 pub mod hit_test;
 pub mod dispatch;
+pub mod local_feedback;
+pub mod scroll;
 
 // Re-export core dispatch types at the crate root for convenience.
 pub use pointer::{
@@ -33,6 +39,14 @@ pub use events::{
 };
 pub use hit_test::hit_test;
 pub use dispatch::{build_agent_batch, DispatchOutcome, DispatchProcessor};
+pub use local_feedback::{
+    LocalFeedbackStyle, ResolvedFeedbackStyle, RollbackTracker,
+    DEFAULT_HOVER_TINT, DEFAULT_PRESS_DARKEN, DEFAULT_FOCUS_RING_COLOR,
+    DEFAULT_FOCUS_RING_WIDTH_PX, ROLLBACK_ANIMATION_MS,
+};
+pub use scroll::{
+    ScrollConfig, ScrollEvent, ScrollState, SetScrollOffsetRequest, ScrollOffsetChangedEvent,
+};
 
 pub mod focus_tree;
 pub mod focus;
@@ -91,6 +105,12 @@ pub struct InputResult {
     pub hit_test_us: u64,
     /// Agent dispatch descriptor, if an event should be forwarded to an agent.
     pub dispatch: Option<AgentDispatch>,
+    /// Local state patch to forward to the compositor immediately.
+    ///
+    /// Non-empty when pressed/hovered/focused state changed. This patch MUST be
+    /// sent to the compositor via the dedicated local-patch channel before the
+    /// next frame to guarantee `input_to_next_present p99 < 33ms`.
+    pub local_patch: SceneLocalPatch,
 }
 
 /// Information needed to dispatch this input event to the owning agent.
@@ -131,6 +151,8 @@ pub struct InputProcessor {
     current_hover: Option<(SceneId, SceneId)>, // (tile_id, node_id)
     /// Currently pressed node.
     current_press: Option<(SceneId, SceneId)>, // (tile_id, node_id)
+    /// Rollback animation tracker (agent-rejection-triggered).
+    rollback_tracker: RollbackTracker,
 }
 
 impl InputProcessor {
@@ -138,10 +160,53 @@ impl InputProcessor {
         Self {
             current_hover: None,
             current_press: None,
+            rollback_tracker: RollbackTracker::new(),
         }
     }
 
-    /// Process a pointer event against the scene graph.
+    /// Apply an agent rejection for an in-progress interaction.
+    ///
+    /// Spec §Local Feedback Rollback: "If an agent explicitly rejects an
+    /// interaction, the local feedback SHALL be reverted with a 100ms reverse
+    /// animation. Rollback SHALL only occur on explicit agent rejection, not on
+    /// agent latency or silence."
+    ///
+    /// Returns a `SceneLocalPatch` containing the rollback state update to
+    /// forward to the compositor. The compositor drives the 100ms animation.
+    pub fn apply_agent_rejection(
+        &mut self,
+        node_id: SceneId,
+        scene: &mut SceneGraph,
+    ) -> SceneLocalPatch {
+        // Clear pressed state in the scene graph
+        if let Some(state) = scene.hit_region_states.get_mut(&node_id) {
+            state.pressed = false;
+        }
+        // Clear current_press if this node was being tracked
+        if let Some((_, pressed_node)) = self.current_press {
+            if pressed_node == node_id {
+                self.current_press = None;
+            }
+        }
+        // Begin rollback animation tracking
+        self.rollback_tracker.begin_rollback(node_id);
+
+        // Produce rollback patch for compositor
+        let mut patch = SceneLocalPatch::new();
+        patch.push_state(
+            LocalStateUpdate::new(node_id)
+                .with_pressed(false)
+                .with_rollback(),
+        );
+        patch
+    }
+
+    /// Returns a reference to the rollback tracker (e.g. for compositor queries).
+    pub fn rollback_tracker(&self) -> &RollbackTracker {
+        &self.rollback_tracker
+    }
+
+    /// Process a pointer event against the scene graph, applying click-to-focus.
     ///
     /// Updates hit-region local state for immediate visual feedback.
     /// Returns the result including timing measurements and an optional
@@ -198,8 +263,15 @@ impl InputProcessor {
     /// Process a pointer event against the scene graph.
     ///
     /// Updates hit-region local state for immediate visual feedback.
-    /// Returns the result including timing measurements and an optional
-    /// `AgentDispatch` descriptor for forwarding the event to the owning agent.
+    /// Returns the result including timing measurements, an optional
+    /// `AgentDispatch` descriptor for forwarding the event to the owning agent,
+    /// and a `SceneLocalPatch` to forward to the compositor immediately.
+    ///
+    /// ## Local feedback contract
+    /// The `local_patch` in the returned `InputResult` MUST be forwarded to the
+    /// compositor via the dedicated local-patch channel before the next frame.
+    /// This ensures `input_to_next_present p99 < 33ms` and satisfies the
+    /// doctrinal guarantee: "Local feedback first."
     pub fn process(&mut self, event: &PointerEvent, scene: &mut SceneGraph) -> InputResult {
         let start = Instant::now();
 
@@ -211,6 +283,8 @@ impl InputProcessor {
         let mut interaction_id: Option<String> = None;
         let mut activated = false;
         let mut dispatch: Option<AgentDispatch> = None;
+        // Accumulate local state changes for the SceneLocalPatch
+        let mut local_patch = SceneLocalPatch::new();
 
         // Decompose HitResult into (tile_id, node_id) where applicable.
         let (hit_tile_id, hit_node_id): (Option<SceneId>, Option<SceneId>) = match &hit {
@@ -232,6 +306,8 @@ impl InputProcessor {
                 if let Some(state) = scene.hit_region_states.get_mut(&old_id) {
                     state.hovered = false;
                 }
+                // Emit local patch for hover-off
+                local_patch.push_state(LocalStateUpdate::new(old_id).with_hovered(false));
                 // Dispatch pointer_leave to previous owning agent
                 if let Some((old_tile_id, _)) = self.current_hover {
                     if let Some(namespace) = tile_namespace(scene, old_tile_id) {
@@ -265,6 +341,8 @@ impl InputProcessor {
                 if let Some(state) = scene.hit_region_states.get_mut(&new_id) {
                     state.hovered = true;
                 }
+                // Emit local patch for hover-on
+                local_patch.push_state(LocalStateUpdate::new(new_id).with_hovered(true));
                 // Dispatch pointer_enter to new owning agent (overwrites leave above —
                 // enter takes priority; the caller can queue both if needed)
                 if let Some(tile_id) = hit_tile_id {
@@ -294,6 +372,8 @@ impl InputProcessor {
                     if let Some(state) = scene.hit_region_states.get_mut(&node_id) {
                         state.pressed = true;
                     }
+                    // Emit local patch for press-on — this is the critical 4ms path
+                    local_patch.push_state(LocalStateUpdate::new(node_id).with_pressed(true));
                     self.current_press = Some((tile_id, node_id));
                     if let Some(namespace) = tile_namespace(scene, tile_id) {
                         let (local_x, local_y) = display_to_local(scene, tile_id, event.x, event.y);
@@ -316,6 +396,8 @@ impl InputProcessor {
                     if let Some(state) = scene.hit_region_states.get_mut(&pressed_node_id) {
                         state.pressed = false;
                     }
+                    // Emit local patch for press-off
+                    local_patch.push_state(LocalStateUpdate::new(pressed_node_id).with_pressed(false));
                     // Activation: press and release on the same node
                     if hit_node_id == Some(pressed_node_id) {
                         activated = true;
@@ -400,6 +482,7 @@ impl InputProcessor {
             local_ack_us,
             hit_test_us,
             dispatch,
+            local_patch,
         }
     }
 }
@@ -720,5 +803,155 @@ mod tests {
         assert_eq!(dispatch.node_id, hr_node_id);
         assert!((dispatch.local_x - 110.0).abs() < 0.01);
         assert!((dispatch.local_y - 85.0).abs() < 0.01);
+    }
+
+    // ── SceneLocalPatch integration tests ────────────────────────────────
+
+    #[test]
+    fn test_local_patch_produced_on_pointer_down() {
+        let (mut scene, _, hr_node_id) = setup_scene_with_hit_region();
+        let mut processor = InputProcessor::new();
+
+        let result = processor.process(
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, timestamp: None },
+            &mut scene,
+        );
+
+        // SceneLocalPatch must contain a pressed=true update for the hit node
+        assert!(!result.local_patch.is_empty(), "local_patch should not be empty after Down");
+        let pressed_update = result.local_patch.node_updates.iter()
+            .find(|u| u.node_id == hr_node_id && u.pressed.is_some())
+            .expect("expected pressed state update for hr_node_id");
+        assert_eq!(pressed_update.pressed, Some(true));
+        assert!(!pressed_update.rollback);
+    }
+
+    #[test]
+    fn test_local_patch_produced_on_pointer_up() {
+        let (mut scene, _, hr_node_id) = setup_scene_with_hit_region();
+        let mut processor = InputProcessor::new();
+
+        // Press first
+        processor.process(
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, timestamp: None },
+            &mut scene,
+        );
+
+        // Up
+        let result = processor.process(
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Up, timestamp: None },
+            &mut scene,
+        );
+
+        assert!(!result.local_patch.is_empty(), "local_patch should not be empty after Up");
+        let state_update = result.local_patch.node_updates.iter()
+            .find(|u| u.node_id == hr_node_id)
+            .expect("expected state update for hr_node_id");
+        assert_eq!(state_update.pressed, Some(false));
+    }
+
+    #[test]
+    fn test_local_patch_hover_on_enter() {
+        let (mut scene, _, hr_node_id) = setup_scene_with_hit_region();
+        let mut processor = InputProcessor::new();
+
+        let result = processor.process(
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Move, timestamp: None },
+            &mut scene,
+        );
+
+        assert!(!result.local_patch.is_empty(), "local_patch should contain hover update");
+        let state_update = result.local_patch.node_updates.iter()
+            .find(|u| u.node_id == hr_node_id)
+            .expect("expected state update for hr_node_id");
+        assert_eq!(state_update.hovered, Some(true));
+    }
+
+    #[test]
+    fn test_local_patch_hover_off_on_leave() {
+        let (mut scene, _, hr_node_id) = setup_scene_with_hit_region();
+        let mut processor = InputProcessor::new();
+
+        // Enter
+        processor.process(
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Move, timestamp: None },
+            &mut scene,
+        );
+
+        // Leave
+        let result = processor.process(
+            &PointerEvent { x: 5.0, y: 5.0, kind: PointerEventKind::Move, timestamp: None },
+            &mut scene,
+        );
+
+        assert!(!result.local_patch.is_empty(), "local_patch should contain hover-off update");
+        let state_update = result.local_patch.node_updates.iter()
+            .find(|u| u.node_id == hr_node_id)
+            .expect("expected state update for hr_node_id");
+        assert_eq!(state_update.hovered, Some(false));
+    }
+
+    #[test]
+    fn test_local_patch_empty_when_no_state_change() {
+        let (mut scene, _, _) = setup_scene_with_hit_region();
+        let mut processor = InputProcessor::new();
+
+        // Move in empty space — no hit, no state change
+        let result = processor.process(
+            &PointerEvent { x: 5.0, y: 5.0, kind: PointerEventKind::Move, timestamp: None },
+            &mut scene,
+        );
+
+        assert!(result.local_patch.is_empty(), "no state changed, patch should be empty");
+    }
+
+    #[test]
+    fn test_apply_agent_rejection_produces_rollback_patch() {
+        let (mut scene, _, hr_node_id) = setup_scene_with_hit_region();
+        let mut processor = InputProcessor::new();
+
+        // Press to set up pressed state
+        processor.process(
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, timestamp: None },
+            &mut scene,
+        );
+        assert!(scene.hit_region_states[&hr_node_id].pressed);
+
+        // Agent rejects the interaction
+        let rollback_patch = processor.apply_agent_rejection(hr_node_id, &mut scene);
+
+        // Pressed state cleared in scene graph immediately
+        assert!(!scene.hit_region_states[&hr_node_id].pressed);
+
+        // Patch contains rollback=true state update
+        assert!(!rollback_patch.is_empty());
+        let update = rollback_patch.node_updates.iter()
+            .find(|u| u.node_id == hr_node_id)
+            .expect("expected rollback state update");
+        assert_eq!(update.pressed, Some(false));
+        assert!(update.rollback, "rollback flag must be set");
+
+        // Rollback tracker should record the animation
+        assert!(processor.rollback_tracker().is_rolling_back(hr_node_id));
+    }
+
+    #[test]
+    fn test_agent_silence_does_not_rollback() {
+        let (mut scene, _, hr_node_id) = setup_scene_with_hit_region();
+        let mut processor = InputProcessor::new();
+
+        // Press — starts pressed
+        processor.process(
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, timestamp: None },
+            &mut scene,
+        );
+        assert!(scene.hit_region_states[&hr_node_id].pressed);
+
+        // Agent does NOT respond (silence) — pressed remains true
+        // (no apply_agent_rejection called)
+        assert!(scene.hit_region_states[&hr_node_id].pressed,
+            "pressed should remain true on agent silence per spec");
+        assert!(!processor.rollback_tracker().is_rolling_back(hr_node_id),
+            "rollback should NOT be triggered by agent silence");
     }
 }
