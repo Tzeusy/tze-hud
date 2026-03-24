@@ -187,6 +187,9 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
 
         // Heartbeat echo — ephemeral (droppable, latest-wins)
         ServerPayload::Heartbeat(_) => TrafficClass::Ephemeral,
+
+        // Agent event emission result — transactional (always delivered)
+        ServerPayload::EmitSceneEventResult(_) => TrafficClass::Transactional,
     }
 }
 
@@ -274,6 +277,49 @@ fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, Status> {
     Ok(tze_hud_scene::SceneId::from_uuid(uuid))
 }
 
+// ─── Per-session event rate limiter ─────────────────────────────────────────
+
+/// Sliding-window rate limiter for agent scene event emission.
+///
+/// Per scene-events/spec.md §5.4: default 10 events/second, 1-second window.
+/// Each session holds one instance; concurrent sessions are independent.
+struct SessionEventRateLimiter {
+    /// Timestamps of accepted events within the current 1-second window.
+    timestamps: std::collections::VecDeque<std::time::Instant>,
+    /// Maximum accepted events per 1-second window (default: 10).
+    max_per_second: usize,
+}
+
+impl SessionEventRateLimiter {
+    /// Create a new limiter with the default limit (10 events/second).
+    fn new() -> Self {
+        Self {
+            timestamps: std::collections::VecDeque::new(),
+            max_per_second: 10,
+        }
+    }
+
+    /// Check whether a new event is within the rate limit and, if so, record it.
+    ///
+    /// Returns `Ok(())` if accepted, `Err(())` if the window is full.
+    fn check_and_record(&mut self, now: std::time::Instant) -> Result<(), ()> {
+        let window = std::time::Duration::from_secs(1);
+        // Prune expired entries.
+        while let Some(&front) = self.timestamps.front() {
+            if now.duration_since(front) >= window {
+                self.timestamps.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.timestamps.len() >= self.max_per_second {
+            return Err(());
+        }
+        self.timestamps.push_back(now);
+        Ok(())
+    }
+}
+
 // ─── Session state ──────────────────────────────────────────────────────────
 
 /// Per-session state tracked by the streaming server.
@@ -310,6 +356,12 @@ struct StreamSession {
     /// Whether the agent indicated `expect_resume=true` in SessionClose (RFC 0005 §1.5).
     /// When true, leases are held for the full reconnect grace period.
     expect_resume: bool,
+
+    /// Sliding-window rate limiter for agent scene event emission.
+    ///
+    /// Tracks per-session event timestamps for the 1-second sliding window.
+    /// Default limit: 10 events/second (spec: scene-events/spec.md §5.4).
+    agent_event_rate_limiter: SessionEventRateLimiter,
 }
 
 impl StreamSession {
@@ -752,6 +804,7 @@ async fn handle_session_init(
         last_client_sequence: 1, // SessionInit is sequence 1; start validation from next
         safe_mode_active: false,
         expect_resume: false,
+        agent_event_rate_limiter: SessionEventRateLimiter::new(),
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -851,6 +904,7 @@ async fn handle_session_resume(
         last_client_sequence: 1, // SessionResume is sequence 1; start validation from next
         safe_mode_active: false,
         expect_resume: false,
+        agent_event_rate_limiter: SessionEventRateLimiter::new(),
     };
 
     let compositor_ts = now_wall_us();
@@ -934,6 +988,10 @@ async fn handle_client_message(
         }
         ClientPayload::CapabilityRequest(req) => {
             handle_capability_request(session, tx, req).await;
+        }
+        // Agent scene event emission (scene-events/spec.md §5.1, §5.2).
+        ClientPayload::EmitSceneEvent(emit) => {
+            handle_emit_scene_event(state, session, tx, client_sequence, emit).await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
@@ -1542,6 +1600,150 @@ async fn handle_heartbeat(
             payload: Some(ServerPayload::Heartbeat(Heartbeat {
                 // Echo the client's monotonic timestamp for RTT calculation
                 timestamp_mono_us: hb.timestamp_mono_us,
+            })),
+        }))
+        .await;
+}
+
+// ─── Agent Scene Event Emission handler ──────────────────────────────────────
+
+/// Handle an `EmitSceneEvent` request from an agent.
+///
+/// Implements the server-side of the agent event emission protocol per
+/// scene-events/spec.md §5.1–§5.4:
+///
+/// 1. Validate the bare name (format + reserved prefix).
+/// 2. Check the `emit_scene_event:<bare_name>` capability.
+/// 3. Enforce the 4 KB payload size limit.
+/// 4. Apply the per-session sliding-window rate limit.
+/// 5. On success, dispatch the event to subscribers and respond with the
+///    fully-prefixed event type.
+///
+/// In v1 the per-session rate limiter state is held inside `StreamSession`
+/// via an `Option<tze_hud_runtime::AgentEventHandler>`.  For now, the handler
+/// is created lazily from the session namespace and capabilities.
+///
+/// Note: Full event bus delivery to subscribers (step 5) is wired in by bead #2.
+/// This handler performs all gating checks and returns a result; actual fan-out
+/// to subscription channels is not implemented in this bead.
+async fn handle_emit_scene_event(
+    _state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    emit: EmitSceneEvent,
+) {
+    use tze_hud_scene::events::naming::{validate_bare_name, build_agent_event_type, NamingError};
+
+    // ── Step 1: Validate bare name ────────────────────────────────────────
+    if let Err(naming_err) = validate_bare_name(&emit.bare_name) {
+        let (error_code, message) = match &naming_err {
+            NamingError::ReservedPrefix { prefix } => (
+                "AGENT_EVENT_RESERVED_PREFIX".to_string(),
+                format!("bare name must not start with reserved prefix {prefix:?}"),
+            ),
+            _ => (
+                "AGENT_EVENT_INVALID_NAME".to_string(),
+                format!("invalid bare name: {naming_err}"),
+            ),
+        };
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::EmitSceneEventResult(EmitSceneEventResult {
+                    request_sequence,
+                    accepted: false,
+                    delivered_event_type: String::new(),
+                    error_code,
+                    error_message: message,
+                })),
+            }))
+            .await;
+        return;
+    }
+
+    // ── Step 2: Capability check ──────────────────────────────────────────
+    let required_cap = format!("emit_scene_event:{}", emit.bare_name);
+    if !session.capabilities.contains(&required_cap) {
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::EmitSceneEventResult(EmitSceneEventResult {
+                    request_sequence,
+                    accepted: false,
+                    delivered_event_type: String::new(),
+                    error_code: "AGENT_EVENT_CAPABILITY_MISSING".to_string(),
+                    error_message: format!("missing capability: {required_cap}"),
+                })),
+            }))
+            .await;
+        return;
+    }
+
+    // ── Step 3: Payload size limit (4 KB) ────────────────────────────────
+    const MAX_PAYLOAD: usize = 4096;
+    if emit.payload.len() > MAX_PAYLOAD {
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::EmitSceneEventResult(EmitSceneEventResult {
+                    request_sequence,
+                    accepted: false,
+                    delivered_event_type: String::new(),
+                    error_code: "AGENT_EVENT_PAYLOAD_TOO_LARGE".to_string(),
+                    error_message: format!(
+                        "payload {} bytes exceeds {MAX_PAYLOAD}-byte limit",
+                        emit.payload.len()
+                    ),
+                })),
+            }))
+            .await;
+        return;
+    }
+
+    // ── Step 4: Rate limit ────────────────────────────────────────────────
+    // Per-session rate limiter is stored on the StreamSession.
+    if session.agent_event_rate_limiter.check_and_record(std::time::Instant::now()).is_err() {
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::EmitSceneEventResult(EmitSceneEventResult {
+                    request_sequence,
+                    accepted: false,
+                    delivered_event_type: String::new(),
+                    error_code: "AGENT_EVENT_RATE_EXCEEDED".to_string(),
+                    error_message: "agent event rate limit exceeded (10/s sliding window)"
+                        .to_string(),
+                })),
+            }))
+            .await;
+        return;
+    }
+
+    // ── Step 5: Build delivered event type and accept ─────────────────────
+    let delivered_event_type = build_agent_event_type(&session.namespace, &emit.bare_name);
+
+    // TODO (bead #2): dispatch delivered_event_type to subscribers via the event bus.
+
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::EmitSceneEventResult(EmitSceneEventResult {
+                request_sequence,
+                accepted: true,
+                delivered_event_type,
+                error_code: String::new(),
+                error_message: String::new(),
             })),
         }))
         .await;
@@ -2533,6 +2735,7 @@ mod tests {
             last_client_sequence: 1,
             safe_mode_active: false,
             expect_resume: false,
+            agent_event_rate_limiter: SessionEventRateLimiter::new(),
         };
 
         // seq=2 (gap=1): OK
