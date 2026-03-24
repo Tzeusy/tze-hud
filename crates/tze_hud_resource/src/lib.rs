@@ -20,12 +20,14 @@
 //! - **Per-agent budget accounting**: `BudgetRegistry` charges decoded bytes per
 //!   agent node reference (full decoded size, double-counted across agents).
 //! - **Font cache**: LRU cache with permanent system/bundled holds.
+//! - **V1 ephemerality**: all resources stored in memory only; lost on restart.
 //!
 //! ## Crate structure
 //!
 //! | Module | Contents |
 //! |---|---|
 //! | [`types`] | `ResourceId`, `ResourceType`, error codes, size constants |
+//! | [`debug`] | Operator/debug hex representation for `ResourceId` |
 //! | [`dedup`] | Content-addressed dedup index (`DedupIndex`, `ResourceRecord`) |
 //! | [`validation`] | Six-step upload validation pipeline |
 //! | [`upload`] | Upload state machine and `ResourceStore` |
@@ -33,21 +35,26 @@
 //! | [`gc`] | GC runner: grace period, cycle timing, frame-render isolation |
 //! | [`budget`] | Per-agent decoded-byte budget accounting |
 //! | [`font_cache`] | LRU font cache with permanent system/bundled holds |
+//! | [`store`] | V1 ephemerality contract (`EphemeralStore`) |
 
 pub mod budget;
+pub mod debug;
 pub mod dedup;
 pub mod font_cache;
 pub mod gc;
 pub mod refcount;
+pub mod store;
 pub mod types;
 pub mod upload;
 pub mod validation;
 
 pub use budget::{AgentResourceUsage, BudgetRegistry, BudgetViolation, TileBudgetChecker};
+pub use debug::{resource_id_hex, to_lowercase_hex};
 pub use dedup::{DedupIndex, ResourceRecord};
 pub use font_cache::{CachedFontHandle, FontCache, FontCacheEntry, FontCacheKey, FontOrigin};
 pub use gc::{GcClock, GcConfig, GcResult, GcRunner, TestClockMs, WallClock};
 pub use refcount::{GcCandidateTable, RefcountError, RefcountLayer};
+pub use store::EphemeralStore;
 pub use types::{
     DecodedMeta, ResourceError, ResourceId, ResourceStoreConfig, ResourceStored, ResourceType,
     CHUNK_SIZE_LIMIT, DEFAULT_MAX_DECODED_TEXTURE_BYTES, DEFAULT_MAX_RESOURCE_BYTES,

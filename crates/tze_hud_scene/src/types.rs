@@ -417,20 +417,33 @@ pub struct HitRegionNode {
     pub accepts_pointer: bool,
 }
 
-/// A static image node that displays raw RGBA pixel data within the node's bounds.
+/// A static image node that references a resource by its content-addressed identity.
 ///
-/// Image data is content-addressed via `content_hash` for deduplication by the compositor.
-/// The `fit_mode` controls how the image is scaled to fill the bounds.
+/// Per resource-store/spec.md §Requirement: Ephemeral Storage in V1 (lines 244-246),
+/// scene snapshots reference resources by `ResourceId` only — blob data is NOT
+/// embedded.  On restart, the resource store is empty; agents must re-upload
+/// referenced resources before the scene can fully render.
+///
+/// The `decoded_bytes` field is set at mutation time (from the resource store
+/// record) so that the scene graph can enforce texture budget limits without
+/// holding raw pixel data.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StaticImageNode {
-    /// Raw RGBA8 pixel data (width * height * 4 bytes).
-    pub image_data: Vec<u8>,
-    /// Width of the image in pixels.
+    /// Content-addressed identity of the image resource (BLAKE3 hash of raw bytes).
+    ///
+    /// This is the only reference to the backing data.  The blob itself lives in
+    /// the runtime's ephemeral resource store, not in the scene graph.
+    pub resource_id: ResourceId,
+    /// Width of the image in pixels (metadata from upload).
     pub width: u32,
-    /// Height of the image in pixels.
+    /// Height of the image in pixels (metadata from upload).
     pub height: u32,
-    /// SHA-256 hex string for content-based deduplication.
-    pub content_hash: String,
+    /// Decoded in-memory size in bytes, recorded at mutation time for budget
+    /// accounting.  Does NOT store the actual pixels.
+    ///
+    /// Using `u64` to match scene budget accounting types (`ResourceBudget.max_texture_bytes`)
+    /// and the protobuf wire type, avoiding lossy casts on 32-bit targets.
+    pub decoded_bytes: u64,
     /// How the image is fitted within `bounds`.
     pub fit_mode: ImageFitMode,
     /// Position and size within the parent tile (in tile-local coordinates).

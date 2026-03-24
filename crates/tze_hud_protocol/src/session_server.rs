@@ -3265,6 +3265,7 @@ mod tests {
                                     y: 0.0,
                                     width: 200.0,
                                     height: 150.0,
+                                    ..Default::default()
                                 }),
                                 z_order: 1,
                             },
@@ -3474,6 +3475,7 @@ mod tests {
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_wall_us(),
+                ..Default::default()
             })),
         })
         .await
@@ -3557,6 +3559,7 @@ mod tests {
                 ],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_wall_us(),
+                ..Default::default()
             })),
         })
         .await
@@ -3896,6 +3899,7 @@ mod tests {
                 batch_id: batch_id.clone(),
                 lease_id: lease_id.clone(),
                 mutations: Vec::new(),
+                ..Default::default()
             })),
         })
         .await
@@ -4004,6 +4008,7 @@ mod tests {
                 batch_id: batch_id.clone(),
                 lease_id: lease_id.clone(),
                 mutations: Vec::new(),
+                ..Default::default()
             })),
         })
         .await
@@ -4028,6 +4033,7 @@ mod tests {
                 batch_id: format!("b{i}").into_bytes(),
                 lease_id: vec![0u8; 16],
                 mutations: Vec::new(),
+                ..Default::default()
             };
             let r = q.enqueue(batch, "ns");
             assert!(
@@ -4040,6 +4046,7 @@ mod tests {
             batch_id: b"b7".to_vec(),
             lease_id: vec![0u8; 16],
             mutations: Vec::new(),
+            ..Default::default()
         };
         let r = q.enqueue(batch, "ns");
         assert!(
@@ -4061,6 +4068,7 @@ mod tests {
                 batch_id: format!("ss{i}").into_bytes(),
                 lease_id: vec![0u8; 16],
                 mutations: vec![],
+                ..Default::default()
             };
             q.enqueue(batch, "ns");
         }
@@ -4074,8 +4082,10 @@ mod tests {
                     tab_id: String::new(),
                     bounds: None,
                     z_order: 0,
+                    ..Default::default()
                 })),
             }],
+            ..Default::default()
         };
         let r = q.enqueue(tx_batch, "ns");
         assert!(
@@ -4862,6 +4872,8 @@ mod tests {
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+            session_open_at_wall_us: 0,
+            dedup_window: DedupWindow::new(1000, 60),
         };
 
         handle_capability_request(
@@ -4919,6 +4931,8 @@ mod tests {
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+            session_open_at_wall_us: 0,
+            dedup_window: DedupWindow::new(1000, 60),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -4983,6 +4997,8 @@ mod tests {
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+            session_open_at_wall_us: 0,
+            dedup_window: DedupWindow::new(1000, 60),
         };
 
         handle_capability_request(
@@ -6011,6 +6027,7 @@ mod tests {
                 ],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_wall_us(),
+                ..Default::default()
             })),
         })
         .await
@@ -6666,5 +6683,4 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         // If we reach here without a panic, the cleanup path is safe.
     }
-
 }
