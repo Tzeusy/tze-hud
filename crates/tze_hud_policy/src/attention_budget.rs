@@ -7,11 +7,15 @@
 //!
 //! The counter maintains a fixed-size ring of per-second event counts.  The
 //! window length is configurable but defaults to 60 seconds (matching the spec).
-//! The entire structure is stack-allocated for deterministic latency.
+//! The slot array is heap-allocated once at construction time and never
+//! resized; no further allocations occur during normal operation.
 //!
 //! Reading `count_in_window()` is O(1) — it returns a cached sum that is
-//! updated on each `record_event()` call. No heap allocation, no iteration.
-//! This satisfies the spec's < 10µs budget for the attention check.
+//! updated on each `record_event()` call. `record_event()` and `advance_to()`
+//! are O(min(elapsed, window_secs)) in the worst case (when the clock jumps by
+//! more than the window), but O(1) amortised across a steady event stream.
+//! Reads via `count_in_window()` and `is_exhausted()` are always O(1) and
+//! satisfy the spec's < 10µs budget for the attention check.
 //!
 //! ## Spec Reference
 //!
@@ -52,9 +56,11 @@ const MAX_WINDOW_SECS: usize = 3600; // 1 hour
 /// Reads are O(1) via `cached_sum`. Writes are O(1): advance expired slots,
 /// increment the current slot, and adjust the cached sum accordingly.
 ///
-/// The structure deliberately avoids `Vec` and heap allocation to keep
-/// latency bounded and deterministic. The window length is set at construction
-/// time and cannot be changed; create a new `AttentionBudget` to resize.
+/// The structure allocates the slot array once at construction time using a
+/// `Box<[u32]>` (heap, but fixed-size — no further allocations during normal
+/// operation). This keeps per-call latency bounded and deterministic.
+/// The window length is set at construction time and cannot be changed;
+/// create a new `AttentionBudget` to resize.
 pub struct AttentionBudget {
     /// Ring buffer of per-second event counts.
     slots: Box<[u32]>,
@@ -145,9 +151,7 @@ impl AttentionBudget {
 
         if elapsed >= ws {
             // All slots are expired — clear everything.
-            for s in self.slots.iter_mut() {
-                *s = 0;
-            }
+            self.slots.fill(0);
             self.cached_sum = 0;
         } else {
             // Zero out the slots between (current+1) and (current+elapsed).
@@ -182,9 +186,7 @@ impl AttentionBudget {
 
     /// Reset all counters (e.g., on lease expiry or explicit flush).
     pub fn reset(&mut self) {
-        for s in self.slots.iter_mut() {
-            *s = 0;
-        }
+        self.slots.fill(0);
         self.cached_sum = 0;
     }
 

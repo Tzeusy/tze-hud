@@ -69,8 +69,10 @@ impl InterruptionClass {
     }
 
     /// Returns `true` if this class bypasses the attention budget unconditionally.
+    ///
+    /// This is the exact complement of `counts_against_budget()`.
     pub fn bypasses_budget(self) -> bool {
-        matches!(self, InterruptionClass::Critical | InterruptionClass::Silent)
+        !self.counts_against_budget()
     }
 
     /// Returns the human-readable name matching RFC 0010 §3.1 enum name.
