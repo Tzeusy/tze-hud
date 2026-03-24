@@ -1551,51 +1551,68 @@ impl SceneGraph {
     /// defer, or force-commit the group.
     ///
     /// This is called by the compositor at Stage 4 (Scene Commit).
+    ///
+    /// # Correctness invariant
+    ///
+    /// `deferral_count` MUST only increment when at least one member has a
+    /// pending mutation AND at least one member is absent. When the group is
+    /// idle (zero pending mutations), the counter MUST NOT change.
+    /// Spec: timing-model/spec.md lines 159, 167–169.
     pub fn evaluate_sync_group_commit(
         &mut self,
         group_id: SceneId,
         tiles_with_pending: &std::collections::BTreeSet<SceneId>,
     ) -> Result<SyncGroupCommitDecision, ValidationError> {
+        use crate::timing::sync_commit::{evaluate_commit, apply_decision, CommitDecision};
+
         let group = self
             .sync_groups
             .get(&group_id)
             .ok_or(ValidationError::SyncGroupNotFound { id: group_id })?;
 
-        match group.commit_policy {
-            SyncCommitPolicy::AvailableMembers => {
-                // Apply whatever is ready — never defers
-                let ready: Vec<SceneId> = group
-                    .members
-                    .iter()
-                    .filter(|id| tiles_with_pending.contains(id))
-                    .copied()
-                    .collect();
-                Ok(SyncGroupCommitDecision::Commit { tiles: ready })
+        let decision = evaluate_commit(group, tiles_with_pending);
+
+        // Translate CommitDecision → SyncGroupCommitDecision and apply state
+        // changes to the group.
+        let result = match &decision {
+            CommitDecision::Commit { tiles } => {
+                SyncGroupCommitDecision::Commit { tiles: tiles.clone() }
             }
-            SyncCommitPolicy::AllOrDefer => {
-                let all_ready = group.members.iter().all(|id| tiles_with_pending.contains(id));
-                if all_ready {
-                    // Reset deferral counter and commit all members
-                    let tiles: Vec<SceneId> = group.members.iter().copied().collect();
-                    self.sync_groups.get_mut(&group_id).unwrap().deferral_count = 0;
-                    Ok(SyncGroupCommitDecision::Commit { tiles })
-                } else if group.deferral_count < group.max_deferrals {
-                    // Defer: increment counter
-                    self.sync_groups.get_mut(&group_id).unwrap().deferral_count += 1;
-                    Ok(SyncGroupCommitDecision::Defer)
-                } else {
-                    // Force-commit with available members after exhausting deferrals
-                    let tiles: Vec<SceneId> = group
-                        .members
-                        .iter()
-                        .filter(|id| tiles_with_pending.contains(id))
-                        .copied()
-                        .collect();
-                    self.sync_groups.get_mut(&group_id).unwrap().deferral_count = 0;
-                    Ok(SyncGroupCommitDecision::ForceCommit { tiles })
-                }
+            CommitDecision::Defer => SyncGroupCommitDecision::Defer,
+            CommitDecision::ForceCommit { committed_tiles, .. } => {
+                SyncGroupCommitDecision::ForceCommit { tiles: committed_tiles.clone() }
             }
-        }
+        };
+
+        // Apply state mutation (deferral_count update) to the group.
+        let group_mut = self.sync_groups.get_mut(&group_id).unwrap();
+        apply_decision(group_mut, &decision);
+
+        Ok(result)
+    }
+
+    /// Add a tile to a sync group with an ownership check.
+    ///
+    /// The `agent_namespace` must match both the tile's namespace and the
+    /// sync group's `owner_namespace`. This enforces the spec rule that an
+    /// agent MUST NOT place another agent's tiles into a sync group.
+    ///
+    /// Spec: timing-model/spec.md lines 188–189.
+    pub fn join_sync_group_checked(
+        &mut self,
+        tile_id: SceneId,
+        group_id: SceneId,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        use crate::timing::sync_group::check_sync_group_ownership;
+
+        let tile = self.tiles.get(&tile_id).ok_or(ValidationError::TileNotFound { id: tile_id })?;
+        let group = self.sync_groups.get(&group_id).ok_or(ValidationError::SyncGroupNotFound { id: group_id })?;
+
+        check_sync_group_ownership(agent_namespace, &tile.namespace, &group.owner_namespace)
+            .map_err(|reason| ValidationError::SyncGroupOwnershipViolation { reason })?;
+
+        self.join_sync_group(tile_id, group_id)
     }
 
     /// Return the number of sync groups in the scene.

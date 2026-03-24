@@ -89,6 +89,11 @@ pub enum ValidationError {
     #[error("sync group member limit exceeded: {limit} tiles per sync group")]
     SyncGroupMemberLimitExceeded { limit: usize },
 
+    /// Returned when an agent attempts to add a tile (or modify a group) it
+    /// does not own. Spec: timing-model/spec.md lines 188–189.
+    #[error("sync group ownership violation: {reason}")]
+    SyncGroupOwnershipViolation { reason: String },
+
     /// A mutation was rejected because the requesting agent does not own the target tile.
     /// RFC 0001 §1.2: namespace isolation.
     #[error("namespace mismatch: tile {tile_id} belongs to namespace '{tile_namespace}', not '{agent_namespace}'")]
@@ -163,6 +168,7 @@ pub enum ValidationErrorCode {
     SyncGroupNotFound,
     SyncGroupLimitExceeded,
     SyncGroupMemberLimitExceeded,
+    SyncGroupOwnershipViolation,
 
     // Misc
     InvalidField,
@@ -217,6 +223,7 @@ impl ValidationErrorCode {
             ValidationError::SyncGroupMemberLimitExceeded { .. } => {
                 Self::SyncGroupMemberLimitExceeded
             }
+            ValidationError::SyncGroupOwnershipViolation { .. } => Self::SyncGroupOwnershipViolation,
             ValidationError::CycleDetected { .. } => Self::CycleDetected,
             ValidationError::ZOrderConflict { .. } => Self::ZOrderConflict,
             ValidationError::BatchSizeExceeded { .. } => Self::BatchSizeExceeded,
@@ -387,6 +394,10 @@ fn build_context_and_hint(
         ),
         ValidationError::SyncGroupMemberLimitExceeded { limit } => (
             json!({ "field": "member_count", "constraint": format!("max {} tiles per sync group", limit) }),
+            None,
+        ),
+        ValidationError::SyncGroupOwnershipViolation { reason } => (
+            json!({ "field": "sync_group", "constraint": reason }),
             None,
         ),
     }

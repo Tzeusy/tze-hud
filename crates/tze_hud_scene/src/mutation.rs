@@ -579,7 +579,8 @@ impl SceneGraph {
             }
             SceneMutation::UpdateTileSyncGroup { tile_id, sync_group } => {
                 if let Some(group_id) = sync_group {
-                    self.join_sync_group(*tile_id, *group_id)?;
+                    // Use checked variant to enforce ownership: agent must own both tile and group.
+                    self.join_sync_group_checked(*tile_id, *group_id, namespace)?;
                 } else {
                     // Clear the sync group
                     let _ = self.leave_sync_group(*tile_id);
@@ -647,7 +648,8 @@ impl SceneGraph {
                 Ok(vec![])
             }
             SceneMutation::JoinSyncGroup { tile_id, group_id } => {
-                self.join_sync_group(*tile_id, *group_id)?;
+                // Use checked variant to enforce ownership: agent must own both tile and group.
+                self.join_sync_group_checked(*tile_id, *group_id, namespace)?;
                 Ok(vec![])
             }
             SceneMutation::LeaveSyncGroup { tile_id } => {
