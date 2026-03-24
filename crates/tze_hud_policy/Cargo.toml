@@ -1,0 +1,14 @@
+[package]
+name = "tze_hud_policy"
+description = "Seven-level policy arbitration stack for tze_hud — pure, no side effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tze_hud_scene = { path = "../tze_hud_scene" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
