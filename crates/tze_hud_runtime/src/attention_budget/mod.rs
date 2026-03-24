@@ -112,8 +112,11 @@ impl InterruptionWindow {
     }
 
     /// Whether the budget is at or above the warning threshold (count >= 80% * limit).
+    ///
+    /// Uses integer arithmetic (`limit * 80 / 100`) to avoid floating-point
+    /// precision concerns.  This is equivalent to `floor(limit * 0.80)`.
     fn is_at_warning(&self) -> bool {
-        let warn_threshold = (self.limit as f64 * WARNING_FRACTION).floor() as u32;
+        let warn_threshold = (self.limit as u64 * 80 / 100) as u32;
         self.count() >= warn_threshold
     }
 }
@@ -199,8 +202,8 @@ impl AttentionBudgetTracker {
         zone_window.expire(now_us);
         zone_window.record(now_us);
 
-        // Determine outcome based on agent budget (agent budget takes precedence).
-        // Zone budget is tracked but agent budget drives the coalescing decision here.
+        // Determine outcome based on the most restrictive of agent and zone budgets.
+        // Agent budget is checked first; zone budget may independently trigger Coalesce or Warning.
         if agent_window.is_exhausted() {
             AttentionBudgetOutcome::Coalesce
         } else if agent_window.is_at_warning() {
@@ -265,6 +268,11 @@ impl AttentionBudgetTracker {
         now_us: u64,
     ) -> SceneEvent {
         let used = self.agent_count(agent_namespace);
+        let limit = self
+            .agent_budgets
+            .get(agent_namespace)
+            .map(|w| w.limit)
+            .unwrap_or(DEFAULT_AGENT_BUDGET);
         self.warning_seq += 1;
         SceneEventBuilder::new(
             "system.attention_budget_warning",
@@ -272,7 +280,7 @@ impl AttentionBudgetTracker {
             EventPayload::AttentionBudgetWarning {
                 agent_namespace: agent_namespace.to_string(),
                 used,
-                limit: DEFAULT_AGENT_BUDGET,
+                limit,
             },
         )
         .wall_us(now_us)

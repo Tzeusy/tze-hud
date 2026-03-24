@@ -196,9 +196,8 @@ impl QuietHoursGate {
     /// If the zone is not yet registered, a default FIFO queue with depth 100
     /// is created automatically.
     ///
-    /// Returns `true` if the event was enqueued; `false` if the zone's queue
-    /// was full and the oldest event was dropped to make room (still enqueued).
-    /// The event is always enqueued — this return value is informational.
+    /// The event is always enqueued. If the zone's queue was at capacity, the
+    /// oldest event is silently dropped to make room (overflow drops oldest-first).
     pub fn enqueue(&mut self, zone_id: Uuid, event: SceneEvent) {
         let queue = self.zone_queues.entry(zone_id).or_insert_with(|| {
             ZoneQueue::new_with_default_depth(ZoneContentionPolicy::Fifo)

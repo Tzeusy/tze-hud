@@ -2567,11 +2567,11 @@ dependencies = [
 name = "tze_hud_runtime"
 version = "0.1.0"
 dependencies = [
- "log",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
+ "tracing",
  "tze_hud_compositor",
  "tze_hud_input",
  "tze_hud_protocol",

@@ -16,7 +16,7 @@
 //! ## What does NOT live here
 //!
 //! The actual delivery loop (draining the queue when quiet hours end) is
-//! performed by `quiet_hours::Gate::drain_queue`, not by this module.
+//! performed by `QuietHoursGate::drain_queues()`, not by this module.
 
 use std::collections::VecDeque;
 
@@ -56,7 +56,13 @@ pub struct ZoneQueue {
 
 impl ZoneQueue {
     /// Create a new queue with the given policy and depth limit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_depth` is 0. A queue of zero capacity is not useful and
+    /// indicates a caller bug.
     pub fn new(policy: ZoneContentionPolicy, max_depth: usize) -> Self {
+        assert!(max_depth > 0, "ZoneQueue::new: max_depth must be >= 1");
         Self {
             policy,
             max_depth,

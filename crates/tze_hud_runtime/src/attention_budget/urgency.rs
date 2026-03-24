@@ -27,6 +27,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use tracing::warn;
+
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Configuration for the earned-urgency tracker.
@@ -52,9 +54,10 @@ impl Default for EarnedUrgencyConfig {
 
 /// Tracks per-agent HIGH-class event rates.
 ///
-/// Warnings are surfaced via the `last_warning` field and via `log::warn!`.
-/// Callers should check [`EarnedUrgencyTracker::record_high_event`] return value
-/// to know when a warning was triggered.
+/// Warnings are surfaced via `log::warn!` and via the
+/// [`UrgencyRecord::ThresholdExceeded`] return value from
+/// [`EarnedUrgencyTracker::record_high_event`].
+/// Callers should inspect the return value to know when a warning was triggered.
 #[derive(Debug, Default)]
 pub struct EarnedUrgencyTracker {
     config: EarnedUrgencyConfig,
@@ -113,14 +116,13 @@ impl EarnedUrgencyTracker {
         let count = window.len() as u32;
 
         if count > self.config.high_rate_threshold {
-            log::warn!(
-                "earned_urgency: agent '{}' has emitted {} HIGH-class events in the last {}s \
-                 (threshold: {}). An agent that escalates everything is an agent that means \
-                 nothing.",
-                agent_namespace,
+            warn!(
+                agent = %agent_namespace,
                 count,
-                self.config.window_us / 1_000_000,
-                self.config.high_rate_threshold,
+                window_secs = self.config.window_us / 1_000_000,
+                threshold = self.config.high_rate_threshold,
+                "earned_urgency: agent has emitted disproportionate HIGH-class events. \
+                 An agent that escalates everything is an agent that means nothing.",
             );
             UrgencyRecord::ThresholdExceeded { count }
         } else {
