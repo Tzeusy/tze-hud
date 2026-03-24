@@ -633,6 +633,7 @@ impl BudgetEnforcer {
 impl AgentResourceState {
     /// Helper: when entering Warning, use `now` as the entered-state instant.
     /// We just need this to avoid a borrow conflict in tick(); not stored.
+    #[allow(dead_code)]
     fn budget_state_entered_instant(&self, now: Instant) -> Instant {
         match &self.budget_state {
             BudgetState::Warning { first_exceeded } => *first_exceeded,
