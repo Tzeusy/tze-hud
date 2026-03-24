@@ -43,6 +43,12 @@ use tze_hud_scene::{
         Capability, LeaseState, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
     },
 };
+use tze_hud_scene::lease::{
+    GracePeriodTimer,
+    TileVisualHint,
+    ORPHAN_GRACE_PERIOD_MS,
+    POST_REVOCATION_FREE_DELAY_MS,
+};
 
 // ─── Test helper: TransitionLog ──────────────────────────────────────────────
 
@@ -940,4 +946,391 @@ fn test_resource_footprint_measurements() {
     assert_eq!(zero_phase.tile_count, 0, "zero tiles at expired phase");
     assert_eq!(zero_phase.node_count, 0, "zero nodes at expired phase");
     assert_eq!(zero_phase.active_lease_count, 0, "zero active leases at expired phase");
+}
+
+// ─── Zone helper ─────────────────────────────────────────────────────────────
+
+/// Build a minimal stream-text zone definition for use in tests.
+fn make_stream_text_zone(name: &str) -> tze_hud_scene::types::ZoneDefinition {
+    use tze_hud_scene::types::{
+        ContentionPolicy, GeometryPolicy, DisplayEdge, RenderingPolicy,
+        ZoneDefinition, ZoneMediaType,
+    };
+    ZoneDefinition {
+        id: SceneId::new(),
+        name: name.to_string(),
+        description: format!("{} zone (test)", name),
+        geometry_policy: GeometryPolicy::EdgeAnchored {
+            edge: DisplayEdge::Bottom,
+            height_pct: 0.10,
+            width_pct: 0.80,
+            margin_px: 48.0,
+        },
+        accepted_media_types: vec![ZoneMediaType::StreamText],
+        rendering_policy: RenderingPolicy::default(),
+        contention_policy: ContentionPolicy::LatestWins,
+        max_publishers: 4,
+        transport_constraint: None,
+        auto_clear_ms: None,
+    }
+}
+
+// ─── Test 11: Disconnection badge set within 1 frame ──────────────────────────
+
+/// Verifies that tiles owned by an orphaned lease receive the DisconnectionBadge
+/// visual hint when `disconnect_lease` is called.
+///
+/// Spec line 133: "Disconnection badge MUST appear within 1 frame."
+/// This test validates the scene-data side of the contract (the compositor
+/// reads `tile.visual_hint` to decide what to render).
+#[test]
+fn test_disconnection_badge_set_on_orphan() {
+    let clock = Arc::new(TestClock::new(0));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+    let tab_id = scene.create_tab("Main", 0).expect("create_tab");
+    let lease_id = scene.grant_lease("agent.hotel", 60_000, vec![Capability::CreateTile]);
+
+    let tile_a = apply_create_tile(&mut scene, tab_id, "agent.hotel", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
+    let tile_b = apply_create_tile(&mut scene, tab_id, "agent.hotel", lease_id, Rect::new(210.0, 0.0, 200.0, 200.0), 2);
+
+    // Tiles start with no badge
+    assert_eq!(scene.tiles[&tile_a].visual_hint, TileVisualHint::None);
+    assert_eq!(scene.tiles[&tile_b].visual_hint, TileVisualHint::None);
+
+    // Disconnect: badge must be set (spec: within 1 frame)
+    clock.advance(1_000);
+    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
+
+    // Both tiles must now show DisconnectionBadge
+    assert_eq!(
+        scene.tiles[&tile_a].visual_hint,
+        TileVisualHint::DisconnectionBadge,
+        "tile_a must have DisconnectionBadge after disconnect"
+    );
+    assert_eq!(
+        scene.tiles[&tile_b].visual_hint,
+        TileVisualHint::DisconnectionBadge,
+        "tile_b must have DisconnectionBadge after disconnect"
+    );
+
+    // Reconnect: badge must clear (spec line 141: within 1 frame)
+    clock.advance(5_000);
+    scene.reconnect_lease(&lease_id, clock.now_millis()).expect("reconnect");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
+
+    assert_eq!(
+        scene.tiles[&tile_a].visual_hint,
+        TileVisualHint::None,
+        "tile_a badge must clear after reconnect"
+    );
+    assert_eq!(
+        scene.tiles[&tile_b].visual_hint,
+        TileVisualHint::None,
+        "tile_b badge must clear after reconnect"
+    );
+
+    let violations = assert_layer0_invariants(&scene);
+    assert!(violations.is_empty(), "Layer 0 violations after badge test: {violations:?}");
+}
+
+// ─── Test 12: Zone publications cleared on lease expiry ───────────────────────
+
+/// Verifies that zone publications from an expired lease are cleared.
+///
+/// Spec §Requirement: Lease Revocation Clears Zone Publications (lines 235–242):
+/// "When a lease is REVOKED or EXPIRED, all zone publications made under that
+/// lease MUST be immediately cleared from the zone registry."
+#[test]
+fn test_zone_publications_cleared_on_lease_expiry() {
+    use tze_hud_scene::types::ZoneContent;
+
+    let clock = Arc::new(TestClock::new(0));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+    let _tab_id = scene.create_tab("Main", 0).expect("create_tab");
+
+    // Register a subtitle zone
+    scene.register_zone(make_stream_text_zone("subtitle"));
+
+    // Grant a lease with a short TTL for agent.india
+    let lease_id = scene.grant_lease("agent.india", 5_000, vec![Capability::CreateTile]);
+
+    // Agent publishes to subtitle zone
+    scene.publish_to_zone(
+        "subtitle",
+        ZoneContent::StreamText("Hello from agent.india".to_string()),
+        "agent.india",
+        None,
+    ).expect("publish_to_zone");
+
+    // Zone should have active publication
+    assert!(!scene.zone_registry.active_publishes.get("subtitle").map(|v| v.is_empty()).unwrap_or(true),
+        "zone must have active publish before expiry");
+
+    // Disconnect agent.india
+    clock.advance(1_000);
+    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+
+    // Zone publication still present during grace period
+    assert!(!scene.zone_registry.active_publishes.get("subtitle").map(|v| v.is_empty()).unwrap_or(true),
+        "zone publish must persist during grace period (stale-badged but visible)");
+
+    // Advance past grace period
+    clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1_000);
+    let expiries = scene.expire_leases();
+    assert!(!expiries.is_empty(), "expiry sweep must find the expired lease");
+
+    // Zone publication must now be cleared
+    let still_active = scene.zone_registry.active_publishes.get("subtitle")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    assert!(!still_active, "zone publication must be cleared after lease expiry");
+}
+
+// ─── Test 13: Zone publish rejected when lease is orphaned ────────────────────
+
+/// Verifies that zone publishes from an orphaned namespace are rejected.
+///
+/// Spec lines 231–233 (adapted to orphan state):
+/// "WHEN a lease is ORPHANED THEN existing zone publications remain visible
+/// with a staleness/disconnection indicator but no new publishes are accepted."
+#[test]
+fn test_zone_publish_rejected_when_lease_orphaned() {
+    use tze_hud_scene::types::ZoneContent;
+    use tze_hud_scene::validation::ValidationError;
+
+    let clock = Arc::new(TestClock::new(0));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+    scene.create_tab("Main", 0).expect("create_tab");
+    scene.register_zone(make_stream_text_zone("subtitle"));
+
+    let lease_id = scene.grant_lease("agent.juliet", 60_000, vec![Capability::CreateTile]);
+
+    // Publish while active — must succeed
+    scene.publish_to_zone_with_lease(
+        "subtitle",
+        ZoneContent::StreamText("first".to_string()),
+        "agent.juliet",
+        None,
+    ).expect("publish while active must succeed");
+
+    // Disconnect agent
+    clock.advance(1_000);
+    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
+
+    // New publish attempt while orphaned — must be rejected
+    let result = scene.publish_to_zone_with_lease(
+        "subtitle",
+        ZoneContent::StreamText("second attempt from disconnected agent".to_string()),
+        "agent.juliet",
+        None,
+    );
+
+    assert!(
+        matches!(result, Err(ValidationError::ZonePublishLeaseOrphaned { .. })),
+        "zone publish from orphaned lease must return ZonePublishLeaseOrphaned, got: {:?}",
+        result
+    );
+
+    // Existing publication must still be present (stale-badged)
+    let pubs = scene.zone_registry.active_publishes.get("subtitle")
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert_eq!(pubs, 1, "existing zone publication must still be visible during orphan");
+}
+
+// ─── Test 14: Budget-driven revocation bypasses grace period ─────────────────
+
+/// Verifies that budget-driven revocation:
+/// - Transitions leases directly to REVOKED (no orphan state).
+/// - Tiles are removed after the 100ms delay.
+/// - Post-revocation resource footprint is zero.
+///
+/// Spec §Post-Revocation Resource Cleanup (lines 253–260).
+#[test]
+fn test_budget_revocation_bypasses_grace_and_zero_footprint() {
+    let clock = Arc::new(TestClock::new(0));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+    let tab_id = scene.create_tab("Main", 0).expect("create_tab");
+    let lease_id = scene.grant_lease("agent.kilo", 60_000, vec![Capability::CreateTile]);
+
+    let tile_a = apply_create_tile(&mut scene, tab_id, "agent.kilo", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
+    let tile_b = apply_create_tile(&mut scene, tab_id, "agent.kilo", lease_id, Rect::new(210.0, 0.0, 200.0, 200.0), 2);
+    assert_eq!(scene.tile_count(), 2);
+
+    // Also grant a second agent that must be unaffected
+    let other_lease = scene.grant_lease("agent.lima", 60_000, vec![Capability::CreateTile]);
+    let tile_other = apply_create_tile(&mut scene, tab_id, "agent.lima", other_lease, Rect::new(500.0, 0.0, 200.0, 200.0), 3);
+    assert_eq!(scene.tile_count(), 3);
+
+    // ── Initiate budget-driven revocation ─────────────────────────────────
+    clock.advance(1_000);
+    let specs = scene.initiate_budget_revocation("agent.kilo");
+
+    assert_eq!(specs.len(), 1, "one lease for agent.kilo");
+    // Lease is now REVOKED (not ORPHANED — grace bypassed)
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Revoked,
+        "budget revocation must set state=REVOKED immediately (not ORPHANED)");
+
+    // Tiles still exist at t+0ms (pending 100ms free delay)
+    // Note: initiate only marks for removal; finalize does the actual free.
+    assert_eq!(specs[0].bypasses_grace_period(), true,
+        "budget policy revocation must bypass grace period");
+
+    // Verify the spec has the right free delay
+    assert!(!specs[0].is_ready_to_free(clock.now_millis()),
+        "not ready to free at t=0 after revocation");
+    assert!(!specs[0].is_ready_to_free(clock.now_millis() + POST_REVOCATION_FREE_DELAY_MS - 1),
+        "not ready at 99ms");
+
+    // ── After 100ms delay: finalize cleanup ───────────────────────────────
+    clock.advance(POST_REVOCATION_FREE_DELAY_MS);
+    let finalized = scene.finalize_budget_revocation(&specs, clock.now_millis());
+    assert_eq!(finalized, 1, "exactly 1 spec finalized");
+
+    // Tiles removed — zero footprint
+    assert!(!scene.tiles.contains_key(&tile_a), "tile_a removed after budget revocation");
+    assert!(!scene.tiles.contains_key(&tile_b), "tile_b removed after budget revocation");
+    assert_eq!(scene.tile_count(), 1, "only agent.lima tile remains");
+
+    // Other agent unaffected
+    assert!(scene.tiles.contains_key(&tile_other), "agent.lima tile survives kilo revocation");
+    assert_eq!(scene.leases[&other_lease].state, LeaseState::Active,
+        "agent.lima lease unaffected");
+
+    let violations = assert_layer0_invariants(&scene);
+    assert!(violations.is_empty(), "Layer 0 violations after budget revocation: {violations:?}");
+
+    let _ = (tile_a, tile_b, tile_other);
+}
+
+// ─── Test 15: Grace period precision (GracePeriodTimer unit integration) ──────
+
+/// Integration test for the GracePeriodTimer precision requirement.
+///
+/// Spec §Grace Period Precision (lines 147–154):
+/// - "The grace period MUST be accurate to +/- 100ms."
+/// - "The runtime MUST NOT prematurely expire the grace period."
+/// - Agent can reconnect at 29,950ms.
+#[test]
+fn test_grace_period_timer_precision_integration() {
+    // Simulate the scenario from the spec (lines 152–154):
+    // WHEN grace = 30,000ms THEN agent can still reconnect at 29,950ms.
+    let timer = GracePeriodTimer::new(
+        SceneId::new(),
+        0,                      // orphaned at t=0
+        ORPHAN_GRACE_PERIOD_MS, // 30,000ms
+    );
+
+    // Must not expire at 29,950ms (spec: MUST NOT prematurely expire)
+    assert!(
+        timer.can_reconnect(29_950),
+        "agent must be able to reconnect at 29,950ms (spec lines 152-154)"
+    );
+    assert!(
+        !timer.has_expired(29_950),
+        "grace period must not be expired at 29,950ms"
+    );
+
+    // Must be expired at exactly 30,000ms
+    assert!(
+        timer.has_expired(30_000),
+        "grace period must be expired at 30,000ms"
+    );
+    assert!(
+        !timer.can_reconnect(30_000),
+        "reconnect must not be allowed at exactly 30,000ms"
+    );
+
+    // SceneGraph-level: reconnect at 29,950ms succeeds
+    let clock = Arc::new(TestClock::new(0));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    let _tab_id = scene.create_tab("Main", 0).expect("create_tab");
+    let lease_id = scene.grant_lease("agent.mike", 600_000, vec![]);
+
+    // Orphan the lease at t=0
+    scene.disconnect_lease(&lease_id, 0).expect("disconnect");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
+
+    // Reconnect at 29,950ms — must succeed
+    scene.reconnect_lease(&lease_id, 29_950).expect("reconnect at 29,950ms must succeed (spec lines 152-154)");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Active,
+        "lease must be Active after reconnect at 29,950ms");
+}
+
+// ─── Test 16: Zone publications cleared on revoke_lease ──────────────────────
+
+/// Verifies that `revoke_lease` clears zone publications from that namespace.
+///
+/// Spec §Requirement: Lease Revocation Clears Zone Publications (lines 235–242).
+#[test]
+fn test_zone_publications_cleared_on_revoke_lease() {
+    use tze_hud_scene::types::ZoneContent;
+
+    let clock = Arc::new(TestClock::new(0));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+    scene.create_tab("Main", 0).expect("create_tab");
+    scene.register_zone(make_stream_text_zone("status"));
+
+    let lease_id = scene.grant_lease("agent.november", 60_000, vec![]);
+
+    // Publish while active
+    scene.publish_to_zone("status", ZoneContent::StreamText("active".into()), "agent.november", None)
+        .expect("publish");
+
+    assert!(!scene.zone_registry.active_publishes.get("status").map(|v| v.is_empty()).unwrap_or(true),
+        "zone must have publication before revocation");
+
+    // Revoke lease
+    scene.revoke_lease(lease_id).expect("revoke_lease");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Revoked);
+
+    // Zone publication must be cleared
+    let still_active = scene.zone_registry.active_publishes.get("status")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    assert!(!still_active, "zone publication must be cleared after revoke_lease");
+}
+
+// ─── Test 17: TTL continues running during orphan state ──────────────────────
+
+/// Verifies that the TTL clock continues running while a lease is ORPHANED.
+///
+/// Spec line 133: "TTL clock MUST continue running during the grace period."
+/// This is distinct from SUSPENDED, where the TTL clock is paused.
+#[test]
+fn test_ttl_continues_during_orphan_state() {
+    let clock = Arc::new(TestClock::new(0));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+    scene.create_tab("Main", 0).expect("create_tab");
+    // Short TTL of 10,000ms
+    let lease_id = scene.grant_lease("agent.oscar", 10_000, vec![]);
+
+    // Advance 2,000ms (TTL now 8,000ms remaining)
+    clock.advance(2_000);
+    let ttl_at_2s = scene.leases[&lease_id].remaining_ms(clock.now_millis());
+    assert!(ttl_at_2s <= 8_100 && ttl_at_2s >= 7_900, "TTL ≈ 8,000ms at t=2s, got {ttl_at_2s}");
+
+    // Disconnect (orphan) at t=2,000ms
+    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
+
+    // Advance another 4,000ms while orphaned (TTL must continue counting down)
+    clock.advance(4_000);
+    let ttl_at_6s = scene.leases[&lease_id].remaining_ms(clock.now_millis());
+    // TTL should be ≈ 4,000ms (10,000 - 6,000 elapsed)
+    assert!(
+        ttl_at_6s <= 4_100 && ttl_at_6s >= 3_900,
+        "TTL must continue running during orphan state: expected ≈4,000ms, got {ttl_at_6s}ms"
+    );
+
+    // Verify the TTL is actually smaller than at t=2s (proving clock ran during orphan)
+    assert!(ttl_at_6s < ttl_at_2s, "TTL must have decreased during orphan state");
 }
