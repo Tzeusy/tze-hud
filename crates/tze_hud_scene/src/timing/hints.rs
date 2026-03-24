@@ -133,7 +133,7 @@ impl Schedule {
 ///
 /// The `schedule` field is a `oneof`-style enum. If the caller provides a
 /// `Schedule::PresentAt` alongside any relative primitive, validation (see
-/// [`validate_mutual_exclusion`]) MUST reject it with `RELATIVE_SCHEDULE_CONFLICT`.
+/// [`validate_timing_hints`][crate::timing::validate_timing_hints]) MUST reject it with `RELATIVE_SCHEDULE_CONFLICT`.
 ///
 /// # Timestamp precedence
 ///
@@ -217,7 +217,7 @@ impl TimingHints {
     /// an enum (not multiple optional fields), this invariant is trivially
     /// maintained by the Rust type system. However, when deserializing from
     /// wire format where the original proto `oneof` allows setting multiple
-    /// fields, callers should use [`validate_mutual_exclusion`].
+    /// fields, callers should use [`validate_timing_hints`][crate::timing::validate_timing_hints].
     pub fn has_relative_schedule(&self) -> bool {
         matches!(
             self.schedule,

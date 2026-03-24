@@ -36,6 +36,11 @@ use serde::{Deserialize, Serialize};
 
 // ─── TileStaleness ───────────────────────────────────────────────────────────
 
+/// Default staleness threshold in microseconds used by `TileStaleness::default()`.
+///
+/// Matches the spec default `tile_stale_threshold_ms = 5000 ms`.
+const DEFAULT_TILE_STALE_THRESHOLD_US: u64 = 5_000_000;
+
 /// Staleness state for a single tile.
 ///
 /// The compositor advances time by calling
@@ -44,7 +49,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// Internally tracks elapsed microseconds so it works correctly with any
 /// injectable clock.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+///
+/// # `Default`
+///
+/// `TileStaleness::default()` uses the spec default threshold of 5 s.
+/// Prefer [`TileStaleness::new`] to set an explicit threshold derived from
+/// `TimingConfig::tile_stale_threshold_ms`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TileStaleness {
     /// Cumulative idle time in microseconds since last mutation.
     elapsed_idle_us: u64,
@@ -57,6 +68,13 @@ pub struct TileStaleness {
     session_suspended: bool,
     /// Whether sync-group drift staleness is active.
     sync_drift_stale: bool,
+}
+
+impl Default for TileStaleness {
+    /// Returns a `TileStaleness` with the spec default threshold of 5 s.
+    fn default() -> Self {
+        Self::new(DEFAULT_TILE_STALE_THRESHOLD_US)
+    }
 }
 
 impl TileStaleness {

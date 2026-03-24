@@ -139,8 +139,9 @@ impl<T: Eq + Clone> PendingQueue<T> {
                 _ => break,
             }
         }
-        // The heap gives us entries in descending order (max-heap reversed to
-        // min), so we get the smallest timestamps first already.
+        // With the reversed `Ord` implementation the BinaryHeap acts as a
+        // min-heap by `present_at_wall_us`, so pops (and thus appends) yield
+        // entries in ascending timestamp order (earliest first) already.
         ready
     }
 

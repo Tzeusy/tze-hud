@@ -265,18 +265,20 @@ mod tests {
         let t2 = SceneId::new();
         let t3 = SceneId::new();
 
-        // Insert in reverse order
+        // Insert in reverse order to verify heap sorts them
         heap.register(t3, WallUs(3_000));
         heap.register(t1, WallUs(1_000));
         heap.register(t2, WallUs(2_000));
 
         let expired = heap.drain_expired(WallUs(3_000));
-        assert_eq!(expired.len(), 3);
-        // Heap drains smallest first
-        assert!(
-            expired[0] == t1 || expired[1] == t1 || expired[2] == t1,
-            "t1 must be in the result"
+        // All three tiles must be present in ascending expiry-time order.
+        assert_eq!(expired.len(), 3, "all three tiles must expire");
+        assert_eq!(
+            expired[0], t1,
+            "t1 (expires 1000) must be first (earliest)"
         );
+        assert_eq!(expired[1], t2, "t2 (expires 2000) must be second");
+        assert_eq!(expired[2], t3, "t3 (expires 3000) must be last");
     }
 
     // ── Freeze-then-unfreeze semantics ──

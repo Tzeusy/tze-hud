@@ -73,17 +73,23 @@ pub struct TimestampValidationInput {
 /// `Err(TimingError)` on a fatal validation failure.
 ///
 /// Checks performed (in order):
-/// 1. `RELATIVE_SCHEDULE_CONFLICT` — more than one schedule variant set
-///    (impossible via enum, but we check via `has_relative_schedule` +
-///    explicit `PresentAt` for the proto wire-decode path)
-/// 2. `INVALID_DELIVERY_POLICY` — `DROP_IF_LATE` with non-`EphemeralRealtime`
-/// 3. `CLOCK_SKEW_EXCESSIVE` — absolute skew > 1 s
-/// 4. `TIMESTAMP_TOO_OLD` — `present_at_wall_us` more than 60 s in the past
-/// 5. `TIMESTAMP_TOO_FUTURE` — `present_at_wall_us` beyond `max_future_schedule_us`
-/// 6. `TIMESTAMP_EXPIRY_BEFORE_PRESENT` — `expires_at_wall_us <= present_at_wall_us`
+/// 1. `INVALID_DELIVERY_POLICY` — `DROP_IF_LATE` with non-`EphemeralRealtime`
+/// 2. `CLOCK_SKEW_EXCESSIVE` — absolute skew > 1 s
+/// 3. `TIMESTAMP_TOO_OLD` — `present_at_wall_us` more than 60 s in the past
+/// 4. `TIMESTAMP_TOO_FUTURE` — `present_at_wall_us` beyond `max_future_schedule_us`
+/// 5. `TIMESTAMP_EXPIRY_BEFORE_PRESENT` — `expires_at_wall_us <= present_at_wall_us`
 ///
 /// The `CLOCK_SKEW_HIGH` warning is appended to the returned vec when
 /// `|estimated_skew_us|` > 100 ms (but <= 1 s).
+///
+/// # Note on `RELATIVE_SCHEDULE_CONFLICT`
+///
+/// The `Schedule` field is a Rust enum — only one variant can be set at a
+/// time, so mutual exclusion is enforced by the type system in this crate.
+/// For the proto wire-decode path, where a non-compliant client may set
+/// multiple `oneof` fields simultaneously, callers MUST check for conflict
+/// during deserialization and return [`TimingError::RelativeScheduleConflict`]
+/// before calling this function.
 pub fn validate_timing_hints(
     hints: &TimingHints,
     ctx: &TimestampValidationInput,

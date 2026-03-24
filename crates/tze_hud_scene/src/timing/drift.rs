@@ -28,6 +28,7 @@
 //! | > 1s | Reject mutation with `CLOCK_SKEW_EXCESSIVE` |
 //! | 3 consecutive ClockSync failures | Terminate session |
 
+use crate::timing::domains::{MonoUs, WallUs};
 use crate::timing::errors::{TimingError, TimingWarning};
 use crate::timing::scheduling::{
     CLOCK_SKEW_EXCESSIVE_THRESHOLD_US, CLOCK_SKEW_HIGH_THRESHOLD_US,
@@ -47,9 +48,9 @@ pub const DEFAULT_CLOCK_JUMP_DETECTION_US: u64 = 50_000;
 #[derive(Clone, Debug)]
 pub struct SessionClockSync {
     /// Compositor monotonic clock at session establishment.
-    pub session_open_mono_us: u64,
+    pub session_open_mono_us: MonoUs,
     /// Compositor wall-clock at session establishment.
-    pub session_open_wall_us: u64,
+    pub session_open_wall_us: WallUs,
     /// Initial clock-skew estimate (wall - mono at session open).
     pub initial_skew_us: i64,
 }
@@ -59,9 +60,10 @@ impl SessionClockSync {
     ///
     /// From spec §Requirement: Session Clock Sync Point (lines 46-48):
     /// `initial_skew = session_open_wall_us - session_open_mono_us`.
-    pub fn new(session_open_mono_us: u64, session_open_wall_us: u64) -> Self {
-        let initial_skew_us = (session_open_wall_us as i128 - session_open_mono_us as i128)
-            .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+    pub fn new(session_open_mono_us: MonoUs, session_open_wall_us: WallUs) -> Self {
+        let initial_skew_us =
+            (session_open_wall_us.as_u64() as i128 - session_open_mono_us.as_u64() as i128)
+                .clamp(i64::MIN as i128, i64::MAX as i128) as i64;
         Self {
             session_open_mono_us,
             session_open_wall_us,
@@ -165,8 +167,12 @@ impl ClockDriftEstimator {
         sorted.sort_unstable();
         let mid = self.count / 2;
         if self.count % 2 == 0 {
-            // Average of two middle values (truncated).
-            sorted[mid - 1] / 2 + sorted[mid] / 2
+            // Average of two middle values computed in i128 to avoid precision
+            // loss and potential overflow with large skew magnitudes.
+            let a = sorted[mid - 1] as i128;
+            let b = sorted[mid] as i128;
+            let avg = (a + b) / 2;
+            avg.clamp(i64::MIN as i128, i64::MAX as i128) as i64
         } else {
             sorted[mid]
         }
@@ -214,7 +220,7 @@ impl ClockDriftEstimator {
 #[derive(Clone, Debug)]
 pub struct ClockSyncRequest {
     /// Agent-supplied current wall-clock time (UTC µs since epoch).
-    pub agent_timestamp_wall_us: u64,
+    pub agent_timestamp_wall_us: WallUs,
 }
 
 /// Response payload for the `ClockSync` unary RPC.
@@ -223,9 +229,9 @@ pub struct ClockSyncRequest {
 #[derive(Clone, Debug)]
 pub struct ClockSyncResponse {
     /// Compositor monotonic clock at RPC handling time.
-    pub compositor_mono_us: u64,
+    pub compositor_mono_us: MonoUs,
     /// Compositor wall-clock at RPC handling time.
-    pub compositor_wall_us: u64,
+    pub compositor_wall_us: WallUs,
     /// Estimated skew: `agent_timestamp_wall_us - compositor_wall_us` (signed).
     /// Positive = agent is ahead.
     pub estimated_skew_us: i64,
@@ -245,11 +251,12 @@ pub struct ClockSyncResponse {
 /// and wall clock values and the estimated skew.
 pub fn handle_clock_sync(
     req: &ClockSyncRequest,
-    compositor_mono_us: u64,
-    compositor_wall_us: u64,
+    compositor_mono_us: MonoUs,
+    compositor_wall_us: WallUs,
     estimator: &mut ClockDriftEstimator,
 ) -> Result<ClockSyncResponse, TimingError> {
-    let estimated_skew_us = estimator.push_sample(req.agent_timestamp_wall_us, compositor_wall_us);
+    let estimated_skew_us =
+        estimator.push_sample(req.agent_timestamp_wall_us.as_u64(), compositor_wall_us.as_u64());
     let abs_skew = estimated_skew_us.unsigned_abs();
 
     // CLOCK_SKEW_EXCESSIVE — reject
@@ -285,14 +292,14 @@ pub struct VsyncSyncPoint {
     /// Frame number (monotonically increasing from session start).
     pub frame_number: u64,
     /// Monotonic clock at vsync.
-    pub vsync_mono_us: u64,
+    pub vsync_mono_us: MonoUs,
     /// Wall-clock at vsync (sampled once and cached per frame).
-    pub vsync_wall_us: u64,
+    pub vsync_wall_us: WallUs,
 }
 
 impl VsyncSyncPoint {
     /// Create a new vsync sync point.
-    pub fn new(frame_number: u64, vsync_mono_us: u64, vsync_wall_us: u64) -> Self {
+    pub fn new(frame_number: u64, vsync_mono_us: MonoUs, vsync_wall_us: WallUs) -> Self {
         Self {
             frame_number,
             vsync_mono_us,
@@ -311,13 +318,13 @@ mod tests {
 
     #[test]
     fn session_clock_sync_initial_skew() {
-        let sync = SessionClockSync::new(1_000_000, 1_050_000); // wall is 50ms ahead
+        let sync = SessionClockSync::new(MonoUs(1_000_000), WallUs(1_050_000)); // wall is 50ms ahead
         assert_eq!(sync.initial_skew_us, 50_000);
     }
 
     #[test]
     fn session_clock_sync_negative_skew() {
-        let sync = SessionClockSync::new(1_100_000, 1_000_000); // mono is 100ms ahead
+        let sync = SessionClockSync::new(MonoUs(1_100_000), WallUs(1_000_000)); // mono is 100ms ahead
         assert_eq!(sync.initial_skew_us, -100_000);
     }
 
@@ -406,9 +413,15 @@ mod tests {
     fn clock_sync_returns_skew_within_tolerance() {
         let mut est = ClockDriftEstimator::new(DEFAULT_CLOCK_JUMP_DETECTION_US);
         let req = ClockSyncRequest {
-            agent_timestamp_wall_us: 1_000_050_000, // +50ms
+            agent_timestamp_wall_us: WallUs(1_000_050_000), // +50ms
         };
-        let resp = handle_clock_sync(&req, 1_000_000_000, 1_000_000_000, &mut est).unwrap();
+        let resp = handle_clock_sync(
+            &req,
+            MonoUs(1_000_000_000),
+            WallUs(1_000_000_000),
+            &mut est,
+        )
+        .unwrap();
         assert!(resp.skew_within_tolerance);
         assert_eq!(resp.estimated_skew_us, 50_000);
         assert!(resp.warning.is_none());
@@ -418,9 +431,15 @@ mod tests {
     fn clock_sync_warns_on_high_skew() {
         let mut est = ClockDriftEstimator::new(DEFAULT_CLOCK_JUMP_DETECTION_US);
         let req = ClockSyncRequest {
-            agent_timestamp_wall_us: 1_000_200_000, // +200ms
+            agent_timestamp_wall_us: WallUs(1_000_200_000), // +200ms
         };
-        let resp = handle_clock_sync(&req, 1_000_000_000, 1_000_000_000, &mut est).unwrap();
+        let resp = handle_clock_sync(
+            &req,
+            MonoUs(1_000_000_000),
+            WallUs(1_000_000_000),
+            &mut est,
+        )
+        .unwrap();
         assert!(!resp.skew_within_tolerance);
         assert!(resp.warning.is_some());
     }
@@ -429,9 +448,15 @@ mod tests {
     fn clock_sync_rejects_excessive_skew() {
         let mut est = ClockDriftEstimator::new(DEFAULT_CLOCK_JUMP_DETECTION_US);
         let req = ClockSyncRequest {
-            agent_timestamp_wall_us: 1_002_000_000, // +2s
+            agent_timestamp_wall_us: WallUs(1_002_000_000), // +2s
         };
-        let err = handle_clock_sync(&req, 1_000_000_000, 1_000_000_000, &mut est).unwrap_err();
+        let err = handle_clock_sync(
+            &req,
+            MonoUs(1_000_000_000),
+            WallUs(1_000_000_000),
+            &mut est,
+        )
+        .unwrap_err();
         assert_eq!(err, TimingError::ClockSkewExcessive);
     }
 
@@ -439,9 +464,9 @@ mod tests {
 
     #[test]
     fn vsync_sync_point_stores_triple() {
-        let sp = VsyncSyncPoint::new(42, 1_000_000, 2_000_000);
+        let sp = VsyncSyncPoint::new(42, MonoUs(1_000_000), WallUs(2_000_000));
         assert_eq!(sp.frame_number, 42);
-        assert_eq!(sp.vsync_mono_us, 1_000_000);
-        assert_eq!(sp.vsync_wall_us, 2_000_000);
+        assert_eq!(sp.vsync_mono_us, MonoUs(1_000_000));
+        assert_eq!(sp.vsync_wall_us, WallUs(2_000_000));
     }
 }
