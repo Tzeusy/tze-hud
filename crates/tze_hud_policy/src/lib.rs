@@ -56,6 +56,9 @@ pub mod override_queue;
 pub mod safety;
 pub mod frame;
 pub mod event;
+pub mod interruption;
+pub mod attention_budget;
+pub mod attention;
 mod tests;
 
 // ─── Public API re-exports ────────────────────────────────────────────────────
@@ -154,4 +157,16 @@ pub use frame::{
 pub use event::{
     DiscardReason, EventContext, EventEvaluation, EventOutcome, evaluate_event,
     safe_mode_activated_in_batch,
+};
+
+// ─── Dedicated attention module re-exports ────────────────────────────────────
+
+pub use attention::{AttentionDecision, evaluate_attention};
+pub use attention_budget::{
+    AttentionBudget,
+    AgentBudgetPair,
+    DEFAULT_PER_AGENT_LIMIT,
+    DEFAULT_PER_ZONE_LIMIT,
+    DEFAULT_PER_ZONE_STACK_LIMIT,
+    DEFAULT_WINDOW_SECS,
 };
