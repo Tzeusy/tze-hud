@@ -14,7 +14,8 @@
 //! | 8     | Telemetry Emit     | Telemetry  | < 200µs     |
 //!
 //! See `pipeline.rs` for the `FramePipeline` orchestrator and `HitTestSnapshot`
-//! (ArcSwap-backed lock-free tile bounds for Stage 2).
+//! (ArcSwap-backed lock-free tile bounds for Stage 2), as well as
+//! `MutationIntakeStage` for Stage 3 budget-gated mutation intake.
 //!
 //! ## Architecture (spec §Thread Model, line 19)
 //!
@@ -51,6 +52,8 @@ pub mod tab_switch_trigger;
 pub mod pipeline;
 pub mod threads;
 pub mod window;
+pub mod session;
+pub mod admission;
 
 pub use agent_events::{
     AgentEventHandler, EmissionError, EmissionOutcome, EmissionResult,
@@ -153,6 +156,10 @@ pub use pipeline::{
     STAGE6_BUDGET_US, STAGE7_BUDGET_US, STAGE8_BUDGET_US,
     TOTAL_PIPELINE_BUDGET_US, INPUT_TO_LOCAL_ACK_BUDGET_US,
     INPUT_TO_SCENE_COMMIT_BUDGET_US, INPUT_TO_NEXT_PRESENT_BUDGET_US,
+    IntakeResult, MutationIntakeStage, PendingCleanup,
+    DEFAULT_POST_REVOCATION_CLEANUP_DELAY_MS,
+    MIN_POST_REVOCATION_CLEANUP_DELAY_MS,
+    MAX_POST_REVOCATION_CLEANUP_DELAY_MS,
 };
 pub use threads::{
     ShutdownToken, ShutdownReason, ShutdownConfig,
@@ -168,4 +175,17 @@ pub use window::{
     OverlaySupport, FallbackReason,
     resolve_window_mode, check_overlay_support,
     should_capture_pointer_event,
+};
+pub use session::{
+    AgentKind, SessionEnvelope, assert_memory_overhead_within_budget,
+    DEFAULT_MAX_TILES, DEFAULT_MAX_TEXTURE_BYTES, DEFAULT_MAX_UPDATE_RATE_HZ,
+    DEFAULT_MAX_NODES_PER_TILE, DEFAULT_MAX_ACTIVE_LEASES,
+    HARD_MAX_TILES, HARD_MAX_TEXTURE_BYTES, HARD_MAX_UPDATE_RATE_HZ,
+    HARD_MAX_NODES_PER_TILE, HARD_MAX_ACTIVE_LEASES,
+};
+pub use admission::{
+    AdmissionController, AdmissionOutcome, HotConnectSnapshot, LimitKind,
+    ResourceExhaustedDetail, SessionLimits,
+    DEFAULT_MAX_RESIDENT_SESSIONS, DEFAULT_MAX_GUEST_SESSIONS, DEFAULT_MAX_TOTAL_SESSIONS,
+    HARD_MAX_RESIDENT_SESSIONS, HARD_MAX_GUEST_SESSIONS, HARD_MAX_TOTAL_SESSIONS,
 };
