@@ -10,6 +10,7 @@ pub mod session_server;
 pub mod token;
 pub mod dedup;
 pub mod subscriptions;
+pub mod lease;
 
 /// Generated protobuf types and gRPC service definitions.
 ///
