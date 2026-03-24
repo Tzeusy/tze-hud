@@ -693,9 +693,11 @@ impl TestSceneRegistry {
 
     /// `lease_expiry` — tile with a very short TTL; validates ACTIVE→EXPIRED transition.
     ///
-    /// The lease is granted with TTL = 1ms relative to `clock`. After advancing the clock
-    /// by 2ms via `expire_leases`, the lease transitions to EXPIRED and tiles are removed.
-    /// The scene as-built has state = ACTIVE; callers advance time externally to test expiry.
+    /// The lease is granted with TTL = 1ms relative to `clock`.  The scene as-built has
+    /// state = ACTIVE.  To test expiry, callers must call `expire_leases(now_ms)` with a
+    /// `now_ms` value past the TTL.  Note: this scene uses `SceneGraph::new()` (system
+    /// clock), so the injected `clock` only sets `granted_at_ms`; time advancement for
+    /// expiry testing requires passing `now_ms` directly to `expire_leases(now_ms)`.
     fn build_lease_expiry(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
         let mut graph = SceneGraph::new(self.display_width, self.display_height);
 
@@ -739,14 +741,15 @@ impl TestSceneRegistry {
             )
             .expect("set_tile_root failed");
 
-        // Leave lease in ACTIVE state — test callers may advance the clock via expire_leases
-        // to drive the ACTIVE→EXPIRED transition (lease-governance/spec.md lines 10-25).
+        // Leave lease in ACTIVE state — test callers drive the ACTIVE→EXPIRED transition
+        // by calling expire_leases(now_ms) with now_ms > granted_at_ms + 1
+        // (lease-governance/spec.md lines 10-25).
 
         let spec = SceneSpec {
             name: "lease_expiry",
             description: "One tile with a 1ms TTL lease (ACTIVE state at build time). \
-                          After clock advances past TTL, expire_leases() transitions the \
-                          lease to EXPIRED and removes the tile. Validates the \
+                          Call expire_leases(now_ms) with now_ms past the TTL to drive the \
+                          ACTIVE→EXPIRED transition and remove the tile. Validates the \
                           ACTIVE→EXPIRED state machine per lease-governance/spec.md §1.",
             expected_tab_count: 1,
             expected_tile_count: 1,

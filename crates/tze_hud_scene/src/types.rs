@@ -742,7 +742,7 @@ impl Lease {
     /// Transition Active -> Orphaned (agent disconnect).
     ///
     /// Starts the grace period. TTL continues running.
-    /// Also accepts `Disconnected` as the source state for backward compat.
+    /// Only `Active` is accepted as source state; any other state returns `InvalidTransition`.
     pub fn disconnect(&mut self, now_ms: u64) -> Result<(), LeaseError> {
         if self.state != LeaseState::Active {
             return Err(LeaseError::InvalidTransition {

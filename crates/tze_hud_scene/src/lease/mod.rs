@@ -94,6 +94,8 @@ pub enum TransitionError {
     SafeModeActive,
     /// Lease not found / not active for zone publish.
     LeaseNotActive,
+    /// Budget hard limit (100%) exceeded — entire MutationBatch must be rejected.
+    BudgetHardLimitExceeded,
 }
 
 // ─── Resource Budget ─────────────────────────────────────────────────────────
@@ -418,11 +420,11 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut lease: S = make_active(clock);
         let result = lease.update_budget_usage(1.0);
-        // Hard limit: must either return an error or set tier to Revocation.
-        assert!(
-            result.is_err() || lease.budget_tier() == BudgetTier::Revocation,
-            "100% usage should set Revocation tier or return error"
-        );
+        // Hard limit: must return BudgetHardLimitExceeded and set Revocation tier.
+        assert_eq!(result, Err(TransitionError::BudgetHardLimitExceeded),
+            "100% usage should return BudgetHardLimitExceeded");
+        assert_eq!(lease.budget_tier(), BudgetTier::Revocation,
+            "tier must be Revocation after hard limit");
     }
 
     // ── 5. ONE_SHOT specifics ────────────────────────────────────────────────

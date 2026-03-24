@@ -133,10 +133,14 @@ impl SceneGraph {
     /// Maximum leases across all agents in the entire runtime (spec §Lease Caps).
     pub const MAX_RUNTIME_LEASES: usize = 64;
 
-    /// Default maximum leases per session (spec §Lease Caps).
+    /// Default maximum leases per session (spec §Lease Caps: "max 8 default").
+    ///
+    /// Exposed for session-layer policy use; the scene graph enforces the hard cap
+    /// (`MAX_LEASES_PER_SESSION`) when `try_grant_lease_for_session` is called.
+    /// Session managers SHOULD use this constant for soft-limit enforcement.
     pub const DEFAULT_MAX_LEASES_PER_SESSION: usize = 8;
 
-    /// Hard maximum leases per session (spec §Lease Caps).
+    /// Hard maximum leases per session (spec §Lease Caps: "64 hard max").
     pub const MAX_LEASES_PER_SESSION: usize = 64;
 
     /// Maximum tiles per lease (spec §Lease Caps).
@@ -174,8 +178,10 @@ impl SceneGraph {
     /// Try to grant a lease, returning an error if runtime or session caps are exceeded.
     ///
     /// Enforces (spec §Requirement: Lease Caps):
-    /// - Max 64 leases per runtime across all agents.
-    /// - Max 64 (hard) leases per session by default.
+    /// - Max 64 leases per runtime across all agents (`MAX_RUNTIME_LEASES`).
+    /// - Max 64 leases per session hard cap (`MAX_LEASES_PER_SESSION`).
+    ///   Session-layer policy should enforce the softer 8-lease default
+    ///   (`DEFAULT_MAX_LEASES_PER_SESSION`) before calling this.
     pub fn try_grant_lease_for_session(
         &mut self,
         namespace: &str,

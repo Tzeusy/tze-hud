@@ -59,6 +59,15 @@ impl<C: Clock> LeaseImpl<C> {
         self.clock.now_millis()
     }
 
+    /// Returns the renewal policy for this lease.
+    ///
+    /// Used by the session layer to arm the AUTO_RENEW timer at 75% TTL elapsed
+    /// and to determine behavior on TTL expiry.
+    pub fn renewal_policy(&self) -> RenewalPolicy {
+        self.renewal_policy
+    }
+
+
     /// Effective remaining TTL accounting for all suspension pauses.
     ///
     /// When `ttl_ms == 0` (indefinite) this always returns `u64::MAX` (no expiry).
@@ -356,14 +365,11 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         let now_ms = self.now_ms();
 
         if usage_fraction >= 1.0 {
-            // Hard limit: set Revocation tier immediately.
+            // Hard limit: set Revocation tier immediately per spec §Budget Hard Limit at 100%.
             self.budget_tier = BudgetTier::Revocation;
             self.warning_started_ms = None;
             self.throttle_started_ms = None;
-            return Err(TransitionError::InvalidTransition {
-                from: self.state,
-                to: self.state, // signal that a hard-limit was hit
-            });
+            return Err(TransitionError::BudgetHardLimitExceeded);
         }
 
         if usage_fraction >= 0.80 {
