@@ -186,12 +186,9 @@ pub struct DegradationController {
     /// (10 frames). The p95 over the last N entries gives the rolling window.
     frame_times: VecDeque<u64>,
 
-    /// Number of consecutive 30-frame windows where p95 < 12ms.
+    /// Number of consecutive 30-frame rolling windows where p95 < 12ms.
     /// Used for the full-recovery path from Level 5.
     clean_recovery_windows: u32,
-
-    /// Running frame count within the current recovery window.
-    frames_in_current_window: u32,
 
     /// Configuration.
     config: DegradationConfig,
@@ -205,9 +202,8 @@ impl DegradationController {
     pub fn new(config: DegradationConfig) -> Self {
         Self {
             level: DegradationLevel::Normal,
-            frame_times: VecDeque::with_capacity(RECOVERY_WINDOW + 1),
+            frame_times: VecDeque::with_capacity(RECOVERY_WINDOW),
             clean_recovery_windows: 0,
-            frames_in_current_window: 0,
             config,
             frame_number: 0,
         }
@@ -244,8 +240,13 @@ impl DegradationController {
     /// recover) the buffer is cleared so that the next evaluation window
     /// starts with fresh observations. This prevents a single burst of high-
     /// latency frames from causing cascading multi-level advances in a single
-    /// cycle, and ensures that the recovery window only counts frames observed
+    /// cycle, and ensures the recovery window only counts frames observed
     /// AFTER the most recent level change.
+    ///
+    /// Trigger evaluation uses a true rolling 10-frame window: checked every
+    /// frame once at least 10 samples exist. Recovery evaluation uses a true
+    /// rolling 30-frame window: checked every frame once at least 30 samples
+    /// exist, matching the spec ("30-frame rolling window").
     pub fn record_frame(&mut self, frame_time_us: u64) -> Option<DegradationEvent> {
         self.frame_number += 1;
 
@@ -258,29 +259,24 @@ impl DegradationController {
         }
         self.frame_times.push_back(frame_time_us);
 
-        // Track frames within the current 30-frame recovery window.
-        self.frames_in_current_window += 1;
-
         let old_level = self.level;
 
         // ── Trigger: advance one level ────────────────────────────────────────
         //
-        // Spec: trigger fires when p95 > 14ms over the 10-frame window.
-        // We only trigger if we have accumulated at least TRIGGER_WINDOW samples
-        // since the last level change.
+        // Spec: trigger fires when p95 > 14ms over the rolling 10-frame window.
+        // Evaluated on every frame once at least TRIGGER_WINDOW samples exist.
         if self.level < DegradationLevel::Emergency
             && self.frame_times.len() >= TRIGGER_WINDOW
         {
             let p95_trigger = p95_of_last_n(&self.frame_times, TRIGGER_WINDOW);
             if p95_trigger > TRIGGER_THRESHOLD_US {
                 self.level = self.level.advance();
-                // Clear the ring buffer and reset window tracking.
-                // New observations start from scratch after a level change,
-                // preventing the same high-latency frames from causing
-                // cascading advances or polluting the recovery window.
+                // Clear the ring buffer after a level change.
+                // New observations start from scratch, preventing the same
+                // high-latency frames from causing cascading advances or
+                // polluting the recovery window.
                 self.frame_times.clear();
                 self.clean_recovery_windows = 0;
-                self.frames_in_current_window = 0;
                 return Some(DegradationEvent {
                     frame_number: self.frame_number,
                     previous_level: old_level.as_u8(),
@@ -293,22 +289,23 @@ impl DegradationController {
 
         // ── Recovery: recover one level ───────────────────────────────────────
         //
-        // Spec: recovery requires p95 < 12ms sustained over a 30-frame window.
-        // For Level 5, full recovery to Normal requires 5 such successive windows
-        // (~2.5 seconds total at 60fps).
+        // Spec: recovery requires p95 < 12ms sustained over a rolling 30-frame
+        // window (spec line 256). Evaluated on every frame once at least
+        // RECOVERY_WINDOW samples exist. For Level 5, full recovery to Normal
+        // requires 5 such successive clean windows (~2.5 seconds at 60fps).
         if self.level > DegradationLevel::Normal
-            && self.frames_in_current_window >= RECOVERY_WINDOW as u32
+            && self.frame_times.len() >= RECOVERY_WINDOW
         {
-            // A full 30-frame window has elapsed — evaluate it.
+            // A full 30-frame rolling window is available — evaluate it.
             let p95_recovery = p95_of_last_n(&self.frame_times, RECOVERY_WINDOW);
 
             if p95_recovery < RECOVERY_THRESHOLD_US {
                 self.clean_recovery_windows += 1;
                 // Always recover one level per clean window.
                 self.level = self.level.recover();
-                // Clear buffer and reset window tracking after level change.
+                // Clear buffer after level change so the next recovery window
+                // starts with fresh post-transition observations.
                 self.frame_times.clear();
-                self.frames_in_current_window = 0;
                 return Some(DegradationEvent {
                     frame_number: self.frame_number,
                     previous_level: old_level.as_u8(),
@@ -317,9 +314,9 @@ impl DegradationController {
                     direction: DegradationDirection::Recover,
                 });
             } else {
-                // Dirty window — reset clean window counter and start fresh.
+                // Dirty window — reset clean window counter.
+                // The ring buffer keeps sliding; no reset needed.
                 self.clean_recovery_windows = 0;
-                self.frames_in_current_window = 0;
             }
         }
 
@@ -328,12 +325,16 @@ impl DegradationController {
 
     /// Determine which tiles to suppress in the render pass at Level 4+ shedding.
     ///
-    /// Returns the set of tile IDs that should be excluded from the render pass.
+    /// Returns the tile descriptors for tiles that should be excluded from the
+    /// render pass. Callers can extract `.tile_id` from each returned descriptor.
     /// Tiles remain in the scene graph; they are simply not presented.
     ///
-    /// At Level 4 (ShedTiles), returns lowest-priority tiles sorted by
-    /// (lease_priority ASC, z_order DESC) — i.e., highest lease_priority value
-    /// is shed first; within a priority class, lowest z_order is shed first.
+    /// At Level 4 (ShedTiles), returns the lowest-priority tiles to suppress.
+    /// The spec preservation order is `(lease_priority ASC, z_order DESC)`:
+    /// lower `lease_priority` values and higher `z_order` values are kept.
+    /// Equivalently, tiles are shed in `(lease_priority DESC, z_order ASC)`
+    /// order — highest `lease_priority` value is shed first; within the same
+    /// priority class, lowest `z_order` is shed first.
     ///
     /// At Level 5 (Emergency), returns all tiles except the single tile with
     /// the lowest lease_priority value (and, as a tiebreaker, the highest
@@ -362,22 +363,18 @@ impl DegradationController {
                 //
                 // Result ordering (front = shed first):
                 //   sort key: (lease_priority DESC, z_order ASC)
-                let mut indexed: Vec<(usize, &TileDescriptor)> =
-                    tiles.iter().enumerate().collect();
-                indexed.sort_by(|(_, a), (_, b)| {
+                let mut sorted: Vec<&TileDescriptor> = tiles.iter().collect();
+                sorted.sort_by(|a, b| {
                     // Higher lease_priority number = lower importance = shed first.
                     b.lease_priority
                         .cmp(&a.lease_priority)
                         .then(a.z_order.cmp(&b.z_order))
                 });
-                // At Level 4, shed the lowest-priority half (at least 1).
+                // At Level 4, shed the lowest-priority quartile (at least 1).
                 // For v1, we shed 25% consistent with the frame-time guardian.
-                let shed_count = ((tiles.len() as f32 * 0.25).ceil() as usize).max(1);
-                indexed
-                    .into_iter()
-                    .take(shed_count)
-                    .map(|(_, t)| t)
-                    .collect()
+                // Integer ceiling: ceil(len * 0.25) == (len + 3) / 4.
+                let shed_count = ((tiles.len() + 3) / 4).max(1);
+                sorted.into_iter().take(shed_count).collect()
             }
             DegradationLevel::Emergency => {
                 // Keep only the single highest-priority tile (lease_priority=0

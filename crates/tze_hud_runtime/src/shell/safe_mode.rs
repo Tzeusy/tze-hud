@@ -590,12 +590,14 @@ mod tests {
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     fn make_shared_state() -> Arc<Mutex<SharedState>> {
+        use tze_hud_protocol::session::RuntimeDegradationLevel;
         Arc::new(Mutex::new(SharedState {
             scene: SceneGraph::new(1920.0, 1080.0),
             sessions: SessionRegistry::new("test-key"),
             safe_mode_active: false,
             freeze_active: false,
             token_store: TokenStore::new(),
+            degradation_level: RuntimeDegradationLevel::Normal,
         }))
     }
 
