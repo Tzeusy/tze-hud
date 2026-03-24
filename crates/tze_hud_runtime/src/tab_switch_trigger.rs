@@ -79,7 +79,8 @@ impl AttentionGate for BlockingGate {
 pub enum TabSwitchOutcome {
     /// No tab is configured for this bare name — no action taken.
     NoMatchingTab,
-    /// A matching tab was found but system events are excluded (spec line 250).
+    /// Event is excluded from triggering tab switches because it is a system
+    /// event (bare name starts with `"system."`); spec line 250.
     ExcludedSystemEvent,
     /// A matching tab was found but the attention gate blocked the switch
     /// (e.g. quiet hours active, spec line 246).
@@ -92,13 +93,14 @@ pub enum TabSwitchOutcome {
 
 /// Evaluates `tab_switch_on_event` trigger conditions and performs the switch.
 ///
-/// Holds a reference to the scene graph (mutable for switching) and the
-/// injected attention gate.
+/// Holds the injected attention gate. The scene graph is provided as a
+/// mutable parameter to [`TabSwitchTrigger::evaluate`].
 ///
 /// # Thread safety
 ///
-/// This struct is not `Sync`. The caller is responsible for holding the scene
-/// graph lock during `evaluate`.
+/// Callers are responsible for ensuring exclusive access to the scene graph
+/// when invoking [`TabSwitchTrigger::evaluate`] (for example, by holding an
+/// appropriate lock around the call).
 pub struct TabSwitchTrigger<G: AttentionGate> {
     gate: G,
 }
@@ -380,5 +382,48 @@ mod tests {
         let fake_id = tze_hud_scene::types::SceneId::new();
         let result = graph.set_tab_switch_on_event(fake_id, Some("x.y".to_string()));
         assert!(result.is_err());
+    }
+
+    // ── set_tab_switch_on_event validates bare name ───────────────────────────
+
+    /// system.* values are rejected at config time by set_tab_switch_on_event.
+    #[test]
+    fn set_tab_switch_on_event_rejects_system_prefix() {
+        let mut graph = make_graph();
+        let tab_id = graph.create_tab("Main", 0).unwrap();
+        let result =
+            graph.set_tab_switch_on_event(tab_id, Some("system.degradation_changed".to_string()));
+        assert!(
+            result.is_err(),
+            "system.* bare names must be rejected at configuration time"
+        );
+    }
+
+    /// scene.* values are rejected at config time by set_tab_switch_on_event.
+    #[test]
+    fn set_tab_switch_on_event_rejects_scene_prefix() {
+        let mut graph = make_graph();
+        let tab_id = graph.create_tab("Main", 0).unwrap();
+        let result =
+            graph.set_tab_switch_on_event(tab_id, Some("scene.tile.created".to_string()));
+        assert!(
+            result.is_err(),
+            "scene.* bare names must be rejected at configuration time"
+        );
+    }
+
+    /// Invalid bare names (single segment, uppercase, etc.) are rejected.
+    #[test]
+    fn set_tab_switch_on_event_rejects_invalid_bare_name() {
+        let mut graph = make_graph();
+        let tab_id = graph.create_tab("Main", 0).unwrap();
+        // Single segment — no dot
+        assert!(graph
+            .set_tab_switch_on_event(tab_id, Some("doorbell".to_string()))
+            .is_err());
+        // Uppercase
+        assert!(graph
+            .set_tab_switch_on_event(tab_id, Some("Doorbell.Ring".to_string()))
+            .is_err());
     }
 }

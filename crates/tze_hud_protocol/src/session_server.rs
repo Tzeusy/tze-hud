@@ -1619,9 +1619,8 @@ async fn handle_heartbeat(
 /// 5. On success, dispatch the event to subscribers and respond with the
 ///    fully-prefixed event type.
 ///
-/// In v1 the per-session rate limiter state is held inside `StreamSession`
-/// via an `Option<tze_hud_runtime::AgentEventHandler>`.  For now, the handler
-/// is created lazily from the session namespace and capabilities.
+/// Per-session rate limiting is enforced via the
+/// `StreamSession::agent_event_rate_limiter: SessionEventRateLimiter` field.
 ///
 /// Note: Full event bus delivery to subscribers (step 5) is wired in by bead #2.
 /// This handler performs all gating checks and returns a result; actual fan-out
@@ -3206,6 +3205,7 @@ mod tests {
             last_client_sequence: 1,
             safe_mode_active: false,
             expect_resume: false,
+            agent_event_rate_limiter: SessionEventRateLimiter::new(),
         };
 
         handle_capability_request(
@@ -3261,6 +3261,7 @@ mod tests {
             last_client_sequence: 1,
             safe_mode_active: false,
             expect_resume: false,
+            agent_event_rate_limiter: SessionEventRateLimiter::new(),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -3323,6 +3324,7 @@ mod tests {
             last_client_sequence: 1,
             safe_mode_active: false,
             expect_resume: false,
+            agent_event_rate_limiter: SessionEventRateLimiter::new(),
         };
 
         handle_capability_request(

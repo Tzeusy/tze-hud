@@ -601,10 +601,10 @@ message EmitSceneEvent {
   // Maximum 4096 bytes (4 KB). Exceeding this limit rejects the emission.
   bytes  payload   = 2;
 
-  // Interruption class hint from the agent.
-  // The runtime applies the more restrictive of this value and the zone ceiling.
-  // Agent-requested CRITICAL is downgraded to HIGH.
-  // Uses wire values matching the InterruptionClass enum in scene data model:
+  // Reserved / advisory field for future attention-policy integration.
+  // Currently not used by the runtime to affect event delivery semantics.
+  // Will be wired to zone-ceiling enforcement and CRITICAL downgrade in bead #3.
+  // Uses wire values matching the InterruptionClass enum in the scene data model:
   //   0=CRITICAL, 1=HIGH, 2=NORMAL (default), 3=LOW, 4=SILENT
   uint32 interruption_class_hint = 3;
 }

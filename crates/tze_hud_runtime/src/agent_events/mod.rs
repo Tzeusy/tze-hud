@@ -82,10 +82,7 @@ impl EmissionError {
                 format!("missing capability: {required}")
             }
             EmissionError::RateLimitExceeded => {
-                format!(
-                    "agent event rate limit exceeded ({}/s sliding window)",
-                    DEFAULT_MAX_EVENTS_PER_SECOND
-                )
+                "agent event rate limit exceeded".to_string()
             }
             EmissionError::PayloadTooLarge { actual, limit } => {
                 format!("payload {actual} bytes exceeds {limit}-byte limit")
@@ -242,7 +239,7 @@ impl AgentEventHandler {
 
     /// Whether the agent holds the given capability.
     pub fn has_capability(&self, cap: &str) -> bool {
-        self.capabilities.contains(&cap.to_string())
+        self.capabilities.iter().any(|c| c == cap)
     }
 }
 
