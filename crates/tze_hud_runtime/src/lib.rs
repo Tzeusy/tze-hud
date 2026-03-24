@@ -1,8 +1,20 @@
 //! # tze_hud_runtime
 //!
-//! Runtime kernel for tze_hud. Orchestrates the frame pipeline:
-//! input drain → local feedback → mutation intake → scene commit →
-//! render encode → GPU submit → telemetry emit.
+//! Runtime kernel for tze_hud. Orchestrates the 8-stage frame pipeline:
+//!
+//! | Stage | Name               | Thread     | Budget (p99) |
+//! |-------|--------------------|------------|-------------|
+//! | 1     | Input Drain        | Main       | < 500µs     |
+//! | 2     | Local Feedback     | Main       | < 500µs     |
+//! | 3     | Mutation Intake    | Compositor | < 1ms       |
+//! | 4     | Scene Commit       | Compositor | < 1ms       |
+//! | 5     | Layout Resolve     | Compositor | < 1ms       |
+//! | 6     | Render Encode      | Compositor | < 4ms       |
+//! | 7     | GPU Submit+Present | Comp+Main  | < 8ms       |
+//! | 8     | Telemetry Emit     | Telemetry  | < 200µs     |
+//!
+//! See `pipeline.rs` for the `FramePipeline` orchestrator and `HitTestSnapshot`
+//! (ArcSwap-backed lock-free tile bounds for Stage 2).
 //!
 //! ## Bead 3: Interruption classification and quiet hours
 //!
@@ -20,6 +32,7 @@ pub mod quiet_hours;
 pub mod attention_budget;
 pub mod shell;
 pub mod tab_switch_trigger;
+pub mod pipeline;
 
 pub use agent_events::{
     AgentEventHandler, EmissionError, EmissionOutcome, EmissionResult,
@@ -86,4 +99,13 @@ pub use shell::redaction::{
     REDACTION_BLANK_COLOR,
     REDACTION_PATTERN_BASE,
     REDACTION_PATTERN_ACCENT,
+};
+
+pub use pipeline::{
+    FramePipeline, HitTestSnapshot, TileBoundsEntry,
+    STAGE1_BUDGET_US, STAGE2_BUDGET_US, STAGE12_COMBINED_BUDGET_US,
+    STAGE3_BUDGET_US, STAGE4_BUDGET_US, STAGE5_BUDGET_US,
+    STAGE6_BUDGET_US, STAGE7_BUDGET_US, STAGE8_BUDGET_US,
+    TOTAL_PIPELINE_BUDGET_US, INPUT_TO_LOCAL_ACK_BUDGET_US,
+    INPUT_TO_SCENE_COMMIT_BUDGET_US, INPUT_TO_NEXT_PRESENT_BUDGET_US,
 };
