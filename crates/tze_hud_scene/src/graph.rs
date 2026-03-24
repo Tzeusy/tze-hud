@@ -4658,6 +4658,7 @@ mod spec_scenarios {
                 interaction_id: "btn-ok".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
 

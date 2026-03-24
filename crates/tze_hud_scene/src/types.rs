@@ -626,11 +626,18 @@ pub struct HitRegionNode {
     #[serde(default)]
     pub event_mask: EventMask,
     /// ARIA-compatible accessibility metadata.
+    ///
+    /// Boxed to keep `HitRegionNode` (and therefore `Node`) within the
+    /// 150-byte struct budget (scene-graph/spec.md line 302, RFC 0001 §8).
+    /// `AccessibilityMeta` is zero by default; boxing costs only 8 bytes when empty.
     #[serde(default)]
-    pub accessibility: AccessibilityMeta,
+    pub accessibility: Box<AccessibilityMeta>,
     /// Compositor-applied visual style overrides for hover/press/focus states.
+    ///
+    /// Boxed to stay within the 150-byte `Node` struct budget
+    /// (scene-graph/spec.md line 302, RFC 0001 §8).
     #[serde(default)]
-    pub local_style: LocalStyle,
+    pub local_style: Box<LocalStyle>,
 }
 
 impl HitResult {
@@ -694,8 +701,8 @@ impl Default for HitRegionNode {
             cursor_style: CursorStyle::Default,
             tooltip: None,
             event_mask: EventMask::default(),
-            accessibility: AccessibilityMeta::default(),
-            local_style: LocalStyle::default(),
+            accessibility: Box::default(),
+            local_style: Box::default(),
         }
     }
 }
