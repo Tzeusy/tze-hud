@@ -1094,9 +1094,9 @@ impl TestSceneRegistry {
 
         // Three agents at different priorities (lower number = higher priority)
         let agents = [
-            ("agent.high_prio", 1u32),
-            ("agent.normal_prio", 2u32),
-            ("agent.low_prio", 3u32),
+            ("agent.high_prio", 1u8),
+            ("agent.normal_prio", 2u8),
+            ("agent.low_prio", 3u8),
         ];
 
         let leases: Vec<SceneId> = agents
@@ -1109,6 +1109,7 @@ impl TestSceneRegistry {
                     Lease {
                         id,
                         namespace: ns.to_string(),
+                        session_id: SceneId::nil(),
                         state: LeaseState::Active,
                         priority: *priority,
                         granted_at_ms: clock.0,
@@ -2593,6 +2594,7 @@ impl SceneGraphTestExt for SceneGraph {
             Lease {
                 id,
                 namespace: namespace.to_string(),
+                session_id: SceneId::nil(),
                 state: LeaseState::Active,
                 priority: 2,
                 granted_at_ms,
@@ -3504,7 +3506,7 @@ mod tests {
     fn three_agents_contention_lease_priorities_are_distinct() {
         let registry = TestSceneRegistry::new();
         let (graph, _spec) = registry.build("three_agents_contention", ClockMs::FIXED).unwrap();
-        let mut priorities: Vec<u32> = graph.leases.values().map(|l| l.priority).collect();
+        let mut priorities: Vec<u8> = graph.leases.values().map(|l| l.priority).collect();
         priorities.sort_unstable();
         priorities.dedup();
         assert_eq!(priorities.len(), 3, "must have 3 distinct lease priorities");
@@ -3878,8 +3880,8 @@ mod tests {
             .expect("must have agent.zone_pub lease");
         assert_eq!(
             pub_lease.state,
-            LeaseState::Disconnected,
-            "zone publisher must be in Disconnected state"
+            LeaseState::Orphaned,
+            "zone publisher must be in Orphaned state"
         );
     }
 
@@ -3963,7 +3965,7 @@ mod tests {
         let registry = TestSceneRegistry::new();
         let (graph, _spec) =
             registry.build("policy_arbitration_collision", ClockMs::FIXED).unwrap();
-        let mut priorities: Vec<u32> = graph.leases.values().map(|l| l.priority).collect();
+        let mut priorities: Vec<u8> = graph.leases.values().map(|l| l.priority).collect();
         priorities.sort_unstable();
         priorities.dedup();
         assert_eq!(
