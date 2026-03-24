@@ -4,6 +4,7 @@
 //! and client helpers for agent communication.
 
 pub mod auth;
+pub mod mcp_bridge;
 pub mod session;
 pub mod convert;
 pub mod session_server;

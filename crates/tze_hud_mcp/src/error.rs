@@ -18,6 +18,7 @@ pub mod codes {
     pub const INVALID_REQUEST: i64 = -32600;
     pub const METHOD_NOT_FOUND: i64 = -32601;
     pub const INVALID_PARAMS: i64 = -32602;
+    /// Internal error — also used for capability-required denials per spec §8.3.
     pub const INTERNAL_ERROR: i64 = -32603;
     /// Scene validation error (e.g. tab not found, lease expired).
     pub const SCENE_ERROR: i64 = -32000;
@@ -27,6 +28,8 @@ pub mod codes {
     pub const NO_ACTIVE_TAB: i64 = -32002;
     /// Invalid ID format (e.g. malformed UUID).
     pub const INVALID_ID: i64 = -32003;
+    /// Authentication failed (bad or missing pre-shared key).
+    pub const UNAUTHENTICATED: i64 = -32004;
 }
 
 /// A serializable JSON-RPC 2.0 error object.
@@ -87,6 +90,29 @@ impl JsonRpcError {
     pub fn invalid_id(reason: impl Into<String>) -> Self {
         Self::new(codes::INVALID_ID, reason.into())
     }
+
+    pub fn unauthenticated() -> Self {
+        Self::new(codes::UNAUTHENTICATED, "Authentication required")
+    }
+
+    /// Capability-required error per spec §8.3.
+    ///
+    /// Returns a JSON-RPC 2.0 error with:
+    /// - code: -32603 (Internal error, as mandated by spec §8.3)
+    /// - data.error_code: "CAPABILITY_REQUIRED"
+    /// - data.context: "tool=<tool_name>"
+    /// - data.hint: {"required_capability": "resident_mcp", "resolution": "..."}
+    pub fn capability_required(tool_name: &str) -> Self {
+        let data = serde_json::json!({
+            "error_code": "CAPABILITY_REQUIRED",
+            "context": format!("tool={tool_name}"),
+            "hint": {
+                "required_capability": "resident_mcp",
+                "resolution": "obtain resident_mcp capability via session handshake"
+            }
+        });
+        Self::new(codes::INTERNAL_ERROR, "Capability required").with_data(data)
+    }
 }
 
 /// High-level MCP error for internal use. Converts to [`JsonRpcError`] for the wire.
@@ -115,6 +141,15 @@ pub enum McpError {
 
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// Caller tried to invoke a resident tool without the `resident_mcp` capability.
+    /// Carries the tool name for the structured error response (spec §8.3).
+    #[error("capability required to call tool: {0}")]
+    CapabilityRequired(String),
+
+    /// Authentication failed: bad or missing pre-shared key (spec §8.4).
+    #[error("authentication required")]
+    Unauthenticated,
 }
 
 impl From<McpError> for JsonRpcError {
@@ -130,6 +165,8 @@ impl From<McpError> for JsonRpcError {
             McpError::InvalidId(msg) => JsonRpcError::invalid_id(msg),
             McpError::MethodNotFound(method) => JsonRpcError::method_not_found(&method),
             McpError::Internal(msg) => JsonRpcError::internal(msg),
+            McpError::CapabilityRequired(tool) => JsonRpcError::capability_required(&tool),
+            McpError::Unauthenticated => JsonRpcError::unauthenticated(),
         }
     }
 }
