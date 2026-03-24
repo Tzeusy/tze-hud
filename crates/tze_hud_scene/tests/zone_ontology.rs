@@ -240,17 +240,21 @@ fn zone_geometry_adapts_profile_builds() {
 fn zone_geometry_adapts_profile_has_relative_zones() {
     let registry = TestSceneRegistry::default();
     let (graph, _spec) = registry.build("zone_geometry_adapts_profile", ClockMs::FIXED).unwrap();
-    for name in &["pip", "ambient_background"] {
+    let mut found_relative = false;
+    for name in &["pip", "ambient-background"] {
         if let Some(zone) = graph.zone_registry.get_by_name(name) {
             assert!(
                 matches!(zone.geometry_policy, GeometryPolicy::Relative { .. }),
                 "zone '{}' must use Relative geometry policy",
                 name
             );
+            found_relative = true;
         }
-        // Note: some builds may use slightly different names; at least one of pip/ambient_background
-        // must be present with Relative geometry.
     }
+    assert!(
+        found_relative,
+        "zone_geometry_adapts_profile scene must contain at least one Relative-geometry zone (pip or ambient-background)"
+    );
 }
 
 #[test]

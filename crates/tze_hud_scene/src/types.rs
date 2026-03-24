@@ -1307,6 +1307,8 @@ pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
 /// Layer attachment for a zone instance — determines rendering order.
 ///
 /// Per RFC 0001 §2.5 and scene-graph/spec.md line 241.
+///
+/// The default is `Content` (within content-layer z-order space).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayerAttachment {
     /// Rendered behind all agent tiles (below content layer).
@@ -1316,6 +1318,12 @@ pub enum LayerAttachment {
     Content,
     /// Rendered above all agent content; managed by runtime chrome rendering.
     Chrome,
+}
+
+impl Default for LayerAttachment {
+    fn default() -> Self {
+        LayerAttachment::Content
+    }
 }
 
 /// Display edge for edge-anchored zone geometry.
@@ -1419,6 +1427,7 @@ pub struct ZoneDefinition {
     pub ephemeral: bool,
     /// Layer attachment — determines rendering order and z-space.
     /// Defaults to [`LayerAttachment::Content`] if not specified.
+    #[serde(default)]
     pub layer_attachment: LayerAttachment,
 }
 
@@ -1744,7 +1753,11 @@ impl ZoneRegistry {
 
     /// Query occupancy for a zone instance (resolved state after contention policy).
     ///
-    /// In v1, `effective_geometry` is not exposed (deferred to post-v1).
+    /// In v1, active publishes are global (not tab-scoped); `tab_id` is echoed
+    /// through to the returned `ZoneOccupancy` but is NOT used as a filter.
+    /// Tab-scoped zone instances are a post-v1 feature. In v1, `effective_geometry`
+    /// is also not exposed (deferred to post-v1 per spec line 360).
+    ///
     /// Returns `None` if the zone is not found.
     pub fn get_occupancy(&self, zone_name: &str, tab_id: SceneId) -> Option<ZoneOccupancy> {
         let _zone = self.zones.get(zone_name)?;

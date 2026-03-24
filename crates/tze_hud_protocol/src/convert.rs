@@ -157,12 +157,10 @@ pub fn scene_zone_content_to_proto(c: &ZoneContent) -> proto::ZoneContent {
             a: c.a,
         }),
         // StaticImage and VideoSurfaceRef: schema defined; full proto encoding is post-v1.
-        // Encode as StreamText placeholder so the wire format stays forward-compatible.
-        ZoneContent::StaticImage(rid) => {
-            Payload::StreamText(format!("<StaticImage:{}>", rid.to_hex()))
-        }
-        ZoneContent::VideoSurfaceRef(sid) => {
-            Payload::StreamText(format!("<VideoSurfaceRef:{}>", sid))
+        // Leave payload unset rather than encoding as StreamText, which would mislead
+        // consumers into treating a resource ID as displayable text.
+        ZoneContent::StaticImage(_) | ZoneContent::VideoSurfaceRef(_) => {
+            return proto::ZoneContent { payload: None };
         }
     };
     proto::ZoneContent { payload: Some(payload) }

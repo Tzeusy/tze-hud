@@ -2003,7 +2003,8 @@ impl SceneGraph {
     /// callers (e.g., the gRPC server) must validate the token before calling this.
     ///
     /// # Arguments
-    /// - `zone_name` — zone type name (resolved to the instance for the active tab)
+    /// - `zone_name` — zone type name, resolved in the global `zone_registry` (v1: publishes
+    ///   are global, not tab-scoped; tab-scoped zone instances are a post-v1 feature)
     /// - `content` — content payload; must match one of the zone's accepted_media_types
     /// - `publisher_namespace` — the publishing agent's namespace
     /// - `merge_key` — key for MergeByKey contention (ignored for other policies)
