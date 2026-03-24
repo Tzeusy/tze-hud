@@ -193,6 +193,11 @@ pub struct ResourceStoreConfig {
     /// Maximum number of concurrent resources in the store (default 4096).
     pub max_concurrent_resources: usize,
     /// Per-agent upload rate limit in bytes/second (default 1 MiB/s).
+    ///
+    /// TODO: enforcement is deferred to the session transport layer (gRPC
+    /// flow-control back-pressure, spec lines 313-314). This field is stored
+    /// here so callers can configure the limit at construction; the resource
+    /// crate itself does not enforce it.
     pub upload_rate_limit_bytes_per_sec: usize,
 }
 
@@ -261,10 +266,16 @@ pub enum ResourceError {
     InvalidChunk(String),
 
     /// Upload was aborted before completion.
+    ///
+    /// **Internal use only** — not transmitted on the wire. Used for
+    /// in-process error propagation when a session disconnects mid-upload.
     #[error("RESOURCE_UPLOAD_ABORTED: {0}")]
     UploadAborted(String),
 
     /// Internal store error.
+    ///
+    /// **Internal use only** — not transmitted on the wire. Used for
+    /// unexpected runtime conditions that do not map to a spec error code.
     #[error("RESOURCE_INTERNAL: {0}")]
     Internal(String),
 }
