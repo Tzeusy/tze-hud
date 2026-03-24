@@ -80,6 +80,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 interaction_id: hr.interaction_id.clone(),
                 accepts_focus: hr.accepts_focus,
                 accepts_pointer: hr.accepts_pointer,
+                ..Default::default()
             })
         }
         Some(proto::node_proto::Data::StaticImage(si)) => {
