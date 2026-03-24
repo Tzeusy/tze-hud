@@ -270,6 +270,7 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                     interaction_id: "demo-button".to_string(),
                     accepts_focus: true,
                     accepts_pointer: true,
+                    ..Default::default()
                 }),
             },
         ).unwrap();
@@ -349,14 +350,16 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
             &mut state.scene,
         )
     };
-    assert!(hover_result.hit.is_some(), "hover should hit the tile");
+    assert!(
+        matches!(hover_result.hit, tze_hud_scene::HitResult::NodeHit { .. }),
+        "hover should hit the tile"
+    );
     assert_eq!(hover_result.interaction_id, Some("demo-button".to_string()));
     assert!(hover_result.dispatch.is_some(), "should dispatch PointerEnter");
     let dispatch = hover_result.dispatch.as_ref().unwrap();
     assert_eq!(dispatch.kind, tze_hud_input::AgentDispatchKind::PointerEnter);
     assert_eq!(dispatch.interaction_id, "demo-button");
-    println!("  Hover: hit={}, interaction_id=demo-button, dispatch=PointerEnter",
-        hover_result.hit.is_some());
+    println!("  Hover: hit=NodeHit, interaction_id=demo-button, dispatch=PointerEnter");
 
     // Move within the hit region (should produce PointerMove)
     let move_result = {
@@ -751,6 +754,7 @@ mod tests {
                 interaction_id: interaction_id.to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         }).unwrap();
         (tile_id, node_id)
@@ -875,7 +879,14 @@ mod tests {
             &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, timestamp: None },
             &mut scene,
         );
-        assert_eq!(result.hit, Some((tile_id, node_id)));
+        assert_eq!(
+            result.hit,
+            tze_hud_scene::HitResult::NodeHit {
+                tile_id,
+                node_id,
+                interaction_id: "button-1".to_string(),
+            }
+        );
         assert_eq!(result.interaction_id, Some("button-1".to_string()));
 
         // Hit outside

@@ -133,6 +133,7 @@ async fn test_input_to_local_ack_p99_within_budget() {
                         interaction_id: "test-button".to_string(),
                         accepts_focus: true,
                         accepts_pointer: true,
+                        ..Default::default()
                     }),
                     children: vec![],
                 },
@@ -203,6 +204,7 @@ async fn test_hit_test_p99_within_budget() {
                         interaction_id: "large-button".to_string(),
                         accepts_focus: true,
                         accepts_pointer: true,
+                        ..Default::default()
                     }),
                     children: vec![],
                 },
