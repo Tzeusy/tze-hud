@@ -109,18 +109,36 @@ impl TokenStore {
         agent_id: &str,
         now_ms: u64,
     ) -> Result<ResumeEntry, ResumeError> {
-        match self.entries.remove(token) {
+        // Peek at the entry before removing it, so that a wrong-agent attempt
+        // does not destroy a valid token (DoS prevention).
+        let verdict = match self.entries.get(token) {
             None => Err(ResumeError::TokenNotFound),
             Some(entry) => {
                 if !entry.is_valid(now_ms) {
+                    // Expired — always safe to drop; the token is unusable.
                     Err(ResumeError::GraceExpired)
                 } else if entry.agent_id != agent_id {
-                    // Token exists but belongs to a different agent — treat as
-                    // not-found to avoid leaking information about other sessions.
+                    // Token exists but belongs to a different agent — leave it
+                    // in place so the legitimate owner can still resume.
+                    // Treat as not-found to avoid leaking information about other sessions.
                     Err(ResumeError::TokenNotFound)
                 } else {
-                    Ok(entry)
+                    // All checks passed — safe to consume.
+                    Ok(())
                 }
+            }
+        };
+
+        match verdict {
+            Err(ResumeError::GraceExpired) => {
+                self.entries.remove(token);
+                Err(ResumeError::GraceExpired)
+            }
+            Err(e) => Err(e),
+            Ok(()) => {
+                // SAFETY: entry was found and validated above; remove returns Some.
+                let entry = self.entries.remove(token).expect("entry must exist after validation");
+                Ok(entry)
             }
         }
     }
@@ -269,6 +287,26 @@ mod tests {
         let result = store.consume(&token, "agent-b", now + 5_000);
         // Treated as TokenNotFound to avoid leaking info
         assert_eq!(result, Err(ResumeError::TokenNotFound));
+    }
+
+    /// Wrong-agent attempt must NOT destroy the token (DoS prevention).
+    ///
+    /// A malicious caller who knows a token but not its agent_id must not be
+    /// able to invalidate it for the legitimate owner.
+    #[test]
+    fn test_wrong_agent_does_not_consume_token() {
+        let mut store = TokenStore::new();
+        let token = make_token();
+        let now = 1_000_000u64;
+        insert_entry(&mut store, &token, "agent-a", 30_000, now);
+
+        // Attempt with wrong agent_id — must fail without removing the entry.
+        let bad = store.consume(&token, "evil-agent", now + 1_000);
+        assert_eq!(bad, Err(ResumeError::TokenNotFound));
+
+        // The legitimate owner must still be able to consume the token.
+        let good = store.consume(&token, "agent-a", now + 2_000);
+        assert!(good.is_ok(), "legitimate owner should still be able to resume: {good:?}");
     }
 
     /// Expired entries are removed by evict_expired.
