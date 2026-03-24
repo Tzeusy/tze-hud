@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Used as the serde default for the `clock` field so that deserialized
 /// graphs behave like freshly constructed ones.
 fn default_clock() -> Arc<dyn Clock> {
-    Arc::new(SystemClock)
+    Arc::new(SystemClock::new())
 }
 
 /// The root scene graph.
@@ -54,7 +54,7 @@ pub struct SceneGraph {
 impl SceneGraph {
     /// Create a new empty scene graph using the real system clock.
     pub fn new(width: f32, height: f32) -> Self {
-        Self::new_with_clock(width, height, Arc::new(SystemClock))
+        Self::new_with_clock(width, height, Arc::new(SystemClock::new()))
     }
 
     /// Create a new empty scene graph with an injected clock.

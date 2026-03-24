@@ -124,7 +124,7 @@ impl FrameRecorder {
     /// Create a `FrameRecorder` backed by the real system clock.
     pub fn new() -> Self {
         Self {
-            clock: Arc::new(SystemClock),
+            clock: Arc::new(SystemClock::new()),
         }
     }
 

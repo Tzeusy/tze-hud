@@ -8,6 +8,7 @@
 //! and assertable without any GPU context.
 
 pub mod clock;
+pub mod timing;
 pub mod types;
 pub mod graph;
 pub mod mutation;
@@ -23,7 +24,8 @@ pub mod events;
 pub mod resource;
 pub mod config;
 
-pub use clock::{Clock, SystemClock, TestClock};
+pub use clock::{Clock, SimulatedClock, SystemClock, TestClock};
+pub use timing::{ClockOffset, DurationUs, MonoUs, WallUs};
 pub use types::*;
 pub use graph::{SceneGraph, SyncGroupCommitDecision};
 pub use mutation::{MutationBatch, MutationResult, SceneMutation};
