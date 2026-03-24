@@ -172,6 +172,7 @@ impl SceneGraph {
                 name: name.to_string(),
                 display_order,
                 created_at_ms: now_ms,
+                tab_switch_on_event: None,
             },
         );
         if self.active_tab.is_none() {
@@ -413,6 +414,48 @@ impl SceneGraph {
             });
         }
         Ok(())
+    }
+
+    /// Configure the `tab_switch_on_event` field for an existing tab.
+    ///
+    /// The bare event name (e.g. `"doorbell.ring"`) triggers automatic tab
+    /// activation when any agent emits a matching bare name.  Pass `None` to
+    /// clear the setting.
+    ///
+    /// Spec: scene-events/spec.md §9.1–§9.4.
+    pub fn set_tab_switch_on_event(
+        &mut self,
+        tab_id: SceneId,
+        bare_name: Option<String>,
+    ) -> Result<(), ValidationError> {
+        let tab = self
+            .tabs
+            .get_mut(&tab_id)
+            .ok_or(ValidationError::TabNotFound { id: tab_id })?;
+        tab.tab_switch_on_event = bare_name;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Find the first tab configured with `tab_switch_on_event == bare_name`.
+    ///
+    /// Returns `None` if no tab is configured for this bare name.
+    /// Excludes any tab whose configured value starts with `"system."` (cannot
+    /// match agent events — runtime enforces this at tab configuration time,
+    /// but defensive check is applied here too per spec line 250).
+    pub fn find_tab_for_event(&self, bare_name: &str) -> Option<SceneId> {
+        self.tabs.values().find_map(|tab| {
+            if let Some(trigger) = &tab.tab_switch_on_event {
+                // System events must NOT trigger tab switches (spec line 250).
+                if trigger.starts_with("system.") {
+                    return None;
+                }
+                if trigger == bare_name {
+                    return Some(tab.id);
+                }
+            }
+            None
+        })
     }
 
     // ─── Lease operations ────────────────────────────────────────────────

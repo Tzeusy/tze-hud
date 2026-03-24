@@ -71,6 +71,10 @@ message ClientMessage {
     // Capability management (RFC 0005 §5.3)
     // At most one CapabilityRequest SHOULD be in flight per session at a time.
     CapabilityRequest capability_request = 32;
+
+    // Agent scene event emission (scene-events/spec.md §5.1, §5.2).
+    // Requires emit_scene_event:<event_name> capability.
+    EmitSceneEvent emit_scene_event = 33;
   }
 }
 
@@ -132,6 +136,9 @@ message ServerMessage {
     // Input control responses (RFC 0004 §8.3.1, RFC 0005 §3.8)
     InputFocusResponse    input_focus_response    = 43;
     InputCaptureResponse  input_capture_response  = 44;
+
+    // Agent scene event emission result (scene-events/spec.md §5.1).
+    EmitSceneEventResult  emit_scene_event_result = 45;
   }
 
   // Field 22 (lease_denial) was removed in the v1 vocabulary rename.
@@ -332,6 +339,12 @@ enum ErrorCode {
   TIMESTAMP_TOO_OLD              = 15;
   TIMESTAMP_TOO_FUTURE           = 16;
   TIMESTAMP_EXPIRY_BEFORE_PRESENT = 17;
+  // Agent event emission errors (scene-events/spec.md §5)
+  AGENT_EVENT_RATE_EXCEEDED      = 18;  // Sliding-window rate limit exceeded (spec line 133)
+  AGENT_EVENT_PAYLOAD_TOO_LARGE  = 19;  // Payload exceeds 4 KB limit (spec line 122)
+  AGENT_EVENT_CAPABILITY_MISSING = 20;  // emit_scene_event:<name> capability not granted (spec line 113)
+  AGENT_EVENT_INVALID_NAME       = 21;  // Bare name failed regex validation
+  AGENT_EVENT_RESERVED_PREFIX    = 22;  // Bare name starts with "system." or "scene."
 }
 
 // Structured error response following the common error model (RFC 0005 §3.5).
@@ -557,4 +570,69 @@ message SetImePosition {
 message BackpressureSignal {
   float  queue_pressure    = 1;  // 0.0 = empty, 1.0 = full
   string suggested_action  = 2;  // "reduce_rate", "coalesce", etc.
+}
+
+// ─── Agent Scene Event Emission (scene-events/spec.md §5.1, §5.2) ─────────────
+
+// Client emits a scene event from an agent source.
+//
+// Emission requires the `emit_scene_event:<event_name>` capability, where
+// `<event_name>` is the bare name (e.g., "doorbell.ring"), not the fully-prefixed
+// delivered event_type.
+//
+// The runtime will:
+//   1. Validate the bare name against [a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+
+//   2. Check that "system." and "scene." prefixes are not present
+//   3. Check the emit_scene_event:<bare_name> capability
+//   4. Enforce the 4 KB payload size limit
+//   5. Enforce the per-session sliding-window rate limit (default 10/s)
+//   6. Namespace-prefix the event as agent.<namespace>.<bare_name> before delivery
+//
+// Correlated by the enclosing ClientMessage.sequence field.
+// Always receives an EmitSceneEventResult response.
+message EmitSceneEvent {
+  // Bare event name supplied by the agent (e.g., "doorbell.ring").
+  // Runtime prefixes this as agent.<namespace>.<bare_name> for delivery.
+  // Must match: [a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+
+  // Must not start with "system." or "scene." (reserved).
+  string bare_name = 1;
+
+  // Encoded event payload (proto-serialised bytes).
+  // Maximum 4096 bytes (4 KB). Exceeding this limit rejects the emission.
+  bytes  payload   = 2;
+
+  // Interruption class hint from the agent.
+  // The runtime applies the more restrictive of this value and the zone ceiling.
+  // Agent-requested CRITICAL is downgraded to HIGH.
+  // Uses wire values matching the InterruptionClass enum in scene data model:
+  //   0=CRITICAL, 1=HIGH, 2=NORMAL (default), 3=LOW, 4=SILENT
+  uint32 interruption_class_hint = 3;
+}
+
+// Server response to EmitSceneEvent.
+// Correlated by request_sequence matching the EmitSceneEvent message's
+// enclosing ClientMessage.sequence.
+message EmitSceneEventResult {
+  // Sequence of the EmitSceneEvent ClientMessage that triggered this.
+  uint64  request_sequence  = 1;
+
+  // true = event accepted, namespace-prefixed, and dispatched to subscribers.
+  // false = emission rejected; inspect error_code and error_message.
+  bool    accepted          = 2;
+
+  // Fully-prefixed event type as delivered to subscribers (populated when accepted=true).
+  // Example: "agent.doorbell_agent.doorbell.ring"
+  string  delivered_event_type = 3;
+
+  // Machine-readable rejection code (populated when accepted=false).
+  // Uses ErrorCode enum names as strings:
+  //   "AGENT_EVENT_CAPABILITY_MISSING"  — missing emit_scene_event:<bare_name>
+  //   "AGENT_EVENT_RATE_EXCEEDED"       — sliding-window rate limit exceeded
+  //   "AGENT_EVENT_PAYLOAD_TOO_LARGE"   — payload > 4 KB
+  //   "AGENT_EVENT_INVALID_NAME"        — bare name fails regex validation
+  //   "AGENT_EVENT_RESERVED_PREFIX"     — bare name starts with "system." or "scene."
+  string  error_code        = 4;
+
+  // Human-readable rejection reason (populated when accepted=false).
+  string  error_message     = 5;
 }
