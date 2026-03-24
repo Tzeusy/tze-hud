@@ -20,6 +20,10 @@
 //! - `local_feedback` — `LocalFeedbackStyle`, `ResolvedFeedbackStyle`, rollback tracker
 //! - `scroll` — `ScrollConfig`, `ScrollState`, scroll-local-first processing
 //! - `capture`    — pointer capture manager (RFC 0004 §2)
+//! - [`envelope`] — full 19-variant `InputEnvelope` for the batching/coalescing pipeline
+//! - [`event_queue`] — per-agent event queue with backpressure and transactional protection
+//! - [`coalescing`] — in-place queue coalescing and per-frame `FrameCoalescer`
+//! - [`batching`] — `EventBatchAssembler` for per-frame batch assembly
 //!
 //! ## Pointer Capture
 //!
@@ -31,6 +35,25 @@
 //! - Capture is released by: explicit CaptureReleaseRequest, PointerUpEvent
 //!   (when release_on_up=true), or runtime theft (Alt+Tab, lease revocation,
 //!   tab switch).
+
+pub mod envelope;
+pub mod event_queue;
+pub mod coalescing;
+pub mod batching;
+
+pub use envelope::{
+    PointerMoveData, PointerEnterData, PointerLeaveData,
+    PointerDownData, PointerUpData, ClickData, PointerCancelData,
+    KeyDownData, KeyUpData, CharacterData,
+    FocusGainedData, FocusLostData,
+    CaptureReleasedData, CaptureReleasedReason,
+    ImeCompositionStartData, ImeCompositionUpdateData, ImeCompositionEndData,
+    GestureData, ScrollOffsetChangedData,
+    CommandInputData,
+};
+pub use event_queue::{AgentEventQueue, DEFAULT_QUEUE_DEPTH, HARD_CAP_QUEUE_DEPTH};
+pub use coalescing::{CoalesceResult, EventCoalescer, FrameCoalescer};
+pub use batching::EventBatchAssembler;
 
 pub mod capture;
 pub mod pointer;
