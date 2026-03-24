@@ -107,36 +107,43 @@ impl<E: Clone> CoalesceBuffer<E> {
 
     /// Push an event into the buffer.
     ///
-    /// - If the event has a `Never` key: always appended, possibly evicting
-    ///   the oldest coalesable event if the buffer is full.
-    /// - If the event has any other key: if an existing entry has the same key,
-    ///   it is replaced with the new event (coalesced). If no existing entry has
-    ///   that key and the buffer is full, the oldest non-`Never` entry is evicted.
-    ///   If the buffer is full with only `Never` entries, the event is dropped
-    ///   (caller is responsible for backpressure signalling at a higher level).
-    pub fn push(&mut self, key: CoalesceKey, event: E) {
+    /// `coalesce` — when `true` (backpressure active), events with the same
+    /// coalescing key replace earlier events (latest-wins). When `false` (no
+    /// backpressure), events are appended in FIFO order without coalescing.
+    ///
+    /// Regardless of `coalesce`:
+    /// - `CoalesceKey::Never` entries are always appended and never dropped.
+    ///   If the buffer is full, the oldest coalesable entry is evicted to make
+    ///   room. If no coalesable entry exists the buffer grows past capacity
+    ///   (the only correct behaviour: "never drop" is stronger than the size
+    ///   bound, and this edge case is rare — it requires a slow subscriber
+    ///   receiving a flood of lease/degradation events).
+    /// - When `coalesce` is `false` and the buffer is full, the oldest
+    ///   coalesable entry is evicted (graceful degradation under unexpected
+    ///   overload without losing Never events).
+    pub fn push(&mut self, key: CoalesceKey, event: E, coalesce: bool) {
         if key == CoalesceKey::Never {
             // Transactional — never drop. If full, evict oldest coalesable entry.
             if self.entries.len() >= self.capacity {
                 self.evict_oldest_coalesable();
-                // If still full (all entries are Never), push anyway — we must not drop.
-                // This grows beyond capacity only for all-Never buffers which is
-                // an extreme edge case.
             }
             self.entries.push_back(CoalesceEntry { key, event });
             return;
         }
 
-        // Check if an existing entry with the same key exists; if so, replace it.
-        for entry in self.entries.iter_mut() {
-            if entry.key == key {
-                // Coalesce: replace with latest (latest-wins).
-                entry.event = event;
-                return;
+        // Under backpressure: check if an existing entry with the same key exists;
+        // if so, replace it (latest-wins coalescing).
+        if coalesce {
+            for entry in self.entries.iter_mut() {
+                if entry.key == key {
+                    entry.event = event;
+                    return;
+                }
             }
         }
 
-        // No existing entry with this key. If the buffer is full, evict.
+        // No existing entry with this key (or not coalescing). If the buffer is
+        // full, evict the oldest coalesable entry to make room.
         if self.entries.len() >= self.capacity {
             if self.evict_oldest_coalesable() {
                 // Eviction succeeded; there is room now.
@@ -193,16 +200,16 @@ impl<E: Clone> Default for CoalesceBuffer<E> {
 mod tests {
     use super::*;
 
-    // ── Basic coalescing ──────────────────────────────────────────────────────
+    // ── Basic coalescing (coalesce=true, i.e. under backpressure) ──────────────
 
     #[test]
     fn test_same_tile_updates_coalesced() {
         let mut buf: CoalesceBuffer<&str> = CoalesceBuffer::new();
         let key = CoalesceKey::TileId("tile-1".to_string());
 
-        buf.push(key.clone(), "update-1");
-        buf.push(key.clone(), "update-2");
-        buf.push(key.clone(), "update-3");
+        buf.push(key.clone(), "update-1", true);
+        buf.push(key.clone(), "update-2", true);
+        buf.push(key.clone(), "update-3", true);
 
         let drained = buf.drain();
         // Only the latest should remain
@@ -213,9 +220,9 @@ mod tests {
     fn test_different_tiles_not_coalesced() {
         let mut buf: CoalesceBuffer<&str> = CoalesceBuffer::new();
 
-        buf.push(CoalesceKey::TileId("tile-1".to_string()), "t1");
-        buf.push(CoalesceKey::TileId("tile-2".to_string()), "t2");
-        buf.push(CoalesceKey::TileId("tile-1".to_string()), "t1-v2");
+        buf.push(CoalesceKey::TileId("tile-1".to_string()), "t1", true);
+        buf.push(CoalesceKey::TileId("tile-2".to_string()), "t2", true);
+        buf.push(CoalesceKey::TileId("tile-1".to_string()), "t1-v2", true);
 
         let drained = buf.drain();
         // tile-2 untouched, tile-1 coalesced to latest
@@ -230,12 +237,28 @@ mod tests {
         let mut buf: CoalesceBuffer<u32> = CoalesceBuffer::new();
         let key = CoalesceKey::Singleton("scene.tab.active_changed".to_string());
 
-        buf.push(key.clone(), 1);
-        buf.push(key.clone(), 2);
-        buf.push(key.clone(), 3);
+        buf.push(key.clone(), 1, true);
+        buf.push(key.clone(), 2, true);
+        buf.push(key.clone(), 3, true);
 
         let drained = buf.drain();
         assert_eq!(drained, vec![3]);
+    }
+
+    // ── No coalescing when not under backpressure ──────────────────────────────
+
+    #[test]
+    fn test_no_coalescing_without_backpressure() {
+        let mut buf: CoalesceBuffer<u32> = CoalesceBuffer::new();
+        let key = CoalesceKey::TileId("tile-1".to_string());
+
+        buf.push(key.clone(), 1, false);
+        buf.push(key.clone(), 2, false);
+        buf.push(key.clone(), 3, false);
+
+        let drained = buf.drain();
+        // All three retained when not under backpressure
+        assert_eq!(drained, vec![1, 2, 3]);
     }
 
     // ── Never-drop events ─────────────────────────────────────────────────────
@@ -244,9 +267,9 @@ mod tests {
     fn test_never_events_not_coalesced() {
         let mut buf: CoalesceBuffer<&str> = CoalesceBuffer::new();
 
-        buf.push(CoalesceKey::Never, "lease-revoked-1");
-        buf.push(CoalesceKey::Never, "lease-revoked-2");
-        buf.push(CoalesceKey::Never, "degradation-changed");
+        buf.push(CoalesceKey::Never, "lease-revoked-1", false);
+        buf.push(CoalesceKey::Never, "lease-revoked-2", false);
+        buf.push(CoalesceKey::Never, "degradation-changed", false);
 
         let drained = buf.drain();
         // All three retained
@@ -262,12 +285,12 @@ mod tests {
 
         // Fill with coalesable events
         for i in 0..4u32 {
-            buf.push(CoalesceKey::TileId(format!("tile-{i}")), i);
+            buf.push(CoalesceKey::TileId(format!("tile-{i}")), i, true);
         }
         assert_eq!(buf.len(), 4);
 
         // Pushing a Never event should evict the oldest coalesable entry
-        buf.push(CoalesceKey::Never, 99);
+        buf.push(CoalesceKey::Never, 99, false);
         assert_eq!(buf.len(), 4); // still 4 — one was evicted
 
         let drained = buf.drain();
@@ -279,12 +302,12 @@ mod tests {
     fn test_coalesable_event_dropped_when_buffer_full_of_never() {
         let mut buf: CoalesceBuffer<u32> = CoalesceBuffer::with_capacity(2);
 
-        buf.push(CoalesceKey::Never, 1);
-        buf.push(CoalesceKey::Never, 2);
+        buf.push(CoalesceKey::Never, 1, false);
+        buf.push(CoalesceKey::Never, 2, false);
         assert_eq!(buf.len(), 2);
 
         // Coalesable event: no room; should be dropped
-        buf.push(CoalesceKey::TileId("tile-1".to_string()), 3);
+        buf.push(CoalesceKey::TileId("tile-1".to_string()), 3, true);
         let drained = buf.drain();
         assert_eq!(drained, vec![1, 2]); // 3 dropped
     }
@@ -302,10 +325,10 @@ mod tests {
 
         // Push 4 unique coalesable events
         for i in 0..4u32 {
-            buf.push(CoalesceKey::TileId(format!("tile-{i}")), i);
+            buf.push(CoalesceKey::TileId(format!("tile-{i}")), i, true);
         }
         // Push a 5th — should evict the oldest (tile-0 → value 0)
-        buf.push(CoalesceKey::TileId("tile-4".to_string()), 4);
+        buf.push(CoalesceKey::TileId("tile-4".to_string()), 4, true);
         let drained = buf.drain();
         assert_eq!(drained.len(), 4);
         assert!(!drained.contains(&0)); // oldest evicted

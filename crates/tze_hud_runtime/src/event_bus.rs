@@ -32,7 +32,6 @@ use std::time::Instant;
 
 use crate::subscriptions::SubscriptionRegistry;
 use coalesce::{CoalesceBuffer, coalesce_key_for};
-use dedup::DeliveryDedup;
 use suppression::is_suppressed;
 
 // ─── Interruption class ───────────────────────────────────────────────────────
@@ -194,11 +193,15 @@ impl SubscriberQueue {
         }
     }
 
-    /// Enqueue an event, applying coalescing if under backpressure.
+    /// Enqueue an event, applying coalescing only when under backpressure.
+    ///
+    /// When `under_backpressure` is `false`, events are appended in FIFO order.
+    /// When `under_backpressure` is `true`, events with the same coalesce key
+    /// are collapsed to the latest (spec line 220-232).
     pub fn enqueue(&mut self, event: ClassifiedEvent, under_backpressure: bool) {
         self.backpressure = under_backpressure;
         let key = coalesce_key_for(&event.event_type, event.entity_id.as_deref());
-        self.buffer.push(key, event);
+        self.buffer.push(key, event, under_backpressure);
     }
 
     /// Drain all queued events, returning them in delivery order.
@@ -297,9 +300,11 @@ impl EventBus {
     ///
     /// Returns `true` if the event should proceed to Stage 4.
     pub fn policy_filter(&mut self, event: &ClassifiedEvent) -> bool {
-        // Rate cap check
+        // Rate cap check. Lease and degradation events bypass the rate cap
+        // regardless of their InterruptionClass — the spec mandates they are
+        // never dropped (spec lines 229-231, 264-265). CRITICAL-class events
+        // also bypass since they represent urgent runtime conditions.
         if !self.rate_limiter.allow() {
-            // CRITICAL and CRITICAL-class lease/degradation events bypass rate cap
             if event.class != InterruptionClass::Critical
                 && !event.event_type.starts_with("system.lease_")
                 && !event.event_type.starts_with("system.degradation_")
@@ -349,11 +354,14 @@ impl EventBus {
                 continue;
             }
 
-            // Deduplication for dual-route events (ZoneOccupancyChanged)
-            let mut dedup = DeliveryDedup::new();
-            if !dedup.allow(&event.event_type) {
-                continue;
-            }
+            // Dual-route deduplication note: ZoneOccupancyChanged matches both
+            // SCENE_TOPOLOGY and ZONE_EVENTS. Because this fan-out iterates
+            // agents (not categories), each namespace appears at most once per
+            // event — `should_receive` already collapses the multi-category match
+            // to a single boolean. No per-loop DeliveryDedup is needed here;
+            // a fresh DeliveryDedup instance created inside the loop would be a
+            // no-op (always allows on first call). DeliveryDedup is useful in
+            // category-based fan-out layouts; see dedup.rs for details.
 
             // Enqueue in the subscriber's coalesce buffer
             let queue = self.subscriber_queues
@@ -750,11 +758,12 @@ mod tests {
     // ── Coalescing under backpressure ─────────────────────────────────────────
 
     #[test]
-    fn test_tile_updates_coalesced_under_backpressure() {
+    fn test_tile_updates_not_coalesced_below_backpressure_threshold() {
+        // Coalescing only occurs when queue.len() >= COALESCE_BUFFER_CAPACITY / 2.
+        // With 5 events in the queue (far below threshold=32), no coalescing happens.
         let mut bus = make_bus_with_agents(&["agent_a"]);
         subscribe(&mut bus, "agent_a", &[CATEGORY_SCENE_TOPOLOGY]);
 
-        // Emit 5 TileUpdated events for the same tile (simulate backpressure scenario)
         for i in 0..5u8 {
             bus.emit(
                 "scene.tile.updated",
@@ -767,10 +776,50 @@ mod tests {
         }
 
         let drained = bus.drain_subscriber("agent_a");
-        // All 5 events were coalesced to 1 (latest-wins)
-        assert_eq!(drained.len(), 1);
-        // The payload should be the last one (5th event, payload = [4])
-        assert_eq!(drained[0].payload, vec![4]);
+        // All 5 events retained (FIFO, no coalescing)
+        assert_eq!(drained.len(), 5);
+    }
+
+    #[test]
+    fn test_tile_updates_coalesced_under_backpressure() {
+        let mut bus = make_bus_with_agents(&["agent_a"]);
+        subscribe(&mut bus, "agent_a", &[CATEGORY_SCENE_TOPOLOGY]);
+
+        // First, fill the queue past the backpressure threshold (COALESCE_BUFFER_CAPACITY / 2 = 32).
+        // Use distinct tile IDs so they don't coalesce with each other.
+        let threshold = coalesce::COALESCE_BUFFER_CAPACITY / 2; // 32
+        for i in 0..threshold {
+            bus.emit(
+                "scene.tile.updated",
+                InterruptionClass::Normal,
+                InterruptionClass::Critical,
+                "agent_b",
+                Some(format!("seed-tile-{i}")),
+                vec![0],
+            );
+        }
+        // Queue is now at threshold; backpressure is active.
+
+        // Emit 5 more TileUpdated events for the same tile — should coalesce to 1.
+        for i in 0..5u8 {
+            bus.emit(
+                "scene.tile.updated",
+                InterruptionClass::Normal,
+                InterruptionClass::Critical,
+                "agent_b",
+                Some("tile-1".to_string()),
+                vec![i],
+            );
+        }
+
+        let drained = bus.drain_subscriber("agent_a");
+        // The 5 TileUpdated events for "tile-1" are coalesced to 1 (latest-wins).
+        let tile1_events: Vec<_> = drained
+            .iter()
+            .filter(|e| e.entity_id.as_deref() == Some("tile-1"))
+            .collect();
+        assert_eq!(tile1_events.len(), 1, "TileUpdated for tile-1 must coalesce to 1 under backpressure");
+        assert_eq!(tile1_events[0].payload, vec![4], "Latest payload must be retained");
     }
 
     #[test]
