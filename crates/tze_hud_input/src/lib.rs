@@ -7,14 +7,28 @@
 //! ## Modules
 //! - `focus_tree` — per-tab focus tree data structure and history
 //! - `focus`      — focus manager (lifecycle, cycling, events, ring metadata)
+//! - `keyboard`   — keyboard event types and dispatch (KeyDownEvent, KeyUpEvent,
+//!                  CharacterEvent) per RFC 0004 §7.4
+//! - `command`    — abstract command input model (NAVIGATE_NEXT … SCROLL_DOWN)
+//!                  per RFC 0004 §10
 
 pub mod focus_tree;
 pub mod focus;
+pub mod keyboard;
+pub mod command;
 
 pub use focus_tree::{FocusOwner, FocusTree};
 pub use focus::{
     FocusManager, FocusGainedEvent, FocusLostEvent, FocusRequest, FocusResult,
     FocusSource, FocusLostReason, FocusRingUpdate, FocusRingBounds, FocusTransition,
+};
+pub use keyboard::{
+    KeyboardProcessor, KeyboardDispatch, KeyboardDispatchKind,
+    KeyboardModifiers, RawKeyDownEvent, RawKeyUpEvent, RawCharacterEvent,
+};
+pub use command::{
+    CommandProcessor, CommandDispatch, CommandInputEvent,
+    CommandAction, CommandSource, RawCommandEvent,
 };
 
 use tze_hud_scene::{SceneId, NodeData, HitResult};

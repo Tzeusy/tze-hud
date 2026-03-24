@@ -268,6 +268,10 @@ impl FocusManager {
         if tile.namespace != req.requesting_namespace {
             return (FocusResult::Invalid, FocusTransition::default());
         }
+        // Ensure the tile belongs to the given tab; prevents cross-tab focus mutation.
+        if tile.tab_id != tab_id {
+            return (FocusResult::Invalid, FocusTransition::default());
+        }
 
         // Validate node if provided: must exist, be a focusable HitRegion,
         // and be reachable from this tile's root (prevents cross-tile node injection).
