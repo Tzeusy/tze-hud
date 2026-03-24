@@ -393,30 +393,30 @@ impl DispatchProcessor {
                     }
                     local_patch.update_node(pressed_node, Some(false), None, None);
 
-                    if node_allows_event(scene, pressed_node, |m| m.pointer_cancel) {
-                        if let Some(namespace) = tile_namespace(scene, pressed_tile) {
-                            let interaction_id = interaction_id_for(scene, pressed_node);
-                            let (local_x, local_y) =
-                                display_to_local(scene, pressed_tile, raw.x, raw.y);
-                            agent_events.push((
-                                RouteTarget::Agent { namespace, tile_id: pressed_tile },
-                                InputEnvelope::PointerCancel(PointerCancelEvent {
-                                    fields: PointerFields {
-                                        tile_id: pressed_tile,
-                                        node_id: pressed_node,
-                                        interaction_id,
-                                        device_id: raw.device_id,
-                                        local_x,
-                                        local_y,
-                                        display_x: raw.x,
-                                        display_y: raw.y,
-                                        modifiers: raw.modifiers,
-                                        timestamp_mono_us: raw.timestamp_mono_us,
-                                    },
-                                    reason: CancelReason::RuntimeRevoked,
-                                }),
-                            ));
-                        }
+                    // PointerCancelEvent is a terminal signal; EventMask does not gate it
+                    // (the main-branch EventMask has no pointer_cancel field).
+                    if let Some(namespace) = tile_namespace(scene, pressed_tile) {
+                        let interaction_id = interaction_id_for(scene, pressed_node);
+                        let (local_x, local_y) =
+                            display_to_local(scene, pressed_tile, raw.x, raw.y);
+                        agent_events.push((
+                            RouteTarget::Agent { namespace, tile_id: pressed_tile },
+                            InputEnvelope::PointerCancel(PointerCancelEvent {
+                                fields: PointerFields {
+                                    tile_id: pressed_tile,
+                                    node_id: pressed_node,
+                                    interaction_id,
+                                    device_id: raw.device_id,
+                                    local_x,
+                                    local_y,
+                                    display_x: raw.x,
+                                    display_y: raw.y,
+                                    modifiers: raw.modifiers,
+                                    timestamp_mono_us: raw.timestamp_mono_us,
+                                },
+                                reason: CancelReason::RuntimeRevoked,
+                            }),
+                        ));
                     }
                 }
             }
