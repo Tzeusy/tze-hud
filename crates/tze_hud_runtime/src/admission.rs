@@ -86,10 +86,12 @@ impl SessionLimits {
 /// Outcome of an admission attempt.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AdmissionOutcome {
-    /// Session admitted. Contains the clamped `SessionEnvelope`.
+    /// Session admitted. Contains the session_id of the newly admitted session.
     Admitted(String), // session_id
     /// Session rejected because a session limit was reached.
     ResourceExhausted(ResourceExhaustedDetail),
+    /// Session rejected because a session with the same ID is already admitted.
+    DuplicateSessionId,
 }
 
 /// Structured detail returned when a session is rejected due to capacity limits.
@@ -112,13 +114,23 @@ pub struct ResourceExhaustedDetail {
 
 impl ResourceExhaustedDetail {
     /// Encode as a compact JSON string for embedding in `SessionError.hint`.
+    ///
+    /// The `estimated_wait_hint` is escaped to avoid JSON injection from
+    /// characters such as `"`, `\`, or control characters.
     pub fn to_json_hint(&self) -> String {
+        let hint_escaped = self
+            .estimated_wait_hint
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
         format!(
             r#"{{"limit":"{}","current":{},"capacity":{},"hint":"{}"}}"#,
             self.limit_kind.as_str(),
             self.current,
             self.limit,
-            self.estimated_wait_hint,
+            hint_escaped,
         )
     }
 }
@@ -256,6 +268,12 @@ impl AdmissionController {
                 limit: kind_limit,
                 estimated_wait_hint: self.estimate_wait_hint(),
             });
+        }
+
+        // Reject duplicate session IDs — HashMap::insert would silently replace
+        // an existing session and corrupt pool counts.
+        if self.sessions.contains_key(&session_id) {
+            return AdmissionOutcome::DuplicateSessionId;
         }
 
         // Admit the session.
@@ -611,5 +629,50 @@ mod tests {
         assert_eq!(c.session_count_by_kind(AgentKind::Resident), 2);
         assert_eq!(c.session_count_by_kind(AgentKind::Guest), 1);
         assert_eq!(c.session_count(), 3);
+    }
+
+    // ─── Duplicate session_id rejection ───────────────────────────────────
+
+    #[test]
+    fn test_duplicate_session_id_rejected() {
+        let mut c = make_controller();
+
+        // First admission with "dup-session" succeeds.
+        let outcome = c.admit_resident_default(
+            "dup-session".to_string(),
+            "agent-dup".to_string(),
+            SceneId::new(),
+        );
+        assert!(matches!(outcome, AdmissionOutcome::Admitted(_)));
+        assert_eq!(c.session_count(), 1);
+
+        // Second admission with the same session_id must be rejected.
+        let outcome = c.admit_resident_default(
+            "dup-session".to_string(),
+            "agent-dup-2".to_string(),
+            SceneId::new(),
+        );
+        assert!(
+            matches!(outcome, AdmissionOutcome::DuplicateSessionId),
+            "duplicate session_id must be rejected"
+        );
+        // Session count must not have changed (no silent overwrite).
+        assert_eq!(c.session_count(), 1);
+    }
+
+    // ─── JSON hint escaping ────────────────────────────────────────────────
+
+    #[test]
+    fn test_json_hint_escapes_special_characters() {
+        let detail = ResourceExhaustedDetail {
+            limit_kind: LimitKind::ResidentSessionLimit,
+            current: 16,
+            limit: 16,
+            estimated_wait_hint: r#"wait "5s" or retry\n"#.to_string(),
+        };
+        let json = detail.to_json_hint();
+        // The hint must not break the JSON structure (no unescaped quotes or backslashes).
+        assert!(!json.contains(r#"wait "5s""#), "unescaped quote should not appear in JSON");
+        assert!(json.contains(r#"wait \"5s\""#), "quote should be escaped");
     }
 }

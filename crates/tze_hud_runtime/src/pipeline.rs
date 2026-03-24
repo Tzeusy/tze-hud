@@ -644,14 +644,16 @@ impl MutationIntakeStage {
 
     /// Construct with a custom cleanup delay (clamped to [0ms, 5000ms]).
     pub fn with_cleanup_delay(delay: Duration) -> Self {
-        let delay_ms = delay.as_millis() as u64;
-        let clamped_ms = delay_ms.clamp(
-            MIN_POST_REVOCATION_CLEANUP_DELAY_MS,
-            MAX_POST_REVOCATION_CLEANUP_DELAY_MS,
+        // Clamp in Duration-space first to avoid u128→u64 truncation for extreme
+        // values like Duration::MAX (as_millis() returns u128, which would wrap
+        // when cast to u64 before clamping).
+        let clamped = delay.clamp(
+            Duration::from_millis(MIN_POST_REVOCATION_CLEANUP_DELAY_MS),
+            Duration::from_millis(MAX_POST_REVOCATION_CLEANUP_DELAY_MS),
         );
         Self {
             enforcer: BudgetEnforcer::new(),
-            cleanup_delay: Duration::from_millis(clamped_ms),
+            cleanup_delay: clamped,
             pending_cleanups: VecDeque::new(),
         }
     }
@@ -755,9 +757,14 @@ impl MutationIntakeStage {
 
     /// Schedule post-revocation cleanup for a namespace.
     ///
-    /// If the namespace already has a pending cleanup, a duplicate is added
-    /// (harmless — the caller should evict resources idempotently).
+    /// If the namespace already has a pending cleanup entry, the duplicate is
+    /// silently dropped — cleanup is idempotent and the existing entry is
+    /// sufficient. This prevents `tick()` from accumulating unbounded duplicate
+    /// entries when a revoked session persists in the budget enforcer.
     pub fn schedule_cleanup(&mut self, namespace: String, revoked_at: Instant) {
+        if self.pending_cleanups.iter().any(|c| c.namespace == namespace) {
+            return; // already scheduled; drop the duplicate
+        }
         self.pending_cleanups.push_back(PendingCleanup {
             namespace,
             revoked_at,
@@ -770,16 +777,20 @@ impl MutationIntakeStage {
     /// Returns the namespaces ready for resource cleanup. The caller is
     /// responsible for freeing textures, node data, and any other
     /// agent-owned state (reducing the agent's resource footprint to zero).
+    ///
+    /// The drain scans the entire queue rather than stopping at the first
+    /// non-ready entry, since `schedule_cleanup` is public and callers may
+    /// enqueue entries with arbitrary `revoked_at` timestamps.
     pub fn drain_ready_cleanups(&mut self, now: Instant) -> Vec<String> {
         let mut ready = Vec::new();
-        // Drain from the front while ready (entries are ordered by revoked_at).
-        while let Some(cleanup) = self.pending_cleanups.front() {
+        self.pending_cleanups.retain(|cleanup| {
             if cleanup.is_ready(now) {
-                ready.push(self.pending_cleanups.pop_front().unwrap().namespace);
+                ready.push(cleanup.namespace.clone());
+                false // remove from queue
             } else {
-                break;
+                true // keep
             }
-        }
+        });
         ready
     }
 
@@ -1202,6 +1213,30 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_cleanup_not_scheduled() {
+        // Force a revocation, then schedule cleanup manually a second time.
+        // Only one cleanup entry should exist (dedup guard).
+        let (mut stage, mut sink) = make_stage();
+        let _ = stage.check_and_apply(
+            "agent-a",
+            0,
+            3 * 1024 * 1024 * 1024_i64,
+            0,
+            Instant::now(),
+            &mut sink,
+        );
+        assert_eq!(stage.pending_cleanup_count(), 1);
+
+        // Schedule again manually — should be a no-op.
+        stage.schedule_cleanup("agent-a".to_string(), Instant::now());
+        assert_eq!(
+            stage.pending_cleanup_count(),
+            1,
+            "duplicate cleanup for same namespace should not be added"
+        );
+    }
+
+    #[test]
     fn test_cleanup_not_ready_before_delay() {
         let (mut stage, mut sink) = make_stage();
 
@@ -1252,6 +1287,17 @@ mod tests {
     #[test]
     fn test_cleanup_delay_clamped_to_max() {
         let stage = MutationIntakeStage::with_cleanup_delay(Duration::from_secs(9999));
+        assert_eq!(
+            stage.cleanup_delay,
+            Duration::from_millis(MAX_POST_REVOCATION_CLEANUP_DELAY_MS)
+        );
+    }
+
+    #[test]
+    fn test_cleanup_delay_extreme_duration_clamped_safely() {
+        // Duration::MAX would overflow u64 if cast via as_millis() as u64.
+        // Verify it is clamped to MAX_POST_REVOCATION_CLEANUP_DELAY_MS without panic.
+        let stage = MutationIntakeStage::with_cleanup_delay(Duration::MAX);
         assert_eq!(
             stage.cleanup_delay,
             Duration::from_millis(MAX_POST_REVOCATION_CLEANUP_DELAY_MS)

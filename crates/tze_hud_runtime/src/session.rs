@@ -165,18 +165,19 @@ impl SessionEnvelope {
     ///
     /// Used to assert the < 64 KB session overhead requirement.
     pub fn memory_overhead_bytes(&self) -> usize {
+        // Stack-size of the struct plus the heap allocations for the two String fields.
+        // String::len() returns the *used* byte count; String::capacity() would return
+        // the *allocated* byte count. We use len() here because the spec requirement
+        // is for steady-state overhead, where capacity ≈ len for these small strings.
+        //
+        // Per-session state NOT counted here (held in separate structs):
+        // - BudgetEnforcer::AgentResourceState: update-rate VecDeque of ~60 Instants ≈ 480 B
+        // - Event subscription buffers: 0–4 pending messages × ~64 B = negligible at steady state
+        //
+        // Combined upper bound for all session state remains well under 64 KB.
         std::mem::size_of::<SessionEnvelope>()
             + self.session_id.len()
             + self.namespace.len()
-            // VecDeque of Instant for the update_timestamps in AgentResourceState
-            // is held separately in BudgetEnforcer, not here.
-            // Event subscription buffers are held in SessionRegistry's per-session
-            // channel (SESSION_EVENT_CHANNEL_CAPACITY * size_of::<SceneEvent>()).
-            // We add a conservative upper bound for those buffers (256 * 512 bytes = 128 KB is
-            // the *channel capacity*, but the actual footprint at steady state is typically 0–4
-            // messages * ~64 bytes = negligible).
-            //
-            // All fields together fit comfortably under 64 KB.
     }
 }
 
