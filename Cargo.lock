@@ -952,6 +952,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "integration"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tze_hud_compositor",
+ "tze_hud_protocol",
+ "tze_hud_runtime",
+ "tze_hud_scene",
+ "tze_hud_telemetry",
+ "uuid",
+]
+
+[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

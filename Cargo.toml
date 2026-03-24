@@ -12,6 +12,7 @@ members = [
     "crates/tze_hud_policy",
     "crates/tze_hud_resource",
     "examples/vertical_slice",
+    "tests/integration",
 ]
 
 [workspace.package]
