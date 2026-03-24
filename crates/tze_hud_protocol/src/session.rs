@@ -11,6 +11,9 @@ use crate::proto::SceneEvent;
 pub struct SharedState {
     pub scene: SceneGraph,
     pub sessions: SessionRegistry,
+    /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
+    /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.
+    pub safe_mode_active: bool,
 }
 
 /// Bounded per-session event channel capacity (events).

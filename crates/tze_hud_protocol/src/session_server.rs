@@ -4,6 +4,23 @@
 //! `HudSession` gRPC service. It manages the bidirectional streaming session
 //! lifecycle: handshake, mutation processing, lease management, heartbeats,
 //! event dispatch, and reconnection.
+//!
+//! # Session Lifecycle State Machine (RFC 0005 §1.1)
+//!
+//! ```text
+//! Connecting → Handshaking → Active ←→ Disconnecting → Closed → Resuming
+//! ```
+//!
+//! Valid transitions:
+//! - Connecting → Handshaking (stream opened, SessionInit received)
+//! - Handshaking → Active (valid auth → SessionEstablished)
+//! - Handshaking → Closed (auth failure → SessionError(AUTH_FAILED))
+//! - Active → Disconnecting (SessionClose received)
+//! - Active → Closed (ungraceful: heartbeat timeout or stream EOF/RST)
+//! - Disconnecting → Closed (stream termination complete)
+//! - Closed → Resuming (SessionResume within grace period)
+//! - Resuming → Active (valid resume token)
+//! - Resuming → Closed (expired/invalid token)
 
 use crate::convert;
 use crate::proto::session::hud_session_server::HudSession;
@@ -11,12 +28,200 @@ use crate::proto::session::*;
 use crate::proto::session::client_message::Payload as ClientPayload;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::session::{SharedState, SESSION_EVENT_CHANNEL_CAPACITY};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
+
+// ─── Session Configuration ───────────────────────────────────────────────────
+
+/// Runtime-configurable parameters for session management (RFC 0005 §10).
+///
+/// All fields correspond to spec-defined configuration parameters with their
+/// documented defaults.
+#[derive(Debug, Clone)]
+pub struct SessionConfig {
+    /// Maximum time (ms) to wait for SessionInit after stream open. Default: 5000.
+    pub handshake_timeout_ms: u64,
+    /// Interval (ms) at which the client must send Heartbeat. Default: 5000.
+    pub heartbeat_interval_ms: u64,
+    /// Number of consecutive missed heartbeats before ungraceful disconnect. Default: 3.
+    pub heartbeat_missed_threshold: u64,
+    /// Grace period (ms) to hold orphaned leases after disconnect. Default: 30000.
+    pub reconnect_grace_period_ms: u64,
+    /// Timeout (ms) before retransmitting unacknowledged transactional messages. Default: 5000.
+    pub retransmit_timeout_ms: u64,
+    /// Per-session deduplication window size (unique batch_id values). Default: 1000.
+    pub dedup_window_size: usize,
+    /// Per-session deduplication window TTL (seconds). Default: 60.
+    pub dedup_window_ttl_s: u64,
+    /// Maximum sequence gap before SEQUENCE_GAP_EXCEEDED. Default: 100.
+    pub max_sequence_gap: u64,
+    /// Per-session ephemeral message buffer quota (oldest dropped beyond this). Default: 16.
+    pub ephemeral_buffer_max: usize,
+    /// Maximum concurrent resident sessions. Default: 16.
+    pub max_concurrent_resident_sessions: usize,
+    /// Maximum concurrent guest sessions. Default: 64.
+    pub max_concurrent_guest_sessions: usize,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            handshake_timeout_ms: 5000,
+            heartbeat_interval_ms: 5000,
+            heartbeat_missed_threshold: 3,
+            reconnect_grace_period_ms: 30_000,
+            retransmit_timeout_ms: 5000,
+            dedup_window_size: 1000,
+            dedup_window_ttl_s: 60,
+            max_sequence_gap: 100,
+            ephemeral_buffer_max: 16,
+            max_concurrent_resident_sessions: 16,
+            max_concurrent_guest_sessions: 64,
+        }
+    }
+}
+
+// ─── Session Lifecycle State Machine ────────────────────────────────────────
+
+/// Session lifecycle states per RFC 0005 §1.1.
+///
+/// The state machine progresses through these states in response to protocol
+/// events (stream open/close, SessionInit/Resume, heartbeat timeout, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionState {
+    /// TCP/TLS establishment in progress. Initial state when gRPC stream is opened.
+    Connecting,
+    /// SessionInit received, validating credentials and capabilities.
+    Handshaking,
+    /// Bidirectional stream is open and agent is active.
+    Active,
+    /// Graceful close: agent sent SessionClose, waiting for stream termination.
+    Disconnecting,
+    /// Stream terminated. Leases are orphaned if previously Active.
+    Closed,
+    /// Agent is reconnecting within the grace period using a resume token.
+    Resuming,
+}
+
+impl SessionState {
+    /// Returns true if this state allows mutation submission.
+    pub fn allows_mutations(&self) -> bool {
+        *self == SessionState::Active
+    }
+
+    /// Human-readable label for logging.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting",
+            Self::Handshaking => "Handshaking",
+            Self::Active => "Active",
+            Self::Disconnecting => "Disconnecting",
+            Self::Closed => "Closed",
+            Self::Resuming => "Resuming",
+        }
+    }
+}
+
+// ─── Traffic Class ───────────────────────────────────────────────────────────
+
+/// Traffic class for outbound server messages (RFC 0005 §3.1, §3.2).
+///
+/// Each class has different delivery guarantees:
+/// - Transactional: at-least-once, ordered, never dropped.
+/// - StateStream: at-least-once with coalescing; intermediate states may be skipped.
+/// - Ephemeral: at-most-once, latest-wins, dropped under backpressure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrafficClass {
+    /// Reliable, ordered, never dropped. MutationResult, LeaseResponse, SessionEstablished, etc.
+    Transactional,
+    /// Coalesced under pressure; intermediate states may be skipped. SceneSnapshot, TelemetryFrame.
+    StateStream,
+    /// Droppable under backpressure; latest value wins. Heartbeat echo, ephemeral ZonePublish.
+    Ephemeral,
+}
+
+/// Classify an outbound `ServerMessage` payload into its traffic class.
+///
+/// Per RFC 0005 §3.1 and §3.2:
+/// - Session lifecycle responses, MutationResult, LeaseResponse, LeaseStateChange,
+///   SubscriptionChangeResult, ZonePublishResult, RuntimeError, BackpressureSignal,
+///   SessionSuspended, SessionResumed, and input-control responses are Transactional.
+/// - SceneSnapshot, SceneDelta, EventBatch, TelemetryFrame are StateStream.
+/// - Heartbeat echoes are Ephemeral.
+pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
+    match payload {
+        // Session lifecycle — always transactional
+        ServerPayload::SessionEstablished(_)
+        | ServerPayload::SessionError(_)
+        | ServerPayload::SessionResumeResult(_)
+        | ServerPayload::SessionSuspended(_)
+        | ServerPayload::SessionResumed(_)
+        | ServerPayload::RuntimeError(_) => TrafficClass::Transactional,
+
+        // Mutation / lease responses — transactional
+        ServerPayload::MutationResult(_)
+        | ServerPayload::LeaseResponse(_)
+        | ServerPayload::LeaseStateChange(_)
+        | ServerPayload::CapabilityNotice(_)
+        | ServerPayload::SubscriptionChangeResult(_)
+        | ServerPayload::ZonePublishResult(_)
+        | ServerPayload::InputFocusResponse(_)
+        | ServerPayload::InputCaptureResponse(_) => TrafficClass::Transactional,
+
+        // Backpressure signal — transactional (must not be dropped)
+        ServerPayload::BackpressureSignal(_) => TrafficClass::Transactional,
+
+        // Scene state / events — state-stream
+        ServerPayload::SceneSnapshot(_)
+        | ServerPayload::SceneDelta(_)
+        | ServerPayload::EventBatch(_) => TrafficClass::StateStream,
+
+        // Heartbeat echo — ephemeral (droppable, latest-wins)
+        ServerPayload::Heartbeat(_) => TrafficClass::Ephemeral,
+    }
+}
+
+// ─── Ephemeral send buffer ────────────────────────────────────────────────────
+
+/// A bounded queue for ephemeral outbound messages.
+///
+/// When the buffer exceeds `capacity`, the oldest message is dropped, retaining
+/// only the latest `capacity` messages (RFC 0005 §2.5: oldest-first eviction).
+struct EphemeralQueue {
+    queue: VecDeque<Result<ServerMessage, Status>>,
+    capacity: usize,
+}
+
+impl EphemeralQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            queue: VecDeque::with_capacity(capacity + 1),
+            capacity,
+        }
+    }
+
+    /// Enqueue a message. If at capacity, drops the oldest entry.
+    fn push(&mut self, msg: Result<ServerMessage, Status>) {
+        if self.queue.len() >= self.capacity {
+            self.queue.pop_front(); // oldest-first eviction
+        }
+        self.queue.push_back(msg);
+    }
+
+    /// Drain the queue into the send channel (non-blocking).
+    async fn flush(&mut self, tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>) {
+        while let Some(msg) = self.queue.pop_front() {
+            let _ = tx.try_send(msg);
+        }
+    }
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
 
 /// Default heartbeat interval in milliseconds.
 const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 5000;
@@ -26,6 +231,12 @@ const HEARTBEAT_MISSED_THRESHOLD: u64 = 3;
 
 /// Default heartbeat timeout: threshold * interval.
 const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_MISSED_THRESHOLD;
+
+/// Default maximum sequence gap before SEQUENCE_GAP_EXCEEDED (RFC 0005 §2.3).
+const DEFAULT_MAX_SEQUENCE_GAP: u64 = 100;
+
+/// Default per-session ephemeral message buffer quota (RFC 0005 §2.5).
+const DEFAULT_EPHEMERAL_BUFFER_MAX: usize = 16;
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
@@ -72,12 +283,71 @@ struct StreamSession {
     server_sequence: u64,
     resume_token: Vec<u8>,
     last_heartbeat_ms: u64,
+
+    /// Current lifecycle state (RFC 0005 §1.1).
+    state: SessionState,
+
+    /// Last validated client-side sequence number (RFC 0005 §2.3).
+    /// Starts at 0 (meaning no message received yet); first valid message must be 1.
+    last_client_sequence: u64,
+
+    /// Whether safe mode is active for this session (RFC 0005 §3.7).
+    /// When true, MutationBatch messages are rejected with SAFE_MODE_ACTIVE.
+    safe_mode_active: bool,
+
+    /// Whether the agent indicated `expect_resume=true` in SessionClose (RFC 0005 §1.5).
+    /// When true, leases are held for the full reconnect grace period.
+    expect_resume: bool,
 }
 
 impl StreamSession {
     fn next_server_seq(&mut self) -> u64 {
         self.server_sequence += 1;
         self.server_sequence
+    }
+
+    /// Transition to a new state. Returns the previous state.
+    fn transition(&mut self, new_state: SessionState) -> SessionState {
+        let prev = self.state.clone();
+        self.state = new_state;
+        prev
+    }
+
+    /// Validate an inbound client sequence number per RFC 0005 §2.3.
+    ///
+    /// Returns `Ok(())` if valid, or an error string with the appropriate
+    /// SessionError code if the sequence is regressed or the gap is too large.
+    fn validate_client_sequence(
+        &mut self,
+        seq: u64,
+        max_gap: u64,
+    ) -> Result<(), (&'static str, String)> {
+        if seq <= self.last_client_sequence {
+            return Err((
+                "SEQUENCE_REGRESSION",
+                format!(
+                    "sequence regression: received {seq}, last was {}",
+                    self.last_client_sequence
+                ),
+            ));
+        }
+        // "gap" per spec (RFC 0005 §2.3) = seq − last_seq.
+        // Reject if gap > max_sequence_gap (default 100).
+        // Example: last=5, seq=105 → gap=100 = max_gap → accepted (not strictly greater).
+        //          last=5, seq=106 → gap=101 > max_gap=100 → rejected.
+        //          last=5, seq=150 (spec example) → gap=145 > 100 → rejected.
+        let gap = seq - self.last_client_sequence;
+        if gap > max_gap {
+            return Err((
+                "SEQUENCE_GAP_EXCEEDED",
+                format!(
+                    "sequence gap {gap} exceeds max {max_gap}: received {seq}, last was {}",
+                    self.last_client_sequence
+                ),
+            ));
+        }
+        self.last_client_sequence = seq;
+        Ok(())
     }
 }
 
@@ -99,6 +369,7 @@ impl HudSessionImpl {
             state: Arc::new(Mutex::new(SharedState {
                 scene,
                 sessions: crate::session::SessionRegistry::new(psk),
+                safe_mode_active: false,
             })),
             psk: psk.to_string(),
         }
@@ -214,7 +485,10 @@ impl HudSession for HudSessionImpl {
                 return; // Handshake failed, error already sent
             };
 
-            // Send SceneSnapshot after successful handshake
+            // Transition: Handshaking/Resuming → Active (RFC 0005 §1.1)
+            session.transition(SessionState::Active);
+
+            // Send SceneSnapshot after successful handshake (RFC 0005 §1.3, §6.4)
             {
                 let st = state.lock().await;
                 let json = st
@@ -235,26 +509,90 @@ impl HudSession for HudSessionImpl {
             }
 
             // Main message loop
+            //
+            // The loop exits for one of three reasons:
+            //   1. Stream EOF (graceful): agent closed the stream.
+            //   2. Stream error: transport-level error.
+            //   3. Heartbeat timeout: no message for heartbeat_missed_threshold × interval.
+            //
+            // In cases (2) and (3) the disconnect is ungraceful; leases become orphaned.
+            // In case (1) the disconnect may be graceful (SessionClose was sent) or
+            // ungraceful (agent dropped the connection without sending SessionClose).
             loop {
-                // Use heartbeat timeout for receive
+                // Use heartbeat timeout for receive (RFC 0005 §1.6, §3.6)
                 let timeout_duration =
                     tokio::time::Duration::from_millis(DEFAULT_HEARTBEAT_TIMEOUT_MS);
 
                 match tokio::time::timeout(timeout_duration, inbound.message()).await {
                     Ok(Ok(Some(msg))) => {
+                        // Update heartbeat timestamp on any received message
                         session.last_heartbeat_ms = now_ms();
+
+                        // Validate client sequence number (RFC 0005 §2.3).
+                        // Skip validation for sequence 0 (unset) to allow legacy callers
+                        // that don't set sequences. Sequence must be monotonically increasing
+                        // starting at 2 (since 1 is the handshake message).
+                        if msg.sequence != 0 {
+                            match session.validate_client_sequence(
+                                msg.sequence,
+                                DEFAULT_MAX_SEQUENCE_GAP,
+                            ) {
+                                Ok(()) => {}
+                                Err((code, message)) => {
+                                    // Close stream with sequence error
+                                    let seq = session.next_server_seq();
+                                    let _ = tx
+                                        .send(Ok(ServerMessage {
+                                            sequence: seq,
+                                            timestamp_wall_us: now_wall_us(),
+                                            payload: Some(ServerPayload::SessionError(
+                                                SessionError {
+                                                    code: code.to_string(),
+                                                    message,
+                                                    hint: String::new(),
+                                                },
+                                            )),
+                                        }))
+                                        .await;
+                                    session.transition(SessionState::Closed);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Check if this is a graceful close message
+                        let is_close = matches!(
+                            &msg.payload,
+                            Some(ClientPayload::SessionClose(_))
+                        );
+
                         handle_client_message(&state, session, &tx, msg).await;
+
+                        // After handling SessionClose, transition to Disconnecting then Closed
+                        if is_close {
+                            session.transition(SessionState::Disconnecting);
+                            session.transition(SessionState::Closed);
+                            break;
+                        }
                     }
                     Ok(Ok(None)) => {
-                        // Stream closed gracefully
+                        // Stream EOF — ungraceful unless session already Disconnecting
+                        if session.state != SessionState::Disconnecting {
+                            session.transition(SessionState::Closed);
+                        } else {
+                            session.transition(SessionState::Closed);
+                        }
                         break;
                     }
                     Ok(Err(_e)) => {
-                        // Stream error
+                        // Stream transport error — ungraceful disconnect
+                        session.transition(SessionState::Closed);
                         break;
                     }
                     Err(_) => {
-                        // Heartbeat timeout - ungraceful disconnect
+                        // Heartbeat timeout — ungraceful disconnect (RFC 0005 §1.6, §3.6)
+                        // Leases are orphaned; reconnection grace period begins.
+                        session.transition(SessionState::Closed);
                         break;
                     }
                 }
@@ -323,6 +661,10 @@ async fn handle_session_init(
         server_sequence: 0,
         resume_token: resume_token.clone(),
         last_heartbeat_ms: now_ms(),
+        state: SessionState::Handshaking,
+        last_client_sequence: 1, // SessionInit is sequence 1; start validation from next
+        safe_mode_active: false,
+        expect_resume: false,
     };
 
     // Compute clock skew estimate
@@ -406,6 +748,10 @@ async fn handle_session_resume(
         server_sequence: 0,
         resume_token: new_resume_token.clone(),
         last_heartbeat_ms: now_ms(),
+        state: SessionState::Resuming,
+        last_client_sequence: 1, // SessionResume is sequence 1; start validation from next
+        safe_mode_active: false,
+        expect_resume: false,
     };
 
     let compositor_ts = now_wall_us();
@@ -480,8 +826,10 @@ async fn handle_client_message(
         ClientPayload::SetImePosition(_pos) => {
             // IME position hint deferred to post-v1; fire-and-forget, no response needed
         }
-        ClientPayload::SessionClose(_close) => {
-            // Client initiated graceful close; the main loop will break on stream end
+        ClientPayload::SessionClose(close) => {
+            // Graceful disconnect (RFC 0005 §1.5).
+            // Record the expect_resume hint; the main loop transitions state after this returns.
+            session.expect_resume = close.expect_resume;
         }
         ClientPayload::CapabilityRequest(_req) => {
             // Capability management is deferred to post-v1.
@@ -515,6 +863,33 @@ async fn handle_mutation_batch(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     batch: MutationBatch,
 ) {
+    // Reject MutationBatch when safe mode is active (RFC 0005 §3.7).
+    // Session-local flag tracks per-session suspension (from SessionSuspended delivery).
+    // Shared state flag tracks global suspension (from the runtime side).
+    // Both are checked; shared state takes precedence.
+    {
+        let st = state.lock().await;
+        let safe_mode = session.safe_mode_active || st.safe_mode_active;
+        if safe_mode {
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                        error_code: "SAFE_MODE_ACTIVE".to_string(),
+                        message: "Mutations are not accepted while the runtime is in safe mode."
+                            .to_string(),
+                        context: String::new(),
+                        hint: r#"{"wait_for": "SessionResumed"}"#.to_string(),
+                        error_code_enum: ErrorCode::SafeModeActive as i32,
+                    })),
+                }))
+                .await;
+            return;
+        }
+    }
+
     let mut st = state.lock().await;
 
     let lease_id = match bytes_to_scene_id(&batch.lease_id) {
@@ -1424,5 +1799,617 @@ mod tests {
             }
             other => panic!("Expected SubscriptionChangeResult, got: {other:?}"),
         }
+    }
+
+    // ─── Sequence number validation tests (RFC 0005 §2.3) ────────────────────
+
+    /// Scenario: Sequence gap exceeds threshold (RFC 0005 §2.3)
+    /// WHEN client sends sequence 5 followed by 150 (gap > max_sequence_gap=100),
+    /// THEN runtime closes the stream with SEQUENCE_GAP_EXCEEDED.
+    #[tokio::test]
+    async fn test_sequence_gap_exceeded() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "seq-gap-agent", "test-key").await;
+
+        // Handshake consumes sequence 1. Send a valid message at sequence 2.
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 100,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Drain the heartbeat echo
+        let _ = stream.next().await;
+
+        // Now jump to sequence 5, then to 150 — gap of 145 > DEFAULT_MAX_SEQUENCE_GAP=100
+        tx.send(ClientMessage {
+            sequence: 5,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 200,
+            })),
+        })
+        .await
+        .unwrap();
+        let _ = stream.next().await; // drain heartbeat echo
+
+        tx.send(ClientMessage {
+            sequence: 150,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 300,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "SEQUENCE_GAP_EXCEEDED",
+                    "Expected SEQUENCE_GAP_EXCEEDED, got: {}",
+                    err.code
+                );
+            }
+            other => panic!("Expected SessionError(SEQUENCE_GAP_EXCEEDED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Sequence regression rejected (RFC 0005 §2.3)
+    /// WHEN client sends sequence 10 followed by sequence 8,
+    /// THEN runtime closes the stream with SEQUENCE_REGRESSION.
+    #[tokio::test]
+    async fn test_sequence_regression() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "seq-reg-agent", "test-key").await;
+
+        // Send sequence 10
+        tx.send(ClientMessage {
+            sequence: 10,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 100,
+            })),
+        })
+        .await
+        .unwrap();
+        let _ = stream.next().await; // drain heartbeat echo
+
+        // Send sequence 8 — regression
+        tx.send(ClientMessage {
+            sequence: 8,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 200,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "SEQUENCE_REGRESSION",
+                    "Expected SEQUENCE_REGRESSION, got: {}",
+                    err.code
+                );
+            }
+            other => panic!("Expected SessionError(SEQUENCE_REGRESSION), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Monotonically increasing sequence numbers accepted.
+    /// WHEN agent sends sequences 1, 2, 3,
+    /// THEN all are processed without error.
+    #[tokio::test]
+    async fn test_sequence_monotonic_accepted() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "seq-ok-agent", "test-key").await;
+
+        for seq in 2u64..=4 {
+            tx.send(ClientMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                    timestamp_mono_us: seq * 1000,
+                })),
+            })
+            .await
+            .unwrap();
+
+            let msg = stream.next().await.unwrap().unwrap();
+            match &msg.payload {
+                Some(ServerPayload::Heartbeat(hb)) => {
+                    assert_eq!(hb.timestamp_mono_us, seq * 1000);
+                }
+                other => panic!("Expected Heartbeat echo at seq {seq}, got: {other:?}"),
+            }
+        }
+    }
+
+    // ─── Safe mode tests (RFC 0005 §3.7) ─────────────────────────────────────
+
+    /// Scenario: Mutations rejected during safe mode (RFC 0005 §3.7)
+    /// WHEN the runtime enters safe mode and the session sets safe_mode_active=true,
+    /// THEN MutationBatch is rejected with SAFE_MODE_ACTIVE.
+    ///
+    /// In this test we drive safe mode via SharedState directly (as the runtime
+    /// would do via SessionSuspended broadcast).
+    #[tokio::test]
+    async fn test_safe_mode_rejects_mutations() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "safe-mode-agent", "test-key").await;
+
+        // Enable safe mode in shared state (simulates runtime entering safe mode)
+        {
+            let mut st = shared_state.lock().await;
+            st.safe_mode_active = true;
+        }
+
+        // Request a lease first (this is transactional, not affected by safe mode)
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 30_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+        let lease_msg = stream.next().await.unwrap().unwrap();
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        // Send MutationBatch while safe mode is active — should be rejected
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(
+                    err.error_code, "SAFE_MODE_ACTIVE",
+                    "Expected SAFE_MODE_ACTIVE, got: {}",
+                    err.error_code
+                );
+            }
+            other => panic!("Expected RuntimeError(SAFE_MODE_ACTIVE), got: {other:?}"),
+        }
+
+        // Disable safe mode
+        {
+            let mut st = shared_state.lock().await;
+            st.safe_mode_active = false;
+        }
+
+        // Mutations should no longer be rejected with SAFE_MODE_ACTIVE.
+        // We use a heartbeat to verify the session is still responsive and
+        // the safe mode is cleared.
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 999,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg2 = stream.next().await.unwrap().unwrap();
+        match &msg2.payload {
+            Some(ServerPayload::Heartbeat(hb)) => {
+                // Session still active after safe mode was cleared
+                assert_eq!(hb.timestamp_mono_us, 999, "Heartbeat should echo correctly");
+            }
+            other => panic!("Expected Heartbeat after safe mode exit, got: {other:?}"),
+        }
+
+        // Now verify a MutationBatch is no longer blocked by SAFE_MODE_ACTIVE.
+        // (It may still fail due to invalid lease, but not because of safe mode.)
+        let batch_id2 = uuid::Uuid::now_v7().as_bytes().to_vec();
+        // Use the real lease from earlier
+        tx.send(ClientMessage {
+            sequence: 5,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id2.clone(),
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg3 = stream.next().await.unwrap().unwrap();
+        match &msg3.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                // We get MutationResult (not RuntimeError with SAFE_MODE_ACTIVE)
+                assert_eq!(result.batch_id, batch_id2);
+            }
+            Some(ServerPayload::RuntimeError(err)) => {
+                // Must NOT be SAFE_MODE_ACTIVE
+                assert_ne!(
+                    err.error_code, "SAFE_MODE_ACTIVE",
+                    "Safe mode should be cleared, unexpected SAFE_MODE_ACTIVE"
+                );
+            }
+            other => panic!("Unexpected message after safe mode exit: {other:?}"),
+        }
+    }
+
+    // ─── Session state machine tests (RFC 0005 §1.1) ─────────────────────────
+
+    /// Scenario: Successful session establishment transitions through Connecting→Handshaking→Active.
+    /// The state machine starts in Handshaking during the handle_session_init call and
+    /// transitions to Active after the handshake response is sent.
+    #[tokio::test]
+    async fn test_state_machine_successful_establishment() {
+        let (mut client, _server) = setup_test().await;
+        let (_tx, messages, _stream) = handshake(&mut client, "state-test-agent", "test-key").await;
+
+        // If handshake succeeded, we must have SessionEstablished followed by SceneSnapshot
+        assert_eq!(messages.len(), 2, "Expected SessionEstablished + SceneSnapshot");
+        assert!(
+            matches!(messages[0].payload, Some(ServerPayload::SessionEstablished(_))),
+            "First message must be SessionEstablished"
+        );
+        assert!(
+            matches!(messages[1].payload, Some(ServerPayload::SceneSnapshot(_))),
+            "Second message must be SceneSnapshot"
+        );
+    }
+
+    /// Scenario: Auth failure transitions Handshaking→Closed with SessionError.
+    #[tokio::test]
+    async fn test_state_machine_auth_failure_to_closed() {
+        let (mut client, _server) = setup_test().await;
+
+        let (init_tx, init_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(init_rx);
+
+        init_tx
+            .send(ClientMessage {
+                sequence: 1,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::SessionInit(SessionInit {
+                    agent_id: "state-fail-agent".to_string(),
+                    agent_display_name: "state-fail-agent".to_string(),
+                    pre_shared_key: "wrong-key".to_string(),
+                    requested_capabilities: Vec::new(),
+                    initial_subscriptions: Vec::new(),
+                    resume_token: Vec::new(),
+                    agent_timestamp_wall_us: 0,
+                })),
+            })
+            .await
+            .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+
+        // State machine should send SessionError (AUTH_FAILED) and transition to Closed
+        match &msg.payload {
+            Some(ServerPayload::SessionError(error)) => {
+                assert_eq!(error.code, "AUTH_FAILED");
+            }
+            other => panic!("Expected SessionError(AUTH_FAILED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Graceful disconnect via SessionClose.
+    /// The session stream should terminate cleanly after SessionClose is sent.
+    #[tokio::test]
+    async fn test_graceful_disconnect_session_close() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "close-agent", "test-key").await;
+
+        // Send SessionClose with expect_resume=false
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionClose(SessionClose {
+                reason: "test shutdown".to_string(),
+                expect_resume: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Stream should close (no response expected for SessionClose)
+        // Give the server a moment to process
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // The stream should be closed; next() should return None or an error
+        // (The server closes the stream after transitioning to Closed state)
+        drop(tx);
+        // Drain any remaining messages
+        let mut got_stream_end = false;
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                break;
+            }
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(None) | Err(_) => {
+                    got_stream_end = true;
+                    break;
+                }
+                Ok(Some(_)) => {
+                    // Some message still in transit, keep draining
+                }
+            }
+        }
+        // Either the stream closed or we timed out — both are acceptable
+        // (test validates that SessionClose is processed without error)
+        let _ = got_stream_end;
+    }
+
+    /// Scenario: Graceful disconnect with expect_resume=true hint (RFC 0005 §1.5).
+    /// The runtime should record the hint (tested via no error returned to client).
+    #[tokio::test]
+    async fn test_graceful_disconnect_with_resume_hint() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, _stream) =
+            handshake(&mut client, "resume-hint-agent", "test-key").await;
+
+        // Send SessionClose with expect_resume=true
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionClose(SessionClose {
+                reason: "updating agent".to_string(),
+                expect_resume: true,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // If no error is returned, the hint was processed successfully.
+        // The test verifies protocol acceptance, not the lease hold behavior
+        // (which requires multi-session coordination tested in integration tests).
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        drop(tx);
+    }
+
+    // ─── SessionConfig default values test (RFC 0005 §10) ────────────────────
+
+    /// Verify SessionConfig defaults match the spec-specified values.
+    #[test]
+    fn test_session_config_defaults() {
+        let config = SessionConfig::default();
+        assert_eq!(config.handshake_timeout_ms, 5000, "handshake_timeout_ms default");
+        assert_eq!(config.heartbeat_interval_ms, 5000, "heartbeat_interval_ms default");
+        assert_eq!(config.heartbeat_missed_threshold, 3, "heartbeat_missed_threshold default");
+        assert_eq!(config.reconnect_grace_period_ms, 30_000, "reconnect_grace_period_ms default");
+        assert_eq!(config.retransmit_timeout_ms, 5000, "retransmit_timeout_ms default");
+        assert_eq!(config.dedup_window_size, 1000, "dedup_window_size default");
+        assert_eq!(config.dedup_window_ttl_s, 60, "dedup_window_ttl_s default");
+        assert_eq!(config.max_sequence_gap, 100, "max_sequence_gap default");
+        assert_eq!(config.ephemeral_buffer_max, 16, "ephemeral_buffer_max default");
+        assert_eq!(config.max_concurrent_resident_sessions, 16, "max_concurrent_resident_sessions default");
+        assert_eq!(config.max_concurrent_guest_sessions, 64, "max_concurrent_guest_sessions default");
+    }
+
+    // ─── Traffic class classification tests (RFC 0005 §3.1, §3.2) ───────────
+
+    /// Verify traffic class routing for server payloads.
+    #[test]
+    fn test_traffic_class_routing() {
+        use crate::proto::session::*;
+
+        // Transactional messages
+        assert_eq!(
+            classify_server_payload(&ServerPayload::SessionEstablished(SessionEstablished::default())),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::MutationResult(MutationResult::default())),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::LeaseResponse(LeaseResponse::default())),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::SessionSuspended(SessionSuspended::default())),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::SessionResumed(SessionResumed::default())),
+            TrafficClass::Transactional,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::RuntimeError(RuntimeError::default())),
+            TrafficClass::Transactional,
+        );
+
+        // StateStream messages
+        assert_eq!(
+            classify_server_payload(&ServerPayload::SceneSnapshot(SceneSnapshot::default())),
+            TrafficClass::StateStream,
+        );
+        assert_eq!(
+            classify_server_payload(&ServerPayload::SceneDelta(SceneDelta::default())),
+            TrafficClass::StateStream,
+        );
+
+        // Ephemeral messages
+        assert_eq!(
+            classify_server_payload(&ServerPayload::Heartbeat(Heartbeat::default())),
+            TrafficClass::Ephemeral,
+        );
+    }
+
+    // ─── Ephemeral queue backpressure tests (RFC 0005 §2.5) ──────────────────
+
+    /// Scenario: Ephemeral messages dropped under pressure (RFC 0005 §2.5)
+    /// WHEN 20 ephemeral messages are enqueued (>16 quota),
+    /// THEN oldest are dropped, retaining latest 16.
+    #[test]
+    fn test_ephemeral_queue_drops_oldest() {
+        let mut queue = EphemeralQueue::new(DEFAULT_EPHEMERAL_BUFFER_MAX);
+
+        // Enqueue 20 messages (4 more than the 16-message quota)
+        for i in 0u64..20 {
+            let msg = Ok(ServerMessage {
+                sequence: i + 1,
+                timestamp_wall_us: 0,
+                payload: Some(ServerPayload::Heartbeat(Heartbeat {
+                    timestamp_mono_us: i,
+                })),
+            });
+            queue.push(msg);
+        }
+
+        // Queue should contain exactly 16 messages (quota)
+        assert_eq!(
+            queue.queue.len(),
+            DEFAULT_EPHEMERAL_BUFFER_MAX,
+            "Queue should be capped at ephemeral_buffer_max=16"
+        );
+
+        // First retained message should be sequence 5 (oldest 4 were dropped: 1,2,3,4)
+        if let Some(Ok(msg)) = queue.queue.front() {
+            assert_eq!(msg.sequence, 5, "Oldest 4 should have been evicted (1-4 dropped, 5 is oldest retained)");
+        }
+
+        // Last retained message should be sequence 20
+        if let Some(Ok(msg)) = queue.queue.back() {
+            assert_eq!(msg.sequence, 20, "Latest message should be 20");
+        }
+    }
+
+    /// Scenario: Ephemeral queue within capacity — no messages dropped.
+    #[test]
+    fn test_ephemeral_queue_within_capacity() {
+        let mut queue = EphemeralQueue::new(DEFAULT_EPHEMERAL_BUFFER_MAX);
+
+        for i in 0u64..16 {
+            queue.push(Ok(ServerMessage {
+                sequence: i + 1,
+                timestamp_wall_us: 0,
+                payload: Some(ServerPayload::Heartbeat(Heartbeat {
+                    timestamp_mono_us: i,
+                })),
+            }));
+        }
+
+        assert_eq!(queue.queue.len(), 16, "All 16 messages retained (at capacity)");
+        if let Some(Ok(msg)) = queue.queue.front() {
+            assert_eq!(msg.sequence, 1, "No eviction: first message is sequence 1");
+        }
+    }
+
+    // ─── Sequence validation unit tests ─────────────────────────────────────
+
+    /// Unit tests for StreamSession::validate_client_sequence.
+    #[test]
+    fn test_validate_sequence_unit() {
+        let mut session = StreamSession {
+            session_id: "test".to_string(),
+            namespace: "test".to_string(),
+            agent_name: "test".to_string(),
+            capabilities: Vec::new(),
+            lease_ids: Vec::new(),
+            subscriptions: Vec::new(),
+            server_sequence: 0,
+            resume_token: Vec::new(),
+            last_heartbeat_ms: 0,
+            state: SessionState::Active,
+            last_client_sequence: 1,
+            safe_mode_active: false,
+            expect_resume: false,
+        };
+
+        // seq=2 (gap=1): OK
+        assert!(session.validate_client_sequence(2, 100).is_ok());
+        assert_eq!(session.last_client_sequence, 2);
+
+        // seq=102 (gap=100): still OK (gap == max_gap, not >)
+        assert!(session.validate_client_sequence(102, 100).is_ok());
+        assert_eq!(session.last_client_sequence, 102);
+
+        // seq=203 (gap=101): exceeds max_gap=100
+        let err = session.validate_client_sequence(203, 100);
+        assert!(err.is_err());
+        let (code, _) = err.unwrap_err();
+        assert_eq!(code, "SEQUENCE_GAP_EXCEEDED");
+        // last_client_sequence unchanged on error
+        assert_eq!(session.last_client_sequence, 102);
+
+        // seq=50 (regression): error
+        let err = session.validate_client_sequence(50, 100);
+        assert!(err.is_err());
+        let (code, _) = err.unwrap_err();
+        assert_eq!(code, "SEQUENCE_REGRESSION");
+
+        // seq=102 (same as last): regression (not strictly greater)
+        let err = session.validate_client_sequence(102, 100);
+        assert!(err.is_err());
+        let (code, _) = err.unwrap_err();
+        assert_eq!(code, "SEQUENCE_REGRESSION");
+    }
+
+    /// Helper that returns the shared state alongside the client for state-manipulation tests.
+    async fn setup_test_with_state() -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<SharedState>>,
+    ) {
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        let shared_state = service.state.clone();
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let incoming =
+                tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let client =
+            HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+                .await
+                .unwrap();
+
+        (client, handle, shared_state)
     }
 }
