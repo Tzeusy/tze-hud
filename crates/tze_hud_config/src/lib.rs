@@ -5,9 +5,9 @@
 //! This crate provides `TzeHudConfig`, the concrete implementation of the
 //! `ConfigLoader` trait defined in `tze_hud_scene::config`.
 //!
-//! ## Scope (per spec §rig-j90m)
+//! ## Scope
 //!
-//! Implements:
+//! ### rig-j90m (TOML schema and file loading)
 //! - TOML Configuration Format (v1-mandatory)
 //! - Configuration File Resolution Order (v1-mandatory)
 //! - Minimal Valid Configuration (v1-mandatory)
@@ -20,13 +20,22 @@
 //! - Schema Export (v1-mandatory)
 //! - Layered Config Composition guard (v1-reserved: hard error)
 //!
-//! Does NOT include:
-//! - Display profile resolution (rig-umgy)
+//! ### rig-umgy (Display profile resolution)
+//! - Display Profile full-display (v1-mandatory)
+//! - Display Profile headless (v1-mandatory)
+//! - Mobile Profile Schema-Reserved (v1-mandatory)
+//! - Profile Auto-Detection (v1-mandatory)
+//! - Profile Budget Escalation Prevention (v1-mandatory)
+//! - Profile Extends Conflict Detection (v1-mandatory)
+//! - Headless Virtual Display (v1-mandatory)
+//!
+//! ## Does NOT include
 //! - Capability vocabulary validation (rig-9yfh)
 //! - Privacy, zone registry, agent registration (rig-mop4)
-//! - Hot-reload (separate bead)
+//! - Hot-reload (rig-mop4)
 
 pub mod loader;
+pub mod profile;
 pub mod raw;
 pub mod resolver;
 pub mod schema;
@@ -34,5 +43,9 @@ pub mod schema;
 mod tests;
 
 pub use loader::TzeHudConfig;
+pub use profile::{
+    HeadlessSignal, AutoDetectResult, auto_detect_profile, resolve_headless_dimensions,
+    resolve_profile, validate_display_profile,
+};
 pub use resolver::resolve_config_path;
 pub use schema::print_schema;

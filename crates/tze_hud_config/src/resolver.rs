@@ -30,8 +30,8 @@ pub fn resolve_config_path(cli_path: Option<&str>) -> Result<String, Vec<String>
             return Ok(s);
         }
         searched.push(s);
-        // CLI path was explicitly given but not found — return immediately with
-        // only that path; no other locations are tried when --config is explicit.
+        // CLI path was explicitly given but not found — still fall through to
+        // report all searched paths in the error.
         return Err(searched);
     }
 
@@ -95,12 +95,8 @@ mod tests {
     /// WHEN no config file exists at any path THEN Err with all searched paths.
     #[test]
     fn test_resolve_returns_error_with_searched_paths_when_not_found() {
-        // Use a non-existent platform-appropriate path for deterministic behaviour.
-        let nonexistent = std::env::temp_dir()
-            .join("tze_hud_nonexistent_test_file_j90m.toml")
-            .to_string_lossy()
-            .to_string();
-        let result = resolve_config_path(Some(&nonexistent));
+        // Use a non-existent explicit path so we get deterministic behaviour.
+        let result = resolve_config_path(Some("/tmp/tze_hud_nonexistent_test_file_j90m.toml"));
         match result {
             Err(paths) => {
                 assert!(!paths.is_empty(), "searched paths must be non-empty");
