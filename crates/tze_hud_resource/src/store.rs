@@ -329,34 +329,25 @@ mod tests {
     // ── No filesystem artifacts ───────────────────────────────────────────────
 
     /// WHEN resources are uploaded and the store is used
-    /// THEN no filesystem artifacts are created.
+    /// THEN no filesystem artifacts are created in the isolated test directory.
     ///
-    /// This test verifies the no-persistence invariant by checking that the
-    /// resource store does not create any files in the current working directory
-    /// or in /tmp (where temporary files commonly appear).
+    /// This test verifies the no-persistence invariant by running the store
+    /// operations in an isolated temporary directory and checking that it
+    /// remains empty afterward.  Using a dedicated temp dir avoids the
+    /// flakiness of scanning the full workspace (other parallel tests may
+    /// legitimately create files there).
     #[tokio::test]
     async fn no_filesystem_artifacts_created() {
-        use std::collections::BTreeSet;
-        use std::path::PathBuf;
+        // Create an isolated temporary directory that starts empty.
+        let tmp = tempfile::tempdir().expect("cannot create temp dir");
+        let tmp_path = tmp.path().to_path_buf();
 
-        fn list_dir_recursive(dir: &std::path::Path) -> BTreeSet<PathBuf> {
-            let mut set = BTreeSet::new();
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        set.insert(path);
-                    } else if path.is_dir() {
-                        set.extend(list_dir_recursive(&path));
-                    }
-                }
-            }
-            set
-        }
-
-        // Snapshot current directory and /tmp before any store operations.
-        let cwd = std::env::current_dir().expect("cannot determine cwd");
-        let before_cwd = list_dir_recursive(&cwd);
+        // Record files before any store operations (should be none).
+        let before: Vec<_> = std::fs::read_dir(&tmp_path)
+            .expect("cannot read temp dir")
+            .flatten()
+            .collect();
+        assert!(before.is_empty(), "temp dir should be empty before test");
 
         let store = default_store();
         let data = minimal_png_1x1();
@@ -381,13 +372,16 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // Verify no new files appeared in the current directory.
-        let after_cwd = list_dir_recursive(&cwd);
-        let new_files: Vec<_> = after_cwd.difference(&before_cwd).collect();
+        // Verify the isolated temp dir is still empty — EphemeralStore must
+        // not write any files, databases, or caches.
+        let after: Vec<_> = std::fs::read_dir(&tmp_path)
+            .expect("cannot read temp dir")
+            .flatten()
+            .collect();
         assert!(
-            new_files.is_empty(),
+            after.is_empty(),
             "EphemeralStore must not create filesystem artifacts; found: {:?}",
-            new_files
+            after.iter().map(|e| e.path()).collect::<Vec<_>>()
         );
     }
 

@@ -972,6 +972,7 @@ fn make_stream_text_zone(name: &str) -> tze_hud_scene::types::ZoneDefinition {
         max_publishers: 4,
         transport_constraint: None,
         auto_clear_ms: None,
+        ephemeral: false,
     }
 }
 

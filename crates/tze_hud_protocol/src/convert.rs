@@ -91,13 +91,18 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 proto::ImageFitModeProto::ImageFitModeScaleDown => ImageFitMode::ScaleDown,
             };
             // RS-4: resource_id is 32 raw bytes on the wire (NOT hex-encoded).
-            let resource_id = ResourceId::from_slice(&si.resource_id)
-                .unwrap_or_else(|| ResourceId::from_bytes([0u8; 32]));
+            // Reject nodes with malformed resource_id (wrong length = protocol violation).
+            let Some(resource_id) = ResourceId::from_slice(&si.resource_id) else {
+                return None;
+            };
+            // decoded_bytes is runtime-owned metadata for budget accounting.
+            // Do not trust client-supplied values; the runtime populates this
+            // from the resource store record when processing the mutation.
             NodeData::StaticImage(StaticImageNode {
                 resource_id,
                 width: si.width,
                 height: si.height,
-                decoded_bytes: si.decoded_bytes as usize,
+                decoded_bytes: 0,
                 fit_mode,
                 bounds,
             })
@@ -382,7 +387,7 @@ mod tests {
                 resource_id,
                 width: 4,
                 height: 4,
-                decoded_bytes: 4 * 4 * 4, // 4×4 RGBA8
+                decoded_bytes: 4 * 4 * 4u64, // 4×4 RGBA8
                 fit_mode,
                 bounds: Rect::new(10.0, 20.0, 80.0, 60.0),
             }),
@@ -398,7 +403,11 @@ mod tests {
         if let NodeData::StaticImage(si) = &restored.data {
             assert_eq!(si.width, 4);
             assert_eq!(si.height, 4);
-            assert_eq!(si.decoded_bytes, 4 * 4 * 4);
+            // decoded_bytes is runtime-owned metadata; proto_node_to_scene zeroes it out
+            // (client-supplied values are not trusted — the runtime populates this
+            // from the resource store after mutation).
+            assert_eq!(si.decoded_bytes, 0,
+                "decoded_bytes must be zeroed on ingestion (runtime sets this, not the client)");
             assert_eq!(si.fit_mode, ImageFitMode::Contain);
             assert_eq!(si.bounds.x, 10.0);
             assert_eq!(si.bounds.y, 20.0);
@@ -442,7 +451,7 @@ mod tests {
                 resource_id,
                 width: 4,
                 height: 1,
-                decoded_bytes: 4 * 1 * 4, // 4×1 RGBA8
+                decoded_bytes: 4 * 1 * 4u64, // 4×1 RGBA8
                 fit_mode: ImageFitMode::Fill,
                 bounds: Rect::new(0.0, 0.0, 100.0, 25.0),
             }),

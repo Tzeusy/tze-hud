@@ -22,7 +22,7 @@ use crate::types::ResourceId;
 
 /// Encode a byte slice as a lowercase hex string.
 ///
-/// Used by `ResourceId`'s `Display` and `Debug` implementations.
+/// Helper for rendering `ResourceId` and related types in operator/debug output.
 /// Output is always 2 × `bytes.len()` characters, all lowercase.
 #[inline]
 pub fn to_lowercase_hex(bytes: &[u8]) -> String {

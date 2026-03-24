@@ -440,7 +440,10 @@ pub struct StaticImageNode {
     pub height: u32,
     /// Decoded in-memory size in bytes, recorded at mutation time for budget
     /// accounting.  Does NOT store the actual pixels.
-    pub decoded_bytes: usize,
+    ///
+    /// Using `u64` to match scene budget accounting types (`ResourceBudget.max_texture_bytes`)
+    /// and the protobuf wire type, avoiding lossy casts on 32-bit targets.
+    pub decoded_bytes: u64,
     /// How the image is fitted within `bounds`.
     pub fit_mode: ImageFitMode,
     /// Position and size within the parent tile (in tile-local coordinates).

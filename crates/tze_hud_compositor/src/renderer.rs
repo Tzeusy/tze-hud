@@ -583,20 +583,16 @@ mod tests {
         // We just verify that *some* non-background pixels appear in the expected warm range.
         let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
 
-        let (img_data, hash) = {
-            let data: Vec<u8> = (0..8 * 8).flat_map(|_| [255u8, 0, 0, 255]).collect();
-            let sum: u64 = data.iter().map(|b| *b as u64).sum();
-            (data, format!("{:016x}", sum))
-        };
-
+        // RS-4: StaticImageNode uses resource_id + decoded_bytes; no raw blob embedded.
+        let resource_id = ResourceId::of(b"8x8 test image placeholder");
         let node = Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data: img_data,
+                resource_id,
                 width: 8,
                 height: 8,
-                content_hash: hash,
+                decoded_bytes: 8 * 8 * 4,
                 fit_mode: ImageFitMode::Contain,
                 bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
             }),
@@ -641,10 +637,7 @@ mod tests {
         }).unwrap();
 
         // Right tile: static image
-        let (img_data, hash) = {
-            let data: Vec<u8> = (0..8 * 8).flat_map(|_| [0u8, 255, 0, 255]).collect();
-            (data, "green-hash".to_string())
-        };
+        // RS-4: StaticImageNode uses resource_id + decoded_bytes; no raw blob embedded.
         let right_tile_id = scene
             .create_tile(tab_id, "agent", lease_id, Rect::new(256.0, 0.0, 256.0, 256.0), 2)
             .unwrap();
@@ -652,10 +645,10 @@ mod tests {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data: img_data,
+                resource_id: ResourceId::of(b"8x8 green placeholder"),
                 width: 8,
                 height: 8,
-                content_hash: hash,
+                decoded_bytes: 8 * 8 * 4,
                 fit_mode: ImageFitMode::Cover,
                 bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
             }),

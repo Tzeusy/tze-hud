@@ -991,7 +991,7 @@ impl SceneGraph {
         match self.nodes.get(&node_id) {
             Some(node) => {
                 let self_bytes = match &node.data {
-                    NodeData::StaticImage(img) => img.decoded_bytes as u64,
+                    NodeData::StaticImage(img) => img.decoded_bytes,
                     _ => 0,
                 };
                 self_bytes
@@ -1034,7 +1034,7 @@ impl SceneGraph {
     /// Count texture bytes in a node (not yet inserted into the graph).
     fn count_texture_bytes_in_node(node: &Node) -> u64 {
         match &node.data {
-            NodeData::StaticImage(img) => img.decoded_bytes as u64,
+            NodeData::StaticImage(img) => img.decoded_bytes,
             _ => 0,
         }
     }
@@ -3075,13 +3075,13 @@ mod tests {
     /// Per RS-4 ephemerality contract, `StaticImageNode` carries only the
     /// content-addressed `ResourceId` and the decoded byte count for budget
     /// accounting — no raw pixel data is embedded in the scene graph.
-    fn make_test_image_resource(w: u32, h: u32) -> (ResourceId, usize) {
+    fn make_test_image_resource(w: u32, h: u32) -> (ResourceId, u64) {
         // Compute a deterministic ResourceId from the dimensions (as a stand-in
         // for "the BLAKE3 hash of the actual pixel bytes").  In production this
         // would be the ResourceId returned by the resource store after upload.
         let fake_bytes: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 0, 255]).collect();
         let resource_id = ResourceId::of(&fake_bytes);
-        let decoded_bytes = (w * h * 4) as usize;
+        let decoded_bytes = u64::from(w * h * 4);
         (resource_id, decoded_bytes)
     }
 
@@ -3116,7 +3116,7 @@ mod tests {
             assert_eq!(si.resource_id, resource_id);
             assert_eq!(si.width, 64);
             assert_eq!(si.height, 48);
-            assert_eq!(si.decoded_bytes, 64 * 48 * 4);
+            assert_eq!(si.decoded_bytes, 64u64 * 48 * 4);
             assert_eq!(si.fit_mode, ImageFitMode::Contain);
         } else {
             panic!("expected StaticImage node data");
@@ -4533,7 +4533,7 @@ mod spec_scenarios {
                 resource_id: ResourceId::of(b"4x4 test image"),
                 width: 4,
                 height: 4,
-                decoded_bytes: 4 * 4 * 4, // 4×4 RGBA8
+                decoded_bytes: 4u64 * 4 * 4, // 4×4 RGBA8
                 fit_mode: ImageFitMode::Contain,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             }),
