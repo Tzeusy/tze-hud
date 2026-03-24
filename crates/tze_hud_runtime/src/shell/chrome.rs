@@ -215,14 +215,31 @@ impl ChromeState {
     /// Remove a tab by id.
     pub fn remove_tab(&mut self, id: u32) {
         if let Some(pos) = self.tabs.iter().position(|t| t.id == id) {
+            let old_active = self.active_tab_index;
             self.tabs.remove(pos);
-            // Adjust active_tab_index
+
             if self.tabs.is_empty() {
                 self.active_tab_index = 0;
-            } else {
-                self.active_tab_index = self.active_tab_index.min(self.tabs.len() - 1);
-                self.tabs[self.active_tab_index].active = true;
+                return;
             }
+
+            // Recompute active_tab_index correctly:
+            // - Removed before active → active shifts left by 1.
+            // - Removed at active → clamp to last tab.
+            // - Removed after active → index unchanged.
+            self.active_tab_index = if pos < old_active {
+                old_active - 1
+            } else if pos == old_active {
+                old_active.min(self.tabs.len() - 1)
+            } else {
+                old_active
+            };
+
+            // Ensure exactly one tab carries the active flag.
+            for tab in &mut self.tabs {
+                tab.active = false;
+            }
+            self.tabs[self.active_tab_index].active = true;
         }
     }
 
@@ -645,7 +662,16 @@ impl ChromeRenderer {
     ///
     /// This is the chrome render pass — it executes AFTER the content render pass.
     pub fn render_chrome(&mut self, display_width: f32, display_height: f32) -> Vec<ChromeDrawCmd> {
-        let state = self.chrome_state.read().expect("ChromeState read lock poisoned");
+        let state = match self.chrome_state.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                // A writer panicked while holding the lock. Recover the inner state so chrome
+                // rendering stays alive — a poisoned lock in the render path must not crash the
+                // compositor. The runtime should separately detect and enter safe mode.
+                tracing::error!("ChromeState RwLock poisoned; recovering for render_chrome");
+                poisoned.into_inner()
+            }
+        };
 
         // Recompute layout if needed.
         let layout = ChromeLayout::compute(&state, display_width, display_height);
@@ -658,7 +684,7 @@ impl ChromeRenderer {
             cmds.extend(self.build_tab_bar_cmds(&state, &layout));
         }
 
-        // Render viewer class indicator + system status (always, even when tab bar hidden).
+        // Render viewer class indicator + system status (only when tab bar is visible).
         cmds.extend(self.build_status_indicator_cmds(&state, &layout, display_width, display_height));
 
         // Safe mode overlay (if active) — renders over everything.
@@ -704,8 +730,12 @@ impl ChromeRenderer {
         let start = if active >= fits { active + 1 - fits } else { 0 };
         let start = start.min(tabs.len().saturating_sub(visible_count));
 
+        // Divide available tab area evenly across visible tabs.
+        // Do NOT apply a MIN_TAB_WIDTH_PX floor here: the floor is only used when computing
+        // `tabs_that_fit` (in ChromeLayout::compute). Applying it again can push tabs into
+        // the reserved mute/status indicator area on narrow viewports.
         let tab_w = if visible_count > 0 {
-            (layout.tab_area_width / visible_count as f32).max(ChromeState::MIN_TAB_WIDTH_PX)
+            layout.tab_area_width / visible_count as f32
         } else {
             ChromeState::MIN_TAB_WIDTH_PX
         };
@@ -822,23 +852,19 @@ impl ChromeRenderer {
         // Transitions cross-fade over 300ms (the only v1 animation).
         let icon_x = display_width - 36.0;
         let icon_y = layout.tab_bar_y + (layout.tab_bar_height - 16.0) / 2.0;
-        let (current_color, current_alpha) = viewer_class_color(state.viewer_class);
-        let (icon_color, icon_alpha) = if let Some(ref t) = state.viewer_class_transition {
+        let icon_color = if let Some(ref t) = state.viewer_class_transition {
             let p = t.progress();
-            let (from_c, from_a) = viewer_class_color(t.from);
-            let (to_c, to_a) = viewer_class_color(t.to);
-            // Linear interpolation between from and to colors.
-            let blended_color = [
+            let from_c = viewer_class_color(t.from);
+            let to_c = viewer_class_color(t.to);
+            // Linear interpolation between from and to colors (including alpha).
+            [
                 from_c[0] * (1.0 - p) + to_c[0] * p,
                 from_c[1] * (1.0 - p) + to_c[1] * p,
                 from_c[2] * (1.0 - p) + to_c[2] * p,
-                (from_a * (1.0 - p) + to_a * p),
-            ];
-            (blended_color, blended_color[3])
+                from_c[3] * (1.0 - p) + to_c[3] * p,
+            ]
         } else {
-            let mut c = current_color;
-            c[3] = current_alpha;
-            (c, current_alpha)
+            viewer_class_color(state.viewer_class)
         };
 
         cmds.push(ChromeDrawCmd {
@@ -859,8 +885,6 @@ impl ChromeRenderer {
             height: 20.0,
             color: [0.3, 0.3, 0.3, 0.4], // greyed/disabled
         });
-
-        let _ = (icon_alpha, current_alpha); // suppress unused warnings
 
         cmds
     }
@@ -915,7 +939,7 @@ impl ChromeRenderer {
         });
 
         // Viewer class icon in overlay (uses same color logic as tab bar).
-        let (vc_color, _) = viewer_class_color(state.viewer_class);
+        let vc_color = viewer_class_color(state.viewer_class);
         cmds.push(ChromeDrawCmd {
             x: btn_x + btn_w + 24.0,
             y: btn_y + (btn_h - 20.0) / 2.0,
@@ -930,14 +954,14 @@ impl ChromeRenderer {
 
 /// Map a viewer class to a representative RGBA color for icon rendering.
 ///
-/// Returns (color [f32; 4], alpha f32). Used for cross-fade interpolation.
-fn viewer_class_color(vc: ViewerClass) -> ([f32; 4], f32) {
+/// Alpha is encoded in `[3]`. Call sites use the full array for cross-fade interpolation.
+fn viewer_class_color(vc: ViewerClass) -> [f32; 4] {
     match vc {
-        ViewerClass::Owner => ([0.4, 0.7, 1.0, 1.0], 1.0),          // bright blue filled
-        ViewerClass::HouseholdMember => ([0.4, 0.7, 1.0, 0.7], 0.7), // medium blue partial
-        ViewerClass::KnownGuest => ([0.4, 0.7, 1.0, 0.4], 0.4),      // outline blue
-        ViewerClass::Unknown => ([0.7, 0.7, 0.7, 0.8], 0.8),          // grey question
-        ViewerClass::Nobody => ([0.4, 0.4, 0.4, 0.3], 0.3),           // dim
+        ViewerClass::Owner => [0.4, 0.7, 1.0, 1.0],         // bright blue filled
+        ViewerClass::HouseholdMember => [0.4, 0.7, 1.0, 0.7], // medium blue partial
+        ViewerClass::KnownGuest => [0.4, 0.7, 1.0, 0.4],    // outline blue
+        ViewerClass::Unknown => [0.7, 0.7, 0.7, 0.8],        // grey question
+        ViewerClass::Nobody => [0.4, 0.4, 0.4, 0.3],         // dim
     }
 }
 
@@ -971,15 +995,19 @@ pub struct DiagnosticSnapshot {
 
 /// Collect a diagnostic snapshot from a ChromeState.
 ///
+/// `active_lease_count` must be supplied by the caller from the scene graph; the
+/// chrome module does not have access to lease state.
+///
 /// This is the CLI-only v1 diagnostic surface. The GUI operator diagnostics overlay
 /// is deferred to post-v1.
 pub fn collect_diagnostic(
     state: &ChromeState,
     timestamp_mono_us: u64,
+    active_lease_count: usize,
 ) -> DiagnosticSnapshot {
     DiagnosticSnapshot {
         timestamp_mono_us,
-        active_lease_count: 0, // filled by caller from scene graph
+        active_lease_count,
         connected_agent_count: state.connected_agent_count,
         tab_count: state.tabs.len(),
         active_tab_index: state.active_tab_index,
@@ -1520,10 +1548,11 @@ mod tests {
         state.viewer_class = ViewerClass::Owner;
         state.safe_mode_active = false;
 
-        let snap = collect_diagnostic(&state, 999_000);
+        let snap = collect_diagnostic(&state, 999_000, 5);
         assert_eq!(snap.tab_count, 2);
         assert_eq!(snap.connected_agent_count, 3);
         assert_eq!(snap.viewer_class_label, "owner");
+        assert_eq!(snap.active_lease_count, 5);
         assert!(!snap.safe_mode_active);
         assert!(!snap.capture_surface_active, "v1: capture_surface_active must be false");
         assert_eq!(snap.timestamp_mono_us, 999_000);
@@ -1532,7 +1561,7 @@ mod tests {
     #[test]
     fn diagnostic_display_formats_correctly() {
         let state = ChromeState::new();
-        let snap = collect_diagnostic(&state, 0);
+        let snap = collect_diagnostic(&state, 0, 0);
         let output = format!("{}", snap);
         assert!(output.contains("tze_hud Chrome Diagnostic Snapshot"));
         assert!(output.contains("unknown"));
@@ -1632,11 +1661,12 @@ mod tests {
         let chrome_cmds = renderer.render_chrome(800.0, 600.0);
 
         // The chrome renderer does not need to know what the content pass rendered.
-        // This structural independence IS the separability guarantee.
-        assert!(
-            !chrome_cmds.is_empty() || true, // chrome may be empty for tiny viewports but pass is still separate
-            "chrome pass is a distinct step from content pass"
-        );
+        // This structural independence IS the separability guarantee: render_chrome() runs
+        // without any reference to scene graph, tile list, or agent state.
+        // For an 800×600 viewport with no tabs and no safe mode, commands may be empty
+        // (status indicator is hidden when tab bar is hidden and there are no tabs).
+        // The key invariant is that the call succeeds independently of content rendering.
+        let _ = chrome_cmds; // structural separability verified by calling render_chrome() at all
 
         // v1 invariant: capture_surface_active never true.
         let state = chrome_state.read().unwrap();
