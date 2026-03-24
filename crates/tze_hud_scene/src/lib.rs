@@ -16,6 +16,13 @@ pub mod validation;
 pub mod test_scenes;
 pub mod calibration;
 
+// ── v1 subsystem trait contracts ─────────────────────────────────────────────
+pub mod lease;
+pub mod policy;
+pub mod events;
+pub mod resource;
+pub mod config;
+
 pub use clock::{Clock, SystemClock, TestClock};
 pub use types::*;
 pub use graph::{SceneGraph, SyncGroupCommitDecision};
