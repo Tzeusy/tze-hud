@@ -13,16 +13,35 @@ pub struct MutationBatch {
     pub mutations: Vec<SceneMutation>,
 }
 
-/// Individual scene mutations.
+/// Individual scene mutations per RFC 0001 §3.1.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SceneMutation {
+    // ── Tab mutations (require manage_tabs capability) ────────────────────
+    /// Create a new tab. RFC 0001 §2.2.
     CreateTab {
         name: String,
         display_order: u32,
     },
+    /// Delete a tab and all its tiles. RFC 0001 §2.2.
+    DeleteTab {
+        tab_id: SceneId,
+    },
+    /// Rename a tab. RFC 0001 §2.2.
+    RenameTab {
+        tab_id: SceneId,
+        new_name: String,
+    },
+    /// Change the display_order of a tab. RFC 0001 §2.2.
+    ReorderTab {
+        tab_id: SceneId,
+        new_order: u32,
+    },
+    /// Switch the active tab. RFC 0001 §2.2.
     SwitchActiveTab {
         tab_id: SceneId,
     },
+    // ── Tile mutations (require create_tiles / modify_own_tiles) ──────────
+    /// Create a new tile. Requires `create_tiles` + `modify_own_tiles`. RFC 0001 §2.3.
     CreateTile {
         tab_id: SceneId,
         namespace: String,
@@ -30,6 +49,41 @@ pub enum SceneMutation {
         bounds: Rect,
         z_order: u32,
     },
+    /// Update tile bounds. RFC 0001 §2.3.
+    UpdateTileBounds {
+        tile_id: SceneId,
+        bounds: Rect,
+    },
+    /// Update tile z-order. RFC 0001 §2.3.
+    UpdateTileZOrder {
+        tile_id: SceneId,
+        z_order: u32,
+    },
+    /// Update tile opacity (must be in [0.0, 1.0]). RFC 0001 §2.3.
+    UpdateTileOpacity {
+        tile_id: SceneId,
+        opacity: f32,
+    },
+    /// Update tile input mode. RFC 0001 §2.3.
+    UpdateTileInputMode {
+        tile_id: SceneId,
+        input_mode: InputMode,
+    },
+    /// Update tile sync group membership. RFC 0001 §2.3.
+    UpdateTileSyncGroup {
+        tile_id: SceneId,
+        sync_group: Option<SceneId>,
+    },
+    /// Update tile expiry timestamp. RFC 0001 §2.3.
+    UpdateTileExpiry {
+        tile_id: SceneId,
+        expires_at: Option<u64>,
+    },
+    /// Delete a tile and all its nodes. RFC 0001 §2.3.
+    DeleteTile {
+        tile_id: SceneId,
+    },
+    // ── Node mutations ────────────────────────────────────────────────────
     SetTileRoot {
         tile_id: SceneId,
         node: Node,
@@ -39,13 +93,7 @@ pub enum SceneMutation {
         parent_id: Option<SceneId>,
         node: Node,
     },
-    UpdateTileBounds {
-        tile_id: SceneId,
-        bounds: Rect,
-    },
-    DeleteTile {
-        tile_id: SceneId,
-    },
+    // ── Zone mutations ────────────────────────────────────────────────────
     /// Publish content to a zone.
     PublishToZone {
         zone_name: String,
@@ -59,6 +107,7 @@ pub enum SceneMutation {
         zone_name: String,
         publish_token: ZonePublishToken,
     },
+    // ── Sync group mutations ──────────────────────────────────────────────
     /// Create a new sync group.
     CreateSyncGroup {
         /// Optional human-readable label (max 128 UTF-8 bytes).
@@ -215,14 +264,28 @@ impl SceneGraph {
         namespace: &str,
     ) -> Result<Vec<SceneId>, ValidationError> {
         match mutation {
+            // ── Tab mutations ─────────────────────────────────────────────────
             SceneMutation::CreateTab { name, display_order } => {
                 let id = self.create_tab(name, *display_order)?;
                 Ok(vec![id])
+            }
+            SceneMutation::DeleteTab { tab_id } => {
+                self.delete_tab(*tab_id)?;
+                Ok(vec![])
+            }
+            SceneMutation::RenameTab { tab_id, new_name } => {
+                self.rename_tab(*tab_id, new_name)?;
+                Ok(vec![])
+            }
+            SceneMutation::ReorderTab { tab_id, new_order } => {
+                self.reorder_tab(*tab_id, *new_order)?;
+                Ok(vec![])
             }
             SceneMutation::SwitchActiveTab { tab_id } => {
                 self.switch_active_tab(*tab_id)?;
                 Ok(vec![])
             }
+            // ── Tile mutations ────────────────────────────────────────────────
             SceneMutation::CreateTile {
                 tab_id,
                 namespace,
@@ -233,6 +296,94 @@ impl SceneGraph {
                 let id = self.create_tile(*tab_id, namespace, *lease_id, *bounds, *z_order)?;
                 Ok(vec![id])
             }
+            SceneMutation::UpdateTileBounds { tile_id, bounds } => {
+                // Use the unchecked path (capability enforcement is the gRPC layer's job).
+                let tile = self
+                    .tiles
+                    .get_mut(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                if bounds.width <= 0.0 || bounds.height <= 0.0 {
+                    return Err(ValidationError::BoundsOutOfRange {
+                        reason: format!(
+                            "tile bounds width ({}) and height ({}) must be > 0.0",
+                            bounds.width, bounds.height
+                        ),
+                    });
+                }
+                tile.bounds = *bounds;
+                self.version += 1;
+                Ok(vec![])
+            }
+            SceneMutation::UpdateTileZOrder { tile_id, z_order } => {
+                let tile = self
+                    .tiles
+                    .get_mut(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                use crate::graph::ZONE_TILE_Z_MIN;
+                if *z_order >= ZONE_TILE_Z_MIN {
+                    return Err(ValidationError::InvalidField {
+                        field: "z_order".into(),
+                        reason: format!(
+                            "z_order 0x{:08X} is >= ZONE_TILE_Z_MIN (0x{:08X})",
+                            z_order, ZONE_TILE_Z_MIN
+                        ),
+                    });
+                }
+                tile.z_order = *z_order;
+                self.version += 1;
+                Ok(vec![])
+            }
+            SceneMutation::UpdateTileOpacity { tile_id, opacity } => {
+                let tile = self
+                    .tiles
+                    .get_mut(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                if !(0.0..=1.0).contains(opacity) {
+                    return Err(ValidationError::InvalidField {
+                        field: "opacity".into(),
+                        reason: format!("opacity {} is not in [0.0, 1.0]", opacity),
+                    });
+                }
+                tile.opacity = *opacity;
+                self.version += 1;
+                Ok(vec![])
+            }
+            SceneMutation::UpdateTileInputMode { tile_id, input_mode } => {
+                let tile = self
+                    .tiles
+                    .get_mut(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                tile.input_mode = *input_mode;
+                self.version += 1;
+                Ok(vec![])
+            }
+            SceneMutation::UpdateTileSyncGroup { tile_id, sync_group } => {
+                if let Some(group_id) = sync_group {
+                    self.join_sync_group(*tile_id, *group_id)?;
+                } else {
+                    // Clear the sync group
+                    let _ = self.leave_sync_group(*tile_id);
+                }
+                Ok(vec![])
+            }
+            SceneMutation::UpdateTileExpiry { tile_id, expires_at } => {
+                let tile = self
+                    .tiles
+                    .get_mut(tile_id)
+                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
+                tile.expires_at = *expires_at;
+                self.version += 1;
+                Ok(vec![])
+            }
+            SceneMutation::DeleteTile { tile_id } => {
+                if !self.tiles.contains_key(tile_id) {
+                    return Err(ValidationError::TileNotFound { id: *tile_id });
+                }
+                self.remove_tile_and_nodes(*tile_id);
+                self.version += 1;
+                Ok(vec![])
+            }
+            // ── Node mutations ────────────────────────────────────────────────
             SceneMutation::SetTileRoot { tile_id, node } => {
                 self.set_tile_root(*tile_id, node.clone())?;
                 Ok(vec![node.id])
@@ -245,29 +396,7 @@ impl SceneGraph {
                 self.add_node_to_tile(*tile_id, *parent_id, node.clone())?;
                 Ok(vec![node.id])
             }
-            SceneMutation::UpdateTileBounds { tile_id, bounds } => {
-                let tile = self
-                    .tiles
-                    .get_mut(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                if bounds.width <= 0.0 || bounds.height <= 0.0 {
-                    return Err(ValidationError::InvalidField {
-                        field: "bounds".into(),
-                        reason: "width and height must be > 0".into(),
-                    });
-                }
-                tile.bounds = *bounds;
-                self.version += 1;
-                Ok(vec![])
-            }
-            SceneMutation::DeleteTile { tile_id } => {
-                if !self.tiles.contains_key(tile_id) {
-                    return Err(ValidationError::TileNotFound { id: *tile_id });
-                }
-                self.remove_tile_and_nodes(*tile_id);
-                self.version += 1;
-                Ok(vec![])
-            }
+            // ── Zone mutations ────────────────────────────────────────────────
             SceneMutation::PublishToZone {
                 zone_name,
                 content,
@@ -284,6 +413,7 @@ impl SceneGraph {
                 self.clear_zone(zone_name)?;
                 Ok(vec![])
             }
+            // ── Sync group mutations ──────────────────────────────────────────
             SceneMutation::CreateSyncGroup {
                 name,
                 owner_namespace,
