@@ -65,7 +65,12 @@ fn spec_parse_error_line_column_are_one_indexed() {
 /// WHEN no config file found at any location THEN Err lists searched paths.
 #[test]
 fn spec_no_config_found_lists_searched_paths() {
-    let result = TzeHudConfig::resolve_config_path(Some("/tmp/tze_hud_no_such_file_j90m_test.toml"));
+    // Use a path that is guaranteed not to exist on any platform.
+    let nonexistent = std::env::temp_dir()
+        .join("tze_hud_no_such_file_j90m_test_xxxxxx.toml")
+        .to_string_lossy()
+        .to_string();
+    let result = TzeHudConfig::resolve_config_path(Some(&nonexistent));
     match result {
         Err(paths) => {
             assert!(!paths.is_empty(), "searched paths must be listed");

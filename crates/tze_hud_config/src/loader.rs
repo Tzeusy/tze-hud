@@ -43,10 +43,6 @@ fn is_valid_event_name(name: &str) -> bool {
         // Empty string is explicitly valid (no auto-switch).
         return true;
     }
-    let parts: Vec<&str> = name.splitn(2, '.').collect();
-    if parts.len() != 2 {
-        return false;
-    }
     fn valid_segment(s: &str) -> bool {
         if s.is_empty() {
             return false;
@@ -58,7 +54,15 @@ fn is_valid_event_name(name: &str) -> bool {
         }
         chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     }
-    valid_segment(parts[0]) && valid_segment(parts[1])
+    if let Some((source, action)) = name.split_once('.') {
+        // Ensure no second dot (e.g. "door.bell.ring" must be rejected).
+        if action.contains('.') {
+            return false;
+        }
+        valid_segment(source) && valid_segment(action)
+    } else {
+        false
+    }
 }
 
 // ─── TzeHudConfig ─────────────────────────────────────────────────────────────
@@ -78,12 +82,16 @@ impl ConfigLoader for TzeHudConfig {
         Self: Sized,
     {
         toml::from_str::<RawConfig>(toml_src).map(|raw| TzeHudConfig { raw }).map_err(|e| {
-            // toml 0.8 errors have a span that includes line/column.
             let message = e.to_string();
 
-            // Extract line/column from the error message.
-            // Format: "... at line N column M"
-            let (line, column) = parse_toml_location(&message);
+            // toml 0.8 provides `span()` (a byte-range into the source).
+            // Convert byte offset to 1-indexed line/column.
+            let (line, column) = if let Some(span) = e.span() {
+                byte_offset_to_line_col(toml_src, span.start)
+            } else {
+                // Fall back to message parsing when span is unavailable.
+                parse_toml_location(&message)
+            };
             ParseError { message, line, column }
         })
     }
@@ -93,9 +101,7 @@ impl ConfigLoader for TzeHudConfig {
     fn normalize(&mut self) {
         // Ensure `runtime` is present (even if empty) so downstream code can
         // rely on `self.raw.runtime.as_ref()` without repeated Option handling.
-        if self.raw.runtime.is_none() {
-            self.raw.runtime = Some(Default::default());
-        }
+        self.raw.runtime.get_or_insert_with(Default::default);
     }
 
     // ── validate ──────────────────────────────────────────────────────────────
@@ -116,16 +122,37 @@ impl ConfigLoader for TzeHudConfig {
         }
 
         // ── (2) [runtime] present and profile set ─────────────────────────────
-        let profile_str = self
-            .raw
-            .runtime
-            .as_ref()
-            .and_then(|r| r.profile.as_deref());
-
-        // Validate profile value if present.
-        if let Some(p) = profile_str {
-            validate_profile(p, &mut errors);
-        }
+        let profile_str = match self.raw.runtime.as_ref() {
+            None => {
+                // Spec requires a [runtime] table.
+                errors.push(ConfigError {
+                    code: ConfigErrorCode::Other("missing_runtime_section".into()),
+                    field_path: "runtime".into(),
+                    expected: "[runtime] table must be present".into(),
+                    got: "runtime table missing".into(),
+                    hint: "add a [runtime] table with a `profile` field, e.g.:\n[runtime]\nprofile = \"full-display\"".into(),
+                });
+                None
+            }
+            Some(runtime) => match runtime.profile.as_deref() {
+                None => {
+                    // Spec requires runtime.profile.
+                    errors.push(ConfigError {
+                        code: ConfigErrorCode::Other("missing_runtime_profile".into()),
+                        field_path: "runtime.profile".into(),
+                        expected: "non-empty profile name (e.g. \"full-display\")".into(),
+                        got: "profile field missing".into(),
+                        hint: "add `profile = \"full-display\"` (or another valid profile) under [runtime]".into(),
+                    });
+                    None
+                }
+                Some(p) => {
+                    validate_profile(p, &mut errors);
+                    Some(p.to_owned())
+                }
+            },
+        };
+        let _ = profile_str; // used only for validation above
 
         // ── (3) [[tabs]] — at least one, names unique, ≤1 default ────────────
         validate_tabs(&self.raw, &mut errors);
@@ -272,6 +299,17 @@ impl ConfigLoader for TzeHudConfig {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Convert a byte offset in `src` to a 1-indexed (line, column) pair.
+///
+/// Used when `toml::de::Error::span()` provides a byte-range offset.
+fn byte_offset_to_line_col(src: &str, offset: usize) -> (u32, u32) {
+    let clamped = offset.min(src.len());
+    let before = &src[..clamped];
+    let line = before.bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+    let col = before.rfind('\n').map_or(clamped, |nl| clamped - nl - 1) as u32 + 1;
+    (line, col)
+}
 
 /// Extract line/column from a toml error message.
 ///
@@ -545,11 +583,21 @@ fn check_monotone_non_decreasing(fields: &[(&str, Option<f64>)], errors: &mut Ve
 /// Resolve profile name to `DisplayProfile` defaults.
 ///
 /// Full profile resolution (auto-detection, custom extends) is handled by rig-umgy.
-/// Here we just map the built-in names.
+/// Here we map the concrete built-in names; `auto` and `custom` are accepted by
+/// validation (rig-umgy will resolve them at runtime) and provisionally mapped to
+/// `full_display()` defaults until that bead is integrated.
 fn resolve_profile_defaults(profile: &str) -> DisplayProfile {
     match profile {
         "headless" => DisplayProfile::headless(),
-        _ => DisplayProfile::full_display(),
+        "full-display" | "auto" | "custom" => DisplayProfile::full_display(),
+        // Unknown profiles should never reach here (validation rejects them).
+        other => {
+            debug_assert!(
+                false,
+                "resolve_profile_defaults() called with unvalidated profile `{other}`"
+            );
+            DisplayProfile::full_display()
+        }
     }
 }
 
