@@ -99,7 +99,12 @@ pub struct FrameTimeWindow {
 
 impl FrameTimeWindow {
     /// Create a new window with the given capacity (number of frames).
+    ///
+    /// # Panics
+    /// Panics if `capacity == 0` (a zero-capacity window cannot hold any samples
+    /// and would grow unboundedly on `push`).
     pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "FrameTimeWindow capacity must be > 0");
         FrameTimeWindow {
             samples: std::collections::VecDeque::with_capacity(capacity),
             capacity,
@@ -129,7 +134,7 @@ impl FrameTimeWindow {
             return None;
         }
         let mut sorted: Vec<f64> = self.samples.iter().cloned().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_unstable_by(f64::total_cmp);
         // Nearest-rank: index = ceil(0.95 * n) - 1
         let n = sorted.len();
         let idx = ((0.95 * n as f64).ceil() as usize).saturating_sub(1).min(n - 1);

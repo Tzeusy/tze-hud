@@ -155,9 +155,10 @@ pub fn shedding_order(tiles: &[TileSheddingEntry], count: usize) -> Vec<usize> {
     // Sort ascending by (lease_priority ASC, z_order DESC): tile indices at the
     // *end* of this order are the least important and should be shed first.
     let mut sorted: Vec<&TileSheddingEntry> = tiles.iter().collect();
-    // We want "least important first" → sort so that highest priority_value comes last:
-    //   primary: lease_priority DESC (largest number = least important)
-    //   secondary: z_order ASC (lower z_order = less important within same priority)
+    // Sort so that the LEAST important tiles come FIRST.
+    // Least important = highest lease_priority value (numerically), then lowest z_order.
+    //   primary:   lease_priority DESC (b cmp a → DESC; highest value = least important)
+    //   secondary: z_order ASC        (a cmp b → ASC;  lowest z_order = less important)
     sorted.sort_by(|a, b| {
         match b.key.lease_priority.cmp(&a.key.lease_priority) {
             std::cmp::Ordering::Equal => a.key.z_order.cmp(&b.key.z_order),
@@ -165,6 +166,7 @@ pub fn shedding_order(tiles: &[TileSheddingEntry], count: usize) -> Vec<usize> {
         }
     });
 
+    // Take the first `count` entries: they are the least important tiles to shed.
     sorted.iter().take(count).map(|e| e.index).collect()
 }
 

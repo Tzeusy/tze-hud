@@ -56,6 +56,8 @@ impl std::fmt::Display for ZonePublishError {
     }
 }
 
+impl std::error::Error for ZonePublishError {}
+
 // ─── Capability check helpers ─────────────────────────────────────────────────
 
 /// Returns `true` if `capabilities` grants the agent permission to publish to
