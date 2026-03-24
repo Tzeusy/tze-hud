@@ -51,6 +51,26 @@ pub struct SceneGraph {
     pub version: u64,
 }
 
+/// Maximum number of tabs in a scene. RFC 0001 §2.1.
+pub const MAX_TABS: usize = 256;
+
+/// Maximum number of tiles per tab. RFC 0001 §2.1.
+pub const MAX_TILES_PER_TAB: usize = 1024;
+
+/// Maximum number of nodes per tile. RFC 0001 §2.1.
+pub const MAX_NODES_PER_TILE: usize = 64;
+
+/// Maximum name length for tabs, in UTF-8 bytes. RFC 0001 §2.2.
+pub const MAX_TAB_NAME_BYTES: usize = 128;
+
+/// Maximum content size for TextMarkdownNode, in UTF-8 bytes. RFC 0001 §2.4.
+pub const MAX_MARKDOWN_BYTES: usize = 65_535;
+
+/// The z-order threshold below which agent-owned tiles must fall.
+/// Tiles with z_order >= ZONE_TILE_Z_MIN are reserved for runtime-managed
+/// zone tiles. RFC 0001 §2.3.
+pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
+
 impl SceneGraph {
     /// Create a new empty scene graph using the real system clock.
     pub fn new(width: f32, height: f32) -> Self {
@@ -79,11 +99,58 @@ impl SceneGraph {
 
     // ─── Tab operations ──────────────────────────────────────────────────
 
+    /// Create a new tab. Requires `ManageTabs` capability when `lease_id` is provided.
+    ///
+    /// RFC 0001 §2.2: Tab name must be non-empty, ≤ 128 UTF-8 bytes.
+    /// Scene must not already have 256 tabs (MAX_TABS). RFC 0001 §2.1.
     pub fn create_tab(&mut self, name: &str, display_order: u32) -> Result<SceneId, ValidationError> {
+        self.create_tab_checked(name, display_order, None)
+    }
+
+    /// Create a tab with an optional capability check against a lease.
+    ///
+    /// Pass `Some(lease_id)` to enforce `ManageTabs` capability. Pass `None` to skip
+    /// the capability check (used by internal scene construction and tests).
+    pub fn create_tab_with_lease(
+        &mut self,
+        name: &str,
+        display_order: u32,
+        lease_id: SceneId,
+    ) -> Result<SceneId, ValidationError> {
+        self.create_tab_checked(name, display_order, Some(lease_id))
+    }
+
+    fn create_tab_checked(
+        &mut self,
+        name: &str,
+        display_order: u32,
+        lease_id: Option<SceneId>,
+    ) -> Result<SceneId, ValidationError> {
+        // Capability check
+        if let Some(lid) = lease_id {
+            self.require_capability(lid, Capability::ManageTabs)?;
+        }
+        // Name validation: non-empty, ≤ 128 UTF-8 bytes (RFC 0001 §2.2)
         if name.is_empty() {
             return Err(ValidationError::InvalidField {
                 field: "name".into(),
                 reason: "tab name must be non-empty".into(),
+            });
+        }
+        if name.len() > MAX_TAB_NAME_BYTES {
+            return Err(ValidationError::InvalidField {
+                field: "name".into(),
+                reason: format!(
+                    "tab name exceeds maximum {} UTF-8 bytes (got {})",
+                    MAX_TAB_NAME_BYTES,
+                    name.len()
+                ),
+            });
+        }
+        // Scene-level tab count limit (RFC 0001 §2.1)
+        if self.tabs.len() >= MAX_TABS {
+            return Err(ValidationError::BudgetExceeded {
+                resource: format!("tabs (limit {})", MAX_TABS),
             });
         }
         // Check display_order uniqueness
@@ -108,12 +175,237 @@ impl SceneGraph {
         Ok(id)
     }
 
+    /// Delete a tab. All tiles in the tab are also removed.
+    ///
+    /// RFC 0001 §2.2. Requires `ManageTabs` capability when lease is provided.
+    pub fn delete_tab(&mut self, tab_id: SceneId) -> Result<(), ValidationError> {
+        self.delete_tab_checked(tab_id, None)
+    }
+
+    /// Delete a tab with capability enforcement.
+    pub fn delete_tab_with_lease(
+        &mut self,
+        tab_id: SceneId,
+        lease_id: SceneId,
+    ) -> Result<(), ValidationError> {
+        self.delete_tab_checked(tab_id, Some(lease_id))
+    }
+
+    fn delete_tab_checked(
+        &mut self,
+        tab_id: SceneId,
+        lease_id: Option<SceneId>,
+    ) -> Result<(), ValidationError> {
+        if let Some(lid) = lease_id {
+            self.require_capability(lid, Capability::ManageTabs)?;
+        }
+        if !self.tabs.contains_key(&tab_id) {
+            return Err(ValidationError::TabNotFound { id: tab_id });
+        }
+        // Remove all tiles in this tab (leave sync groups first to avoid dangling members)
+        let tab_tiles: Vec<SceneId> = self
+            .tiles
+            .values()
+            .filter(|t| t.tab_id == tab_id)
+            .map(|t| t.id)
+            .collect();
+        for tile_id in tab_tiles {
+            // Remove tile from its sync group before deleting the tile itself,
+            // so sync_group.members does not retain a dangling tile ID.
+            let _ = self.leave_sync_group(tile_id);
+            self.remove_tile_and_nodes(tile_id);
+        }
+        self.tabs.remove(&tab_id);
+        if self.active_tab == Some(tab_id) {
+            // Fall back to the tab with the lowest display_order
+            self.active_tab = self
+                .tabs
+                .values()
+                .min_by_key(|t| t.display_order)
+                .map(|t| t.id);
+        }
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Rename a tab. RFC 0001 §2.2. Requires `ManageTabs` capability when lease is provided.
+    pub fn rename_tab(&mut self, tab_id: SceneId, new_name: &str) -> Result<(), ValidationError> {
+        self.rename_tab_checked(tab_id, new_name, None)
+    }
+
+    /// Rename a tab with capability enforcement.
+    pub fn rename_tab_with_lease(
+        &mut self,
+        tab_id: SceneId,
+        new_name: &str,
+        lease_id: SceneId,
+    ) -> Result<(), ValidationError> {
+        self.rename_tab_checked(tab_id, new_name, Some(lease_id))
+    }
+
+    fn rename_tab_checked(
+        &mut self,
+        tab_id: SceneId,
+        new_name: &str,
+        lease_id: Option<SceneId>,
+    ) -> Result<(), ValidationError> {
+        if let Some(lid) = lease_id {
+            self.require_capability(lid, Capability::ManageTabs)?;
+        }
+        if new_name.is_empty() {
+            return Err(ValidationError::InvalidField {
+                field: "name".into(),
+                reason: "tab name must be non-empty".into(),
+            });
+        }
+        if new_name.len() > MAX_TAB_NAME_BYTES {
+            return Err(ValidationError::InvalidField {
+                field: "name".into(),
+                reason: format!(
+                    "tab name exceeds maximum {} UTF-8 bytes (got {})",
+                    MAX_TAB_NAME_BYTES,
+                    new_name.len()
+                ),
+            });
+        }
+        let tab = self
+            .tabs
+            .get_mut(&tab_id)
+            .ok_or(ValidationError::TabNotFound { id: tab_id })?;
+        tab.name = new_name.to_string();
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Change the display_order of a tab. RFC 0001 §2.2.
+    pub fn reorder_tab(&mut self, tab_id: SceneId, new_order: u32) -> Result<(), ValidationError> {
+        self.reorder_tab_checked(tab_id, new_order, None)
+    }
+
+    /// Change the display_order of a tab with capability enforcement.
+    pub fn reorder_tab_with_lease(
+        &mut self,
+        tab_id: SceneId,
+        new_order: u32,
+        lease_id: SceneId,
+    ) -> Result<(), ValidationError> {
+        self.reorder_tab_checked(tab_id, new_order, Some(lease_id))
+    }
+
+    fn reorder_tab_checked(
+        &mut self,
+        tab_id: SceneId,
+        new_order: u32,
+        lease_id: Option<SceneId>,
+    ) -> Result<(), ValidationError> {
+        if let Some(lid) = lease_id {
+            self.require_capability(lid, Capability::ManageTabs)?;
+        }
+        if !self.tabs.contains_key(&tab_id) {
+            return Err(ValidationError::TabNotFound { id: tab_id });
+        }
+        // display_order must be unique across tabs (excluding this tab)
+        if self
+            .tabs
+            .values()
+            .any(|t| t.id != tab_id && t.display_order == new_order)
+        {
+            return Err(ValidationError::DuplicateDisplayOrder { order: new_order });
+        }
+        let tab = self.tabs.get_mut(&tab_id).unwrap();
+        tab.display_order = new_order;
+        self.version += 1;
+        Ok(())
+    }
+
     pub fn switch_active_tab(&mut self, tab_id: SceneId) -> Result<(), ValidationError> {
+        self.switch_active_tab_checked(tab_id, None)
+    }
+
+    /// Switch active tab with capability enforcement.
+    pub fn switch_active_tab_with_lease(
+        &mut self,
+        tab_id: SceneId,
+        lease_id: SceneId,
+    ) -> Result<(), ValidationError> {
+        self.switch_active_tab_checked(tab_id, Some(lease_id))
+    }
+
+    fn switch_active_tab_checked(
+        &mut self,
+        tab_id: SceneId,
+        lease_id: Option<SceneId>,
+    ) -> Result<(), ValidationError> {
+        if let Some(lid) = lease_id {
+            self.require_capability(lid, Capability::ManageTabs)?;
+        }
         if !self.tabs.contains_key(&tab_id) {
             return Err(ValidationError::TabNotFound { id: tab_id });
         }
         self.active_tab = Some(tab_id);
         self.version += 1;
+        Ok(())
+    }
+
+    // ─── Capability helpers ──────────────────────────────────────────────
+
+    /// Check that the lease exists, is active (not expired, not suspended), and has the given capability.
+    ///
+    /// Returns `CapabilityMissing` if the capability is absent, `LeaseExpired`
+    /// if the lease TTL has elapsed, `LeaseNotFound` if the ID is unknown,
+    /// or `InvalidField` if the lease is in a non-Active state that disallows mutations.
+    fn require_capability(
+        &self,
+        lease_id: SceneId,
+        cap: Capability,
+    ) -> Result<(), ValidationError> {
+        let lease = self
+            .leases
+            .get(&lease_id)
+            .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
+        // Capability check before expiry: the spec says lease must be valid
+        if !lease.has_capability(cap) {
+            return Err(ValidationError::CapabilityMissing {
+                capability: format!("{:?}", cap),
+            });
+        }
+        // Check lease is not expired
+        let now = self.clock.now_millis();
+        if lease.is_expired(now) {
+            return Err(ValidationError::LeaseExpired { id: lease_id });
+        }
+        // Check lease state allows mutations (Active only; Suspended/Disconnected block mutations)
+        if !lease.is_mutations_allowed() {
+            return Err(ValidationError::InvalidField {
+                field: "lease_state".into(),
+                reason: format!(
+                    "lease {} is in {:?} state; mutations require Active state",
+                    lease_id, lease.state
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Check that the lease is currently active (not expired, not suspended).
+    fn require_active_lease(&self, lease_id: SceneId) -> Result<(), ValidationError> {
+        let lease = self
+            .leases
+            .get(&lease_id)
+            .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
+        let now = self.clock.now_millis();
+        if lease.is_expired(now) {
+            return Err(ValidationError::LeaseExpired { id: lease_id });
+        }
+        if !lease.is_mutations_allowed() {
+            return Err(ValidationError::InvalidField {
+                field: "lease_state".into(),
+                reason: format!(
+                    "lease {} is in {:?} state; mutations require Active state",
+                    lease_id, lease.state
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -551,7 +843,7 @@ impl SceneGraph {
         }
     }
 
-    fn count_node_subtree(&self, node_id: SceneId) -> u32 {
+    pub(crate) fn count_node_subtree(&self, node_id: SceneId) -> u32 {
         match self.nodes.get(&node_id) {
             Some(node) => {
                 1 + node
@@ -590,6 +882,24 @@ impl SceneGraph {
         1
     }
 
+    /// Count the incoming node plus any of its children that are already in the graph.
+    ///
+    /// Used by `set_tile_root_impl` to validate the post-insert node count before
+    /// replacing the tile root. The incoming `node` is counted as 1, and any of its
+    /// `children` SceneIds that already exist in `self.nodes` are recursively counted.
+    ///
+    /// For a brand-new node with no pre-existing children, this returns 1 (correct).
+    /// For a node whose `children` already reference persisted nodes (e.g., re-attaching
+    /// an existing subtree), this returns the full subtree size, preventing the node
+    /// count limit from being bypassed.
+    fn count_node_tree_deep(&self, node: &Node) -> usize {
+        1 + node
+            .children
+            .iter()
+            .map(|child_id| self.count_node_subtree(*child_id) as usize)
+            .sum::<usize>()
+    }
+
     /// Count texture bytes in a node (not yet inserted into the graph).
     fn count_texture_bytes_in_node(node: &Node) -> u64 {
         match &node.data {
@@ -600,6 +910,13 @@ impl SceneGraph {
 
     // ─── Tile operations ─────────────────────────────────────────────────
 
+    /// Create a tile. This is the unchecked form used internally for scene construction.
+    ///
+    /// For agent-facing operations use [`create_tile_checked`] which enforces:
+    /// - Lease active + `CreateTiles` + `ModifyOwnTiles` capabilities
+    /// - Per-tab tile count limit (1024)
+    /// - Bounds positive-size and within-display-area
+    /// - z_order < ZONE_TILE_Z_MIN
     pub fn create_tile(
         &mut self,
         tab_id: SceneId,
@@ -608,19 +925,110 @@ impl SceneGraph {
         bounds: Rect,
         z_order: u32,
     ) -> Result<SceneId, ValidationError> {
+        self.create_tile_impl(tab_id, namespace, lease_id, bounds, z_order, false)
+    }
+
+    /// Create a tile with full spec-compliant validation including capability checks.
+    ///
+    /// RFC 0001 §2.3, §3.1, §3.3: requires active lease, `create_tiles`, and
+    /// `modify_own_tiles` capabilities. Enforces per-tab tile limit, bounds invariants,
+    /// and z_order zone-band reservation.
+    pub fn create_tile_checked(
+        &mut self,
+        tab_id: SceneId,
+        namespace: &str,
+        lease_id: SceneId,
+        bounds: Rect,
+        z_order: u32,
+    ) -> Result<SceneId, ValidationError> {
+        self.create_tile_impl(tab_id, namespace, lease_id, bounds, z_order, true)
+    }
+
+    fn create_tile_impl(
+        &mut self,
+        tab_id: SceneId,
+        namespace: &str,
+        lease_id: SceneId,
+        bounds: Rect,
+        z_order: u32,
+        enforce_capabilities: bool,
+    ) -> Result<SceneId, ValidationError> {
         // Validate tab exists
         if !self.tabs.contains_key(&tab_id) {
             return Err(ValidationError::TabNotFound { id: tab_id });
         }
-        // Validate lease exists
-        if !self.leases.contains_key(&lease_id) {
-            return Err(ValidationError::LeaseNotFound { id: lease_id });
+
+        if enforce_capabilities {
+            // Lease must be active and have create_tiles + modify_own_tiles
+            self.require_active_lease(lease_id)?;
+            self.require_capability(lease_id, Capability::CreateTiles)?;
+            self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+            // Namespace isolation: the caller's namespace must match the lease's namespace.
+            // This prevents an agent from creating tiles in another agent's namespace
+            // using their own (valid) lease. RFC 0001 §1.2.
+            let lease_namespace = self
+                .leases
+                .get(&lease_id)
+                .map(|l| l.namespace.as_str())
+                .unwrap_or("");
+            if namespace != lease_namespace {
+                return Err(ValidationError::NamespaceMismatch {
+                    tile_id: lease_id, // use lease_id as context; tile not created yet
+                    tile_namespace: lease_namespace.to_string(),
+                    agent_namespace: namespace.to_string(),
+                });
+            }
+        } else {
+            // Validate lease exists at minimum
+            if !self.leases.contains_key(&lease_id) {
+                return Err(ValidationError::LeaseNotFound { id: lease_id });
+            }
         }
-        // Validate bounds
+
+        // Per-tab tile count limit (RFC 0001 §2.1: max 1024 tiles per tab)
+        let tiles_in_tab = self.tiles.values().filter(|t| t.tab_id == tab_id).count();
+        if tiles_in_tab >= MAX_TILES_PER_TAB {
+            return Err(ValidationError::BudgetExceeded {
+                resource: format!("tiles_per_tab (limit {})", MAX_TILES_PER_TAB),
+            });
+        }
+
+        // Bounds: width and height must be > 0 (RFC 0001 §2.3)
         if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return Err(ValidationError::BoundsOutOfRange {
+                reason: format!(
+                    "tile bounds width ({}) and height ({}) must be > 0.0",
+                    bounds.width, bounds.height
+                ),
+            });
+        }
+
+        // Bounds must be fully within the tab display area (RFC 0001 §2.3)
+        if !bounds.is_within(&self.display_area) {
+            return Err(ValidationError::BoundsOutOfRange {
+                reason: format!(
+                    "tile bounds ({},{} {}×{}) are not fully within display area ({},{} {}×{})",
+                    bounds.x,
+                    bounds.y,
+                    bounds.width,
+                    bounds.height,
+                    self.display_area.x,
+                    self.display_area.y,
+                    self.display_area.width,
+                    self.display_area.height,
+                ),
+            });
+        }
+
+        // z_order must be < ZONE_TILE_Z_MIN for agent-owned tiles (RFC 0001 §2.3)
+        if z_order >= ZONE_TILE_Z_MIN {
             return Err(ValidationError::InvalidField {
-                field: "bounds".into(),
-                reason: "width and height must be > 0".into(),
+                field: "z_order".into(),
+                reason: format!(
+                    "z_order 0x{:08X} is >= ZONE_TILE_Z_MIN (0x{:08X}); reserved for runtime zone tiles",
+                    z_order, ZONE_TILE_Z_MIN
+                ),
             });
         }
 
@@ -647,7 +1055,229 @@ impl SceneGraph {
         Ok(id)
     }
 
+    /// Update the bounds of a tile.
+    ///
+    /// RFC 0001 §2.3: requires active lease + `ModifyOwnTiles` capability.
+    /// Bounds must be positive and within the display area.
+    pub fn update_tile_bounds(
+        &mut self,
+        tile_id: SceneId,
+        bounds: Rect,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.get_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+        if bounds.width <= 0.0 || bounds.height <= 0.0 {
+            return Err(ValidationError::BoundsOutOfRange {
+                reason: format!(
+                    "tile bounds width ({}) and height ({}) must be > 0.0",
+                    bounds.width, bounds.height
+                ),
+            });
+        }
+        if !bounds.is_within(&self.display_area) {
+            return Err(ValidationError::BoundsOutOfRange {
+                reason: format!(
+                    "tile bounds ({},{} {}×{}) are not fully within display area",
+                    bounds.x, bounds.y, bounds.width, bounds.height
+                ),
+            });
+        }
+
+        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        tile.bounds = bounds;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Update the z-order of a tile.
+    ///
+    /// RFC 0001 §2.3: requires active lease + `ModifyOwnTiles`.
+    /// z_order must be < ZONE_TILE_Z_MIN.
+    pub fn update_tile_z_order(
+        &mut self,
+        tile_id: SceneId,
+        z_order: u32,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.get_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+        if z_order >= ZONE_TILE_Z_MIN {
+            return Err(ValidationError::InvalidField {
+                field: "z_order".into(),
+                reason: format!(
+                    "z_order 0x{:08X} is >= ZONE_TILE_Z_MIN (0x{:08X}); reserved for runtime zone tiles",
+                    z_order, ZONE_TILE_Z_MIN
+                ),
+            });
+        }
+
+        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        tile.z_order = z_order;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Update the opacity of a tile.
+    ///
+    /// RFC 0001 §2.3: opacity must be in [0.0, 1.0]. Requires active lease + `ModifyOwnTiles`.
+    pub fn update_tile_opacity(
+        &mut self,
+        tile_id: SceneId,
+        opacity: f32,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.get_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+        if !(0.0..=1.0).contains(&opacity) {
+            return Err(ValidationError::InvalidField {
+                field: "opacity".into(),
+                reason: format!(
+                    "opacity {} is not in [0.0, 1.0]",
+                    opacity
+                ),
+            });
+        }
+
+        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        tile.opacity = opacity;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Update the input mode of a tile.
+    ///
+    /// RFC 0001 §2.3: requires active lease + `ModifyOwnTiles`.
+    pub fn update_tile_input_mode(
+        &mut self,
+        tile_id: SceneId,
+        input_mode: InputMode,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.get_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        tile.input_mode = input_mode;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Update the expiry timestamp of a tile.
+    ///
+    /// RFC 0001 §2.3: requires active lease + `ModifyOwnTiles`.
+    pub fn update_tile_expiry(
+        &mut self,
+        tile_id: SceneId,
+        expires_at: Option<u64>,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.get_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+        let tile = self.tiles.get_mut(&tile_id).unwrap();
+        tile.expires_at = expires_at;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Delete a tile and all its nodes.
+    ///
+    /// RFC 0001 §2.3: requires active lease + `ModifyOwnTiles`. Namespace isolation enforced.
+    pub fn delete_tile(
+        &mut self,
+        tile_id: SceneId,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        let lease_id = self.get_tile_lease_checked(tile_id, agent_namespace)?;
+        self.require_active_lease(lease_id)?;
+        self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+        // Leave sync group before removing the tile to avoid dangling member entries.
+        let _ = self.leave_sync_group(tile_id);
+        self.remove_tile_and_nodes(tile_id);
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Get the lease ID for a tile, enforcing namespace isolation.
+    ///
+    /// Returns `NamespaceMismatch` if the tile belongs to a different namespace.
+    /// Returns `TileNotFound` if the tile does not exist.
+    fn get_tile_lease_checked(
+        &self,
+        tile_id: SceneId,
+        agent_namespace: &str,
+    ) -> Result<SceneId, ValidationError> {
+        let tile = self
+            .tiles
+            .get(&tile_id)
+            .ok_or(ValidationError::TileNotFound { id: tile_id })?;
+        if tile.namespace != agent_namespace {
+            return Err(ValidationError::NamespaceMismatch {
+                tile_id,
+                tile_namespace: tile.namespace.clone(),
+                agent_namespace: agent_namespace.to_string(),
+            });
+        }
+        Ok(tile.lease_id)
+    }
+
     pub fn set_tile_root(&mut self, tile_id: SceneId, node: Node) -> Result<(), ValidationError> {
+        self.set_tile_root_impl(tile_id, node, None)
+    }
+
+    /// Set tile root with full capability and node-count enforcement.
+    pub fn set_tile_root_checked(
+        &mut self,
+        tile_id: SceneId,
+        node: Node,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        self.set_tile_root_impl(tile_id, node, Some(agent_namespace))
+    }
+
+    fn set_tile_root_impl(
+        &mut self,
+        tile_id: SceneId,
+        node: Node,
+        agent_namespace: Option<&str>,
+    ) -> Result<(), ValidationError> {
+        if let Some(ns) = agent_namespace {
+            let lease_id = self.get_tile_lease_checked(tile_id, ns)?;
+            self.require_active_lease(lease_id)?;
+            self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        }
+
+        // Check for duplicate node ID (scene-globally unique per RFC 0001 §2.1)
+        if self.nodes.contains_key(&node.id) {
+            return Err(ValidationError::DuplicateId { id: node.id });
+        }
+
+        // Validate node data constraints (e.g. TextMarkdownNode content size limit)
+        if let Some(err) = validate_text_markdown_node_data(&node.data) {
+            return Err(err);
+        }
+
+        // Node count limit: SetTileRoot replaces the whole tree.
+        // Count nodes in the incoming tree (simple count; children are flat in our model).
+        let incoming_count = self.count_node_tree_deep(&node);
+        if incoming_count > MAX_NODES_PER_TILE {
+            return Err(ValidationError::NodeCountExceeded {
+                tile_id,
+                current: incoming_count,
+                limit: MAX_NODES_PER_TILE,
+            });
+        }
+
         // Get old root first, then release the borrow
         let old_root = {
             let tile = self
@@ -687,8 +1317,55 @@ impl SceneGraph {
         parent_id: Option<SceneId>,
         node: Node,
     ) -> Result<(), ValidationError> {
-        if !self.tiles.contains_key(&tile_id) {
+        self.add_node_to_tile_impl(tile_id, parent_id, node, None)
+    }
+
+    /// Add a node to a tile with full spec-compliant validation.
+    pub fn add_node_to_tile_checked(
+        &mut self,
+        tile_id: SceneId,
+        parent_id: Option<SceneId>,
+        node: Node,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        self.add_node_to_tile_impl(tile_id, parent_id, node, Some(agent_namespace))
+    }
+
+    fn add_node_to_tile_impl(
+        &mut self,
+        tile_id: SceneId,
+        parent_id: Option<SceneId>,
+        node: Node,
+        agent_namespace: Option<&str>,
+    ) -> Result<(), ValidationError> {
+        if let Some(ns) = agent_namespace {
+            let lease_id = self.get_tile_lease_checked(tile_id, ns)?;
+            self.require_active_lease(lease_id)?;
+            self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        } else if !self.tiles.contains_key(&tile_id) {
             return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+
+        // Check for duplicate node ID (RFC 0001 §2.1: NodeIds must be scene-globally unique)
+        if self.nodes.contains_key(&node.id) {
+            return Err(ValidationError::DuplicateId { id: node.id });
+        }
+
+        // Validate node data constraints (e.g. TextMarkdownNode content size limit)
+        if let Some(err) = validate_text_markdown_node_data(&node.data) {
+            return Err(err);
+        }
+
+        // Enforce per-tile node count limit (RFC 0001 §2.1: max 64 nodes)
+        let current_count = self.count_nodes_in_tile(
+            self.tiles.get(&tile_id).unwrap()
+        ) as usize;
+        if current_count >= MAX_NODES_PER_TILE {
+            return Err(ValidationError::NodeCountExceeded {
+                tile_id,
+                current: current_count,
+                limit: MAX_NODES_PER_TILE,
+            });
         }
 
         let node_id = node.id;
@@ -2800,4 +3477,688 @@ mod tests {
         assert_eq!(expiries[0].terminal_state, LeaseState::Expired);
         assert!(expiries[0].removed_tiles.contains(&tile_id));
     }
+}
+
+// ─── Spec scenario tests (RFC 0001 §2.1–§2.4) ────────────────────────────────
+//
+// Each test corresponds to a WHEN/THEN scenario from the issue spec.
+
+#[cfg(test)]
+mod spec_scenarios {
+    use super::*;
+    use crate::clock::TestClock;
+    use crate::types::{
+        Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
+        TextMarkdownNode, FontFamily, TextAlign, TextOverflow, HitRegionNode,
+    };
+    use std::sync::Arc;
+
+    fn make_scene() -> SceneGraph {
+        SceneGraph::new(1920.0, 1080.0)
+    }
+
+    fn make_scene_with_clock() -> (SceneGraph, Arc<TestClock>) {
+        let clock = Arc::new(TestClock::new(1_000_000));
+        let scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+        (scene, clock)
+    }
+
+    // ─ Tab limit enforcement (spec line 50) ──────────────────────────────────
+    // WHEN an agent attempts CreateTab and 256 tabs already exist
+    // THEN the runtime MUST reject with BudgetExceeded
+
+    #[test]
+    fn tab_limit_256_enforced() {
+        let mut scene = make_scene();
+        for i in 0..MAX_TABS {
+            scene.create_tab(&format!("Tab {}", i), i as u32).expect("should create tab");
+        }
+        assert_eq!(scene.tabs.len(), MAX_TABS);
+        let err = scene.create_tab("Overflow", MAX_TABS as u32).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::BudgetExceeded { .. }),
+            "expected BudgetExceeded, got {:?}",
+            err
+        );
+    }
+
+    // ─ Tile limit enforcement (spec line 54) ─────────────────────────────────
+    // WHEN an agent attempts CreateTile on a tab that already has 1024 tiles
+    // THEN the runtime MUST reject with BudgetExceeded
+
+    #[test]
+    fn tile_limit_1024_per_tab_enforced() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+
+        // The test scene is 1920×1080; tiles are 1px×1px at unique positions.
+        // Use a grid: 32 cols × 32 rows = 1024. We'll use tiny tiles in bounds.
+        // Actually: MAX_TILES_PER_TAB = 1024.
+        for i in 0..(MAX_TILES_PER_TAB) {
+            let x = (i % 40) as f32 * 48.0;
+            let y = (i / 40) as f32 * 42.0;
+            if x + 40.0 <= 1920.0 && y + 40.0 <= 1080.0 {
+                scene
+                    .create_tile(tab_id, "agent", lease_id, Rect::new(x, y, 40.0, 40.0), i as u32)
+                    .expect("should create tile within limit");
+            } else {
+                // Re-use same position for tiles that would go out of bounds (unchecked path ignores bounds)
+                scene
+                    .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 1.0, 1.0), i as u32)
+                    .expect("should create tile within limit");
+            }
+        }
+        assert_eq!(
+            scene.tiles.values().filter(|t| t.tab_id == tab_id).count(),
+            MAX_TILES_PER_TAB
+        );
+
+        let err = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 1.0, 1.0), MAX_TILES_PER_TAB as u32)
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::BudgetExceeded { .. }),
+            "expected BudgetExceeded, got {:?}",
+            err
+        );
+    }
+
+    // ─ Node limit enforcement (spec line 58) ─────────────────────────────────
+    // WHEN an agent attempts InsertNode on a tile with 64 nodes
+    // THEN the runtime MUST reject with NodeCountExceeded
+
+    #[test]
+    fn node_limit_64_per_tile_enforced() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile, Capability::CreateNode]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 400.0), 1)
+            .unwrap();
+
+        // Add root node first, then chain children off the root.
+        let root_id = SceneId::new();
+        let root_node = Node {
+            id: root_id,
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                bounds: Rect::new(0.0, 0.0, 400.0, 400.0),
+            }),
+        };
+        scene.add_node_to_tile(tile_id, None, root_node).expect("root should be added");
+
+        // Add MAX_NODES_PER_TILE - 1 children off the root (total will be MAX_NODES_PER_TILE)
+        for i in 1..MAX_NODES_PER_TILE {
+            let child = Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba::new(0.1 * (i % 10) as f32, 0.0, 0.0, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+                }),
+            };
+            scene.add_node_to_tile(tile_id, Some(root_id), child)
+                .unwrap_or_else(|e| panic!("should add child {} ok: {:?}", i, e));
+        }
+
+        // Verify we have exactly MAX_NODES_PER_TILE nodes in the tile
+        let count = scene.count_node_subtree(root_id);
+        assert_eq!(count as usize, MAX_NODES_PER_TILE, "should have exactly {} nodes", MAX_NODES_PER_TILE);
+
+        // One more should be rejected
+        let overflow_node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::BLACK,
+                bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
+            }),
+        };
+        let err = scene.add_node_to_tile(tile_id, Some(root_id), overflow_node).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::NodeCountExceeded { .. }),
+            "expected NodeCountExceeded, got {:?}",
+            err
+        );
+    }
+
+    // ─ Duplicate NodeId rejection (spec line 62) ─────────────────────────────
+    // WHEN an agent attempts to add a node with a NodeId that already exists in the scene
+    // THEN the runtime MUST reject with DuplicateId
+
+    #[test]
+    fn duplicate_node_id_rejected() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+
+        let node_id = SceneId::new();
+        let node = Node {
+            id: node_id,
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            }),
+        };
+        // First insertion succeeds
+        scene.add_node_to_tile(tile_id, None, node.clone()).expect("first insert should succeed");
+
+        // Second insertion with the same node ID should fail
+        let tile_id2 = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(200.0, 0.0, 200.0, 200.0), 2)
+            .unwrap();
+        let err = scene.add_node_to_tile(tile_id2, None, node).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::DuplicateId { id } if id == node_id),
+            "expected DuplicateId, got {:?}",
+            err
+        );
+    }
+
+    // ─ Tab name too long (spec line 79) ──────────────────────────────────────
+    // WHEN an agent submits CreateTab with a name exceeding 128 UTF-8 bytes
+    // THEN the runtime MUST reject with InvalidFieldValue
+
+    #[test]
+    fn tab_name_too_long_rejected() {
+        let mut scene = make_scene();
+        let long_name = "a".repeat(MAX_TAB_NAME_BYTES + 1);
+        let err = scene.create_tab(&long_name, 0).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidField { ref field, .. } if field == "name"),
+            "expected InvalidField for name, got {:?}",
+            err
+        );
+    }
+
+    // ─ Tab mutation without capability (spec line 83) ─────────────────────────
+    // WHEN an agent without manage_tabs capability submits CreateTab
+    // THEN the runtime MUST reject with CapabilityMissing
+
+    #[test]
+    fn tab_create_without_manage_tabs_rejected() {
+        let mut scene = make_scene();
+        // Lease with no capabilities
+        let lease_id = scene.grant_lease("agent", 300_000, vec![]);
+        let err = scene.create_tab_with_lease("My Tab", 0, lease_id).unwrap_err();
+        assert!(
+            matches!(err, ValidationError::CapabilityMissing { ref capability } if capability.contains("ManageTabs")),
+            "expected CapabilityMissing(ManageTabs), got {:?}",
+            err
+        );
+    }
+
+    // ─ Create and switch tab (spec line 71) ──────────────────────────────────
+    // WHEN an agent with manage_tabs submits CreateTab + SwitchActiveTab
+    // THEN the new tab MUST be created and become active
+
+    #[test]
+    fn create_and_switch_tab_with_capability() {
+        let mut scene = make_scene();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::ManageTabs]);
+        let tab_id = scene.create_tab_with_lease("New Tab", 0, lease_id).unwrap();
+        scene.switch_active_tab_with_lease(tab_id, lease_id).unwrap();
+        assert_eq!(scene.active_tab, Some(tab_id));
+    }
+
+    // ─ Tab rename (spec line 75) ─────────────────────────────────────────────
+    // WHEN an agent submits RenameTab with a new name of 100 UTF-8 bytes
+    // THEN the tab name MUST be updated
+
+    #[test]
+    fn rename_tab_with_100_byte_name() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Original", 0).unwrap();
+        let new_name = "a".repeat(100);
+        scene.rename_tab(tab_id, &new_name).unwrap();
+        assert_eq!(scene.tabs[&tab_id].name, new_name);
+    }
+
+    // ─ Create tile with valid lease (spec line 92) ────────────────────────────
+    // WHEN an agent with create_tiles + modify_own_tiles and valid lease submits CreateTile
+    // THEN the tile MUST be created with specified bounds, z_order, and opacity
+
+    #[test]
+    fn create_tile_checked_requires_capabilities() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        // No capabilities — should fail
+        let lease_no_caps = scene.grant_lease("agent", 300_000, vec![]);
+        let err = scene
+            .create_tile_checked(tab_id, "agent", lease_no_caps, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap_err();
+        assert!(matches!(err, ValidationError::CapabilityMissing { .. }), "got {:?}", err);
+
+        // Only create_tiles (not modify_own_tiles) — should still fail
+        let lease_create_only = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles]);
+        let err = scene
+            .create_tile_checked(tab_id, "agent", lease_create_only, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap_err();
+        assert!(matches!(err, ValidationError::CapabilityMissing { .. }), "got {:?}", err);
+
+        // Full capabilities — should succeed
+        let lease_full = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile_checked(tab_id, "agent", lease_full, Rect::new(0.0, 0.0, 200.0, 200.0), 5)
+            .unwrap();
+        assert_eq!(scene.tiles[&tile_id].z_order, 5);
+        assert!((scene.tiles[&tile_id].opacity - 1.0).abs() < f32::EPSILON);
+    }
+
+    // ─ Tile mutation with expired lease (spec line 96) ───────────────────────
+    // WHEN an agent submits UpdateTileBounds but the tile's lease has expired
+    // THEN the runtime MUST reject with LeaseExpired
+
+    #[test]
+    fn tile_mutation_with_expired_lease_rejected() {
+        let (mut scene, clock) = make_scene_with_clock();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 100, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+
+        // Advance clock past TTL
+        clock.advance(200);
+
+        let err = scene
+            .update_tile_bounds(tile_id, Rect::new(10.0, 10.0, 100.0, 100.0), "agent")
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::LeaseExpired { .. }),
+            "expected LeaseExpired, got {:?}",
+            err
+        );
+    }
+
+    // ─ Delete tile (spec line 100) ─────────────────────────────────────────────
+    // WHEN an agent submits DeleteTile for a tile it owns with a valid lease
+    // THEN the tile and all its nodes MUST be removed
+
+    #[test]
+    fn delete_tile_removes_tile_and_nodes() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+        let node_id = SceneId::new();
+        scene.set_tile_root(tile_id, Node {
+            id: node_id,
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+            }),
+        }).unwrap();
+        assert!(scene.nodes.contains_key(&node_id));
+
+        scene.delete_tile(tile_id, "agent").unwrap();
+        assert!(!scene.tiles.contains_key(&tile_id), "tile should be removed");
+        assert!(!scene.nodes.contains_key(&node_id), "nodes should be removed with tile");
+    }
+
+    // ─ Opacity out of range (spec line 109) ──────────────────────────────────
+    // WHEN an agent submits UpdateTileOpacity with opacity = 1.5
+    // THEN the runtime MUST reject with InvalidFieldValue
+
+    #[test]
+    fn opacity_out_of_range_rejected() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+
+        let err = scene.update_tile_opacity(tile_id, 1.5, "agent").unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidField { ref field, .. } if field == "opacity"),
+            "expected InvalidField(opacity), got {:?}",
+            err
+        );
+
+        let err2 = scene.update_tile_opacity(tile_id, -0.1, "agent").unwrap_err();
+        assert!(matches!(err2, ValidationError::InvalidField { .. }), "got {:?}", err2);
+    }
+
+    // ─ Zero-size bounds (spec line 113) ──────────────────────────────────────
+    // WHEN an agent submits CreateTile with width = 0.0
+    // THEN the runtime MUST reject with BoundsOutOfRange
+
+    #[test]
+    fn zero_size_bounds_rejected() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        // create_tile_checked requires CreateTiles + ModifyOwnTiles; use correct capabilities
+        // so the bounds check is reached (not capability check).
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+
+        let err = scene
+            .create_tile_checked(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 0.0, 100.0), // width = 0.0
+                1,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::BoundsOutOfRange { .. }),
+            "expected BoundsOutOfRange, got {:?}", err
+        );
+
+        // Use the basic create_tile (no capability check) to also confirm bounds are rejected
+        let lease_unchecked = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        let err2 = scene
+            .create_tile(tab_id, "agent", lease_unchecked, Rect::new(0.0, 0.0, 0.0, 100.0), 1)
+            .unwrap_err();
+        assert!(
+            matches!(err2, ValidationError::BoundsOutOfRange { .. }),
+            "expected BoundsOutOfRange, got {:?}",
+            err2
+        );
+    }
+
+    // ─ Bounds outside tab area (spec line 117) ───────────────────────────────
+    // WHEN UpdateTileBounds with x + width exceeding tab display width
+    // THEN reject with BoundsOutOfRange
+
+    #[test]
+    fn bounds_outside_display_rejected() {
+        let mut scene = make_scene(); // 1920×1080
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+
+        let err = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(1800.0, 0.0, 200.0, 100.0), 1) // x + w = 2000 > 1920
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::BoundsOutOfRange { .. }),
+            "expected BoundsOutOfRange, got {:?}",
+            err
+        );
+    }
+
+    // ─ Z-order in reserved zone band (spec line 121) ─────────────────────────
+    // WHEN CreateTile with z_order = ZONE_TILE_Z_MIN
+    // THEN reject with InvalidFieldValue
+
+    #[test]
+    fn z_order_reserved_zone_band_rejected() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+
+        let err = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), ZONE_TILE_Z_MIN)
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidField { ref field, .. } if field == "z_order"),
+            "expected InvalidField(z_order), got {:?}",
+            err
+        );
+
+        // Also reject z_order above the threshold
+        let err2 = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), ZONE_TILE_Z_MIN + 1)
+            .unwrap_err();
+        assert!(matches!(err2, ValidationError::InvalidField { .. }), "got {:?}", err2);
+
+        // z_order just below threshold is fine
+        scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), ZONE_TILE_Z_MIN - 1)
+            .expect("z_order just below ZONE_TILE_Z_MIN must succeed");
+    }
+
+    // ─ TextMarkdownNode content limit (spec line 130) ─────────────────────────
+    // WHEN TextMarkdownNode with content exceeding 65535 UTF-8 bytes
+    // THEN reject with InvalidFieldValue
+
+    #[test]
+    fn text_markdown_content_limit_enforced() {
+        let oversized = "x".repeat(MAX_MARKDOWN_BYTES + 1);
+        // Validate that the node construction itself is possible but the validation
+        // catches it. We check via validate_node_data if it exists, or directly.
+        // For now, test that creating such content is flagged at the graph level.
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: oversized.clone(),
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                font_size_px: 16.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::WHITE,
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+        // The validation function
+        let err = validate_text_markdown_node_data(&node.data);
+        assert!(err.is_some(), "oversized content should be flagged");
+    }
+
+    // ─ Cross-namespace tile access denied (spec line 37) ─────────────────────
+    // WHEN agent "weather-agent" attempts to mutate a tile owned by namespace "cal"
+    // THEN reject with CapabilityMissing or LeaseNotFound
+
+    #[test]
+    fn cross_namespace_tile_access_denied() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let cal_lease = scene.grant_lease("cal", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let tile_id = scene
+            .create_tile(tab_id, "cal", cal_lease, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+
+        // weather-agent tries to update bounds of cal's tile
+        let err = scene
+            .update_tile_bounds(tile_id, Rect::new(10.0, 10.0, 100.0, 100.0), "wtr")
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::NamespaceMismatch { .. }),
+            "expected NamespaceMismatch, got {:?}",
+            err
+        );
+    }
+
+    // ─ Struct size budgets (spec line 307, 311) ───────────────────────────────
+    // Tile < 200 bytes, Node < 150 bytes
+
+    #[test]
+    fn tile_struct_size_under_200_bytes() {
+        use std::mem::size_of;
+        let tile_size = size_of::<Tile>();
+        assert!(
+            tile_size < 200,
+            "Tile struct is {} bytes, must be < 200 bytes per RFC 0001 §8",
+            tile_size
+        );
+    }
+
+    #[test]
+    fn node_struct_size_under_150_bytes() {
+        use std::mem::size_of;
+        let node_size = size_of::<Node>();
+        assert!(
+            node_size < 150,
+            "Node struct is {} bytes, must be < 150 bytes per RFC 0001 §8",
+            node_size
+        );
+    }
+
+    // ─ Tab CRUD full cycle ────────────────────────────────────────────────────
+
+    #[test]
+    fn tab_delete_removes_tiles_too() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+        scene.create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1).unwrap();
+        assert_eq!(scene.tile_count(), 1);
+
+        scene.delete_tab(tab_id).unwrap();
+        assert_eq!(scene.tabs.len(), 0, "tab should be removed");
+        assert_eq!(scene.tile_count(), 0, "tiles should be removed with tab");
+        assert_eq!(scene.active_tab, None, "active_tab should be None after deleting last tab");
+    }
+
+    #[test]
+    fn tab_reorder_updates_display_order() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        scene.reorder_tab(tab_id, 5).unwrap();
+        assert_eq!(scene.tabs[&tab_id].display_order, 5);
+    }
+
+    #[test]
+    fn tab_reorder_conflict_rejected() {
+        let mut scene = make_scene();
+        let tab_a = scene.create_tab("A", 0).unwrap();
+        let _tab_b = scene.create_tab("B", 1).unwrap();
+        // Try to give tab_a the same order as tab_b
+        let err = scene.reorder_tab(tab_a, 1).unwrap_err();
+        assert!(matches!(err, ValidationError::DuplicateDisplayOrder { .. }), "got {:?}", err);
+    }
+
+    // ─ Opacity valid range ────────────────────────────────────────────────────
+
+    #[test]
+    fn tile_opacity_accepts_boundary_values() {
+        let mut scene = make_scene();
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+
+        scene.update_tile_opacity(tile_id, 0.0, "agent").unwrap();
+        assert!((scene.tiles[&tile_id].opacity - 0.0).abs() < f32::EPSILON);
+
+        scene.update_tile_opacity(tile_id, 1.0, "agent").unwrap();
+        assert!((scene.tiles[&tile_id].opacity - 1.0).abs() < f32::EPSILON);
+
+        scene.update_tile_opacity(tile_id, 0.5, "agent").unwrap();
+        assert!((scene.tiles[&tile_id].opacity - 0.5).abs() < f32::EPSILON);
+    }
+
+    // ─ All 25 test scenes pass Layer 0 invariants ────────────────────────────
+
+    #[test]
+    fn all_25_test_scenes_pass_layer0_invariants() {
+        use crate::test_scenes::{assert_layer0_invariants, ClockMs, TestSceneRegistry};
+
+        let registry = TestSceneRegistry::new();
+        let names = TestSceneRegistry::scene_names();
+        assert_eq!(names.len(), 25, "must have exactly 25 registered scenes, got {}", names.len());
+
+        for name in names {
+            let (graph, _spec) = registry
+                .build(name, ClockMs::FIXED)
+                .unwrap_or_else(|| panic!("scene '{}' failed to build", name));
+            let violations = assert_layer0_invariants(&graph);
+            assert!(
+                violations.is_empty(),
+                "scene '{}' has Layer 0 violations: {:?}",
+                name,
+                violations
+            );
+        }
+    }
+
+    // ─ V1 node types constructable without GPU ───────────────────────────────
+
+    #[test]
+    fn all_v1_node_types_constructable() {
+        // SolidColorNode
+        let _ = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.5, 0.5, 0.5, 1.0),
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            }),
+        };
+
+        // TextMarkdownNode
+        let _ = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "# Hello".to_string(),
+                bounds: Rect::new(0.0, 0.0, 400.0, 200.0),
+                font_size_px: 16.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::WHITE,
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+
+        // HitRegionNode
+        let _ = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(10.0, 10.0, 100.0, 50.0),
+                interaction_id: "btn-ok".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+            }),
+        };
+
+        // StaticImageNode — constructable without GPU context
+        use crate::types::StaticImageNode;
+        use crate::types::ImageFitMode;
+        let _ = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                image_data: vec![255u8; 4 * 4 * 4], // 4×4 RGBA
+                width: 4,
+                height: 4,
+                content_hash: "test-hash".to_string(),
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            }),
+        };
+    }
+}
+
+// ─── Helper for TextMarkdownNode content size validation ──────────────────────
+
+/// Validate a TextMarkdownNode's content size.
+///
+/// Returns `Some(ValidationError)` if the content exceeds `MAX_MARKDOWN_BYTES`.
+/// Used by `set_tile_root_impl` when strict content validation is needed.
+pub fn validate_text_markdown_node_data(data: &NodeData) -> Option<ValidationError> {
+    if let NodeData::TextMarkdown(tm) = data {
+        if tm.content.len() > MAX_MARKDOWN_BYTES {
+            return Some(ValidationError::InvalidField {
+                field: "content".into(),
+                reason: format!(
+                    "TextMarkdownNode content exceeds {} UTF-8 bytes (got {})",
+                    MAX_MARKDOWN_BYTES,
+                    tm.content.len()
+                ),
+            });
+        }
+    }
+    None
 }

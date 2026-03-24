@@ -27,7 +27,15 @@ pub mod config;
 pub use clock::{Clock, SimulatedClock, SystemClock, TestClock};
 pub use timing::{ClockOffset, DurationUs, MonoUs, WallUs};
 pub use types::*;
-pub use graph::{SceneGraph, SyncGroupCommitDecision};
+pub use graph::{
+    SceneGraph, SyncGroupCommitDecision,
+    // RFC 0001 §2.1 scene-level capacity constants
+    MAX_TABS, MAX_TILES_PER_TAB, MAX_NODES_PER_TILE, MAX_TAB_NAME_BYTES, MAX_MARKDOWN_BYTES,
+    // RFC 0001 §2.3 zone band reservation
+    ZONE_TILE_Z_MIN,
+    // Node data validation
+    validate_text_markdown_node_data,
+};
 pub use mutation::{MutationBatch, MutationResult, SceneMutation};
 pub use diff::{SceneDiff, DiffEntry};
 pub use validation::ValidationError;
