@@ -2001,12 +2001,22 @@ impl SceneGraph {
     ///
     /// Token validation is out-of-scope for the pure scene graph layer;
     /// callers (e.g., the gRPC server) must validate the token before calling this.
+    ///
+    /// # Arguments
+    /// - `zone_name` — zone type name (resolved to the instance for the active tab)
+    /// - `content` — content payload; must match one of the zone's accepted_media_types
+    /// - `publisher_namespace` — the publishing agent's namespace
+    /// - `merge_key` — key for MergeByKey contention (ignored for other policies)
+    /// - `expires_at_wall_us` — optional wall-clock expiry (µs since epoch)
+    /// - `content_classification` — optional opaque content classification tag
     pub fn publish_to_zone(
         &mut self,
         zone_name: &str,
         content: ZoneContent,
         publisher_namespace: &str,
         merge_key: Option<String>,
+        expires_at_wall_us: Option<u64>,
+        content_classification: Option<String>,
     ) -> Result<(), ValidationError> {
         // Check zone exists and content type is accepted
         let (contention_policy, max_publishers, accepted) = {
@@ -2033,6 +2043,8 @@ impl SceneGraph {
             content,
             published_at_ms: now_ms,
             merge_key: merge_key.clone(),
+            expires_at_wall_us,
+            content_classification,
         };
 
         let publishes = self
@@ -2283,13 +2295,38 @@ impl SceneGraph {
         finalized
     }
 
-    /// Clear all active publishes for a zone.
+    /// Clear all active publishes for a zone (regardless of publisher).
+    ///
+    /// This removes ALL publications from the zone. For per-publisher clearing,
+    /// use [`clear_zone_for_publisher`].
     pub fn clear_zone(&mut self, zone_name: &str) -> Result<(), ValidationError> {
         if !self.zone_registry.zones.contains_key(zone_name) {
             return Err(ValidationError::ZoneNotFound { name: zone_name.to_string() });
         }
         self.zone_registry.active_publishes.remove(zone_name);
         self.version += 1;
+        Ok(())
+    }
+
+    /// Clear all active publishes for a zone made by a specific publisher.
+    ///
+    /// Per spec: "ClearZone clears all publications by the agent in the specified zone."
+    /// If no publications exist for the publisher, this is a no-op (but still succeeds).
+    pub fn clear_zone_for_publisher(
+        &mut self,
+        zone_name: &str,
+        publisher_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        if !self.zone_registry.zones.contains_key(zone_name) {
+            return Err(ValidationError::ZoneNotFound { name: zone_name.to_string() });
+        }
+        if let Some(publishes) = self.zone_registry.active_publishes.get_mut(zone_name) {
+            let before = publishes.len();
+            publishes.retain(|r| r.publisher_namespace != publisher_namespace);
+            if publishes.len() != before {
+                self.version += 1;
+            }
+        }
         Ok(())
     }
 
@@ -2300,6 +2337,8 @@ impl SceneGraph {
             ZoneContent::Notification(_) => Some(ZoneMediaType::ShortTextWithIcon),
             ZoneContent::StatusBar(_) => Some(ZoneMediaType::KeyValuePairs),
             ZoneContent::SolidColor(_) => Some(ZoneMediaType::SolidColor),
+            ZoneContent::StaticImage(_) => Some(ZoneMediaType::StaticImage),
+            ZoneContent::VideoSurfaceRef(_) => Some(ZoneMediaType::VideoSurfaceRef),
         }
     }
 
@@ -2606,6 +2645,7 @@ mod tests {
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
         }
     }
 
@@ -2627,6 +2667,7 @@ mod tests {
             transport_constraint: None,
             auto_clear_ms: Some(5_000),
             ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
         }
     }
 
@@ -2648,6 +2689,7 @@ mod tests {
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
         }
     }
 
@@ -2711,6 +2753,8 @@ mod tests {
             ZoneContent::StreamText("hello".to_string()),
             "agent",
             None,
+            None,
+            None,
         );
         assert!(matches!(result, Err(ValidationError::ZoneNotFound { .. })));
     }
@@ -2729,6 +2773,8 @@ mod tests {
             }),
             "agent",
             None,
+            None,
+            None,
         );
         assert!(matches!(result, Err(ValidationError::ZoneMediaTypeMismatch { .. })));
     }
@@ -2738,8 +2784,8 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
 
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("first".to_string()), "a1", None).unwrap();
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("second".to_string()), "a2", None).unwrap();
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("first".to_string()), "a1", None, None, None).unwrap();
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("second".to_string()), "a2", None, None, None).unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("subtitle");
         assert_eq!(publishes.len(), 1);
@@ -2758,15 +2804,15 @@ mod tests {
             urgency: 1,
         });
 
-        scene.publish_to_zone("notifications", notification("msg1"), "a1", None).unwrap();
-        scene.publish_to_zone("notifications", notification("msg2"), "a2", None).unwrap();
-        scene.publish_to_zone("notifications", notification("msg3"), "a3", None).unwrap();
+        scene.publish_to_zone("notifications", notification("msg1"), "a1", None, None, None).unwrap();
+        scene.publish_to_zone("notifications", notification("msg2"), "a2", None, None, None).unwrap();
+        scene.publish_to_zone("notifications", notification("msg3"), "a3", None, None, None).unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("notifications");
         assert_eq!(publishes.len(), 3);
 
         // 4th publish should trim the oldest
-        scene.publish_to_zone("notifications", notification("msg4"), "a4", None).unwrap();
+        scene.publish_to_zone("notifications", notification("msg4"), "a4", None, None, None).unwrap();
         let publishes = scene.zone_registry.active_for_zone("notifications");
         assert_eq!(publishes.len(), 3);
         // Oldest (msg1) should be gone, newest (msg4) at end
@@ -2952,14 +2998,14 @@ mod tests {
         };
 
         // Publish with different keys
-        scene.publish_to_zone("status-bar", kv("clock", "12:00"), "a1", Some("clock".to_string())).unwrap();
-        scene.publish_to_zone("status-bar", kv("battery", "80%"), "a2", Some("battery".to_string())).unwrap();
+        scene.publish_to_zone("status-bar", kv("clock", "12:00"), "a1", Some("clock".to_string()), None, None).unwrap();
+        scene.publish_to_zone("status-bar", kv("battery", "80%"), "a2", Some("battery".to_string()), None, None).unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("status-bar");
         assert_eq!(publishes.len(), 2);
 
         // Update existing key "clock"
-        scene.publish_to_zone("status-bar", kv("clock", "12:01"), "a1", Some("clock".to_string())).unwrap();
+        scene.publish_to_zone("status-bar", kv("clock", "12:01"), "a1", Some("clock".to_string()), None, None).unwrap();
         let publishes = scene.zone_registry.active_for_zone("status-bar");
         assert_eq!(publishes.len(), 2); // Still 2 (clock replaced, battery retained)
         let clock = publishes.iter().find(|r| r.merge_key.as_deref() == Some("clock")).unwrap();
@@ -2990,11 +3036,12 @@ mod tests {
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
         };
         scene.register_zone(zone);
 
-        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::WHITE), "a1", None).unwrap();
-        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::BLACK), "a2", None).unwrap();
+        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::WHITE), "a1", None, None, None).unwrap();
+        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::BLACK), "a2", None, None, None).unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("pip");
         assert_eq!(publishes.len(), 1);
@@ -3006,7 +3053,7 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
 
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "a1", None).unwrap();
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "a1", None, None, None).unwrap();
         assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
 
         scene.clear_zone("subtitle").unwrap();
@@ -3024,7 +3071,7 @@ mod tests {
     fn test_zone_registry_snapshot() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hi".to_string()), "a1", None).unwrap();
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hi".to_string()), "a1", None, None, None).unwrap();
 
         let snap = scene.zone_registry.snapshot();
         assert_eq!(snap.zones.len(), 1);
@@ -3048,6 +3095,8 @@ mod tests {
                     content: ZoneContent::StreamText("batch publish".to_string()),
                     publish_token: dummy_token(),
                     merge_key: None,
+                    expires_at_wall_us: None,
+                    content_classification: None,
                 },
             ],
             timing_hints: None,
@@ -3063,9 +3112,12 @@ mod tests {
 
     #[test]
     fn test_clear_zone_via_mutation_batch() {
+        // Per spec: ClearZone clears publications by THIS agent (batch.agent_namespace).
+        // Publish as "agent", then clear as "agent" — should clear.
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "a1", None).unwrap();
+        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "agent", None, None, None).unwrap();
+        assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
 
         use crate::mutation::{MutationBatch, SceneMutation};
 
@@ -3084,7 +3136,45 @@ mod tests {
 
         let result = scene.apply_batch(&batch);
         assert!(result.applied);
+        // "agent" published, "agent" cleared — should be 0
         assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 0);
+    }
+
+    #[test]
+    fn test_clear_zone_per_publisher_only_affects_own_publishes() {
+        // Publish as two agents; ClearZone from agent "a1" should only remove "a1"'s publish.
+        // subtitle zone has max_publishers=2 for this test; use a zone that supports 2 publishers.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        // Use a Stack zone so both publishes can coexist
+        let stack_zone = ZoneDefinition {
+            id: SceneId::new(),
+            name: "shared".to_string(),
+            description: "Stack zone for publisher isolation test".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 0.1,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 4 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: LayerAttachment::Content,
+        };
+        scene.register_zone(stack_zone);
+
+        scene.publish_to_zone("shared", ZoneContent::StreamText("from a1".to_string()), "a1", None, None, None).unwrap();
+        scene.publish_to_zone("shared", ZoneContent::StreamText("from a2".to_string()), "a2", None, None, None).unwrap();
+        assert_eq!(scene.zone_registry.active_for_zone("shared").len(), 2);
+
+        // Clear only "a1"'s publication
+        scene.clear_zone_for_publisher("shared", "a1").unwrap();
+        let pubs = scene.zone_registry.active_for_zone("shared");
+        assert_eq!(pubs.len(), 1);
+        assert_eq!(pubs[0].publisher_namespace, "a2");
     }
 
     #[test]

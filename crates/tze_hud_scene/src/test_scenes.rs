@@ -27,8 +27,8 @@
 use crate::graph::SceneGraph;
 use crate::types::{
     Capability, ContentionPolicy, DisplayEdge, FontFamily, GeometryPolicy, HitRegionNode,
-    InputMode, Node, NodeData, Rect, RenderingPolicy, Rgba, SceneId, SolidColorNode, TextAlign,
-    TextMarkdownNode, TextOverflow, ZoneDefinition, ZoneMediaType,
+    InputMode, LayerAttachment, Node, NodeData, Rect, RenderingPolicy, Rgba, SceneId,
+    SolidColorNode, TextAlign, TextMarkdownNode, TextOverflow, ZoneDefinition, ZoneMediaType,
 };
 
 // ─── Clock injection ─────────────────────────────────────────────────────────
@@ -1658,6 +1658,7 @@ impl TestSceneRegistry {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
             },
         );
 
@@ -1745,6 +1746,7 @@ impl TestSceneRegistry {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
             },
         );
 
@@ -1834,6 +1836,7 @@ impl TestSceneRegistry {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Chrome,
             },
         );
 
@@ -1959,6 +1962,7 @@ impl TestSceneRegistry {
                     transport_constraint: None,
                     auto_clear_ms: None,
                     ephemeral: false,
+                    layer_attachment: LayerAttachment::Chrome,
                 },
             );
         }
@@ -2047,6 +2051,7 @@ impl TestSceneRegistry {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
             },
         );
 
@@ -2071,6 +2076,7 @@ impl TestSceneRegistry {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Background,
             },
         );
 
@@ -2155,6 +2161,7 @@ impl TestSceneRegistry {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
             },
         );
 
@@ -4185,6 +4192,7 @@ mod tests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
             },
         );
 

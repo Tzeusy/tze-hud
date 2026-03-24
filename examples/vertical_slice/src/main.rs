@@ -291,6 +291,8 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
             ZoneContent::StatusBar(StatusBarPayload { entries }),
             &namespace,
             Some("agent-status".to_string()),
+            None,
+            None,
         ).unwrap();
         println!("  Published to status-bar zone (MergeByKey, key=agent-status)");
 
@@ -311,6 +313,8 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 urgency: 1,
             }),
             &namespace,
+            None,
+            None,
             None,
         ).unwrap();
         println!("  Published notification to notification-area zone");
@@ -1117,6 +1121,8 @@ mod tests {
             ZoneContent::StatusBar(StatusBarPayload { entries }),
             "test-agent",
             Some("test-key".to_string()),
+            None,
+            None,
         ).unwrap();
 
         let active = scene.zone_registry.active_for_zone("status-bar");
@@ -1131,6 +1137,8 @@ mod tests {
             ZoneContent::StatusBar(StatusBarPayload { entries: entries2 }),
             "test-agent",
             Some("test-key".to_string()),
+            None,
+            None,
         ).unwrap();
 
         let active = scene.zone_registry.active_for_zone("status-bar");
@@ -1147,6 +1155,8 @@ mod tests {
             "nonexistent-zone",
             ZoneContent::StreamText("hello".to_string()),
             "test-agent",
+            None,
+            None,
             None,
         );
 

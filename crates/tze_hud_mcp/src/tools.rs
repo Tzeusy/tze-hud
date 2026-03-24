@@ -640,7 +640,7 @@ fn parse_scene_id(s: &str) -> McpResult<SceneId> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy}, SceneId};
+    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy, LayerAttachment}, SceneId};
 
     fn scene_with_tab() -> (SceneGraph, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -894,6 +894,7 @@ mod tests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
             },
         );
         (scene, tab_id, zone_name)
@@ -963,6 +964,7 @@ mod tests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
             },
         );
         let err =
@@ -1036,6 +1038,7 @@ mod tests {
                     transport_constraint: None,
                     auto_clear_ms: None,
                     ephemeral: false,
+                    layer_attachment: LayerAttachment::Content,
                 },
             );
         }

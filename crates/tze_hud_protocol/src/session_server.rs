@@ -1905,6 +1905,10 @@ async fn handle_mutation_batch(
                         content,
                         publish_token: token,
                         merge_key,
+                        // expires_at_wall_us and content_classification are not yet present
+                        // in the PublishToZoneMutation proto (post-v1 wire extensions).
+                        expires_at_wall_us: None,
+                        content_classification: None,
                     });
                 }
             }
@@ -2706,6 +2710,10 @@ async fn handle_zone_publish(
                     token: Vec::new(),
                 },
                 merge_key,
+                // expires_at_wall_us and content_classification are not yet present in
+                // the ZonePublish proto message (post-v1 wire extensions).
+                expires_at_wall_us: None,
+                content_classification: None,
             };
 
             // Apply as a single-mutation batch

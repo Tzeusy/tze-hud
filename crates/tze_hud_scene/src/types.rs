@@ -1295,6 +1295,29 @@ impl SyncGroup {
 
 // ─── Zone types ─────────────────────────────────────────────────────────────
 
+/// Minimum z-order for Content-layer zone tiles (= 0x8000_0000).
+///
+/// Content-layer zone tiles must participate in the same z-order traversal as
+/// agent tiles but in the reserved upper band (≥ ZONE_TILE_Z_MIN). Agent tiles
+/// must use z_order values below this constant.
+///
+/// Per scene-graph/spec.md §Requirement: Zone Layer Attachment.
+pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
+
+/// Layer attachment for a zone instance — determines rendering order.
+///
+/// Per RFC 0001 §2.5 and scene-graph/spec.md line 241.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerAttachment {
+    /// Rendered behind all agent tiles (below content layer).
+    Background,
+    /// Rendered within the content layer z-order space at
+    /// z_order >= [`ZONE_TILE_Z_MIN`].
+    Content,
+    /// Rendered above all agent content; managed by runtime chrome rendering.
+    Chrome,
+}
+
 /// Display edge for edge-anchored zone geometry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisplayEdge {
@@ -1394,6 +1417,9 @@ pub struct ZoneDefinition {
     /// Per RFC 0005 §3.1, §8.6.
     #[serde(default)]
     pub ephemeral: bool,
+    /// Layer attachment — determines rendering order and z-space.
+    /// Defaults to [`LayerAttachment::Content`] if not specified.
+    pub layer_attachment: LayerAttachment,
 }
 
 // ─── Zone publish token ──────────────────────────────────────────────────────
@@ -1430,11 +1456,18 @@ pub enum ZoneContent {
     Notification(NotificationPayload),
     StatusBar(StatusBarPayload),
     SolidColor(Rgba),
+    /// Static image reference (v1-mandatory: content-addressed resource).
+    StaticImage(ResourceId),
+    /// Video surface reference (post-v1; schema defined, rendering deferred).
+    VideoSurfaceRef(SceneId),
 }
 
 // ─── Zone publish records ────────────────────────────────────────────────────
 
 /// Record of a single publish event into a zone.
+///
+/// This is the publication event (third level of the zone ontology:
+/// ZoneType → ZoneInstance → ZonePublication → ZoneOccupancy).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ZonePublishRecord {
     pub zone_name: String,
@@ -1443,6 +1476,57 @@ pub struct ZonePublishRecord {
     pub published_at_ms: u64,
     /// For MergeByKey contention: the key under which this record is stored.
     pub merge_key: Option<String>,
+    /// Optional wall-clock expiry timestamp (microseconds since epoch).
+    /// When present, the runtime MUST clear this publication at or before this time.
+    /// None = no expiry (publication lives until explicitly cleared or zone cleared).
+    pub expires_at_wall_us: Option<u64>,
+    /// Optional content classification tag (e.g., "public", "private", "pii").
+    /// Used by policy and redaction layers; treated as opaque by the scene graph.
+    pub content_classification: Option<String>,
+}
+
+/// Type alias for `ZonePublishRecord` — the canonical name for the publication
+/// level of the four-level zone ontology.
+///
+/// Ontology levels:
+/// 1. `ZoneDefinition` — the zone type (schema, accepted media, contention policy)
+/// 2. `ZoneInstance` — zone type bound to a specific tab
+/// 3. `ZonePublication` (= `ZonePublishRecord`) — a single publish event
+/// 4. `ZoneOccupancy` — resolved state after applying contention policy
+pub type ZonePublication = ZonePublishRecord;
+
+/// A zone instance — zone type bound to a specific tab.
+///
+/// In v1, zone instances are static (loaded from config; one instance per tab
+/// per zone type). Agents MUST NOT create zone instances.
+///
+/// Per scene-graph/spec.md §Requirement: Zone Registry (line 185).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ZoneInstance {
+    /// The zone type (definition) this instance belongs to.
+    pub zone_type_name: String,
+    /// The tab this instance is bound to.
+    pub tab_id: SceneId,
+    /// Instance-level geometry override (None = use zone type's geometry_policy).
+    pub geometry_override: Option<GeometryPolicy>,
+}
+
+/// Zone occupancy — the resolved state after applying the contention policy.
+///
+/// This is the fourth level of the zone ontology. In v1, effective_geometry
+/// is NOT exposed (deferred to post-v1 per spec line 360).
+///
+/// Per scene-graph/spec.md §Requirement: Zone Occupancy Query API (line 360,
+/// post-v1), and §Requirement: Zone Registry (line 185, v1-mandatory).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ZoneOccupancy {
+    pub zone_name: String,
+    pub tab_id: SceneId,
+    /// Active publications after applying contention policy.
+    pub active_publications: Vec<ZonePublishRecord>,
+    /// Occupant count after contention resolution.
+    pub occupant_count: u32,
+    // NOTE: effective_geometry intentionally absent in v1 (post-v1 per spec line 360).
 }
 
 // ─── Zone registry ───────────────────────────────────────────────────────────
@@ -1475,10 +1559,13 @@ impl ZoneRegistry {
     }
 
     /// Create a registry pre-populated with the default v1 zones.
+    ///
+    /// V1 zone set (scene-graph/spec.md §Implementation Details):
+    /// subtitle, notification-area, status-bar, pip, ambient-background, alert-banner.
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
 
-        // status-bar zone: edge-anchored bottom, MergeByKey
+        // 1. status-bar: edge-anchored bottom, MergeByKey, Chrome layer
         registry.register(ZoneDefinition {
             id: SceneId::new(),
             name: "status-bar".to_string(),
@@ -1496,9 +1583,10 @@ impl ZoneRegistry {
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
         });
 
-        // notification-area zone: edge-anchored top-right, Stack
+        // 2. notification-area: top-right relative, Stack, Chrome layer
         registry.register(ZoneDefinition {
             id: SceneId::new(),
             name: "notification-area".to_string(),
@@ -1516,9 +1604,10 @@ impl ZoneRegistry {
             transport_constraint: None,
             auto_clear_ms: Some(5_000),
             ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
         });
 
-        // subtitle zone: edge-anchored bottom, LatestWins
+        // 3. subtitle: edge-anchored bottom, LatestWins, Content layer
         registry.register(ZoneDefinition {
             id: SceneId::new(),
             name: "subtitle".to_string(),
@@ -1536,6 +1625,81 @@ impl ZoneRegistry {
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // 4. pip: picture-in-picture, Relative geometry, Replace, Content layer
+        registry.register(ZoneDefinition {
+            id: SceneId::new(),
+            name: "pip".to_string(),
+            description: "Picture-in-picture overlay zone".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.70,
+                width_pct: 0.22,
+                height_pct: 0.26,
+            },
+            accepted_media_types: vec![
+                ZoneMediaType::SolidColor,
+                ZoneMediaType::StaticImage,
+                ZoneMediaType::VideoSurfaceRef,
+            ],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // 5. ambient-background: full-screen, Replace, Background layer
+        registry.register(ZoneDefinition {
+            id: SceneId::new(),
+            name: "ambient-background".to_string(),
+            description: "Ambient background zone — full display, behind all content".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            accepted_media_types: vec![
+                ZoneMediaType::SolidColor,
+                ZoneMediaType::StaticImage,
+                ZoneMediaType::VideoSurfaceRef,
+            ],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Background,
+        });
+
+        // 6. alert-banner: edge-anchored top, Replace, Chrome layer
+        registry.register(ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_string(),
+            description: "Alert banner — top edge, single occupant".to_string(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.05,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![
+                ZoneMediaType::ShortTextWithIcon,
+                ZoneMediaType::StreamText,
+            ],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: Some(10_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
         });
 
         registry
@@ -1576,6 +1740,33 @@ impl ZoneRegistry {
             .get(zone_name)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Query occupancy for a zone instance (resolved state after contention policy).
+    ///
+    /// In v1, `effective_geometry` is not exposed (deferred to post-v1).
+    /// Returns `None` if the zone is not found.
+    pub fn get_occupancy(&self, zone_name: &str, tab_id: SceneId) -> Option<ZoneOccupancy> {
+        let _zone = self.zones.get(zone_name)?;
+        let pubs = self.active_publishes
+            .get(zone_name)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        let occupant_count = pubs.len() as u32;
+        Some(ZoneOccupancy {
+            zone_name: zone_name.to_string(),
+            tab_id,
+            active_publications: pubs,
+            occupant_count,
+        })
+    }
+
+    /// Query zones by layer attachment.
+    pub fn zones_with_attachment(&self, attachment: LayerAttachment) -> Vec<&ZoneDefinition> {
+        self.zones
+            .values()
+            .filter(|z| z.layer_attachment == attachment)
+            .collect()
     }
 
     /// Snapshot the registry (all definitions + all active publishes).
