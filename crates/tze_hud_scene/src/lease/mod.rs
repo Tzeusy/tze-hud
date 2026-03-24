@@ -13,6 +13,8 @@ pub mod capability;
 pub mod degradation;
 pub mod orphan;
 pub mod cleanup;
+pub mod budget;
+pub mod enforcement;
 
 pub use types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
 pub use state_machine::LeaseImpl;
@@ -39,6 +41,12 @@ pub use cleanup::{
     ZonePublicationSweep,
     CleanupResult,
 };
+pub use budget::{
+    BudgetDelta, BudgetDimension, BudgetHardViolation, BudgetUsage,
+    anti_collusion_texture_bytes, check_budget_hard, check_budget_soft,
+    is_budget_soft_warning,
+};
+pub use enforcement::{CriticalBypassTrigger, EnforcementAction, EnforcementLadder};
 
 use crate::clock::Clock;
 
