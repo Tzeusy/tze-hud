@@ -2366,14 +2366,14 @@ impl SceneGraph {
     /// Use [`SceneGraphSnapshot::verify_checksum`] to verify after deserialization.
     ///
     /// # Clock arguments
-    /// `wall_us` is UTC wall-clock microseconds since epoch (i64, signed to handle
-    /// pre-epoch edge cases). `mono_us` is monotonic microseconds since process start.
+    /// `wall_us` is UTC wall-clock microseconds since epoch (u64). `mono_us` is
+    /// monotonic microseconds since process start.
     ///
     /// # v1 Constraints
     /// - Resources are referenced by ResourceId only; no blob data is included.
     /// - effective_geometry is NOT included (post-v1 per spec line 360).
     /// - Incremental diff is NOT available (snapshot-only reconnect in v1).
-    pub fn take_snapshot(&self, wall_us: i64, mono_us: u64) -> SceneGraphSnapshot {
+    pub fn take_snapshot(&self, wall_us: u64, mono_us: u64) -> SceneGraphSnapshot {
         // Tabs: keyed by display_order for deterministic ordering.
         let tabs: std::collections::BTreeMap<u32, Tab> = self
             .tabs
@@ -2403,15 +2403,19 @@ impl SceneGraph {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        // Zone instances: sorted by zone_type_name then tab_id for determinism.
+        // Zone instances: intentionally empty in v1.
         // In v1 the zone_registry does not store ZoneInstance directly —
-        // instance binding is implicit (one per tab per zone type when zone is loaded).
-        // We emit an empty vec here; session management fills it when delivering to agents.
+        // instance binding is implicit (one per tab per zone type when a zone is loaded).
+        // Consumers of this snapshot MUST NOT rely on zone_instances being populated;
+        // any instance bindings must be derived from zone_types and current tab/node state.
+        // Post-v1: explicit ZoneInstance tracking will populate this field.
         let zone_instances: Vec<ZoneInstance> = Vec::new();
 
         // Active publications: BTreeMap keyed by zone name; each Vec is already
-        // ordered by insertion (policy-enforced). Sort each Vec by published_at_ms
-        // then publisher_namespace for full determinism.
+        // ordered by insertion (policy-enforced). Sort each Vec with a total order
+        // to guarantee determinism: published_at_ms → publisher_namespace → merge_key.
+        // The merge_key tie-breaker ensures records that share a timestamp and namespace
+        // (e.g., MergeByKey records) are still ordered deterministically.
         let active_publications: std::collections::BTreeMap<String, Vec<ZonePublishRecord>> = self
             .zone_registry
             .active_publishes
@@ -2422,6 +2426,7 @@ impl SceneGraph {
                     a.published_at_ms
                         .cmp(&b.published_at_ms)
                         .then_with(|| a.publisher_namespace.cmp(&b.publisher_namespace))
+                        .then_with(|| a.merge_key.cmp(&b.merge_key))
                 });
                 (zone_name.clone(), sorted)
             })

@@ -1593,7 +1593,7 @@ pub struct SceneGraphSnapshot {
     pub sequence: u64,
 
     /// UTC wall-clock at snapshot time, microseconds since Unix epoch.
-    pub snapshot_wall_us: i64,
+    pub snapshot_wall_us: u64,
 
     /// Monotonic timestamp at snapshot time, microseconds since process start.
     pub snapshot_mono_us: u64,

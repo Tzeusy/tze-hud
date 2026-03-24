@@ -29,7 +29,7 @@ use tze_hud_scene::{
     test_scenes::{ClockMs, TestSceneRegistry},
 };
 
-const WALL_US: i64 = 1_735_689_600_000_000;
+const WALL_US: u64 = 1_735_689_600_000_000;
 const MONO_US: u64 = 12_345_678;
 
 // ─── Scene builders ───────────────────────────────────────────────────────────

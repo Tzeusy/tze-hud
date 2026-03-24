@@ -549,7 +549,7 @@ message RuntimeTelemetryFrame {
 // this snapshot before issuing mutations. Sequence-number resumption starts
 // from the `sequence` field value.
 //
-// Encoding: snapshot_json carries a JSON-serialized SceneSnapshot struct
+// Encoding: snapshot_json carries a JSON-serialized SceneGraphSnapshot struct
 // (defined in tze_hud_scene::types). The JSON uses compact (non-pretty)
 // encoding for byte stability and must include all fields from the struct,
 // including tabs (ordered by display_order), tiles, nodes, zone_registry
@@ -566,7 +566,7 @@ message RuntimeTelemetryFrame {
 //   - Incremental diff is NOT available; snapshot-only reconnect in v1.
 //   - effective_geometry is NOT included (post-v1 per spec line 360).
 message SceneSnapshot {
-  // Full scene topology as canonical compact JSON (SceneSnapshot struct).
+  // Full scene topology as canonical compact JSON (SceneGraphSnapshot struct).
   // Includes: sequence, snapshot_wall_us, snapshot_mono_us, tabs, tiles,
   // nodes, zone_registry, active_tab, checksum.
   string snapshot_json  = 1;
@@ -575,8 +575,8 @@ message SceneSnapshot {
   // Agents resume mutation submission from this sequence number.
   uint64 sequence       = 2;
 
-  // UTC wall-clock at snapshot time (microseconds since Unix epoch, signed).
-  sint64 snapshot_wall_us = 3;
+  // UTC wall-clock at snapshot time (microseconds since Unix epoch).
+  uint64 snapshot_wall_us = 3;
 
   // Monotonic timestamp at snapshot time (microseconds since process start).
   uint64 snapshot_mono_us = 4;
@@ -586,11 +586,10 @@ message SceneSnapshot {
   // Agents SHOULD verify before applying. Mismatch indicates corruption.
   string blake3_checksum = 5;
 
-  // Deprecated field (pre-spec SceneGraph JSON) — kept for backward compat.
-  // New implementations MUST use snapshot_json (field 1) instead.
-  // Field 6 was previously `version` (uint64) — reserved; do not reuse.
-  reserved 6;
-  reserved "version";
+  // The field name `version` (previously at tag 2) and `scene_json` (previously
+  // at tag 1) are reserved to prevent accidental reuse of old names that had
+  // different semantics in the pre-spec SceneSnapshot format.
+  reserved "scene_json", "version";
 }
 
 // Incremental scene update for subscribed events.
