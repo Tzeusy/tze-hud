@@ -11,6 +11,28 @@
 //!                  CharacterEvent) per RFC 0004 §7.4
 //! - `command`    — abstract command input model (NAVIGATE_NEXT … SCROLL_DOWN)
 //!                  per RFC 0004 §10
+//! - [`pointer`] — rich pointer event types (PointerDownEvent, ClickEvent, etc.)
+//! - [`events`] — HitTestResult, RouteTarget, SceneLocalPatch, InputEnvelope, EventBatch
+//! - [`hit_test`] — headless-testable hit-test pipeline
+//! - [`dispatch`] — Stage 1+2 dispatch pipeline (DispatchProcessor)
+
+pub mod pointer;
+pub mod events;
+pub mod hit_test;
+pub mod dispatch;
+
+// Re-export core dispatch types at the crate root for convenience.
+pub use pointer::{
+    CancelReason, ClickEvent, ContextMenuEvent, DoubleClickEvent, Modifiers, PointerButton,
+    PointerCancelEvent, PointerDownEvent, PointerEnterEvent, PointerFields, PointerLeaveEvent,
+    PointerMoveEvent, PointerUpEvent, RawPointerEvent, RawPointerEventKind,
+};
+pub use events::{
+    EventBatch, HitTestResult, InputEnvelope, LocalStateUpdate, RouteTarget, SceneLocalPatch,
+    ScrollOffsetUpdate,
+};
+pub use hit_test::hit_test;
+pub use dispatch::{build_agent_batch, DispatchOutcome, DispatchProcessor};
 
 pub mod focus_tree;
 pub mod focus;
