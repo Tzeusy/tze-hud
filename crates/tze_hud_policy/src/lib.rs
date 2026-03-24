@@ -52,6 +52,10 @@ pub mod privacy;
 pub mod resource;
 pub mod content;
 pub mod telemetry;
+pub mod override_queue;
+pub mod safety;
+pub mod frame;
+pub mod event;
 mod tests;
 
 // ─── Public API re-exports ────────────────────────────────────────────────────
@@ -133,4 +137,21 @@ pub use telemetry::{
     CapabilityAuditKind,
     MutationLatencyAccumulator,
     PolicyTelemetry,
+};
+
+// ─── Per-frame / per-event pipeline re-exports ────────────────────────────────
+
+pub use override_queue::{OverrideCommand, OverrideCommandQueue, OVERRIDE_QUEUE_CAPACITY};
+
+pub use safety::{
+    GpuFailureContext, SafetySignal, SafeModeEntryReason, evaluate_safety,
+};
+
+pub use frame::{
+    ContentFrameSignal, FrameEvaluation, FramePrivacyContext, ResourceFrameSignal, evaluate_frame,
+};
+
+pub use event::{
+    DiscardReason, EventContext, EventEvaluation, EventOutcome, evaluate_event,
+    safe_mode_activated_in_batch,
 };
