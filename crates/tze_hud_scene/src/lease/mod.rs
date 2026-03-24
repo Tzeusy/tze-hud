@@ -6,9 +6,18 @@
 
 pub mod types;
 pub mod state_machine;
+pub mod ttl;
+pub mod suspension;
 
 pub use types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
 pub use state_machine::LeaseImpl;
+pub use ttl::{TtlState, TtlCheck, AutoRenewalArm, DisarmReason, AUTO_RENEW_THRESHOLD};
+pub use suspension::{
+    SuspensionManager, SuspendedEntry, SafeModeResult, SafeModeResumeResult,
+    LeaseResumeData, SuspensionTimeoutEntry,
+    DEFAULT_MAX_SUSPENSION_MS, SAFE_MODE_SUSPEND_DEADLINE_MS, SAFE_MODE_RESUME_DEADLINE_MS,
+    assert_state_preserved, is_suspendable, is_resumable,
+};
 
 use crate::clock::Clock;
 
