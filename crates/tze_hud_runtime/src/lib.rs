@@ -17,6 +17,7 @@ pub mod subscriptions;
 pub mod event_bus;
 pub mod quiet_hours;
 pub mod attention_budget;
+pub mod shell;
 
 pub use budget::{
     AgentResourceState, BudgetCheckOutcome, BudgetEnforcer, BudgetState,
@@ -41,3 +42,13 @@ pub use attention_budget::{
     UrgencyRecord, DEFAULT_AGENT_BUDGET, DEFAULT_ZONE_BUDGET, DEFAULT_STACK_ZONE_BUDGET,
     WARNING_FRACTION, ROLLING_WINDOW_US,
 };
+pub use shell::chrome::{
+    AgentVisibleTopology, AuditPayload, AuditTrigger, ChromeLayout,
+    ChromeRenderer, ChromeShortcut, ChromeState, ChromeTab, CollectingAuditSink,
+    DiagnosticSnapshot, DismissTileResult, NoopAuditSink, RevokeReason, SafeModeEntryReason,
+    ShellAuditEvent, ShellAuditSink, ShortcutResult, SystemHealth, TabBarPosition,
+    ViewerClass, ViewerClassTransition, collect_diagnostic, handle_shortcut,
+    strip_chrome_from_topology,
+};
+// ChromeDrawCmd is defined in tze_hud_compositor to avoid circular deps.
+pub use tze_hud_compositor::ChromeDrawCmd;

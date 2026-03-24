@@ -2,8 +2,18 @@
 //!
 //! For the vertical slice, this renders tiles as colored rectangles
 //! with hit-region highlighting for local feedback.
+//!
+//! ## Two-pass rendering (content → chrome)
+//!
+//! [`Compositor::render_frame_with_chrome`] implements the three-layer ordering required by
+//! the chrome sovereignty contract:
+//!   1. Background + content pass (`LoadOp::Clear` — clears and draws agent tiles)
+//!   2. Chrome pass (`LoadOp::Load` — draws chrome on top of content, preserving pixels)
+//!
+//! This separation is the architectural foundation for future render-skip redaction
+//! (capture-safe architecture): the content and chrome passes are structurally independent.
 
-use crate::pipeline::{rect_vertices, RectVertex, RECT_SHADER};
+use crate::pipeline::{rect_vertices, ChromeDrawCmd, RectVertex, RECT_SHADER};
 use crate::surface::HeadlessSurface;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
@@ -201,6 +211,162 @@ impl Compositor {
         telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
 
         // Copy to readback buffer
+        surface.copy_to_buffer(&mut encoder);
+
+        let submit_start = std::time::Instant::now();
+        self.queue.submit(std::iter::once(encoder.finish()));
+        self.device.poll(wgpu::Maintain::Wait);
+        telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
+
+        telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
+        telemetry
+    }
+
+    /// Render one frame with a separate chrome pass after the content pass.
+    ///
+    /// # Layer ordering (back to front)
+    ///
+    /// 1. **Content pass** — background clear + all agent tiles. Uses `LoadOp::Clear`.
+    /// 2. **Chrome pass** — draws chrome draw commands on top. Uses `LoadOp::Load` to
+    ///    preserve the content pass pixels, ensuring chrome is always on top.
+    ///
+    /// Chrome draw commands are produced by the caller (from `ChromeRenderer::render_chrome`)
+    /// before calling this function. The compositor does not access `ChromeState` directly —
+    /// chrome state is fully decoupled from scene/agent state.
+    ///
+    /// # Separable passes
+    ///
+    /// The content pass and chrome pass are encoded as two separate `RenderPass` blocks
+    /// within the same `CommandEncoder`. This architectural separation is the foundation
+    /// for future render-skip redaction (capture-safe architecture): the content pass can
+    /// be suppressed independently of the chrome pass.
+    ///
+    /// # Chrome layer sovereignty
+    ///
+    /// Because the chrome pass uses `LoadOp::Load` and runs after the content pass,
+    /// chrome pixels are always written last — no agent tile can occlude chrome regardless
+    /// of its z-order value.
+    pub fn render_frame_with_chrome(
+        &mut self,
+        scene: &SceneGraph,
+        surface: &HeadlessSurface,
+        chrome_cmds: &[ChromeDrawCmd],
+    ) -> FrameTelemetry {
+        let frame_start = std::time::Instant::now();
+        self.frame_number += 1;
+
+        let mut telemetry = FrameTelemetry::new(self.frame_number);
+
+        // ── Pass 1: Content (background + agent tiles) ──────────────────────
+        let tiles = scene.visible_tiles();
+        telemetry.tile_count = tiles.len() as u32;
+        telemetry.node_count = scene.node_count() as u32;
+        telemetry.active_leases = scene.leases.len() as u32;
+
+        let mut content_vertices: Vec<RectVertex> = Vec::new();
+        let sw = self.width as f32;
+        let sh = self.height as f32;
+
+        for tile in &tiles {
+            let bg_color = self.tile_background_color(tile, scene);
+            let verts = rect_vertices(tile.bounds.x, tile.bounds.y, tile.bounds.width, tile.bounds.height, sw, sh, bg_color);
+            content_vertices.extend_from_slice(&verts);
+            if let Some(root_id) = tile.root_node {
+                self.render_node(root_id, tile, scene, &mut content_vertices, sw, sh);
+            }
+        }
+
+        let encode_start = std::time::Instant::now();
+
+        let content_buffer = if content_vertices.is_empty() {
+            None
+        } else {
+            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("content_vertex_buffer"),
+                contents: bytemuck::cast_slice(&content_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            Some(buf)
+        };
+
+        // ── Pass 2: Chrome ───────────────────────────────────────────────────
+        let mut chrome_vertices: Vec<RectVertex> = Vec::new();
+        for cmd in chrome_cmds {
+            let verts = rect_vertices(cmd.x, cmd.y, cmd.width, cmd.height, sw, sh, cmd.color);
+            chrome_vertices.extend_from_slice(&verts);
+        }
+
+        let chrome_buffer = if chrome_vertices.is_empty() {
+            None
+        } else {
+            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chrome_vertex_buffer"),
+                contents: bytemuck::cast_slice(&chrome_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            Some(buf)
+        };
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame_encoder_with_chrome"),
+        });
+
+        // Content render pass — clears the surface and draws agent tiles.
+        {
+            let mut content_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("content_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.05,
+                            g: 0.05,
+                            b: 0.1,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            content_pass.set_pipeline(&self.pipeline);
+            if let Some(ref buf) = content_buffer {
+                content_pass.set_vertex_buffer(0, buf.slice(..));
+                content_pass.draw(0..content_vertices.len() as u32, 0..1);
+            }
+        }
+
+        // Chrome render pass — uses LoadOp::Load to preserve content pixels.
+        // Chrome commands are drawn ON TOP of content by construction.
+        // No agent tile can occlude chrome regardless of z-order.
+        {
+            let mut chrome_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("chrome_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // LoadOp::Load: preserve content pixels — chrome draws on top.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            chrome_pass.set_pipeline(&self.pipeline);
+            if let Some(ref buf) = chrome_buffer {
+                chrome_pass.set_vertex_buffer(0, buf.slice(..));
+                chrome_pass.draw(0..chrome_vertices.len() as u32, 0..1);
+            }
+        }
+
+        telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
+
         surface.copy_to_buffer(&mut encoder);
 
         let submit_start = std::time::Instant::now();
@@ -501,5 +667,152 @@ mod tests {
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 512 * 256 * 4, "pixel buffer size mismatch");
         // Just verify the frame completed without panic and returned the expected buffer size.
+    }
+
+    // ── Chrome layer pixel tests ──────────────────────────────────────────────
+
+    /// Layer 1 pixel test: chrome layer is always visible above max-z-order agent tile.
+    ///
+    /// Acceptance criterion: "Layer 1 pixel tests confirm chrome always visible above
+    /// max-z-order agent tile."
+    ///
+    /// This test renders a bright red tile at max z-order (u32::MAX) then renders a
+    /// distinctive chrome rectangle over the same region. The chrome pixels (pure green)
+    /// must overwrite the red tile pixels.
+    #[tokio::test]
+    async fn test_chrome_always_above_max_zorder_tile() {
+        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+
+        // Agent tile at max z-order with bright red content.
+        let mut scene = SceneGraph::new(256.0, 256.0);
+        let tab_id = scene.create_tab("test", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), u32::MAX)
+            .unwrap();
+        scene.set_tile_root(tile_id, Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(1.0, 0.0, 0.0, 1.0), // bright red
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        }).unwrap();
+
+        // Chrome draw command: bright green rectangle covering the full surface.
+        // In NDC space, this will overwrite all tile content.
+        let chrome_cmds = vec![crate::pipeline::ChromeDrawCmd {
+            x: 0.0,
+            y: 0.0,
+            width: 256.0,
+            height: 40.0, // tab bar height
+            color: [0.0, 1.0, 0.0, 1.0], // pure green — distinctive chrome marker
+        }];
+
+        compositor.render_frame_with_chrome(&scene, &surface, &chrome_cmds);
+        compositor.device.poll(wgpu::Maintain::Wait);
+
+        let pixels = surface.read_pixels(&compositor.device);
+
+        // Check the top-left pixel region (where chrome covers the tile).
+        // In sRGB, linear [0,1,0] green becomes approximately [0, 255, 0].
+        // We look for pixels that are distinctly green (G > 200, R < 50).
+        let chrome_top_pixel = &pixels[0..4]; // first pixel (top-left)
+        assert!(
+            chrome_top_pixel[1] > 150, // green channel dominant
+            "chrome green channel should be dominant at top: {:?}",
+            chrome_top_pixel
+        );
+        // The tile red should NOT bleed through chrome.
+        assert!(
+            chrome_top_pixel[0] < 50,
+            "agent tile red must not show through chrome: {:?}",
+            chrome_top_pixel
+        );
+    }
+
+    /// Layer 1 pixel test: chrome hit-test priority — chrome is always drawn last.
+    ///
+    /// Verifies the separable render pass architecture: content pass first (agent tiles),
+    /// chrome pass second (chrome elements). The two-pass structure guarantees chrome
+    /// always occupies the final pixels regardless of content.
+    #[tokio::test]
+    async fn test_chrome_pass_uses_load_op_load() {
+        // Render a scene with a blue agent tile + a chrome red stripe.
+        // Blue content should persist where chrome doesn't cover; red should cover where it does.
+        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+
+        let mut scene = SceneGraph::new(256.0, 256.0);
+        let tab_id = scene.create_tab("test", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), 1)
+            .unwrap();
+        scene.set_tile_root(tile_id, Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                // Blue tile — fills entire surface in content pass.
+                color: Rgba::new(0.0, 0.0, 1.0, 1.0),
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        }).unwrap();
+
+        // Chrome: red stripe only in top half (rows 0..128).
+        let chrome_cmds = vec![crate::pipeline::ChromeDrawCmd {
+            x: 0.0,
+            y: 0.0,
+            width: 256.0,
+            height: 128.0,
+            color: [1.0, 0.0, 0.0, 1.0], // pure red
+        }];
+
+        compositor.render_frame_with_chrome(&scene, &surface, &chrome_cmds);
+        compositor.device.poll(wgpu::Maintain::Wait);
+
+        let pixels = surface.read_pixels(&compositor.device);
+
+        // Top row: chrome (red) should dominate.
+        let top_px = &pixels[0..4];
+        assert!(
+            top_px[0] > 150,
+            "top pixel should be red (chrome): {:?}", top_px
+        );
+        assert!(
+            top_px[2] < 50,
+            "top pixel blue (tile) must be suppressed by chrome: {:?}", top_px
+        );
+
+        // Bottom row: content (blue) should persist — chrome didn't cover it.
+        // Row 255 starts at pixel offset 255*256*4.
+        let bottom_row_offset = 255 * 256 * 4;
+        let bottom_px = &pixels[bottom_row_offset..bottom_row_offset + 4];
+        assert!(
+            bottom_px[2] > 150,
+            "bottom pixel should be blue (tile content, no chrome): {:?}", bottom_px
+        );
+        assert!(
+            bottom_px[0] < 50,
+            "bottom pixel red should be absent (no chrome): {:?}", bottom_px
+        );
+    }
+
+    /// Verify that render_frame_with_chrome renders correctly even when chrome_cmds is empty.
+    #[tokio::test]
+    async fn test_two_pass_with_empty_chrome_cmds() {
+        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let scene = scene_with_node(Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.5, 0.5, 0.5, 1.0),
+                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+            }),
+        });
+        // Empty chrome cmds — must not panic.
+        compositor.render_frame_with_chrome(&scene, &surface, &[]);
+        compositor.device.poll(wgpu::Maintain::Wait);
+        let pixels = surface.read_pixels(&compositor.device);
+        assert_eq!(pixels.len(), 256 * 256 * 4);
     }
 }
