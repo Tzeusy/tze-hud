@@ -46,7 +46,9 @@ pub use envelope::{
     PointerDownData, PointerUpData, ClickData, PointerCancelData,
     KeyDownData, KeyUpData, CharacterData,
     FocusGainedData, FocusLostData,
-    CaptureReleasedData, CaptureReleasedReason,
+    // CaptureReleasedData and CaptureReleasedReason are defined in lib.rs
+    // (from the pointer capture module); re-exporting envelope:: versions
+    // would create duplicate definitions.
     ImeCompositionStartData, ImeCompositionUpdateData, ImeCompositionEndData,
     GestureData, ScrollOffsetChangedData,
     CommandInputData,
