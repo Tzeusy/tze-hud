@@ -21,7 +21,10 @@ use serde::{Deserialize, Serialize};
 pub struct FrameTelemetry {
     /// Frame number (monotonically increasing).
     pub frame_number: u64,
-    /// Timestamp of frame start (microseconds since process start).
+    /// Timestamp of frame start (microseconds since the Unix epoch).
+    ///
+    /// Populated by the `FrameRecorder` using wall-clock time (`Clock::now_us()`).
+    /// Not to be confused with a process-local monotonic offset.
     pub timestamp_us: u64,
     /// Total frame time in microseconds (Stage 1 start → Stage 7 end).
     pub frame_time_us: u64,
@@ -60,18 +63,24 @@ pub struct FrameTelemetry {
     /// Non-blocking channel send of TelemetryRecord to telemetry thread.
     pub stage8_telemetry_emit_us: u64,
 
-    // ── Legacy field aliases (maintained for backward compatibility) ─────────
+    // ── Legacy field aliases (in-process API compatibility only) ────────────
+    //
+    // These fields are excluded from serialization (`#[serde(skip)]`) so they
+    // do NOT appear in JSON telemetry output. They exist solely for in-process
+    // Rust callers that were written against the pre-stage-naming API.
+    // If downstream consumers read the serialized JSON, migrate to the canonical
+    // `stageN_*_us` field names; these aliases will not be present in the output.
 
-    /// Alias for stage1_input_drain_us. Kept for backward compatibility.
+    /// Alias for stage1_input_drain_us (in-process only; not serialized).
     #[serde(skip)]
     pub input_drain_us: u64,
-    /// Alias for stage4_scene_commit_us. Kept for backward compatibility.
+    /// Alias for stage4_scene_commit_us (in-process only; not serialized).
     #[serde(skip)]
     pub scene_commit_us: u64,
-    /// Alias for stage6_render_encode_us. Kept for backward compatibility.
+    /// Alias for stage6_render_encode_us (in-process only; not serialized).
     #[serde(skip)]
     pub render_encode_us: u64,
-    /// Alias for stage7_gpu_submit_us. Kept for backward compatibility.
+    /// Alias for stage7_gpu_submit_us (in-process only; not serialized).
     #[serde(skip)]
     pub gpu_submit_us: u64,
 

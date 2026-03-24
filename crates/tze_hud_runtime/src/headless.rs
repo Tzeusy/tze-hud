@@ -107,10 +107,9 @@ impl HeadlessRuntime {
         let stage1_us = s1_start.elapsed().as_micros() as u64;
 
         // Stage 2: Local Feedback (load ArcSwap snapshot — no mutex)
+        // Per spec §3.2: Stage 2 reads the snapshot published after Stage 4 of the
+        // *previous* frame. It must not publish a new snapshot (that is Stage 4's job).
         let s2_start = Instant::now();
-        // Publish initial snapshot for this frame (based on current scene)
-        let snap = HitTestSnapshot::from_scene(scene);
-        self.pipeline.hit_test_snapshot.store(Arc::new(snap));
         let _snap_ref = self.pipeline.hit_test_snapshot.load();
         let stage2_us = s2_start.elapsed().as_micros() as u64;
 
@@ -138,9 +137,7 @@ impl HeadlessRuntime {
         // Total frame time: stage 1 start → stage 7 end
         let frame_time_us = frame_start.elapsed().as_micros() as u64;
 
-        // Stage 8: Telemetry Emit (non-blocking record into collector)
-        let s8_start = Instant::now();
-        // Build the per-stage telemetry record
+        // Build the per-stage telemetry record (outside the Stage 8 timed region)
         let mut telemetry = FrameTelemetry::new(compositor_telemetry.frame_number);
         telemetry.stage1_input_drain_us = stage1_us;
         telemetry.stage2_local_feedback_us = stage2_us;
@@ -159,10 +156,14 @@ impl HeadlessRuntime {
             self.pipeline.telemetry_overflow_count();
         telemetry.sync_legacy_aliases();
 
+        drop(state);
+
+        // Stage 8: Telemetry Emit — non-blocking record into collector.
+        // Timer wraps the actual emit so the measurement reflects its cost.
+        let s8_start = Instant::now();
+        self.telemetry.record(telemetry.clone());
         telemetry.stage8_telemetry_emit_us = s8_start.elapsed().as_micros() as u64;
 
-        drop(state);
-        self.telemetry.record(telemetry.clone());
         telemetry
     }
 

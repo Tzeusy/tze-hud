@@ -324,8 +324,11 @@ impl FramePipeline {
     /// Stage 8 (Telemetry Emit) — Telemetry thread.
     ///
     /// Sends a `TelemetryRecord` to the telemetry thread via a non-blocking
-    /// bounded channel. If the channel is full, drops the oldest record and
-    /// increments `telemetry_overflow_count`. Must never block the frame pipeline.
+    /// bounded channel. If the channel is full, the emitter drops a record
+    /// (the drop policy — newest vs. oldest — is determined by the caller's
+    /// `emit_fn` implementation) and returns `true` to signal overflow.
+    /// `telemetry_overflow_count` is incremented on each overflow. Must never
+    /// block the frame pipeline.
     ///
     /// Returns elapsed_us.
     ///
@@ -465,9 +468,16 @@ impl FramePipeline {
         let _snapshot = self.hit_test_snapshot.load();
         telemetry.stage2_local_feedback_us = s2_start.elapsed().as_micros() as u64;
 
-        // Stage 3: Mutation Intake — drain the provided pending batch list
+        // Stage 3: Mutation Intake — drain / count the pending batch list.
+        // Per spec §3.2: Stage 3 drains the MutationBatch channel and applies
+        // agent envelope limits. apply_batch() (commit work) belongs to Stage 4.
         let s3_start = Instant::now();
         let batch_count = pending_mutations.len() as u32;
+        telemetry.stage3_mutation_intake_us = s3_start.elapsed().as_micros() as u64;
+
+        // Stage 4: Scene Commit — apply batches (all-or-nothing per batch) and
+        // publish updated hit-test snapshot via ArcSwap.
+        let s4_start = Instant::now();
         let mut mutations_applied = 0u32;
         // Each batch is validated and applied independently (no coalescing)
         for batch in &pending_mutations {
@@ -477,11 +487,6 @@ impl FramePipeline {
                 mutations_applied += batch.mutations.len() as u32;
             }
         }
-        telemetry.stage3_mutation_intake_us = s3_start.elapsed().as_micros() as u64;
-
-        // Stage 4: Scene Commit — publish hit-test snapshot
-        let s4_start = Instant::now();
-        // Build and publish updated hit-test snapshot via ArcSwap
         let new_snapshot = HitTestSnapshot::from_scene(scene_graph_mut);
         self.hit_test_snapshot.store(Arc::new(new_snapshot));
         telemetry.stage4_scene_commit_us = s4_start.elapsed().as_micros() as u64;
