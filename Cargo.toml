@@ -10,8 +10,8 @@ members = [
     "crates/tze_hud_mcp",
     "crates/tze_hud_a11y",
     "crates/tze_hud_policy",
-    "crates/tze_hud_resource",
     "crates/tze_hud_config",
+    "crates/tze_hud_resource",
     "examples/vertical_slice",
     "tests/integration",
 ]

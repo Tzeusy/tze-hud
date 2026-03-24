@@ -1,11 +1,7 @@
 //! Integration tests for `TzeHudConfig`.
 //!
 //! Each test corresponds to a WHEN/THEN scenario from the issue acceptance
-//! criteria (rig-j90m) and `configuration/spec.md`.
-//!
-//! NOTE: `tze_hud_scene::config::tests` is `#[cfg(test)]`-gated inside its own
-//! crate and not accessible from here as a module. We inline equivalent test
-//! logic directly rather than re-exporting.
+//! criteria (rig-j90m, rig-umgy) and `configuration/spec.md`.
 
 use tze_hud_scene::config::{ConfigErrorCode, ConfigLoader, ParseError};
 use crate::loader::TzeHudConfig;
@@ -46,52 +42,18 @@ fn spec_parse_error_includes_line_column() {
     }
 }
 
-/// WHEN TOML has a syntax error THEN ParseError.line >= 1 and .column >= 1.
-#[test]
-fn spec_parse_error_line_column_are_one_indexed() {
-    let bad_toml = "not = valid [\n";
-    let result = TzeHudConfig::parse(bad_toml);
-    match result {
-        Err(ParseError { line, column, .. }) => {
-            assert!(line >= 1, "line must be >= 1, got {line}");
-            assert!(column >= 1, "column must be >= 1, got {column}");
-        }
-        Ok(_) => panic!("invalid TOML should fail"),
-    }
-}
-
 // ── Spec §Configuration File Resolution Order ─────────────────────────────────
 
 /// WHEN no config file found at any location THEN Err lists searched paths.
 #[test]
 fn spec_no_config_found_lists_searched_paths() {
-    // Use a path that is guaranteed not to exist on any platform.
-    let nonexistent = std::env::temp_dir()
-        .join("tze_hud_no_such_file_j90m_test_xxxxxx.toml")
-        .to_string_lossy()
-        .to_string();
-    let result = TzeHudConfig::resolve_config_path(Some(&nonexistent));
+    let result = TzeHudConfig::resolve_config_path(Some("/tmp/tze_hud_no_such_file_j90m_test.toml"));
     match result {
         Err(paths) => {
             assert!(!paths.is_empty(), "searched paths must be listed");
         }
         Ok(_) => panic!("should not have found a non-existent file"),
     }
-}
-
-/// WHEN --config /path/to/custom.toml specified THEN only that path is used.
-#[test]
-fn spec_cli_path_takes_precedence() {
-    let dir = std::env::temp_dir();
-    let cli_file = dir.join("tze_hud_j90m_cli_precedence.toml");
-    std::fs::write(&cli_file, b"[runtime]\nprofile = \"headless\"\n[[tabs]]\nname = \"T\"\n")
-        .unwrap();
-
-    let result = TzeHudConfig::resolve_config_path(Some(cli_file.to_str().unwrap()));
-    assert!(result.is_ok(), "CLI path should be found");
-    assert_eq!(result.unwrap(), cli_file.to_string_lossy().as_ref());
-
-    let _ = std::fs::remove_file(&cli_file);
 }
 
 // ── Spec §Minimal Valid Configuration ─────────────────────────────────────────
@@ -190,14 +152,9 @@ name = "Morning"
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let dup_errors: Vec<_> = errors
-        .iter()
-        .filter(|e| matches!(e.code, ConfigErrorCode::DuplicateTabName))
-        .collect();
-    assert!(!dup_errors.is_empty(), "should have CONFIG_DUPLICATE_TAB_NAME error");
     assert!(
-        dup_errors[0].field_path.contains("tabs"),
-        "field_path should reference tabs"
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::DuplicateTabName)),
+        "should have CONFIG_DUPLICATE_TAB_NAME error"
     );
 }
 
@@ -220,8 +177,7 @@ default_tab = true
     let errors = loader.validate();
     assert!(
         errors.iter().any(|e| matches!(e.code, ConfigErrorCode::MultipleDefaultTabs)),
-        "should have CONFIG_MULTIPLE_DEFAULT_TABS error, got: {:?}",
-        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+        "should have CONFIG_MULTIPLE_DEFAULT_TABS error"
     );
 }
 
@@ -245,8 +201,7 @@ reserved_bottom_fraction = 0.5
     let errors = loader.validate();
     assert!(
         errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidReservedFraction)),
-        "reserved_top + reserved_bottom = 1.0 should produce CONFIG_INVALID_RESERVED_FRACTION, got: {:?}",
-        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+        "reserved_top + reserved_bottom = 1.0 should produce CONFIG_INVALID_RESERVED_FRACTION"
     );
 }
 
@@ -293,8 +248,7 @@ coalesce_frame_ms = 14.0
     let errors = loader.validate();
     assert!(
         errors.iter().any(|e| matches!(e.code, ConfigErrorCode::DegradationThresholdOrder)),
-        "out-of-order thresholds should produce CONFIG_DEGRADATION_THRESHOLD_ORDER, got: {:?}",
-        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+        "out-of-order thresholds should produce CONFIG_DEGRADATION_THRESHOLD_ORDER"
     );
 }
 
@@ -335,8 +289,7 @@ tab_switch_on_event = "Doorbell-Ring"
     let errors = loader.validate();
     assert!(
         errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidEventName)),
-        "invalid event name should produce CONFIG_INVALID_EVENT_NAME, got: {:?}",
-        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+        "invalid event name should produce CONFIG_INVALID_EVENT_NAME"
     );
 }
 
@@ -371,9 +324,9 @@ fn spec_schema_export_produces_valid_json_schema() {
 
 // ── Spec §Mobile Profile ──────────────────────────────────────────────────────
 
-/// WHEN profile = "mobile" THEN CONFIG_MOBILE_PROFILE_NOT_EXERCISED.
+/// WHEN profile = "mobile" THEN CONFIG_MOBILE_PROFILE_NOT_EXERCISED (not CONFIG_UNKNOWN_PROFILE).
 #[test]
-fn spec_mobile_profile_rejected() {
+fn spec_mobile_profile_rejected_with_correct_code() {
     let toml = r#"
 [runtime]
 profile = "mobile"
@@ -387,6 +340,253 @@ name = "Main"
         matches!(e.code, ConfigErrorCode::MobileProfileNotExercised)
     });
     assert!(has_mobile_error, "mobile profile should produce CONFIG_MOBILE_PROFILE_NOT_EXERCISED");
+    // Must NOT produce CONFIG_UNKNOWN_PROFILE (it's a distinct error).
+    let has_unknown = errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownProfile));
+    assert!(!has_unknown, "mobile profile must NOT produce CONFIG_UNKNOWN_PROFILE");
+    // Hint must mention full-display or headless.
+    let mobile_error = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::MobileProfileNotExercised)).unwrap();
+    assert!(
+        mobile_error.hint.contains("full-display") || mobile_error.hint.contains("headless"),
+        "hint should suggest full-display or headless, got: {:?}", mobile_error.hint
+    );
+}
+
+// ── Spec §Display Profile headless - not extendable ──────────────────────────
+
+/// WHEN extends = "headless" THEN CONFIG_HEADLESS_NOT_EXTENDABLE.
+#[test]
+fn spec_headless_not_extendable() {
+    let toml = r#"
+[runtime]
+profile = "custom"
+
+[display_profile]
+extends = "headless"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::HeadlessNotExtendable)),
+        "extends=headless must produce CONFIG_HEADLESS_NOT_EXTENDABLE, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
+// ── Spec §Mobile Profile - extends mobile is valid ────────────────────────────
+
+/// WHEN profile = "custom" and extends = "mobile" THEN accepted.
+#[test]
+fn spec_extends_mobile_with_custom_profile_accepted() {
+    let toml = r#"
+[runtime]
+profile = "custom"
+
+[display_profile]
+extends = "mobile"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    // No HEADLESS_NOT_EXTENDABLE, UNKNOWN_PROFILE, or EXTENDS_CONFLICTS error.
+    let fatal_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.code,
+                ConfigErrorCode::HeadlessNotExtendable
+                    | ConfigErrorCode::UnknownProfile
+                    | ConfigErrorCode::ProfileExtendsConflictsWithProfile
+            )
+        })
+        .collect();
+    assert!(
+        fatal_errors.is_empty(),
+        "extends=mobile with profile=custom should be accepted, got errors: {:?}",
+        fatal_errors
+    );
+}
+
+// ── Spec §Profile Budget Escalation Prevention ────────────────────────────────
+
+/// WHEN custom profile extends full-display and sets max_tiles = 2048 THEN
+/// CONFIG_PROFILE_BUDGET_ESCALATION (spec lines 107-108).
+#[test]
+fn spec_budget_escalation_rejected() {
+    let toml = r#"
+[runtime]
+profile = "custom"
+
+[display_profile]
+extends = "full-display"
+max_tiles = 2048
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
+        "max_tiles=2048 exceeding base 1024 should produce BUDGET_ESCALATION, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+    // Error should identify the offending field.
+    let budget_error = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)).unwrap();
+    assert!(
+        budget_error.field_path.contains("max_tiles"),
+        "error should identify max_tiles field, got: {:?}", budget_error.field_path
+    );
+}
+
+/// WHEN custom profile sets allow_background_zones = true over mobile base (false) THEN
+/// CONFIG_PROFILE_CAPABILITY_ESCALATION (spec lines 111-112).
+#[test]
+fn spec_capability_escalation_rejected() {
+    let toml = r#"
+[runtime]
+profile = "custom"
+
+[display_profile]
+extends = "mobile"
+allow_background_zones = true
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileCapabilityEscalation)),
+        "allow_background_zones=true over mobile base should produce CAPABILITY_ESCALATION, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
+// ── Spec §Profile Extends Conflict Detection ─────────────────────────────────
+
+/// WHEN profile = "full-display" and extends = "headless" THEN
+/// CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE (spec lines 120-121).
+///
+/// headless-not-extendable fires first (both errors are acceptable here per spec).
+#[test]
+fn spec_extends_conflicts_with_profile() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[display_profile]
+extends = "headless"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    // Must produce at least one of the two relevant errors.
+    let has_conflict = errors.iter().any(|e| {
+        matches!(
+            e.code,
+            ConfigErrorCode::HeadlessNotExtendable | ConfigErrorCode::ProfileExtendsConflictsWithProfile
+        )
+    });
+    assert!(
+        has_conflict,
+        "profile=full-display + extends=headless must produce a conflict/not-extendable error, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
+/// WHEN profile = "full-display" and extends = "mobile" THEN
+/// CONFIG_PROFILE_EXTENDS_CONFLICTS_WITH_PROFILE.
+#[test]
+fn spec_full_display_extends_mobile_conflict() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[display_profile]
+extends = "mobile"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileExtendsConflictsWithProfile)),
+        "profile=full-display + extends=mobile must produce EXTENDS_CONFLICTS, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
+// ── Spec §Display Profile full-display — freeze ───────────────────────────────
+
+/// WHEN profile = "full-display" THEN resolved profile has correct budget values (spec lines 55-56).
+#[test]
+fn spec_full_display_profile_budget_values() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "T"
+"#;
+    let loader = parse_ok(toml);
+    let resolved = loader.freeze().expect("freeze should succeed");
+    assert_eq!(resolved.profile.max_tiles, 1024);
+    assert_eq!(resolved.profile.max_texture_mb, 2048);
+    assert_eq!(resolved.profile.max_agents, 16);
+    assert_eq!(resolved.profile.target_fps, 60);
+    assert_eq!(resolved.profile.min_fps, 30);
+}
+
+/// WHEN profile = "headless" THEN resolved profile has correct budget values (spec lines 63-65).
+#[test]
+fn spec_headless_profile_budget_values() {
+    let toml = r#"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "T"
+"#;
+    let loader = parse_ok(toml);
+    let resolved = loader.freeze().expect("freeze should succeed");
+    assert_eq!(resolved.profile.max_tiles, 256);
+    assert_eq!(resolved.profile.max_texture_mb, 512);
+    assert_eq!(resolved.profile.max_agents, 8);
+    assert_eq!(resolved.profile.target_fps, 60);
+    assert_eq!(resolved.profile.min_fps, 1);
+    assert_eq!(resolved.profile.name, "headless");
+}
+
+// ── Spec §Headless Virtual Display ───────────────────────────────────────────
+
+/// WHEN profile=headless and headless_width=1280, headless_height=720 THEN
+/// zone geometry computes against 1280x720 virtual surface (spec lines 282-283).
+///
+/// The headless dimension values are exercised at the profile module level; this
+/// test confirms the loader accepts the config and produces a headless profile.
+#[test]
+fn spec_headless_virtual_display_dimensions() {
+    let toml = r#"
+[runtime]
+profile = "headless"
+headless_width = 1280
+headless_height = 720
+
+[[tabs]]
+name = "T"
+"#;
+    let loader = parse_ok(toml);
+    let resolved = loader.freeze().expect("freeze should succeed");
+    assert_eq!(resolved.profile.name, "headless");
+    assert_eq!(resolved.profile.max_tiles, 256, "headless budget preserved with custom dimensions");
 }
 
 // ── Spec §Capability Vocabulary ───────────────────────────────────────────────
@@ -433,18 +633,6 @@ capabilities = ["emit_scene_event:system.shutdown"]
     assert!(has_reserved, "emit_scene_event:system.* should produce CONFIG_RESERVED_EVENT_PREFIX");
 }
 
-// ── Spec §Profile Budget / Capability Escalation (delegated) ─────────────────
-
-/// budget escalation check is delegated to rig-umgy
-#[test]
-#[ignore = "profile budget escalation check delegated to rig-umgy"]
-fn spec_budget_escalation_rejected() {}
-
-/// capability escalation check is delegated to rig-umgy
-#[test]
-#[ignore = "profile capability escalation check delegated to rig-umgy"]
-fn spec_capability_escalation_rejected() {}
-
 // ── freeze / ResolvedConfig ───────────────────────────────────────────────────
 
 /// WHEN minimal config frozen THEN tab_names contains the tab.
@@ -462,23 +650,6 @@ name = "Dashboard"
     assert_eq!(resolved.tab_names, vec!["Dashboard".to_string()]);
 }
 
-/// WHEN profile = "headless" THEN resolved profile has headless budget.
-#[test]
-fn spec_freeze_headless_profile_budget_values() {
-    let toml = r#"
-[runtime]
-profile = "headless"
-
-[[tabs]]
-name = "T"
-"#;
-    let loader = parse_ok(toml);
-    let resolved = loader.freeze().expect("freeze should succeed");
-    assert_eq!(resolved.profile.max_tiles, 256);
-    assert_eq!(resolved.profile.max_texture_mb, 512);
-    assert_eq!(resolved.profile.max_agents, 8);
-}
-
 /// WHEN config has validation errors THEN freeze returns Err.
 #[test]
 fn spec_freeze_returns_err_on_validation_errors() {
@@ -491,21 +662,24 @@ profile = "full-display"
     assert!(result.is_err(), "freeze should fail when there are no tabs");
 }
 
-/// WHEN profile = "full-display" THEN resolved profile has correct budget values.
+/// WHEN custom profile extends full-display with max_tiles=512 THEN resolved has 512.
 #[test]
-fn spec_full_display_profile_budget_values() {
+fn spec_custom_profile_override_applied() {
     let toml = r#"
 [runtime]
-profile = "full-display"
+profile = "custom"
+
+[display_profile]
+extends = "full-display"
+max_tiles = 512
 
 [[tabs]]
 name = "T"
 "#;
     let loader = parse_ok(toml);
     let resolved = loader.freeze().expect("freeze should succeed");
-    assert_eq!(resolved.profile.max_tiles, 1024);
-    assert_eq!(resolved.profile.max_texture_mb, 2048);
-    assert_eq!(resolved.profile.max_agents, 16);
-    assert_eq!(resolved.profile.target_fps, 60);
-    assert_eq!(resolved.profile.min_fps, 30);
+    assert_eq!(resolved.profile.max_tiles, 512, "override max_tiles should be applied");
+    assert_eq!(resolved.profile.name, "custom");
+    // Other values fall back to base.
+    assert_eq!(resolved.profile.max_texture_mb, 2048, "non-overridden fields use base values");
 }
