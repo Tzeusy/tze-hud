@@ -11,6 +11,8 @@ pub mod suspension;
 pub mod priority;
 pub mod capability;
 pub mod degradation;
+pub mod orphan;
+pub mod cleanup;
 
 pub use types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
 pub use state_machine::LeaseImpl;
@@ -20,6 +22,22 @@ pub use suspension::{
     LeaseResumeData, SuspensionTimeoutEntry,
     DEFAULT_MAX_SUSPENSION_MS, SAFE_MODE_SUSPEND_DEADLINE_MS, SAFE_MODE_RESUME_DEADLINE_MS,
     assert_state_preserved, is_suspendable, is_resumable,
+};
+pub use orphan::{
+    DEFAULT_GRACE_PERIOD_MS as ORPHAN_GRACE_PERIOD_MS,
+    GRACE_PRECISION_MS,
+    GracePeriodTimer,
+    OrphanedLeaseSnapshot,
+    TileVisualHint,
+    ZonePublishResult,
+    check_zone_publish_allowed,
+};
+pub use cleanup::{
+    POST_REVOCATION_FREE_DELAY_MS,
+    RevocationKind,
+    PostRevocationCleanupSpec,
+    ZonePublicationSweep,
+    CleanupResult,
 };
 
 use crate::clock::Clock;

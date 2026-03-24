@@ -114,6 +114,38 @@ pub enum ValidationError {
     /// Batch size exceeded the 1000-mutation hard limit.
     #[error("batch size exceeded: max {max}, got {got}")]
     BatchSizeExceeded { max: usize, got: usize },
+
+    // ── Lease-state zone-publish errors (spec §Zone Publish Requires Active Lease) ──
+
+    /// Zone publish rejected: no active lease found for publisher namespace.
+    ///
+    /// Spec line 214: "Missing lease MUST produce `LEASE_NOT_FOUND`".
+    #[error("zone publish rejected: lease not found for namespace '{namespace}'")]
+    ZonePublishLeaseNotFound { namespace: String },
+
+    /// Zone publish rejected: lease exists but is not in ACTIVE state.
+    ///
+    /// Spec line 214: "inactive lease `LEASE_NOT_ACTIVE`".
+    /// Covers other non-ACTIVE lease states not handled by specialized variants
+    /// (for example, terminal states such as REVOKED, EXPIRED, RELEASED, DENIED).
+    /// SUSPENDED and ORPHANED have dedicated variants (`ZonePublishSafeModeActive`,
+    /// `ZonePublishLeaseOrphaned`).
+    #[error("zone publish rejected: lease for '{namespace}' is not active (state: {state})")]
+    ZonePublishLeaseNotActive { namespace: String, state: String },
+
+    /// Zone publish rejected: lease is SUSPENDED (safe mode active).
+    ///
+    /// Spec line 227: "New zone publishes under the suspended lease MUST be
+    /// rejected with `SAFE_MODE_ACTIVE`".
+    #[error("zone publish rejected: safe mode active for lease '{namespace}'")]
+    ZonePublishSafeModeActive { namespace: String },
+
+    /// Zone publish rejected: lease is ORPHANED (agent disconnected).
+    ///
+    /// Spec lines 231–233 (adapted to orphan): existing publications remain
+    /// visible with stale badge; new publishes are rejected.
+    #[error("zone publish rejected: lease for '{namespace}' is orphaned (agent disconnected)")]
+    ZonePublishLeaseOrphaned { namespace: String },
 }
 
 // ─── Stable error codes (RFC 0001 §3.4) ─────────────────────────────────────
@@ -177,6 +209,12 @@ pub enum ValidationErrorCode {
     ResourceNotFound,
     NamespaceMismatch,
 
+    // Lease-state zone-publish errors
+    ZonePublishLeaseNotFound,
+    ZonePublishLeaseNotActive,
+    ZonePublishSafeModeActive,
+    ZonePublishLeaseOrphaned,
+
     // Unknown / future-proof catch-all
     Unknown,
 }
@@ -227,6 +265,10 @@ impl ValidationErrorCode {
             ValidationError::CycleDetected { .. } => Self::CycleDetected,
             ValidationError::ZOrderConflict { .. } => Self::ZOrderConflict,
             ValidationError::BatchSizeExceeded { .. } => Self::BatchSizeExceeded,
+            ValidationError::ZonePublishLeaseNotFound { .. } => Self::ZonePublishLeaseNotFound,
+            ValidationError::ZonePublishLeaseNotActive { .. } => Self::ZonePublishLeaseNotActive,
+            ValidationError::ZonePublishSafeModeActive { .. } => Self::ZonePublishSafeModeActive,
+            ValidationError::ZonePublishLeaseOrphaned { .. } => Self::ZonePublishLeaseOrphaned,
         }
     }
 }
@@ -400,6 +442,22 @@ fn build_context_and_hint(
             json!({ "field": "sync_group", "constraint": reason }),
             None,
         ),
+        ValidationError::ZonePublishLeaseNotFound { namespace } => (
+            json!({ "field": "lease", "value": namespace, "constraint": "active lease required for zone publish" }),
+            None,
+        ),
+        ValidationError::ZonePublishLeaseNotActive { namespace, state } => (
+            json!({ "field": "lease", "value": namespace, "constraint": format!("lease must be ACTIVE for zone publish, current state: {}", state) }),
+            None,
+        ),
+        ValidationError::ZonePublishSafeModeActive { namespace } => (
+            json!({ "field": "lease", "value": namespace, "constraint": "zone publish rejected: safe mode active" }),
+            None,
+        ),
+        ValidationError::ZonePublishLeaseOrphaned { namespace } => (
+            json!({ "field": "lease", "value": namespace, "constraint": "zone publish rejected: lease is orphaned (agent disconnected)" }),
+            None,
+        ),
     }
 }
 
@@ -451,4 +509,5 @@ impl BatchRejected {
     pub fn primary_code(&self) -> Option<ValidationErrorCode> {
         self.errors.first().map(|e| e.code)
     }
+
 }

@@ -365,6 +365,13 @@ pub struct Tile {
     pub expires_at: Option<u64>,
     pub resource_budget: ResourceBudget,
     pub root_node: Option<SceneId>,
+    /// Visual overlay hint for the compositor.
+    ///
+    /// Set by the scene graph in response to lease state changes.
+    /// The compositor renders the indicated badge/overlay within 1 frame
+    /// of this field being set (spec line 133).
+    #[serde(default)]
+    pub visual_hint: crate::lease::TileVisualHint,
 }
 
 // ─── Nodes ──────────────────────────────────────────────────────────────────

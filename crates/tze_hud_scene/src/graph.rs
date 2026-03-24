@@ -603,14 +603,18 @@ impl SceneGraph {
     }
 
     pub fn revoke_lease(&mut self, lease_id: SceneId) -> Result<(), ValidationError> {
-        let lease = self
-            .leases
-            .get_mut(&lease_id)
-            .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
-        if lease.state.is_terminal() {
-            return Err(ValidationError::LeaseNotFound { id: lease_id });
-        }
-        lease.state = LeaseState::Revoked;
+        let namespace = {
+            let lease = self
+                .leases
+                .get_mut(&lease_id)
+                .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
+            if lease.state.is_terminal() {
+                return Err(ValidationError::LeaseNotFound { id: lease_id });
+            }
+            let ns = lease.namespace.clone();
+            lease.state = LeaseState::Revoked;
+            ns
+        };
         // Remove all tiles associated with this lease
         let orphaned_tiles: Vec<SceneId> = self
             .tiles
@@ -621,6 +625,9 @@ impl SceneGraph {
         for tile_id in orphaned_tiles {
             self.remove_tile_and_nodes(tile_id);
         }
+        // Spec §Requirement: Lease Revocation Clears Zone Publications
+        // (lines 235–242): clear all zone pubs from this namespace on revocation.
+        self.clear_zone_publications_for_namespace(&namespace);
         self.version += 1;
         Ok(())
     }
@@ -662,23 +669,46 @@ impl SceneGraph {
     }
 
     /// Mark a lease as disconnected (agent disconnect, enters grace period).
+    ///
+    /// Spec §Orphan Handling Grace Period (lines 132–145):
+    /// - Lease transitions ACTIVE → ORPHANED.
+    /// - TTL clock continues running.
+    /// - All tiles owned by this lease receive `TileVisualHint::DisconnectionBadge`
+    ///   (compositor must display the badge within 1 frame, spec line 133).
     pub fn disconnect_lease(&mut self, lease_id: &SceneId, now_ms: u64) -> Result<(), LeaseError> {
         let lease = self
             .leases
             .get_mut(lease_id)
             .ok_or(LeaseError::LeaseNotFound(*lease_id))?;
         lease.disconnect(now_ms)?;
+        // Set disconnection badge on all tiles owned by this lease.
+        // Compositor must render the badge within 1 frame (spec line 133).
+        for tile in self.tiles.values_mut() {
+            if tile.lease_id == *lease_id {
+                tile.visual_hint = crate::lease::TileVisualHint::DisconnectionBadge;
+            }
+        }
         self.version += 1;
         Ok(())
     }
 
     /// Reconnect a disconnected lease (agent reconnect within grace period).
+    ///
+    /// Spec §Orphan Handling Grace Period (lines 139–141):
+    /// ORPHANED → ACTIVE; disconnection badges cleared within 1 frame.
     pub fn reconnect_lease(&mut self, lease_id: &SceneId, now_ms: u64) -> Result<(), LeaseError> {
         let lease = self
             .leases
             .get_mut(lease_id)
             .ok_or(LeaseError::LeaseNotFound(*lease_id))?;
         lease.reconnect(now_ms)?;
+        // Clear disconnection badge on all tiles owned by this lease.
+        // Compositor must clear the badge within 1 frame (spec line 141).
+        for tile in self.tiles.values_mut() {
+            if tile.lease_id == *lease_id {
+                tile.visual_hint = crate::lease::TileVisualHint::None;
+            }
+        }
         self.version += 1;
         Ok(())
     }
@@ -758,6 +788,9 @@ impl SceneGraph {
             .collect();
 
         for (id, terminal_state) in to_process {
+            // Collect the namespace before mutating so we can clear zone pubs.
+            let namespace = self.leases.get(&id).map(|l| l.namespace.clone());
+
             // Collect tile IDs that will be removed
             let removed_tiles: Vec<SceneId> = self
                 .tiles
@@ -771,6 +804,16 @@ impl SceneGraph {
             if let Some(lease) = self.leases.get_mut(&id) {
                 lease.state = terminal_state;
             }
+
+            // Spec §Requirement: Lease Revocation Clears Zone Publications
+            // (lines 235–242): When a lease is REVOKED or EXPIRED, all zone
+            // publications made under that lease MUST be immediately cleared.
+            if terminal_state.is_terminal() {
+                if let Some(ns) = namespace {
+                    self.clear_zone_publications_for_namespace(&ns);
+                }
+            }
+
             expiries.push(LeaseExpiry {
                 lease_id: id,
                 terminal_state,
@@ -782,6 +825,26 @@ impl SceneGraph {
             self.version += 1;
         }
         expiries
+    }
+
+    /// Remove all zone publications from a given agent namespace.
+    ///
+    /// Called on lease expiry/revocation to satisfy spec §Requirement: Lease
+    /// Revocation Clears Zone Publications (lines 235–242).
+    ///
+    /// **Design note**: Zone publications are namespace-scoped rather than
+    /// lease-scoped in v1. A namespace holds at most one non-terminal lease
+    /// at a time in v1 (multi-lease atomic operations are post-v1, spec lines
+    /// 325–332), so clearing by namespace is equivalent to clearing by lease.
+    /// If a namespace ever has multiple concurrent leases in future versions,
+    /// `ZonePublishRecord` should carry a `lease_id` field and clearing should
+    /// filter by lease_id instead.
+    pub fn clear_zone_publications_for_namespace(&mut self, namespace: &str) {
+        for publishes in self.zone_registry.active_publishes.values_mut() {
+            publishes.retain(|r| r.publisher_namespace != namespace);
+        }
+        // Remove empty entries for cleanliness
+        self.zone_registry.active_publishes.retain(|_, v| !v.is_empty());
     }
 
     // ─── Budget enforcement ─────────────────────────────────────────────
@@ -1117,6 +1180,7 @@ impl SceneGraph {
                 expires_at: None,
                 resource_budget: ResourceBudget::default(),
                 root_node: None,
+                visual_hint: crate::lease::TileVisualHint::None,
             },
         );
         self.version += 1;
@@ -1893,6 +1957,195 @@ impl SceneGraph {
 
         self.version += 1;
         Ok(())
+    }
+
+    /// Publish content to a zone with lease-state enforcement.
+    ///
+    /// This is the lease-aware variant of `publish_to_zone`. It looks up the
+    /// active lease for `publisher_namespace` and enforces spec
+    /// §Requirement: Zone Publish Requires Active Lease (lines 213–242):
+    ///
+    /// - ACTIVE lease → accepted.
+    /// - ORPHANED lease → rejected with `ZonePublishLeaseOrphaned`; existing
+    ///   content remains visible with stale badge (spec lines 231–233).
+    /// - SUSPENDED lease → rejected with `ZonePublishSafeModeActive`
+    ///   (spec line 227).
+    /// - Terminal or missing lease → rejected with `ZonePublishLeaseNotFound`
+    ///   or `ZonePublishLeaseNotActive`.
+    ///
+    /// Callers that do not hold a lease (e.g., system/chrome publishers) should
+    /// use the unchecked `publish_to_zone` directly.
+    pub fn publish_to_zone_with_lease(
+        &mut self,
+        zone_name: &str,
+        content: ZoneContent,
+        publisher_namespace: &str,
+        merge_key: Option<String>,
+    ) -> Result<(), ValidationError> {
+        use crate::lease::orphan::ZonePublishResult;
+
+        // Prefer ACTIVE lease for this namespace. If no ACTIVE lease exists, find
+        // the first non-terminal lease for error reporting. If only terminal leases
+        // exist, return LEASE_NOT_ACTIVE (per spec line 214: inactive lease →
+        // LEASE_NOT_ACTIVE). Return LEASE_NOT_FOUND only if no lease at all.
+        let all_leases_for_ns: Vec<_> = self
+            .leases
+            .values()
+            .filter(|l| l.namespace == publisher_namespace)
+            .map(|l| l.state)
+            .collect();
+
+        let lease_state = if all_leases_for_ns.is_empty() {
+            // No lease at all.
+            None
+        } else {
+            // Prefer Active; fall back to the first non-terminal; otherwise use first terminal.
+            all_leases_for_ns
+                .iter()
+                .copied()
+                .find(|&s| s == LeaseState::Active)
+                .or_else(|| all_leases_for_ns.iter().copied().find(|s| !s.is_terminal()))
+                .or_else(|| all_leases_for_ns.first().copied())
+        };
+
+        match lease_state {
+            None => {
+                // No lease whatsoever (namespace has never held a lease).
+                return Err(ValidationError::ZonePublishLeaseNotFound {
+                    namespace: publisher_namespace.to_string(),
+                });
+            }
+            Some(state) => {
+                // Convert types::LeaseState to lease::LeaseState for the check.
+                // The check function uses the lease mod's LeaseState, which
+                // mirrors the types.rs version.
+                let result = match state {
+                    LeaseState::Active => ZonePublishResult::Accepted,
+                    LeaseState::Orphaned | LeaseState::Disconnected => {
+                        ZonePublishResult::RejectedLeaseOrphaned
+                    }
+                    LeaseState::Suspended => ZonePublishResult::RejectedSafeModeActive,
+                    _ => ZonePublishResult::RejectedLeaseTerminal,
+                };
+                match result {
+                    ZonePublishResult::Accepted => {} // fall through to publish
+                    ZonePublishResult::RejectedLeaseOrphaned => {
+                        return Err(ValidationError::ZonePublishLeaseOrphaned {
+                            namespace: publisher_namespace.to_string(),
+                        });
+                    }
+                    ZonePublishResult::RejectedSafeModeActive => {
+                        return Err(ValidationError::ZonePublishSafeModeActive {
+                            namespace: publisher_namespace.to_string(),
+                        });
+                    }
+                    ZonePublishResult::RejectedLeaseTerminal => {
+                        return Err(ValidationError::ZonePublishLeaseNotActive {
+                            namespace: publisher_namespace.to_string(),
+                            state: format!("{:?}", state),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Lease is Active — delegate to unchecked publish.
+        self.publish_to_zone(zone_name, content, publisher_namespace, merge_key)
+    }
+
+    /// Budget-driven revocation: transitions all non-terminal session leases to
+    /// REVOKED, clears tiles, clears zone publications.
+    ///
+    /// Spec §Post-Revocation Resource Cleanup (lines 253–260):
+    /// - Bypasses the grace period entirely.
+    /// - Caller is responsible for sending `LeaseResponse{revoke_reason=BUDGET_POLICY}`
+    ///   and then waiting `POST_REVOCATION_FREE_DELAY_MS` before calling
+    ///   `finalize_budget_revocation`.
+    ///
+    /// Returns the cleanup spec (containing the free delay) for each revoked lease.
+    pub fn initiate_budget_revocation(
+        &mut self,
+        session_namespace: &str,
+    ) -> Vec<crate::lease::cleanup::PostRevocationCleanupSpec> {
+        use crate::lease::cleanup::{PostRevocationCleanupSpec, RevocationKind};
+        let now_ms = self.clock.now_millis();
+
+        // Collect all non-terminal leases for this namespace.
+        let to_revoke: Vec<SceneId> = self
+            .leases
+            .values()
+            .filter(|l| l.namespace == session_namespace && !l.state.is_terminal())
+            .map(|l| l.id)
+            .collect();
+
+        let mut specs = Vec::new();
+        for lease_id in to_revoke {
+            // Transition to REVOKED (bypasses grace — no orphan path).
+            if let Some(lease) = self.leases.get_mut(&lease_id) {
+                lease.state = LeaseState::Revoked;
+            }
+            // Tiles will be freed after the 100ms delay by finalize_budget_revocation.
+            // Budget revocation bypasses the orphan/disconnection path, so tiles
+            // do not receive a DisconnectionBadge — they are simply marked for
+            // pending removal (visual_hint remains None; compositor will not render
+            // them once removed by finalize_budget_revocation).
+
+            // Clear zone publications immediately on REVOKED transition.
+            // Spec §Requirement: Lease Revocation Clears Zone Publications
+            // (lines 235–242): zone pubs must be cleared when lease is REVOKED/EXPIRED.
+            // Tile/node resources are deferred by the 100ms delay; zone pubs are not.
+            if let Some(lease) = self.leases.get(&lease_id) {
+                let ns = lease.namespace.clone();
+                self.clear_zone_publications_for_namespace(&ns);
+            }
+            specs.push(PostRevocationCleanupSpec::new(
+                lease_id,
+                session_namespace,
+                RevocationKind::BudgetPolicy,
+                now_ms,
+            ));
+        }
+
+        if !specs.is_empty() {
+            self.version += 1;
+        }
+        specs
+    }
+
+    /// Finalize budget revocation: remove tiles and zone publications for
+    /// all leases in the cleanup specs that are ready to free.
+    ///
+    /// Must be called after `POST_REVOCATION_FREE_DELAY_MS` has elapsed
+    /// (spec line 254: "free all resources after a 100ms delay").
+    ///
+    /// Returns the number of specs that were finalized.
+    pub fn finalize_budget_revocation(
+        &mut self,
+        specs: &[crate::lease::cleanup::PostRevocationCleanupSpec],
+        now_ms: u64,
+    ) -> usize {
+        let mut finalized = 0;
+        for spec in specs {
+            if spec.is_ready_to_free(now_ms) {
+                // Remove tiles
+                let tile_ids: Vec<SceneId> = self
+                    .tiles
+                    .values()
+                    .filter(|t| t.lease_id == spec.lease_id)
+                    .map(|t| t.id)
+                    .collect();
+                for tid in tile_ids {
+                    self.remove_tile_and_nodes(tid);
+                }
+                // Clear zone publications
+                self.clear_zone_publications_for_namespace(&spec.session_namespace);
+                finalized += 1;
+            }
+        }
+        if finalized > 0 {
+            self.version += 1;
+        }
+        finalized
     }
 
     /// Clear all active publishes for a zone.
