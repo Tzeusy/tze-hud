@@ -364,7 +364,7 @@ impl SceneGraph {
             .get(&lease_id)
             .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
         // Capability check before expiry: the spec says lease must be valid
-        if !lease.has_capability(cap) {
+        if !lease.has_capability(cap.clone()) {
             return Err(ValidationError::CapabilityMissing {
                 capability: format!("{:?}", cap),
             });
