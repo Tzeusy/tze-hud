@@ -27,7 +27,7 @@
 use crate::graph::SceneGraph;
 use crate::types::{
     Capability, ContentionPolicy, DisplayEdge, FontFamily, GeometryPolicy, HitRegionNode,
-    Node, NodeData, Rect, RenderingPolicy, Rgba, SceneId, SolidColorNode, TextAlign,
+    InputMode, Node, NodeData, Rect, RenderingPolicy, Rgba, SceneId, SolidColorNode, TextAlign,
     TextMarkdownNode, TextOverflow, ZoneDefinition, ZoneMediaType,
 };
 
@@ -144,18 +144,76 @@ impl TestSceneRegistry {
     /// Returns `None` if the name is not known.
     pub fn build(&self, name: &str, clock: ClockMs) -> Option<(SceneGraph, SceneSpec)> {
         match name {
+            // ── original 5 ──
             "empty" => Some(self.build_empty(clock)),
             "single_tile" => Some(self.build_single_tile(clock)),
             "two_tiles" => Some(self.build_two_tiles(clock)),
             "max_tiles" => Some(self.build_max_tiles(clock)),
             "zone_test" => Some(self.build_zone_test(clock)),
+            // ── 20 new scenes ──
+            "overlapping_tiles_zorder" => Some(self.build_overlapping_tiles_zorder(clock)),
+            "overlay_transparency" => Some(self.build_overlay_transparency(clock)),
+            "tab_switch" => Some(self.build_tab_switch(clock)),
+            "lease_expiry" => Some(self.build_lease_expiry(clock)),
+            "mobile_degraded" => Some(self.build_mobile_degraded(clock)),
+            "sync_group_media" => Some(self.build_sync_group_media(clock)),
+            "input_highlight" => Some(self.build_input_highlight(clock)),
+            "coalesced_dashboard" => Some(self.build_coalesced_dashboard(clock)),
+            "three_agents_contention" => Some(self.build_three_agents_contention(clock)),
+            "overlay_passthrough_regions" => Some(self.build_overlay_passthrough_regions(clock)),
+            "disconnect_reclaim_multiagent" => {
+                Some(self.build_disconnect_reclaim_multiagent(clock))
+            }
+            "privacy_redaction_mode" => Some(self.build_privacy_redaction_mode(clock)),
+            "chatty_dashboard_touch" => Some(self.build_chatty_dashboard_touch(clock)),
+            "zone_publish_subtitle" => Some(self.build_zone_publish_subtitle(clock)),
+            "zone_reject_wrong_type" => Some(self.build_zone_reject_wrong_type(clock)),
+            "zone_conflict_two_publishers" => {
+                Some(self.build_zone_conflict_two_publishers(clock))
+            }
+            "zone_orchestrate_then_publish" => {
+                Some(self.build_zone_orchestrate_then_publish(clock))
+            }
+            "zone_geometry_adapts_profile" => {
+                Some(self.build_zone_geometry_adapts_profile(clock))
+            }
+            "zone_disconnect_cleanup" => Some(self.build_zone_disconnect_cleanup(clock)),
+            "policy_matrix_basic" => Some(self.build_policy_matrix_basic(clock)),
             _ => None,
         }
     }
 
     /// All known scene names.
     pub fn scene_names() -> &'static [&'static str] {
-        &["empty", "single_tile", "two_tiles", "max_tiles", "zone_test"]
+        &[
+            // original 5
+            "empty",
+            "single_tile",
+            "two_tiles",
+            "max_tiles",
+            "zone_test",
+            // 20 new scenes
+            "overlapping_tiles_zorder",
+            "overlay_transparency",
+            "tab_switch",
+            "lease_expiry",
+            "mobile_degraded",
+            "sync_group_media",
+            "input_highlight",
+            "coalesced_dashboard",
+            "three_agents_contention",
+            "overlay_passthrough_regions",
+            "disconnect_reclaim_multiagent",
+            "privacy_redaction_mode",
+            "chatty_dashboard_touch",
+            "zone_publish_subtitle",
+            "zone_reject_wrong_type",
+            "zone_conflict_two_publishers",
+            "zone_orchestrate_then_publish",
+            "zone_geometry_adapts_profile",
+            "zone_disconnect_cleanup",
+            "policy_matrix_basic",
+        ]
     }
 
     // ─── Scene builders ───────────────────────────────────────────────────
@@ -484,6 +542,1887 @@ impl TestSceneRegistry {
             expected_tile_count: 2,
             has_hit_regions: false,
             has_zones: true,
+        };
+
+        (graph, spec)
+    }
+
+    // ─── New scene builders (scenes 6-25) ────────────────────────────────
+
+    /// `overlapping_tiles_zorder` — 3 tiles with overlapping bounds and explicit z-orders.
+    ///
+    /// Validates z-order composition: the compositing layer must respect z_order even when
+    /// tile bounds intersect. Layer 0 invariant: all z-orders are distinct per tab.
+    fn build_overlapping_tiles_zorder(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Overlap", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.overlap",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Three tiles with overlapping bounds; z-orders 1, 2, 3 (bottom to top)
+        let base = Rect::new(100.0, 100.0, 600.0, 400.0);
+        let mid = Rect::new(200.0, 150.0, 600.0, 400.0);
+        let top = Rect::new(300.0, 200.0, 600.0, 400.0);
+
+        for (bounds, z, color) in [
+            (base, 1u32, Rgba::new(0.8, 0.2, 0.2, 1.0)),
+            (mid, 2u32, Rgba::new(0.2, 0.8, 0.2, 1.0)),
+            (top, 3u32, Rgba::new(0.2, 0.2, 0.8, 1.0)),
+        ] {
+            let tile_id = graph
+                .create_tile(tab_id, "agent.overlap", lease_id, bounds, z)
+                .expect("create_tile failed");
+            let node = Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::SolidColor(SolidColorNode {
+                    color,
+                    bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                }),
+            };
+            graph.set_tile_root(tile_id, node).expect("set_tile_root failed");
+        }
+
+        let spec = SceneSpec {
+            name: "overlapping_tiles_zorder",
+            description: "Three tiles with deliberately overlapping bounds and distinct \
+                          z-orders (1, 2, 3). Validates z-order composition: higher z-order \
+                          must occlude lower z-order tiles per scene-graph/spec.md §3.",
+            expected_tab_count: 1,
+            expected_tile_count: 3,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `overlay_transparency` — chrome overlay with alpha < 1.0 over an agent tile.
+    ///
+    /// Validates the alpha blending path. Layer 0: opacity is in [0.0, 1.0].
+    /// Layer 1 pixel expectation: ±2/channel blending tolerance.
+    fn build_overlay_transparency(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Overlay", 0).expect("create_tab failed");
+
+        let agent_lease = graph.grant_lease_at(
+            "agent.base",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        let chrome_lease = graph.grant_lease_at(
+            "chrome.overlay",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Base agent tile — full background
+        let base_bounds = Rect::new(0.0, 0.0, self.display_width, self.display_height);
+        let base_tile = graph
+            .create_tile(tab_id, "agent.base", agent_lease, base_bounds, 1)
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                base_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.1, 0.1, 0.5, 1.0),
+                        bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Chrome overlay tile with semi-transparent opacity
+        let overlay_bounds = Rect::new(200.0, 200.0, 400.0, 200.0);
+        let overlay_tile = graph
+            .create_tile(tab_id, "chrome.overlay", chrome_lease, overlay_bounds, 10)
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                overlay_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(1.0, 1.0, 1.0, 0.5),
+                        bounds: Rect::new(0.0, 0.0, overlay_bounds.width, overlay_bounds.height),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Set tile-level opacity to 0.75 to exercise the tile opacity path
+        graph
+            .tiles
+            .get_mut(&overlay_tile)
+            .expect("overlay tile missing")
+            .opacity = 0.75;
+
+        let spec = SceneSpec {
+            name: "overlay_transparency",
+            description: "Chrome overlay tile (opacity=0.75, color alpha=0.5) over a solid \
+                          agent tile. Validates alpha blending path with ±2/channel tolerance \
+                          per heart-and-soul/validation.md line 117.",
+            expected_tab_count: 1,
+            expected_tile_count: 2,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `tab_switch` — 2 tabs with different tile layouts; validates tab isolation.
+    ///
+    /// Layer 0: each tab's tiles are independent; z_orders are unique per tab (not globally).
+    fn build_tab_switch(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_a = graph.create_tab("TabA", 0).expect("create_tab failed");
+        let tab_b = graph.create_tab("TabB", 1).expect("create_tab failed");
+
+        let lease_a = graph.grant_lease_at(
+            "agent.tabA",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+        let lease_b = graph.grant_lease_at(
+            "agent.tabB",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Tab A: 1 tile
+        let tile_a = graph
+            .create_tile(tab_a, "agent.tabA", lease_a, Rect::new(50.0, 50.0, 800.0, 400.0), 1)
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                tile_a,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "Tab A content".to_string(),
+                        bounds: Rect::new(0.0, 0.0, 800.0, 400.0),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.1, 0.2, 0.4, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Tab B: 2 tiles using the same z_orders as Tab A — valid because z_order is per-tab
+        for (i, (z, label)) in [(1u32, "Tab B tile 1"), (2u32, "Tab B tile 2")].iter().enumerate()
+        {
+            let x = 50.0 + i as f32 * 480.0;
+            let tile = graph
+                .create_tile(
+                    tab_b,
+                    "agent.tabB",
+                    lease_b,
+                    Rect::new(x, 100.0, 440.0, 300.0),
+                    *z,
+                )
+                .expect("create_tile failed");
+            graph
+                .set_tile_root(
+                    tile,
+                    Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        data: NodeData::TextMarkdown(TextMarkdownNode {
+                            content: label.to_string(),
+                            bounds: Rect::new(0.0, 0.0, 440.0, 300.0),
+                            font_size_px: 16.0,
+                            font_family: FontFamily::SystemSansSerif,
+                            color: Rgba::WHITE,
+                            background: Some(Rgba::new(0.2, 0.1, 0.3, 1.0)),
+                            alignment: TextAlign::Start,
+                            overflow: TextOverflow::Clip,
+                        }),
+                    },
+                )
+                .expect("set_tile_root failed");
+        }
+
+        // Switch to tab B so active_tab != tab_a (tests tab switching logic)
+        graph.switch_active_tab(tab_b).expect("switch_active_tab failed");
+
+        let spec = SceneSpec {
+            name: "tab_switch",
+            description: "Two tabs: Tab A has 1 tile, Tab B has 2 tiles. Active tab is B. \
+                          Validates tab isolation: z_orders are per-tab, not global. \
+                          Per scene-graph/spec.md §2 (Tab[0-256]).",
+            expected_tab_count: 2,
+            expected_tile_count: 3,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `lease_expiry` — tile with a very short TTL; validates ACTIVE→EXPIRED transition.
+    ///
+    /// The lease is granted with TTL = 1ms relative to `clock`. After advancing the clock
+    /// by 2ms via `expire_leases`, the lease transitions to EXPIRED and tiles are removed.
+    /// The scene as-built has state = ACTIVE; callers advance time externally to test expiry.
+    fn build_lease_expiry(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Expiring", 0).expect("create_tab failed");
+
+        // Short-lived lease: expires 1 ms after `clock`
+        let lease_id = graph.grant_lease_at(
+            "agent.expiry",
+            clock.0,
+            1, // TTL = 1 ms — already logically past if now > clock+1
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        let tile_id = graph
+            .create_tile(
+                tab_id,
+                "agent.expiry",
+                lease_id,
+                Rect::new(100.0, 100.0, 600.0, 400.0),
+                1,
+            )
+            .expect("create_tile failed");
+
+        graph
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "This tile will expire (TTL = 1ms)".to_string(),
+                        bounds: Rect::new(0.0, 0.0, 600.0, 400.0),
+                        font_size_px: 16.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.5, 0.1, 0.1, 1.0)),
+                        alignment: TextAlign::Center,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Leave lease in ACTIVE state — test callers may advance the clock via expire_leases
+        // to drive the ACTIVE→EXPIRED transition (lease-governance/spec.md lines 10-25).
+
+        let spec = SceneSpec {
+            name: "lease_expiry",
+            description: "One tile with a 1ms TTL lease (ACTIVE state at build time). \
+                          After clock advances past TTL, expire_leases() transitions the \
+                          lease to EXPIRED and removes the tile. Validates the \
+                          ACTIVE→EXPIRED state machine per lease-governance/spec.md §1.",
+            expected_tab_count: 1,
+            expected_tile_count: 1,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `mobile_degraded` — scene using a narrow mobile display (390×844) to exercise
+    /// the mobile-profile degradation path.
+    ///
+    /// Per configuration/spec.md lines 71-82, the mobile profile enforces stricter
+    /// resource budgets. This scene is constructed with `with_display(390, 844)`.
+    fn build_mobile_degraded(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        // Use a mobile-sized display rather than 1920×1080
+        let mobile_w = 390.0_f32;
+        let mobile_h = 844.0_f32;
+        let mut graph = SceneGraph::new(mobile_w, mobile_h);
+
+        let tab_id = graph.create_tab("Mobile", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.mobile",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Single full-width tile within mobile bounds
+        let tile_bounds = Rect::new(0.0, 0.0, mobile_w, mobile_h * 0.5);
+        let tile_id = graph
+            .create_tile(tab_id, "agent.mobile", lease_id, tile_bounds, 1)
+            .expect("create_tile failed");
+
+        graph
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "Mobile presence (390×844)".to_string(),
+                        bounds: Rect::new(0.0, 0.0, tile_bounds.width, tile_bounds.height),
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.05, 0.1, 0.15, 1.0)),
+                        alignment: TextAlign::Center,
+                        overflow: TextOverflow::Ellipsis,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "mobile_degraded",
+            description: "Single tile on a 390×844 mobile display. Validates the mobile \
+                          profile degradation path: tighter resource budgets apply, \
+                          content must fit the smaller viewport. \
+                          Per configuration/spec.md lines 71-82.",
+            expected_tab_count: 1,
+            expected_tile_count: 1,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `sync_group_media` — 2 tiles enrolled in a sync group with staggered `present_at`.
+    ///
+    /// Both tiles share a sync group with `AllOrDefer` commit policy and `max_deferrals=3`.
+    /// Per timing-model/spec.md lines 124-173 and lines 50-61 (`present_at` semantics).
+    fn build_sync_group_media(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        use crate::types::SyncCommitPolicy;
+
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("SyncMedia", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.sync",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Create sync group with AllOrDefer policy (both tiles must be ready before commit)
+        let group_id = graph
+            .create_sync_group(
+                Some("media-pair".to_string()),
+                "agent.sync",
+                SyncCommitPolicy::AllOrDefer,
+                3, // max_deferrals
+            )
+            .expect("create_sync_group failed");
+
+        // Tile A — left panel, present_at = clock
+        let tile_a = graph
+            .create_tile(
+                tab_id,
+                "agent.sync",
+                lease_id,
+                Rect::new(20.0, 20.0, 880.0, 600.0),
+                1,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                tile_a,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.2, 0.4, 0.7, 1.0),
+                        bounds: Rect::new(0.0, 0.0, 880.0, 600.0),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+        graph.tiles.get_mut(&tile_a).expect("tile_a missing").present_at = Some(clock.0);
+
+        // Tile B — right panel, staggered present_at (100ms later)
+        let tile_b = graph
+            .create_tile(
+                tab_id,
+                "agent.sync",
+                lease_id,
+                Rect::new(920.0, 20.0, 980.0, 600.0),
+                2,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                tile_b,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.7, 0.4, 0.2, 1.0),
+                        bounds: Rect::new(0.0, 0.0, 980.0, 600.0),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+        graph.tiles.get_mut(&tile_b).expect("tile_b missing").present_at =
+            Some(clock.offset(100).0);
+
+        // Enroll both tiles in the sync group
+        graph.join_sync_group(tile_a, group_id).expect("join_sync_group tile_a failed");
+        graph.join_sync_group(tile_b, group_id).expect("join_sync_group tile_b failed");
+
+        let spec = SceneSpec {
+            name: "sync_group_media",
+            description: "Two tiles enrolled in a sync group (AllOrDefer, max_deferrals=3). \
+                          present_at timestamps differ by 100ms to exercise deferred-commit \
+                          path. Per timing-model/spec.md lines 124-173.",
+            expected_tab_count: 1,
+            expected_tile_count: 2,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `input_highlight` — tile with a HitRegionNode accepting focus and pointer events.
+    ///
+    /// Validates the focus tree (per-tab, at most one focus owner) and focus cycling
+    /// per input-model/spec.md lines 11-22 and 78-89.
+    fn build_input_highlight(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Input", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.input",
+            clock.0,
+            300_000,
+            vec![
+                Capability::CreateTile,
+                Capability::CreateNode,
+                Capability::ReceiveInput,
+            ],
+        );
+
+        // Background tile
+        let bg_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.input",
+                lease_id,
+                Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                1,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                bg_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.05, 0.05, 0.15, 1.0),
+                        bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Interactive tile with hit region (accepts focus + pointer)
+        let btn_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.input",
+                lease_id,
+                Rect::new(400.0, 300.0, 400.0, 100.0),
+                5,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                btn_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 400.0, 100.0),
+                        interaction_id: "primary-button".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "input_highlight",
+            description: "Background tile plus an interactive tile with a HitRegionNode \
+                          (accepts_focus=true, accepts_pointer=true). Validates the focus \
+                          tree (per-tab, ≤1 owner) and focus cycling per \
+                          input-model/spec.md lines 11-22 and 78-89.",
+            expected_tab_count: 1,
+            expected_tile_count: 2,
+            has_hit_regions: true,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `coalesced_dashboard` — 12 tiles with sequential mutations demonstrating state-stream
+    /// coalescing. Validates atomic batch semantics per scene-graph/spec.md lines 142-157.
+    fn build_coalesced_dashboard(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Dashboard", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.dashboard",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+        );
+
+        // 4 columns × 3 rows = 12 tiles representing a live dashboard layout
+        let cols = 4u32;
+        let rows = 3u32;
+        let pad = 10.0_f32;
+        let tile_w = (self.display_width - pad * (cols as f32 + 1.0)) / cols as f32;
+        let tile_h = (self.display_height - pad * (rows as f32 + 1.0)) / rows as f32;
+
+        let metrics = [
+            "CPU", "Memory", "Network In", "Network Out", "Disk Read", "Disk Write", "Latency",
+            "Throughput", "Error Rate", "Queue Depth", "Active Conns", "Uptime",
+        ];
+
+        for row in 0..rows {
+            for col in 0..cols {
+                let idx = (row * cols + col) as usize;
+                let z = idx as u32 + 1;
+                let x = pad + col as f32 * (tile_w + pad);
+                let y = pad + row as f32 * (tile_h + pad);
+                let tile_id = graph
+                    .create_tile(tab_id, "agent.dashboard", lease_id, Rect::new(x, y, tile_w, tile_h), z)
+                    .expect("create_tile failed in coalesced_dashboard");
+
+                graph
+                    .set_tile_root(
+                        tile_id,
+                        Node {
+                            id: SceneId::new(),
+                            children: vec![],
+                            data: NodeData::TextMarkdown(TextMarkdownNode {
+                                content: format!(
+                                    "**{}**\n\n`{:.1}%`",
+                                    metrics[idx],
+                                    (idx as f32 * 7.3) % 100.0
+                                ),
+                                bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
+                                font_size_px: 13.0,
+                                font_family: FontFamily::SystemMonospace,
+                                color: Rgba::WHITE,
+                                background: Some(Rgba::new(
+                                    0.08 + (col as f32 * 0.04),
+                                    0.1,
+                                    0.18,
+                                    1.0,
+                                )),
+                                alignment: TextAlign::Start,
+                                overflow: TextOverflow::Ellipsis,
+                            }),
+                        },
+                    )
+                    .expect("set_tile_root failed in coalesced_dashboard");
+            }
+        }
+
+        let spec = SceneSpec {
+            name: "coalesced_dashboard",
+            description: "12-tile dashboard (4 cols × 3 rows) representing live metrics. \
+                          Demonstrates the state-stream coalescing path: rapid sequential \
+                          set_tile_root calls on many tiles. Per scene-graph/spec.md §5 \
+                          (atomic batch, lines 142-157).",
+            expected_tab_count: 1,
+            expected_tile_count: 12,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `three_agents_contention` — 3 agents with different lease priorities and overlapping
+    /// z-order requests.
+    ///
+    /// Validates priority sort: lease_priority ASC, z_order DESC per
+    /// lease-governance/spec.md lines 62-69.
+    fn build_three_agents_contention(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Contention", 0).expect("create_tab failed");
+
+        // Three agents at different priorities (lower number = higher priority)
+        let agents = [
+            ("agent.high_prio", 1u32),
+            ("agent.normal_prio", 2u32),
+            ("agent.low_prio", 3u32),
+        ];
+
+        let leases: Vec<SceneId> = agents
+            .iter()
+            .map(|(ns, priority)| {
+                use crate::types::{Lease, LeaseState, RenewalPolicy, ResourceBudget};
+                let id = SceneId::new();
+                graph.leases.insert(
+                    id,
+                    Lease {
+                        id,
+                        namespace: ns.to_string(),
+                        state: LeaseState::Active,
+                        priority: *priority,
+                        granted_at_ms: clock.0,
+                        ttl_ms: 300_000,
+                        renewal_policy: RenewalPolicy::default(),
+                        capabilities: vec![Capability::CreateTile, Capability::CreateNode],
+                        resource_budget: ResourceBudget::default(),
+                        suspended_at_ms: None,
+                        ttl_remaining_at_suspend_ms: None,
+                        disconnected_at_ms: None,
+                        grace_period_ms: SceneGraph::DEFAULT_GRACE_PERIOD_MS,
+                    },
+                );
+                graph.version += 1;
+                id
+            })
+            .collect();
+
+        // Each agent places a tile that partially overlaps the others
+        let positions = [
+            Rect::new(100.0, 100.0, 700.0, 500.0),
+            Rect::new(300.0, 200.0, 700.0, 500.0),
+            Rect::new(500.0, 300.0, 700.0, 500.0),
+        ];
+        let colors = [
+            Rgba::new(0.8, 0.2, 0.2, 1.0),
+            Rgba::new(0.2, 0.8, 0.2, 1.0),
+            Rgba::new(0.2, 0.2, 0.8, 1.0),
+        ];
+
+        for ((ns, _), (lease_id, (bounds, color))) in agents.iter().zip(
+            leases
+                .iter()
+                .zip(positions.iter().zip(colors.iter())),
+        ) {
+            let z = match *ns {
+                "agent.high_prio" => 10u32,
+                "agent.normal_prio" => 5u32,
+                _ => 1u32,
+            };
+            let tile_id = graph
+                .create_tile(tab_id, ns, *lease_id, *bounds, z)
+                .expect("create_tile failed");
+            graph
+                .set_tile_root(
+                    tile_id,
+                    Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        data: NodeData::SolidColor(SolidColorNode {
+                            color: *color,
+                            bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                        }),
+                    },
+                )
+                .expect("set_tile_root failed");
+        }
+
+        let spec = SceneSpec {
+            name: "three_agents_contention",
+            description: "Three agents with lease priorities 1 (high), 2 (normal), 3 (low) \
+                          each placing overlapping tiles at z-orders 10, 5, 1. Validates \
+                          priority-sort contention resolution: lease_priority ASC, \
+                          z_order DESC per lease-governance/spec.md lines 62-69.",
+            expected_tab_count: 1,
+            expected_tile_count: 3,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `overlay_passthrough_regions` — chrome overlay with mixed passthrough / capture regions.
+    ///
+    /// Validates the hit-test pipeline: chrome-first, z-descending, reverse tree order per
+    /// input-model/spec.md line 264. Passthrough tiles let pointer events fall through.
+    fn build_overlay_passthrough_regions(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Passthrough", 0).expect("create_tab failed");
+
+        let agent_lease = graph.grant_lease_at(
+            "agent.content",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode, Capability::ReceiveInput],
+        );
+        let chrome_lease = graph.grant_lease_at(
+            "chrome.ui",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode, Capability::ReceiveInput],
+        );
+
+        // Content tile — below the overlay, accepts input in its own region
+        let content_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.content",
+                agent_lease,
+                Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                1,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                content_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                        interaction_id: "content-area".to_string(),
+                        accepts_focus: false,
+                        accepts_pointer: true,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Chrome overlay — PASSTHROUGH input mode (pointer events fall through)
+        let overlay_tile = graph
+            .create_tile(
+                tab_id,
+                "chrome.ui",
+                chrome_lease,
+                Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                20,
+            )
+            .expect("create_tile failed");
+        graph.tiles.get_mut(&overlay_tile).expect("overlay tile missing").input_mode =
+            InputMode::Passthrough;
+        graph
+            .set_tile_root(
+                overlay_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.0, 0.0, 0.0, 0.15),
+                        bounds: Rect::new(0.0, 0.0, self.display_width, self.display_height),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Interactive chrome widget on top — CAPTURE (blocks input)
+        let widget_tile = graph
+            .create_tile(
+                tab_id,
+                "chrome.ui",
+                chrome_lease,
+                Rect::new(self.display_width - 200.0, 20.0, 180.0, 60.0),
+                30,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                widget_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 180.0, 60.0),
+                        interaction_id: "chrome-menu-button".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "overlay_passthrough_regions",
+            description: "Content tile (z=1, Capture) beneath a full-screen passthrough \
+                          overlay (z=20, Passthrough) with a small capture widget (z=30). \
+                          Validates hit-test pipeline: chrome-first, z-descending, \
+                          per input-model/spec.md line 264.",
+            expected_tab_count: 1,
+            expected_tile_count: 3,
+            has_hit_regions: true,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `disconnect_reclaim_multiagent` — 3 agents where 1 agent is in Disconnected state.
+    ///
+    /// Validates orphan detection and the 30,000ms grace period per
+    /// lease-governance/spec.md lines 132-155.
+    fn build_disconnect_reclaim_multiagent(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("MultiAgent", 0).expect("create_tab failed");
+
+        // Agent A and B — still active
+        let lease_a = graph.grant_lease_at(
+            "agent.alpha",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+        let lease_b = graph.grant_lease_at(
+            "agent.beta",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Agent C — will be disconnected
+        let lease_c = graph.grant_lease_at(
+            "agent.gamma",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        let agents_data = [
+            ("agent.alpha", lease_a, Rect::new(10.0, 10.0, 600.0, 500.0), 1u32),
+            ("agent.beta", lease_b, Rect::new(660.0, 10.0, 600.0, 500.0), 2u32),
+            ("agent.gamma", lease_c, Rect::new(10.0, 560.0, 600.0, 500.0), 3u32),
+        ];
+
+        for (ns, lease_id, bounds, z) in agents_data {
+            let tile_id = graph
+                .create_tile(tab_id, ns, lease_id, bounds, z)
+                .expect("create_tile failed");
+            graph
+                .set_tile_root(
+                    tile_id,
+                    Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        data: NodeData::TextMarkdown(TextMarkdownNode {
+                            content: format!("{ns} — connected"),
+                            bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                            font_size_px: 16.0,
+                            font_family: FontFamily::SystemSansSerif,
+                            color: Rgba::WHITE,
+                            background: Some(Rgba::new(0.1, 0.15, 0.2, 1.0)),
+                            alignment: TextAlign::Start,
+                            overflow: TextOverflow::Clip,
+                        }),
+                    },
+                )
+                .expect("set_tile_root failed");
+        }
+
+        // Disconnect agent.gamma — enters 30,000ms grace period
+        graph.disconnect_lease(&lease_c, clock.0).expect("disconnect_lease failed");
+
+        let spec = SceneSpec {
+            name: "disconnect_reclaim_multiagent",
+            description: "Three agents: alpha and beta are ACTIVE, gamma is DISCONNECTED \
+                          (entered grace period at clock.0). After 30,000ms the grace period \
+                          expires and gamma's tiles can be reclaimed. \
+                          Per lease-governance/spec.md lines 132-155.",
+            expected_tab_count: 1,
+            expected_tile_count: 3,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `privacy_redaction_mode` — tiles with SENSITIVE classification present for
+    /// redaction testing.
+    ///
+    /// Validates Level 2 Privacy Evaluation: VisibilityClassification vs ViewerClass
+    /// per policy-arbitration/spec.md lines 91-104.
+    fn build_privacy_redaction_mode(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Privacy", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.privacy",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Public tile — safe to display to any viewer class
+        let public_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.privacy",
+                lease_id,
+                Rect::new(0.0, 0.0, 960.0, self.display_height),
+                1,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                public_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "**PUBLIC CONTENT**\n\nVisible to all viewer classes.".to_string(),
+                        bounds: Rect::new(0.0, 0.0, 960.0, self.display_height),
+                        font_size_px: 16.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.05, 0.2, 0.05, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Sensitive tile — must be redacted for untrusted viewers
+        // (VisibilityClassification=SENSITIVE triggers Level 2 Privacy Evaluation)
+        let sensitive_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.privacy",
+                lease_id,
+                Rect::new(980.0, 0.0, 940.0, self.display_height),
+                2,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                sensitive_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "**[SENSITIVE]**\n\nMust be redacted for UNTRUSTED viewers. \
+                                  Visible only to TRUSTED ViewerClass."
+                            .to_string(),
+                        bounds: Rect::new(0.0, 0.0, 940.0, self.display_height),
+                        font_size_px: 16.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::new(1.0, 0.8, 0.0, 1.0),
+                        background: Some(Rgba::new(0.3, 0.05, 0.05, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "privacy_redaction_mode",
+            description: "Two tiles: one PUBLIC (visible to all), one SENSITIVE (must be \
+                          redacted for untrusted viewers). Validates Level 2 Privacy \
+                          Evaluation (VisibilityClassification vs ViewerClass) per \
+                          policy-arbitration/spec.md lines 91-104.",
+            expected_tab_count: 1,
+            expected_tile_count: 2,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `chatty_dashboard_touch` — dashboard layout with HitRegionNode tiles ready for
+    /// high-frequency input injection (<100µs hit-test for 50 tiles).
+    fn build_chatty_dashboard_touch(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Chatty", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.chatty",
+            clock.0,
+            300_000,
+            vec![
+                Capability::CreateTile,
+                Capability::CreateNode,
+                Capability::ReceiveInput,
+            ],
+        );
+
+        // 5 columns × 10 rows = 50 hit-region tiles (one per cell)
+        let cols = 5u32;
+        let rows = 10u32;
+        let tile_w = self.display_width / cols as f32;
+        let tile_h = self.display_height / rows as f32;
+
+        for row in 0..rows {
+            for col in 0..cols {
+                let z = row * cols + col + 1;
+                let x = col as f32 * tile_w;
+                let y = row as f32 * tile_h;
+                let tile_id = graph
+                    .create_tile(
+                        tab_id,
+                        "agent.chatty",
+                        lease_id,
+                        Rect::new(x, y, tile_w - 1.0, tile_h - 1.0),
+                        z,
+                    )
+                    .expect("create_tile failed in chatty_dashboard_touch");
+                graph
+                    .set_tile_root(
+                        tile_id,
+                        Node {
+                            id: SceneId::new(),
+                            children: vec![],
+                            data: NodeData::HitRegion(HitRegionNode {
+                                bounds: Rect::new(0.0, 0.0, tile_w - 1.0, tile_h - 1.0),
+                                interaction_id: format!("cell-{row}-{col}"),
+                                accepts_focus: false,
+                                accepts_pointer: true,
+                            }),
+                        },
+                    )
+                    .expect("set_tile_root failed in chatty_dashboard_touch");
+            }
+        }
+
+        let spec = SceneSpec {
+            name: "chatty_dashboard_touch",
+            description: "50 hit-region tiles in a 5×10 grid, each ready for high-frequency \
+                          touch/pointer input injection. Validates the input drain budget: \
+                          hit-test for 50 tiles must complete in <100µs per \
+                          input-model/spec.md line 264.",
+            expected_tab_count: 1,
+            expected_tile_count: 50,
+            has_hit_regions: true,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
+
+    /// `zone_publish_subtitle` — tile publishing to the subtitle zone.
+    ///
+    /// Renamed from `zone_test` in the canonical scene list. Validates zone registry
+    /// operations and tile-to-zone mapping per scene-graph/spec.md lines 198-200.
+    fn build_zone_publish_subtitle(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Subtitle", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.subtitle",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Register subtitle zone
+        graph.zone_registry.zones.insert(
+            "subtitle".to_string(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: "subtitle".to_string(),
+                description: "Centered subtitle overlay at the bottom of the screen.".to_string(),
+                geometry_policy: GeometryPolicy::EdgeAnchored {
+                    edge: DisplayEdge::Bottom,
+                    height_pct: 0.10,
+                    width_pct: 0.80,
+                    margin_px: 48.0,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+            },
+        );
+
+        // Tile publishing to the subtitle zone
+        let sub_bounds = Rect::new(
+            self.display_width * 0.1,
+            self.display_height * 0.88,
+            self.display_width * 0.8,
+            self.display_height * 0.08,
+        );
+        let tile_id = graph
+            .create_tile(tab_id, "agent.subtitle", lease_id, sub_bounds, 10)
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "Subtitle zone: StreamText content".to_string(),
+                        bounds: Rect::new(0.0, 0.0, sub_bounds.width, sub_bounds.height),
+                        font_size_px: 20.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.0, 0.0, 0.0, 0.75)),
+                        alignment: TextAlign::Center,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "zone_publish_subtitle",
+            description: "One tile publishing StreamText to the subtitle zone \
+                          (EdgeAnchored bottom, 80% width, LatestWins contention, \
+                          max_publishers=1). Validates zone registry + tile-to-zone \
+                          mapping per scene-graph/spec.md lines 198-200.",
+            expected_tab_count: 1,
+            expected_tile_count: 1,
+            has_hit_regions: false,
+            has_zones: true,
+        };
+
+        (graph, spec)
+    }
+
+    /// `zone_reject_wrong_type` — zone configured for StreamText; scene encodes the
+    /// expectation that a wrong content type would be rejected.
+    ///
+    /// The scene itself is structurally valid (it builds without error). The rejection
+    /// semantic is documented in the SceneSpec description so higher validation layers
+    /// can inject wrong-type publishes and assert the error.
+    fn build_zone_reject_wrong_type(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("TypedZone", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.typed",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Zone accepts ONLY StreamText
+        graph.zone_registry.zones.insert(
+            "typed_zone".to_string(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: "typed_zone".to_string(),
+                description: "Zone that accepts only StreamText (used to validate type rejection)."
+                    .to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.2,
+                    y_pct: 0.6,
+                    width_pct: 0.6,
+                    height_pct: 0.2,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 2,
+                transport_constraint: None,
+                auto_clear_ms: None,
+            },
+        );
+
+        let tile_bounds = Rect::new(
+            self.display_width * 0.2,
+            self.display_height * 0.6,
+            self.display_width * 0.6,
+            self.display_height * 0.2,
+        );
+        let tile_id = graph
+            .create_tile(tab_id, "agent.typed", lease_id, tile_bounds, 1)
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "typed_zone accepts StreamText only".to_string(),
+                        bounds: Rect::new(0.0, 0.0, tile_bounds.width, tile_bounds.height),
+                        font_size_px: 16.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.15, 0.1, 0.25, 1.0)),
+                        alignment: TextAlign::Center,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "zone_reject_wrong_type",
+            description: "Zone 'typed_zone' accepts only ZoneMediaType::StreamText. \
+                          Injecting a KeyValuePairs or Notification payload must be \
+                          rejected with a type-mismatch error. Per scene-graph/spec.md \
+                          lines 198-200 (type validation).",
+            expected_tab_count: 1,
+            expected_tile_count: 1,
+            has_hit_regions: false,
+            has_zones: true,
+        };
+
+        (graph, spec)
+    }
+
+    /// `zone_conflict_two_publishers` — 2 agents publishing to the same zone with
+    /// LatestWins contention policy.
+    ///
+    /// Per scene-graph/spec.md lines 185-196.
+    fn build_zone_conflict_two_publishers(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Conflict", 0).expect("create_tab failed");
+
+        let lease_a = graph.grant_lease_at(
+            "agent.pub_a",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+        let lease_b = graph.grant_lease_at(
+            "agent.pub_b",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Shared zone with LatestWins — second publish replaces first
+        graph.zone_registry.zones.insert(
+            "shared_banner".to_string(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: "shared_banner".to_string(),
+                description: "Shared zone for contention testing (LatestWins).".to_string(),
+                geometry_policy: GeometryPolicy::EdgeAnchored {
+                    edge: DisplayEdge::Top,
+                    height_pct: 0.06,
+                    width_pct: 1.0,
+                    margin_px: 0.0,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 2,
+                transport_constraint: None,
+                auto_clear_ms: None,
+            },
+        );
+
+        // Both agents place a tile targeting the shared_banner zone
+        let banner_bounds = Rect::new(0.0, 0.0, self.display_width, self.display_height * 0.06);
+
+        for (ns, lease_id, z, content) in [
+            ("agent.pub_a", lease_a, 1u32, "Publisher A — will be evicted"),
+            ("agent.pub_b", lease_b, 2u32, "Publisher B — LatestWins"),
+        ] {
+            let tile_id = graph
+                .create_tile(tab_id, ns, lease_id, banner_bounds, z)
+                .expect("create_tile failed");
+            graph
+                .set_tile_root(
+                    tile_id,
+                    Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        data: NodeData::TextMarkdown(TextMarkdownNode {
+                            content: content.to_string(),
+                            bounds: Rect::new(
+                                0.0,
+                                0.0,
+                                banner_bounds.width,
+                                banner_bounds.height,
+                            ),
+                            font_size_px: 14.0,
+                            font_family: FontFamily::SystemSansSerif,
+                            color: Rgba::WHITE,
+                            background: Some(Rgba::new(0.2, 0.1, 0.1, 0.9)),
+                            alignment: TextAlign::Center,
+                            overflow: TextOverflow::Ellipsis,
+                        }),
+                    },
+                )
+                .expect("set_tile_root failed");
+        }
+
+        let spec = SceneSpec {
+            name: "zone_conflict_two_publishers",
+            description: "Two agents (pub_a at z=1, pub_b at z=2) each publishing to \
+                          'shared_banner' zone with LatestWins contention. \
+                          pub_b's content wins; pub_a's publish is evicted. \
+                          Per scene-graph/spec.md lines 185-196.",
+            expected_tab_count: 1,
+            expected_tile_count: 2,
+            has_hit_regions: false,
+            has_zones: true,
+        };
+
+        (graph, spec)
+    }
+
+    /// `zone_orchestrate_then_publish` — orchestrated zone publish sequence:
+    /// zone is registered, then content is published to it in order.
+    ///
+    /// Validates the full zone publish lifecycle per scene-graph/spec.md lines 185-200.
+    fn build_zone_orchestrate_then_publish(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("Orchestrate", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.orchestrate",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Three zones registered in orchestration order
+        let zone_defs = [
+            (
+                "alert_banner",
+                "Alert banner at the top of the display.",
+                GeometryPolicy::EdgeAnchored {
+                    edge: DisplayEdge::Top,
+                    height_pct: 0.05,
+                    width_pct: 1.0,
+                    margin_px: 0.0,
+                },
+                ZoneMediaType::ShortTextWithIcon,
+                ContentionPolicy::Replace,
+            ),
+            (
+                "notification_area",
+                "Notification stack in the top-right corner.",
+                GeometryPolicy::Relative {
+                    x_pct: 0.75,
+                    y_pct: 0.02,
+                    width_pct: 0.24,
+                    height_pct: 0.30,
+                },
+                ZoneMediaType::ShortTextWithIcon,
+                ContentionPolicy::Stack { max_depth: 5 },
+            ),
+            (
+                "status_bar",
+                "Status bar at the bottom edge.",
+                GeometryPolicy::EdgeAnchored {
+                    edge: DisplayEdge::Bottom,
+                    height_pct: 0.04,
+                    width_pct: 1.0,
+                    margin_px: 0.0,
+                },
+                ZoneMediaType::KeyValuePairs,
+                ContentionPolicy::MergeByKey { max_keys: 16 },
+            ),
+        ];
+
+        for (name, desc, geom, media_type, contention) in &zone_defs {
+            graph.zone_registry.zones.insert(
+                name.to_string(),
+                ZoneDefinition {
+                    id: SceneId::new(),
+                    name: name.to_string(),
+                    description: desc.to_string(),
+                    geometry_policy: *geom,
+                    accepted_media_types: vec![*media_type],
+                    rendering_policy: RenderingPolicy::default(),
+                    contention_policy: *contention,
+                    max_publishers: 4,
+                    transport_constraint: None,
+                    auto_clear_ms: None,
+                },
+            );
+        }
+
+        // One tile per zone demonstrating the publish sequence
+        let zone_tile_configs = [
+            ("alert_banner", Rect::new(0.0, 0.0, self.display_width, self.display_height * 0.05), 10u32),
+            ("notification_area", Rect::new(self.display_width * 0.75, self.display_height * 0.02, self.display_width * 0.24, self.display_height * 0.30), 20u32),
+            ("status_bar", Rect::new(0.0, self.display_height * 0.96, self.display_width, self.display_height * 0.04), 30u32),
+        ];
+
+        for (zone_name, bounds, z) in &zone_tile_configs {
+            let tile_id = graph
+                .create_tile(tab_id, "agent.orchestrate", lease_id, *bounds, *z)
+                .expect("create_tile failed");
+            graph
+                .set_tile_root(
+                    tile_id,
+                    Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        data: NodeData::TextMarkdown(TextMarkdownNode {
+                            content: format!("→ {zone_name}"),
+                            bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
+                            font_size_px: 12.0,
+                            font_family: FontFamily::SystemSansSerif,
+                            color: Rgba::WHITE,
+                            background: Some(Rgba::new(0.1, 0.1, 0.3, 0.85)),
+                            alignment: TextAlign::Center,
+                            overflow: TextOverflow::Clip,
+                        }),
+                    },
+                )
+                .expect("set_tile_root failed");
+        }
+
+        let spec = SceneSpec {
+            name: "zone_orchestrate_then_publish",
+            description: "Three zones registered in orchestration order (alert_banner, \
+                          notification_area, status_bar) each with a tile publishing to it. \
+                          Validates the full zone publish lifecycle per \
+                          scene-graph/spec.md lines 185-200.",
+            expected_tab_count: 1,
+            expected_tile_count: 3,
+            has_hit_regions: false,
+            has_zones: true,
+        };
+
+        (graph, spec)
+    }
+
+    /// `zone_geometry_adapts_profile` — zone with geometry policy that adapts to the
+    /// display profile (desktop vs mobile).
+    ///
+    /// Uses Relative geometry so the zone scales correctly across viewport sizes.
+    /// Per configuration/spec.md lines 123-134.
+    fn build_zone_geometry_adapts_profile(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("AdaptiveZone", 0).expect("create_tab failed");
+
+        let lease_id = graph.grant_lease_at(
+            "agent.adaptive",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // pip zone: relative geometry — adapts to display size
+        graph.zone_registry.zones.insert(
+            "pip".to_string(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: "pip".to_string(),
+                description: "Picture-in-picture zone that adapts to display profile.".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.75,
+                    y_pct: 0.70,
+                    width_pct: 0.22,
+                    height_pct: 0.26,
+                },
+                accepted_media_types: vec![ZoneMediaType::SolidColor],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Replace,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+            },
+        );
+
+        // ambient_background zone: full-screen relative geometry
+        graph.zone_registry.zones.insert(
+            "ambient_background".to_string(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: "ambient_background".to_string(),
+                description: "Ambient background zone (full display, behind all content)."
+                    .to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 1.0,
+                },
+                accepted_media_types: vec![ZoneMediaType::SolidColor, ZoneMediaType::StaticImage],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Replace,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+            },
+        );
+
+        // Tile occupying the pip zone region
+        let pip_bounds = Rect::new(
+            self.display_width * 0.75,
+            self.display_height * 0.70,
+            self.display_width * 0.22,
+            self.display_height * 0.26,
+        );
+        let tile_id = graph
+            .create_tile(tab_id, "agent.adaptive", lease_id, pip_bounds, 5)
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.0, 0.3, 0.5, 0.9),
+                        bounds: Rect::new(0.0, 0.0, pip_bounds.width, pip_bounds.height),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "zone_geometry_adapts_profile",
+            description: "Two zones with Relative geometry ('pip' and 'ambient_background') \
+                          that scale proportionally to the display size, adapting to \
+                          desktop/mobile profiles. Per configuration/spec.md lines 123-134.",
+            expected_tab_count: 1,
+            expected_tile_count: 1,
+            has_hit_regions: false,
+            has_zones: true,
+        };
+
+        (graph, spec)
+    }
+
+    /// `zone_disconnect_cleanup` — zone publisher agent disconnects; validates cleanup.
+    ///
+    /// One agent registers as a zone publisher; then its lease enters Disconnected state.
+    /// After the grace period the lease is cleaned up, removing the tile from the zone's
+    /// visual footprint. Per lease-governance/spec.md lines 132-155.
+    fn build_zone_disconnect_cleanup(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("ZoneCleanup", 0).expect("create_tab failed");
+
+        let pub_lease = graph.grant_lease_at(
+            "agent.zone_pub",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+        let stable_lease = graph.grant_lease_at(
+            "agent.stable",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Subtitle zone
+        graph.zone_registry.zones.insert(
+            "subtitle".to_string(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: "subtitle".to_string(),
+                description: "Subtitle zone for disconnect cleanup test.".to_string(),
+                geometry_policy: GeometryPolicy::EdgeAnchored {
+                    edge: DisplayEdge::Bottom,
+                    height_pct: 0.08,
+                    width_pct: 0.80,
+                    margin_px: 40.0,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+            },
+        );
+
+        // Stable tile — unaffected by the publisher disconnect
+        let stable_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.stable",
+                stable_lease,
+                Rect::new(0.0, 0.0, self.display_width, self.display_height * 0.85),
+                1,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                stable_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.08, 0.1, 0.18, 1.0),
+                        bounds: Rect::new(
+                            0.0,
+                            0.0,
+                            self.display_width,
+                            self.display_height * 0.85,
+                        ),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Publisher tile — this agent will disconnect
+        let pub_bounds = Rect::new(
+            self.display_width * 0.1,
+            self.display_height * 0.88,
+            self.display_width * 0.8,
+            self.display_height * 0.08,
+        );
+        let pub_tile = graph
+            .create_tile(tab_id, "agent.zone_pub", pub_lease, pub_bounds, 10)
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                pub_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "Zone publisher — will disconnect".to_string(),
+                        bounds: Rect::new(0.0, 0.0, pub_bounds.width, pub_bounds.height),
+                        font_size_px: 18.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.0, 0.0, 0.0, 0.75)),
+                        alignment: TextAlign::Center,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Publisher agent disconnects (enters 30,000ms grace period)
+        graph.disconnect_lease(&pub_lease, clock.0).expect("disconnect_lease failed");
+
+        let spec = SceneSpec {
+            name: "zone_disconnect_cleanup",
+            description: "Zone publisher (agent.zone_pub) disconnects at clock.0, entering \
+                          the 30,000ms grace period. After grace period, the lease + tile \
+                          are cleaned up, clearing the zone's visual footprint. \
+                          Per lease-governance/spec.md lines 132-155.",
+            expected_tab_count: 1,
+            expected_tile_count: 2,
+            has_hit_regions: false,
+            has_zones: true,
+        };
+
+        (graph, spec)
+    }
+
+    /// `policy_matrix_basic` — scene that exercises all 7 policy evaluation levels.
+    ///
+    /// Includes tiles with: viewer classification, content sensitivity, interruption
+    /// class markers, and degradation state — sufficient for Level 1→2→5→6 per-frame
+    /// evaluation per policy-arbitration/spec.md lines 10-17 and 194-199.
+    fn build_policy_matrix_basic(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("PolicyMatrix", 0).expect("create_tab failed");
+
+        let system_lease = graph.grant_lease_at(
+            "system.chrome",
+            clock.0,
+            86_400_000, // 24h — system chrome stays up
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        let agent_lease = graph.grant_lease_at(
+            "agent.content",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        let sensitive_lease = graph.grant_lease_at(
+            "agent.sensitive",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+
+        // Set system lease to priority 0 (system/chrome tier)
+        if let Some(lease) = graph.leases.get_mut(&system_lease) {
+            lease.priority = 0;
+        }
+
+        // Set agent lease to priority 2 (normal agent)
+        // (already the default)
+
+        // Set sensitive lease to priority 1 (high — sensitive content needs priority scheduling)
+        if let Some(lease) = graph.leases.get_mut(&sensitive_lease) {
+            lease.priority = 1;
+        }
+
+        // Level 1: system chrome tile (always visible, never redacted)
+        let chrome_tile = graph
+            .create_tile(
+                tab_id,
+                "system.chrome",
+                system_lease,
+                Rect::new(0.0, 0.0, self.display_width, 40.0),
+                100,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                chrome_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.05, 0.05, 0.1, 1.0),
+                        bounds: Rect::new(0.0, 0.0, self.display_width, 40.0),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Level 2: PUBLIC content tile (visible to all viewer classes)
+        let public_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.content",
+                agent_lease,
+                Rect::new(0.0, 50.0, self.display_width * 0.5, self.display_height - 90.0),
+                10,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                public_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "PUBLIC — Level 1 policy (visible to all)".to_string(),
+                        bounds: Rect::new(
+                            0.0,
+                            0.0,
+                            self.display_width * 0.5,
+                            self.display_height - 90.0,
+                        ),
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.05, 0.2, 0.05, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Level 2: SENSITIVE content tile (redacted for untrusted viewers)
+        let sensitive_tile = graph
+            .create_tile(
+                tab_id,
+                "agent.sensitive",
+                sensitive_lease,
+                Rect::new(
+                    self.display_width * 0.5 + 10.0,
+                    50.0,
+                    self.display_width * 0.5 - 10.0,
+                    self.display_height - 90.0,
+                ),
+                20,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                sensitive_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "SENSITIVE — Level 2 privacy (redacted for UNTRUSTED viewers)\n\n\
+                                  INTERRUPTION CLASS: high-urgency\n\
+                                  DEGRADATION: graceful (content collapses to summary)"
+                            .to_string(),
+                        bounds: Rect::new(
+                            0.0,
+                            0.0,
+                            self.display_width * 0.5 - 10.0,
+                            self.display_height - 90.0,
+                        ),
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::new(1.0, 0.85, 0.0, 1.0),
+                        background: Some(Rgba::new(0.3, 0.05, 0.05, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Ellipsis,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // Level 5: interactive chrome element (hit region — blocks lower z tiles)
+        let chrome_btn_tile = graph
+            .create_tile(
+                tab_id,
+                "system.chrome",
+                system_lease,
+                Rect::new(self.display_width - 120.0, self.display_height - 50.0, 110.0, 40.0),
+                200,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                chrome_btn_tile,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 110.0, 40.0),
+                        interaction_id: "policy-dismiss-btn".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "policy_matrix_basic",
+            description: "Four tiles covering all 7 policy evaluation levels: system chrome \
+                          (Level 1, priority=0), public content (Level 2, visible to all), \
+                          sensitive content (Level 2, redacted for UNTRUSTED + interruption \
+                          class + degradation marker), and interactive chrome button (Level 5). \
+                          Per policy-arbitration/spec.md lines 10-17 and 194-199.",
+            expected_tab_count: 1,
+            expected_tile_count: 4,
+            has_hit_regions: true,
+            has_zones: false,
         };
 
         (graph, spec)
@@ -1123,6 +3062,772 @@ mod tests {
         let registry = TestSceneRegistry::new();
         let (graph, _spec) = registry.build("zone_test", ClockMs::FIXED).unwrap();
         assert_no_violations(&graph, "zone_test");
+    }
+
+    // ── Scene: overlapping_tiles_zorder ──────────────────────────────────
+
+    #[test]
+    fn overlapping_tiles_zorder_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("overlapping_tiles_zorder", ClockMs::FIXED);
+        assert!(result.is_some(), "overlapping_tiles_zorder must build");
+    }
+
+    #[test]
+    fn overlapping_tiles_zorder_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("overlapping_tiles_zorder", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 3, "must have 3 tiles");
+    }
+
+    #[test]
+    fn overlapping_tiles_zorder_z_orders_unique() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("overlapping_tiles_zorder", ClockMs::FIXED).unwrap();
+        let mut z_orders: Vec<u32> = graph.tiles.values().map(|t| t.z_order).collect();
+        z_orders.sort_unstable();
+        let before = z_orders.len();
+        z_orders.dedup();
+        assert_eq!(z_orders.len(), before, "z_orders must be unique");
+    }
+
+    #[test]
+    fn overlapping_tiles_zorder_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("overlapping_tiles_zorder", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "overlapping_tiles_zorder");
+    }
+
+    // ── Scene: overlay_transparency ───────────────────────────────────────
+
+    #[test]
+    fn overlay_transparency_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("overlay_transparency", ClockMs::FIXED);
+        assert!(result.is_some(), "overlay_transparency must build");
+    }
+
+    #[test]
+    fn overlay_transparency_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("overlay_transparency", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 2, "must have 2 tiles");
+    }
+
+    #[test]
+    fn overlay_transparency_overlay_tile_has_sub_unit_opacity() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("overlay_transparency", ClockMs::FIXED).unwrap();
+        let opacities: Vec<f32> = graph.tiles.values().map(|t| t.opacity).collect();
+        assert!(
+            opacities.iter().any(|&o| o < 1.0),
+            "at least one tile must have opacity < 1.0 for transparency test"
+        );
+    }
+
+    #[test]
+    fn overlay_transparency_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("overlay_transparency", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "overlay_transparency");
+    }
+
+    // ── Scene: tab_switch ─────────────────────────────────────────────────
+
+    #[test]
+    fn tab_switch_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("tab_switch", ClockMs::FIXED);
+        assert!(result.is_some(), "tab_switch must build");
+    }
+
+    #[test]
+    fn tab_switch_has_two_tabs() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("tab_switch", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
+        assert_eq!(spec.expected_tab_count, 2, "must have 2 tabs");
+    }
+
+    #[test]
+    fn tab_switch_active_tab_is_tab_b() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("tab_switch", ClockMs::FIXED).unwrap();
+        // Active tab should be tab B (which has 2 tiles)
+        let active_id = graph.active_tab.expect("must have active tab");
+        let tiles_on_active: Vec<_> =
+            graph.tiles.values().filter(|t| t.tab_id == active_id).collect();
+        assert_eq!(tiles_on_active.len(), 2, "active tab (B) must have 2 tiles");
+    }
+
+    #[test]
+    fn tab_switch_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("tab_switch", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "tab_switch");
+    }
+
+    // ── Scene: lease_expiry ───────────────────────────────────────────────
+
+    #[test]
+    fn lease_expiry_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("lease_expiry", ClockMs::FIXED);
+        assert!(result.is_some(), "lease_expiry must build");
+    }
+
+    #[test]
+    fn lease_expiry_lease_is_active_at_build_time() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("lease_expiry", ClockMs::FIXED).unwrap();
+        use crate::types::LeaseState;
+        let lease = graph.leases.values().next().expect("must have a lease");
+        assert_eq!(
+            lease.state,
+            LeaseState::Active,
+            "lease must be ACTIVE at build time"
+        );
+        assert_eq!(lease.ttl_ms, 1, "TTL must be 1ms");
+    }
+
+    #[test]
+    fn lease_expiry_passes_layer0_invariants_at_build_time() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("lease_expiry", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "lease_expiry");
+    }
+
+    // ── Scene: mobile_degraded ────────────────────────────────────────────
+
+    #[test]
+    fn mobile_degraded_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("mobile_degraded", ClockMs::FIXED);
+        assert!(result.is_some(), "mobile_degraded must build");
+    }
+
+    #[test]
+    fn mobile_degraded_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("mobile_degraded", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+    }
+
+    #[test]
+    fn mobile_degraded_display_is_mobile_size() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("mobile_degraded", ClockMs::FIXED).unwrap();
+        // Mobile display: 390×844
+        assert_eq!(graph.display_area.width, 390.0, "display width must be 390");
+        assert_eq!(graph.display_area.height, 844.0, "display height must be 844");
+    }
+
+    #[test]
+    fn mobile_degraded_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("mobile_degraded", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "mobile_degraded");
+    }
+
+    // ── Scene: sync_group_media ───────────────────────────────────────────
+
+    #[test]
+    fn sync_group_media_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("sync_group_media", ClockMs::FIXED);
+        assert!(result.is_some(), "sync_group_media must build");
+    }
+
+    #[test]
+    fn sync_group_media_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("sync_group_media", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 2, "must have 2 tiles");
+    }
+
+    #[test]
+    fn sync_group_media_tiles_share_sync_group() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("sync_group_media", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.sync_groups.len(), 1, "must have exactly one sync group");
+        let group = graph.sync_groups.values().next().unwrap();
+        assert_eq!(group.members.len(), 2, "sync group must have 2 members");
+        // Both tiles must point to the sync group
+        let tiles_in_group: Vec<_> =
+            graph.tiles.values().filter(|t| t.sync_group.is_some()).collect();
+        assert_eq!(tiles_in_group.len(), 2, "both tiles must be in a sync group");
+    }
+
+    #[test]
+    fn sync_group_media_present_at_are_staggered() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("sync_group_media", ClockMs::FIXED).unwrap();
+        let present_ats: Vec<u64> =
+            graph.tiles.values().filter_map(|t| t.present_at).collect();
+        assert_eq!(present_ats.len(), 2, "both tiles must have present_at set");
+        let min = *present_ats.iter().min().unwrap();
+        let max = *present_ats.iter().max().unwrap();
+        assert_eq!(max - min, 100, "present_at must differ by 100ms");
+    }
+
+    #[test]
+    fn sync_group_media_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("sync_group_media", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "sync_group_media");
+    }
+
+    // ── Scene: input_highlight ────────────────────────────────────────────
+
+    #[test]
+    fn input_highlight_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("input_highlight", ClockMs::FIXED);
+        assert!(result.is_some(), "input_highlight must build");
+    }
+
+    #[test]
+    fn input_highlight_has_hit_region() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("input_highlight", ClockMs::FIXED).unwrap();
+        assert!(spec.has_hit_regions, "spec must declare has_hit_regions = true");
+        let hit_count = graph
+            .nodes
+            .values()
+            .filter(|n| matches!(n.data, NodeData::HitRegion(_)))
+            .count();
+        assert_eq!(hit_count, 1, "must have exactly one hit region node");
+    }
+
+    #[test]
+    fn input_highlight_hit_region_accepts_focus_and_pointer() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("input_highlight", ClockMs::FIXED).unwrap();
+        let hit_node = graph
+            .nodes
+            .values()
+            .find(|n| matches!(n.data, NodeData::HitRegion(_)))
+            .expect("must have a hit region node");
+        if let NodeData::HitRegion(hr) = &hit_node.data {
+            assert!(hr.accepts_focus, "hit region must accept focus");
+            assert!(hr.accepts_pointer, "hit region must accept pointer");
+        }
+    }
+
+    #[test]
+    fn input_highlight_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("input_highlight", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "input_highlight");
+    }
+
+    // ── Scene: coalesced_dashboard ────────────────────────────────────────
+
+    #[test]
+    fn coalesced_dashboard_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("coalesced_dashboard", ClockMs::FIXED);
+        assert!(result.is_some(), "coalesced_dashboard must build");
+    }
+
+    #[test]
+    fn coalesced_dashboard_has_twelve_tiles() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("coalesced_dashboard", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 12, "must have 12 tiles");
+    }
+
+    #[test]
+    fn coalesced_dashboard_all_tiles_within_display() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("coalesced_dashboard", ClockMs::FIXED).unwrap();
+        let out_of_bounds: Vec<_> = graph
+            .tiles
+            .values()
+            .filter(|t| !t.bounds.is_within(&graph.display_area))
+            .collect();
+        assert!(
+            out_of_bounds.is_empty(),
+            "{} tile(s) outside display area",
+            out_of_bounds.len()
+        );
+    }
+
+    #[test]
+    fn coalesced_dashboard_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("coalesced_dashboard", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "coalesced_dashboard");
+    }
+
+    // ── Scene: three_agents_contention ────────────────────────────────────
+
+    #[test]
+    fn three_agents_contention_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("three_agents_contention", ClockMs::FIXED);
+        assert!(result.is_some(), "three_agents_contention must build");
+    }
+
+    #[test]
+    fn three_agents_contention_has_three_distinct_namespaces() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("three_agents_contention", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        let mut namespaces: Vec<&str> =
+            graph.tiles.values().map(|t| t.namespace.as_str()).collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        assert_eq!(namespaces.len(), 3, "must have 3 distinct namespaces");
+    }
+
+    #[test]
+    fn three_agents_contention_lease_priorities_are_distinct() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("three_agents_contention", ClockMs::FIXED).unwrap();
+        let mut priorities: Vec<u32> = graph.leases.values().map(|l| l.priority).collect();
+        priorities.sort_unstable();
+        priorities.dedup();
+        assert_eq!(priorities.len(), 3, "must have 3 distinct lease priorities");
+    }
+
+    #[test]
+    fn three_agents_contention_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("three_agents_contention", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "three_agents_contention");
+    }
+
+    // ── Scene: overlay_passthrough_regions ────────────────────────────────
+
+    #[test]
+    fn overlay_passthrough_regions_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("overlay_passthrough_regions", ClockMs::FIXED);
+        assert!(result.is_some(), "overlay_passthrough_regions must build");
+    }
+
+    #[test]
+    fn overlay_passthrough_regions_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) =
+            registry.build("overlay_passthrough_regions", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 3, "must have 3 tiles");
+        assert!(spec.has_hit_regions, "spec must declare has_hit_regions = true");
+    }
+
+    #[test]
+    fn overlay_passthrough_regions_has_passthrough_tile() {
+        use crate::types::InputMode;
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("overlay_passthrough_regions", ClockMs::FIXED).unwrap();
+        let passthrough_tiles: Vec<_> = graph
+            .tiles
+            .values()
+            .filter(|t| t.input_mode == InputMode::Passthrough)
+            .collect();
+        assert_eq!(passthrough_tiles.len(), 1, "must have exactly 1 passthrough tile");
+    }
+
+    #[test]
+    fn overlay_passthrough_regions_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("overlay_passthrough_regions", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "overlay_passthrough_regions");
+    }
+
+    // ── Scene: disconnect_reclaim_multiagent ──────────────────────────────
+
+    #[test]
+    fn disconnect_reclaim_multiagent_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("disconnect_reclaim_multiagent", ClockMs::FIXED);
+        assert!(result.is_some(), "disconnect_reclaim_multiagent must build");
+    }
+
+    #[test]
+    fn disconnect_reclaim_multiagent_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) =
+            registry.build("disconnect_reclaim_multiagent", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 3, "must have 3 tiles");
+    }
+
+    #[test]
+    fn disconnect_reclaim_multiagent_gamma_is_disconnected() {
+        use crate::types::LeaseState;
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("disconnect_reclaim_multiagent", ClockMs::FIXED).unwrap();
+        let gamma_lease = graph
+            .leases
+            .values()
+            .find(|l| l.namespace == "agent.gamma")
+            .expect("must have agent.gamma lease");
+        assert_eq!(
+            gamma_lease.state,
+            LeaseState::Disconnected,
+            "gamma lease must be Disconnected"
+        );
+        assert!(gamma_lease.disconnected_at_ms.is_some(), "must have disconnected_at_ms");
+    }
+
+    #[test]
+    fn disconnect_reclaim_multiagent_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("disconnect_reclaim_multiagent", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "disconnect_reclaim_multiagent");
+    }
+
+    // ── Scene: privacy_redaction_mode ─────────────────────────────────────
+
+    #[test]
+    fn privacy_redaction_mode_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("privacy_redaction_mode", ClockMs::FIXED);
+        assert!(result.is_some(), "privacy_redaction_mode must build");
+    }
+
+    #[test]
+    fn privacy_redaction_mode_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("privacy_redaction_mode", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 2, "must have 2 tiles");
+    }
+
+    #[test]
+    fn privacy_redaction_mode_has_sensitive_tile_content() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("privacy_redaction_mode", ClockMs::FIXED).unwrap();
+        // The sensitive tile has yellow text (Rgba with high r and g) to signal classification
+        let has_sensitive_color = graph.nodes.values().any(|n| {
+            if let NodeData::TextMarkdown(t) = &n.data {
+                t.color.r > 0.9 && t.color.g > 0.7 && t.color.b < 0.2
+            } else {
+                false
+            }
+        });
+        assert!(has_sensitive_color, "must have a tile with sensitive (yellow) text color");
+    }
+
+    #[test]
+    fn privacy_redaction_mode_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("privacy_redaction_mode", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "privacy_redaction_mode");
+    }
+
+    // ── Scene: chatty_dashboard_touch ─────────────────────────────────────
+
+    #[test]
+    fn chatty_dashboard_touch_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("chatty_dashboard_touch", ClockMs::FIXED);
+        assert!(result.is_some(), "chatty_dashboard_touch must build");
+    }
+
+    #[test]
+    fn chatty_dashboard_touch_has_fifty_tiles() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("chatty_dashboard_touch", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 50, "must have 50 tiles");
+    }
+
+    #[test]
+    fn chatty_dashboard_touch_all_tiles_are_hit_regions() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("chatty_dashboard_touch", ClockMs::FIXED).unwrap();
+        assert!(spec.has_hit_regions, "spec must declare has_hit_regions = true");
+        let hit_count = graph
+            .nodes
+            .values()
+            .filter(|n| matches!(n.data, NodeData::HitRegion(_)))
+            .count();
+        assert_eq!(hit_count, 50, "all 50 tiles must have a hit region root node");
+    }
+
+    #[test]
+    fn chatty_dashboard_touch_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("chatty_dashboard_touch", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "chatty_dashboard_touch");
+    }
+
+    // ── Scene: zone_publish_subtitle ──────────────────────────────────────
+
+    #[test]
+    fn zone_publish_subtitle_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("zone_publish_subtitle", ClockMs::FIXED);
+        assert!(result.is_some(), "zone_publish_subtitle must build");
+    }
+
+    #[test]
+    fn zone_publish_subtitle_has_subtitle_zone() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+        assert!(spec.has_zones, "spec must declare has_zones = true");
+        assert!(
+            graph.zone_registry.zones.contains_key("subtitle"),
+            "must have subtitle zone"
+        );
+    }
+
+    #[test]
+    fn zone_publish_subtitle_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "zone_publish_subtitle");
+    }
+
+    // ── Scene: zone_reject_wrong_type ─────────────────────────────────────
+
+    #[test]
+    fn zone_reject_wrong_type_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("zone_reject_wrong_type", ClockMs::FIXED);
+        assert!(result.is_some(), "zone_reject_wrong_type must build");
+    }
+
+    #[test]
+    fn zone_reject_wrong_type_has_typed_zone() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("zone_reject_wrong_type", ClockMs::FIXED).unwrap();
+        assert!(spec.has_zones, "spec must declare has_zones = true");
+        let zone = graph
+            .zone_registry
+            .zones
+            .get("typed_zone")
+            .expect("must have typed_zone");
+        assert_eq!(
+            zone.accepted_media_types,
+            vec![ZoneMediaType::StreamText],
+            "typed_zone must accept only StreamText"
+        );
+    }
+
+    #[test]
+    fn zone_reject_wrong_type_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("zone_reject_wrong_type", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "zone_reject_wrong_type");
+    }
+
+    // ── Scene: zone_conflict_two_publishers ───────────────────────────────
+
+    #[test]
+    fn zone_conflict_two_publishers_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("zone_conflict_two_publishers", ClockMs::FIXED);
+        assert!(result.is_some(), "zone_conflict_two_publishers must build");
+    }
+
+    #[test]
+    fn zone_conflict_two_publishers_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) =
+            registry.build("zone_conflict_two_publishers", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert!(spec.has_zones, "spec must declare has_zones = true");
+        assert!(
+            graph.zone_registry.zones.contains_key("shared_banner"),
+            "must have shared_banner zone"
+        );
+    }
+
+    #[test]
+    fn zone_conflict_two_publishers_contention_is_latest_wins() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("zone_conflict_two_publishers", ClockMs::FIXED).unwrap();
+        let zone = graph.zone_registry.zones.get("shared_banner").unwrap();
+        assert_eq!(
+            zone.contention_policy,
+            ContentionPolicy::LatestWins,
+            "shared_banner must use LatestWins contention"
+        );
+    }
+
+    #[test]
+    fn zone_conflict_two_publishers_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("zone_conflict_two_publishers", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "zone_conflict_two_publishers");
+    }
+
+    // ── Scene: zone_orchestrate_then_publish ──────────────────────────────
+
+    #[test]
+    fn zone_orchestrate_then_publish_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("zone_orchestrate_then_publish", ClockMs::FIXED);
+        assert!(result.is_some(), "zone_orchestrate_then_publish must build");
+    }
+
+    #[test]
+    fn zone_orchestrate_then_publish_has_three_zones() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) =
+            registry.build("zone_orchestrate_then_publish", ClockMs::FIXED).unwrap();
+        assert!(spec.has_zones, "spec must declare has_zones = true");
+        assert_eq!(graph.zone_registry.zones.len(), 3, "must have 3 zones");
+        for zone_name in &["alert_banner", "notification_area", "status_bar"] {
+            assert!(
+                graph.zone_registry.zones.contains_key(*zone_name),
+                "must have zone '{zone_name}'"
+            );
+        }
+    }
+
+    #[test]
+    fn zone_orchestrate_then_publish_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("zone_orchestrate_then_publish", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "zone_orchestrate_then_publish");
+    }
+
+    // ── Scene: zone_geometry_adapts_profile ───────────────────────────────
+
+    #[test]
+    fn zone_geometry_adapts_profile_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("zone_geometry_adapts_profile", ClockMs::FIXED);
+        assert!(result.is_some(), "zone_geometry_adapts_profile must build");
+    }
+
+    #[test]
+    fn zone_geometry_adapts_profile_has_relative_zones() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) =
+            registry.build("zone_geometry_adapts_profile", ClockMs::FIXED).unwrap();
+        assert!(spec.has_zones, "spec must declare has_zones = true");
+        for zone in graph.zone_registry.zones.values() {
+            assert!(
+                matches!(zone.geometry_policy, GeometryPolicy::Relative { .. }),
+                "zone '{}' must use Relative geometry",
+                zone.name
+            );
+        }
+    }
+
+    #[test]
+    fn zone_geometry_adapts_profile_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("zone_geometry_adapts_profile", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "zone_geometry_adapts_profile");
+    }
+
+    // ── Scene: zone_disconnect_cleanup ────────────────────────────────────
+
+    #[test]
+    fn zone_disconnect_cleanup_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("zone_disconnect_cleanup", ClockMs::FIXED);
+        assert!(result.is_some(), "zone_disconnect_cleanup must build");
+    }
+
+    #[test]
+    fn zone_disconnect_cleanup_publisher_is_disconnected() {
+        use crate::types::LeaseState;
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("zone_disconnect_cleanup", ClockMs::FIXED).unwrap();
+        assert!(spec.has_zones, "spec must declare has_zones = true");
+        let pub_lease = graph
+            .leases
+            .values()
+            .find(|l| l.namespace == "agent.zone_pub")
+            .expect("must have agent.zone_pub lease");
+        assert_eq!(
+            pub_lease.state,
+            LeaseState::Disconnected,
+            "zone publisher must be in Disconnected state"
+        );
+    }
+
+    #[test]
+    fn zone_disconnect_cleanup_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("zone_disconnect_cleanup", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "zone_disconnect_cleanup");
+    }
+
+    // ── Scene: policy_matrix_basic ────────────────────────────────────────
+
+    #[test]
+    fn policy_matrix_basic_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("policy_matrix_basic", ClockMs::FIXED);
+        assert!(result.is_some(), "policy_matrix_basic must build");
+    }
+
+    #[test]
+    fn policy_matrix_basic_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) = registry.build("policy_matrix_basic", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 4, "must have 4 tiles");
+        assert!(spec.has_hit_regions, "spec must declare has_hit_regions = true");
+    }
+
+    #[test]
+    fn policy_matrix_basic_has_system_lease_at_priority_zero() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("policy_matrix_basic", ClockMs::FIXED).unwrap();
+        let system_lease = graph
+            .leases
+            .values()
+            .find(|l| l.namespace == "system.chrome")
+            .expect("must have system.chrome lease");
+        assert_eq!(system_lease.priority, 0, "system.chrome lease must have priority 0");
+    }
+
+    #[test]
+    fn policy_matrix_basic_has_three_distinct_namespaces() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("policy_matrix_basic", ClockMs::FIXED).unwrap();
+        let mut namespaces: Vec<&str> =
+            graph.leases.values().map(|l| l.namespace.as_str()).collect();
+        namespaces.sort_unstable();
+        namespaces.dedup();
+        assert_eq!(namespaces.len(), 3, "must have 3 distinct lease namespaces");
+    }
+
+    #[test]
+    fn policy_matrix_basic_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) = registry.build("policy_matrix_basic", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "policy_matrix_basic");
+    }
+
+    // ── scene_names() has exactly 25 entries ──────────────────────────────
+
+    #[test]
+    fn scene_names_returns_exactly_25_entries() {
+        assert_eq!(
+            TestSceneRegistry::scene_names().len(),
+            25,
+            "scene_names() must return exactly 25 entries"
+        );
     }
 
     // ── Registry meta ─────────────────────────────────────────────────────
