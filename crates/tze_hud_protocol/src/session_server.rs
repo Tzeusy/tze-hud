@@ -1016,6 +1016,8 @@ async fn handle_mutation_batch(
         batch_id: tze_hud_scene::SceneId::new(),
         agent_namespace: session.namespace.clone(),
         mutations: scene_mutations,
+        timing_hints: None,
+        lease_id: None,
     };
 
     let result = st.scene.apply_batch(&scene_batch);
@@ -1310,6 +1312,8 @@ async fn handle_zone_publish(
                 batch_id: tze_hud_scene::SceneId::new(),
                 agent_namespace: session.namespace.clone(),
                 mutations: vec![mutation],
+                timing_hints: None,
+                lease_id: None,
             };
             let result = st.scene.apply_batch(&batch);
             if result.applied {

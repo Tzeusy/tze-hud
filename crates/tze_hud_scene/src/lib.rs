@@ -55,9 +55,11 @@ pub use graph::{
     // Node data validation
     validate_text_markdown_node_data,
 };
-pub use mutation::{MutationBatch, MutationResult, SceneMutation};
+pub use mutation::{MutationBatch, MutationResult, SceneMutation, TimingHints, MAX_BATCH_SIZE};
 pub use diff::{SceneDiff, DiffEntry};
-pub use validation::ValidationError;
+pub use validation::{
+    BatchRejected, BatchValidationError, ValidationError, ValidationErrorCode,
+};
 pub use test_scenes::{
     ClockMs, SceneSpec, TestSceneRegistry, InvariantViolation, SceneGraphTestExt,
     assert_layer0_invariants,

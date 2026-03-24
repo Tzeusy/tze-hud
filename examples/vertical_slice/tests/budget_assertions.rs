@@ -280,6 +280,8 @@ fn test_transaction_validation_p99_within_budget() {
                 ),
                 z_order: (i as u32 % 10) + 1,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         let elapsed_us = start.elapsed().as_micros() as u64;

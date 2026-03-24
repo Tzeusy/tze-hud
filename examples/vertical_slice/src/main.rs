@@ -539,6 +539,8 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 bounds: Rect::new(100.0, 350.0, 200.0, 100.0),
                 z_order: 3,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
 
         let result = state.scene.apply_batch(&batch);
@@ -593,6 +595,8 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 bounds: Rect::new(100.0, 350.0, 200.0, 100.0),
                 z_order: 3,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
 
         let result = state.scene.apply_batch(&batch);
@@ -605,6 +609,8 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
             batch_id: SceneId::new(),
             agent_namespace: namespace.clone(),
             mutations: vec![SceneMutation::DeleteTile { tile_id: new_tile }],
+            timing_hints: None,
+            lease_id: None,
         };
         let del_result = state.scene.apply_batch(&delete_batch);
         assert!(del_result.applied, "delete tile should succeed");
@@ -983,6 +989,8 @@ mod tests {
                 bounds: Rect::new(10.0, 10.0, 100.0, 100.0),
                 z_order: 1,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
 
         let result = scene.apply_batch(&batch);
@@ -1015,6 +1023,8 @@ mod tests {
                 bounds: Rect::new(10.0, 10.0, 100.0, 100.0),
                 z_order: 1,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
 
         let result = scene.apply_batch(&batch);
@@ -1041,6 +1051,8 @@ mod tests {
                     bounds: Rect::new(i as f32 * 90.0, 10.0, 80.0, 60.0),
                     z_order: i + 1,
                 }],
+                timing_hints: None,
+                lease_id: None,
             };
             let result = scene.apply_batch(&batch);
             assert!(result.applied, "tile {} should be within budget", i);
@@ -1057,6 +1069,8 @@ mod tests {
                 bounds: Rect::new(0.0, 100.0, 80.0, 60.0),
                 z_order: 9,
             }],
+            timing_hints: None,
+            lease_id: None,
         };
         let result = scene.apply_batch(&batch);
         assert!(!result.applied, "9th tile should exceed budget");
