@@ -8,7 +8,7 @@
 //! # Session Lifecycle State Machine (RFC 0005 §1.1)
 //!
 //! ```text
-//! Connecting → Handshaking → Active ←→ Disconnecting → Closed → Resuming
+//! Connecting → Handshaking → Active → Disconnecting → Closed → Resuming
 //! ```
 //!
 //! Valid transitions:
@@ -288,7 +288,9 @@ struct StreamSession {
     state: SessionState,
 
     /// Last validated client-side sequence number (RFC 0005 §2.3).
-    /// Starts at 0 (meaning no message received yet); first valid message must be 1.
+    /// Initialized to 1 during session init/resume (treating the handshake message as
+    /// sequence 1). Each subsequent validated message must carry a strictly greater
+    /// sequence number within `max_sequence_gap` of the previous.
     last_client_sequence: u64,
 
     /// Whether safe mode is active for this session (RFC 0005 §3.7).
@@ -576,12 +578,13 @@ impl HudSession for HudSessionImpl {
                         }
                     }
                     Ok(Ok(None)) => {
-                        // Stream EOF — ungraceful unless session already Disconnecting
-                        if session.state != SessionState::Disconnecting {
-                            session.transition(SessionState::Closed);
-                        } else {
-                            session.transition(SessionState::Closed);
-                        }
+                        // Stream EOF — transitions to Closed whether graceful or ungraceful.
+                        // If session was Disconnecting (SessionClose already received and
+                        // processed), this is the expected stream termination completing
+                        // the Disconnecting → Closed transition. Otherwise it is an
+                        // ungraceful disconnect (agent dropped the connection without
+                        // sending SessionClose); leases become orphaned in either case.
+                        session.transition(SessionState::Closed);
                         break;
                     }
                     Ok(Err(_e)) => {
@@ -1939,11 +1942,11 @@ mod tests {
     // ─── Safe mode tests (RFC 0005 §3.7) ─────────────────────────────────────
 
     /// Scenario: Mutations rejected during safe mode (RFC 0005 §3.7)
-    /// WHEN the runtime enters safe mode and the session sets safe_mode_active=true,
+    /// WHEN the runtime enters safe mode and sets `SharedState.safe_mode_active = true`,
     /// THEN MutationBatch is rejected with SAFE_MODE_ACTIVE.
     ///
-    /// In this test we drive safe mode via SharedState directly (as the runtime
-    /// would do via SessionSuspended broadcast).
+    /// In this test we drive safe mode via `SharedState` directly (as the runtime
+    /// would do via a SessionSuspended broadcast to all sessions).
     #[tokio::test]
     async fn test_safe_mode_rejects_mutations() {
         let (mut client, _server, shared_state) = setup_test_with_state().await;
@@ -2169,9 +2172,10 @@ mod tests {
                 }
             }
         }
-        // Either the stream closed or we timed out — both are acceptable
-        // (test validates that SessionClose is processed without error)
-        let _ = got_stream_end;
+        assert!(
+            got_stream_end,
+            "session stream did not terminate after SessionClose — graceful disconnect had no observable effect"
+        );
     }
 
     /// Scenario: Graceful disconnect with expect_resume=true hint (RFC 0005 §1.5).
