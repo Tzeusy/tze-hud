@@ -33,6 +33,9 @@ pub use timing::{
     TimingError, TimingWarning,
     // Scheduling helpers
     is_in_scope_for_frame, validate_timing_hints, TimestampValidationInput,
+    // Relative scheduling primitives (rig-wu3q)
+    resolve_after_us, resolve_frames_from_now, resolve_next_frame, resolve_schedule,
+    IntakeContext,
     // Pending queue
     PendingEntry, PendingQueue,
     // Expiration heap

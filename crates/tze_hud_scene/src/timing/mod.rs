@@ -8,6 +8,7 @@
 //! | [`hints`] | Timing Fields on Payloads, Message Class Typed Enum |
 //! | [`errors`] | Timestamp Validation (error codes) |
 //! | [`scheduling`] | Timestamp Validation (logic), Frame Quantization |
+//! | [`relative`] | Relative Scheduling Primitives (after_us, frames_from_now, next_frame) |
 //! | [`pending_queue`] | Presentation Deadline, Session Close Pending Queue Flush |
 //! | [`expiration`] | Expiration Policy |
 //! | [`staleness`] | Staleness Indicators |
@@ -31,6 +32,7 @@ pub mod domains;
 pub mod hints;
 pub mod errors;
 pub mod scheduling;
+pub mod relative;
 pub mod pending_queue;
 pub mod expiration;
 pub mod staleness;
@@ -47,6 +49,10 @@ pub use scheduling::{
     is_in_scope_for_frame, validate_timing_hints, TimestampValidationInput,
     CLOCK_SKEW_EXCESSIVE_THRESHOLD_US, CLOCK_SKEW_HIGH_THRESHOLD_US,
     DEFAULT_MAX_FUTURE_SCHEDULE_US, TIMESTAMP_TOO_OLD_THRESHOLD_US,
+};
+pub use relative::{
+    resolve_after_us, resolve_frames_from_now, resolve_next_frame, resolve_schedule,
+    IntakeContext,
 };
 pub use pending_queue::{PendingEntry, PendingQueue};
 pub use expiration::{ExpirationEntry, ExpirationHeap};
