@@ -105,9 +105,14 @@ pub fn is_mandatory(category: &str) -> bool {
 ///
 /// ZONE_EVENTS uses prefix matching: any capability that starts with
 /// `publish_zone:` satisfies the requirement.
+///
+/// Unknown categories are unconditionally denied regardless of the agent's
+/// capabilities, preventing a malicious agent from activating unknown
+/// subscription categories by requesting a synthetic `"__unknown__"` capability.
 fn has_required_capability(category: &str, capabilities: &[String]) -> bool {
     match required_capability(category) {
         None => true, // mandatory — no capability check
+        Some("__unknown__") => false, // unknown category — unconditionally denied
         Some("publish_zone:") => capabilities
             .iter()
             .any(|c| c.starts_with("publish_zone:")),

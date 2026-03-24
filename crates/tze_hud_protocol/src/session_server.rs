@@ -2446,17 +2446,19 @@ async fn handle_zone_publish(
                     Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
                     None => ("ZONE_PUBLISH_FAILED".to_string(), "Zone publish failed".to_string()),
                 };
-                // On failure, always send result (even for ephemeral zones) so client knows
-                (false, code, msg, false)
+                // On failure, preserve the zone's ephemeral flag for consistent fire-and-forget
+                // semantics (RFC 0005 §8.6): ephemeral zones never send ZonePublishResult,
+                // even on failure. The client must not expect a response.
+                (false, code, msg, zone_is_ephemeral)
             }
         } else {
-            (false, "INVALID_CONTENT".to_string(), "Missing or invalid zone content".to_string(), false)
+            (false, "INVALID_CONTENT".to_string(), "Missing or invalid zone content".to_string(), zone_is_ephemeral)
         }
     };
 
     // Durable zones: send ZonePublishResult (transactional ack).
-    // Ephemeral zones on success: fire-and-forget, no ZonePublishResult sent.
-    // Ephemeral zones on failure: is_ephemeral_zone=false (overridden above), so result is sent.
+    // Ephemeral zones: fire-and-forget — no ZonePublishResult sent, even on failure
+    // (RFC 0005 §8.6: "Ephemeral-zone publishes SHALL be fire-and-forget").
     if !is_ephemeral_zone {
         let seq = session.next_server_seq();
         let _ = tx
@@ -2472,7 +2474,7 @@ async fn handle_zone_publish(
             }))
             .await;
     }
-    // Ephemeral zone publish succeeded: no ack sent (fire-and-forget per RFC 0005 §8.6)
+    // Ephemeral zone: no ack sent (fire-and-forget per RFC 0005 §8.6), success or failure
 }
 
 /// Handle an InputFocusRequest from the client (RFC 0005 §3.8, RFC 0004 §8.3.1).
@@ -2550,7 +2552,7 @@ async fn handle_input_capture_release(
     let capture_released = CaptureReleasedEvent {
         tile_id: rel.tile_id.clone(),
         node_id: Vec::new(),
-        timestamp_mono_us: now_us, // wall-clock as proxy for mono in v1
+        timestamp_mono_us: 0, // no monotonic clock available; leave unset (v1)
         device_id: rel.device_kind.clone(),
         reason: CaptureReleasedReason::AgentReleased as i32,
     };
