@@ -70,10 +70,14 @@ impl Default for TileVisualHint {
 /// Tracks the grace window for a single orphaned lease.
 ///
 /// The grace period starts the instant `disconnect` is detected (i.e., when
-/// `orphaned_at_ms` is recorded). The timer enforces the `+/- 100 ms`
-/// precision guarantee: `has_expired` returns `false` until at least
-/// `grace_ms - GRACE_PRECISION_MS` have elapsed, and `must_expire` returns
-/// `true` once `grace_ms + GRACE_PRECISION_MS` have elapsed.
+/// `orphaned_at_ms` is recorded). Callers poll this timer and treat the grace
+/// period as expired once at least `grace_ms` milliseconds have elapsed since
+/// `orphaned_at_ms`.
+///
+/// This timer does not intentionally expire early; any deviation from the
+/// configured window is due to the underlying clock and scheduling latency,
+/// and is expected to stay within the `+/- GRACE_PRECISION_MS` tolerance
+/// required by the spec (line 148).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GracePeriodTimer {
     /// Lease this timer belongs to.

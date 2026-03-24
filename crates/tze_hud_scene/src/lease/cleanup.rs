@@ -196,7 +196,13 @@ impl ZonePublicationSweep {
     }
 
     /// Returns `true` if this sweep should unconditionally clear zone
-    /// publications (REVOKED or EXPIRED; not for SUSPENDED or ORPHANED).
+    /// publications. Returns `true` for all terminal states (REVOKED, EXPIRED,
+    /// DENIED, RELEASED); returns `false` for non-terminal states (ACTIVE,
+    /// SUSPENDED, ORPHANED, REQUESTED).
+    ///
+    /// The spec (lines 235–242) specifically names REVOKED and EXPIRED as
+    /// triggers; DENIED and RELEASED are also terminal and imply the lease
+    /// never produced zone publications, so clearing is safe and consistent.
     pub fn should_clear(&self) -> bool {
         self.terminal_state.is_terminal()
     }

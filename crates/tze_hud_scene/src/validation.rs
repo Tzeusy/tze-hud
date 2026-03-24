@@ -126,7 +126,10 @@ pub enum ValidationError {
     /// Zone publish rejected: lease exists but is not in ACTIVE state.
     ///
     /// Spec line 214: "inactive lease `LEASE_NOT_ACTIVE`".
-    /// Covers SUSPENDED, ORPHANED, terminal states.
+    /// Covers other non-ACTIVE lease states not handled by specialized variants
+    /// (for example, terminal states such as REVOKED, EXPIRED, RELEASED, DENIED).
+    /// SUSPENDED and ORPHANED have dedicated variants (`ZonePublishSafeModeActive`,
+    /// `ZonePublishLeaseOrphaned`).
     #[error("zone publish rejected: lease for '{namespace}' is not active (state: {state})")]
     ZonePublishLeaseNotActive { namespace: String, state: String },
 

@@ -371,7 +371,7 @@ pub struct Tile {
     /// The compositor renders the indicated badge/overlay within 1 frame
     /// of this field being set (spec line 133).
     #[serde(default)]
-    pub visual_hint: crate::lease::orphan::TileVisualHint,
+    pub visual_hint: crate::lease::TileVisualHint,
 }
 
 // ─── Nodes ──────────────────────────────────────────────────────────────────
