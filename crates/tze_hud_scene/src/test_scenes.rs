@@ -113,7 +113,7 @@ impl std::fmt::Display for InvariantViolation {
 /// use tze_hud_scene::test_scenes::{TestSceneRegistry, ClockMs};
 ///
 /// let registry = TestSceneRegistry::new();
-/// let (graph, spec) = registry.build("single_tile", ClockMs::FIXED).unwrap();
+/// let (graph, spec) = registry.build("single_tile_solid", ClockMs::FIXED).unwrap();
 /// // graph is ready for Layer 0 assertions
 /// ```
 pub struct TestSceneRegistry {
@@ -144,12 +144,11 @@ impl TestSceneRegistry {
     /// Returns `None` if the name is not known.
     pub fn build(&self, name: &str, clock: ClockMs) -> Option<(SceneGraph, SceneSpec)> {
         match name {
-            // ── original 5 ──
-            "empty" => Some(self.build_empty(clock)),
-            "single_tile" => Some(self.build_single_tile(clock)),
-            "two_tiles" => Some(self.build_two_tiles(clock)),
-            "max_tiles" => Some(self.build_max_tiles(clock)),
-            "zone_test" => Some(self.build_zone_test(clock)),
+            // ── original 5 (canonical names per validation-framework/spec.md §"Test Scene Registry") ──
+            "empty_scene" => Some(self.build_empty_scene(clock)),
+            "single_tile_solid" => Some(self.build_single_tile_solid(clock)),
+            "three_tiles_no_overlap" => Some(self.build_three_tiles_no_overlap(clock)),
+            "max_tiles_stress" => Some(self.build_max_tiles_stress(clock)),
             // ── 20 new scenes ──
             "overlapping_tiles_zorder" => Some(self.build_overlapping_tiles_zorder(clock)),
             "overlay_transparency" => Some(self.build_overlay_transparency(clock)),
@@ -179,20 +178,22 @@ impl TestSceneRegistry {
             }
             "zone_disconnect_cleanup" => Some(self.build_zone_disconnect_cleanup(clock)),
             "policy_matrix_basic" => Some(self.build_policy_matrix_basic(clock)),
+            "policy_arbitration_collision" => {
+                Some(self.build_policy_arbitration_collision(clock))
+            }
             _ => None,
         }
     }
 
-    /// All known scene names.
+    /// All known scene names (canonical per validation-framework/spec.md §"Test Scene Registry").
     pub fn scene_names() -> &'static [&'static str] {
         &[
-            // original 5
-            "empty",
-            "single_tile",
-            "two_tiles",
-            "max_tiles",
-            "zone_test",
-            // 20 new scenes
+            // original 4 (canonical names)
+            "empty_scene",
+            "single_tile_solid",
+            "three_tiles_no_overlap",
+            "max_tiles_stress",
+            // 21 additional scenes
             "overlapping_tiles_zorder",
             "overlay_transparency",
             "tab_switch",
@@ -213,17 +214,18 @@ impl TestSceneRegistry {
             "zone_geometry_adapts_profile",
             "zone_disconnect_cleanup",
             "policy_matrix_basic",
+            "policy_arbitration_collision",
         ]
     }
 
     // ─── Scene builders ───────────────────────────────────────────────────
 
-    /// `empty` — no tabs, no tiles. Validates clean initialisation.
-    fn build_empty(&self, _clock: ClockMs) -> (SceneGraph, SceneSpec) {
+    /// `empty_scene` — no tabs, no tiles. Validates clean initialisation.
+    fn build_empty_scene(&self, _clock: ClockMs) -> (SceneGraph, SceneSpec) {
         let graph = SceneGraph::new(self.display_width, self.display_height);
 
         let spec = SceneSpec {
-            name: "empty",
+            name: "empty_scene",
             description: "No tabs, no tiles. Validates clean startup state.",
             expected_tab_count: 0,
             expected_tile_count: 0,
@@ -234,8 +236,8 @@ impl TestSceneRegistry {
         (graph, spec)
     }
 
-    /// `single_tile` — one tab, one tile with a text content node.
-    fn build_single_tile(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+    /// `single_tile_solid` — one tab, one tile with a text content node.
+    fn build_single_tile_solid(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
         let mut graph = SceneGraph::new(self.display_width, self.display_height);
 
         let tab_id = graph.create_tab("Main", 0).expect("create_tab failed");
@@ -269,7 +271,7 @@ impl TestSceneRegistry {
         graph.set_tile_root(tile_id, text_node).expect("set_tile_root failed");
 
         let spec = SceneSpec {
-            name: "single_tile",
+            name: "single_tile_solid",
             description: "One tab, one tile with markdown text content.",
             expected_tab_count: 1,
             expected_tile_count: 1,
@@ -280,8 +282,8 @@ impl TestSceneRegistry {
         (graph, spec)
     }
 
-    /// `two_tiles` — one tab, two tiles (text + hit_region). Matches the vertical-slice layout.
-    fn build_two_tiles(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+    /// `three_tiles_no_overlap` — one tab, three non-overlapping tiles (text + hit_region + solid).
+    fn build_three_tiles_no_overlap(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
         let mut graph = SceneGraph::new(self.display_width, self.display_height);
 
         let tab_id = graph.create_tab("Dashboard", 0).expect("create_tab failed");
@@ -338,12 +340,28 @@ impl TestSceneRegistry {
         };
         graph.set_tile_root(hit_tile_id, hit_node).expect("set_tile_root failed");
 
+        // Tile 3 — solid color status bar at the bottom, no overlap with tiles 1 or 2
+        let status_tile_bounds = Rect::new(0.0, 600.0, self.display_width, 80.0);
+        let status_tile_id = graph
+            .create_tile(tab_id, "agent.two", lease_id, status_tile_bounds, 3)
+            .expect("create_tile failed");
+
+        let status_node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.05, 0.05, 0.1, 1.0),
+                bounds: Rect::new(0.0, 0.0, self.display_width, 80.0),
+            }),
+        };
+        graph.set_tile_root(status_tile_id, status_node).expect("set_tile_root failed");
+
         let spec = SceneSpec {
-            name: "two_tiles",
-            description: "One tab, two non-overlapping tiles: text (left) and hit-region (right). \
-                          Mirrors the vertical-slice layout.",
+            name: "three_tiles_no_overlap",
+            description: "One tab, three non-overlapping tiles: text (left), hit-region (right), \
+                          and solid-color status bar (bottom). All bounds are disjoint.",
             expected_tab_count: 1,
-            expected_tile_count: 2,
+            expected_tile_count: 3,
             has_hit_regions: true,
             has_zones: false,
         };
@@ -351,11 +369,11 @@ impl TestSceneRegistry {
         (graph, spec)
     }
 
-    /// `max_tiles` — stress test with many tiles, approaching the default `max_nodes` budget.
+    /// `max_tiles_stress` — stress test with many tiles, approaching the default `max_nodes` budget.
     ///
     /// Creates 60 tiles on a single tab (default budget is 64). This exercises the scene graph
     /// under load and validates that bookkeeping remains consistent near capacity.
-    fn build_max_tiles(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+    fn build_max_tiles_stress(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
         let mut graph = SceneGraph::new(self.display_width, self.display_height);
 
         let tab_id = graph.create_tab("Stress", 0).expect("create_tab failed");
@@ -417,14 +435,16 @@ impl TestSceneRegistry {
                         }),
                     }
                 };
-                graph.set_tile_root(tile_id, node).expect("set_tile_root failed in max_tiles");
+                graph
+                    .set_tile_root(tile_id, node)
+                    .expect("set_tile_root failed in max_tiles_stress");
             }
         }
 
         let tile_count = (cols * rows) as usize;
 
         let spec = SceneSpec {
-            name: "max_tiles",
+            name: "max_tiles_stress",
             description: "Stress test with 60 tiles (near the 64-node default budget) on a \
                           single tab. Exercises scene graph bookkeeping under load.",
             expected_tab_count: 1,
@@ -436,118 +456,7 @@ impl TestSceneRegistry {
         (graph, spec)
     }
 
-    /// `zone_test` — tiles publishing to zones, with a zone registry populated.
-    fn build_zone_test(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
-        let mut graph = SceneGraph::new(self.display_width, self.display_height);
-
-        let tab_id = graph.create_tab("Zoned", 0).expect("create_tab failed");
-
-        let lease_id = graph.grant_lease_at(
-            "agent.zones",
-            clock.0,
-            300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
-        );
-
-        // Register two zones
-        graph.zone_registry.zones.insert(
-            "subtitle".to_string(),
-            ZoneDefinition {
-                id: SceneId::new(),
-                name: "subtitle".to_string(),
-                description: "Centered subtitle overlay at the bottom of the screen.".to_string(),
-                geometry_policy: GeometryPolicy::EdgeAnchored {
-                    edge: DisplayEdge::Bottom,
-                    height_pct: 0.10,
-                    width_pct: 0.80,
-                    margin_px: 48.0,
-                },
-                accepted_media_types: vec![ZoneMediaType::StreamText],
-                rendering_policy: RenderingPolicy::default(),
-                contention_policy: ContentionPolicy::LatestWins,
-                max_publishers: 1,
-                transport_constraint: None,
-                auto_clear_ms: None,
-            },
-        );
-        graph.zone_registry.zones.insert(
-            "status_bar".to_string(),
-            ZoneDefinition {
-                id: SceneId::new(),
-                name: "status_bar".to_string(),
-                description: "Persistent status bar at the top of the screen.".to_string(),
-                geometry_policy: GeometryPolicy::EdgeAnchored {
-                    edge: DisplayEdge::Bottom,
-                    height_pct: 0.04,
-                    width_pct: 1.0,
-                    margin_px: 0.0,
-                },
-                accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
-                rendering_policy: RenderingPolicy::default(),
-                contention_policy: ContentionPolicy::MergeByKey { max_keys: 32 },
-                max_publishers: 16,
-                transport_constraint: None,
-                auto_clear_ms: None,
-            },
-        );
-
-        // Tile publishing to the subtitle zone
-        let subtitle_tile_bounds = Rect::new(
-            self.display_width * 0.1,
-            self.display_height * 0.9,
-            self.display_width * 0.8,
-            self.display_height * 0.05,
-        );
-        let subtitle_tile_id = graph
-            .create_tile(tab_id, "agent.zones", lease_id, subtitle_tile_bounds, 10)
-            .expect("create_tile failed");
-
-        let subtitle_node = Node {
-            id: SceneId::new(),
-            children: vec![],
-            data: NodeData::TextMarkdown(TextMarkdownNode {
-                content: "Zone subtitle text content".to_string(),
-                bounds: Rect::new(0.0, 0.0, subtitle_tile_bounds.width, subtitle_tile_bounds.height),
-                font_size_px: 20.0,
-                font_family: FontFamily::SystemSansSerif,
-                color: Rgba::WHITE,
-                background: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
-                alignment: TextAlign::Center,
-                overflow: TextOverflow::Clip,
-            }),
-        };
-        graph.set_tile_root(subtitle_tile_id, subtitle_node).expect("set_tile_root failed");
-
-        // Tile publishing to the status bar zone
-        let status_tile_bounds = Rect::new(0.0, 0.0, self.display_width, 32.0);
-        let status_tile_id = graph
-            .create_tile(tab_id, "agent.zones", lease_id, status_tile_bounds, 20)
-            .expect("create_tile failed");
-
-        let status_node = Node {
-            id: SceneId::new(),
-            children: vec![],
-            data: NodeData::SolidColor(SolidColorNode {
-                color: Rgba::new(0.15, 0.15, 0.2, 0.9),
-                bounds: Rect::new(0.0, 0.0, self.display_width, 32.0),
-            }),
-        };
-        graph.set_tile_root(status_tile_id, status_node).expect("set_tile_root failed");
-
-        let spec = SceneSpec {
-            name: "zone_test",
-            description: "Two tiles publishing to registered zones (subtitle and status_bar). \
-                          Validates zone registry operations and tile-to-zone mapping.",
-            expected_tab_count: 1,
-            expected_tile_count: 2,
-            has_hit_regions: false,
-            has_zones: true,
-        };
-
-        (graph, spec)
-    }
-
-    // ─── New scene builders (scenes 6-25) ────────────────────────────────
+    // ─── New scene builders (scenes 5-25) ────────────────────────────────
 
     /// `overlapping_tiles_zorder` — 3 tiles with overlapping bounds and explicit z-orders.
     ///
@@ -2427,6 +2336,165 @@ impl TestSceneRegistry {
 
         (graph, spec)
     }
+
+    /// `policy_arbitration_collision` — multiple agents compete across all policy levels in a
+    /// single frame, triggering per-frame evaluation order (L1→L2→L5→L6) per
+    /// policy-arbitration/spec.md lines 194-199.
+    ///
+    /// Three agents hold leases at different priorities. Each creates tiles that intentionally
+    /// compete: a high-priority system tile (L1/safety), a privacy-sensitive tile (L2), and a
+    /// resource-heavy agent tile (L5/resource). The scene exercises the arbitration pipeline
+    /// by placing all agents in contention simultaneously.
+    fn build_policy_arbitration_collision(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
+        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+
+        let tab_id = graph.create_tab("ArbitrationCollision", 0).expect("create_tab failed");
+
+        // Level 1 (Safety) — system agent; priority 0, highest authority
+        let system_lease = graph.grant_lease_at(
+            "system.safety",
+            clock.0,
+            86_400_000, // 24h
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+        if let Some(lease) = graph.leases.get_mut(&system_lease) {
+            lease.priority = 0;
+        }
+
+        // Level 2 (Privacy) — privacy-sensitive agent; priority 1
+        let privacy_lease = graph.grant_lease_at(
+            "agent.privacy",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
+        if let Some(lease) = graph.leases.get_mut(&privacy_lease) {
+            lease.priority = 1;
+        }
+
+        // Level 5 (Resource) + Level 6 (Content) — normal content agent; priority 2
+        let content_lease = graph.grant_lease_at(
+            "agent.content",
+            clock.0,
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+        );
+
+        // L1: system safety overlay — full-width banner at top (z_order 100)
+        let safety_tile_id = graph
+            .create_tile(
+                tab_id,
+                "system.safety",
+                system_lease,
+                Rect::new(0.0, 0.0, self.display_width, 48.0),
+                100,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                safety_tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.9, 0.1, 0.1, 1.0),
+                        bounds: Rect::new(0.0, 0.0, self.display_width, 48.0),
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // L2: privacy-sensitive tile — left panel (z_order 20)
+        let privacy_tile_id = graph
+            .create_tile(
+                tab_id,
+                "agent.privacy",
+                privacy_lease,
+                Rect::new(0.0, 60.0, self.display_width * 0.45, self.display_height - 120.0),
+                20,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                privacy_tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "SENSITIVE — L2 Privacy\nRedacted for untrusted viewers."
+                            .to_string(),
+                        bounds: Rect::new(
+                            0.0,
+                            0.0,
+                            self.display_width * 0.45,
+                            self.display_height - 120.0,
+                        ),
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::new(1.0, 0.9, 0.0, 1.0),
+                        background: Some(Rgba::new(0.25, 0.05, 0.05, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Ellipsis,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        // L5/L6: content agent tile — right panel (z_order 10); evaluated last
+        let content_tile_id = graph
+            .create_tile(
+                tab_id,
+                "agent.content",
+                content_lease,
+                Rect::new(
+                    self.display_width * 0.5,
+                    60.0,
+                    self.display_width * 0.5,
+                    self.display_height - 120.0,
+                ),
+                10,
+            )
+            .expect("create_tile failed");
+        graph
+            .set_tile_root(
+                content_tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "PUBLIC — L5/L6 Content\nResource and content gate evaluated last."
+                            .to_string(),
+                        bounds: Rect::new(
+                            0.0,
+                            0.0,
+                            self.display_width * 0.5,
+                            self.display_height - 120.0,
+                        ),
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.05, 0.15, 0.05, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root failed");
+
+        let spec = SceneSpec {
+            name: "policy_arbitration_collision",
+            description: "Three agents compete across all per-frame policy levels simultaneously: \
+                          system.safety (L1, priority=0), agent.privacy (L2, priority=1), and \
+                          agent.content (L5/L6, priority=2). Validates per-frame evaluation order \
+                          L1→L2→L5→L6 per policy-arbitration/spec.md lines 194-199.",
+            expected_tab_count: 1,
+            expected_tile_count: 3,
+            has_hit_regions: false,
+            has_zones: false,
+        };
+
+        (graph, spec)
+    }
 }
 
 // ─── Graph extension: grant_lease_at ─────────────────────────────────────────
@@ -2846,12 +2914,12 @@ mod tests {
         }
     }
 
-    // ── Scene: empty ─────────────────────────────────────────────────────
+    // ── Scene: empty_scene ───────────────────────────────────────────────
 
     #[test]
     fn empty_scene_has_correct_structure() {
         let registry = TestSceneRegistry::new();
-        let (graph, spec) = registry.build("empty", ClockMs::FIXED).unwrap();
+        let (graph, spec) = registry.build("empty_scene", ClockMs::FIXED).unwrap();
 
         assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
         assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
@@ -2864,28 +2932,28 @@ mod tests {
     #[test]
     fn empty_scene_passes_all_layer0_invariants() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("empty", ClockMs::FIXED).unwrap();
-        assert_no_violations(&graph, "empty");
+        let (graph, _spec) = registry.build("empty_scene", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "empty_scene");
     }
 
-    // ── Scene: single_tile ────────────────────────────────────────────────
+    // ── Scene: single_tile_solid ──────────────────────────────────────────
 
     #[test]
     fn single_tile_scene_has_correct_structure() {
         let registry = TestSceneRegistry::new();
-        let (graph, spec) = registry.build("single_tile", ClockMs::FIXED).unwrap();
+        let (graph, spec) = registry.build("single_tile_solid", ClockMs::FIXED).unwrap();
 
         assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
         assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
-        assert!(graph.active_tab.is_some(), "single_tile must have an active tab");
-        assert_eq!(graph.leases.len(), 1, "single_tile must have exactly one lease");
-        assert_eq!(graph.nodes.len(), 1, "single_tile must have exactly one node");
+        assert!(graph.active_tab.is_some(), "single_tile_solid must have an active tab");
+        assert_eq!(graph.leases.len(), 1, "single_tile_solid must have exactly one lease");
+        assert_eq!(graph.nodes.len(), 1, "single_tile_solid must have exactly one node");
     }
 
     #[test]
     fn single_tile_scene_tile_has_text_root() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("single_tile", ClockMs::FIXED).unwrap();
+        let (graph, _spec) = registry.build("single_tile_solid", ClockMs::FIXED).unwrap();
 
         let tile = graph.tiles.values().next().unwrap();
         assert!(tile.root_node.is_some(), "tile must have a root node");
@@ -2896,7 +2964,7 @@ mod tests {
     #[test]
     fn single_tile_scene_tile_within_display() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("single_tile", ClockMs::FIXED).unwrap();
+        let (graph, _spec) = registry.build("single_tile_solid", ClockMs::FIXED).unwrap();
 
         let tile = graph.tiles.values().next().unwrap();
         assert!(
@@ -2908,26 +2976,30 @@ mod tests {
     #[test]
     fn single_tile_scene_passes_all_layer0_invariants() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("single_tile", ClockMs::FIXED).unwrap();
-        assert_no_violations(&graph, "single_tile");
+        let (graph, _spec) = registry.build("single_tile_solid", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "single_tile_solid");
     }
 
-    // ── Scene: two_tiles ──────────────────────────────────────────────────
+    // ── Scene: three_tiles_no_overlap ────────────────────────────────────
 
     #[test]
     fn two_tiles_scene_has_correct_structure() {
         let registry = TestSceneRegistry::new();
-        let (graph, spec) = registry.build("two_tiles", ClockMs::FIXED).unwrap();
+        let (graph, spec) = registry.build("three_tiles_no_overlap", ClockMs::FIXED).unwrap();
 
         assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
         assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
-        assert_eq!(graph.nodes.len(), 2, "two_tiles must have exactly two nodes");
+        assert_eq!(
+            graph.nodes.len(),
+            3,
+            "three_tiles_no_overlap must have exactly three nodes"
+        );
     }
 
     #[test]
     fn two_tiles_scene_has_one_hit_region() {
         let registry = TestSceneRegistry::new();
-        let (graph, spec) = registry.build("two_tiles", ClockMs::FIXED).unwrap();
+        let (graph, spec) = registry.build("three_tiles_no_overlap", ClockMs::FIXED).unwrap();
 
         let hit_region_count = graph
             .nodes
@@ -2935,7 +3007,11 @@ mod tests {
             .filter(|n| matches!(n.data, NodeData::HitRegion(_)))
             .count();
 
-        assert_eq!(hit_region_count, 1, "two_tiles must have exactly one hit region node");
+        assert_eq!(
+            hit_region_count,
+            1,
+            "three_tiles_no_overlap must have exactly one hit region node"
+        );
         assert_eq!(
             graph.hit_region_states.len(),
             1,
@@ -2947,40 +3023,48 @@ mod tests {
     #[test]
     fn two_tiles_scene_tiles_do_not_overlap() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("two_tiles", ClockMs::FIXED).unwrap();
+        let (graph, _spec) = registry.build("three_tiles_no_overlap", ClockMs::FIXED).unwrap();
 
         let tiles: Vec<_> = graph.tiles.values().collect();
-        assert_eq!(tiles.len(), 2, "expected exactly 2 tiles");
-        assert!(
-            !tiles[0].bounds.intersects(&tiles[1].bounds),
-            "two_tiles tiles must not overlap: {:?} vs {:?}",
-            tiles[0].bounds,
-            tiles[1].bounds,
-        );
+        assert_eq!(tiles.len(), 3, "expected exactly 3 tiles");
+        // Verify all pairs of tiles are non-overlapping
+        for i in 0..tiles.len() {
+            for j in (i + 1)..tiles.len() {
+                assert!(
+                    !tiles[i].bounds.intersects(&tiles[j].bounds),
+                    "tiles must not overlap: tile[{i}] {:?} vs tile[{j}] {:?}",
+                    tiles[i].bounds,
+                    tiles[j].bounds,
+                );
+            }
+        }
     }
 
     #[test]
     fn two_tiles_scene_z_orders_are_unique() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("two_tiles", ClockMs::FIXED).unwrap();
+        let (graph, _spec) = registry.build("three_tiles_no_overlap", ClockMs::FIXED).unwrap();
 
-        let tiles: Vec<_> = graph.tiles.values().collect();
-        assert_ne!(tiles[0].z_order, tiles[1].z_order, "z_orders must be unique");
+        let mut z_orders: Vec<u32> = graph.tiles.values().map(|t| t.z_order).collect();
+        z_orders.sort_unstable();
+        let before = z_orders.len();
+        z_orders.dedup();
+        assert_eq!(z_orders.len(), before, "all z_orders must be unique");
     }
 
     #[test]
     fn two_tiles_scene_passes_all_layer0_invariants() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("two_tiles", ClockMs::FIXED).unwrap();
-        assert_no_violations(&graph, "two_tiles");
+        let (graph, _spec) = registry.build("three_tiles_no_overlap", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "three_tiles_no_overlap");
     }
 
-    // ── Scene: max_tiles ──────────────────────────────────────────────────
+    // ── Scene: max_tiles_stress ───────────────────────────────────────────
 
     #[test]
     fn max_tiles_scene_has_correct_structure() {
         let registry = TestSceneRegistry::new();
-        let (graph, spec) = registry.build("max_tiles", ClockMs::FIXED).unwrap();
+        let (graph, spec) = registry.build("max_tiles_stress", ClockMs::FIXED).unwrap();
 
         assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
         assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
@@ -2995,7 +3079,7 @@ mod tests {
     #[test]
     fn max_tiles_scene_all_tiles_within_display() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("max_tiles", ClockMs::FIXED).unwrap();
+        let (graph, _spec) = registry.build("max_tiles_stress", ClockMs::FIXED).unwrap();
 
         let out_of_bounds: Vec<_> = graph
             .tiles
@@ -3013,7 +3097,7 @@ mod tests {
     #[test]
     fn max_tiles_scene_z_orders_all_unique() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("max_tiles", ClockMs::FIXED).unwrap();
+        let (graph, _spec) = registry.build("max_tiles_stress", ClockMs::FIXED).unwrap();
 
         let mut z_orders: Vec<u32> = graph.tiles.values().map(|t| t.z_order).collect();
         z_orders.sort_unstable();
@@ -3025,43 +3109,8 @@ mod tests {
     #[test]
     fn max_tiles_scene_passes_all_layer0_invariants() {
         let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("max_tiles", ClockMs::FIXED).unwrap();
-        assert_no_violations(&graph, "max_tiles");
-    }
-
-    // ── Scene: zone_test ──────────────────────────────────────────────────
-
-    #[test]
-    fn zone_test_scene_has_correct_structure() {
-        let registry = TestSceneRegistry::new();
-        let (graph, spec) = registry.build("zone_test", ClockMs::FIXED).unwrap();
-
-        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
-        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
-        assert!(spec.has_zones, "spec must declare has_zones = true");
-        assert_eq!(graph.zone_registry.zones.len(), 2, "must have 2 registered zones");
-    }
-
-    #[test]
-    fn zone_test_scene_zone_names_are_correct() {
-        let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("zone_test", ClockMs::FIXED).unwrap();
-
-        assert!(
-            graph.zone_registry.zones.contains_key("subtitle"),
-            "must have subtitle zone"
-        );
-        assert!(
-            graph.zone_registry.zones.contains_key("status_bar"),
-            "must have status_bar zone"
-        );
-    }
-
-    #[test]
-    fn zone_test_scene_passes_all_layer0_invariants() {
-        let registry = TestSceneRegistry::new();
-        let (graph, _spec) = registry.build("zone_test", ClockMs::FIXED).unwrap();
-        assert_no_violations(&graph, "zone_test");
+        let (graph, _spec) = registry.build("max_tiles_stress", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "max_tiles_stress");
     }
 
     // ── Scene: overlapping_tiles_zorder ──────────────────────────────────
@@ -3819,6 +3868,65 @@ mod tests {
         assert_no_violations(&graph, "policy_matrix_basic");
     }
 
+    // ── Scene: policy_arbitration_collision ───────────────────────────────
+
+    #[test]
+    fn policy_arbitration_collision_builds_without_error() {
+        let registry = TestSceneRegistry::new();
+        let result = registry.build("policy_arbitration_collision", ClockMs::FIXED);
+        assert!(result.is_some(), "policy_arbitration_collision must build");
+    }
+
+    #[test]
+    fn policy_arbitration_collision_has_correct_structure() {
+        let registry = TestSceneRegistry::new();
+        let (graph, spec) =
+            registry.build("policy_arbitration_collision", ClockMs::FIXED).unwrap();
+        assert_eq!(graph.tabs.len(), spec.expected_tab_count, "tab count");
+        assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
+        assert_eq!(spec.expected_tile_count, 3, "must have 3 tiles (one per policy level group)");
+        assert!(!spec.has_zones, "no zones expected in this scene");
+    }
+
+    #[test]
+    fn policy_arbitration_collision_has_three_distinct_priorities() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("policy_arbitration_collision", ClockMs::FIXED).unwrap();
+        let mut priorities: Vec<u32> = graph.leases.values().map(|l| l.priority).collect();
+        priorities.sort_unstable();
+        priorities.dedup();
+        assert_eq!(
+            priorities.len(),
+            3,
+            "must have 3 distinct lease priorities (0, 1, 2)"
+        );
+        assert_eq!(priorities[0], 0, "must have a priority-0 (system/safety) lease");
+        assert_eq!(priorities[1], 1, "must have a priority-1 (privacy) lease");
+        assert_eq!(priorities[2], 2, "must have a priority-2 (content) lease");
+    }
+
+    #[test]
+    fn policy_arbitration_collision_has_system_safety_lease() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("policy_arbitration_collision", ClockMs::FIXED).unwrap();
+        let system_lease = graph
+            .leases
+            .values()
+            .find(|l| l.namespace == "system.safety")
+            .expect("must have system.safety lease");
+        assert_eq!(system_lease.priority, 0, "system.safety lease must have priority 0");
+    }
+
+    #[test]
+    fn policy_arbitration_collision_passes_layer0_invariants() {
+        let registry = TestSceneRegistry::new();
+        let (graph, _spec) =
+            registry.build("policy_arbitration_collision", ClockMs::FIXED).unwrap();
+        assert_no_violations(&graph, "policy_arbitration_collision");
+    }
+
     // ── scene_names() has exactly 25 entries ──────────────────────────────
 
     #[test]
@@ -3876,8 +3984,8 @@ mod tests {
         let t1 = ClockMs(1_000_000_000_000);
         let t2 = ClockMs(2_000_000_000_000);
 
-        let (graph1, _) = registry.build("single_tile", t1).unwrap();
-        let (graph2, _) = registry.build("single_tile", t2).unwrap();
+        let (graph1, _) = registry.build("single_tile_solid", t1).unwrap();
+        let (graph2, _) = registry.build("single_tile_solid", t2).unwrap();
 
         let lease1 = graph1.leases.values().next().unwrap();
         let lease2 = graph2.leases.values().next().unwrap();
