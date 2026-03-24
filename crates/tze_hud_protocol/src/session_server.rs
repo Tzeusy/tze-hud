@@ -1147,14 +1147,11 @@ async fn handle_session_init(
         policy.partition_capabilities(&init.requested_capabilities);
 
     // ── Step 4: Subscription filtering (RFC 0005 §7.1) ──────────────────────
-    // Initial subscriptions are filtered against the agent's AUTHORIZATION POLICY,
-    // not just the explicitly requested capabilities. An unrestricted PSK agent can
-    // subscribe to any category even if it didn't explicitly request the governing
-    // capability in `requested_capabilities`.
-    //
-    // We represent the policy's authorization scope: for unrestricted PSK agents
-    // we pass ["*"] as a sentinel to filter_subscriptions to allow everything.
-    // For restricted agents we would pass the granted_capabilities list.
+    // Initial subscriptions are filtered against the agent's explicitly granted
+    // capabilities. Agents must include the required capability in their
+    // `requested_capabilities` to subscribe to capability-gated categories
+    // (e.g. `access_input_events` for INPUT_EVENTS, `read_scene_topology` for
+    // SCENE_TOPOLOGY). Mandatory categories are always active.
     let policy_caps = if policy.is_unrestricted() {
         vec!["*".to_string()]
     } else {
@@ -1162,7 +1159,7 @@ async fn handle_session_init(
     };
     let sub_result = subscriptions::filter_subscriptions(
         &init.initial_subscriptions,
-        &policy_caps,
+        &granted_capabilities,
     );
 
     let session_id = uuid::Uuid::now_v7().to_string();
@@ -4402,23 +4399,23 @@ mod tests {
         }
     }
 
-    /// Scenario: PSK (unrestricted) agent successfully subscribes to INPUT_EVENTS (RFC 0005 §7.1)
-    /// WHEN a PSK-authenticated agent requests INPUT_EVENTS subscription,
+    /// Scenario: PSK agent with access_input_events capability successfully subscribes to
+    /// INPUT_EVENTS (RFC 0005 §7.1).
+    /// WHEN a PSK-authenticated agent requests INPUT_EVENTS subscription AND includes
+    /// access_input_events in requested_capabilities,
     /// THEN SessionEstablished includes INPUT_EVENTS in active_subscriptions and
     /// denied_subscriptions is empty.
     ///
-    /// PSK sessions carry an unrestricted policy (policy_capabilities = ["*"]), so they
-    /// can subscribe to any category regardless of what was in requested_capabilities.
-    /// The denied-subscription path is exercised in auth module unit tests (filter_subscriptions).
+    /// Subscription gating uses the agent's explicitly granted capabilities (RFC 0005 §7.1).
+    /// Agents must request the required capability to subscribe to gated categories.
     #[tokio::test]
-    async fn test_psk_unrestricted_allows_input_events_subscription() {
+    async fn test_psk_with_capability_allows_input_events_subscription() {
         let (mut client, _server) = setup_test().await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        // PSK agent requesting INPUT_EVENTS subscription (no specific capability needed
-        // since PSK is unrestricted)
+        // PSK agent requesting INPUT_EVENTS subscription WITH the required capability
         tx.send(ClientMessage {
             sequence: 1,
             timestamp_wall_us: now_wall_us(),
@@ -4426,7 +4423,7 @@ mod tests {
                 agent_id: "sub-test-agent".to_string(),
                 agent_display_name: "sub-test-agent".to_string(),
                 pre_shared_key: "test-key".to_string(),
-                requested_capabilities: Vec::new(), // no capabilities requested
+                requested_capabilities: vec!["access_input_events".to_string()],
                 initial_subscriptions: vec!["INPUT_EVENTS".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: 0,
@@ -4442,17 +4439,17 @@ mod tests {
         let msg = response_stream.next().await.unwrap().unwrap();
         match &msg.payload {
             Some(ServerPayload::SessionEstablished(established)) => {
-                // PSK agent (unrestricted policy) should be able to subscribe to INPUT_EVENTS
+                // Agent with access_input_events capability should have INPUT_EVENTS active
                 assert!(
                     established.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
-                    "PSK unrestricted agent should have INPUT_EVENTS in active_subscriptions; \
+                    "Agent with access_input_events should have INPUT_EVENTS in active_subscriptions; \
                      active={:?}, denied={:?}",
                     established.active_subscriptions,
                     established.denied_subscriptions
                 );
                 assert!(
                     established.denied_subscriptions.is_empty(),
-                    "PSK agent should have no denied subscriptions"
+                    "Agent with required capability should have no denied subscriptions"
                 );
             }
             other => panic!("Expected SessionEstablished, got: {other:?}"),
@@ -4994,7 +4991,12 @@ mod tests {
                 agent_id: "sub-resume-agent".to_string(),
                 agent_display_name: "sub-resume-agent".to_string(),
                 pre_shared_key: "test-key".to_string(),
-                requested_capabilities: vec!["create_tile".to_string()],
+                // Include required capabilities for both subscriptions
+                requested_capabilities: vec![
+                    "create_tile".to_string(),
+                    "read_scene_topology".to_string(),
+                    "access_input_events".to_string(),
+                ],
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string(), "INPUT_EVENTS".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_wall_us(),
