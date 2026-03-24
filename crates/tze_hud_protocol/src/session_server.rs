@@ -863,7 +863,9 @@ async fn handle_session_resume(
                 accepted: true,
                 new_session_token: new_resume_token.clone(),
                 new_server_sequence: seq,
-                negotiated_protocol_version: 1,
+                // Resume always runs at the highest runtime-supported version.
+                // version = major * 1000 + minor; v1.1 = 1001.
+                negotiated_protocol_version: crate::auth::RUNTIME_MAX_VERSION,
                 granted_capabilities: Vec::new(),
                 error: String::new(),
                 active_subscriptions: Vec::new(),
@@ -1376,11 +1378,15 @@ async fn handle_capability_request(
 
     match policy.evaluate_capability_request(&req.capabilities) {
         Ok(granted) => {
-            // Update session capabilities with newly granted ones.
+            // Compute newly granted capabilities (exclude those already held).
+            // CapabilityNotice.granted must contain only *newly* granted capabilities
+            // so clients don't misinterpret re-requests as fresh grants.
             let seq = session.next_server_seq();
+            let mut newly_granted: Vec<String> = Vec::new();
             for cap in &granted {
                 if !session.capabilities.contains(cap) {
                     session.capabilities.push(cap.clone());
+                    newly_granted.push(cap.clone());
                 }
             }
             let _ = tx
@@ -1388,7 +1394,7 @@ async fn handle_capability_request(
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::CapabilityNotice(CapabilityNotice {
-                        granted,
+                        granted: newly_granted,
                         revoked: Vec::new(),
                         reason: req.reason.clone(),
                         effective_at_server_seq: seq,
@@ -1878,7 +1884,8 @@ mod tests {
             Some(ServerPayload::SessionResumeResult(result)) => {
                 assert!(result.accepted, "expected resume to be accepted");
                 assert!(!result.new_session_token.is_empty());
-                assert_eq!(result.negotiated_protocol_version, 1);
+                // version = major * 1000 + minor; runtime max = v1.1 = 1001
+                assert_eq!(result.negotiated_protocol_version, crate::auth::RUNTIME_MAX_VERSION);
             }
             other => panic!("Expected SessionResumeResult on resume, got: {other:?}"),
         }
@@ -2828,26 +2835,16 @@ mod tests {
         }
     }
 
-    /// Scenario: Subscription denied for missing capability (RFC 0005 §7.1)
-    /// WHEN agent requests INPUT_EVENTS subscription but lacks access_input_events capability,
-    /// THEN SessionEstablished includes INPUT_EVENTS in denied_subscriptions.
+    /// Scenario: PSK (unrestricted) agent successfully subscribes to INPUT_EVENTS (RFC 0005 §7.1)
+    /// WHEN a PSK-authenticated agent requests INPUT_EVENTS subscription,
+    /// THEN SessionEstablished includes INPUT_EVENTS in active_subscriptions and
+    /// denied_subscriptions is empty.
     ///
-    /// This test creates a restricted agent (not using the default PSK handshake helper)
-    /// to simulate a guest/restricted agent.
+    /// PSK sessions carry an unrestricted policy (policy_capabilities = ["*"]), so they
+    /// can subscribe to any category regardless of what was in requested_capabilities.
+    /// The denied-subscription path is exercised in auth module unit tests (filter_subscriptions).
     #[tokio::test]
-    async fn test_subscription_denied_for_missing_capability() {
-        // Set up a server with a restricted capability policy.
-        // We test this by injecting a "guest" policy rather than PSK.
-        // Since v1 PSK agents are unrestricted, we test the subscription gating
-        // by verifying that INPUT_EVENTS (requires access_input_events) is denied
-        // when the agent explicitly doesn't request that capability but does request
-        // INPUT_EVENTS subscription.
-        //
-        // The subscription check uses policy_capabilities, which is ["*"] for PSK
-        // sessions — meaning PSK agents can always subscribe to anything.
-        // To test denied subscriptions, we verify the filter_subscriptions logic
-        // directly in the auth module tests, and here we just confirm that a PSK
-        // session with unrestricted policy correctly allows the subscription.
+    async fn test_psk_unrestricted_allows_input_events_subscription() {
         let (mut client, _server) = setup_test().await;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
@@ -2934,27 +2931,16 @@ mod tests {
         }
     }
 
-    /// Scenario: Unauthorized capability denied (RFC 0005 §5.3)
-    /// WHEN an agent requests capabilities it is not authorized for,
-    /// THEN runtime denies with RuntimeError(PERMISSION_DENIED).
+    /// Scenario: PSK (unrestricted) agent receives CapabilityNotice for any capability (RFC 0005 §5.3)
+    /// WHEN a PSK-authenticated agent requests any capability mid-session,
+    /// THEN runtime responds with CapabilityNotice (not RuntimeError).
     ///
-    /// Note: PSK agents in v1 are unrestricted, so we test via a restricted policy.
-    /// This integration test verifies the RuntimeError structure is correct.
-    /// The policy enforcement is further tested in the auth module unit tests.
+    /// PSK sessions in v1 carry an unrestricted policy, so no capability request
+    /// can be denied via this integration path. The denied path (PERMISSION_DENIED)
+    /// is exercised in test_capability_request_denied_for_guest_session and
+    /// test_capability_request_partial_grant_denied_entirely below.
     #[tokio::test]
-    async fn test_mid_session_capability_request_denied() {
-        // For this test we need a restricted session. Since PSK sessions are
-        // unrestricted in v1, we test the denied path by using a guest session
-        // (no policy_capabilities). We set up a session manually and send the
-        // CapabilityRequest through the server.
-        //
-        // Since the integration test path always uses PSK (unrestricted), this
-        // scenario is best tested via the handle_capability_request unit test below.
-        // Here we verify the RuntimeError structure when denial happens.
-
-        // To force a guest policy, we use an empty policy_capabilities session.
-        // This is not directly testable via the PSK path in integration tests,
-        // but we can verify the CapabilityNotice is correctly returned for authorized caps.
+    async fn test_mid_session_capability_request_unrestricted_succeeds() {
         let (mut client, _server) = setup_test().await;
         let (tx, _init_messages, mut stream) =
             handshake(&mut client, "deny-test-agent", "test-key").await;

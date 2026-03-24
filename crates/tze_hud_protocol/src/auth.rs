@@ -24,6 +24,25 @@ use crate::proto::session::{
     auth_credential::Credential, AuthCredential,
 };
 
+// Constant-time byte-level equality to resist timing side-channels.
+// `subtle` is not in scope for v1; we use a manual xor-fold that is
+// branch-free across the key bytes and a fixed-time length check.
+//
+// This is NOT a cryptographic HMAC; for v1 PSK the surface is local
+// gRPC only. Replace with subtle::ConstantTimeEq when the crate is added.
+fn ct_eq_str(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 // ─── Subscription capability requirements ────────────────────────────────────
 
 /// Returns the capability required to subscribe to the given subscription
@@ -64,7 +83,8 @@ pub enum AuthResult {
 pub fn evaluate_auth_credential(credential: &AuthCredential, psk: &str) -> AuthResult {
     match &credential.credential {
         Some(Credential::PreSharedKey(cred)) => {
-            if cred.key == psk {
+            // Use branch-free comparison to resist timing side-channels.
+            if ct_eq_str(&cred.key, psk) {
                 AuthResult::Accepted
             } else {
                 AuthResult::Failed("pre-shared key mismatch".to_string())
@@ -113,7 +133,8 @@ pub fn authenticate_session_init(
     }
 
     // Fall back to the deprecated plain-string PSK field.
-    if legacy_psk == server_psk {
+    // Use branch-free comparison to resist timing side-channels.
+    if ct_eq_str(legacy_psk, server_psk) {
         AuthResult::Accepted
     } else {
         AuthResult::Failed("invalid pre-shared key".to_string())
@@ -187,8 +208,8 @@ impl CapabilityPolicy {
     /// Used for PSK-authenticated agents in v1 where the PSK holder is
     /// implicitly trusted for all capabilities.
     pub fn unrestricted() -> Self {
-        // Sentinel: empty `allowed` + `is_unrestricted = true`.
-        // We use a separate field approach through a special "allow-all" marker.
+        // Sentinel: `"*"` in `allowed` indicates an allow-all policy.
+        // `is_unrestricted()` and `permits()` both rely on this `"*"` marker.
         Self { allowed: vec!["*".to_string()] }
     }
 
@@ -520,14 +541,14 @@ mod tests {
     fn test_partition_capabilities() {
         let policy = CapabilityPolicy::new(vec![
             "read_telemetry".to_string(),
-            "create_tile".to_string(),
+            "create_tiles".to_string(), // canonical: plural
         ]);
         let (granted, denied) = policy.partition_capabilities(&[
             "read_telemetry".to_string(),
             "overlay_privileges".to_string(),
-            "create_tile".to_string(),
+            "create_tiles".to_string(), // canonical: plural
         ]);
-        assert_eq!(granted, vec!["read_telemetry", "create_tile"]);
+        assert_eq!(granted, vec!["read_telemetry", "create_tiles"]);
         assert_eq!(denied, vec!["overlay_privileges"]);
     }
 
