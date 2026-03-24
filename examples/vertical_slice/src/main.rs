@@ -349,6 +349,7 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 x: 550.0,
                 y: 150.0,
                 kind: tze_hud_input::PointerEventKind::Move,
+                device_id: 0,
                 timestamp: None,
             },
             &mut state.scene,
@@ -374,6 +375,7 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 x: 560.0,
                 y: 160.0,
                 kind: tze_hud_input::PointerEventKind::Move,
+                device_id: 0,
                 timestamp: None,
             },
             &mut state.scene,
@@ -395,6 +397,7 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 x: 550.0,
                 y: 150.0,
                 kind: tze_hud_input::PointerEventKind::Down,
+                device_id: 0,
                 timestamp: None,
             },
             &mut state.scene,
@@ -423,6 +426,7 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 x: 550.0,
                 y: 150.0,
                 kind: tze_hud_input::PointerEventKind::Up,
+                device_id: 0,
                 timestamp: None,
             },
             &mut state.scene,
@@ -880,7 +884,7 @@ mod tests {
 
         // Hit inside
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, timestamp: None },
+            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
             &mut scene,
         );
         assert_eq!(
@@ -895,7 +899,7 @@ mod tests {
 
         // Hit outside
         let result = processor.process(
-            &PointerEvent { x: 10.0, y: 10.0, kind: PointerEventKind::Down, timestamp: None },
+            &PointerEvent { x: 10.0, y: 10.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
             &mut scene,
         );
         assert!(result.hit.is_none());
@@ -917,7 +921,7 @@ mod tests {
 
         // Press on button
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Down, timestamp: None },
+            &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
             &mut scene,
         );
 
@@ -928,7 +932,7 @@ mod tests {
 
         // Release on button (activate)
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Up, timestamp: None },
+            &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Up, device_id: 0, timestamp: None },
             &mut scene,
         );
 
@@ -955,7 +959,7 @@ mod tests {
 
         for _ in 0..30 {
             let result = processor.process(
-                &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Down, timestamp: None },
+                &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
                 &mut scene,
             );
             bucket.record(result.local_ack_us);
