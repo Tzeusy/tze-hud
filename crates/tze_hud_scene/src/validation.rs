@@ -186,6 +186,12 @@ impl ValidationErrorCode {
             ValidationError::NodeNotFound { .. } => Self::NodeNotFound,
             ValidationError::DuplicateDisplayOrder { .. } => Self::DuplicateDisplayOrder,
             ValidationError::DuplicateId { .. } => Self::DuplicateId,
+            // BoundsOutOfRange covers two cases:
+            // - invalid dimensions (width/height <= 0.0) → BoundsInvalid
+            // - outside display area → BoundsOutOfRange
+            ValidationError::BoundsOutOfRange { reason } if reason.contains("must be > 0.0") => {
+                Self::BoundsInvalid
+            }
             ValidationError::BoundsOutOfRange { .. } => Self::BoundsOutOfRange,
             ValidationError::NodeCountExceeded { .. } => Self::NodeCountExceeded,
             ValidationError::ResourceNotFound { .. } => Self::ResourceNotFound,

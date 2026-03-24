@@ -55,7 +55,8 @@ pub use graph::{
     // Node data validation
     validate_text_markdown_node_data,
 };
-pub use mutation::{MutationBatch, MutationResult, SceneMutation, TimingHints, MAX_BATCH_SIZE};
+pub use mutation::{MutationBatch, MutationResult, SceneMutation, MAX_BATCH_SIZE};
+pub use mutation::TimingHints as MutationTimingHints;
 pub use diff::{SceneDiff, DiffEntry};
 pub use validation::{
     BatchRejected, BatchValidationError, ValidationError, ValidationErrorCode,

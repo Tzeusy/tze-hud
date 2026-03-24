@@ -205,12 +205,20 @@ impl SceneMutation {
     pub fn type_name(&self) -> &'static str {
         match self {
             SceneMutation::CreateTab { .. } => "CreateTab",
+            SceneMutation::DeleteTab { .. } => "DeleteTab",
+            SceneMutation::RenameTab { .. } => "RenameTab",
+            SceneMutation::ReorderTab { .. } => "ReorderTab",
             SceneMutation::SwitchActiveTab { .. } => "SwitchActiveTab",
             SceneMutation::CreateTile { .. } => "CreateTile",
+            SceneMutation::UpdateTileBounds { .. } => "UpdateTileBounds",
+            SceneMutation::UpdateTileZOrder { .. } => "UpdateTileZOrder",
+            SceneMutation::UpdateTileOpacity { .. } => "UpdateTileOpacity",
+            SceneMutation::UpdateTileInputMode { .. } => "UpdateTileInputMode",
+            SceneMutation::UpdateTileSyncGroup { .. } => "UpdateTileSyncGroup",
+            SceneMutation::UpdateTileExpiry { .. } => "UpdateTileExpiry",
+            SceneMutation::DeleteTile { .. } => "DeleteTile",
             SceneMutation::SetTileRoot { .. } => "SetTileRoot",
             SceneMutation::AddNode { .. } => "AddNode",
-            SceneMutation::UpdateTileBounds { .. } => "UpdateTileBounds",
-            SceneMutation::DeleteTile { .. } => "DeleteTile",
             SceneMutation::PublishToZone { .. } => "PublishToZone",
             SceneMutation::ClearZone { .. } => "ClearZone",
             SceneMutation::CreateSyncGroup { .. } => "CreateSyncGroup",
@@ -485,13 +493,21 @@ impl SceneGraph {
     ///
     /// Returns `Ok(())` if the subtree is acyclic, or `Err(node_id)` identifying the
     /// node that creates the cycle.
+    ///
+    /// # Algorithm
+    ///
+    /// `visited` tracks the current DFS path (nodes on the active recursion stack).
+    /// A node is removed from `visited` when the recursion backtracks from it, so
+    /// shared child nodes (valid in a DAG) are not incorrectly flagged as cycles.
+    /// Only true back-edges (node encountered while still on the active path) are
+    /// rejected as cycles.
     fn detect_cycle(
         &self,
         node_id: SceneId,
         visited: &mut std::collections::HashSet<SceneId>,
     ) -> Result<(), SceneId> {
         if !visited.insert(node_id) {
-            // Visited twice in this path → cycle
+            // node_id is already on the active DFS path → back-edge → cycle
             return Err(node_id);
         }
         if let Some(node) = self.nodes.get(&node_id) {
@@ -499,6 +515,9 @@ impl SceneGraph {
                 self.detect_cycle(child_id, visited)?;
             }
         }
+        // Backtrack: remove from path so sibling branches can share this node
+        // without being falsely flagged as cycles.
+        visited.remove(&node_id);
         Ok(())
     }
 
@@ -724,6 +743,7 @@ mod tests {
         assert!(result.rejection.is_some());
         let rej = result.rejection.unwrap();
         assert_eq!(rej.errors[0].mutation_index, 1);
+        // Zero-size bounds is a BoundsInvalid violation (width/height must be > 0.0)
         assert_eq!(rej.errors[0].code, ValidationErrorCode::BoundsInvalid);
     }
 
