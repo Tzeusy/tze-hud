@@ -90,11 +90,14 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
                 proto::ImageFitModeProto::ImageFitModeFill => ImageFitMode::Fill,
                 proto::ImageFitModeProto::ImageFitModeScaleDown => ImageFitMode::ScaleDown,
             };
+            // RS-4: resource_id is 32 raw bytes on the wire (NOT hex-encoded).
+            let resource_id = ResourceId::from_slice(&si.resource_id)
+                .unwrap_or_else(|| ResourceId::from_bytes([0u8; 32]));
             NodeData::StaticImage(StaticImageNode {
-                image_data: si.image_data.clone(),
+                resource_id,
                 width: si.width,
                 height: si.height,
-                content_hash: si.content_hash.clone(),
+                decoded_bytes: si.decoded_bytes as usize,
                 fit_mode,
                 bounds,
             })
@@ -288,10 +291,11 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
                 ImageFitMode::ScaleDown => proto::ImageFitModeProto::ImageFitModeScaleDown as i32,
             };
             Some(proto::node_proto::Data::StaticImage(proto::StaticImageNodeProto {
-                image_data: si.image_data.clone(),
+                // RS-4: wire format is 32 raw bytes (not hex).
+                resource_id: si.resource_id.as_bytes().to_vec(),
                 width: si.width,
                 height: si.height,
-                content_hash: si.content_hash.clone(),
+                decoded_bytes: si.decoded_bytes as u64,
                 fit_mode,
                 bounds: Some(proto::Rect { x: si.bounds.x, y: si.bounds.y, width: si.bounds.width, height: si.bounds.height }),
             }))
@@ -368,17 +372,17 @@ mod tests {
         assert!(proto_to_resource_id(&bad).is_none());
     }
 
+    // RS-4: StaticImageNode uses resource_id + decoded_bytes; no raw blob.
     fn make_static_image_node(fit_mode: ImageFitMode) -> Node {
-        let pixel_count = 4u32 * 4u32;
-        let image_data: Vec<u8> = (0..pixel_count).flat_map(|_| [255u8, 128, 0, 255]).collect();
+        let resource_id = ResourceId::of(b"4x4 test image resource");
         Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data,
+                resource_id,
                 width: 4,
                 height: 4,
-                content_hash: "deadbeef".to_string(),
+                decoded_bytes: 4 * 4 * 4, // 4×4 RGBA8
                 fit_mode,
                 bounds: Rect::new(10.0, 20.0, 80.0, 60.0),
             }),
@@ -394,11 +398,14 @@ mod tests {
         if let NodeData::StaticImage(si) = &restored.data {
             assert_eq!(si.width, 4);
             assert_eq!(si.height, 4);
-            assert_eq!(si.content_hash, "deadbeef");
+            assert_eq!(si.decoded_bytes, 4 * 4 * 4);
             assert_eq!(si.fit_mode, ImageFitMode::Contain);
             assert_eq!(si.bounds.x, 10.0);
             assert_eq!(si.bounds.y, 20.0);
-            assert_eq!(si.image_data.len(), 4 * 4 * 4);
+            // resource_id must survive proto roundtrip as 32 raw bytes.
+            let original_id = ResourceId::of(b"4x4 test image resource");
+            assert_eq!(si.resource_id, original_id,
+                "resource_id must be preserved across proto roundtrip");
         } else {
             panic!("expected StaticImage variant after proto roundtrip");
         }
@@ -425,26 +432,36 @@ mod tests {
     }
 
     #[test]
-    fn test_static_image_proto_preserves_pixel_data() {
-        // Verify pixel data survives proto encode/decode.
-        let image_data: Vec<u8> = (0..16u8).flat_map(|i| [i, i * 2, 255 - i, 128]).collect();
+    fn test_static_image_proto_preserves_resource_id() {
+        // RS-4: Verify ResourceId (32 bytes) survives proto encode/decode as raw bytes.
+        let resource_id = ResourceId::of(b"some unique resource bytes for testing");
         let node = Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data: image_data.clone(),
+                resource_id,
                 width: 4,
                 height: 1,
-                content_hash: "test-hash".to_string(),
+                decoded_bytes: 4 * 1 * 4, // 4×1 RGBA8
                 fit_mode: ImageFitMode::Fill,
                 bounds: Rect::new(0.0, 0.0, 100.0, 25.0),
             }),
         };
 
         let proto = scene_node_to_proto(&node);
+
+        // The wire must carry raw 32 bytes (not hex).
+        if let Some(crate::proto::node_proto::Data::StaticImage(ref p)) = proto.data {
+            assert_eq!(p.resource_id.len(), 32,
+                "wire format must be 32 raw bytes (RS-4: not hex)");
+            assert_eq!(&p.resource_id[..], resource_id.as_bytes(),
+                "wire bytes must match the raw BLAKE3 digest");
+        }
+
         let restored = proto_node_to_scene(&proto).unwrap();
         if let NodeData::StaticImage(si) = &restored.data {
-            assert_eq!(si.image_data, image_data);
+            assert_eq!(si.resource_id, resource_id,
+                "ResourceId must survive proto roundtrip");
         } else {
             panic!("wrong variant");
         }

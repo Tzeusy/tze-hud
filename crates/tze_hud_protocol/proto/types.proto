@@ -74,14 +74,20 @@ enum ImageFitModeProto {
   IMAGE_FIT_MODE_SCALE_DOWN  = 4;  // Like Contain but never scale up
 }
 
-// A static image node carrying raw RGBA8 pixel data.
+// A static image node referencing a resource by content-addressed identity.
+//
+// Per RS-4 (rig-6l03) ephemerality contract: scene messages carry only the
+// ResourceId reference (32 raw bytes).  Raw pixel data is NOT embedded.
+// Agents upload resources via ResourceUploadStart before creating image nodes.
 message StaticImageNodeProto {
-  // Raw RGBA8 pixel data (width * height * 4 bytes).
-  bytes  image_data    = 1;
+  // BLAKE3 hash of the raw resource bytes (32 bytes).
+  // Wire format: raw bytes (NOT hex-encoded).
+  bytes  resource_id   = 1;
   uint32 width         = 2;
   uint32 height        = 3;
-  // SHA-256 hex string for content-addressed deduplication.
-  string content_hash  = 4;
+  // Decoded in-memory size in bytes (for budget accounting).
+  // Set by the runtime when confirming the mutation; clients may send 0.
+  uint64 decoded_bytes = 4;
   ImageFitModeProto fit_mode = 5;
   Rect   bounds        = 6;
 }

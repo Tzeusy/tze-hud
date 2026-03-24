@@ -991,7 +991,7 @@ impl SceneGraph {
         match self.nodes.get(&node_id) {
             Some(node) => {
                 let self_bytes = match &node.data {
-                    NodeData::StaticImage(img) => img.image_data.len() as u64,
+                    NodeData::StaticImage(img) => img.decoded_bytes as u64,
                     _ => 0,
                 };
                 self_bytes
@@ -1034,7 +1034,7 @@ impl SceneGraph {
     /// Count texture bytes in a node (not yet inserted into the graph).
     fn count_texture_bytes_in_node(node: &Node) -> u64 {
         match &node.data {
-            NodeData::StaticImage(img) => img.image_data.len() as u64,
+            NodeData::StaticImage(img) => img.decoded_bytes as u64,
             _ => 0,
         }
     }
@@ -3070,13 +3070,19 @@ mod tests {
 
     // ─── StaticImageNode tests ────────────────────────────────────────────
 
-    fn make_test_image(w: u32, h: u32) -> (Vec<u8>, String) {
-        // Solid red RGBA8 image.
-        let data: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 0, 255]).collect();
-        // Simple content hash: hex-encoded byte sum (not SHA-256 but sufficient for unit tests).
-        let sum: u64 = data.iter().map(|b| *b as u64).sum();
-        let hash = format!("{:016x}", sum);
-        (data, hash)
+    /// Build a test `ResourceId` and decoded size for a w×h RGBA8 image.
+    ///
+    /// Per RS-4 ephemerality contract, `StaticImageNode` carries only the
+    /// content-addressed `ResourceId` and the decoded byte count for budget
+    /// accounting — no raw pixel data is embedded in the scene graph.
+    fn make_test_image_resource(w: u32, h: u32) -> (ResourceId, usize) {
+        // Compute a deterministic ResourceId from the dimensions (as a stand-in
+        // for "the BLAKE3 hash of the actual pixel bytes").  In production this
+        // would be the ResourceId returned by the resource store after upload.
+        let fake_bytes: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 0, 255]).collect();
+        let resource_id = ResourceId::of(&fake_bytes);
+        let decoded_bytes = (w * h * 4) as usize;
+        (resource_id, decoded_bytes)
     }
 
     #[test]
@@ -3088,15 +3094,15 @@ mod tests {
             .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 300.0), 1)
             .unwrap();
 
-        let (img_data, hash) = make_test_image(64, 48);
+        let (resource_id, decoded_bytes) = make_test_image_resource(64, 48);
         let node = Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data: img_data.clone(),
+                resource_id,
                 width: 64,
                 height: 48,
-                content_hash: hash.clone(),
+                decoded_bytes,
                 fit_mode: ImageFitMode::Contain,
                 bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
             }),
@@ -3107,11 +3113,11 @@ mod tests {
 
         let stored = scene.nodes.get(&node.id).unwrap();
         if let NodeData::StaticImage(si) = &stored.data {
+            assert_eq!(si.resource_id, resource_id);
             assert_eq!(si.width, 64);
             assert_eq!(si.height, 48);
-            assert_eq!(si.content_hash, hash);
+            assert_eq!(si.decoded_bytes, 64 * 48 * 4);
             assert_eq!(si.fit_mode, ImageFitMode::Contain);
-            assert_eq!(si.image_data.len(), 64 * 48 * 4);
         } else {
             panic!("expected StaticImage node data");
         }
@@ -3120,25 +3126,31 @@ mod tests {
     #[test]
     fn test_static_image_node_all_fit_modes() {
         // Verify all ImageFitMode variants are constructable and round-trip through JSON.
+        let (resource_id, decoded_bytes) = make_test_image_resource(4, 4);
         for fit_mode in [
             ImageFitMode::Contain,
             ImageFitMode::Cover,
             ImageFitMode::Fill,
             ImageFitMode::ScaleDown,
         ] {
-            let (img_data, hash) = make_test_image(4, 4);
             let node_data = NodeData::StaticImage(StaticImageNode {
-                image_data: img_data,
+                resource_id,
                 width: 4,
                 height: 4,
-                content_hash: hash,
+                decoded_bytes,
                 fit_mode,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             });
             let json = serde_json::to_string(&node_data).unwrap();
+            // Acceptance (RS-4): snapshot must NOT contain raw blob data.
+            assert!(
+                !json.contains("image_data"),
+                "snapshot JSON must not contain image_data blob"
+            );
             let restored: NodeData = serde_json::from_str(&json).unwrap();
             if let NodeData::StaticImage(si) = restored {
                 assert_eq!(si.fit_mode, fit_mode);
+                assert_eq!(si.resource_id, resource_id);
             } else {
                 panic!("wrong variant after JSON roundtrip");
             }
@@ -3154,15 +3166,15 @@ mod tests {
             .create_tile(tab_id, "agent", lease_id, Rect::new(10.0, 10.0, 200.0, 150.0), 1)
             .unwrap();
 
-        let (img_data, hash) = make_test_image(16, 16);
+        let (resource_id, decoded_bytes) = make_test_image_resource(16, 16);
         let node = Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data: img_data,
+                resource_id,
                 width: 16,
                 height: 16,
-                content_hash: hash.clone(),
+                decoded_bytes,
                 fit_mode: ImageFitMode::Cover,
                 bounds: Rect::new(0.0, 0.0, 200.0, 150.0),
             }),
@@ -3170,17 +3182,26 @@ mod tests {
         scene.set_tile_root(tile_id, node).unwrap();
 
         let json = scene.snapshot_json().unwrap();
+
+        // Acceptance (RS-4): scene snapshot includes ResourceId references but NOT blob data.
+        // The JSON must not contain raw pixel data.
+        assert!(
+            !json.contains("image_data"),
+            "snapshot JSON must not embed raw image blob data (RS-4 ephemerality contract)"
+        );
+
         let restored = SceneGraph::from_json(&json).unwrap();
 
         assert_eq!(scene.node_count(), restored.node_count());
         // Verify the node data survived the roundtrip.
-        for (id, n) in &restored.nodes {
+        for (_id, n) in &restored.nodes {
             if let NodeData::StaticImage(si) = &n.data {
-                assert_eq!(si.content_hash, hash);
+                assert_eq!(si.resource_id, resource_id,
+                    "resource_id must survive snapshot roundtrip");
                 assert_eq!(si.fit_mode, ImageFitMode::Cover);
                 assert_eq!(si.width, 16);
                 assert_eq!(si.height, 16);
-                let _ = id;
+                assert_eq!(si.decoded_bytes, decoded_bytes);
             }
         }
     }
@@ -3195,15 +3216,15 @@ mod tests {
             .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
             .unwrap();
 
-        let (img_data, hash) = make_test_image(8, 8);
+        let (resource_id, decoded_bytes) = make_test_image_resource(8, 8);
         let node1 = Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data: img_data,
+                resource_id,
                 width: 8,
                 height: 8,
-                content_hash: hash,
+                decoded_bytes,
                 fit_mode: ImageFitMode::Fill,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             }),
@@ -4502,16 +4523,17 @@ mod spec_scenarios {
         };
 
         // StaticImageNode — constructable without GPU context
+        // RS-4: uses resource_id + decoded_bytes, no raw blob data embedded.
         use crate::types::StaticImageNode;
         use crate::types::ImageFitMode;
         let _ = Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::StaticImage(StaticImageNode {
-                image_data: vec![255u8; 4 * 4 * 4], // 4×4 RGBA
+                resource_id: ResourceId::of(b"4x4 test image"),
                 width: 4,
                 height: 4,
-                content_hash: "test-hash".to_string(),
+                decoded_bytes: 4 * 4 * 4, // 4×4 RGBA8
                 fit_mode: ImageFitMode::Contain,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             }),
