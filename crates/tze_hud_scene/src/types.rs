@@ -445,13 +445,19 @@ pub enum CursorStyle {
 
 /// Event delivery filter mask for a HitRegionNode.
 ///
-/// When a flag is `false` the corresponding event type is suppressed before it
-/// reaches the owning agent's EventBatch — saving agent bandwidth for nodes
-/// that don't need every event type.  All flags default to `true`.
+/// **Data model only in v1.** This struct carries the mask values set by the
+/// owning agent; the filtering logic (suppressing event delivery when a flag is
+/// `false`) is implemented in the input-dispatch layer (input model epic,
+/// post-v1 or separate bead).  Until that layer is wired, all event types
+/// reach the agent regardless of this mask.
 ///
-/// Note: The runtime still performs hit-testing and local-state updates even
-/// when agent delivery is suppressed.  `event_mask` controls agent delivery
-/// only; it is not consulted by the hit-test spatial query.
+/// When the filtering layer is active, a flag of `false` suppresses the
+/// corresponding event type before it reaches the owning agent's EventBatch,
+/// saving agent bandwidth.  All flags default to `true`.
+///
+/// The runtime still performs hit-testing and local-state updates regardless
+/// of mask values.  `event_mask` controls agent delivery only — it is never
+/// consulted by the hit-test spatial query.
 ///
 /// Source: RFC 0004 §7.1, input-model/spec.md lines 249, 253-255.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

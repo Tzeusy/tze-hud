@@ -1923,11 +1923,16 @@ impl SceneGraph {
                 state.hovered = false;
             }
         }
-        // Set new hover.
+        // Set new hover.  Use entry().or_insert_with() so that HitRegionNodes
+        // inserted directly into `self.nodes` (e.g. in multi-node trees whose
+        // children were not routed through `set_tile_root`) still get their
+        // local state initialised on first hit rather than silently failing.
         let new_hover = if let HitResult::NodeHit { node_id, .. } = result {
-            if let Some(state) = self.hit_region_states.get_mut(node_id) {
-                state.hovered = true;
-            }
+            let state = self
+                .hit_region_states
+                .entry(*node_id)
+                .or_insert_with(|| HitRegionLocalState::new(*node_id));
+            state.hovered = true;
             Some(*node_id)
         } else {
             None
