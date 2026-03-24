@@ -147,11 +147,11 @@ impl Compositor {
     /// Per runtime-kernel/spec.md Requirement: Headless Mode (line 198):
     /// "No conditional compilation for the render path."
     ///
-    /// After rendering, if the surface is a `HeadlessSurface`, call
-    /// `surface.copy_to_buffer(&mut encoder)` before submit and then
-    /// `surface.read_pixels()` for pixel readback.  The caller is responsible
-    /// for managing readback (the compositor does not know which surface type
-    /// it has).
+    /// For headless pixel readback, use `render_frame_headless()` instead,
+    /// which includes the `copy_to_buffer` step internally so that
+    /// `surface.read_pixels()` returns the current frame's data.
+    /// `render_frame()` does NOT copy pixels to the readback buffer — the
+    /// encoder is created and consumed internally and is not exposed.
     ///
     /// Returns telemetry for this frame.
     pub fn render_frame(
@@ -273,6 +273,13 @@ impl Compositor {
     /// This is a convenience method for testing/CI that handles the extra
     /// `copy_to_buffer` step required for headless pixel readback.
     ///
+    /// The `copy_to_buffer` call must happen before `queue.submit()`, which
+    /// means it cannot be cleanly extracted into a post-render callback without
+    /// breaking the submit boundary.  This method intentionally duplicates the
+    /// render pipeline for that reason.  A follow-up refactor should extract a
+    /// shared internal `encode_frame` helper that accepts an optional readback
+    /// callback, eliminating this duplication.
+    ///
     /// Returns telemetry for this frame.
     pub fn render_frame_headless(
         &mut self,
@@ -290,10 +297,15 @@ impl Compositor {
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
 
-        // Build vertex buffer from scene
+        // Build vertex buffer from scene.
+        // Use surface.size() — not self.width/self.height — so that vertex
+        // normalization is correct even if the HeadlessSurface was created with
+        // different dimensions than the compositor's stored width/height.
         let mut vertices: Vec<RectVertex> = Vec::new();
-        let sw = self.width as f32;
-        let sh = self.height as f32;
+        let (sw, sh) = {
+            let (w, h) = surface.size();
+            (w as f32, h as f32)
+        };
 
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
@@ -715,6 +727,12 @@ mod tests {
     use crate::surface::HeadlessSurface;
     use tze_hud_scene::graph::SceneGraph;
 
+    /// Mutex to serialize tests that mutate `HEADLESS_FORCE_SOFTWARE`, a
+    /// global environment variable.  Rust tests run in parallel by default,
+    /// so concurrent mutations would cause races.  This is an in-process lock;
+    /// it does not protect against separate test binary runs.
+    static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Convenience: build a minimal scene with one tile containing the given node.
     fn scene_with_node(node: Node) -> SceneGraph {
         let mut scene = SceneGraph::new(256.0, 256.0);
@@ -990,17 +1008,18 @@ mod tests {
     /// the env var set does not crash.
     #[tokio::test]
     async fn test_new_headless_with_force_software_env_var() {
-        // Temporarily set the env var.  std::env::set_var is intentionally
-        // not thread-safe in Rust tests; this test must run in a dedicated
-        // runtime (#[tokio::test]) so env state doesn't bleed across tests.
-        //
-        // On systems with no software GPU the adapter request will fall back
-        // to any available adapter.  We accept NoAdapter as a successful test
-        // outcome because the test is validating the env-var code path, not
-        // that llvmpipe is installed.
+        // Serialize all env-var-mutating tests via a process-wide mutex.
+        // Rust tests run in parallel by default; without serialization,
+        // a concurrent test could observe or overwrite HEADLESS_FORCE_SOFTWARE.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+
+        // Safety: single-threaded within the mutex guard; no other test
+        // touches HEADLESS_FORCE_SOFTWARE while _guard is held.
         unsafe { std::env::set_var("HEADLESS_FORCE_SOFTWARE", "1"); }
         let result = Compositor::new_headless(64, 64).await;
         unsafe { std::env::remove_var("HEADLESS_FORCE_SOFTWARE"); }
+        drop(_guard);
+
         // Either Ok (software GPU found) or Err(NoAdapter) (no software GPU
         // installed in this CI environment) are acceptable.  A panic would not be.
         match result {

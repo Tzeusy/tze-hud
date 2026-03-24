@@ -234,16 +234,16 @@ impl HeadlessRuntime {
     /// Returns the server task handle.  The caller must retain it to keep the
     /// server running.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `config.grpc_port == 0`.  Check before calling.
+    /// Returns `Err` if `config.grpc_port == 0` (gRPC server disabled) or if
+    /// the gRPC server fails to bind.
     pub async fn start_grpc_server(
         &self,
     ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
-        assert!(
-            self.config.grpc_port != 0,
-            "start_grpc_server called with grpc_port = 0 (disabled)"
-        );
+        if self.config.grpc_port == 0 {
+            return Err("start_grpc_server: grpc_port = 0 (gRPC server disabled)".into());
+        }
         let addr = format!("[::1]:{}", self.config.grpc_port).parse()?;
 
         let service = HudSessionImpl::from_shared_state(
@@ -308,10 +308,16 @@ mod tests {
     /// after startup.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_headless_grpc_server_starts() {
+        // Bind to port 0 to get an ephemeral port, then release the listener
+        // before tonic binds. This avoids hardcoded ports that may conflict in CI.
+        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let free_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
         let config = HeadlessConfig {
             width: 64,
             height: 64,
-            grpc_port: 50199, // arbitrary port unlikely to conflict
+            grpc_port: free_port,
             psk: "test".to_string(),
         };
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");

@@ -765,7 +765,7 @@ async fn test_scene_overlay_transparency_pixels() {
     );
 }
 
-// ─── Batch test for remaining 20 scenes ──────────────────────────────────────
+// ─── Batch test for remaining 19 scenes ──────────────────────────────────────
 //
 // For the remaining scenes (tab_switch, lease_expiry, mobile_degraded,
 // sync_group_media, input_highlight, coalesced_dashboard, three_agents_contention,
