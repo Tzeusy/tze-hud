@@ -181,7 +181,10 @@ pub struct SceneEvent {
     pub event_id: Uuid,
 
     /// Namespaced dotted event type string (e.g. `"scene.tile.created"`).
-    /// Validated against the naming convention in `naming.rs`.
+    ///
+    /// Callers are responsible for ensuring this string conforms to the
+    /// naming convention defined in `naming.rs` (see `validate_event_type`);
+    /// `SceneEvent` itself does not validate the event_type on construction.
     pub event_type: String,
 
     /// Effective interruption class after zone-ceiling enforcement.

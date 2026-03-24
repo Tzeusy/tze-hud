@@ -96,9 +96,18 @@ fn validate_segment(segment: &str, position: usize) -> Result<(), NamingError> {
         return Err(NamingError::EmptySegment { position });
     }
     let first = segment.chars().next().unwrap();
+    // First character must be a lowercase letter: [a-z].
+    // Digits and underscores are allowed only after the first character.
     if first.is_ascii_digit() {
         return Err(NamingError::SegmentStartsWithDigit {
             segment: segment.to_string(),
+        });
+    }
+    if !first.is_ascii_lowercase() {
+        // Catches leading underscores, uppercase letters, and other non-[a-z] starters.
+        return Err(NamingError::InvalidCharacter {
+            segment: segment.to_string(),
+            ch: first,
         });
     }
     for ch in segment.chars() {
@@ -379,6 +388,14 @@ mod tests {
     #[test]
     fn bare_name_leading_dot_rejected() {
         assert!(validate_bare_name(".ring").is_err());
+    }
+
+    #[test]
+    fn segment_leading_underscore_rejected() {
+        // A segment starting with '_' must be rejected — [a-z][a-z0-9_]* requires
+        // a lowercase letter as the first character.
+        assert!(validate_event_type("scene._hidden.created").is_err());
+        assert!(validate_bare_name("_hidden.event").is_err());
     }
 
     // ── build_agent_event_type ────────────────────────────────────────────────
