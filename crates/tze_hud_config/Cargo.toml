@@ -1,0 +1,17 @@
+[package]
+name = "tze_hud_config"
+description = "TOML configuration loading and validation for tze_hud — implements ConfigLoader trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tze_hud_scene = { path = "../tze_hud_scene" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+schemars = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
