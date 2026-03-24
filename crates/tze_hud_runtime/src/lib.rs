@@ -25,6 +25,7 @@
 
 pub mod agent_events;
 pub mod budget;
+pub mod degradation;
 pub mod headless;
 pub mod subscriptions;
 pub mod event_bus;
@@ -42,6 +43,9 @@ pub use agent_events::rate_limiter::AgentEventRateLimiter;
 pub use budget::{
     AgentResourceState, BudgetCheckOutcome, BudgetEnforcer, BudgetState,
     BudgetTelemetrySink, CollectingTelemetrySink, NoopTelemetrySink,
+};
+pub use degradation::{
+    DegradationConfig, DegradationController, DegradationLevel, TileDescriptor,
 };
 pub use headless::HeadlessRuntime;
 pub use subscriptions::{

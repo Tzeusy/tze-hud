@@ -10,5 +10,6 @@ pub mod collector;
 pub use record::{
     FrameTelemetry, SessionSummary, LatencyBucket,
     BudgetTier, BudgetViolationKind, BudgetViolationEvent, FrameTimeShedEvent,
+    DegradationEvent, DegradationDirection,
 };
 pub use collector::{FrameRecorder, TelemetryCollector};
