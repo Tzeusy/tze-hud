@@ -18,6 +18,7 @@
 //! read the resulting `OverrideState`.
 
 use std::collections::VecDeque;
+use tze_hud_scene::SceneId;
 
 /// Maximum number of override commands that can be queued at once (spec §11.1).
 pub const OVERRIDE_QUEUE_CAPACITY: usize = 16;
@@ -28,13 +29,16 @@ pub const OVERRIDE_QUEUE_CAPACITY: usize = 16;
 /// before `MutationBatch` intake (spec §3.2, §11.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OverrideCommand {
-    /// Dismiss the tile identified by the given tile ID string.
+    /// Dismiss the tile identified by the given `SceneId`.
     ///
     /// Level 0 wins over Level 3 Security: the tile is dismissed regardless of lease
     /// priority or capabilities (spec lines 57-59).
+    ///
+    /// At the input boundary, string-based tile identifiers must be parsed to `SceneId`
+    /// before being enqueued, ensuring type safety throughout the internal runtime.
     Dismiss {
-        /// Opaque tile identifier. The compositor resolves this to a scene node.
-        tile_id: String,
+        /// Strongly-typed tile identifier. Resolves to a scene node during compositor drain.
+        tile_id: SceneId,
     },
 
     /// Enter safe mode immediately.
@@ -60,7 +64,8 @@ pub enum OverrideCommand {
 /// **Producer**: input thread — calls `push`.
 /// **Consumer**: compositor thread — calls `drain` before any `MutationBatch` intake.
 ///
-/// If the queue is full when `push` is called, the command is silently dropped.
+/// If the queue is full when `push` is called, the command is dropped and `push` returns
+/// `false`. Callers may observe this via the return value and log a warning if desired.
 /// In practice this should not occur under normal operation; the compositor drains
 /// the queue every frame (< 16.6ms), and 16 commands per frame is far above the
 /// expected human input rate.
@@ -160,16 +165,17 @@ mod tests {
 
     #[test]
     fn test_drain_returns_all_in_fifo_order() {
+        let tile_id = SceneId::new();
         let mut q = OverrideCommandQueue::new();
         q.push(OverrideCommand::SafeMode);
         q.push(OverrideCommand::Freeze);
-        q.push(OverrideCommand::Dismiss { tile_id: "tile_1".to_string() });
+        q.push(OverrideCommand::Dismiss { tile_id });
 
         let drained = q.drain();
         assert_eq!(drained.len(), 3);
         assert_eq!(drained[0], OverrideCommand::SafeMode);
         assert_eq!(drained[1], OverrideCommand::Freeze);
-        assert_eq!(drained[2], OverrideCommand::Dismiss { tile_id: "tile_1".to_string() });
+        assert_eq!(drained[2], OverrideCommand::Dismiss { tile_id });
         assert!(q.is_empty());
     }
 
@@ -211,7 +217,7 @@ mod tests {
     fn test_safe_mode_is_first_in_drain_when_pushed_first() {
         let mut q = OverrideCommandQueue::new();
         q.push(OverrideCommand::SafeMode);
-        q.push(OverrideCommand::Dismiss { tile_id: "t1".to_string() });
+        q.push(OverrideCommand::Dismiss { tile_id: SceneId::new() });
 
         let cmds = q.drain();
         assert_eq!(cmds[0], OverrideCommand::SafeMode);

@@ -157,37 +157,32 @@ pub fn evaluate_safety(state: &SafetyState, gpu: &GpuFailureContext) -> SafetySi
         signal = SafetySignal::most_severe(signal, SafetySignal::GpuReconfiguration);
     }
 
-    // Frame-time emergency: p95 exceeds threshold while GPU is healthy.
-    // (GPU healthy check: if device is lost this is already handled below as Tier 2.)
-    if state.gpu_healthy
-        && state.scene_graph_intact
-        && state.frame_time_p95_us > state.emergency_threshold_us
-    {
-        signal = SafetySignal::most_severe(
-            signal,
-            SafetySignal::SafeModeEntry {
-                reason: SafeModeEntryReason::EmergencyDegradation,
-            },
-        );
-    }
+    // Tier 2: Safe mode entry. Multiple Tier-2 triggers may fire in the same frame.
+    // Because all `SafeModeEntry` variants have the same severity, we must choose
+    // the highest-priority reason explicitly using if/else-if rather than relying on
+    // `most_severe` tie-breaking (which would mask higher-priority reasons).
+    //
+    // Priority among Tier-2 reasons (highest first):
+    //   1. GPU device lost  — most critical; overrides all other Tier-2 reasons.
+    //   2. Scene graph corruption — memory/data integrity failure.
+    //   3. Emergency degradation — frame-time exceeded; GPU and scene are otherwise healthy.
+    let tier2_reason: Option<SafeModeEntryReason> = if !state.gpu_healthy || gpu.device_lost {
+        // Tier 2a: GPU device lost (highest Tier-2 priority).
+        Some(SafeModeEntryReason::GpuDeviceLost)
+    } else if !state.scene_graph_intact || gpu.scene_graph_corrupted {
+        // Tier 2b: scene graph corruption.
+        Some(SafeModeEntryReason::SceneGraphCorruption)
+    } else if state.frame_time_p95_us > state.emergency_threshold_us {
+        // Tier 2c: frame-time emergency (GPU and scene are healthy).
+        Some(SafeModeEntryReason::EmergencyDegradation)
+    } else {
+        None
+    };
 
-    // Tier 2a: scene graph corruption.
-    if !state.scene_graph_intact || gpu.scene_graph_corrupted {
+    if let Some(reason) = tier2_reason {
         signal = SafetySignal::most_severe(
             signal,
-            SafetySignal::SafeModeEntry {
-                reason: SafeModeEntryReason::SceneGraphCorruption,
-            },
-        );
-    }
-
-    // Tier 2b: GPU device lost.
-    if !state.gpu_healthy || gpu.device_lost {
-        signal = SafetySignal::most_severe(
-            signal,
-            SafetySignal::SafeModeEntry {
-                reason: SafeModeEntryReason::GpuDeviceLost,
-            },
+            SafetySignal::SafeModeEntry { reason },
         );
     }
 
@@ -256,7 +251,10 @@ mod tests {
     // ─── Tier 2: GPU Device Lost ──────────────────────────────────────────────
 
     /// WHEN wgpu::DeviceError::Lost is detected
-    /// THEN the runtime enters safe mode (Tier 2) with SafeModeEntryReason=CRITICAL_ERROR (spec line 67-68)
+    /// THEN the runtime enters safe mode (Tier 2) with SafeModeEntryReason=GpuDeviceLost (spec line 67-68)
+    ///
+    /// Note: the spec scenario names the reason `CRITICAL_ERROR`, but the implementation uses the
+    /// more descriptive `GpuDeviceLost` variant which unambiguously identifies the failure cause.
     #[test]
     fn test_tier2_gpu_device_lost_via_state() {
         let mut state = healthy_safety_state();
@@ -371,10 +369,47 @@ mod tests {
         state.gpu_healthy = false;
         state.scene_graph_intact = false;
         let signal = evaluate_safety(&state, &no_failure());
-        // Both are Tier 2 SafeModeEntry; device_lost takes precedence (evaluated last)
+        // Both are Tier 2 SafeModeEntry; GpuDeviceLost takes precedence over SceneGraphCorruption
+        // because GPU device loss is the higher-priority Tier-2 reason.
         assert!(matches!(
             signal,
-            SafetySignal::SafeModeEntry { .. }
+            SafetySignal::SafeModeEntry {
+                reason: SafeModeEntryReason::GpuDeviceLost
+            }
+        ));
+    }
+
+    /// WHEN scene corruption occurs but GPU is healthy
+    /// THEN GpuDeviceLost does NOT mask SceneGraphCorruption
+    #[test]
+    fn test_scene_corruption_without_device_lost_gives_scene_corruption_reason() {
+        let mut state = healthy_safety_state();
+        state.scene_graph_intact = false;
+        // gpu_healthy = true, no device_lost
+        let signal = evaluate_safety(&state, &no_failure());
+        assert!(matches!(
+            signal,
+            SafetySignal::SafeModeEntry {
+                reason: SafeModeEntryReason::SceneGraphCorruption
+            }
+        ));
+    }
+
+    /// WHEN both device_lost and scene_graph_corrupted flags are set simultaneously
+    /// THEN GpuDeviceLost is the chosen reason (higher priority Tier-2)
+    #[test]
+    fn test_device_lost_beats_scene_corruption_as_tier2_reason() {
+        let gpu = GpuFailureContext {
+            device_lost: true,
+            scene_graph_corrupted: true,
+            ..Default::default()
+        };
+        let signal = evaluate_safety(&healthy_safety_state(), &gpu);
+        assert!(matches!(
+            signal,
+            SafetySignal::SafeModeEntry {
+                reason: SafeModeEntryReason::GpuDeviceLost
+            }
         ));
     }
 

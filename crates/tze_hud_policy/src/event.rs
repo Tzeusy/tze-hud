@@ -77,6 +77,11 @@ pub enum EventOutcome {
 pub enum DiscardReason {
     /// Safe mode was activated by Level 0; the event was preempted.
     SafeModePreempted,
+    /// LOW-priority event was shed during quiet hours (spec RFC 0010 §3.1).
+    ///
+    /// LOW content (background sync, telemetry, status refreshes) is discarded
+    /// during quiet hours because it is too stale by quiet hours exit to be useful.
+    QuietHoursShed,
 }
 
 // ─── Per-event input context ──────────────────────────────────────────────────
@@ -188,10 +193,9 @@ pub fn evaluate_event(ectx: &EventContext) -> EventEvaluation {
     // ─── Level 3: Security ───────────────────────────────────────────────────
     levels_evaluated.push(ArbitrationLevel::Security);
 
-    let required_caps: Vec<&str> = ectx.required_capabilities.iter().map(String::as_str).collect();
     if let Some(reject_outcome) = evaluate_event_level3_security(
         &ectx.security_context,
-        &required_caps,
+        &ectx.required_capabilities,
         &ectx.target_namespace,
         ectx.event_ref,
     ) {
@@ -234,14 +238,11 @@ fn evaluate_event_level4_attention(
                 unreachable!("handled above")
             }
             InterruptionClass::Low => {
-                // LOW is shed (discarded) during quiet hours, not queued.
-                // For per-event evaluation, treat as Discarded via quiet-hours shed.
-                // We reuse Queued with QuietHours reason; the caller handles LOW discard semantics.
-                return Some(EventOutcome::Queued {
-                    queue_reason: QueueReason::QuietHours {
-                        window_end_us: ctx.quiet_hours_end_us,
-                    },
-                    earliest_present_us: ctx.quiet_hours_end_us,
+                // LOW is discarded during quiet hours, not queued.
+                // Spec RFC 0010 §3.1: LOW content (background sync, telemetry, status refreshes)
+                // is too stale by quiet hours exit to be useful.
+                return Some(EventOutcome::Discarded {
+                    reason: DiscardReason::QuietHoursShed,
                 });
             }
             InterruptionClass::Normal => {
@@ -288,7 +289,7 @@ fn evaluate_event_level4_attention(
 /// Returns `None` if all checks pass.
 fn evaluate_event_level3_security(
     ctx: &SecurityContext,
-    required_capabilities: &[&str],
+    required_capabilities: &[String],
     target_namespace: &str,
     event_ref: SceneId,
 ) -> Option<EventOutcome> {
@@ -323,7 +324,7 @@ fn evaluate_event_level3_security(
     }
 
     // Capability checks (conjunctive — all must pass).
-    for &cap in required_capabilities {
+    for cap in required_capabilities {
         if !ctx.has_capability(cap) {
             return Some(EventOutcome::Rejected(ArbitrationError {
                 code: ArbitrationErrorCode::CapabilityDenied,
@@ -510,7 +511,7 @@ mod tests {
     fn test_dismiss_override_does_not_trigger_safe_mode_discard() {
         let mut ectx = default_event_ctx();
         ectx.override_command = Some(OverrideCommand::Dismiss {
-            tile_id: "tile_1".to_string(),
+            tile_id: SceneId::new(),
         });
 
         let result = evaluate_event(&ectx);
@@ -551,6 +552,28 @@ mod tests {
         assert!(
             matches!(result.outcome, EventOutcome::Queued { .. }),
             "Expected Queued, got {:?}",
+            result.outcome
+        );
+        assert_eq!(result.levels_evaluated.len(), 2); // L0 + L4
+    }
+
+    /// WHEN quiet hours are active and a mutation with LOW interruption class arrives
+    /// THEN the mutation is discarded (not queued) because LOW content is too stale
+    /// by quiet hours exit to be useful (spec RFC 0010 §3.1)
+    #[test]
+    fn test_quiet_hours_discards_low_interruption() {
+        let mut ectx = default_event_ctx();
+        ectx.attention_context.quiet_hours_active = true;
+        ectx.attention_context.quiet_hours_end_us = Some(100_000);
+        ectx.attention_context.interruption_class = InterruptionClass::Low;
+
+        let result = evaluate_event(&ectx);
+        assert_eq!(
+            result.outcome,
+            EventOutcome::Discarded {
+                reason: DiscardReason::QuietHoursShed
+            },
+            "Expected Discarded(QuietHoursShed) for LOW during quiet hours, got {:?}",
             result.outcome
         );
         assert_eq!(result.levels_evaluated.len(), 2); // L0 + L4
