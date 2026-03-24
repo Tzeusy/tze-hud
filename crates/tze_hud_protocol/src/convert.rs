@@ -3,6 +3,34 @@
 use crate::proto;
 use tze_hud_scene::*;
 
+// ─── Identity round-trips ─────────────────────────────────────────────────────
+
+/// Encode a `SceneId` as a `SceneIdProto` (16 bytes, little-endian).
+pub fn scene_id_to_proto(id: SceneId) -> proto::SceneIdProto {
+    proto::SceneIdProto { bytes: id.to_bytes_le().to_vec() }
+}
+
+/// Decode a `SceneIdProto` back to a `SceneId`.
+///
+/// Returns `None` if the `bytes` field is not exactly 16 bytes.
+pub fn proto_to_scene_id(p: &proto::SceneIdProto) -> Option<SceneId> {
+    SceneId::from_bytes_le(&p.bytes)
+}
+
+/// Encode a `ResourceId` as a `ResourceIdProto` (32 raw bytes, never hex).
+pub fn resource_id_to_proto(id: ResourceId) -> proto::ResourceIdProto {
+    proto::ResourceIdProto { bytes: id.as_bytes().to_vec() }
+}
+
+/// Decode a `ResourceIdProto` back to a `ResourceId`.
+///
+/// Returns `None` if the `bytes` field is not exactly 32 bytes.
+pub fn proto_to_resource_id(p: &proto::ResourceIdProto) -> Option<ResourceId> {
+    ResourceId::from_slice(&p.bytes)
+}
+
+// ─── Geometry ─────────────────────────────────────────────────────────────────
+
 /// Convert a protobuf Rect to a scene Rect.
 pub fn proto_rect_to_scene(r: &proto::Rect) -> Rect {
     Rect::new(r.x, r.y, r.width, r.height)
@@ -288,6 +316,56 @@ pub fn zone_publish_record_to_proto(r: &ZonePublishRecord) -> proto::ZonePublish
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SceneId / ResourceId proto round-trips ───────────────────────────────
+
+    #[test]
+    fn scene_id_proto_round_trip() {
+        let id = SceneId::new();
+        let proto = scene_id_to_proto(id);
+        assert_eq!(proto.bytes.len(), 16, "SceneId proto must be 16 bytes");
+        let restored = proto_to_scene_id(&proto).expect("must decode 16 bytes");
+        assert_eq!(id, restored, "SceneId proto round-trip must be lossless");
+    }
+
+    #[test]
+    fn scene_id_null_proto_round_trip() {
+        let null = SceneId::null();
+        let proto = scene_id_to_proto(null);
+        assert_eq!(proto.bytes, vec![0u8; 16]);
+        let restored = proto_to_scene_id(&proto).unwrap();
+        assert!(restored.is_null());
+    }
+
+    #[test]
+    fn scene_id_proto_rejects_wrong_length() {
+        let bad = crate::proto::SceneIdProto { bytes: vec![0u8; 15] };
+        assert!(proto_to_scene_id(&bad).is_none());
+    }
+
+    #[test]
+    fn resource_id_proto_round_trip() {
+        let id = ResourceId::of(b"proto round-trip test content");
+        let proto = resource_id_to_proto(id);
+        assert_eq!(proto.bytes.len(), 32, "ResourceId proto must be 32 bytes");
+        let restored = proto_to_resource_id(&proto).expect("must decode 32 bytes");
+        assert_eq!(id, restored, "ResourceId proto round-trip must be lossless");
+    }
+
+    #[test]
+    fn resource_id_proto_bytes_are_raw_not_hex() {
+        let id = ResourceId::of(b"no hex on the wire");
+        let proto = resource_id_to_proto(id);
+        // The bytes field must not be a hex string — verify it has exactly 32 bytes
+        // and that it matches the raw hash bytes.
+        assert_eq!(&proto.bytes[..], id.as_bytes() as &[u8]);
+    }
+
+    #[test]
+    fn resource_id_proto_rejects_wrong_length() {
+        let bad = crate::proto::ResourceIdProto { bytes: vec![0u8; 31] };
+        assert!(proto_to_resource_id(&bad).is_none());
+    }
 
     fn make_static_image_node(fit_mode: ImageFitMode) -> Node {
         let pixel_count = 4u32 * 4u32;

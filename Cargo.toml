@@ -44,6 +44,7 @@ proptest = "1"
 # Misc
 thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
+blake3 = "1"
 
 [profile.release]
 lto = true
