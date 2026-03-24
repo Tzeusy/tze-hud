@@ -8,6 +8,7 @@ pub mod session;
 pub mod convert;
 pub mod session_server;
 pub mod token;
+pub mod dedup;
 
 /// Generated protobuf types and gRPC service definitions.
 ///

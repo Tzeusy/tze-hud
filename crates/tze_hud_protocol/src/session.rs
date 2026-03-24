@@ -10,6 +10,29 @@ use crate::proto::SceneEvent;
 use crate::proto::session::ServerMessage;
 use crate::token::TokenStore;
 
+/// Current degradation level of the runtime (RFC 0005 §3.4).
+///
+/// Mirrors `DegradationLevel` from `session.proto` as a plain Rust enum so that
+/// the compositor and other non-proto code can track the level without depending
+/// on generated proto types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeDegradationLevel {
+    Normal = 1,
+    CoalescingMore = 2,
+    MediaQualityReduced = 3,
+    StreamsReduced = 4,
+    RenderingSimplified = 5,
+    SheddingTiles = 6,
+    AudioOnlyFallback = 7,
+}
+
+impl RuntimeDegradationLevel {
+    /// Convert to the proto enum integer value.
+    pub fn to_proto_i32(self) -> i32 {
+        self as i32
+    }
+}
+
 /// Shared state between the gRPC server and the compositor.
 pub struct SharedState {
     pub scene: SceneGraph,
@@ -29,6 +52,9 @@ pub struct SharedState {
     /// `freeze_active = false`. Safe mode entry cancels freeze
     /// and discards all per-session freeze queues.
     pub freeze_active: bool,
+    /// Current degradation level (RFC 0005 §3.4).
+    /// Default: Normal (no degradation).
+    pub degradation_level: RuntimeDegradationLevel,
 }
 
 /// Bounded per-session event channel capacity (events).

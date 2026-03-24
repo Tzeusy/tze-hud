@@ -139,6 +139,11 @@ message ServerMessage {
 
     // Agent scene event emission result (scene-events/spec.md §5.1).
     EmitSceneEventResult  emit_scene_event_result = 45;
+
+    // Degradation notice (RFC 0005 §3.4, §7.1).
+    // Transactional — never dropped. Delivered to ALL active sessions unconditionally
+    // on degradation level change, regardless of subscription configuration.
+    DegradationNotice     degradation_notice      = 46;
   }
 
   // Field 22 (lease_denial) was removed in the v1 vocabulary rename.
@@ -380,12 +385,28 @@ message CapabilityNotice {
 
 // ─── Mutation messages ────────────────────────────────────────────────────────
 
+// Optional timing semantics for a MutationBatch (RFC 0003 §3.5, §4.5).
+// Clock domain: wall-clock (UTC µs since Unix epoch).
+// 0 in either field means "no constraint" (present immediately / no expiry).
+message TimingHints {
+  // Wall-clock time at which mutations should be presented (UTC µs since epoch).
+  // 0 = present immediately.
+  // Rejected if < session_open_at_wall_us - 60_000_000 µs (TIMESTAMP_TOO_OLD).
+  // Rejected if > current_wall_us + max_future_schedule_us (TIMESTAMP_TOO_FUTURE).
+  uint64 present_at_wall_us = 1;
+
+  // Wall-clock expiry for the mutations (UTC µs since epoch).
+  // 0 = no expiry.
+  // Rejected if > 0 and <= present_at_wall_us (TIMESTAMP_EXPIRY_BEFORE_PRESENT).
+  uint64 expires_at_wall_us = 2;
+}
+
 // Atomic batch of scene mutations (RFC 0001 SS4).
 message MutationBatch {
   bytes  batch_id  = 1;  // UUIDv7; deduplication key (RFC 0005 SS5.2)
   bytes  lease_id  = 2;  // Lease under which mutations execute
   repeated tze_hud.protocol.v1.MutationProto mutations = 3;  // Ordered; applied atomically
-  // Future: TimingHints timing = 4;
+  TimingHints timing = 4;  // Optional timing semantics (RFC 0003 §3.5)
 }
 
 // Server response to MutationBatch.
@@ -635,4 +656,31 @@ message EmitSceneEventResult {
 
   // Human-readable rejection reason (populated when accepted=false).
   string  error_message     = 5;
+}
+
+// ─── Degradation (RFC 0005 §3.4, §7.1) ───────────────────────────────────────
+
+// Degradation severity levels reported by the runtime.
+// NORMAL means all systems operating at full capability.
+// Higher levels indicate progressively deeper capacity reduction.
+enum DegradationLevel {
+  DEGRADATION_LEVEL_UNSPECIFIED     = 0;  // Sentinel / unknown
+  NORMAL                            = 1;  // Full capability; no degradation
+  COALESCING_MORE                   = 2;  // State-stream updates are coalesced more aggressively
+  MEDIA_QUALITY_REDUCED             = 3;  // AV stream quality/bitrate reduced
+  STREAMS_REDUCED                   = 4;  // Some media streams suspended
+  RENDERING_SIMPLIFIED              = 5;  // Compositor drops non-critical render passes
+  SHEDDING_TILES                    = 6;  // Low-priority tiles actively shed
+  AUDIO_ONLY_FALLBACK               = 7;  // Video disabled; audio-only mode
+}
+
+// Runtime notifies all active sessions of a change in degradation level.
+// Transactional — never dropped under backpressure (RFC 0005 §3.4).
+// Delivered unconditionally to ALL active sessions regardless of subscription config.
+// degradation_notices subscriptions SHALL NOT be filterable (RFC 0005 §7.1).
+message DegradationNotice {
+  DegradationLevel level              = 1;  // Current degradation level
+  string           reason             = 2;  // Human-readable reason for the change
+  repeated string  affected_capabilities = 3;  // Capabilities impacted at this level
+  uint64           timestamp_wall_us  = 4;  // Wall-clock time of the level change (UTC µs)
 }

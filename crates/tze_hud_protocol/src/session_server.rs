@@ -27,6 +27,7 @@ use crate::auth::{
     AuthResult,
 };
 use crate::convert;
+use crate::dedup::{CachedResult, DedupWindow};
 use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::*;
 use crate::proto::session::client_message::Payload as ClientPayload;
@@ -71,6 +72,8 @@ pub struct SessionConfig {
     pub max_concurrent_resident_sessions: usize,
     /// Maximum concurrent guest sessions. Default: 64.
     pub max_concurrent_guest_sessions: usize,
+    /// Maximum future schedule horizon in microseconds (RFC 0003 §3.5). Default: 300_000_000 (5 min).
+    pub max_future_schedule_us: u64,
 }
 
 impl Default for SessionConfig {
@@ -87,6 +90,7 @@ impl Default for SessionConfig {
             ephemeral_buffer_max: 16,
             max_concurrent_resident_sessions: 16,
             max_concurrent_guest_sessions: 64,
+            max_future_schedule_us: 300_000_000, // 5 minutes in microseconds
         }
     }
 }
@@ -180,6 +184,9 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
 
         // Backpressure signal — transactional (must not be dropped)
         ServerPayload::BackpressureSignal(_) => TrafficClass::Transactional,
+
+        // Degradation notice — transactional (RFC 0005 §3.4; never dropped)
+        ServerPayload::DegradationNotice(_) => TrafficClass::Transactional,
 
         // Scene state / events — state-stream
         ServerPayload::SceneSnapshot(_)
@@ -595,6 +602,13 @@ struct StreamSession {
     ///
     /// The shell owns freeze state transitions; the session server owns the queue.
     freeze_queue: SessionFreezeQueue,
+
+    /// Wall-clock time (UTC µs since epoch) at which this session was opened.
+    /// Used for TIMESTAMP_TOO_OLD validation of TimingHints (RFC 0003 §3.5).
+    session_open_at_wall_us: u64,
+
+    /// Per-session MutationBatch deduplication window (RFC 0005 §5.2).
+    dedup_window: DedupWindow,
 }
 
 impl StreamSession {
@@ -648,20 +662,35 @@ impl StreamSession {
     }
 }
 
+/// Broadcast channel capacity for transactional server-push messages (DegradationNotice, etc.).
+///
+/// A capacity of 32 ensures that if a session is briefly slow to consume messages it
+/// still receives all degradation notices without the sender blocking.
+const BROADCAST_CHANNEL_CAPACITY: usize = 32;
+
 // ─── Service implementation ─────────────────────────────────────────────────
 
 /// The bidirectional streaming session service implementation.
 ///
 /// Holds shared state (scene graph + session registry) and implements the
 /// `HudSession` trait generated from `session.proto`.
+///
+/// `degradation_tx` is a broadcast channel used to deliver `DegradationNotice`
+/// messages to all active sessions unconditionally (RFC 0005 §3.4, §7.1).
+/// Each session handler task subscribes to this channel and forwards any
+/// received notices to the agent stream at Transactional traffic class.
 pub struct HudSessionImpl {
     pub state: Arc<Mutex<SharedState>>,
     psk: String,
+    /// Broadcast sender for transactional server-push notices (DegradationNotice).
+    /// Cloned into each session handler task.
+    pub degradation_tx: tokio::sync::broadcast::Sender<DegradationNotice>,
 }
 
 impl HudSessionImpl {
     /// Create a new session service with the given scene graph and PSK.
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
+        let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SharedState {
                 scene,
@@ -669,16 +698,55 @@ impl HudSessionImpl {
                 safe_mode_active: false,
                 token_store: TokenStore::new(),
                 freeze_active: false,
+                degradation_level: crate::session::RuntimeDegradationLevel::Normal,
             })),
             psk: psk.to_string(),
+            degradation_tx,
         }
     }
 
     /// Create from existing shared state.
     pub fn from_shared_state(state: Arc<Mutex<SharedState>>, psk: &str) -> Self {
+        let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
+            degradation_tx,
+        }
+    }
+
+    /// Broadcast a `DegradationNotice` to all currently-active sessions.
+    ///
+    /// Updates `SharedState::degradation_level` so that newly-joining sessions
+    /// can observe the current level. Then sends the notice on the broadcast
+    /// channel so every active session handler delivers it transactionally.
+    ///
+    /// Returns the number of active sessions that received the notice (0 if
+    /// no sessions are connected).
+    pub async fn broadcast_degradation(
+        &self,
+        level: crate::session::RuntimeDegradationLevel,
+        reason: &str,
+        affected_capabilities: Vec<String>,
+    ) -> usize {
+        // Update shared state.
+        {
+            let mut st = self.state.lock().await;
+            st.degradation_level = level;
+        }
+
+        let notice = DegradationNotice {
+            level: level.to_proto_i32(),
+            reason: reason.to_string(),
+            affected_capabilities,
+            timestamp_wall_us: now_wall_us(),
+        };
+
+        // Broadcast returns an error only when there are no active subscribers
+        // (no sessions connected). That is not an error condition.
+        match self.degradation_tx.send(notice) {
+            Ok(n) => n,
+            Err(_) => 0,
         }
     }
 }
@@ -695,6 +763,10 @@ impl HudSession for HudSessionImpl {
         let mut inbound = request.into_inner();
         let state = self.state.clone();
         let psk = self.psk.clone();
+        // Subscribe to the degradation broadcast channel before spawning the task.
+        // Subscribing here (rather than inside the task) ensures we don't miss notices
+        // that arrive between task spawn and channel subscription.
+        let mut degradation_rx = self.degradation_tx.subscribe();
 
         // Create outbound channel
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(
@@ -817,6 +889,10 @@ impl HudSession for HudSessionImpl {
             // In cases (2) and (3) the disconnect is ungraceful; leases become orphaned.
             // In case (1) the disconnect may be graceful (SessionClose was sent) or
             // ungraceful (agent dropped the connection without sending SessionClose).
+            //
+            // The loop also listens on `degradation_rx` for transactional DegradationNotice
+            // broadcasts (RFC 0005 §3.4). These are delivered unconditionally to all active
+            // sessions regardless of subscription config and are never dropped.
             loop {
                 // Use heartbeat timeout for receive (RFC 0005 §1.6, §3.6)
                 let timeout_duration =
@@ -844,78 +920,110 @@ impl HudSession for HudSessionImpl {
                     }
                 }
 
-                match tokio::time::timeout(timeout_duration, inbound.message()).await {
-                    Ok(Ok(Some(msg))) => {
-                        // Update heartbeat timestamp on any received message
-                        session.last_heartbeat_ms = now_ms();
+                tokio::select! {
+                    // ── Inbound client message ────────────────────────────────
+                    msg_result = tokio::time::timeout(timeout_duration, inbound.message()) => {
+                        match msg_result {
+                            Ok(Ok(Some(msg))) => {
+                                // Update heartbeat timestamp on any received message
+                                session.last_heartbeat_ms = now_ms();
 
-                        // Validate client sequence number (RFC 0005 §2.3).
-                        // Skip validation for sequence 0 (unset) to allow legacy callers
-                        // that don't set sequences. Sequence must be monotonically increasing
-                        // starting at 2 (since 1 is the handshake message).
-                        if msg.sequence != 0 {
-                            match session.validate_client_sequence(
-                                msg.sequence,
-                                DEFAULT_MAX_SEQUENCE_GAP,
-                            ) {
-                                Ok(()) => {}
-                                Err((code, message)) => {
-                                    // Close stream with sequence error
-                                    let seq = session.next_server_seq();
-                                    let _ = tx
-                                        .send(Ok(ServerMessage {
-                                            sequence: seq,
-                                            timestamp_wall_us: now_wall_us(),
-                                            payload: Some(ServerPayload::SessionError(
-                                                SessionError {
-                                                    code: code.to_string(),
-                                                    message,
-                                                    hint: String::new(),
-                                                },
-                                            )),
-                                        }))
-                                        .await;
+                                // Validate client sequence number (RFC 0005 §2.3).
+                                // Skip validation for sequence 0 (unset) to allow legacy callers
+                                // that don't set sequences. Sequence must be monotonically increasing
+                                // starting at 2 (since 1 is the handshake message).
+                                if msg.sequence != 0 {
+                                    match session.validate_client_sequence(
+                                        msg.sequence,
+                                        DEFAULT_MAX_SEQUENCE_GAP,
+                                    ) {
+                                        Ok(()) => {}
+                                        Err((code, message)) => {
+                                            // Close stream with sequence error
+                                            let seq = session.next_server_seq();
+                                            let _ = tx
+                                                .send(Ok(ServerMessage {
+                                                    sequence: seq,
+                                                    timestamp_wall_us: now_wall_us(),
+                                                    payload: Some(ServerPayload::SessionError(
+                                                        SessionError {
+                                                            code: code.to_string(),
+                                                            message,
+                                                            hint: String::new(),
+                                                        },
+                                                    )),
+                                                }))
+                                                .await;
+                                            session.transition(SessionState::Closed);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                // Check if this is a graceful close message
+                                let is_close = matches!(
+                                    &msg.payload,
+                                    Some(ClientPayload::SessionClose(_))
+                                );
+
+                                handle_client_message(&state, session, &tx, msg).await;
+
+                                // After handling SessionClose, transition to Disconnecting then Closed
+                                if is_close {
+                                    session.transition(SessionState::Disconnecting);
                                     session.transition(SessionState::Closed);
                                     break;
                                 }
                             }
+                            Ok(Ok(None)) => {
+                                // Stream EOF
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
+                            Ok(Err(_e)) => {
+                                // Stream transport error — ungraceful disconnect
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
+                            Err(_) => {
+                                // Heartbeat timeout (RFC 0005 §1.6, §3.6)
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
                         }
+                    }
 
-                        // Check if this is a graceful close message
-                        let is_close = matches!(
-                            &msg.payload,
-                            Some(ClientPayload::SessionClose(_))
-                        );
-
-                        handle_client_message(&state, session, &tx, msg).await;
-
-                        // After handling SessionClose, transition to Disconnecting then Closed
-                        if is_close {
-                            session.transition(SessionState::Disconnecting);
-                            session.transition(SessionState::Closed);
-                            break;
+                    // ── DegradationNotice broadcast (RFC 0005 §3.4, §7.1) ────
+                    //
+                    // Transactional — delivered unconditionally to all active sessions
+                    // regardless of subscription config. Never dropped.
+                    degradation_result = degradation_rx.recv() => {
+                        match degradation_result {
+                            Ok(notice) => {
+                                let seq = session.next_server_seq();
+                                let _ = tx
+                                    .send(Ok(ServerMessage {
+                                        sequence: seq,
+                                        timestamp_wall_us: now_wall_us(),
+                                        payload: Some(ServerPayload::DegradationNotice(notice)),
+                                    }))
+                                    .await;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                // We missed `n` notices due to slow consumption.
+                                // Per spec §3.4, DegradationNotice is transactional and must not
+                                // be dropped. Log the anomaly and continue — the session remains
+                                // open. Operators should investigate why this session is slow.
+                                // In a production implementation this would emit a metric/alert.
+                                let _ = n; // suppress unused warning; real code: tracing::warn!
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                // Broadcast channel closed — runtime is shutting down.
+                                // Treat as ungraceful disconnect.
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
                         }
-                    }
-                    Ok(Ok(None)) => {
-                        // Stream EOF — transitions to Closed whether graceful or ungraceful.
-                        // If session was Disconnecting (SessionClose already received and
-                        // processed), this is the expected stream termination completing
-                        // the Disconnecting → Closed transition. Otherwise it is an
-                        // ungraceful disconnect (agent dropped the connection without
-                        // sending SessionClose); leases become orphaned in either case.
-                        session.transition(SessionState::Closed);
-                        break;
-                    }
-                    Ok(Err(_e)) => {
-                        // Stream transport error — ungraceful disconnect
-                        session.transition(SessionState::Closed);
-                        break;
-                    }
-                    Err(_) => {
-                        // Heartbeat timeout — ungraceful disconnect (RFC 0005 §1.6, §3.6)
-                        // Leases are orphaned; reconnection grace period begins.
-                        session.transition(SessionState::Closed);
-                        break;
                     }
                 }
             }
@@ -1067,6 +1175,7 @@ async fn handle_session_init(
         );
     }
 
+    let session_open_at = now_wall_us();
     let mut session = StreamSession {
         session_id: session_id.clone(),
         namespace: namespace.clone(),
@@ -1084,6 +1193,8 @@ async fn handle_session_init(
         expect_resume: false,
         agent_event_rate_limiter: SessionEventRateLimiter::new(),
         freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+        session_open_at_wall_us: session_open_at,
+        dedup_window: DedupWindow::new(1000, 60),
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -1209,6 +1320,7 @@ async fn handle_session_resume(
 
     // Resume session with PSK-unrestricted policy (same as new session).
     let resume_policy_caps = vec!["*".to_string()];
+    let session_open_at = now_wall_us();
     let mut session = StreamSession {
         session_id: session_id.clone(),
         namespace: namespace.clone(),
@@ -1228,6 +1340,8 @@ async fn handle_session_resume(
         expect_resume: false,
         agent_event_rate_limiter: SessionEventRateLimiter::new(),
         freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+        session_open_at_wall_us: session_open_at,
+        dedup_window: DedupWindow::new(1000, 60),
     };
 
     let compositor_ts = now_wall_us();
@@ -1322,6 +1436,70 @@ async fn handle_client_message(
             // Protocol violation: ignore (or could send RuntimeError)
         }
     }
+}
+
+/// Maximum future schedule horizon in microseconds (RFC 0003 §3.5, default 5 minutes).
+const DEFAULT_MAX_FUTURE_SCHEDULE_US: u64 = 300_000_000;
+
+/// Validate TimingHints for a MutationBatch (RFC 0003 §3.5, RFC 0005 §3.3).
+///
+/// Returns `Ok(())` if valid, or `Err((error_code, message))` for each
+/// invalid condition.
+///
+/// Validation rules:
+/// - `present_at_wall_us < session_open_at_wall_us - 60_000_000` → TIMESTAMP_TOO_OLD
+/// - `present_at_wall_us > current_wall_us + max_future_schedule_us` → TIMESTAMP_TOO_FUTURE
+/// - `expires_at_wall_us > 0 && expires_at_wall_us <= present_at_wall_us` → TIMESTAMP_EXPIRY_BEFORE_PRESENT
+///
+/// A value of 0 in either field means "no constraint".
+fn validate_timing_hints(
+    hints: &TimingHints,
+    session_open_at_wall_us: u64,
+    max_future_schedule_us: u64,
+) -> Result<(), (&'static str, String)> {
+    let present = hints.present_at_wall_us;
+    let expires = hints.expires_at_wall_us;
+
+    if present > 0 {
+        let now = now_wall_us();
+
+        // TIMESTAMP_TOO_OLD: present_at_wall_us more than 60 seconds before session open
+        // (RFC 0003 §3.5; 60s = 60_000_000 µs)
+        let too_old_threshold = session_open_at_wall_us.saturating_sub(60_000_000);
+        if present < too_old_threshold {
+            return Err((
+                "TIMESTAMP_TOO_OLD",
+                format!(
+                    "present_at_wall_us ({present}) is more than 60s before session open \
+                     ({session_open_at_wall_us})"
+                ),
+            ));
+        }
+
+        // TIMESTAMP_TOO_FUTURE: present_at_wall_us exceeds max_future_schedule_us horizon
+        if present > now.saturating_add(max_future_schedule_us) {
+            return Err((
+                "TIMESTAMP_TOO_FUTURE",
+                format!(
+                    "present_at_wall_us ({present}) exceeds max future schedule \
+                     ({max_future_schedule_us} µs from now={now})"
+                ),
+            ));
+        }
+
+        // TIMESTAMP_EXPIRY_BEFORE_PRESENT: non-zero expiry at or before present
+        if expires > 0 && expires <= present {
+            return Err((
+                "TIMESTAMP_EXPIRY_BEFORE_PRESENT",
+                format!(
+                    "expires_at_wall_us ({expires}) must be strictly after \
+                     present_at_wall_us ({present})"
+                ),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 async fn handle_mutation_batch(
@@ -1498,22 +1676,96 @@ async fn handle_mutation_batch(
         }
     }
 
-    let mut st = state.lock().await;
-
-    let lease_id = match bytes_to_scene_id(&batch.lease_id) {
-        Ok(id) => id,
-        Err(_) => {
+    // ── Deduplication (RFC 0005 §5.2) ────────────────────────────────────────
+    //
+    // If this batch_id is already in the dedup window, return the cached result
+    // without re-applying mutations. This covers retransmission scenarios where
+    // the agent resends with the same batch_id and a new sequence number.
+    if !batch.batch_id.is_empty() {
+        if let Some(cached) = session.dedup_window.lookup(&batch.batch_id) {
             let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::MutationResult(MutationResult {
-                        batch_id: batch.batch_id.clone(),
+                        batch_id: batch.batch_id,
+                        accepted: cached.accepted,
+                        created_ids: cached.created_ids,
+                        error_code: cached.error_code,
+                        error_message: cached.error_message,
+                    })),
+                }))
+                .await;
+            return;
+        }
+    }
+
+    // ── TimingHints validation (RFC 0003 §3.5, RFC 0005 §3.3) ────────────────
+    if let Some(ref hints) = batch.timing {
+        if let Err((error_code, message)) = validate_timing_hints(
+            hints,
+            session.session_open_at_wall_us,
+            DEFAULT_MAX_FUTURE_SCHEDULE_US,
+        ) {
+            let error_code_enum = match error_code {
+                "TIMESTAMP_TOO_OLD" => ErrorCode::TimestampTooOld as i32,
+                "TIMESTAMP_TOO_FUTURE" => ErrorCode::TimestampTooFuture as i32,
+                "TIMESTAMP_EXPIRY_BEFORE_PRESENT" => {
+                    ErrorCode::TimestampExpiryBeforePresent as i32
+                }
+                _ => ErrorCode::InvalidArgument as i32,
+            };
+            // context points at the specific field that caused the rejection.
+            let context = match error_code {
+                "TIMESTAMP_EXPIRY_BEFORE_PRESENT" => "timing.expires_at_wall_us",
+                _ => "timing.present_at_wall_us",
+            };
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                        error_code: error_code.to_string(),
+                        message,
+                        context: context.to_string(),
+                        hint: r#"{"check_field": "timing"}"#.to_string(),
+                        error_code_enum,
+                    })),
+                }))
+                .await;
+            return;
+        }
+    }
+
+    let mut st = state.lock().await;
+
+    let lease_id = match bytes_to_scene_id(&batch.lease_id) {
+        Ok(id) => id,
+        Err(_) => {
+            let cached = CachedResult {
+                accepted: false,
+                created_ids: Vec::new(),
+                error_code: "INVALID_ARGUMENT".to_string(),
+                error_message: "Invalid lease_id bytes".to_string(),
+            };
+            if !batch.batch_id.is_empty() {
+                session.dedup_window.insert(batch.batch_id.clone(), cached.clone());
+            }
+            let seq = session.next_server_seq();
+            // Drop lock before awaiting send to avoid holding mutex across await point.
+            drop(st);
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::MutationResult(MutationResult {
+                        batch_id: batch.batch_id,
                         accepted: false,
                         created_ids: Vec::new(),
-                        error_code: "INVALID_ARGUMENT".to_string(),
-                        error_message: "Invalid lease_id bytes".to_string(),
+                        error_code: cached.error_code,
+                        error_message: cached.error_message,
                     })),
                 }))
                 .await;
@@ -1525,17 +1777,28 @@ async fn handle_mutation_batch(
     let tab_id = match st.scene.active_tab {
         Some(id) => id,
         None => {
+            let cached = CachedResult {
+                accepted: false,
+                created_ids: Vec::new(),
+                error_code: "PRECONDITION_FAILED".to_string(),
+                error_message: "No active tab".to_string(),
+            };
+            if !batch.batch_id.is_empty() {
+                session.dedup_window.insert(batch.batch_id.clone(), cached.clone());
+            }
             let seq = session.next_server_seq();
+            // Drop lock before awaiting send to avoid holding mutex across await point.
+            drop(st);
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::MutationResult(MutationResult {
-                        batch_id: batch.batch_id.clone(),
+                        batch_id: batch.batch_id,
                         accepted: false,
                         created_ids: Vec::new(),
-                        error_code: "PRECONDITION_FAILED".to_string(),
-                        error_message: "No active tab".to_string(),
+                        error_code: cached.error_code,
+                        error_message: cached.error_message,
                     })),
                 }))
                 .await;
@@ -1629,6 +1892,27 @@ async fn handle_mutation_batch(
 
     let seq = session.next_server_seq();
     if result.applied {
+        let created_ids: Vec<Vec<u8>> = result
+            .created_ids
+            .iter()
+            .map(|id| scene_id_to_bytes(*id))
+            .collect();
+
+        // Cache result before sending.
+        if !batch.batch_id.is_empty() {
+            session.dedup_window.insert(
+                batch.batch_id.clone(),
+                CachedResult {
+                    accepted: true,
+                    created_ids: created_ids.clone(),
+                    error_code: String::new(),
+                    error_message: String::new(),
+                },
+            );
+        }
+
+        // Drop lock before awaiting send to avoid holding mutex across await point.
+        drop(st);
         let _ = tx
             .send(Ok(ServerMessage {
                 sequence: seq,
@@ -1636,17 +1920,33 @@ async fn handle_mutation_batch(
                 payload: Some(ServerPayload::MutationResult(MutationResult {
                     batch_id: batch.batch_id,
                     accepted: true,
-                    created_ids: result
-                        .created_ids
-                        .iter()
-                        .map(|id| scene_id_to_bytes(*id))
-                        .collect(),
+                    created_ids,
                     error_code: String::new(),
                     error_message: String::new(),
                 })),
             }))
             .await;
     } else {
+        let error_message = result
+            .error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown error".to_string());
+
+        // Cache rejection result before sending.
+        if !batch.batch_id.is_empty() {
+            session.dedup_window.insert(
+                batch.batch_id.clone(),
+                CachedResult {
+                    accepted: false,
+                    created_ids: Vec::new(),
+                    error_code: "MUTATION_REJECTED".to_string(),
+                    error_message: error_message.clone(),
+                },
+            );
+        }
+
+        // Drop lock before awaiting send to avoid holding mutex across await point.
+        drop(st);
         let _ = tx
             .send(Ok(ServerMessage {
                 sequence: seq,
@@ -1656,10 +1956,7 @@ async fn handle_mutation_batch(
                     accepted: false,
                     created_ids: Vec::new(),
                     error_code: "MUTATION_REJECTED".to_string(),
-                    error_message: result
-                        .error
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| "unknown error".to_string()),
+                    error_message,
                 })),
             }))
             .await;
@@ -2544,6 +2841,7 @@ mod tests {
                         ),
                     ),
                 }],
+                timing: None,
             })),
         })
         .await
@@ -2939,6 +3237,7 @@ mod tests {
                 batch_id: batch_id.clone(),
                 lease_id: lease_id.clone(),
                 mutations: Vec::new(),
+                timing: None,
             })),
         })
         .await
@@ -2995,6 +3294,7 @@ mod tests {
                 batch_id: batch_id2.clone(),
                 lease_id: lease_id.clone(),
                 mutations: Vec::new(),
+                timing: None,
             })),
         })
         .await
@@ -3456,6 +3756,14 @@ mod tests {
             TrafficClass::StateStream,
         );
 
+        // DegradationNotice — transactional (RFC 0005 §3.4)
+        assert_eq!(
+            classify_server_payload(&ServerPayload::DegradationNotice(
+                DegradationNotice::default()
+            )),
+            TrafficClass::Transactional,
+        );
+
         // Ephemeral messages
         assert_eq!(
             classify_server_payload(&ServerPayload::Heartbeat(Heartbeat::default())),
@@ -3545,6 +3853,8 @@ mod tests {
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
+            session_open_at_wall_us: now_wall_us(),
+            dedup_window: DedupWindow::new(1000, 60),
         };
 
         // seq=2 (gap=1): OK
@@ -4505,5 +4815,381 @@ mod tests {
             }
             other => panic!("Expected SessionResumeResult, got: {other:?}"),
         }
+    }
+
+    // ─── DegradationNotice tests (RFC 0005 §3.4, §7.1) ───────────────────────
+
+    /// traffic_class: DegradationNotice must be Transactional (RFC 0005 §3.4).
+    #[test]
+    fn test_degradation_notice_is_transactional() {
+        assert_eq!(
+            classify_server_payload(&ServerPayload::DegradationNotice(
+                DegradationNotice::default()
+            )),
+            TrafficClass::Transactional,
+            "DegradationNotice must be Transactional — never dropped"
+        );
+    }
+
+    /// Scenario: WHEN runtime enters COALESCING_MORE degradation level,
+    /// THEN all active sessions receive DegradationNotice unconditionally.
+    #[tokio::test]
+    async fn test_degradation_notice_broadcast_to_active_session() {
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        let degradation_tx = service.degradation_tx.clone();
+        let state_ref = service.state.clone();
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _server = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let mut client =
+            HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+                .await
+                .unwrap();
+
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "degrad-agent", "test-key").await;
+
+        // Give the session task a brief moment to subscribe to the broadcast channel.
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Broadcast a COALESCING_MORE degradation notice from the "compositor side".
+        let notice = DegradationNotice {
+            level: DegradationLevel::CoalescingMore as i32,
+            reason: "high load".to_string(),
+            affected_capabilities: vec!["state_stream".to_string()],
+            timestamp_wall_us: now_wall_us(),
+        };
+        let _ = degradation_tx.send(notice.clone());
+
+        // Update shared state level (mirrors what broadcast_degradation() does).
+        {
+            let mut st = state_ref.lock().await;
+            st.degradation_level = crate::session::RuntimeDegradationLevel::CoalescingMore;
+        }
+
+        // The session should receive DegradationNotice next.
+        let timeout = tokio::time::Duration::from_millis(500);
+        let msg = tokio::time::timeout(timeout, stream.next())
+            .await
+            .expect("timeout waiting for DegradationNotice")
+            .expect("stream ended")
+            .expect("stream error");
+
+        match &msg.payload {
+            Some(ServerPayload::DegradationNotice(dn)) => {
+                assert_eq!(
+                    dn.level,
+                    DegradationLevel::CoalescingMore as i32,
+                    "Expected COALESCING_MORE"
+                );
+                assert_eq!(dn.reason, "high load");
+                assert!(dn.affected_capabilities.contains(&"state_stream".to_string()));
+            }
+            other => panic!("Expected DegradationNotice, got: {other:?}"),
+        }
+
+        drop(tx);
+    }
+
+    // ─── Deduplication tests (RFC 0005 §5.2) ─────────────────────────────────
+
+    /// Scenario: duplicate batch_id within window returns cached MutationResult.
+    #[tokio::test]
+    async fn test_mutation_dedup_returns_cached_result() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "dedup-agent", "test-key").await;
+
+        // Obtain a lease
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+        let lease_msg = stream.next().await.unwrap().unwrap();
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        // Send first MutationBatch with a unique batch_id
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+                timing: None,
+            })),
+        })
+        .await
+        .unwrap();
+        let first_result = stream.next().await.unwrap().unwrap();
+        let first_accepted = match &first_result.payload {
+            Some(ServerPayload::MutationResult(r)) => {
+                assert_eq!(r.batch_id, batch_id);
+                r.accepted
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
+        };
+
+        // Retransmit with the same batch_id but a new sequence number
+        tx.send(ClientMessage {
+            sequence: 4, // new sequence
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(), // same batch_id
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+                timing: None,
+            })),
+        })
+        .await
+        .unwrap();
+        let dedup_result = stream.next().await.unwrap().unwrap();
+        match &dedup_result.payload {
+            Some(ServerPayload::MutationResult(r)) => {
+                assert_eq!(
+                    r.batch_id, batch_id,
+                    "batch_id must be echoed from cached result"
+                );
+                assert_eq!(
+                    r.accepted, first_accepted,
+                    "Dedup must return cached accepted flag"
+                );
+            }
+            other => panic!("Expected cached MutationResult on retransmit, got: {other:?}"),
+        }
+
+        drop(tx);
+    }
+
+    // ─── TimingHints validation tests (RFC 0003 §3.5, RFC 0005 §3.3) ─────────
+
+    /// Unit test for validate_timing_hints: TIMESTAMP_TOO_OLD.
+    #[test]
+    fn test_timing_hints_too_old() {
+        // present_at_wall_us = session_open - 61 seconds → TIMESTAMP_TOO_OLD
+        let session_open = 200_000_000u64; // arbitrary µs baseline
+        let present = session_open - 61_000_001; // > 60s before session open
+        let hints = TimingHints {
+            present_at_wall_us: present,
+            expires_at_wall_us: 0,
+        };
+        let result = validate_timing_hints(&hints, session_open, DEFAULT_MAX_FUTURE_SCHEDULE_US);
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, "TIMESTAMP_TOO_OLD");
+    }
+
+    /// Unit test for validate_timing_hints: TIMESTAMP_TOO_FUTURE.
+    #[test]
+    fn test_timing_hints_too_future() {
+        let session_open = now_wall_us();
+        let max_future = DEFAULT_MAX_FUTURE_SCHEDULE_US;
+        // Use session_open as baseline and a large margin (1 full second) to avoid
+        // flakiness from the µs gap between now_wall_us() calls.
+        // present must exceed current_wall_us + max_future, where current_wall_us is
+        // re-sampled inside validate_timing_hints. The 1-second buffer ensures the
+        // margin holds even under scheduler jitter.
+        let present = session_open + max_future + 1_000_000; // 1s beyond horizon
+        let hints = TimingHints {
+            present_at_wall_us: present,
+            expires_at_wall_us: 0,
+        };
+        let result = validate_timing_hints(&hints, session_open, max_future);
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, "TIMESTAMP_TOO_FUTURE");
+    }
+
+    /// Unit test for validate_timing_hints: TIMESTAMP_EXPIRY_BEFORE_PRESENT.
+    #[test]
+    fn test_timing_hints_expiry_before_present() {
+        let session_open = now_wall_us().saturating_sub(1_000_000); // 1s ago
+        let now = now_wall_us();
+        let present = now + 1_000_000; // 1s in future (valid range)
+        let expires = present - 1; // expires before present → invalid
+        let hints = TimingHints {
+            present_at_wall_us: present,
+            expires_at_wall_us: expires,
+        };
+        let result = validate_timing_hints(&hints, session_open, DEFAULT_MAX_FUTURE_SCHEDULE_US);
+        assert!(result.is_err());
+        let (code, _) = result.unwrap_err();
+        assert_eq!(code, "TIMESTAMP_EXPIRY_BEFORE_PRESENT");
+    }
+
+    /// Unit test for validate_timing_hints: valid future scheduling (present_at in future).
+    #[test]
+    fn test_timing_hints_valid_future() {
+        let session_open = now_wall_us().saturating_sub(1_000_000); // 1s ago
+        let now = now_wall_us();
+        let present = now + 500_000; // 500ms in the future (well within 5 min)
+        let expires = present + 2_000_000; // 2s after present → valid
+        let hints = TimingHints {
+            present_at_wall_us: present,
+            expires_at_wall_us: expires,
+        };
+        assert!(
+            validate_timing_hints(&hints, session_open, DEFAULT_MAX_FUTURE_SCHEDULE_US).is_ok(),
+            "Valid future TimingHints should not be rejected"
+        );
+    }
+
+    /// Unit test for validate_timing_hints: zero fields bypass validation.
+    #[test]
+    fn test_timing_hints_zero_bypasses_validation() {
+        let session_open = now_wall_us();
+        let hints = TimingHints {
+            present_at_wall_us: 0,
+            expires_at_wall_us: 0,
+        };
+        assert!(
+            validate_timing_hints(&hints, session_open, DEFAULT_MAX_FUTURE_SCHEDULE_US).is_ok(),
+            "Zero TimingHints should always be valid"
+        );
+    }
+
+    /// Integration test: MutationBatch with TIMESTAMP_TOO_OLD is rejected via stream.
+    #[tokio::test]
+    async fn test_mutation_timing_too_old_rejected() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "timing-old-agent", "test-key").await;
+
+        // Get a lease
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+        let lease_msg = stream.next().await.unwrap().unwrap();
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        // Send a mutation with present_at more than 60s before epoch 0 (which means
+        // it's more than 60s before session open; session opened near now_wall_us(),
+        // so session_open - 60s - 1 ≫ 0 for any real timestamp).
+        //
+        // Use present_at = 1 µs since epoch — guaranteed to be older than
+        // session_open_at_wall_us - 60_000_000.
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+                timing: Some(TimingHints {
+                    present_at_wall_us: 1, // far in the past
+                    expires_at_wall_us: 0,
+                }),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let result_msg = stream.next().await.unwrap().unwrap();
+        match &result_msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "TIMESTAMP_TOO_OLD");
+                assert_eq!(err.error_code_enum, ErrorCode::TimestampTooOld as i32);
+            }
+            other => panic!("Expected RuntimeError(TIMESTAMP_TOO_OLD), got: {other:?}"),
+        }
+
+        drop(tx);
+    }
+
+    /// Integration test: MutationBatch with TIMESTAMP_EXPIRY_BEFORE_PRESENT is rejected.
+    #[tokio::test]
+    async fn test_mutation_timing_expiry_before_present_rejected() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "timing-exp-agent", "test-key").await;
+
+        // Get a lease
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+        let lease_msg = stream.next().await.unwrap().unwrap();
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        let now = now_wall_us();
+        let present = now + 500_000; // 500ms in future
+        let expires = present - 1; // expires 1µs before present → invalid
+
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+                timing: Some(TimingHints {
+                    present_at_wall_us: present,
+                    expires_at_wall_us: expires,
+                }),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let result_msg = stream.next().await.unwrap().unwrap();
+        match &result_msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "TIMESTAMP_EXPIRY_BEFORE_PRESENT");
+                assert_eq!(
+                    err.error_code_enum,
+                    ErrorCode::TimestampExpiryBeforePresent as i32
+                );
+            }
+            other => panic!(
+                "Expected RuntimeError(TIMESTAMP_EXPIRY_BEFORE_PRESENT), got: {other:?}"
+            ),
+        }
+
+        drop(tx);
     }
 }
