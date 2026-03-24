@@ -105,6 +105,7 @@ impl JsonRpcError {
     pub fn capability_required(tool_name: &str) -> Self {
         let data = serde_json::json!({
             "error_code": "CAPABILITY_REQUIRED",
+            "message": "Capability required",
             "context": format!("tool={tool_name}"),
             "hint": {
                 "required_capability": "resident_mcp",

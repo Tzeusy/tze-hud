@@ -39,6 +39,7 @@
 //! to HTTP, stdio, or any other transport.
 
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 use tze_hud_scene::graph::SceneGraph;
 use tracing::{debug, error, warn};
@@ -209,32 +210,43 @@ impl McpServer {
 
         // ── Per-call authentication (spec §8.4) ──────────────────────────────
         if let Some(ref expected) = self.config.pre_shared_key {
-            // Attempt auth: first from CallerContext bearer token, then from
-            // the `_auth` param field in the JSON-RPC params object.
-            let provided_key = ctx.bearer_token.as_deref().or_else(|| {
-                request
-                    .params
-                    .as_object()
-                    .and_then(|o| o.get("_auth"))
-                    .and_then(|v| v.as_str())
-            });
+            // Attempt auth from two independent sources (spec §8.4: either is valid):
+            // 1. CallerContext bearer token (from HTTP Authorization header).
+            // 2. `_auth` param field in the JSON-RPC params object.
+            //
+            // Both are checked independently — if a bearer token is present but
+            // wrong, the `_auth` param can still authenticate the call.  This
+            // prevents a rogue/stale transport header from blocking valid in-params auth.
+            //
+            // Constant-time comparison (via `subtle`) prevents timing side-channels.
+            let bearer_key = ctx.bearer_token.as_deref();
+            let param_key = request
+                .params
+                .as_object()
+                .and_then(|o| o.get("_auth"))
+                .and_then(|v| v.as_str());
 
-            match provided_key {
-                Some(key) if key == expected => {
-                    // Authenticated. Strip _auth from params so handlers never
-                    // see it (avoids unknown-field errors in typed params structs).
-                    if let Some(obj) = request.params.as_object_mut() {
-                        obj.remove("_auth");
-                    }
+            let expected_bytes = expected.as_bytes();
+            let authenticated = bearer_key
+                .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
+                .unwrap_or(false)
+                || param_key
+                    .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
+                    .unwrap_or(false);
+
+            if authenticated {
+                // Authenticated. Strip _auth from params so handlers never
+                // see it (avoids unknown-field errors in typed params structs).
+                if let Some(obj) = request.params.as_object_mut() {
+                    obj.remove("_auth");
                 }
-                _ => {
-                    warn!(method = %request.method, "MCP: authentication failed");
-                    let resp = McpResponse::err(
-                        request.id.clone(),
-                        JsonRpcError::from(McpError::Unauthenticated),
-                    );
-                    return serde_json::to_string(&resp).unwrap_or_default();
-                }
+            } else {
+                warn!(method = %request.method, "MCP: authentication failed");
+                let resp = McpResponse::err(
+                    request.id.clone(),
+                    JsonRpcError::from(McpError::Unauthenticated),
+                );
+                return serde_json::to_string(&resp).unwrap_or_default();
             }
         }
 
@@ -371,14 +383,27 @@ impl McpServer {
                         ("", std::str::from_utf8(raw).unwrap_or(""))
                     };
 
-                // Extract Bearer token from Authorization header
+                // Extract Bearer token from Authorization header.
+                // Header name matching is case-insensitive (HTTP/1.1 §3.2).
+                // Scheme matching is also case-insensitive per RFC 7235 §2.1
+                // ("Bearer" is the registered scheme but clients may lowercase it).
                 let bearer_token = header_section
                     .lines()
                     .find(|l| l.to_lowercase().starts_with("authorization:"))
                     .and_then(|l| l.splitn(2, ':').nth(1))
                     .map(|v| v.trim())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .map(str::to_owned);
+                    .and_then(|v| {
+                        // Split into scheme + credentials; accept any case of "Bearer".
+                        let mut parts = v.splitn(2, ' ');
+                        match (parts.next(), parts.next()) {
+                            (Some(scheme), Some(credentials))
+                                if scheme.eq_ignore_ascii_case("bearer") =>
+                            {
+                                Some(credentials.trim().to_owned())
+                            }
+                            _ => None,
+                        }
+                    });
 
                 let ctx = if let Some(token) = bearer_token {
                     CallerContext::with_bearer(token)

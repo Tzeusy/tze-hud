@@ -361,7 +361,8 @@ pub struct PublishToZoneParams {
     /// Font size in pixels. Defaults to 16.
     #[serde(default = "default_font_size")]
     pub font_size_px: f32,
-    /// TTL in microseconds. 0 means use zone default. Defaults to 0.
+    /// TTL in microseconds. A value of 0 selects the built-in default of
+    /// 60_000 ms (60_000_000 µs). Defaults to 0.
     #[serde(default)]
     pub ttl_us: u64,
     /// Merge key for idempotent zone publishes (optional).
@@ -384,7 +385,7 @@ pub struct PublishToZoneResult {
     pub tile_id: String,
     /// UUID of the node holding the content.
     pub node_id: String,
-    /// Effective TTL in microseconds (0 = zone default applied).
+    /// Effective TTL in microseconds applied to the lease (never 0 in response).
     pub ttl_us: u64,
     /// Echo of the merge key, if provided.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -394,11 +395,12 @@ pub struct PublishToZoneResult {
 /// Publish markdown content to a named zone.
 ///
 /// This is the primary LLM-first tool: a single call with zero scene context
-/// required. It looks up the zone by name, creates a tile, and sets the
-/// markdown content.
+/// required. It looks up the zone by name, creates a new tile in the active
+/// tab, and sets the markdown content.
 ///
-/// If the zone already has a tile associated, it updates that tile's content.
-/// Otherwise, a new tile is created in the active tab at default bounds.
+/// Each call always creates a new tile. Update-in-place semantics (via
+/// `merge_key`) are reserved for a future version. For now, `merge_key` is
+/// accepted and echoed but does not affect scene mutation behavior.
 ///
 /// # Errors
 /// - `invalid_params` if `zone_name` or `content` is empty.
@@ -426,10 +428,12 @@ pub fn handle_publish_to_zone(
     let tab_id = scene.active_tab.ok_or(McpError::NoActiveTab)?;
 
     // Convert ttl_us to ttl_ms for lease grant; 0 means use a sensible default.
+    // Use div_ceil to ensure any positive sub-millisecond TTL rounds up to at
+    // least 1 ms, preventing an unintended indefinite lease (ttl_ms == 0).
     let ttl_ms = if p.ttl_us == 0 {
-        60_000 // 1 minute default
+        60_000u64 // 1 minute default
     } else {
-        p.ttl_us / 1_000
+        p.ttl_us.div_ceil(1_000)
     };
 
     // Grant lease
@@ -473,7 +477,9 @@ pub fn handle_publish_to_zone(
         tab_id: tab_id.to_string(),
         tile_id: tile_id.to_string(),
         node_id: node_id.to_string(),
-        ttl_us: p.ttl_us,
+        // Return the effective TTL used for the lease (ttl_ms converted back to
+        // microseconds), not the raw request value, so callers know what was applied.
+        ttl_us: ttl_ms * 1_000,
         merge_key: p.merge_key,
     })
 }
