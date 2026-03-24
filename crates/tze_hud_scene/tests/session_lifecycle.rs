@@ -125,13 +125,14 @@ fn apply_create_tile(
     };
     let result = scene.apply_batch(&batch);
     assert!(result.applied, "CreateTile should succeed");
+    assert_eq!(result.created_ids.len(), 1, "CreateTile should produce exactly one created_id");
     result.created_ids[0]
 }
 
-fn apply_set_tile_root(scene: &mut SceneGraph, tile_id: SceneId, node: Node) {
+fn apply_set_tile_root(scene: &mut SceneGraph, tile_id: SceneId, namespace: &str, node: Node) {
     let batch = MutationBatch {
         batch_id: SceneId::new(),
-        agent_namespace: "agent".to_string(),
+        agent_namespace: namespace.to_string(),
         mutations: vec![SceneMutation::SetTileRoot { tile_id, node }],
     };
     let result = scene.apply_batch(&batch);
@@ -142,7 +143,7 @@ fn apply_set_tile_root(scene: &mut SceneGraph, tile_id: SceneId, node: Node) {
 
 /// Validates the complete session lifecycle state machine:
 /// lease grant (Active) → mutate → disconnect (Disconnected) → reconnect
-/// (Active) → safe mode (Suspended) → safe mode exit (Active) → close (Released)
+/// (Active) → safe mode (Suspended) → safe mode exit (Active) → close (Revoked)
 ///
 /// Produces a state-transition log in JSON format.
 #[test]
@@ -173,6 +174,7 @@ fn test_full_session_lifecycle_state_transitions() {
     apply_set_tile_root(
         &mut scene,
         tile_id,
+        "agent.alpha",
         make_solid_node(Rect::new(0.0, 0.0, 400.0, 300.0), Rgba::new(0.2, 0.4, 0.8, 1.0)),
     );
     assert_eq!(scene.tile_count(), 1);
@@ -295,12 +297,14 @@ fn test_reconnect_within_grace_period_delivers_snapshot() {
     scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Disconnected);
 
-    // Snapshot taken while in grace period — tiles still exist
+    // Snapshot taken while in grace period — tiles still exist.
+    // Deserialize the snapshot to validate it faithfully captures the scene state.
     let grace_snapshot_json = scene.snapshot_json().expect("snapshot_json");
-    assert!(grace_snapshot_json.contains(&tile_a.to_string()) || scene.tiles.contains_key(&tile_a),
-        "tile_a must exist in grace period");
-    assert!(scene.tiles.contains_key(&tile_b), "tile_b must exist in grace period");
-    assert!(scene.tiles.contains_key(&tile_c), "tile_c must exist in grace period");
+    let snapshot_scene = SceneGraph::from_json(&grace_snapshot_json).expect("deserialize snapshot");
+    assert_eq!(snapshot_scene.tile_count(), 3, "snapshot must contain all 3 tiles during grace period");
+    assert!(snapshot_scene.tiles.contains_key(&tile_a), "snapshot must contain tile_a in grace period");
+    assert!(snapshot_scene.tiles.contains_key(&tile_b), "snapshot must contain tile_b in grace period");
+    assert!(snapshot_scene.tiles.contains_key(&tile_c), "snapshot must contain tile_c in grace period");
 
     // Reconnect within grace (5 s << 30 s default grace)
     clock.advance(5_000);
@@ -334,7 +338,7 @@ fn test_reconnect_after_grace_period_expiry_clears_state() {
     let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
 
     let tab_id = scene.create_tab("Workspace", 0).expect("create_tab");
-    // Short TTL to speed up the test
+    // Use a long TTL; this test exercises grace-period expiry, not TTL expiry
     let lease_id = scene.grant_lease("agent.charlie", 9_000_000, vec![Capability::CreateTile]);
 
     apply_create_tile(&mut scene, tab_id, "agent.charlie", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
@@ -497,8 +501,9 @@ fn test_safe_mode_exit_resumes_leases_and_accepts_mutations() {
 /// that a lease that was frozen before safe mode entry ends up in the correct
 /// Suspended state and resumes cleanly on safe mode exit.
 ///
-/// This test also verifies that a ONE_SHOT lease suspended during safe mode
-/// retains its TTL accounting per RFC 0008 §1.4.
+/// Both leases are standard leases with Manual renewal policy. Safe mode exit
+/// resumes all suspended leases, including the pre-frozen one — this models
+/// "safe mode cancels active freeze" per RFC 0008 §3.4.
 #[test]
 fn test_freeze_plus_safe_mode_interaction() {
     let clock = Arc::new(TestClock::new(0));
@@ -693,9 +698,9 @@ fn test_zero_resource_footprint_after_disconnect_and_expiry() {
     let tile_c = apply_create_tile(&mut scene, tab_id, "agent.foxtrot", lease_id, Rect::new(0.0, 210.0, 200.0, 200.0), 3);
 
     // Add content nodes to the tiles
-    apply_set_tile_root(&mut scene, tile_a, make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(1.0, 0.0, 0.0, 1.0)));
-    apply_set_tile_root(&mut scene, tile_b, make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(0.0, 1.0, 0.0, 1.0)));
-    apply_set_tile_root(&mut scene, tile_c, make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(0.0, 0.0, 1.0, 1.0)));
+    apply_set_tile_root(&mut scene, tile_a, "agent.foxtrot", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(1.0, 0.0, 0.0, 1.0)));
+    apply_set_tile_root(&mut scene, tile_b, "agent.foxtrot", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(0.0, 1.0, 0.0, 1.0)));
+    apply_set_tile_root(&mut scene, tile_c, "agent.foxtrot", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(0.0, 0.0, 1.0, 1.0)));
 
     assert_eq!(scene.tile_count(), 3);
     assert_eq!(scene.node_count(), 3, "one node per tile");
@@ -703,7 +708,7 @@ fn test_zero_resource_footprint_after_disconnect_and_expiry() {
     // Also create a second (unrelated) agent — its resources must survive expiry
     let lease_other = scene.grant_lease("agent.golf", 9_000_000, vec![Capability::CreateTile]);
     let tile_other = apply_create_tile(&mut scene, tab_id, "agent.golf", lease_other, Rect::new(600.0, 0.0, 200.0, 200.0), 10);
-    apply_set_tile_root(&mut scene, tile_other, make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::WHITE));
+    apply_set_tile_root(&mut scene, tile_other, "agent.golf", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::WHITE));
     assert_eq!(scene.tile_count(), 4);
 
     // Record pre-disconnect state
