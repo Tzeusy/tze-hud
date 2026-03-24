@@ -2197,7 +2197,7 @@ impl SceneGraph {
         }
 
         // Lease is Active — delegate to unchecked publish.
-        self.publish_to_zone(zone_name, content, publisher_namespace, merge_key)
+        self.publish_to_zone(zone_name, content, publisher_namespace, merge_key, None, None)
     }
 
     /// Budget-driven revocation: transitions all non-terminal session leases to
@@ -3162,6 +3162,7 @@ mod tests {
             max_publishers: 4,
             transport_constraint: None,
             auto_clear_ms: None,
+            ephemeral: false,
             layer_attachment: LayerAttachment::Content,
         };
         scene.register_zone(stack_zone);

@@ -2092,6 +2092,8 @@ async fn apply_queued_batch_to_scene(
                         content,
                         publish_token: token,
                         merge_key,
+                        expires_at_wall_us: None,
+                        content_classification: None,
                     });
                 }
             }
@@ -3049,6 +3051,25 @@ mod tests {
     use tokio_stream::StreamExt;
     use tze_hud_scene::graph::SceneGraph;
 
+    /// Consume the next non-LeaseStateChange message from a stream.
+    ///
+    /// Some test scenarios interleave LeaseStateChange events (e.g.,
+    /// REQUESTED→ACTIVE after lease grant) with MutationResult/RuntimeError
+    /// messages. This helper drains those state-change events so tests can
+    /// assert on the first substantive message without order-dependency.
+    async fn next_non_state_change(
+        stream: &mut tonic::Streaming<crate::proto::session::ServerMessage>,
+    ) -> crate::proto::session::ServerMessage {
+        use crate::proto::session::server_message::Payload as P;
+        loop {
+            let msg = stream.next().await.unwrap().unwrap();
+            if let Some(P::LeaseStateChange(_)) = &msg.payload {
+                continue;
+            }
+            return msg;
+        }
+    }
+
     /// Start a test server and return a connected client.
     async fn setup_test() -> (
         HudSessionClient<tonic::transport::Channel>,
@@ -3286,7 +3307,15 @@ mod tests {
         .await
         .unwrap();
 
-        let result_msg = stream.next().await.unwrap().unwrap();
+        // Drain any interleaved LeaseStateChange events before expecting MutationResult.
+        // A LeaseStateChange(REQUESTED -> ACTIVE) may be emitted after lease grant.
+        let result_msg = loop {
+            let msg = stream.next().await.unwrap().unwrap();
+            if let Some(ServerPayload::LeaseStateChange(_)) = &msg.payload {
+                continue; // skip lease state events
+            }
+            break msg;
+        };
         match &result_msg.payload {
             Some(ServerPayload::MutationResult(result)) => {
                 // This will fail because no active tab exists, which is expected
@@ -3788,7 +3817,7 @@ mod tests {
         .await
         .unwrap();
 
-        let msg = stream.next().await.unwrap().unwrap();
+        let msg = next_non_state_change(&mut stream).await;
         match &msg.payload {
             Some(ServerPayload::RuntimeError(err)) => {
                 assert_eq!(
@@ -3913,7 +3942,7 @@ mod tests {
         .await
         .unwrap();
 
-        let msg = stream.next().await.unwrap().unwrap();
+        let msg = next_non_state_change(&mut stream).await;
         match &msg.payload {
             Some(ServerPayload::MutationResult(result)) => {
                 // Accepted=true: mutation was queued, not rejected
@@ -4022,7 +4051,7 @@ mod tests {
         .await
         .unwrap();
 
-        let msg = stream.next().await.unwrap().unwrap();
+        let msg = next_non_state_change(&mut stream).await;
         match &msg.payload {
             Some(ServerPayload::RuntimeError(err)) => {
                 assert_eq!(err.error_code, "SAFE_MODE_ACTIVE");
@@ -4882,6 +4911,7 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: 0,
             dedup_window: DedupWindow::new(1000, 60),
+            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
         };
 
         handle_capability_request(
@@ -4941,6 +4971,7 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: 0,
             dedup_window: DedupWindow::new(1000, 60),
+            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -5007,6 +5038,7 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: 0,
             dedup_window: DedupWindow::new(1000, 60),
+            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
         };
 
         handle_capability_request(
@@ -5508,7 +5540,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let first_result = stream.next().await.unwrap().unwrap();
+        let first_result = next_non_state_change(&mut stream).await;
         let first_accepted = match &first_result.payload {
             Some(ServerPayload::MutationResult(r)) => {
                 assert_eq!(r.batch_id, batch_id);
@@ -5683,7 +5715,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result_msg = stream.next().await.unwrap().unwrap();
+        let result_msg = next_non_state_change(&mut stream).await;
         match &result_msg.payload {
             Some(ServerPayload::RuntimeError(err)) => {
                 assert_eq!(err.error_code, "TIMESTAMP_TOO_OLD");
@@ -5741,7 +5773,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result_msg = stream.next().await.unwrap().unwrap();
+        let result_msg = next_non_state_change(&mut stream).await;
         match &result_msg.payload {
             Some(ServerPayload::RuntimeError(err)) => {
                 assert_eq!(err.error_code, "TIMESTAMP_EXPIRY_BEFORE_PRESENT");
@@ -5766,7 +5798,7 @@ mod tests {
     #[tokio::test]
     async fn test_ephemeral_zone_no_publish_result() {
         use tze_hud_scene::types::{
-            ContentionPolicy, GeometryPolicy, RenderingPolicy, ZoneDefinition, ZoneMediaType,
+            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition, ZoneMediaType,
         };
         let scene = SceneGraph::new(800.0, 600.0);
         let service = HudSessionImpl::new(scene, "test-key");
@@ -5791,6 +5823,7 @@ mod tests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: true, // <-- ephemeral zone
+                layer_attachment: LayerAttachment::Content,
             });
         }
 
@@ -5866,7 +5899,7 @@ mod tests {
     #[tokio::test]
     async fn test_durable_zone_publish_result() {
         use tze_hud_scene::types::{
-            ContentionPolicy, GeometryPolicy, RenderingPolicy, ZoneDefinition, ZoneMediaType,
+            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition, ZoneMediaType,
         };
         let scene = SceneGraph::new(800.0, 600.0);
         let service = HudSessionImpl::new(scene, "test-key");
@@ -5891,6 +5924,7 @@ mod tests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 ephemeral: false, // <-- durable zone
+                layer_attachment: LayerAttachment::Content,
             });
         }
 

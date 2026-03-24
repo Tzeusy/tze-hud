@@ -676,12 +676,16 @@ mod tests {
     async fn test_chrome_always_above_max_zorder_tile() {
         let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
 
-        // Agent tile at max z-order with bright red content.
+        // Agent tile at max valid agent z-order with bright red content.
+        // Agent tiles must use z_order < ZONE_TILE_Z_MIN (0x8000_0000); u32::MAX is
+        // reserved for runtime zone tiles (scene-graph/spec.md §Zone Layer Attachment).
+        use tze_hud_scene::types::ZONE_TILE_Z_MIN;
+        let max_agent_z = ZONE_TILE_Z_MIN - 1; // 0x7FFF_FFFF
         let mut scene = SceneGraph::new(256.0, 256.0);
         let tab_id = scene.create_tab("test", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), u32::MAX)
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), max_agent_z)
             .unwrap();
         scene.set_tile_root(tile_id, Node {
             id: SceneId::new(),

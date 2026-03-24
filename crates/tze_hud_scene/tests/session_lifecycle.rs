@@ -40,7 +40,7 @@ use tze_hud_scene::{
     mutation::{MutationBatch, SceneMutation},
     test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants},
     types::{
-        Capability, LeaseState, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
+        Capability, LayerAttachment, LeaseState, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
     },
 };
 use tze_hud_scene::lease::{
@@ -973,6 +973,7 @@ fn make_stream_text_zone(name: &str) -> tze_hud_scene::types::ZoneDefinition {
         transport_constraint: None,
         auto_clear_ms: None,
         ephemeral: false,
+    layer_attachment: LayerAttachment::Content,
     }
 }
 
@@ -1063,6 +1064,8 @@ fn test_zone_publications_cleared_on_lease_expiry() {
         "subtitle",
         ZoneContent::StreamText("Hello from agent.india".to_string()),
         "agent.india",
+        None,
+        None,
         None,
     ).expect("publish_to_zone");
 
@@ -1282,7 +1285,7 @@ fn test_zone_publications_cleared_on_revoke_lease() {
     let lease_id = scene.grant_lease("agent.november", 60_000, vec![]);
 
     // Publish while active
-    scene.publish_to_zone("status", ZoneContent::StreamText("active".into()), "agent.november", None)
+    scene.publish_to_zone("status", ZoneContent::StreamText("active".into()), "agent.november", None, None, None)
         .expect("publish");
 
     assert!(!scene.zone_registry.active_publishes.get("status").map(|v| v.is_empty()).unwrap_or(true),

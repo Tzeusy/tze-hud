@@ -58,6 +58,7 @@ fn make_subtitle_zone() -> ZoneDefinition {
         transport_constraint: None,
         auto_clear_ms: None,
         layer_attachment: LayerAttachment::Content,
+        ephemeral: false,
     }
 }
 
@@ -297,6 +298,7 @@ fn contention_stack_evicts_oldest_at_max_depth() {
         transport_constraint: None,
         auto_clear_ms: None,
         layer_attachment: LayerAttachment::Chrome,
+        ephemeral: false,
     });
 
     let notif = |text: &str| {
@@ -345,6 +347,7 @@ fn contention_merge_by_key_same_key_replaces() {
         transport_constraint: None,
         auto_clear_ms: None,
         layer_attachment: LayerAttachment::Chrome,
+        ephemeral: false,
     });
 
     let kv = |k: &str, v: &str| {
@@ -389,6 +392,7 @@ fn contention_replace_evicts_current() {
         transport_constraint: None,
         auto_clear_ms: None,
         layer_attachment: LayerAttachment::Content,
+        ephemeral: false,
     });
 
     scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::WHITE), "a1", None, None, None).unwrap();
@@ -520,6 +524,7 @@ fn static_image_content_publishes_successfully() {
         transport_constraint: None,
         auto_clear_ms: None,
         layer_attachment: LayerAttachment::Background,
+        ephemeral: false,
     });
 
     let resource_id = ResourceId::of(b"fake image data");
@@ -556,6 +561,7 @@ fn video_surface_ref_schema_defined_but_not_rendered() {
         transport_constraint: None,
         auto_clear_ms: None,
         layer_attachment: LayerAttachment::Content,
+        ephemeral: false,
     });
 
     // The zone can be registered and the content can be published (schema accepted).
@@ -626,6 +632,7 @@ fn clear_zone_for_publisher_only_removes_own_publications() {
         transport_constraint: None,
         auto_clear_ms: None,
         layer_attachment: LayerAttachment::Content,
+        ephemeral: false,
     });
 
     scene.publish_to_zone("shared", ZoneContent::StreamText("from a1".to_string()), "a1", None, None, None).unwrap();
@@ -818,6 +825,7 @@ mod proptests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 layer_attachment: LayerAttachment::Content,
+                ephemeral: false,
             });
 
             for (content, ns) in publishes {
@@ -852,6 +860,7 @@ mod proptests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 layer_attachment: LayerAttachment::Content,
+                ephemeral: false,
             });
 
             for (content, ns) in publishes {
@@ -887,6 +896,7 @@ mod proptests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 layer_attachment: LayerAttachment::Chrome,
+                ephemeral: false,
             });
 
             for (content, ns) in publishes {
@@ -940,6 +950,7 @@ mod proptests {
                 transport_constraint: None,
                 auto_clear_ms: None,
                 layer_attachment: LayerAttachment::Chrome,
+                ephemeral: false,
             });
 
             for (key, ns) in &publishes {

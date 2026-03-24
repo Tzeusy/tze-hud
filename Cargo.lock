@@ -952,23 +952,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "integration"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tonic",
- "tze_hud_compositor",
- "tze_hud_protocol",
- "tze_hud_runtime",
- "tze_hud_scene",
- "tze_hud_telemetry",
- "uuid",
-]
-
-[[package]]
 name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2199,12 +2182,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "subtle"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2525,7 +2502,6 @@ dependencies = [
  "bytemuck",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
  "tze_hud_scene",
  "tze_hud_telemetry",
  "wgpu",
@@ -2547,7 +2523,6 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2604,7 +2579,6 @@ name = "tze_hud_runtime"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
- "libc",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
