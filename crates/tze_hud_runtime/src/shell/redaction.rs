@@ -30,27 +30,14 @@ use tze_hud_scene::types::Rect;
 
 // ─── Viewer class ─────────────────────────────────────────────────────────────
 
-/// The class of the current viewer.
+/// Type alias to [`super::chrome::ViewerClass`] so that redaction evaluation and
+/// chrome state stay type-aligned without duplicating the enum definition.
 ///
-/// Re-declared here so that the redaction module is self-contained and does not
-/// create a circular dependency with `tze_hud_policy`.  The ordering matches
-/// the policy spec: Owner (most permissive) → Nobody (least permissive).
+/// Callers can pass `ChromeState.viewer_class` directly to [`is_tile_redacted`]
+/// and [`RedactionFrame::build`] without any conversion.
 ///
 /// Agents must never receive viewer class information through any API surface.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ViewerClass {
-    /// Display owner — can see all content including Sensitive.
-    Owner,
-    /// Trusted household member — can see Public and Household content.
-    HouseholdMember,
-    /// Recognized non-household visitor — can see only Public content.
-    KnownGuest,
-    /// Unrecognized person — can see only Public content.
-    #[default]
-    Unknown,
-    /// No viewer present — can see only Public content.
-    Nobody,
-}
+pub use super::chrome::ViewerClass;
 
 // ─── Content classification ──────────────────────────────────────────────────
 
@@ -185,9 +172,15 @@ pub fn hit_regions_enabled(state: &TileRedactionState) -> bool {
 ///
 /// # Parameters
 ///
-/// * `bounds` — tile bounds in screen-pixel coordinates.
+/// * `bounds` — tile bounds in screen-pixel coordinates.  If `width` or `height`
+///   are non-positive the function returns an empty vec immediately.
 /// * `style`  — `Pattern` (checkerboard) or `Blank` (solid neutral).
 pub fn build_redaction_cmds(bounds: Rect, style: RedactionStyle) -> Vec<ChromeDrawCmd> {
+    // Guard: degenerate or inverted bounds must not produce geometry.
+    if bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return Vec::new();
+    }
+
     let mut cmds = Vec::new();
 
     match style {
@@ -210,8 +203,13 @@ pub fn build_redaction_cmds(bounds: Rect, style: RedactionStyle) -> Vec<ChromeDr
             // with a texture pipeline the checkerboard would be a generated
             // texture; here it is approximated with a modest number of rects
             // so the test suite can verify placeholder rendering without GPU.
+            //
+            // Accent rect count is capped at `MAX_PATTERN_ACCENT_RECTS` to bound
+            // per-frame CPU allocation on large tiles.  When the cap is exceeded
+            // the tile falls through to the blank style (base fill only) so the
+            // tile is still fully covered without unbounded allocation.
 
-            // Base fill.
+            // Base fill (also serves as the fallback when cap is exceeded).
             cmds.push(ChromeDrawCmd {
                 x: bounds.x,
                 y: bounds.y,
@@ -225,25 +223,31 @@ pub fn build_redaction_cmds(bounds: Rect, style: RedactionStyle) -> Vec<ChromeDr
             let cols = ((bounds.width / cell).ceil() as u32).max(1);
             let rows = ((bounds.height / cell).ceil() as u32).max(1);
 
-            for row in 0..rows {
-                for col in 0..cols {
-                    // Only shade alternating cells (checkerboard parity).
-                    if (row + col) % 2 == 0 {
-                        continue;
-                    }
-                    let cx = bounds.x + col as f32 * cell;
-                    let cy = bounds.y + row as f32 * cell;
-                    let cw = cell.min(bounds.x + bounds.width - cx);
-                    let ch = cell.min(bounds.y + bounds.height - cy);
+            // Pre-check: if the grid would exceed the cap, skip accent rects
+            // entirely (the base fill above already covers the tile).
+            let total_cells = cols as usize * rows as usize;
+            let accent_cells = (total_cells + 1) / 2; // ceil(total/2) worst-case
+            if accent_cells <= MAX_PATTERN_ACCENT_RECTS {
+                for row in 0..rows {
+                    for col in 0..cols {
+                        // Only shade alternating cells (checkerboard parity).
+                        if (row + col) % 2 == 0 {
+                            continue;
+                        }
+                        let cx = bounds.x + col as f32 * cell;
+                        let cy = bounds.y + row as f32 * cell;
+                        let cw = cell.min(bounds.x + bounds.width - cx);
+                        let ch = cell.min(bounds.y + bounds.height - cy);
 
-                    if cw > 0.0 && ch > 0.0 {
-                        cmds.push(ChromeDrawCmd {
-                            x: cx,
-                            y: cy,
-                            width: cw,
-                            height: ch,
-                            color: REDACTION_PATTERN_ACCENT,
-                        });
+                        if cw > 0.0 && ch > 0.0 {
+                            cmds.push(ChromeDrawCmd {
+                                x: cx,
+                                y: cy,
+                                width: cw,
+                                height: ch,
+                                color: REDACTION_PATTERN_ACCENT,
+                            });
+                        }
                     }
                 }
             }
@@ -257,6 +261,16 @@ pub fn build_redaction_cmds(bounds: Rect, style: RedactionStyle) -> Vec<ChromeDr
 
 /// Cell size for the checkerboard pattern in pixels.
 pub const PATTERN_CELL_PX: f32 = 24.0;
+
+/// Maximum number of accent `ChromeDrawCmd` rects emitted by the pattern renderer
+/// per tile per frame.  When the tile's cell grid would exceed this count the
+/// pattern renderer falls back to the base fill only (no accent rects), so the
+/// tile is fully covered without unbounded per-frame allocation.
+///
+/// At `PATTERN_CELL_PX = 24px`, a 1920×1080 tile has ≈ 3400 cells and ≈ 1700
+/// accent rects — just above this cap.  Increase the constant if the pattern
+/// must be visible at 4K; at that point a texture-based approach is preferred.
+pub const MAX_PATTERN_ACCENT_RECTS: usize = 1024;
 
 /// Base fill color for the redaction placeholder (both styles use this as a
 /// foundation for the blank style and as the lighter cell for the pattern).

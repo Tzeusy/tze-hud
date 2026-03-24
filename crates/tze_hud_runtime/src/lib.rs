@@ -78,6 +78,7 @@ pub use shell::redaction::{
     hit_regions_enabled,
     build_redaction_cmds,
     PATTERN_CELL_PX,
+    MAX_PATTERN_ACCENT_RECTS,
     REDACTION_BLANK_COLOR,
     REDACTION_PATTERN_BASE,
     REDACTION_PATTERN_ACCENT,
