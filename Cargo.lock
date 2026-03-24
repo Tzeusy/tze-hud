@@ -2508,6 +2508,7 @@ dependencies = [
  "bytemuck",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "tze_hud_scene",
  "tze_hud_telemetry",
  "wgpu",
@@ -2586,6 +2587,7 @@ name = "tze_hud_runtime"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "libc",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

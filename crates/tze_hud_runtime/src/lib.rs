@@ -16,6 +16,20 @@
 //! See `pipeline.rs` for the `FramePipeline` orchestrator and `HitTestSnapshot`
 //! (ArcSwap-backed lock-free tile bounds for Stage 2).
 //!
+//! ## Architecture (spec §Thread Model, line 19)
+//!
+//! Four fixed thread groups — no dynamic spawning after startup:
+//!
+//! - **Main thread**: winit event loop, input drain, local feedback,
+//!   surface.present() when signalled by FrameReadySignal.
+//! - **Compositor thread**: scene commit, render encode, GPU submit.
+//!   Exclusively owns wgpu Device and Queue.
+//! - **Network threads**: Tokio multi-thread runtime for gRPC, MCP, sessions.
+//! - **Telemetry thread**: async structured emission.
+//!
+//! Inter-thread communication uses bounded channels only (spec §Channel Topology,
+//! line 272). See [`channels`] for the complete channel inventory.
+//!
 //! ## Bead 3: Interruption classification and quiet hours
 //!
 //! - [`attention_budget`] — per-agent and per-zone rolling interruption budgets,
@@ -25,6 +39,7 @@
 
 pub mod agent_events;
 pub mod budget;
+pub mod channels;
 pub mod degradation;
 pub mod headless;
 pub mod subscriptions;
@@ -34,6 +49,8 @@ pub mod attention_budget;
 pub mod shell;
 pub mod tab_switch_trigger;
 pub mod pipeline;
+pub mod threads;
+pub mod window;
 
 pub use agent_events::{
     AgentEventHandler, EmissionError, EmissionOutcome, EmissionResult,
@@ -43,6 +60,30 @@ pub use agent_events::rate_limiter::AgentEventRateLimiter;
 pub use budget::{
     AgentResourceState, BudgetCheckOutcome, BudgetEnforcer, BudgetState,
     BudgetTelemetrySink, CollectingTelemetrySink, NoopTelemetrySink,
+};
+pub use channels::{
+    ChannelSet, OverflowCounters,
+    // Ring-buffer types
+    RingBuffer,
+    // Backpressure channel types
+    BackpressureSender, BackpressureReceiver, backpressure_channel,
+    // Coalesce-key channel types
+    CoalesceKeySender, CoalesceKeyReceiver, CoalesceKeyed,
+    StateStreamKey, StateStreamEventKind,
+    coalesce_key_channel,
+    // FrameReadySignal
+    FrameReadyTx, FrameReadyRx, frame_ready_channel,
+    // Message payloads
+    InputEvent, InputEventKind,
+    SceneLocalPatch, LocalPatchKind,
+    SceneEventEphemeral, EphemeralEventKind,
+    SceneEventTransactional, TransactionalEventKind,
+    SceneEventStateStream, StateStreamPayload,
+    TelemetryRecord,
+    // Capacity constants
+    INPUT_EVENT_CAPACITY, SCENE_LOCAL_PATCH_CAPACITY,
+    SCENE_EVENT_EPHEMERAL_CAPACITY, TELEMETRY_RECORD_CAPACITY,
+    SCENE_EVENT_TRANSACTIONAL_CAPACITY, SCENE_EVENT_STATE_STREAM_CAPACITY,
 };
 pub use degradation::{
     DegradationConfig, DegradationController, DegradationLevel, TileDescriptor,
@@ -112,4 +153,19 @@ pub use pipeline::{
     STAGE6_BUDGET_US, STAGE7_BUDGET_US, STAGE8_BUDGET_US,
     TOTAL_PIPELINE_BUDGET_US, INPUT_TO_LOCAL_ACK_BUDGET_US,
     INPUT_TO_SCENE_COMMIT_BUDGET_US, INPUT_TO_NEXT_PRESENT_BUDGET_US,
+};
+pub use threads::{
+    ShutdownToken, ShutdownReason, ShutdownConfig,
+    ThreadRole,
+    CompositorThreadHandle, CompositorReady,
+    spawn_compositor_thread, spawn_telemetry_thread,
+    NetworkRuntime,
+    elevate_main_thread_priority,
+    graceful_shutdown,
+};
+pub use window::{
+    WindowMode, WindowConfig, HitRegion,
+    OverlaySupport, FallbackReason,
+    resolve_window_mode, check_overlay_support,
+    should_capture_pointer_event,
 };
