@@ -335,6 +335,7 @@ mod tests {
                     max_publishers: 4,
                     transport_constraint: None,
                     auto_clear_ms: None,
+                    ephemeral: false,
                 },
             );
         }
@@ -383,6 +384,7 @@ mod tests {
                     max_publishers: 4,
                     transport_constraint: None,
                     auto_clear_ms: None,
+                    ephemeral: false,
                 },
             );
         }

@@ -126,6 +126,10 @@ message ServerMessage {
     // Backpressure
     BackpressureSignal    backpressure_signal    = 35;
 
+    // Runtime telemetry delivered to agents subscribed to TELEMETRY_FRAMES (RFC 0005 §9).
+    // State-stream class: coalesced under backpressure; requires read_telemetry capability.
+    RuntimeTelemetryFrame runtime_telemetry     = 36;
+
     // Subscription acknowledgement (RFC 0005 §7.3)
     SubscriptionChangeResult subscription_change_result = 39;
 
@@ -519,6 +523,21 @@ message TelemetryFrame {
   uint32 mutations_sent           = 2;  // Mutations sent since last frame
   uint32 mutations_acked          = 3;  // Mutations acknowledged since last frame
   uint64 rtt_estimate_us          = 4;  // Latest RTT estimate (us)
+}
+
+// Runtime-to-agent compositor telemetry (RFC 0005 §9, §3.2).
+// Delivered on ServerMessage field 36 to agents subscribed to TELEMETRY_FRAMES.
+// State-stream traffic class: coalesced under backpressure, latest-wins.
+// Requires the read_telemetry capability AND TELEMETRY_FRAMES subscription.
+message RuntimeTelemetryFrame {
+  uint64 sample_timestamp_wall_us = 1;  // Wall-clock UTC (us since epoch)
+  float  compositor_frame_rate    = 2;  // Frames per second (recent average)
+  uint64 compositor_frame_budget_us = 3;  // Target frame budget (us)
+  uint64 compositor_frame_time_us  = 4;  // Actual last frame time (us)
+  uint32 active_sessions          = 5;  // Number of active agent sessions
+  uint32 active_leases            = 6;  // Number of active leases
+  uint64 heap_used_bytes          = 7;  // Heap memory used (bytes)
+  float  gpu_utilization_pct      = 8;  // GPU utilization 0.0–100.0
 }
 
 // ─── Scene state messages ─────────────────────────────────────────────────────

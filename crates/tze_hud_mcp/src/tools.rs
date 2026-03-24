@@ -870,6 +870,7 @@ mod tests {
                 max_publishers: 4,
                 transport_constraint: None,
                 auto_clear_ms: None,
+                ephemeral: false,
             },
         );
         (scene, tab_id, zone_name)
@@ -916,6 +917,7 @@ mod tests {
                 max_publishers: 4,
                 transport_constraint: None,
                 auto_clear_ms: None,
+                ephemeral: false,
             },
         );
         let err =
@@ -988,6 +990,7 @@ mod tests {
                     max_publishers: 4,
                     transport_constraint: None,
                     auto_clear_ms: None,
+                    ephemeral: false,
                 },
             );
         }

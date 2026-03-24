@@ -212,6 +212,7 @@ pub fn zone_definition_to_proto(z: &ZoneDefinition) -> proto::ZoneDefinitionProt
         auto_clear_ms: z.auto_clear_ms.unwrap_or(0),
         stack_max_depth,
         merge_max_keys,
+        ephemeral: z.ephemeral,
     }
 }
 

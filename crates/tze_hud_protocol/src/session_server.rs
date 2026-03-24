@@ -23,7 +23,7 @@
 //! - Resuming → Closed (expired/invalid token)
 
 use crate::auth::{
-    authenticate_session_init, filter_subscriptions, negotiate_version, CapabilityPolicy,
+    authenticate_session_init, negotiate_version, CapabilityPolicy,
     AuthResult,
 };
 use crate::convert;
@@ -34,6 +34,7 @@ use crate::proto::session::client_message::Payload as ClientPayload;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::session::{SharedState, SESSION_EVENT_CHANNEL_CAPACITY};
 use crate::token::{TokenStore, DEFAULT_GRACE_PERIOD_MS};
+use crate::subscriptions;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -188,10 +189,11 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         // Degradation notice — transactional (RFC 0005 §3.4; never dropped)
         ServerPayload::DegradationNotice(_) => TrafficClass::Transactional,
 
-        // Scene state / events — state-stream
+        // Scene state / events / runtime telemetry — state-stream
         ServerPayload::SceneSnapshot(_)
         | ServerPayload::SceneDelta(_)
-        | ServerPayload::EventBatch(_) => TrafficClass::StateStream,
+        | ServerPayload::EventBatch(_)
+        | ServerPayload::RuntimeTelemetry(_) => TrafficClass::StateStream,
 
         // Heartbeat echo — ephemeral (droppable, latest-wins)
         ServerPayload::Heartbeat(_) => TrafficClass::Ephemeral,
@@ -1158,8 +1160,10 @@ async fn handle_session_init(
     } else {
         granted_capabilities.clone()
     };
-    let (active_subscriptions, denied_subscriptions) =
-        filter_subscriptions(&init.initial_subscriptions, &policy_caps);
+    let sub_result = subscriptions::filter_subscriptions(
+        &init.initial_subscriptions,
+        &policy_caps,
+    );
 
     let session_id = uuid::Uuid::now_v7().to_string();
     let namespace = init.agent_id.clone();
@@ -1183,7 +1187,7 @@ async fn handle_session_init(
         capabilities: granted_capabilities.clone(),
         policy_capabilities: policy_caps.clone(),
         lease_ids: Vec::new(),
-        subscriptions: active_subscriptions.clone(),
+        subscriptions: sub_result.active.clone(),
         server_sequence: 0,
         resume_token: resume_token.clone(),
         last_heartbeat_ms: now_ms(),
@@ -1222,8 +1226,8 @@ async fn handle_session_init(
                 server_sequence: seq,
                 compositor_timestamp_wall_us: compositor_ts,
                 estimated_skew_us: estimated_skew,
-                active_subscriptions,
-                denied_subscriptions,
+                active_subscriptions: sub_result.active,
+                denied_subscriptions: sub_result.denied,
                 negotiated_protocol_version: negotiated_version,
             })),
         }))
@@ -1405,19 +1409,25 @@ async fn handle_client_message(
             handle_heartbeat(session, tx, hb).await;
         }
         ClientPayload::TelemetryFrame(_tf) => {
-            // Accept telemetry frames silently (logging/storage deferred to post-v1)
+            // Accept agent-side telemetry frames silently (logging/storage deferred to post-v1)
         }
-        ClientPayload::InputFocusRequest(_req) => {
-            // Input focus arbitration deferred to post-v1; silently accepted
+        ClientPayload::InputFocusRequest(req) => {
+            // Synchronous focus request (RFC 0005 §3.8).
+            // v1 grants focus unconditionally (arbitration deferred to post-v1).
+            handle_input_focus_request(session, tx, req).await;
         }
-        ClientPayload::InputCaptureRequest(_req) => {
-            // Input capture arbitration deferred to post-v1; silently accepted
+        ClientPayload::InputCaptureRequest(req) => {
+            // Synchronous capture request (RFC 0005 §3.8).
+            // v1 grants capture unconditionally (arbitration deferred to post-v1).
+            handle_input_capture_request(session, tx, req).await;
         }
-        ClientPayload::InputCaptureRelease(_rel) => {
-            // Input capture release deferred to post-v1; silently accepted
+        ClientPayload::InputCaptureRelease(rel) => {
+            // Asynchronous capture release (RFC 0005 §3.8).
+            // Confirmed by CaptureReleasedEvent in EventBatch (field 34).
+            handle_input_capture_release(session, tx, rel).await;
         }
         ClientPayload::SetImePosition(_pos) => {
-            // IME position hint deferred to post-v1; fire-and-forget, no response needed
+            // IME position hint (RFC 0005 §3.8): fire-and-forget, no response sent.
         }
         ClientPayload::SessionClose(close) => {
             // Graceful disconnect (RFC 0005 §1.5).
@@ -2256,23 +2266,19 @@ async fn handle_subscription_change(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     change: SubscriptionChange,
 ) {
-    // Filter additions against the session's authorization policy (RFC 0005 §7.1).
-    // Uses `policy_capabilities` (e.g. ["*"] for unrestricted PSK sessions) rather
-    // than the explicitly requested `capabilities` list, so unrestricted agents can
-    // subscribe to any category regardless of what was in `requested_capabilities`.
-    let (allowed_additions, denied_additions) =
-        filter_subscriptions(&change.subscribe, &session.policy_capabilities);
+    // Apply capability-filtered subscription change (RFC 0005 §7.3).
+    // Mandatory subscriptions (DEGRADATION_NOTICES, LEASE_CHANGES) cannot be removed.
+    // Additions without the required capability are placed in denied_subscriptions.
+    // New subscription set takes effect immediately after the ack is sent.
+    let result = subscriptions::apply_subscription_change(
+        &session.subscriptions,
+        &change.subscribe,
+        &change.unsubscribe,
+        &session.capabilities,
+    );
 
-    // Add permitted subscriptions
-    for sub in &allowed_additions {
-        if !session.subscriptions.contains(sub) {
-            session.subscriptions.push(sub.clone());
-        }
-    }
-    // Remove unsubscribed
-    for unsub in &change.unsubscribe {
-        session.subscriptions.retain(|s| s != unsub);
-    }
+    // Update session's active subscription set
+    session.subscriptions = result.active.clone();
 
     let seq = session.next_server_seq();
     let _ = tx
@@ -2280,8 +2286,8 @@ async fn handle_subscription_change(
             sequence: seq,
             timestamp_wall_us: now_wall_us(),
             payload: Some(ServerPayload::SubscriptionChangeResult(SubscriptionChangeResult {
-                active_subscriptions: session.subscriptions.clone(),
-                denied_subscriptions: denied_additions,
+                active_subscriptions: result.active,
+                denied_subscriptions: result.denied,
             })),
         }))
         .await;
@@ -2365,11 +2371,11 @@ async fn handle_capability_request(
 /// Handle a ZonePublish from the client (RFC 0005 §3.1, §8.6).
 ///
 /// Durable-zone publishes are transactional and receive a ZonePublishResult.
-/// Ephemeral-zone publishes are fire-and-forget; no result is sent.
+/// Ephemeral-zone publishes are fire-and-forget; no ZonePublishResult is sent.
 ///
-/// V1 implementation: zone durability detection is deferred; all session-stream
-/// ZonePublish messages are treated as durable and forwarded through the
-/// mutation path, receiving a ZonePublishResult ack.
+/// Zone durability is determined by `ZoneDefinition.ephemeral`:
+/// - `false` (default): durable → sends ZonePublishResult ack.
+/// - `true`: ephemeral → fire-and-forget, no ZonePublishResult.
 async fn handle_zone_publish(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -2377,10 +2383,19 @@ async fn handle_zone_publish(
     request_sequence: u64,
     publish: ZonePublish,
 ) {
-
-    // Apply the zone publish through the scene graph mutation path
-    let (accepted, error_code, error_message) = {
+    // Apply the zone publish through the scene graph mutation path.
+    // Also determine zone durability (ephemeral vs durable) for ack decision.
+    let (accepted, error_code, error_message, is_ephemeral_zone) = {
         let mut st = state.lock().await;
+
+        // Check zone durability before applying the mutation
+        let zone_is_ephemeral = st
+            .scene
+            .zone_registry
+            .get_by_name(&publish.zone_name)
+            .map(|def| def.ephemeral)
+            .unwrap_or(false); // Unknown zones default to durable (will fail below)
+
         let content = publish
             .content
             .as_ref()
@@ -2412,7 +2427,7 @@ async fn handle_zone_publish(
             };
             let result = st.scene.apply_batch(&batch);
             if result.applied {
-                (true, String::new(), String::new())
+                (true, String::new(), String::new(), zone_is_ephemeral)
             } else {
                 let (code, msg) = match &result.error {
                     Some(tze_hud_scene::ValidationError::ZoneNotFound { name }) => (
@@ -2434,26 +2449,128 @@ async fn handle_zone_publish(
                     Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
                     None => ("ZONE_PUBLISH_FAILED".to_string(), "Zone publish failed".to_string()),
                 };
-                (false, code, msg)
+                // On failure, always send result (even for ephemeral zones) so client knows
+                (false, code, msg, false)
             }
         } else {
-            (false, "INVALID_CONTENT".to_string(), "Missing or invalid zone content".to_string())
+            (false, "INVALID_CONTENT".to_string(), "Missing or invalid zone content".to_string(), false)
         }
     };
 
-    // Send ZonePublishResult (v1 treats all session-stream zone publishes as durable)
-    let seq = session.next_server_seq();
+    // Durable zones: send ZonePublishResult (transactional ack).
+    // Ephemeral zones on success: fire-and-forget, no ZonePublishResult sent.
+    // Ephemeral zones on failure: is_ephemeral_zone=false (overridden above), so result is sent.
+    if !is_ephemeral_zone {
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::ZonePublishResult(ZonePublishResult {
+                    request_sequence,
+                    accepted,
+                    error_code,
+                    error_message,
+                })),
+            }))
+            .await;
+    }
+    // Ephemeral zone publish succeeded: no ack sent (fire-and-forget per RFC 0005 §8.6)
+}
 
+/// Handle an InputFocusRequest from the client (RFC 0005 §3.8, RFC 0004 §8.3.1).
+///
+/// Synchronous: runtime responds with InputFocusResponse correlated by sequence.
+/// v1 grants focus unconditionally (focus arbitration deferred to post-v1).
+async fn handle_input_focus_request(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    req: InputFocusRequest,
+) {
+    let seq = session.next_server_seq();
     let _ = tx
         .send(Ok(ServerMessage {
             sequence: seq,
             timestamp_wall_us: now_wall_us(),
-            payload: Some(ServerPayload::ZonePublishResult(ZonePublishResult {
-                request_sequence,
-                accepted,
-                error_code,
-                error_message,
+            payload: Some(ServerPayload::InputFocusResponse(InputFocusResponse {
+                tile_id: req.tile_id.clone(),
+                granted: true,
+                reason: String::new(),
             })),
+        }))
+        .await;
+}
+
+/// Handle an InputCaptureRequest from the client (RFC 0005 §3.8, RFC 0004 §8.3.1).
+///
+/// Synchronous: runtime responds with InputCaptureResponse correlated by sequence.
+/// v1 grants capture unconditionally (arbitration deferred to post-v1).
+async fn handle_input_capture_request(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    req: InputCaptureRequest,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::InputCaptureResponse(InputCaptureResponse {
+                tile_id: req.tile_id.clone(),
+                granted: true,
+                device_kind: req.device_kind.clone(),
+                reason: String::new(),
+            })),
+        }))
+        .await;
+}
+
+/// Handle an InputCaptureRelease from the client (RFC 0005 §3.8, RFC 0004 §8.3.1).
+///
+/// Asynchronous: confirmed by CaptureReleasedEvent in the next EventBatch (field 34).
+/// No synchronous response is sent. The event is delivered with reason=AGENT_RELEASED.
+/// v1: immediately delivers a CaptureReleasedEvent in a synthetic EventBatch.
+async fn handle_input_capture_release(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    rel: InputCaptureRelease,
+) {
+    use crate::proto::{CaptureReleasedEvent, EventBatch, InputEnvelope};
+    use crate::proto::input_envelope::Event as InputEvent;
+    use crate::proto::CaptureReleasedReason;
+
+    // Only deliver the CaptureReleasedEvent if the agent is subscribed to FOCUS_EVENTS.
+    // CaptureReleasedEvent is a focus variant (RFC 0005 §7.1).
+    if !session.subscriptions.iter().any(|s| s == subscriptions::category::FOCUS_EVENTS) {
+        // Agent not subscribed to FOCUS_EVENTS; do not deliver CaptureReleasedEvent.
+        // The release is still processed (capture is released from the runtime side).
+        return;
+    }
+
+    let now_us = now_wall_us();
+    let seq = session.next_server_seq();
+
+    let capture_released = CaptureReleasedEvent {
+        tile_id: rel.tile_id.clone(),
+        node_id: Vec::new(),
+        timestamp_mono_us: now_us, // wall-clock as proxy for mono in v1
+        device_id: rel.device_kind.clone(),
+        reason: CaptureReleasedReason::AgentReleased as i32,
+    };
+
+    let batch = EventBatch {
+        frame_number: 0, // synthetic batch (not tied to compositor frame)
+        batch_ts_us: now_us,
+        events: vec![InputEnvelope {
+            event: Some(InputEvent::CaptureReleased(capture_released)),
+        }],
+    };
+
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_us,
+            payload: Some(ServerPayload::EventBatch(batch)),
         }))
         .await;
 }
@@ -2677,7 +2794,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        // Send SessionInit
+        // Send SessionInit with read_scene_topology so SCENE_TOPOLOGY subscription is granted
         tx.send(ClientMessage {
             sequence: 1,
             timestamp_wall_us: now_wall_us(),
@@ -2688,6 +2805,7 @@ mod tests {
                 requested_capabilities: vec![
                     "create_tile".to_string(),
                     "receive_input".to_string(),
+                    "read_scene_topology".to_string(),
                 ],
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
@@ -2728,9 +2846,28 @@ mod tests {
                 assert_eq!(established.namespace, "test-agent");
                 assert!(established.granted_capabilities.contains(&"create_tile".to_string()));
                 assert!(established.granted_capabilities.contains(&"receive_input".to_string()));
+                assert!(established.granted_capabilities.contains(&"read_scene_topology".to_string()));
                 assert!(!established.resume_token.is_empty());
                 assert_eq!(established.heartbeat_interval_ms, DEFAULT_HEARTBEAT_INTERVAL_MS);
-                assert!(established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()));
+                // SCENE_TOPOLOGY is granted because agent has read_scene_topology capability
+                assert!(
+                    established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY should be active (agent has read_scene_topology)"
+                );
+                // Mandatory subscriptions always present
+                assert!(
+                    established.active_subscriptions.contains(&"DEGRADATION_NOTICES".to_string()),
+                    "DEGRADATION_NOTICES must always be active"
+                );
+                assert!(
+                    established.active_subscriptions.contains(&"LEASE_CHANGES".to_string()),
+                    "LEASE_CHANGES must always be active"
+                );
+                // denied_subscriptions must be empty (all requested categories granted)
+                assert!(
+                    established.denied_subscriptions.is_empty(),
+                    "no subscriptions should be denied"
+                );
             }
             other => panic!("Expected SessionEstablished, got: {other:?}"),
         }
@@ -3020,13 +3157,43 @@ mod tests {
         }
     }
 
+    /// Scenario: Add subscription mid-session with required capability (RFC 0005 §7.3).
+    /// Also validates subscription denied for missing capability.
     #[tokio::test]
     async fn test_subscription_change_result() {
         let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "subscriber", "test-key").await;
 
-        // Send a SubscriptionChange
+        // Use a custom handshake with access_input_events to test SubscriptionChange
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "subscriber".to_string(),
+                agent_display_name: "subscriber".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec![
+                    "read_scene_topology".to_string(),
+                    "access_input_events".to_string(),
+                ],
+                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+
+        // Collect SessionEstablished and SceneSnapshot
+        for _ in 0..2 {
+            let _ = response_stream.next().await;
+        }
+
+        // Send a SubscriptionChange to add INPUT_EVENTS (has access_input_events)
         tx.send(ClientMessage {
             sequence: 2,
             timestamp_wall_us: now_wall_us(),
@@ -3038,21 +3205,95 @@ mod tests {
         .await
         .unwrap();
 
-        let msg = stream.next().await.unwrap().unwrap();
+        let msg = response_stream.next().await.unwrap().unwrap();
         match &msg.payload {
             Some(ServerPayload::SubscriptionChangeResult(result)) => {
+                // Initial SCENE_TOPOLOGY subscription should still be active
                 assert!(
                     result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
-                    "initial subscription should still be active"
+                    "initial SCENE_TOPOLOGY subscription should still be active"
                 );
+                // Newly added INPUT_EVENTS should be active (agent has access_input_events)
                 assert!(
                     result.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
-                    "newly added subscription should be active"
+                    "newly added INPUT_EVENTS subscription should be active"
                 );
-                assert!(result.denied_subscriptions.is_empty());
+                // Mandatory subscriptions always present
+                assert!(
+                    result.active_subscriptions.contains(&"DEGRADATION_NOTICES".to_string()),
+                    "DEGRADATION_NOTICES must always be active"
+                );
+                assert!(
+                    result.active_subscriptions.contains(&"LEASE_CHANGES".to_string()),
+                    "LEASE_CHANGES must always be active"
+                );
+                // No denied subscriptions (all requested categories have required capability)
+                assert!(
+                    result.denied_subscriptions.is_empty(),
+                    "no subscriptions should be denied"
+                );
             }
             other => panic!("Expected SubscriptionChangeResult, got: {other:?}"),
         }
+        drop(tx);
+    }
+
+    /// Scenario: Subscription denied when capability is missing (RFC 0005 §7.1, spec lines 455-457).
+    /// WHEN agent requests INPUT_EVENTS without access_input_events capability
+    /// THEN subscription is denied and listed in denied_subscriptions.
+    #[tokio::test]
+    async fn test_subscription_denied_without_capability() {
+        let (mut client, _server) = setup_test().await;
+
+        // Handshake WITHOUT access_input_events capability
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "no-input-agent".to_string(),
+                agent_display_name: "no-input-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec!["read_scene_topology".to_string()],
+                // Request INPUT_EVENTS without access_input_events capability
+                initial_subscriptions: vec![
+                    "SCENE_TOPOLOGY".to_string(),
+                    "INPUT_EVENTS".to_string(),
+                ],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+
+        // First message: SessionEstablished
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionEstablished(established)) => {
+                // INPUT_EVENTS should be in denied_subscriptions
+                assert!(
+                    established.denied_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    "INPUT_EVENTS must be denied without access_input_events capability"
+                );
+                // INPUT_EVENTS should NOT be in active_subscriptions
+                assert!(
+                    !established.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    "INPUT_EVENTS must not be active without access_input_events capability"
+                );
+                // SCENE_TOPOLOGY is granted (agent has read_scene_topology)
+                assert!(
+                    established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY should be active with read_scene_topology capability"
+                );
+            }
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        }
+        drop(tx);
     }
 
     // ─── Sequence number validation tests (RFC 0005 §2.3) ────────────────────
@@ -4515,6 +4756,7 @@ mod tests {
         (client, handle, shared_state)
     }
 
+
     // ─── Reconnection and resume tests (RFC 0005 §6.1–6.6, rig-3dou) ────────
 
     /// Helper: perform a full handshake and return the resume token.
@@ -5192,4 +5434,371 @@ mod tests {
 
         drop(tx);
     }
+}
+
+    // ─── Zone durability tests (RFC 0005 §3.1, §8.6) ─────────────────────────
+
+    /// Scenario: Ephemeral zone publish is fire-and-forget — no ZonePublishResult.
+    /// WHEN agent publishes to an ephemeral zone (zone.ephemeral=true)
+    /// THEN runtime does NOT send a ZonePublishResult (spec lines 624-626)
+    #[tokio::test]
+    async fn test_ephemeral_zone_no_publish_result() {
+        use tze_hud_scene::types::{
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, ZoneDefinition, ZoneMediaType,
+        };
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+
+        // Register an ephemeral zone in the scene
+        {
+            let mut st = service.state.lock().await;
+            st.scene.zone_registry.register(ZoneDefinition {
+                id: tze_hud_scene::SceneId::new(),
+                name: "live-caption".to_string(),
+                description: "Ephemeral caption zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.1,
+                    y_pct: 0.8,
+                    width_pct: 0.8,
+                    height_pct: 0.1,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: true, // <-- ephemeral zone
+            });
+        }
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(crate::proto::session::hud_session_server::HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let mut client =
+            crate::proto::session::hud_session_client::HudSessionClient::connect(
+                format!("http://[::1]:{}", addr.port()),
+            )
+            .await
+            .unwrap();
+
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "ephemeral-publisher", "test-key").await;
+
+        // Publish to the ephemeral zone
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ZonePublish(ZonePublish {
+                zone_name: "live-caption".to_string(),
+                content: Some(crate::proto::ZoneContent {
+                    payload: Some(crate::proto::zone_content::Payload::StreamText(
+                        "caption text".to_string(),
+                    )),
+                }),
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Send a heartbeat so we can verify the next message is a heartbeat echo
+        // (meaning no ZonePublishResult was sent for the ephemeral zone publish)
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 99999,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // The first message after the ephemeral zone publish should be the heartbeat echo,
+        // NOT a ZonePublishResult (ephemeral zones are fire-and-forget)
+        let next_msg = stream.next().await.unwrap().unwrap();
+        match &next_msg.payload {
+            Some(ServerPayload::ZonePublishResult(_)) => {
+                panic!("Ephemeral zone publish must NOT produce a ZonePublishResult")
+            }
+            Some(ServerPayload::Heartbeat(hb)) => {
+                assert_eq!(hb.timestamp_mono_us, 99999, "expected heartbeat echo");
+            }
+            other => panic!("Expected Heartbeat echo (no ZonePublishResult), got: {other:?}"),
+        }
+        drop(handle);
+    }
+
+    /// Scenario: Durable zone publish is acknowledged (RFC 0005 §3.1, spec lines 620-622).
+    /// WHEN agent publishes to a durable zone (zone.ephemeral=false)
+    /// THEN runtime sends a ZonePublishResult.
+    #[tokio::test]
+    async fn test_durable_zone_publish_result() {
+        use tze_hud_scene::types::{
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, ZoneDefinition, ZoneMediaType,
+        };
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+
+        // Register a durable zone
+        {
+            let mut st = service.state.lock().await;
+            st.scene.zone_registry.register(ZoneDefinition {
+                id: tze_hud_scene::SceneId::new(),
+                name: "status-text".to_string(),
+                description: "Durable status text zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 0.05,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 4,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false, // <-- durable zone
+            });
+        }
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(crate::proto::session::hud_session_server::HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let mut client =
+            crate::proto::session::hud_session_client::HudSessionClient::connect(
+                format!("http://[::1]:{}", addr.port()),
+            )
+            .await
+            .unwrap();
+
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "durable-publisher", "test-key").await;
+
+        let client_seq: u64 = 2;
+        tx.send(ClientMessage {
+            sequence: client_seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::ZonePublish(ZonePublish {
+                zone_name: "status-text".to_string(),
+                content: Some(crate::proto::ZoneContent {
+                    payload: Some(crate::proto::zone_content::Payload::StreamText(
+                        "status: ok".to_string(),
+                    )),
+                }),
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Durable zone: should receive ZonePublishResult
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::ZonePublishResult(result)) => {
+                assert_eq!(result.request_sequence, client_seq);
+                assert!(result.accepted, "durable zone publish should be accepted");
+            }
+            other => panic!("Expected ZonePublishResult for durable zone, got: {other:?}"),
+        }
+        drop(handle);
+    }
+
+    // ─── Input control tests (RFC 0005 §3.8) ─────────────────────────────────
+
+    /// Scenario: InputFocusRequest → InputFocusResponse (synchronous, correlated by sequence).
+    /// WHEN agent sends InputFocusRequest at sequence N,
+    /// THEN runtime responds with InputFocusResponse (spec lines 567-569).
+    #[tokio::test]
+    async fn test_input_focus_request_response() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "focus-agent", "test-key").await;
+
+        let tile_id_bytes = vec![1u8; 16];
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::InputFocusRequest(InputFocusRequest {
+                tile_id: tile_id_bytes.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::InputFocusResponse(resp)) => {
+                assert_eq!(resp.tile_id, tile_id_bytes, "tile_id must match request");
+                assert!(resp.granted, "focus should be granted in v1");
+            }
+            other => panic!("Expected InputFocusResponse, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: InputCaptureRequest → InputCaptureResponse (synchronous).
+    #[tokio::test]
+    async fn test_input_capture_request_response() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "capture-agent", "test-key").await;
+
+        let tile_id_bytes = vec![2u8; 16];
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::InputCaptureRequest(InputCaptureRequest {
+                tile_id: tile_id_bytes.clone(),
+                device_kind: "pointer".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::InputCaptureResponse(resp)) => {
+                assert_eq!(resp.tile_id, tile_id_bytes, "tile_id must match request");
+                assert_eq!(resp.device_kind, "pointer");
+                assert!(resp.granted, "capture should be granted in v1");
+            }
+            other => panic!("Expected InputCaptureResponse, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: InputCaptureRelease → CaptureReleasedEvent in EventBatch (asynchronous).
+    /// WHEN agent sends InputCaptureRelease (field 29) for a captured device
+    /// THEN runtime delivers CaptureReleasedEvent in EventBatch (field 34), reason=AGENT_RELEASED
+    /// (spec lines 571-573). Only delivered if agent has FOCUS_EVENTS subscription.
+    #[tokio::test]
+    async fn test_input_capture_release_delivers_event() {
+        let (mut client, _server) = setup_test().await;
+
+        // Use a custom handshake with access_input_events (needed for FOCUS_EVENTS sub)
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream_rx = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "capture-release-agent".to_string(),
+                agent_display_name: "capture-release-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec![
+                    "access_input_events".to_string(),
+                ],
+                initial_subscriptions: vec![
+                    "INPUT_EVENTS".to_string(),
+                    "FOCUS_EVENTS".to_string(),
+                ],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream_rx).await.unwrap().into_inner();
+
+        // Drain SessionEstablished and SceneSnapshot
+        for _ in 0..2 {
+            let _ = response_stream.next().await;
+        }
+
+        // Send InputCaptureRelease
+        let tile_id_bytes = vec![3u8; 16];
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::InputCaptureRelease(InputCaptureRelease {
+                tile_id: tile_id_bytes.clone(),
+                device_kind: "pointer".to_string(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Should receive EventBatch with CaptureReleasedEvent
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::EventBatch(batch)) => {
+                assert_eq!(batch.events.len(), 1, "should have exactly one event");
+                match &batch.events[0].event {
+                    Some(crate::proto::input_envelope::Event::CaptureReleased(ev)) => {
+                        assert_eq!(ev.tile_id, tile_id_bytes, "tile_id must match release request");
+                        assert_eq!(
+                            ev.reason,
+                            crate::proto::CaptureReleasedReason::AgentReleased as i32,
+                            "reason must be AGENT_RELEASED"
+                        );
+                    }
+                    other => panic!("Expected CaptureReleasedEvent, got: {other:?}"),
+                }
+            }
+            other => panic!("Expected EventBatch with CaptureReleasedEvent, got: {other:?}"),
+        }
+        drop(tx);
+    }
+
+    /// Scenario: SetImePosition is fire-and-forget — no response sent.
+    #[tokio::test]
+    async fn test_set_ime_position_no_response() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "ime-agent", "test-key").await;
+
+        // Send SetImePosition (fire-and-forget)
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SetImePosition(SetImePosition {
+                tile_id: vec![4u8; 16],
+                x: 100.0,
+                y: 200.0,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Send a heartbeat immediately after — should receive heartbeat echo, NOT any IME response
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 88888,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::Heartbeat(hb)) => {
+                assert_eq!(hb.timestamp_mono_us, 88888, "expected heartbeat echo after SetImePosition");
+            }
+            other => panic!("Expected Heartbeat (no IME response), got: {other:?}"),
+        }
+    }
+}
+
 }

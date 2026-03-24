@@ -202,6 +202,9 @@ message ZoneDefinitionProto {
   // Stack/MergeByKey parameters
   uint32               stack_max_depth      = 10;  // For Stack policy
   uint32               merge_max_keys       = 11;  // For MergeByKey policy
+  // When true, publishes to this zone are fire-and-forget (no ZonePublishResult).
+  // When false (default), publishes are transactional (RFC 0005 §3.1, §8.6).
+  bool                 ephemeral            = 12;
 }
 
 message ZonePublishRecordProto {
