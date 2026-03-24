@@ -24,10 +24,10 @@
 //!
 //! # NAVIGATE_NEXT with no focus (spec lines 323–326)
 //! When `action == CommandAction::NavigateNext` and focus is `FocusOwner::None`,
-//! the runtime SHALL advance focus to the first focusable element. The caller
-//! is responsible for driving `FocusManager::navigate_next`; the processor
-//! records the action and returns a `CommandDispatch` with `node_id = None` so
-//! the caller can handle routing after the focus update.
+//! `CommandProcessor::process` returns `None` (no dispatch). The caller is
+//! responsible for first driving `FocusManager::navigate_next` to advance focus
+//! to the first focusable element, then calling `process` again with the updated
+//! `FocusOwner` so routing can proceed for the newly focused element.
 //!
 //! # Spec refs
 //! - Lines 378–380: Command Input Model
@@ -267,6 +267,7 @@ mod tests {
                 interaction_id: "btn-submit".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         scene.set_tile_root(tile_id, node).unwrap();
