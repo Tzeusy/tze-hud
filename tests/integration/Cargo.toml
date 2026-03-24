@@ -8,11 +8,12 @@ edition.workspace = true
 name = "multi_agent"
 path = "multi_agent.rs"
 
+# Integration tests always run headless (no display server required).
+# tze_hud_runtime is built with the headless feature unconditionally so
+# all tests run in CI without a display. The workspace-level `headless`
+# feature is re-exported here for downstream tooling that may set it.
 [features]
-headless = [
-    "tze_hud_runtime/headless",
-    "tze_hud_compositor/headless",
-]
+headless = ["tze_hud_compositor/headless"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }

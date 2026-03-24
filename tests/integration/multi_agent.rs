@@ -91,7 +91,10 @@ struct ZoneContentionEvent {
     policy: String,
     publisher: String,
     content_summary: String,
-    active_publishers_after: usize,
+    /// Number of active zone entries after this publish event.
+    /// Note: for Stack policy this may exceed the number of distinct publishers
+    /// since one publisher can hold multiple entries.
+    active_entries_after: usize,
 }
 
 /// Zone contention resolution log artifact.
@@ -817,7 +820,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
                     publisher: agent_b.namespace.clone(),
                     content_summary: "2 notifications published (both retained by Stack policy)"
                         .to_string(),
-                    active_publishers_after: notif_active.len(),
+                    active_entries_after: notif_active.len(),
                 },
                 ZoneContentionEvent {
                     zone: "subtitle".to_string(),
@@ -825,7 +828,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
                     publisher: agent_c.namespace.clone(),
                     content_summary: "2 subtitles published; only latest retained (LatestWins policy)"
                         .to_string(),
-                    active_publishers_after: sub_active.len(),
+                    active_entries_after: sub_active.len(),
                 },
             ],
             notification_area_final_count: notif_active.len(),
