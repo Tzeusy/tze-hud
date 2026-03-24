@@ -15,11 +15,17 @@
 //!   No other subsystem may write these fields.
 //! - Override controls are local, frame-bounded, unconditional, and cannot be vetoed.
 //!
+//! # Redaction (Shell #4)
+//!
+//! Privacy redaction is handled by [`redaction`]. The shell is the sole owner of
+//! redaction rendering decisions. Agents are never notified. See `redaction.rs`.
+//!
 //! See `chrome.rs` for chrome layer implementation.
 //! See `freeze.rs` for freeze semantics.
 
 pub mod chrome;
 pub mod freeze;
+pub mod redaction;
 
 pub use chrome::{
     // Core state
@@ -62,4 +68,26 @@ pub use freeze::{
     classify_mutation_batch, EnqueueResult, FreezeManager, FreezeQueue, FreezeState,
     MutationTrafficClass, QueuedMutation, DEFAULT_AUTO_UNFREEZE_MS,
     DEFAULT_FREEZE_QUEUE_CAPACITY, QUEUE_PRESSURE_FRACTION,
+};
+
+pub use redaction::{
+    // Content classification (ViewerClass is already re-exported from chrome above)
+    ContentClassification,
+    // Redaction style
+    RedactionStyle,
+    // Core evaluation
+    is_tile_redacted,
+    hit_regions_enabled,
+    // Per-tile state
+    TileRedactionState,
+    // Placeholder rendering
+    build_redaction_cmds,
+    // Frame-level evaluation
+    RedactionFrame,
+    // Rendering constants
+    PATTERN_CELL_PX,
+    MAX_PATTERN_ACCENT_RECTS,
+    REDACTION_BLANK_COLOR,
+    REDACTION_PATTERN_BASE,
+    REDACTION_PATTERN_ACCENT,
 };
