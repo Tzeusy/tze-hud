@@ -25,7 +25,26 @@ pub mod resource;
 pub mod config;
 
 pub use clock::{Clock, SimulatedClock, SystemClock, TestClock};
-pub use timing::{ClockOffset, DurationUs, MonoUs, WallUs};
+pub use timing::{
+    ClockOffset, DurationUs, MonoUs, WallUs,
+    // TimingHints and supporting types
+    DeliveryPolicy, MessageClass, Schedule, TimingHints,
+    // Errors and warnings
+    TimingError, TimingWarning,
+    // Scheduling helpers
+    is_in_scope_for_frame, validate_timing_hints, TimestampValidationInput,
+    // Pending queue
+    PendingEntry, PendingQueue,
+    // Expiration heap
+    ExpirationEntry, ExpirationHeap,
+    // Staleness
+    TileStaleness,
+    // Drift detection / ClockSync
+    handle_clock_sync, ClockDriftEstimator, ClockSyncRequest, ClockSyncResponse,
+    SessionClockSync, VsyncSyncPoint,
+    // Timing configuration
+    TimingConfig, TimingConfigError,
+};
 pub use types::*;
 pub use graph::{
     SceneGraph, SyncGroupCommitDecision,
