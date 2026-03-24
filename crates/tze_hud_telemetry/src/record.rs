@@ -3,22 +3,80 @@
 use serde::{Deserialize, Serialize};
 
 /// Per-frame telemetry record.
+///
+/// All stage timings are in microseconds (us). Stage names map to the
+/// 8-stage frame pipeline defined in RFC 0002 §3.2:
+///
+/// | Stage | Thread     | Budget (p99) |
+/// |-------|-----------|-------------|
+/// | 1     | Main       | < 500us      |
+/// | 2     | Main       | < 500us      |
+/// | 3     | Compositor | < 1ms        |
+/// | 4     | Compositor | < 1ms        |
+/// | 5     | Compositor | < 1ms        |
+/// | 6     | Compositor | < 4ms        |
+/// | 7     | Compositor+Main | < 8ms   |
+/// | 8     | Telemetry  | < 200us      |
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FrameTelemetry {
     /// Frame number (monotonically increasing).
     pub frame_number: u64,
     /// Timestamp of frame start (microseconds since process start).
     pub timestamp_us: u64,
-    /// Total frame time in microseconds.
+    /// Total frame time in microseconds (Stage 1 start → Stage 7 end).
     pub frame_time_us: u64,
-    /// Time spent in input drain (microseconds).
+
+    // ── Per-stage timings ────────────────────────────────────────────────────
+
+    /// Stage 1 — Input Drain (main thread). p99 budget: 500us.
+    /// Drain OS input events, attach hardware timestamps, enqueue InputEvent records.
+    pub stage1_input_drain_us: u64,
+
+    /// Stage 2 — Local Feedback (main thread). p99 budget: 500us.
+    /// Hit-test against tile bounds snapshot (ArcSwap), update pressed/hovered flags.
+    pub stage2_local_feedback_us: u64,
+
+    /// Stage 3 — Mutation Intake (compositor thread). p99 budget: 1ms.
+    /// Drain MutationBatch channel, apply agent envelope limits. Each batch is atomic.
+    pub stage3_mutation_intake_us: u64,
+
+    /// Stage 4 — Scene Commit (compositor thread). p99 budget: 1ms.
+    /// Apply validated batches with all-or-nothing semantics; publish hit-test snapshot.
+    pub stage4_scene_commit_us: u64,
+
+    /// Stage 5 — Layout Resolve (compositor thread). p99 budget: 1ms.
+    /// Incremental layout: recompute only changed tiles, z-order, compositing regions.
+    pub stage5_layout_resolve_us: u64,
+
+    /// Stage 6 — Render Encode (compositor thread). p99 budget: 4ms.
+    /// Build wgpu CommandEncoder; issue draw calls. MUST NOT submit to GPU queue.
+    pub stage6_render_encode_us: u64,
+
+    /// Stage 7 — GPU Submit + Present (compositor+main thread). p99 budget: 8ms.
+    /// Submit CommandBuffer; signal main thread; main thread calls surface.present().
+    pub stage7_gpu_submit_us: u64,
+
+    /// Stage 8 — Telemetry Emit (telemetry thread). p99 budget: 200us.
+    /// Non-blocking channel send of TelemetryRecord to telemetry thread.
+    pub stage8_telemetry_emit_us: u64,
+
+    // ── Legacy field aliases (maintained for backward compatibility) ─────────
+
+    /// Alias for stage1_input_drain_us. Kept for backward compatibility.
+    #[serde(skip)]
     pub input_drain_us: u64,
-    /// Time spent in scene commit (microseconds).
+    /// Alias for stage4_scene_commit_us. Kept for backward compatibility.
+    #[serde(skip)]
     pub scene_commit_us: u64,
-    /// Time spent in render encode (microseconds).
+    /// Alias for stage6_render_encode_us. Kept for backward compatibility.
+    #[serde(skip)]
     pub render_encode_us: u64,
-    /// Time spent in GPU submit + present (microseconds).
+    /// Alias for stage7_gpu_submit_us. Kept for backward compatibility.
+    #[serde(skip)]
     pub gpu_submit_us: u64,
+
+    // ── Scene counters ───────────────────────────────────────────────────────
+
     /// Number of visible tiles this frame.
     pub tile_count: u32,
     /// Number of nodes rendered this frame.
@@ -29,6 +87,10 @@ pub struct FrameTelemetry {
     pub mutations_applied: u32,
     /// Number of hit-region states updated this frame.
     pub hit_region_updates: u32,
+    /// Number of tiles that had layout recomputed (incremental layout).
+    pub tiles_layout_recomputed: u32,
+    /// Number of telemetry overflow drops since process start (non-blocking telemetry channel).
+    pub telemetry_overflow_count: u64,
 }
 
 impl FrameTelemetry {
@@ -37,6 +99,15 @@ impl FrameTelemetry {
             frame_number,
             timestamp_us: 0,
             frame_time_us: 0,
+            stage1_input_drain_us: 0,
+            stage2_local_feedback_us: 0,
+            stage3_mutation_intake_us: 0,
+            stage4_scene_commit_us: 0,
+            stage5_layout_resolve_us: 0,
+            stage6_render_encode_us: 0,
+            stage7_gpu_submit_us: 0,
+            stage8_telemetry_emit_us: 0,
+            // Legacy aliases
             input_drain_us: 0,
             scene_commit_us: 0,
             render_encode_us: 0,
@@ -46,7 +117,20 @@ impl FrameTelemetry {
             active_leases: 0,
             mutations_applied: 0,
             hit_region_updates: 0,
+            tiles_layout_recomputed: 0,
+            telemetry_overflow_count: 0,
         }
+    }
+
+    /// Synchronize legacy alias fields from the per-stage fields.
+    ///
+    /// Call this after setting all stage fields to keep the deprecated aliases
+    /// consistent with the canonical per-stage values.
+    pub fn sync_legacy_aliases(&mut self) {
+        self.input_drain_us = self.stage1_input_drain_us;
+        self.scene_commit_us = self.stage4_scene_commit_us;
+        self.render_encode_us = self.stage6_render_encode_us;
+        self.gpu_submit_us = self.stage7_gpu_submit_us;
     }
 }
 
