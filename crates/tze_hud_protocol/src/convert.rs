@@ -358,7 +358,7 @@ mod tests {
         let proto = resource_id_to_proto(id);
         // The bytes field must not be a hex string — verify it has exactly 32 bytes
         // and that it matches the raw hash bytes.
-        assert_eq!(&proto.bytes[..], id.as_bytes() as &[u8]);
+        assert_eq!(&proto.bytes[..], id.as_bytes());
     }
 
     #[test]

@@ -37,7 +37,11 @@ impl SceneId {
 
     /// Null/zero ID used as the "absent" sentinel (RFC 0001 §1.1).
     ///
-    /// Protobuf fields absent their presence bit decode to this value.
+    /// When encoded as a protobuf `bytes` field, this value serializes to 16
+    /// zero bytes. Note that in proto3 an unset `bytes` field defaults to an
+    /// empty vector (length 0), not 16 zero bytes; callers must explicitly
+    /// handle the empty-bytes case (e.g., `proto_to_scene_id` returns `None`
+    /// for empty input) and decide whether to treat it as this sentinel.
     pub fn null() -> Self {
         SceneId(Uuid::nil())
     }
@@ -1308,23 +1312,24 @@ mod proptests {
     use super::*;
     use proptest::prelude::*;
 
-    proptest! {
-        /// Generates 10,000 SceneIds and asserts they are monotonically non-decreasing.
-        ///
-        /// UUIDv7 guarantees creation-time ordering, so lexicographic sort == chronological sort.
-        #[test]
-        fn scene_id_monotonic_10k(_ in 0u32..1u32) {
-            let ids: Vec<SceneId> = (0..10_000).map(|_| SceneId::new()).collect();
-            for w in ids.windows(2) {
-                prop_assert!(
-                    w[0] <= w[1],
-                    "SceneId not monotonically non-decreasing: {:?} > {:?}",
-                    w[0],
-                    w[1]
-                );
-            }
+    /// Generates 10,000 SceneIds and asserts they are monotonically non-decreasing.
+    ///
+    /// UUIDv7 guarantees creation-time ordering via a monotonic counter within the
+    /// same millisecond, so lexicographic sort == chronological sort.
+    #[test]
+    fn scene_id_monotonic_10k() {
+        let ids: Vec<SceneId> = (0..10_000).map(|_| SceneId::new()).collect();
+        for w in ids.windows(2) {
+            assert!(
+                w[0] <= w[1],
+                "SceneId not monotonically non-decreasing: {:?} > {:?}",
+                w[0],
+                w[1]
+            );
         }
+    }
 
+    proptest! {
         /// Verifies that any 16-byte input round-trips through SceneId bytes LE encoding.
         #[test]
         fn scene_id_bytes_le_roundtrip_arb(raw in proptest::array::uniform16(0u8..)) {
