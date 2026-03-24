@@ -212,6 +212,19 @@ impl DedupIndex {
             .map(|entry| entry.value().decoded_bytes)
             .sum()
     }
+
+    /// Remove a resource from the index.
+    ///
+    /// Called by the GC runner when a resource's grace period has elapsed and
+    /// it is being evicted.  Returns the evicted record if it was present.
+    ///
+    /// This frees the decoded in-memory representation once the last `Arc` to
+    /// the `ResourceRecord` is dropped.
+    pub fn remove(&self, resource_id: &ResourceId) -> Option<Arc<ResourceRecord>> {
+        self.inner
+            .remove(resource_id)
+            .map(|(_, record)| record)
+    }
 }
 
 impl Default for DedupIndex {

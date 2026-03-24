@@ -2,7 +2,8 @@
 //!
 //! Content-addressed resource store for tze_hud.
 //!
-//! Implements RFC 0011 upload and deduplication requirements:
+//! Implements RFC 0011 upload, deduplication, reference counting, GC, budget
+//! accounting, and font cache requirements:
 //!
 //! - **BLAKE3 content addressing**: `ResourceId` = 32-byte BLAKE3 digest of raw bytes.
 //! - **Deduplication**: `DedupIndex` checks `expected_hash` on `ResourceUploadStart`; returns
@@ -12,6 +13,13 @@
 //! - **Validation pipeline**: capability, hash integrity, size limits, budget,
 //!   type check, decode validation.
 //! - **Concurrent upload limits**: max 4 per agent.
+//! - **Reference counting**: atomic per-resource refcount; `RefcountLayer` wraps
+//!   `DedupIndex` with GC candidacy tracking.
+//! - **Garbage collection**: `GcRunner` evicts resources after configurable grace
+//!   period (default 60 s) with 5 ms per-cycle budget.
+//! - **Per-agent budget accounting**: `BudgetRegistry` charges decoded bytes per
+//!   agent node reference (full decoded size, double-counted across agents).
+//! - **Font cache**: LRU cache with permanent system/bundled holds.
 //!
 //! ## Crate structure
 //!
@@ -21,13 +29,25 @@
 //! | [`dedup`] | Content-addressed dedup index (`DedupIndex`, `ResourceRecord`) |
 //! | [`validation`] | Six-step upload validation pipeline |
 //! | [`upload`] | Upload state machine and `ResourceStore` |
+//! | [`refcount`] | Scene-graph-level reference counting and GC candidacy |
+//! | [`gc`] | GC runner: grace period, cycle timing, frame-render isolation |
+//! | [`budget`] | Per-agent decoded-byte budget accounting |
+//! | [`font_cache`] | LRU font cache with permanent system/bundled holds |
 
+pub mod budget;
 pub mod dedup;
+pub mod font_cache;
+pub mod gc;
+pub mod refcount;
 pub mod types;
 pub mod upload;
 pub mod validation;
 
+pub use budget::{AgentResourceUsage, BudgetRegistry, BudgetViolation, TileBudgetChecker};
 pub use dedup::{DedupIndex, ResourceRecord};
+pub use font_cache::{CachedFontHandle, FontCache, FontCacheEntry, FontCacheKey, FontOrigin};
+pub use gc::{GcClock, GcConfig, GcResult, GcRunner, TestClockMs, WallClock};
+pub use refcount::{GcCandidateTable, RefcountError, RefcountLayer};
 pub use types::{
     DecodedMeta, ResourceError, ResourceId, ResourceStoreConfig, ResourceStored, ResourceType,
     CHUNK_SIZE_LIMIT, DEFAULT_MAX_DECODED_TEXTURE_BYTES, DEFAULT_MAX_RESOURCE_BYTES,
