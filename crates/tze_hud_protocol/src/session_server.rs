@@ -32,6 +32,7 @@ use crate::proto::session::*;
 use crate::proto::session::client_message::Payload as ClientPayload;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::session::{SharedState, SESSION_EVENT_CHANNEL_CAPACITY};
+use crate::token::{TokenStore, DEFAULT_GRACE_PERIOD_MS};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -382,6 +383,7 @@ impl HudSessionImpl {
                 scene,
                 sessions: crate::session::SessionRegistry::new(psk),
                 safe_mode_active: false,
+                token_store: TokenStore::new(),
             })),
             psk: psk.to_string(),
         }
@@ -611,9 +613,30 @@ impl HudSession for HudSessionImpl {
                 }
             }
 
-            // Cleanup: remove session from registry
-            let mut st = state.lock().await;
-            st.sessions.remove_session(&session.session_id);
+            // Cleanup: remove session from registry and store resume token.
+            //
+            // The resume token issued at handshake time is saved to the TokenStore so
+            // the agent can reconnect within the grace period using SessionResume.
+            // Token is not persisted across process restarts (RFC 0005 §6.6).
+            {
+                let mut st = state.lock().await;
+                st.sessions.remove_session(&session.session_id);
+
+                // Only register a resume token if the session was ever Active
+                // (i.e. handshake succeeded). Sessions that fail auth do not
+                // get an orphaned-lease grace period.
+                if !session.resume_token.is_empty() {
+                    st.token_store.insert(
+                        session.resume_token.clone(),
+                        session.agent_name.clone(),
+                        session.capabilities.clone(),
+                        session.subscriptions.clone(),
+                        session.lease_ids.clone(),
+                        DEFAULT_GRACE_PERIOD_MS,
+                        now_ms(),
+                    );
+                }
+            }
         });
 
         // Return the receiver stream as the response
@@ -789,6 +812,19 @@ async fn handle_session_init(
     Some(session)
 }
 
+/// Handle a `SessionResume` message — the first message on a reconnecting stream
+/// within the grace period (RFC 0005 §6.2–6.4).
+///
+/// # Protocol contract
+///
+/// 1. Re-authenticate via `pre_shared_key` (RFC 0005 §6.2).
+/// 2. Look up and consume the resume token from the [`TokenStore`].
+///    - If missing or expired → `SessionError(SESSION_GRACE_EXPIRED)`.
+///    - If valid → restore session state and issue new token.
+/// 3. Send [`SessionResumeResult`] with `accepted=true` and the confirmed
+///    subscription/capability state.
+/// 4. The caller (main session loop) sends a [`SceneSnapshot`] immediately
+///    after this function returns (same mechanism as new connections).
 async fn handle_session_resume(
     state: &Arc<Mutex<SharedState>>,
     psk: &str,
@@ -819,18 +855,46 @@ async fn handle_session_resume(
         }
     }
 
-    // For v1, we don't have persistent resume state, so treat as new session
-    // but preserve the agent_id namespace.
+    // Step 2: Validate the resume token.
+    let current_ms = now_ms();
+    let resume_result = {
+        let mut st = state.lock().await;
+        st.token_store.consume(&resume.resume_token, &resume.agent_id, current_ms)
+    };
+
+    let prior_entry = match resume_result {
+        Ok(entry) => entry,
+        Err(err) => {
+            // Token invalid or expired — agent must perform a full SessionInit.
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: 1,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::SessionError(SessionError {
+                        code: err.error_code().to_string(),
+                        message: err.message().to_string(),
+                        hint: err.hint().to_string(),
+                    })),
+                }))
+                .await;
+            return None;
+        }
+    };
+
+    // Step 3: Build restored session.
     let session_id = uuid::Uuid::now_v7().to_string();
     let namespace = resume.agent_id.clone();
+    // Issue a fresh single-use token for the resumed session (RFC 0005 §6.3).
     let new_resume_token = uuid::Uuid::now_v7().as_bytes().to_vec();
 
+    // Register the resumed agent in the session registry so shared-state
+    // operations (e.g. lease grant, broadcast) can find it.
     {
         let mut st = state.lock().await;
         let _ = st.sessions.authenticate(
             &resume.agent_id,
             psk,
-            &[],
+            &prior_entry.capabilities,
         );
     }
 
@@ -840,10 +904,12 @@ async fn handle_session_resume(
         session_id: session_id.clone(),
         namespace: namespace.clone(),
         agent_name: resume.agent_id.clone(),
-        capabilities: Vec::new(),
+        capabilities: prior_entry.capabilities.clone(),
         policy_capabilities: resume_policy_caps,
-        lease_ids: Vec::new(),
-        subscriptions: Vec::new(),
+        // Restore orphaned leases so the agent can continue using them.
+        lease_ids: prior_entry.orphaned_lease_ids.clone(),
+        // Restore subscription set from before the disconnect.
+        subscriptions: prior_entry.subscriptions.clone(),
         server_sequence: 0,
         resume_token: new_resume_token.clone(),
         last_heartbeat_ms: now_ms(),
@@ -866,10 +932,11 @@ async fn handle_session_resume(
                 // Resume always runs at the highest runtime-supported version.
                 // version = major * 1000 + minor; v1.1 = 1001.
                 negotiated_protocol_version: crate::auth::RUNTIME_MAX_VERSION,
-                granted_capabilities: Vec::new(),
-                error: String::new(),
-                active_subscriptions: Vec::new(),
+                // RFC 0005 §6.3: agents MUST use confirmed state, not assume pre-disconnect set.
+                granted_capabilities: prior_entry.capabilities,
+                active_subscriptions: prior_entry.subscriptions,
                 denied_subscriptions: Vec::new(),
+                error: String::new(),
             })),
         }))
         .await;
@@ -3185,5 +3252,307 @@ mod tests {
                 .unwrap();
 
         (client, handle, shared_state)
+    }
+
+    // ─── Reconnection and resume tests (RFC 0005 §6.1–6.6, rig-3dou) ────────
+
+    /// Helper: perform a full handshake and return the resume token.
+    ///
+    /// Drops the sender and response stream, waits for server-side cleanup,
+    /// then returns the resume token for use in subsequent resume attempts.
+    async fn handshake_and_disconnect(
+        client: &mut HudSessionClient<tonic::transport::Channel>,
+        agent_id: &str,
+        psk: &str,
+    ) -> Vec<u8> {
+        let (tx, init_messages, stream) = handshake(client, agent_id, psk).await;
+        let resume_token = match &init_messages[0].payload {
+            Some(ServerPayload::SessionEstablished(e)) => e.resume_token.clone(),
+            _ => panic!("Expected SessionEstablished"),
+        };
+        drop(tx);
+        drop(stream);
+        // Allow server task to process EOF and register the resume token.
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        resume_token
+    }
+
+    /// Scenario (rig-3dou AC): Reconnect within grace period succeeds with
+    /// `SessionResumeResult(accepted=true)`.
+    /// RFC 0005 §6.1–6.3
+    #[tokio::test]
+    async fn test_reconnect_within_grace_accepted() {
+        let (mut client, _server) = setup_test().await;
+        let resume_token = handshake_and_disconnect(&mut client, "resume-ok-agent", "test-key").await;
+
+        let (resume_tx, resume_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let resume_stream = tokio_stream::wrappers::ReceiverStream::new(resume_rx);
+
+        resume_tx
+            .send(ClientMessage {
+                sequence: 1,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::SessionResume(SessionResume {
+                    agent_id: "resume-ok-agent".to_string(),
+                    resume_token: resume_token.clone(),
+                    last_seen_server_sequence: 2,
+                    pre_shared_key: "test-key".to_string(),
+                    auth_credential: None,
+                })),
+            })
+            .await
+            .unwrap();
+
+        let mut response_stream = client.session(resume_stream).await.unwrap().into_inner();
+
+        let msg1 = response_stream.next().await.unwrap().unwrap();
+        match &msg1.payload {
+            Some(ServerPayload::SessionResumeResult(result)) => {
+                assert!(result.accepted, "expected resume to be accepted");
+                assert!(!result.new_session_token.is_empty(), "new token must be issued");
+                assert_ne!(
+                    result.new_session_token, resume_token,
+                    "new token must differ from old token"
+                );
+                assert_eq!(result.negotiated_protocol_version, crate::auth::RUNTIME_MAX_VERSION);
+            }
+            other => panic!("Expected SessionResumeResult, got: {other:?}"),
+        }
+
+        // Full SceneSnapshot must follow SessionResumeResult (RFC 0005 §6.4).
+        let msg2 = response_stream.next().await.unwrap().unwrap();
+        match &msg2.payload {
+            Some(ServerPayload::SceneSnapshot(_)) => {}
+            other => panic!("Expected SceneSnapshot after resume, got: {other:?}"),
+        }
+    }
+
+    /// Scenario (rig-3dou AC): New session token is issued on resume; old token
+    /// is single-use and consumed.
+    /// RFC 0005 §6.1 — "single-use for resumption"
+    #[tokio::test]
+    async fn test_resume_token_single_use() {
+        let (mut client, _server) = setup_test().await;
+        let resume_token = handshake_and_disconnect(&mut client, "single-use-agent", "test-key").await;
+
+        // First resume: should succeed and consume the token.
+        let (tx1, rx1) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let s1 = tokio_stream::wrappers::ReceiverStream::new(rx1);
+        tx1.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionResume(SessionResume {
+                agent_id: "single-use-agent".to_string(),
+                resume_token: resume_token.clone(),
+                last_seen_server_sequence: 2,
+                pre_shared_key: "test-key".to_string(),
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut r1 = client.session(s1).await.unwrap().into_inner();
+        let first_resume = r1.next().await.unwrap().unwrap();
+        match &first_resume.payload {
+            Some(ServerPayload::SessionResumeResult(result)) => {
+                assert!(result.accepted, "first resume must succeed");
+            }
+            other => panic!("Expected SessionResumeResult, got: {other:?}"),
+        }
+        drop(tx1);
+        drop(r1);
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        // Second resume attempt with the same original token: must fail.
+        let (tx2, rx2) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let s2 = tokio_stream::wrappers::ReceiverStream::new(rx2);
+        tx2.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionResume(SessionResume {
+                agent_id: "single-use-agent".to_string(),
+                resume_token: resume_token.clone(),
+                last_seen_server_sequence: 2,
+                pre_shared_key: "test-key".to_string(),
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut r2 = client.session(s2).await.unwrap().into_inner();
+        let second_resume = r2.next().await.unwrap().unwrap();
+        match &second_resume.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "SESSION_GRACE_EXPIRED",
+                    "second use of same token must fail with SESSION_GRACE_EXPIRED, got: {}",
+                    err.code
+                );
+            }
+            other => panic!("Expected SessionError(SESSION_GRACE_EXPIRED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario (rig-3dou AC): Re-authentication required on resume.
+    /// Invalid credentials result in `SessionError(AUTH_FAILED)`.
+    /// RFC 0005 §6.2
+    #[tokio::test]
+    async fn test_resume_auth_required() {
+        let (mut client, _server) = setup_test().await;
+        let resume_token = handshake_and_disconnect(&mut client, "auth-check-agent", "test-key").await;
+
+        let (resume_tx, resume_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let resume_stream = tokio_stream::wrappers::ReceiverStream::new(resume_rx);
+
+        // Use wrong PSK on resume — must be rejected with AUTH_FAILED.
+        resume_tx
+            .send(ClientMessage {
+                sequence: 1,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::SessionResume(SessionResume {
+                    agent_id: "auth-check-agent".to_string(),
+                    resume_token: resume_token.clone(),
+                    last_seen_server_sequence: 2,
+                    pre_shared_key: "wrong-key".to_string(),
+                    auth_credential: None,
+                })),
+            })
+            .await
+            .unwrap();
+
+        let mut response_stream = client.session(resume_stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(err.code, "AUTH_FAILED", "expected AUTH_FAILED, got: {}", err.code);
+            }
+            other => panic!("Expected SessionError(AUTH_FAILED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario (rig-3dou AC): Bogus token (as if runtime restarted and all tokens
+    /// cleared) is rejected with `SESSION_GRACE_EXPIRED`.
+    /// RFC 0005 §6.6
+    #[tokio::test]
+    async fn test_bogus_token_rejected_with_grace_expired() {
+        let (mut client, _server) = setup_test().await;
+
+        let bogus_token = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        let (resume_tx, resume_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let resume_stream = tokio_stream::wrappers::ReceiverStream::new(resume_rx);
+
+        resume_tx
+            .send(ClientMessage {
+                sequence: 1,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ClientPayload::SessionResume(SessionResume {
+                    agent_id: "restart-agent".to_string(),
+                    resume_token: bogus_token,
+                    last_seen_server_sequence: 0,
+                    pre_shared_key: "test-key".to_string(),
+                    auth_credential: None,
+                })),
+            })
+            .await
+            .unwrap();
+
+        let mut response_stream = client.session(resume_stream).await.unwrap().into_inner();
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "SESSION_GRACE_EXPIRED",
+                    "unknown token must produce SESSION_GRACE_EXPIRED, got: {}",
+                    err.code
+                );
+                assert!(!err.hint.is_empty(), "hint should direct client to SessionInit");
+            }
+            other => panic!("Expected SessionError(SESSION_GRACE_EXPIRED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario (rig-3dou AC): SessionResumeResult carries complete subscription state.
+    /// RFC 0005 §6.3 — agents MUST use confirmed subscription state, not assume pre-disconnect set.
+    #[tokio::test]
+    async fn test_resume_result_carries_subscription_state() {
+        let (mut client, _server) = setup_test().await;
+
+        // Establish a session that requested a specific subscription.
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "sub-resume-agent".to_string(),
+                agent_display_name: "sub-resume-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec!["create_tile".to_string()],
+                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string(), "INPUT_EVENTS".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        let established_msg = response_stream.next().await.unwrap().unwrap();
+        let resume_token = match &established_msg.payload {
+            Some(ServerPayload::SessionEstablished(e)) => e.resume_token.clone(),
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        };
+
+        drop(tx);
+        drop(response_stream);
+        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+
+        // Now resume.
+        let (rtx, rrx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let rstream = tokio_stream::wrappers::ReceiverStream::new(rrx);
+
+        rtx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionResume(SessionResume {
+                agent_id: "sub-resume-agent".to_string(),
+                resume_token,
+                last_seen_server_sequence: 2,
+                pre_shared_key: "test-key".to_string(),
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut rs = client.session(rstream).await.unwrap().into_inner();
+        let resume_result_msg = rs.next().await.unwrap().unwrap();
+        match &resume_result_msg.payload {
+            Some(ServerPayload::SessionResumeResult(result)) => {
+                assert!(result.accepted);
+                // Capabilities must be restored.
+                assert!(
+                    result.granted_capabilities.contains(&"create_tile".to_string()),
+                    "create_tile capability must be restored on resume"
+                );
+                // Subscriptions must be restored.
+                assert!(
+                    result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY subscription must be present in resume result"
+                );
+                assert!(
+                    result.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    "INPUT_EVENTS subscription must be present in resume result"
+                );
+            }
+            other => panic!("Expected SessionResumeResult, got: {other:?}"),
+        }
     }
 }
