@@ -1,77 +1,79 @@
 //! Surface abstraction — windowed or headless.
 //!
 //! The compositor renders to a surface without knowing which kind it is.
-//! Two implementations are provided:
 //!
-//! - [`HeadlessSurface`] — offscreen texture for testing and CI. `present()` is a no-op.
-//! - [`WindowSurface`] — stub for a real winit/wgpu swapchain surface. In v1 the windowed
-//!   compositor is wired at the integration layer; this type captures the interface contract.
+//! # Design
 //!
-//! ## Spec: CompositorSurface Trait (RFC 0002 §8.1, spec.md line 364)
+//! `CompositorSurface` is the trait that decouples the frame pipeline from the
+//! display back-end.  Two implementations ship in v1:
 //!
-//! ```text
-//! CompositorSurface:
-//!   acquire_frame() -> CompositorFrame
-//!   present(frame: CompositorFrame)
-//!   size() -> (u32, u32)
-//! ```
+//! - [`HeadlessSurface`] — offscreen `wgpu::Texture` for testing and CI.
+//!   `present()` is a no-op; pixel readback uses `copy_texture_to_buffer`.
+//! - [`WindowSurface`] — window-backed surface via `wgpu::Surface`.
+//!   Reserved for windowed mode; windowed rendering is post-vertical-slice.
 //!
-//! `CompositorFrame` bundles the `TextureView` with an ownership guard that keeps
-//! the `SurfaceTexture` alive until `present()` is called (headless surfaces use
-//! a no-op guard).
+//! Per runtime-kernel/spec.md Requirement: Compositor Surface Trait (line 364)
+//! the surface is abstracted behind `CompositorSurface` with `acquire_frame()`,
+//! `present()`, and `size()`.  `CompositorFrame` bundles the `TextureView` with
+//! an ownership guard so the `SurfaceTexture` lives until after `present()`.
+//!
+//! ## Thread model
+//! - `acquire_frame()` is called on the compositor thread.
+//! - `present()` MUST be called on the main thread (macOS/Metal requirement).
+//!   The compositor thread signals the main thread via `FrameReadySignal`;
+//!   the main thread calls `surface.present()`.
+//! - `size()` may be called from any thread (read-only).
 
-/// A frame acquired from the surface.
+use std::any::Any;
+
+// ─── CompositorFrame ─────────────────────────────────────────────────────────
+
+/// A frame ready for rendering: a `TextureView` plus an ownership guard.
 ///
-/// Bundles the `TextureView` with an optional ownership guard. The guard keeps
-/// any associated `SurfaceTexture` alive until this frame is presented or dropped.
+/// The `_guard` holds a heap-allocated value that keeps the underlying GPU
+/// resource alive until this `CompositorFrame` is dropped.  For `HeadlessSurface`
+/// the guard is a `()` no-op.  For `WindowSurface` it would hold the
+/// `wgpu::SurfaceTexture`.
 ///
-/// For [`HeadlessSurface`], `guard` is `None` (no swapchain texture to manage).
-/// For a real [`WindowSurface`], the guard holds the `wgpu::SurfaceTexture`.
+/// Per runtime-kernel/spec.md: "CompositorFrame MUST bundle the TextureView
+/// with an ownership guard (_guard: Box<dyn Any + Send>) to keep the
+/// SurfaceTexture alive until after present()." (line 364)
 pub struct CompositorFrame {
-    /// The texture view to render into.
+    /// Render target for this frame.
     pub view: wgpu::TextureView,
-    /// Optional guard keeping the underlying surface texture alive until present.
-    pub guard: Option<Box<dyn std::any::Any + Send>>,
+    /// Ownership guard — keeps the backing resource alive until this frame is dropped.
+    pub _guard: Box<dyn Any + Send>,
 }
+
+// ─── CompositorSurface trait ─────────────────────────────────────────────────
 
 /// Trait for compositor render targets.
 ///
-/// Implemented by both [`HeadlessSurface`] and [`WindowSurface`].
+/// Implemented by both `HeadlessSurface` (offscreen) and `WindowSurface`
+/// (display-connected).  The compositor uses this trait exclusively — no
+/// `if headless { … } else { … }` branches in the frame pipeline.
 ///
-/// ## Thread model
-/// - `acquire_frame()` is called on the compositor thread.
-/// - `present()` MUST be called on the main thread (macOS/Metal requirement).
-///   The compositor thread signals the main thread via `FrameReadySignal`;
-///   the main thread calls `surface.present()`.
-/// - `size()` may be called from any thread (read-only).
+/// Per runtime-kernel/spec.md Requirement: Compositor Surface Trait (line 364):
+/// - `acquire_frame()` → `CompositorFrame` containing the `TextureView`.
+/// - `present()` — submit/flip the frame.  No-op for headless.
+/// - `size()` → `(width, height)` in pixels.
 pub trait CompositorSurface: Send + 'static {
-    /// Acquire a frame for rendering.
-    ///
-    /// Returns a [`CompositorFrame`] containing the texture view and an optional
-    /// ownership guard. The guard keeps the underlying surface texture alive until
-    /// `present()` is called.
+    /// Acquire a frame for rendering.  Returns a `CompositorFrame` whose
+    /// `_guard` keeps the underlying GPU resource alive.
     ///
     /// Called on the compositor thread (Stage 6 / Stage 7 boundary).
     fn acquire_frame(&self) -> CompositorFrame;
 
-    /// Present the rendered frame.
+    /// Present (flip/submit) the current frame.
     ///
-    /// For [`HeadlessSurface`] this is a no-op.
+    /// For `HeadlessSurface` this is a no-op per spec line 199.
     /// For a real surface this submits the frame to the display.
     ///
     /// **MUST be called on the main thread** (macOS/Metal requirement).
     fn present(&self);
 
-    /// Returns (width, height) in physical pixels.
+    /// Surface dimensions in pixels.
     fn size(&self) -> (u32, u32);
-
-    /// Returns the current texture view for the surface.
-    ///
-    /// Convenience accessor used by [`crate::renderer::Compositor::render_frame`].
-    /// The default implementation acquires a frame and returns a reference to its view.
-    ///
-    /// For [`HeadlessSurface`] this returns a reference to the pre-allocated view.
-    fn current_texture_view(&self) -> &wgpu::TextureView;
 }
 
 // ─── WindowSurface ─────────────────────────────────────────────────────────────
@@ -116,21 +118,23 @@ impl CompositorSurface for WindowSurface {
     }
 
     fn present(&self) {
-        // Stub: no-op until real window integration is wired.
+        // Windowed present() will call SurfaceTexture::present() when swap-chain is wired up.
+        // Currently a stub — will be filled in when windowed mode is integrated.
     }
 
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
-
-    fn current_texture_view(&self) -> &wgpu::TextureView {
-        unimplemented!(
-            "WindowSurface::current_texture_view is a stub — use HeadlessSurface for testing"
-        )
-    }
 }
 
+// ─── HeadlessSurface ─────────────────────────────────────────────────────────
+
 /// Headless offscreen surface for testing and CI.
+///
+/// Satisfies:
+/// - runtime-kernel/spec.md Requirement: Headless Mode (line 198)
+/// - validation-framework/spec.md Requirement: DR-V2 (line 186)
+/// - validation-framework/spec.md Requirement: DR-V6 (line 238)
 pub struct HeadlessSurface {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -187,6 +191,8 @@ impl HeadlessSurface {
     }
 
     /// Copy the rendered texture to the readback buffer.
+    ///
+    /// Call this after the render pass, before submitting the command buffer.
     pub fn copy_to_buffer(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -213,6 +219,9 @@ impl HeadlessSurface {
 
     /// Read back pixels from the buffer. Returns RGBA8 data.
     /// This is a blocking call (waits for GPU to finish).
+    ///
+    /// Per runtime-kernel/spec.md line 208: pixel readback is on-demand via
+    /// `copy_texture_to_buffer`.
     pub fn read_pixels(&self, device: &wgpu::Device) -> Vec<u8> {
         let buffer_slice = self.output_buffer.slice(..);
 
@@ -281,33 +290,30 @@ impl HeadlessSurface {
 
 // ─── CompositorSurface impl for HeadlessSurface ────────────────────────────────
 
+/// `HeadlessSurface` implements `CompositorSurface`.
+///
+/// - `acquire_frame()` creates a new `TextureView` from the offscreen texture; guard is `()`.
+/// - `present()` is a no-op (spec line 199: "Headless surface present() MUST be a no-op").
+/// - `size()` returns `(width, height)`.
 impl CompositorSurface for HeadlessSurface {
-    /// Acquire a frame for rendering into the headless texture.
-    ///
-    /// Returns a `CompositorFrame` with the pre-allocated texture view and
-    /// no ownership guard (the texture is owned by `HeadlessSurface` itself).
     fn acquire_frame(&self) -> CompositorFrame {
-        // HeadlessSurface owns the texture; we create a new view for this frame.
-        // The guard is None because there is no swapchain texture to release.
-        let view = self.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        CompositorFrame { view, guard: None }
+        // Re-create the view from the texture (the stored view can't be Clone).
+        // We return a new TextureView pointing at the same texture.
+        // The guard is a no-op `()` because the texture is owned by HeadlessSurface.
+        let view = self
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        CompositorFrame {
+            view,
+            _guard: Box::new(()), // no-op guard — HeadlessSurface owns the texture
+        }
     }
 
-    /// No-op — headless surfaces don't present to a display.
-    fn present(&self) {
-        // Headless: present() is intentionally a no-op (spec line 139).
-    }
+    /// No-op — headless mode does not present to a display (spec line 199).
+    fn present(&self) {}
 
     fn size(&self) -> (u32, u32) {
         (self.width, self.height)
-    }
-
-    /// Returns a reference to the pre-allocated texture view.
-    ///
-    /// The renderer uses this for the render pass attachment. This avoids
-    /// re-creating the view per frame in the hot path.
-    fn current_texture_view(&self) -> &wgpu::TextureView {
-        &self.view
     }
 }
 
@@ -335,5 +341,12 @@ mod tests {
         assert!(result.is_err(), "should fail when diff > tolerance");
         let msg = result.unwrap_err();
         assert!(msg.contains("channel 0"), "error should identify channel: {msg}");
+    }
+
+    /// `WindowSurface::size()` should return configured dimensions without panicking.
+    #[test]
+    fn test_window_surface_size() {
+        let ws = WindowSurface::new(1920, 1080);
+        assert_eq!(ws.size(), (1920, 1080));
     }
 }

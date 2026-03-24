@@ -5,6 +5,40 @@
 //! (no cross-thread signalling). This is correct for testing because the pipeline
 //! contract (stage order, per-stage telemetry, ArcSwap snapshot, overflow counter)
 //! is identical to the windowed runtime; only the thread assignment differs.
+//!
+//! # Headless Mode Parity
+//!
+//! Per runtime-kernel/spec.md Requirement: Headless Mode (line 198):
+//! "Headless mode MUST use the same process, code path, and pipeline as
+//! windowed mode.  The only difference SHALL be the render surface."
+//!
+//! `HeadlessRuntime` wires the full pipeline:
+//! - `Compositor` (GPU device + wgpu render pipeline)
+//! - `HeadlessSurface` (offscreen render target, `present()` is a no-op)
+//! - `InputProcessor` (hit-test, local feedback)
+//! - `TelemetryCollector` (per-frame telemetry)
+//! - `SharedState` (scene + session registry)
+//! - gRPC server (HudSession streaming — optional)
+//!
+//! # Software GPU
+//!
+//! `HeadlessRuntime::new` respects the `HEADLESS_FORCE_SOFTWARE` environment
+//! variable (spec line 409).  When set to `1`, wgpu adapter selection uses
+//! `force_fallback_adapter = true` (llvmpipe on Linux, WARP on Windows).
+//!
+//! # Session Limits & Hot-Connect
+//!
+//! Per spec Requirement: Session Limits (line 355): headless mode still runs
+//! the gRPC session server — agents connect normally, session limits are
+//! enforced identically.
+//!
+//! Per spec Requirement: Hot-Connect (line 346): agents connecting to headless
+//! runtime receive the full scene snapshot (handled by `HudSessionImpl`).
+//!
+//! # grpc_port = 0
+//!
+//! Setting `grpc_port = 0` in `HeadlessConfig` disables the gRPC server.
+//! Tests that don't exercise the session layer use this to skip server startup.
 
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use tze_hud_compositor::{Compositor, HeadlessSurface};
@@ -20,9 +54,14 @@ use tokio::sync::Mutex;
 
 /// Configuration for the headless runtime.
 pub struct HeadlessConfig {
+    /// Render target width in pixels.
     pub width: u32,
+    /// Render target height in pixels.
     pub height: u32,
+    /// gRPC server port.  Set to `0` to disable the gRPC server entirely
+    /// (useful for tests that only need rendering, not session management).
     pub grpc_port: u16,
+    /// Pre-shared key for session authentication.
     pub psk: String,
 }
 
@@ -39,8 +78,10 @@ impl Default for HeadlessConfig {
 
 /// The headless runtime instance.
 ///
-/// Owns the frame pipeline (including the ArcSwap hit-test snapshot),
-/// the compositor, and the telemetry collector.
+/// Owns all runtime state: GPU compositor, offscreen surface, input processor,
+/// telemetry collector, and scene/session state.
+/// Includes the frame pipeline orchestrator (ArcSwap hit-test snapshot,
+/// overflow counter, per-stage telemetry).
 pub struct HeadlessRuntime {
     pub compositor: Compositor,
     pub surface: HeadlessSurface,
@@ -54,6 +95,9 @@ pub struct HeadlessRuntime {
 
 impl HeadlessRuntime {
     /// Create a new headless runtime.
+    ///
+    /// Respects `HEADLESS_FORCE_SOFTWARE=1` — when set, the wgpu adapter
+    /// selection uses `force_fallback_adapter = true` (spec line 211).
     pub async fn new(config: HeadlessConfig) -> Result<Self, Box<dyn std::error::Error>> {
         let compositor = Compositor::new_headless(config.width, config.height).await?;
         let surface = HeadlessSurface::new(&compositor.device, config.width, config.height);
@@ -91,7 +135,9 @@ impl HeadlessRuntime {
     /// in headless mode). Per-stage telemetry is recorded in the returned
     /// `FrameTelemetry`.
     ///
-    /// The compositor renders the current scene to the headless surface.
+    /// The compositor renders the current scene to the headless surface via
+    /// the surface-agnostic `render_frame()` path (spec line 198: no conditional
+    /// compilation in the render path).
     pub async fn render_frame(&mut self) -> FrameTelemetry {
         let frame_start = Instant::now();
         let state = self.state.lock().await;
@@ -156,6 +202,7 @@ impl HeadlessRuntime {
             self.pipeline.telemetry_overflow_count();
         telemetry.sync_legacy_aliases();
 
+
         drop(state);
 
         // Stage 8: Telemetry Emit — non-blocking record into collector.
@@ -168,15 +215,35 @@ impl HeadlessRuntime {
     }
 
     /// Read back pixels from the last rendered frame.
+    ///
+    /// Returns RGBA8 data (width × height × 4 bytes).  Blocks until GPU is idle.
+    ///
+    /// Per spec line 208: "pixel readback MUST be on-demand via copy_texture_to_buffer."
     pub fn read_pixels(&self) -> Vec<u8> {
         self.surface.read_pixels(&self.compositor.device)
     }
 
     /// Start the gRPC server in the background, serving the HudSession streaming service.
-    /// Returns the server task handle.
+    ///
+    /// Per spec Requirement: Session Limits (line 355): headless runtime still
+    /// runs the gRPC server — agents connect normally.
+    ///
+    /// Per spec Requirement: Hot-Connect (line 346): the `HudSessionImpl` sends
+    /// a full scene snapshot to each agent on connect.
+    ///
+    /// Returns the server task handle.  The caller must retain it to keep the
+    /// server running.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `config.grpc_port == 0`.  Check before calling.
     pub async fn start_grpc_server(
         &self,
     ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
+        assert!(
+            self.config.grpc_port != 0,
+            "start_grpc_server called with grpc_port = 0 (disabled)"
+        );
         let addr = format!("[::1]:{}", self.config.grpc_port).parse()?;
 
         let service = HudSessionImpl::from_shared_state(
@@ -196,5 +263,66 @@ impl HeadlessRuntime {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         Ok(handle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that grpc_port = 0 does not start a server by default.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_headless_runtime_no_grpc() {
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            psk: "test".to_string(),
+        };
+        let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+        // render_frame should succeed without a gRPC server
+        let telemetry = runtime.render_frame().await;
+        assert!(telemetry.frame_time_us > 0, "frame time must be non-zero");
+    }
+
+    /// Verify that read_pixels returns the correct buffer size after a render.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_headless_read_pixels_buffer_size() {
+        let config = HeadlessConfig {
+            width: 128,
+            height: 96,
+            grpc_port: 0,
+            psk: "test".to_string(),
+        };
+        let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+        runtime.render_frame().await;
+        let pixels = runtime.read_pixels();
+        assert_eq!(
+            pixels.len(),
+            128 * 96 * 4,
+            "pixel buffer must be width * height * 4 bytes (RGBA8)"
+        );
+    }
+
+    /// Verify that the gRPC server starts and the runtime remains functional
+    /// after startup.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_headless_grpc_server_starts() {
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 50199, // arbitrary port unlikely to conflict
+            psk: "test".to_string(),
+        };
+        let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+        let _server = runtime.start_grpc_server().await.expect("server start");
+
+        // Render a frame while the server is running
+        let telemetry = runtime.render_frame().await;
+        assert!(telemetry.frame_time_us > 0);
+
+        // Server task is still running (not panicked)
+        assert!(!_server.is_finished(), "gRPC server task should still be running");
+        _server.abort();
     }
 }
