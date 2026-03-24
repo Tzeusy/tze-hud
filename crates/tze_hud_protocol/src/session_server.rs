@@ -1716,6 +1716,11 @@ async fn handle_mutation_batch(
                 }
                 _ => ErrorCode::InvalidArgument as i32,
             };
+            // context points at the specific field that caused the rejection.
+            let context = match error_code {
+                "TIMESTAMP_EXPIRY_BEFORE_PRESENT" => "timing.expires_at_wall_us",
+                _ => "timing.present_at_wall_us",
+            };
             let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -1724,7 +1729,7 @@ async fn handle_mutation_batch(
                     payload: Some(ServerPayload::RuntimeError(RuntimeError {
                         error_code: error_code.to_string(),
                         message,
-                        context: "timing.present_at_wall_us".to_string(),
+                        context: context.to_string(),
                         hint: r#"{"check_field": "timing"}"#.to_string(),
                         error_code_enum,
                     })),
@@ -1749,6 +1754,8 @@ async fn handle_mutation_batch(
                 session.dedup_window.insert(batch.batch_id.clone(), cached.clone());
             }
             let seq = session.next_server_seq();
+            // Drop lock before awaiting send to avoid holding mutex across await point.
+            drop(st);
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
@@ -1780,6 +1787,8 @@ async fn handle_mutation_batch(
                 session.dedup_window.insert(batch.batch_id.clone(), cached.clone());
             }
             let seq = session.next_server_seq();
+            // Drop lock before awaiting send to avoid holding mutex across await point.
+            drop(st);
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
@@ -1902,6 +1911,8 @@ async fn handle_mutation_batch(
             );
         }
 
+        // Drop lock before awaiting send to avoid holding mutex across await point.
+        drop(st);
         let _ = tx
             .send(Ok(ServerMessage {
                 sequence: seq,
@@ -1934,6 +1945,8 @@ async fn handle_mutation_batch(
             );
         }
 
+        // Drop lock before awaiting send to avoid holding mutex across await point.
+        drop(st);
         let _ = tx
             .send(Ok(ServerMessage {
                 sequence: seq,
@@ -4992,9 +5005,13 @@ mod tests {
     #[test]
     fn test_timing_hints_too_future() {
         let session_open = now_wall_us();
-        // present_at_wall_us far beyond max_future_schedule_us (300 seconds)
         let max_future = DEFAULT_MAX_FUTURE_SCHEDULE_US;
-        let present = now_wall_us() + max_future + 1; // 1µs beyond horizon
+        // Use session_open as baseline and a large margin (1 full second) to avoid
+        // flakiness from the µs gap between now_wall_us() calls.
+        // present must exceed current_wall_us + max_future, where current_wall_us is
+        // re-sampled inside validate_timing_hints. The 1-second buffer ensures the
+        // margin holds even under scheduler jitter.
+        let present = session_open + max_future + 1_000_000; // 1s beyond horizon
         let hints = TimingHints {
             present_at_wall_us: present,
             expires_at_wall_us: 0,

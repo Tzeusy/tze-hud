@@ -42,8 +42,11 @@ struct Entry {
 
 /// Per-session deduplication window.
 ///
-/// Thread-safety: this type is **not** `Send + Sync` on its own. Callers must
-/// synchronise access (e.g., by holding the per-session `Mutex`).
+/// Thread-safety: this type performs no internal synchronization and is not
+/// safe for concurrent mutation without external coordination (e.g., by
+/// holding the per-session `Mutex`). Note: the underlying types (`HashMap`,
+/// `VecDeque`, `Instant`) are `Send + Sync`; the constraint is about mutation
+/// safety, not trait bounds.
 pub struct DedupWindow {
     /// Maximum number of unique batch IDs stored before FIFO eviction.
     max_entries: usize,
@@ -118,11 +121,10 @@ impl DedupWindow {
     pub fn insert(&mut self, batch_id: Vec<u8>, result: CachedResult) {
         self.purge_expired();
 
-        // If the key already exists, remove it from the order queue so we
-        // can re-insert at the back with a fresh timestamp.
-        if self.cache.contains_key(&batch_id) {
+        // If the key already exists, remove it from the cache and order queue
+        // so we can re-insert at the back with a fresh timestamp.
+        if self.cache.remove(&batch_id).is_some() {
             self.order.retain(|k| k != &batch_id);
-            self.cache.remove(&batch_id);
         }
 
         // Evict oldest entry if at capacity.
