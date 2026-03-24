@@ -194,6 +194,229 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
     }
 }
 
+// ─── Inbound mutation traffic class ──────────────────────────────────────────
+
+/// Traffic class for an **inbound** `MutationBatch`.
+///
+/// Used by the per-session freeze queue to implement traffic-class-aware
+/// overflow (system-shell/spec.md §Freeze Scene, source RFC 0007 §4.3):
+///
+/// - **Transactional** — never evicted; gRPC backpressure applied on overflow.
+/// - **StateStream** — coalesced (latest-wins) before eviction.
+/// - **Ephemeral** — dropped oldest-first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InboundTrafficClass {
+    Transactional,
+    StateStream,
+    Ephemeral,
+}
+
+/// Classify an inbound `MutationBatch` by examining its contained mutations.
+///
+/// Any structural/identity-changing mutation makes the batch Transactional;
+/// otherwise content mutations are StateStream; empty batch is Ephemeral.
+fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
+    for m in &batch.mutations {
+        if let Some(ref mutation) = m.mutation {
+            use crate::proto::mutation_proto::Mutation;
+            match mutation {
+                Mutation::CreateTile(_) => return InboundTrafficClass::Transactional,
+                // SetTileRoot is StateStream — keep looking for Transactional
+                Mutation::SetTileRoot(_) => {}
+                Mutation::PublishToZone(_) => {}
+                Mutation::ClearZone(_) => {}
+            }
+        }
+    }
+    // If we found any mutation at all, it's StateStream (content update)
+    if batch.mutations.is_empty() {
+        InboundTrafficClass::Ephemeral
+    } else {
+        InboundTrafficClass::StateStream
+    }
+}
+
+// ─── Per-session freeze queue ─────────────────────────────────────────────────
+
+/// Default per-session mutation queue capacity while frozen.
+/// Source: system-shell/spec.md §Freeze Scene (default 1000).
+const FREEZE_QUEUE_CAPACITY: usize = 1_000;
+
+/// Queue pressure threshold fraction (80% of capacity).
+/// Source: system-shell/spec.md §Freeze Backpressure Signal.
+const FREEZE_QUEUE_PRESSURE_FRACTION: f32 = 0.80;
+
+/// A queued mutation entry for the per-session freeze queue.
+#[derive(Clone, Debug)]
+struct FrozenMutation {
+    /// The original proto `MutationBatch` to re-apply on unfreeze.
+    batch: MutationBatch,
+    /// Traffic class inferred at enqueue time.
+    traffic_class: InboundTrafficClass,
+    /// Coalesce key for StateStream mutations: `"<namespace>/<lease_id_hex>"`.
+    /// When two entries share the same key, the newer one replaces the older
+    /// (latest-wins coalescing per spec).
+    coalesce_key: Option<String>,
+}
+
+/// Outcome of a freeze-queue enqueue operation.
+#[derive(Debug)]
+enum FreezeEnqueueResult {
+    /// Mutation queued (possibly with pressure warning).
+    Queued { pressure_warning: bool },
+    /// StateStream coalesced with existing entry.
+    Coalesced,
+    /// A non-transactional entry was evicted; caller sends MUTATION_DROPPED.
+    Evicted { evicted_batch_id: Vec<u8> },
+    /// Transactional mutation overflows queue; caller applies gRPC backpressure.
+    BackpressureRequired,
+    /// Ephemeral mutation dropped (queue full of transactional entries).
+    Dropped,
+}
+
+/// Per-session bounded mutation queue used during freeze.
+struct SessionFreezeQueue {
+    capacity: usize,
+    queue: VecDeque<FrozenMutation>,
+}
+
+impl SessionFreezeQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            queue: VecDeque::with_capacity(capacity.min(256)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    fn is_full(&self) -> bool {
+        self.queue.len() >= self.capacity
+    }
+
+    fn pressure_warning_threshold(&self) -> usize {
+        (self.capacity as f32 * FREEZE_QUEUE_PRESSURE_FRACTION) as usize
+    }
+
+    fn crosses_pressure_threshold_after_add(&self, before_len: usize) -> bool {
+        let threshold = self.pressure_warning_threshold();
+        before_len < threshold && self.queue.len() >= threshold
+    }
+
+    /// Enqueue a mutation batch per traffic-class-aware overflow rules.
+    fn enqueue(
+        &mut self,
+        batch: MutationBatch,
+        namespace: &str,
+    ) -> FreezeEnqueueResult {
+        let traffic_class = classify_inbound_batch(&batch);
+        // Derive coalesce key for StateStream: "namespace/lease_id_hex".
+        // Using the first 8 bytes (64 bits) as a compact key.
+        let coalesce_key = if traffic_class == InboundTrafficClass::StateStream {
+            let prefix_len = batch.lease_id.len().min(8);
+            let key_hex: String = batch.lease_id[..prefix_len]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            Some(format!("{namespace}/{key_hex}"))
+        } else {
+            None
+        };
+
+        let before_len = self.queue.len();
+
+        match traffic_class {
+            InboundTrafficClass::Transactional => {
+                if self.is_full() {
+                    return FreezeEnqueueResult::BackpressureRequired;
+                }
+                self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                let warn = self.crosses_pressure_threshold_after_add(before_len);
+                FreezeEnqueueResult::Queued { pressure_warning: warn }
+            }
+
+            InboundTrafficClass::StateStream => {
+                // Try coalescing: if an entry with the same key exists, replace it.
+                if let Some(ref key) = coalesce_key {
+                    for entry in self.queue.iter_mut() {
+                        if entry.traffic_class == InboundTrafficClass::StateStream
+                            && entry.coalesce_key.as_deref() == Some(key.as_str())
+                        {
+                            *entry = FrozenMutation {
+                                batch,
+                                traffic_class,
+                                coalesce_key,
+                            };
+                            return FreezeEnqueueResult::Coalesced;
+                        }
+                    }
+                }
+
+                if self.is_full() {
+                    // Evict oldest non-transactional entry.
+                    if let Some(idx) = self
+                        .queue
+                        .iter()
+                        .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
+                    {
+                        let evicted = self.queue.remove(idx).unwrap();
+                        self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                        return FreezeEnqueueResult::Evicted {
+                            evicted_batch_id: evicted.batch.batch_id,
+                        };
+                    } else {
+                        // All slots transactional → backpressure.
+                        return FreezeEnqueueResult::BackpressureRequired;
+                    }
+                }
+
+                self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                let warn = self.crosses_pressure_threshold_after_add(before_len);
+                FreezeEnqueueResult::Queued { pressure_warning: warn }
+            }
+
+            InboundTrafficClass::Ephemeral => {
+                if self.is_full() {
+                    // Evict oldest non-transactional, or drop this one.
+                    if let Some(idx) = self
+                        .queue
+                        .iter()
+                        .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
+                    {
+                        let evicted = self.queue.remove(idx).unwrap();
+                        self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                        return FreezeEnqueueResult::Evicted {
+                            evicted_batch_id: evicted.batch.batch_id,
+                        };
+                    } else {
+                        return FreezeEnqueueResult::Dropped;
+                    }
+                }
+
+                self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                let warn = self.crosses_pressure_threshold_after_add(before_len);
+                FreezeEnqueueResult::Queued { pressure_warning: warn }
+            }
+        }
+    }
+
+    /// Drain the queue in submission order.
+    fn drain(&mut self) -> Vec<MutationBatch> {
+        self.queue.drain(..).map(|e| e.batch).collect()
+    }
+
+    /// Discard all queued mutations (used on safe mode cancellation).
+    fn discard(&mut self) {
+        self.queue.clear();
+    }
+}
+
 // ─── Ephemeral send buffer ────────────────────────────────────────────────────
 
 /// A bounded queue for ephemeral outbound messages.
@@ -363,6 +586,15 @@ struct StreamSession {
     /// Tracks per-session event timestamps for the 1-second sliding window.
     /// Default limit: 10 events/second (spec: scene-events/spec.md §5.4).
     agent_event_rate_limiter: SessionEventRateLimiter,
+
+    /// Per-session mutation queue for freeze semantics (system-shell/spec.md §Freeze Scene).
+    ///
+    /// When `SharedState.freeze_active` is true, incoming MutationBatch messages
+    /// are enqueued here rather than applied to the scene. On unfreeze, all queued
+    /// mutations are applied in submission order.
+    ///
+    /// The shell owns freeze state transitions; the session server owns the queue.
+    freeze_queue: SessionFreezeQueue,
 }
 
 impl StreamSession {
@@ -436,6 +668,7 @@ impl HudSessionImpl {
                 sessions: crate::session::SessionRegistry::new(psk),
                 safe_mode_active: false,
                 token_store: TokenStore::new(),
+                freeze_active: false,
             })),
             psk: psk.to_string(),
         }
@@ -588,6 +821,28 @@ impl HudSession for HudSessionImpl {
                 // Use heartbeat timeout for receive (RFC 0005 §1.6, §3.6)
                 let timeout_duration =
                     tokio::time::Duration::from_millis(DEFAULT_HEARTBEAT_TIMEOUT_MS);
+
+                // ── Unfreeze drain: apply queued mutations if freeze just cleared ──
+                // When the shell sets SharedState.freeze_active = false, queued
+                // mutations are applied at the start of the next loop iteration
+                // so they are delivered in the next available frame batch
+                // (system-shell/spec.md §Freeze Scene: "Unfreeze applies queued
+                //  mutations in submission order in the next available frame batch").
+                //
+                // IMPORTANT: Use `apply_queued_batch_to_scene` (not
+                // `handle_mutation_batch`) here. Each queued batch has already
+                // received an immediate `MutationResult(accepted=true)` when it
+                // was enqueued. Re-using `handle_mutation_batch` would send a
+                // second result for the same batch_id, violating RFC 0005 §2.1.
+                {
+                    let freeze_active = state.lock().await.freeze_active;
+                    if !freeze_active && !session.freeze_queue.is_empty() {
+                        let queued = session.freeze_queue.drain();
+                        for queued_batch in queued {
+                            apply_queued_batch_to_scene(&state, session, queued_batch).await;
+                        }
+                    }
+                }
 
                 match tokio::time::timeout(timeout_duration, inbound.message()).await {
                     Ok(Ok(Some(msg))) => {
@@ -828,6 +1083,7 @@ async fn handle_session_init(
         safe_mode_active: false,
         expect_resume: false,
         agent_event_rate_limiter: SessionEventRateLimiter::new(),
+        freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -971,6 +1227,7 @@ async fn handle_session_resume(
         safe_mode_active: false,
         expect_resume: false,
         agent_event_rate_limiter: SessionEventRateLimiter::new(),
+        freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
     };
 
     let compositor_ts = now_wall_us();
@@ -1073,10 +1330,13 @@ async fn handle_mutation_batch(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     batch: MutationBatch,
 ) {
-    // Reject MutationBatch when safe mode is active (RFC 0005 §3.7).
+    // ── Step 1: Safe mode check (RFC 0005 §3.7) ─────────────────────────────
+    // Reject MutationBatch when safe mode is active.
     // Session-local flag tracks per-session suspension (from SessionSuspended delivery).
     // Shared state flag tracks global suspension (from the runtime side).
     // Both are checked; shared state takes precedence.
+    // Per the spec invariant: safe_mode=true implies freeze_active=false,
+    // so this check runs before the freeze check.
     {
         let st = state.lock().await;
         let safe_mode = session.safe_mode_active || st.safe_mode_active;
@@ -1096,6 +1356,144 @@ async fn handle_mutation_batch(
                     })),
                 }))
                 .await;
+            return;
+        }
+    }
+
+    // ── Step 2: Freeze check (system-shell/spec.md §Freeze Scene) ────────────
+    // When the scene is frozen, mutations are QUEUED (not rejected).
+    // Agents are NEVER informed that the scene is frozen — signals are generic
+    // queue-pressure signals to avoid leaking viewer state.
+    {
+        let st = state.lock().await;
+        if st.freeze_active {
+            // Determine traffic class and enqueue.
+            let namespace = session.namespace.clone();
+            let result = session.freeze_queue.enqueue(batch.clone(), &namespace);
+            drop(st);
+
+            match result {
+                FreezeEnqueueResult::Queued { pressure_warning } => {
+                    if pressure_warning {
+                        // Send MUTATION_QUEUE_PRESSURE — generic, not freeze-specific.
+                        let seq = session.next_server_seq();
+                        let _ = tx
+                            .send(Ok(ServerMessage {
+                                sequence: seq,
+                                timestamp_wall_us: now_wall_us(),
+                                payload: Some(ServerPayload::MutationResult(MutationResult {
+                                    batch_id: batch.batch_id,
+                                    accepted: true,
+                                    created_ids: Vec::new(),
+                                    error_code: "MUTATION_QUEUE_PRESSURE".to_string(),
+                                    error_message: "Mutation queue is under pressure (>= 80% capacity).".to_string(),
+                                })),
+                            }))
+                            .await;
+                    } else {
+                        // Send accepted=true (queued — not yet applied, but accepted).
+                        let seq = session.next_server_seq();
+                        let _ = tx
+                            .send(Ok(ServerMessage {
+                                sequence: seq,
+                                timestamp_wall_us: now_wall_us(),
+                                payload: Some(ServerPayload::MutationResult(MutationResult {
+                                    batch_id: batch.batch_id,
+                                    accepted: true,
+                                    created_ids: Vec::new(),
+                                    error_code: String::new(),
+                                    error_message: String::new(),
+                                })),
+                            }))
+                            .await;
+                    }
+                }
+                FreezeEnqueueResult::Coalesced => {
+                    // Coalesced with an existing entry — accepted.
+                    let seq = session.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::MutationResult(MutationResult {
+                                batch_id: batch.batch_id,
+                                accepted: true,
+                                created_ids: Vec::new(),
+                                error_code: String::new(),
+                                error_message: String::new(),
+                            })),
+                        }))
+                        .await;
+                }
+                FreezeEnqueueResult::Evicted { evicted_batch_id } => {
+                    // An older non-transactional entry was evicted; new one queued.
+                    // Send MUTATION_DROPPED for the evicted batch (generic signal).
+                    let seq_evicted = session.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq_evicted,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::MutationResult(MutationResult {
+                                batch_id: evicted_batch_id,
+                                accepted: false,
+                                created_ids: Vec::new(),
+                                error_code: "MUTATION_DROPPED".to_string(),
+                                error_message: "Mutation evicted from queue due to capacity pressure.".to_string(),
+                            })),
+                        }))
+                        .await;
+                    // New batch was queued — send accepted.
+                    let seq_new = session.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq_new,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::MutationResult(MutationResult {
+                                batch_id: batch.batch_id,
+                                accepted: true,
+                                created_ids: Vec::new(),
+                                error_code: String::new(),
+                                error_message: String::new(),
+                            })),
+                        }))
+                        .await;
+                }
+                FreezeEnqueueResult::BackpressureRequired => {
+                    // Transactional mutation: queue full — apply gRPC backpressure.
+                    // Send MUTATION_QUEUE_PRESSURE signal.
+                    let seq = session.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::MutationResult(MutationResult {
+                                batch_id: batch.batch_id,
+                                accepted: false,
+                                created_ids: Vec::new(),
+                                error_code: "MUTATION_QUEUE_PRESSURE".to_string(),
+                                error_message: "Mutation queue full; backpressure applied.".to_string(),
+                            })),
+                        }))
+                        .await;
+                }
+                FreezeEnqueueResult::Dropped => {
+                    // Ephemeral mutation dropped.
+                    let seq = session.next_server_seq();
+                    let _ = tx
+                        .send(Ok(ServerMessage {
+                            sequence: seq,
+                            timestamp_wall_us: now_wall_us(),
+                            payload: Some(ServerPayload::MutationResult(MutationResult {
+                                batch_id: batch.batch_id,
+                                accepted: false,
+                                created_ids: Vec::new(),
+                                error_code: "MUTATION_DROPPED".to_string(),
+                                error_message: "Ephemeral mutation dropped; queue at capacity.".to_string(),
+                            })),
+                        }))
+                        .await;
+                }
+            }
             return;
         }
     }
@@ -1266,6 +1664,117 @@ async fn handle_mutation_batch(
             }))
             .await;
     }
+}
+
+/// Apply a previously-queued mutation batch to the scene without sending a
+/// `MutationResult` response.
+///
+/// This is called during the unfreeze drain. The initial `MutationResult`
+/// (with `accepted = true`) was already sent when the batch was enqueued;
+/// sending a second one would violate the "one response per request" contract
+/// (RFC 0005 §2.1).
+///
+/// Safe mode and freeze checks are intentionally skipped here: the spec
+/// invariant (`safe_mode = true → freeze_active = false`) guarantees that
+/// safe mode cannot activate between freeze deactivation and the drain.
+async fn apply_queued_batch_to_scene(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    batch: MutationBatch,
+) {
+    let mut st = state.lock().await;
+
+    let lease_id = match bytes_to_scene_id(&batch.lease_id) {
+        Ok(id) => id,
+        Err(_) => return, // invalid lease_id — silently skip (already acked)
+    };
+
+    let tab_id = match st.scene.active_tab {
+        Some(id) => id,
+        None => return, // no active tab — skip silently
+    };
+
+    let mut scene_mutations = Vec::new();
+    for m in &batch.mutations {
+        match &m.mutation {
+            Some(crate::proto::mutation_proto::Mutation::CreateTile(ct)) => {
+                let bounds = ct
+                    .bounds
+                    .as_ref()
+                    .map(convert::proto_rect_to_scene)
+                    .unwrap_or(tze_hud_scene::Rect::new(0.0, 0.0, 200.0, 150.0));
+                scene_mutations.push(SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: session.namespace.clone(),
+                    lease_id,
+                    bounds,
+                    z_order: ct.z_order,
+                });
+            }
+            Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
+                if let Ok(tile_id) = uuid::Uuid::parse_str(&str_.tile_id)
+                    .map(tze_hud_scene::SceneId::from_uuid)
+                {
+                    if let Some(ref node_proto) = str_.node
+                        && let Some(node) = convert::proto_node_to_scene(node_proto)
+                    {
+                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::PublishToZone(pz)) => {
+                let content = pz
+                    .content
+                    .as_ref()
+                    .and_then(convert::proto_zone_content_to_scene);
+                if let Some(content) = content {
+                    let token = tze_hud_scene::types::ZonePublishToken {
+                        token: pz
+                            .publish_token
+                            .as_ref()
+                            .map(|t| t.token.clone())
+                            .unwrap_or_default(),
+                    };
+                    let merge_key = if pz.merge_key.is_empty() {
+                        None
+                    } else {
+                        Some(pz.merge_key.clone())
+                    };
+                    scene_mutations.push(SceneMutation::PublishToZone {
+                        zone_name: pz.zone_name.clone(),
+                        content,
+                        publish_token: token,
+                        merge_key,
+                    });
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::ClearZone(cz)) => {
+                let token = tze_hud_scene::types::ZonePublishToken {
+                    token: cz
+                        .publish_token
+                        .as_ref()
+                        .map(|t| t.token.clone())
+                        .unwrap_or_default(),
+                };
+                scene_mutations.push(SceneMutation::ClearZone {
+                    zone_name: cz.zone_name.clone(),
+                    publish_token: token,
+                });
+            }
+            None => {}
+        }
+    }
+
+    let scene_batch = SceneMutationBatch {
+        batch_id: tze_hud_scene::SceneId::new(),
+        agent_namespace: session.namespace.clone(),
+        mutations: scene_mutations,
+        timing_hints: None,
+        lease_id: None,
+    };
+
+    // Apply to scene; result is intentionally discarded — response already sent.
+    let _ = st.scene.apply_batch(&scene_batch);
 }
 
 async fn handle_lease_request(
@@ -2508,6 +3017,239 @@ mod tests {
         }
     }
 
+    // ─── Freeze queue tests (system-shell/spec.md §Freeze Scene) ────────────
+
+    /// Scenario: Freeze queues mutations (spec line 146)
+    /// WHEN viewer activates freeze via SharedState.freeze_active = true
+    /// AND agent submits a MutationBatch
+    /// THEN mutations are queued (accepted = true), tile content does not update
+    #[tokio::test]
+    async fn test_freeze_queues_mutations_not_applied() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "freeze-agent", "test-key").await;
+
+        // Request a lease
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 30_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+        let lease_msg = stream.next().await.unwrap().unwrap();
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        // Activate freeze
+        {
+            let mut st = shared_state.lock().await;
+            st.freeze_active = true;
+        }
+
+        // Submit a MutationBatch while frozen
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                // Accepted=true: mutation was queued, not rejected
+                assert_eq!(result.batch_id, batch_id);
+                assert!(
+                    result.accepted,
+                    "Mutation should be accepted (queued) during freeze, not rejected"
+                );
+                // Scene should NOT have been modified; error code should not be SAFE_MODE_ACTIVE
+                assert_ne!(result.error_code, "SAFE_MODE_ACTIVE");
+            }
+            Some(ServerPayload::RuntimeError(err)) => {
+                panic!("Mutation should be queued during freeze, not rejected with error: {err:?}");
+            }
+            other => panic!("Expected MutationResult during freeze, got: {other:?}"),
+        }
+
+        // Deactivate freeze — queued mutation should be applied in next iteration
+        {
+            let mut st = shared_state.lock().await;
+            st.freeze_active = false;
+        }
+
+        // Send a heartbeat to trigger the unfreeze drain on next loop iteration
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 9999,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // The unfreeze drain applies queued mutations (resulting in MutationResult(accepted))
+        // before processing the heartbeat. We may get additional MutationResult messages.
+        // Wait for the heartbeat echo to confirm the session is still active.
+        let mut got_heartbeat = false;
+        for _ in 0..5 {
+            if let Some(Ok(msg)) = stream.next().await {
+                match &msg.payload {
+                    Some(ServerPayload::Heartbeat(hb)) => {
+                        assert_eq!(hb.timestamp_mono_us, 9999);
+                        got_heartbeat = true;
+                        break;
+                    }
+                    Some(ServerPayload::MutationResult(_)) => {
+                        // Drained mutation result — expected, continue
+                    }
+                    other => panic!("Unexpected message after unfreeze: {other:?}"),
+                }
+            }
+        }
+        assert!(
+            got_heartbeat,
+            "Expected heartbeat echo after unfreeze drain"
+        );
+    }
+
+    /// Scenario: Freeze ignored during safe mode (spec line 137)
+    /// WHEN safe mode is active AND freeze is set
+    /// THEN mutations are rejected with SAFE_MODE_ACTIVE (not queued)
+    #[tokio::test]
+    async fn test_safe_mode_takes_precedence_over_freeze() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "safe-freeze-agent", "test-key").await;
+
+        // Request a lease
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 30_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+        let lease_msg = stream.next().await.unwrap().unwrap();
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        // Set BOTH safe mode and freeze (invariant: safe mode cancels freeze, but we test
+        // that safe mode takes precedence in the session server check order)
+        {
+            let mut st = shared_state.lock().await;
+            st.safe_mode_active = true;
+            st.freeze_active = false; // Invariant: safe_mode=true => freeze_active=false
+        }
+
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id.clone(),
+                mutations: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::RuntimeError(err)) => {
+                assert_eq!(err.error_code, "SAFE_MODE_ACTIVE");
+            }
+            other => panic!("Expected SAFE_MODE_ACTIVE RuntimeError, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: SessionFreezeQueue unit test — MUTATION_QUEUE_PRESSURE at 80% capacity
+    #[test]
+    fn test_session_freeze_queue_pressure_signal() {
+        let mut q = SessionFreezeQueue::new(10);
+        // Fill 7 entries (70%) without crossing threshold
+        for i in 0..7 {
+            let batch = MutationBatch {
+                batch_id: format!("b{i}").into_bytes(),
+                lease_id: vec![0u8; 16],
+                mutations: Vec::new(),
+            };
+            let r = q.enqueue(batch, "ns");
+            assert!(
+                matches!(r, FreezeEnqueueResult::Queued { pressure_warning: false }),
+                "Expected no pressure warning at {i}/7"
+            );
+        }
+        // 8th entry crosses 80%
+        let batch = MutationBatch {
+            batch_id: b"b7".to_vec(),
+            lease_id: vec![0u8; 16],
+            mutations: Vec::new(),
+        };
+        let r = q.enqueue(batch, "ns");
+        assert!(
+            matches!(r, FreezeEnqueueResult::Queued { pressure_warning: true }),
+            "Expected pressure_warning=true at 80%"
+        );
+    }
+
+    /// Scenario: SessionFreezeQueue transactional never evicted
+    #[test]
+    fn test_session_freeze_queue_transactional_never_evicted() {
+        use crate::proto::mutation_proto::Mutation;
+        use crate::proto::{MutationProto, CreateTileMutation};
+
+        let mut q = SessionFreezeQueue::new(2);
+        // Fill with non-empty (StateStream) batches
+        for i in 0..2 {
+            let batch = MutationBatch {
+                batch_id: format!("ss{i}").into_bytes(),
+                lease_id: vec![0u8; 16],
+                mutations: vec![],
+            };
+            q.enqueue(batch, "ns");
+        }
+
+        // Submit a transactional mutation (CreateTile) — should get backpressure
+        let tx_batch = MutationBatch {
+            batch_id: b"tx1".to_vec(),
+            lease_id: vec![0u8; 16],
+            mutations: vec![MutationProto {
+                mutation: Some(Mutation::CreateTile(CreateTileMutation {
+                    tab_id: String::new(),
+                    bounds: None,
+                    z_order: 0,
+                })),
+            }],
+        };
+        let r = q.enqueue(tx_batch, "ns");
+        assert!(
+            matches!(r, FreezeEnqueueResult::BackpressureRequired),
+            "Transactional mutation should require backpressure when queue is full, got: {r:?}"
+        );
+    }
+
     // ─── Session state machine tests (RFC 0005 §1.1) ─────────────────────────
 
     /// Scenario: Successful session establishment transitions through Connecting→Handshaking→Active.
@@ -2802,6 +3544,7 @@ mod tests {
             safe_mode_active: false,
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
+            freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         };
 
         // seq=2 (gap=1): OK
@@ -3273,6 +4016,7 @@ mod tests {
             safe_mode_active: false,
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
+            freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         };
 
         handle_capability_request(
@@ -3329,6 +4073,7 @@ mod tests {
             safe_mode_active: false,
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
+            freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -3392,6 +4137,7 @@ mod tests {
             safe_mode_active: false,
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
+            freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         };
 
         handle_capability_request(

@@ -53,6 +53,7 @@ impl HeadlessRuntime {
             sessions,
             safe_mode_active: false,
             token_store: tze_hud_protocol::token::TokenStore::new(),
+            freeze_active: false,
         }));
 
         Ok(Self {
