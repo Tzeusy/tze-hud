@@ -26,6 +26,7 @@
 pub mod chrome;
 pub mod freeze;
 pub mod redaction;
+pub mod safe_mode;
 
 pub use chrome::{
     // Core state
@@ -60,6 +61,20 @@ pub use chrome::{
     // Diagnostics
     DiagnosticSnapshot,
     collect_diagnostic,
+};
+pub use safe_mode::{
+    // Core state
+    ShellOverrideState,
+    // Results
+    LeaseResumeInfo,
+    SafeModeEntryResult,
+    SafeModeExitResult,
+    // Input handling
+    SafeModeInput,
+    SafeModeInputResult,
+    classify_safe_mode_input,
+    // Controller
+    SafeModeController,
 };
 // ChromeDrawCmd lives in tze_hud_compositor to avoid circular dependencies.
 pub use tze_hud_compositor::ChromeDrawCmd;

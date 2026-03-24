@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+use tonic::Status;
 use tze_hud_scene::SceneId;
 use tze_hud_scene::graph::SceneGraph;
 
 use crate::proto::SceneEvent;
+use crate::proto::session::ServerMessage;
 use crate::token::TokenStore;
 
 /// Shared state between the gRPC server and the compositor.
@@ -44,11 +46,18 @@ pub struct AgentSession {
     /// Sender half of the per-session event channel.
     /// Present once the agent calls SubscribeEvents; None before that.
     pub event_tx: Option<mpsc::Sender<SceneEvent>>,
+    /// Sender half of the per-session ServerMessage channel.
+    ///
+    /// Used by the safe mode controller to deliver `SessionSuspended` and
+    /// `SessionResumed` messages outside the normal event subscription path.
+    /// Registered by the session handler when the stream is established.
+    /// These messages are transactional (never dropped) — per RFC 0005 §3.1.
+    pub server_message_tx: Option<mpsc::Sender<Result<ServerMessage, Status>>>,
 }
 
 impl Clone for AgentSession {
     fn clone(&self) -> Self {
-        // event_tx is not cloned — the channel is owned by the session record.
+        // event_tx and server_message_tx are not cloned — channels are owned by the session record.
         Self {
             session_id: self.session_id.clone(),
             namespace: self.namespace.clone(),
@@ -57,6 +66,7 @@ impl Clone for AgentSession {
             lease_ids: self.lease_ids.clone(),
             event_subscribed: self.event_subscribed,
             event_tx: None,
+            server_message_tx: None,
         }
     }
 }
@@ -99,6 +109,7 @@ impl SessionRegistry {
             lease_ids: Vec::new(),
             event_subscribed: false,
             event_tx: None,
+            server_message_tx: None,
         };
 
         self.sessions.insert(session_id, session.clone());
@@ -145,6 +156,53 @@ impl SessionRegistry {
             if let Some(tx) = &session.event_tx {
                 let _ = tx.try_send(event.clone());
             }
+        }
+    }
+
+    /// Broadcast a `ServerMessage` to all connected sessions via their direct server channels.
+    ///
+    /// Used by the safe mode controller to deliver `SessionSuspended` and `SessionResumed`
+    /// to all active session streams.  These messages are transactional (RFC 0005 §3.1) and
+    /// must not be dropped; if the channel is full the send will fail and the drop is logged
+    /// as a warning (the session's backpressure signal path handles overflow recovery).
+    ///
+    /// Returns the count of sessions that received the message.
+    pub fn broadcast_server_message(&self, msg: ServerMessage) -> usize {
+        let mut sent = 0;
+        for session in self.sessions.values() {
+            if let Some(tx) = &session.server_message_tx {
+                if let Err(e) = tx.try_send(Ok(msg.clone())) {
+                    tracing::warn!(
+                        session_id = %session.session_id,
+                        "Failed to deliver transactional ServerMessage (channel full or closed); message dropped: {}",
+                        e
+                    );
+                } else {
+                    sent += 1;
+                }
+            }
+        }
+        sent
+    }
+
+    /// Register the `ServerMessage` sender for an existing session.
+    ///
+    /// Called by the session handler when a new session stream is established.
+    /// Allows the safe mode controller to deliver out-of-band control messages
+    /// (`SessionSuspended`, `SessionResumed`) to all active sessions.
+    ///
+    /// Returns `true` if the sender was registered successfully, `false` if the
+    /// `session_id` is not found in the registry.
+    pub fn register_server_message_tx(
+        &mut self,
+        session_id: &str,
+        tx: mpsc::Sender<Result<ServerMessage, Status>>,
+    ) -> bool {
+        if let Some(session) = self.sessions.get_mut(session_id) {
+            session.server_message_tx = Some(tx);
+            true
+        } else {
+            false
         }
     }
 }
