@@ -68,3 +68,17 @@ pub use shell::{
     MutationTrafficClass, QueuedMutation, DEFAULT_AUTO_UNFREEZE_MS,
     DEFAULT_FREEZE_QUEUE_CAPACITY, QUEUE_PRESSURE_FRACTION,
 };
+
+pub use shell::redaction::{
+    ContentClassification,
+    RedactionStyle,
+    RedactionFrame,
+    TileRedactionState,
+    is_tile_redacted,
+    hit_regions_enabled,
+    build_redaction_cmds,
+    PATTERN_CELL_PX,
+    REDACTION_BLANK_COLOR,
+    REDACTION_PATTERN_BASE,
+    REDACTION_PATTERN_ACCENT,
+};
