@@ -102,9 +102,13 @@ impl AgentResourceUsage {
             .resource_refs
             .entry(resource_id)
             .or_insert((0, decoded_bytes));
+        // Decoded size is immutable per resource; assert consistency on re-charge.
+        debug_assert_eq!(
+            entry.1, decoded_bytes,
+            "inconsistent decoded_bytes for ResourceId when charging usage"
+        );
         entry.0 += 1;
-        entry.1 = decoded_bytes; // decoded size is immutable per resource
-        self.total_decoded_bytes += decoded_bytes;
+        self.total_decoded_bytes += entry.1;
     }
 
     /// Uncharge `decoded_bytes` for `resource_id` when a node is deleted.
@@ -199,7 +203,7 @@ impl BudgetRegistry {
             return Ok(()); // 0 = unlimited
         }
         let current = self.agent_used_bytes(agent_ns);
-        let projected = current + new_decoded_bytes;
+        let projected = current.saturating_add(new_decoded_bytes);
         if projected > agent_limit_bytes {
             Err(BudgetViolation::AgentTotalTextureBytes {
                 agent_ns: agent_ns.to_owned(),
@@ -271,7 +275,7 @@ impl TileBudgetChecker {
 
     /// Register that this mutation batch adds a node referencing `decoded_bytes`.
     pub fn add_ref(&mut self, _resource_id: ResourceId, decoded_bytes: usize) {
-        self.batch_added_bytes += decoded_bytes;
+        self.batch_added_bytes = self.batch_added_bytes.saturating_add(decoded_bytes);
     }
 
     /// Validate the accumulated batch against the per-tile limit.
@@ -282,7 +286,17 @@ impl TileBudgetChecker {
         if self.per_tile_limit_bytes == 0 {
             return Ok(()); // unlimited
         }
-        let projected = self.current_tile_bytes + self.batch_added_bytes;
+        let projected = match self.current_tile_bytes.checked_add(self.batch_added_bytes) {
+            Some(sum) => sum,
+            None => {
+                // Treat arithmetic overflow as exceeding the budget.
+                return Err(BudgetViolation::PerTileTextureBytes {
+                    tile_id: self.tile_id.clone(),
+                    used_bytes: usize::MAX,
+                    limit_bytes: self.per_tile_limit_bytes,
+                });
+            }
+        };
         if projected > self.per_tile_limit_bytes {
             Err(BudgetViolation::PerTileTextureBytes {
                 tile_id: self.tile_id.clone(),

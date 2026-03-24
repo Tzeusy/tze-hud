@@ -11,8 +11,9 @@
 //! ## Design
 //!
 //! The `DedupIndex` itself is the append-only authoritative map of live
-//! resources.  This module does NOT modify the dedup index — it only reads
-//! records from it and maintains the separate `GcCandidateTable`.
+//! resources.  This module does not insert or remove entries in the dedup
+//! index; it performs refcount operations on existing records and maintains
+//! the separate `GcCandidateTable`.
 //!
 //! Separation of concerns:
 //!
@@ -162,7 +163,7 @@ impl RefcountLayer {
     ///
     /// < 1 µs (spec line 319): one `AtomicU32::fetch_add` + conditional
     /// Mutex-guarded `HashMap::remove` (only on resurrection).
-    pub fn inc_ref(&self, id: ResourceId, _now_ms: u64) -> Result<u32, RefcountError> {
+    pub fn inc_ref(&self, id: ResourceId) -> Result<u32, RefcountError> {
         let record = self.dedup.get(&id).ok_or(RefcountError::NotFound)?;
         let new_count = record.inc_refcount();
         // If this was a resurrection (previous refcount was 0), remove from candidates.
@@ -192,32 +193,37 @@ impl RefcountLayer {
     pub fn dec_ref(&self, id: ResourceId, now_ms: u64) -> Result<u32, RefcountError> {
         let record = self.dedup.get(&id).ok_or(RefcountError::NotFound)?;
 
-        // dec_refcount handles the underflow: panics in debug, clamps and logs
-        // in release (spec lines 145–148).  We need to detect underflow to
-        // return RefcountError::Underflow to the caller in release builds.
-        let current = record.refcount();
-        if current == 0 {
-            // Already at zero — dec_refcount would underflow.
-            debug_assert!(
-                false,
-                "dec_ref called on resource {} already at refcount 0",
-                id
-            );
-            tracing::error!(
-                resource_id = %id,
-                "dec_ref underflow — refcount already at 0; this is a bug"
-            );
-            return Err(RefcountError::Underflow);
+        // Atomically decrement the refcount and detect underflow in a single
+        // operation, eliminating any TOCTOU race between the read and decrement.
+        let old_count = record.refcount.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+            |v| if v > 0 { Some(v - 1) } else { None },
+        );
+
+        match old_count {
+            Ok(old) => {
+                let new_count = old - 1;
+                if new_count == 0 {
+                    // Resource just entered GC candidacy.
+                    self.candidates.enter(id, now_ms);
+                }
+                Ok(new_count)
+            }
+            Err(_) => {
+                // Underflow: refcount was already 0.
+                debug_assert!(
+                    false,
+                    "dec_ref called on resource {} already at refcount 0",
+                    id
+                );
+                tracing::error!(
+                    resource_id = %id,
+                    "dec_ref underflow — refcount already at 0; this is a bug"
+                );
+                Err(RefcountError::Underflow)
+            }
         }
-
-        let new_count = record.dec_refcount();
-
-        if new_count == 0 {
-            // Resource just entered GC candidacy.
-            self.candidates.enter(id, now_ms);
-        }
-
-        Ok(new_count)
     }
 
     /// Current refcount.  `None` if the resource is not in the store.
@@ -276,7 +282,7 @@ mod tests {
         insert_resource(&layer, id);
 
         assert_eq!(layer.refcount(id), Some(0));
-        let new = layer.inc_ref(id, 0).unwrap();
+        let new = layer.inc_ref(id).unwrap();
         assert_eq!(new, 1);
         assert_eq!(layer.refcount(id), Some(1));
     }
@@ -288,8 +294,8 @@ mod tests {
         let id = ResourceId::from_content(b"dec-test");
         insert_resource(&layer, id);
 
-        layer.inc_ref(id, 0).unwrap();
-        layer.inc_ref(id, 0).unwrap(); // refcount = 2
+        layer.inc_ref(id).unwrap();
+        layer.inc_ref(id).unwrap(); // refcount = 2
         let new = layer.dec_ref(id, 0).unwrap();
         assert_eq!(new, 1);
     }
@@ -301,8 +307,8 @@ mod tests {
         let id = ResourceId::from_content(b"shared");
         insert_resource(&layer, id);
 
-        layer.inc_ref(id, 0).unwrap(); // agent A
-        layer.inc_ref(id, 0).unwrap(); // agent B
+        layer.inc_ref(id).unwrap(); // agent A
+        layer.inc_ref(id).unwrap(); // agent B
         let new = layer.dec_ref(id, 0).unwrap(); // agent A deletes
         assert_eq!(new, 1, "agent B still holds a reference");
         assert!(!layer.candidates().snapshot().iter().any(|(rid, _)| *rid == id),
@@ -316,7 +322,7 @@ mod tests {
         let id = ResourceId::from_content(b"gc-candidate");
         insert_resource(&layer, id);
 
-        layer.inc_ref(id, 0).unwrap();
+        layer.inc_ref(id).unwrap();
         layer.dec_ref(id, 1000).unwrap(); // now at 0
 
         let candidates = layer.candidates().snapshot();
@@ -333,14 +339,14 @@ mod tests {
         let id = ResourceId::from_content(b"resurrect");
         insert_resource(&layer, id);
 
-        layer.inc_ref(id, 0).unwrap();
+        layer.inc_ref(id).unwrap();
         layer.dec_ref(id, 1000).unwrap(); // enter candidacy
 
         // Still in store.
         assert!(layer.contains(id));
 
         // Resurrect.
-        let new = layer.inc_ref(id, 20_000).unwrap();
+        let new = layer.inc_ref(id).unwrap();
         assert_eq!(new, 1);
 
         // Must be removed from candidates.
@@ -381,7 +387,7 @@ mod tests {
     fn inc_ref_not_found() {
         let layer = make_refcount_layer();
         let id = ResourceId::from_content(b"not-found");
-        assert_eq!(layer.inc_ref(id, 0), Err(RefcountError::NotFound));
+        assert_eq!(layer.inc_ref(id), Err(RefcountError::NotFound));
     }
 
     #[test]

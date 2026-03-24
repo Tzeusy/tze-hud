@@ -168,8 +168,17 @@ impl FontCache {
         }
 
         // Evict LRU entries until there is room.
+        //
+        // NOTE: If `byte_cost` is larger than `max_agent_bytes` (or the cache
+        // is already empty), the eviction loop exhausts all candidates and
+        // breaks, and the oversized entry is still admitted.  This is
+        // intentional: the spec (lines 276–277) mandates evicting the LRU
+        // agent-uploaded font when the budget is exceeded, but does not prohibit
+        // admitting a single entry that cannot fit.  The compositor must not
+        // rely on `agent_bytes_used <= max_agent_bytes` as a hard invariant;
+        // treat `max_agent_bytes` as a soft target, not a hard cap per entry.
         if self.max_agent_bytes > 0 {
-            while self.agent_bytes_used + byte_cost > self.max_agent_bytes {
+            while self.agent_bytes_used.saturating_add(byte_cost) > self.max_agent_bytes {
                 if !self.evict_lru_one() {
                     break; // nothing left to evict
                 }
@@ -211,24 +220,32 @@ impl FontCache {
     /// Resolve a font for a `TextMarkdownNode`:
     ///
     /// 1. Try `resource_id` lookup.
-    /// 2. On miss, return the `SystemSansSerif` bundled handle (fallback is
-    ///    transparent — no error to the agent, spec lines 265–266).
+    /// 2. On miss, attempt to return the `SystemSansSerif` bundled handle
+    ///    (fallback is transparent — no error to the agent, spec lines 265–266).
+    /// 3. If the `SystemSansSerif` fallback is not present in the cache,
+    ///    returns `None`.  Callers must ensure the fallback is pre-inserted via
+    ///    `insert_permanent` at initialization time.
     pub fn resolve_agent_font_or_fallback(
         &mut self,
         resource_id: ResourceId,
-    ) -> CachedFontHandle {
+    ) -> Option<CachedFontHandle> {
         let agent_key = FontCacheKey::Resource(resource_id);
         if self.entries.contains_key(&agent_key) {
             let entry = self.entries.get(&agent_key).unwrap();
             if entry.origin == FontOrigin::Agent {
                 self.lru_promote(&agent_key);
             }
-            return CachedFontHandle(agent_key);
+            return Some(CachedFontHandle(agent_key));
         }
 
-        // Fallback to SystemSansSerif (spec lines 265–266).
+        // Fallback to SystemSansSerif (spec lines 265–266). Only return a
+        // handle if the fallback is actually present in the cache.
         let fallback = FontCacheKey::Named("SystemSansSerif".to_owned());
-        CachedFontHandle(fallback)
+        if self.entries.contains_key(&fallback) {
+            Some(CachedFontHandle(fallback))
+        } else {
+            None
+        }
     }
 
     /// Total byte cost of agent-uploaded fonts in the cache.
@@ -391,7 +408,8 @@ mod tests {
 
         // Request a custom font that is NOT in the cache.
         let missing = rid(0xFF);
-        let handle = cache.resolve_agent_font_or_fallback(missing);
+        let handle = cache.resolve_agent_font_or_fallback(missing)
+            .expect("fallback must be present when SystemSansSerif is pre-inserted");
 
         // Must silently fall back to SystemSansSerif (no error).
         assert_eq!(handle.key(), &fallback_key, "must fall back to SystemSansSerif");
