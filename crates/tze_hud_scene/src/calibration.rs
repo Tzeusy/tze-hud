@@ -59,6 +59,9 @@ pub mod budgets {
     pub const EVENT_CLASSIFICATION_US: u64 = 5;
     /// Event delivery to agent.
     pub const EVENT_DELIVERY_US: u64 = 100;
+    /// Event dispatch to agent (hit-test + session lookup + serialization + enqueue):
+    /// < 2ms from Stage 2 completion (spec.md line 356-358 / RFC 0004 §8.2).
+    pub const EVENT_DISPATCH_BUDGET_US: u64 = 2_000;
 }
 
 // ─── Calibration result ─────────────────────────────────────────────────────
@@ -583,6 +586,7 @@ mod tests {
         assert!(budgets::POLICY_EVALUATION_US > 0);
         assert!(budgets::EVENT_CLASSIFICATION_US > 0);
         assert!(budgets::EVENT_DELIVERY_US > 0);
+        assert!(budgets::EVENT_DISPATCH_BUDGET_US > 0);
     }
 
     #[test]
