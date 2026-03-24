@@ -10,5 +10,5 @@ pub mod surface;
 pub mod pipeline;
 
 pub use renderer::Compositor;
-pub use surface::{CompositorSurface, HeadlessSurface};
+pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use pipeline::ChromeDrawCmd;

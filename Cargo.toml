@@ -47,6 +47,7 @@ proptest = "1"
 thiserror = "2"
 bytemuck = { version = "1", features = ["derive"] }
 blake3 = "1"
+arc-swap = "1"
 
 [profile.release]
 lto = true
