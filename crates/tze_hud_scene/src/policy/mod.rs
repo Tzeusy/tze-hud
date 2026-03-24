@@ -7,6 +7,10 @@
 
 use crate::clock::Clock;
 
+// Re-export the canonical InterruptionClass from events to avoid duplicate
+// wire-level type definitions and potential mismatches across subsystems.
+pub use crate::events::InterruptionClass;
+
 // ─── Policy Levels ───────────────────────────────────────────────────────────
 
 /// The seven arbitration levels ordered by precedence (0 = highest).
@@ -69,21 +73,6 @@ impl ViewerClass {
     }
 }
 
-// ─── Interruption Class ──────────────────────────────────────────────────────
-
-/// Interruption urgency class.
-///
-/// From spec §Requirement: Level 4 Attention Management (RFC 0010 §3.1 is
-/// authoritative).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InterruptionClass {
-    Critical = 0,
-    High = 1,
-    Normal = 2,
-    Low = 3,
-    Silent = 4,
-}
-
 // ─── Policy Context ──────────────────────────────────────────────────────────
 
 /// Input to the policy evaluator for a single mutation.
@@ -129,6 +118,13 @@ pub struct PolicyContext {
 /// Outcome of policy evaluation for a single mutation.
 ///
 /// From spec §Requirement: ArbitrationOutcome Types.
+///
+/// Note on composed outcomes: `QueueRedacted` handles the cross-level scenario
+/// where privacy (Level 2) requires redaction AND quiet hours (Level 4) requires
+/// queueing.  Per spec §Cross-Level Conflict Resolution: "Privacy redaction plus
+/// quiet hours — mutation is committed with redaction AND quiet hours evaluation
+/// still runs".  `QueueRedacted` encodes this combined semantics so implementations
+/// can satisfy the contract unambiguously without losing either dimension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArbitrationAction {
     /// Accepted and committed to scene.
@@ -137,6 +133,8 @@ pub enum ArbitrationAction {
     CommitRedacted,
     /// Deferred until condition clears.
     Queue,
+    /// Queued AND will be committed with redaction when delivered (privacy + quiet hours).
+    QueueRedacted,
     /// Rejected with structured error.
     Reject,
     /// Shed by resource/degradation policy — no error.
@@ -398,8 +396,10 @@ pub mod tests {
         assert!(decision.applied_level < PolicyLevel::Resource);
     }
 
-    /// WHEN privacy redacts AND quiet hours are active THEN CommitRedacted + Queue composed.
+    /// WHEN privacy redacts AND quiet hours are active THEN QueueRedacted (composed action).
     /// Per spec: mutation committed with redaction AND quiet hours evaluation still runs.
+    /// `QueueRedacted` encodes this combined semantics: the mutation will be committed
+    /// with redaction when delivered, but is queued until quiet hours exit.
     pub fn test_privacy_redaction_composed_with_quiet_hours<E: PolicyEvaluator<TestClock>>() {
         let clock = TestClock::new(0);
         let mut evaluator = E::new(clock);
@@ -413,8 +413,8 @@ pub mod tests {
         let decision = evaluator.evaluate(&ctx);
         // Per spec §Cross-Level Conflict Resolution: "Scenario: Privacy redaction plus quiet hours"
         // mutation IS committed with redaction AND quiet hours evaluation runs →
-        // action should be Queue (queued-with-redaction).
-        assert_eq!(decision.action, ArbitrationAction::Queue);
+        // action should be QueueRedacted (both privacy and attention levels decisive).
+        assert_eq!(decision.action, ArbitrationAction::QueueRedacted);
     }
 
     /// WHEN multi-viewer scenario (Owner + Guest) THEN most restrictive viewer class applies.

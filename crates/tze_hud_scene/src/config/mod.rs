@@ -159,7 +159,8 @@ pub trait ConfigLoader {
     /// (1) `cli_path`, (2) `$TZE_HUD_CONFIG` env, (3) `./tze_hud.toml`,
     /// (4) XDG config.
     ///
-    /// Returns the first path found, or `None` with the list of searched paths.
+    /// Returns `Ok(path)` for the first path found; returns `Err(searched_paths)` when
+    /// no file is found, where `searched_paths` is the ordered list of paths that were tried.
     fn resolve_config_path(cli_path: Option<&str>) -> Result<String, Vec<String>>
     where
         Self: Sized;
@@ -196,14 +197,36 @@ pub const CANONICAL_CAPABILITIES: &[&str] = &[
 ];
 
 /// Returns `true` if `name` is a valid v1 capability per the canonical vocabulary.
+///
+/// Parameterized forms are validated:
+/// - `publish_zone:<name>`: suffix must be non-empty.
+/// - `emit_scene_event:<event>`: suffix must be non-empty and must not start with reserved
+///   prefixes (`scene.` or `system.`).
+/// - `lease:priority:<N>`: suffix must be a non-empty numeric value.
 pub fn is_canonical_capability(name: &str) -> bool {
     // Exact matches.
     if CANONICAL_CAPABILITIES.contains(&name) {
         return true;
     }
-    // Parameterized forms.
-    if name.starts_with("publish_zone:") || name.starts_with("emit_scene_event:") || name.starts_with("lease:priority:") {
+    // Parameterized forms with validation.
+    if let Some(zone_name) = name.strip_prefix("publish_zone:") {
+        return !zone_name.is_empty();
+    }
+    if let Some(event_name) = name.strip_prefix("emit_scene_event:") {
+        if event_name.is_empty() {
+            return false;
+        }
+        // Reserved event prefixes must not be usable as capability grants.
+        if event_name.starts_with("scene.") || event_name.starts_with("system.") {
+            return false;
+        }
         return true;
+    }
+    if let Some(priority_str) = name.strip_prefix("lease:priority:") {
+        if priority_str.is_empty() {
+            return false;
+        }
+        return priority_str.parse::<u32>().is_ok();
     }
     false
 }

@@ -105,6 +105,11 @@ pub struct Subscription {
 /// - Payload size limit (4 KB)
 /// - Subscription category management
 /// - Self-event suppression (the emitting agent does NOT receive its own events)
+/// - **CRITICAL class downgrade for agent events**: Only the runtime may emit
+///   `CRITICAL` interruptions.  When an agent declares `class = CRITICAL`, the
+///   router MUST silently downgrade it to `HIGH` before routing.  The
+///   `SceneEvent::effective_class` returned to subscribers reflects the
+///   post-downgrade class.
 ///
 /// Clock injection via `C: Clock` enables deterministic quiet-hours and
 /// rate-window testing.
@@ -120,9 +125,14 @@ pub trait EventRouter<C: Clock> {
     ///
     /// - `agent_ns`: emitting agent's namespace.
     /// - `event_name`: agent-supplied `<category>.<action>` suffix (e.g., `"doorbell.ring"`).
-    /// - `class`: declared interruption class.
+    /// - `class`: declared interruption class.  Note: if `class == CRITICAL`, the router
+    ///   silently downgrades it to `HIGH` (only the runtime may emit true CRITICAL events).
     /// - `payload`: raw bytes (max 4 KB).
     /// - `capabilities`: capabilities held by the agent.
+    /// - `zone_id`: optional zone context for per-zone FIFO quiet-hours queueing.
+    ///   When `None`, the router uses a default zone bucket ("default_zone").
+    ///   Zone-publish events (those targeting a specific zone) should supply the zone name
+    ///   so the router can apply per-zone LatestWins or FIFO semantics during quiet hours.
     ///
     /// Returns `Err(EventError)` if:
     /// - agent lacks `emit_scene_event:<event_name>` capability,
@@ -336,11 +346,10 @@ pub mod tests {
         // Not delivered yet.
         let events = router.drain_delivered("listener");
         assert!(events.is_empty(), "NORMAL event must be queued, not delivered");
-        // Queue should have 1 entry.
+        // Queue should have 1 entry (the NORMAL event is queued, not delivered).
         assert!(
-            router.quiet_queue_depth("default_zone") > 0
-                || router.drain_delivered("listener").is_empty(),
-            "event should be in queue"
+            router.quiet_queue_depth("default_zone") > 0,
+            "NORMAL event should be present in quiet-hours queue"
         );
     }
 
@@ -461,6 +470,30 @@ pub mod tests {
             },
         );
         assert_eq!(r, Err(EventError::SubscriptionLimitExceeded));
+    }
+
+    // ── 9. Agent-declared CRITICAL class is downgraded to HIGH ────────────────
+
+    /// WHEN agent emits event with class=CRITICAL THEN effective_class on delivered
+    /// event is HIGH (only runtime may emit true CRITICAL interruptions).
+    pub fn test_agent_critical_class_downgraded_to_high<R: EventRouter<TestClock>>() {
+        let clock = TestClock::new(0);
+        let mut router = R::new(clock);
+        router.subscribe(
+            "listener",
+            Subscription { category: SubscriptionCategory::AgentEvents, prefix_filter: None },
+        ).unwrap();
+        let caps = capabilities_with(&["emit_scene_event:alarm.smoke"]);
+        router
+            .emit("agent_a", "alarm.smoke", InterruptionClass::Critical, vec![], &caps)
+            .expect("emit succeeds — CRITICAL is silently downgraded, not rejected");
+        let events = router.drain_delivered("listener");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].effective_class,
+            InterruptionClass::High,
+            "agent-declared CRITICAL must be downgraded to HIGH by the router"
+        );
     }
 
     // ── Compile-time generic check ────────────────────────────────────────────
