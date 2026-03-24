@@ -18,6 +18,15 @@ pub struct SharedState {
     /// In-memory resume token store (RFC 0005 §6.1).
     /// Cleared on process restart; never persisted.
     pub token_store: TokenStore,
+    /// Runtime-wide freeze state (system-shell/spec.md §Freeze Scene).
+    ///
+    /// The shell is the sole writer of this field. When `freeze_active` is
+    /// `true`, mutation batches are queued (not rejected) until unfreeze.
+    ///
+    /// Per the invariant: `safe_mode_active = true` implies
+    /// `freeze_state.freeze_active = false`. Safe mode entry cancels freeze
+    /// and discards all per-session freeze queues.
+    pub freeze_active: bool,
 }
 
 /// Bounded per-session event channel capacity (events).

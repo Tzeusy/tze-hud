@@ -63,3 +63,8 @@ pub use tab_switch_trigger::{
     ACTIVE_TAB_CHANGED_EVENT_TYPE, AttentionGate, BlockingGate,
     PermissiveGate, TabSwitchOutcome, TabSwitchTrigger,
 };
+pub use shell::{
+    classify_mutation_batch, EnqueueResult, FreezeManager, FreezeQueue, FreezeState,
+    MutationTrafficClass, QueuedMutation, DEFAULT_AUTO_UNFREEZE_MS,
+    DEFAULT_FREEZE_QUEUE_CAPACITY, QUEUE_PRESSURE_FRACTION,
+};
