@@ -11,6 +11,7 @@ members = [
     "crates/tze_hud_a11y",
     "crates/tze_hud_policy",
     "crates/tze_hud_resource",
+    "crates/tze_hud_config",
     "examples/vertical_slice",
     "tests/integration",
 ]
@@ -44,6 +45,10 @@ tracing-subscriber = { version = "0.3", features = ["json"] }
 # Testing
 proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
+
+# Config
+toml = "0.8"
+schemars = { version = "0.8", features = ["derive"] }
 
 # Misc
 subtle = "2.5"
