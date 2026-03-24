@@ -18,11 +18,16 @@
 //!
 //! The following are deferred to later beads in this epic:
 //! - Subscription filtering and delivery mechanics (bead #2)
-//! - Interruption classification and quiet hours enforcement (bead #3)
 //! - Agent event emission protocol and rate limiting (bead #4)
 //! - tab_switch_on_event (bead #4)
+//!
+//! ## Added in bead #3
+//!
+//! - [`interruption`] — agent CRITICAL downgrade, zone ceiling enforcement
+//!   functions (`apply_agent_class`, `apply_zone_ceiling`, `classify_agent_event`).
 
 pub mod envelope;
+pub mod interruption;
 pub mod naming;
 pub mod taxonomy;
 
@@ -30,6 +35,7 @@ pub mod taxonomy;
 pub use envelope::{
     EventPayload, EventSource, InterruptionClass, SceneEvent, SceneEventBuilder,
 };
+pub use interruption::{apply_agent_class, apply_zone_ceiling, classify_agent_event};
 pub use naming::{
     build_agent_event_type, validate_bare_name, validate_event_type, NamingError,
 };
