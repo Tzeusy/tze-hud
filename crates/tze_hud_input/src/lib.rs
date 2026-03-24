@@ -1534,6 +1534,15 @@ mod tests {
         let dispatch = result.dispatch.expect("should dispatch on up");
         assert_eq!(dispatch.kind, AgentDispatchKind::PointerUp);
         assert_eq!(dispatch.tile_id, t1);
+
+        // The secondary dispatch (extra_dispatches) must contain CaptureReleased(POINTER_UP)
+        // per spec line 125: "CaptureReleasedEvent(reason=POINTER_UP) SHALL be dispatched"
+        assert_eq!(result.extra_dispatches.len(), 1,
+            "CaptureReleased must be delivered as extra_dispatch after PointerUp");
+        let cap_released = &result.extra_dispatches[0];
+        assert_eq!(cap_released.kind, AgentDispatchKind::CaptureReleased);
+        assert_eq!(cap_released.capture_released_reason, Some(CaptureReleasedReason::PointerUp));
+        assert_eq!(cap_released.tile_id, t1);
     }
 
     /// WHEN a node holds pointer capture and the user presses Alt+Tab THEN the runtime
