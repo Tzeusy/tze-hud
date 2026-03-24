@@ -23,8 +23,9 @@
 //! # Badges (Shell #5)
 //!
 //! Disconnection badges and backpressure signals are handled by [`badges`]. The
-//! shell is the sole owner of badge rendering. Badge state is written to
-//! `ChromeState` by the control plane and read by the chrome render pass.
+//! shell is the sole owner of badge rendering. Badge state is owned by the
+//! `badges` subsystem (per-tile [`badges::TileBadgeState`] and frame-level
+//! [`badges::BadgeFrame`]) and consumed by the chrome render pass.
 //! Agents are never notified of badge state. See `badges.rs`.
 //!
 //! See `chrome.rs` for chrome layer implementation.

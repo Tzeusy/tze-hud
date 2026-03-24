@@ -45,8 +45,9 @@ use tze_hud_scene::types::{Rect, SceneId};
 
 /// The set of active badges for a single tile.
 ///
-/// Written by the control plane (lease manager, session manager) via
-/// [`ChromeState::tile_badges`].  Read by the chrome render pass via
+/// Written by the control plane (lease manager, session manager) into the
+/// chrome state (see [`crate::shell::chrome::ChromeState`]) and surfaced
+/// per-frame via [`BadgeFrame`].  Read by the chrome render pass via
 /// [`build_badge_cmds`].
 ///
 /// This struct is **never** exposed to agents.
@@ -107,7 +108,8 @@ pub const DISCONNECTION_BADGE_OFFSET_PX: f32 = 8.0;
 /// Background color for the disconnection badge icon area.
 ///
 /// Dark, semi-transparent background to ensure legibility over any tile content.
-/// Alpha is factored into the pre-multiplied `DISCONNECTED_BADGE_OPACITY`.
+/// Uses straight alpha (`DISCONNECTED_BADGE_OPACITY`) as the compositor pipeline
+/// uses `wgpu::BlendState::ALPHA_BLENDING` (straight, not pre-multiplied alpha).
 pub const DISCONNECTION_BADGE_BG_COLOR: [f32; 4] = [
     0.08, // R
     0.08, // G
@@ -168,8 +170,9 @@ pub fn build_badge_cmds(bounds: Rect, badge_state: &TileBadgeState) -> Vec<Chrom
         return Vec::new();
     }
 
-    // Pre-allocate: at most 4 rects per tile (scrim + badge_bg + icon + border).
-    let mut cmds = Vec::with_capacity(4);
+    // Pre-allocate for worst case: 3 rects for disconnection badge
+    // (scrim + badge_bg + icon) + 4 rects for budget warning = 7 total.
+    let mut cmds = Vec::with_capacity(7);
 
     // ── Disconnection badge ───────────────────────────────────────────────
     if badge_state.disconnected {
@@ -226,41 +229,50 @@ pub fn build_badge_cmds(bounds: Rect, badge_state: &TileBadgeState) -> Vec<Chrom
 
     // ── Budget warning badge ──────────────────────────────────────────────
     if badge_state.budget_warning {
-        // Amber border highlight: four thin rectangles forming a 2px border
+        // Amber border highlight: four thin rectangles forming a border
         // around the tile perimeter, each at 70% opacity.
         //
-        // Top edge
-        cmds.push(ChromeDrawCmd {
-            x: bounds.x,
-            y: bounds.y,
-            width: bounds.width,
-            height: BUDGET_WARNING_BORDER_PX,
-            color: BUDGET_WARNING_AMBER_COLOR,
-        });
-        // Bottom edge
-        cmds.push(ChromeDrawCmd {
-            x: bounds.x,
-            y: bounds.y + bounds.height - BUDGET_WARNING_BORDER_PX,
-            width: bounds.width,
-            height: BUDGET_WARNING_BORDER_PX,
-            color: BUDGET_WARNING_AMBER_COLOR,
-        });
-        // Left edge (excluding corners already covered by top/bottom)
-        cmds.push(ChromeDrawCmd {
-            x: bounds.x,
-            y: bounds.y + BUDGET_WARNING_BORDER_PX,
-            width: BUDGET_WARNING_BORDER_PX,
-            height: (bounds.height - 2.0 * BUDGET_WARNING_BORDER_PX).max(0.0),
-            color: BUDGET_WARNING_AMBER_COLOR,
-        });
-        // Right edge
-        cmds.push(ChromeDrawCmd {
-            x: bounds.x + bounds.width - BUDGET_WARNING_BORDER_PX,
-            y: bounds.y + BUDGET_WARNING_BORDER_PX,
-            width: BUDGET_WARNING_BORDER_PX,
-            height: (bounds.height - 2.0 * BUDGET_WARNING_BORDER_PX).max(0.0),
-            color: BUDGET_WARNING_AMBER_COLOR,
-        });
+        // Clamp the effective border thickness so it never exceeds half the
+        // tile's smallest dimension — this keeps all geometry within bounds
+        // for very small or degenerate tiles.
+        let border = BUDGET_WARNING_BORDER_PX
+            .min(bounds.width * 0.5)
+            .min(bounds.height * 0.5);
+
+        if border > 0.0 {
+            // Top edge
+            cmds.push(ChromeDrawCmd {
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: border,
+                color: BUDGET_WARNING_AMBER_COLOR,
+            });
+            // Bottom edge
+            cmds.push(ChromeDrawCmd {
+                x: bounds.x,
+                y: bounds.y + bounds.height - border,
+                width: bounds.width,
+                height: border,
+                color: BUDGET_WARNING_AMBER_COLOR,
+            });
+            // Left edge (excluding corners already covered by top/bottom)
+            cmds.push(ChromeDrawCmd {
+                x: bounds.x,
+                y: bounds.y + border,
+                width: border,
+                height: (bounds.height - 2.0 * border).max(0.0),
+                color: BUDGET_WARNING_AMBER_COLOR,
+            });
+            // Right edge
+            cmds.push(ChromeDrawCmd {
+                x: bounds.x + bounds.width - border,
+                y: bounds.y + border,
+                width: border,
+                height: (bounds.height - 2.0 * border).max(0.0),
+                color: BUDGET_WARNING_AMBER_COLOR,
+            });
+        }
     }
 
     cmds
@@ -275,11 +287,11 @@ pub fn build_badge_cmds(bounds: Rect, badge_state: &TileBadgeState) -> Vec<Chrom
 /// leaking viewer state (spec §Freeze Backpressure Signal: "Agents MUST NOT be
 /// informed that the scene is frozen").
 ///
-/// The session server converts this signal into a `RuntimeError` field inside
-/// the `MutationResult` gRPC response:
+/// The session server converts this signal into the `error_code` field of the
+/// `MutationResult` gRPC response (see `session.proto`):
 ///
-/// * [`BackpressureSignal::QueuePressure`] → `MUTATION_QUEUE_PRESSURE`
-/// * [`BackpressureSignal::MutationDropped`] → `MUTATION_DROPPED`
+/// * [`BackpressureSignal::QueuePressure`] → `error_code = "MUTATION_QUEUE_PRESSURE"`
+/// * [`BackpressureSignal::MutationDropped`] → `error_code = "MUTATION_DROPPED"`
 ///
 /// # Spec reference
 ///
@@ -290,21 +302,23 @@ pub fn build_badge_cmds(bounds: Rect, badge_state: &TileBadgeState) -> Vec<Chrom
 pub enum BackpressureSignal {
     /// Sent when the per-session freeze queue reaches 80% capacity.
     ///
-    /// Maps to `MUTATION_QUEUE_PRESSURE` in `MutationResult.runtime_error`.
+    /// Maps to `error_code = "MUTATION_QUEUE_PRESSURE"` in `MutationResult`
+    /// (see `session.proto`).
     ///
     /// `pressure` is the current fill fraction in [0.0, 1.0].
     QueuePressure {
-        /// Session that submitted the mutation.
-        session_id: SceneId,
+        /// Opaque session identifier (UUIDv7 bytes) from `SessionEstablished.session_id`.
+        session_id: Vec<u8>,
         /// Current queue fill fraction at the moment of threshold crossing.
         pressure: f32,
     },
     /// Sent when a state-stream mutation is evicted from a full queue.
     ///
-    /// Maps to `MUTATION_DROPPED` in `MutationResult.runtime_error`.
+    /// Maps to `error_code = "MUTATION_DROPPED"` in `MutationResult`
+    /// (see `session.proto`).
     MutationDropped {
-        /// Session that submitted the dropped mutation.
-        session_id: SceneId,
+        /// Opaque session identifier (UUIDv7 bytes) from `SessionEstablished.session_id`.
+        session_id: Vec<u8>,
         /// The `batch_id` of the evicted mutation batch (for correlation).
         batch_id: Vec<u8>,
     },
@@ -315,13 +329,16 @@ pub enum BackpressureSignal {
 /// A snapshot of which tiles have badges in the current frame.
 ///
 /// The shell builds a `BadgeFrame` once per frame from the per-tile badge
-/// states stored in `ChromeState.tile_badges`, then passes it to the
-/// compositor for overlay rendering.
+/// states held in the chrome state (see [`crate::shell::chrome::ChromeState`]),
+/// then passes it to the compositor for overlay rendering.
 ///
 /// This struct is **never** exposed to agents.
 pub struct BadgeFrame {
-    /// Per-tile badge states.  Indexed in the same order as `visible_tiles()`.
-    /// Tiles absent from the map are assumed to have no active badges.
+    /// Per-tile badge states.  An unordered list of `(tile_id, TileBadgeState)`
+    /// pairs covering tiles that have at least one active badge.
+    /// Tiles absent from this list are assumed to have no active badges.
+    /// Lookup is O(N) via [`BadgeFrame::badge_for`]; N is the number of
+    /// badged tiles (expected to be small in practice).
     pub tile_badges: Vec<(SceneId, TileBadgeState)>,
 }
 
@@ -632,14 +649,15 @@ mod tests {
     /// THEN runtime sends MUTATION_QUEUE_PRESSURE in MutationResult.
     #[test]
     fn spec_queue_pressure_signal_at_80_percent() {
-        let id = scene_id();
+        // session_id is opaque UUIDv7 bytes (matches SessionEstablished.session_id in session.proto).
+        let session_id = vec![0u8; 16];
         let signal = BackpressureSignal::QueuePressure {
-            session_id: id.clone(),
+            session_id,
             pressure: 0.82,
         };
 
         // Signal is constructed without error.  The session server is responsible
-        // for converting this into MUTATION_QUEUE_PRESSURE in MutationResult.
+        // for converting this into error_code="MUTATION_QUEUE_PRESSURE" in MutationResult.
         if let BackpressureSignal::QueuePressure { pressure, .. } = &signal {
             assert!(*pressure >= 0.80, "QueuePressure must fire at ≥80% fill");
         } else {
@@ -652,10 +670,11 @@ mod tests {
     /// THEN runtime sends MUTATION_DROPPED.
     #[test]
     fn spec_mutation_dropped_signal_contains_batch_id() {
-        let id = scene_id();
+        // session_id is opaque UUIDv7 bytes (matches SessionEstablished.session_id in session.proto).
+        let session_id = vec![0u8; 16];
         let batch_id = vec![1u8, 2, 3, 4];
         let signal = BackpressureSignal::MutationDropped {
-            session_id: id,
+            session_id,
             batch_id: batch_id.clone(),
         };
 
