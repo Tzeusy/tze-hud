@@ -50,6 +50,12 @@ pub enum AutoRenewalArm {
 // ─── DisarmReason ────────────────────────────────────────────────────────────
 
 /// Why the auto-renewal timer was disarmed.
+///
+/// The reason is stored in `TtlState` so that `on_resume` can correctly
+/// distinguish a safe-mode disarm (which MUST re-arm on safe-mode exit) from
+/// a budget-warning or session-disconnecting disarm (which MUST NOT be
+/// re-armed automatically — the session layer must call `rearm_renewal`
+/// explicitly when the condition clears).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisarmReason {
     BudgetWarning,
@@ -114,6 +120,12 @@ pub struct TtlState<C: Clock> {
     renewal_policy: RenewalPolicy,
     /// Whether the auto-renewal timer is armed.
     auto_renewal_arm: AutoRenewalArm,
+    /// Why the auto-renewal timer was disarmed.
+    ///
+    /// `None` when the timer is Armed or NotApplicable.  Stored so that
+    /// `on_resume` only re-arms timers that were disarmed *because of safe mode*;
+    /// budget-warning and session-disconnecting disarms are NOT auto-reversed.
+    disarm_reason: Option<DisarmReason>,
     /// Whether a renewal has already been fired for the current TTL window
     /// (prevents duplicate AUTO_RENEW events before the session layer resets).
     renewal_fired: bool,
@@ -138,6 +150,7 @@ impl<C: Clock> TtlState<C> {
             ttl_remaining_at_suspend_ms: None,
             renewal_policy,
             auto_renewal_arm,
+            disarm_reason: None,
             renewal_fired: false,
         }
     }
@@ -183,11 +196,17 @@ impl<C: Clock> TtlState<C> {
     ///
     /// Per spec: `effective_expiry_ms = granted_at_ms + ttl_ms + total_suspension_ms`.
     /// Call after resuming from suspension to get the accurate adjusted value.
+    ///
+    /// Uses `saturating_add` to avoid overflow on pathological inputs.
     pub fn adjusted_expires_at_ms(&self) -> Option<u64> {
         if self.ttl_ms == 0 {
             return None;
         }
-        Some(self.granted_at_ms + self.ttl_ms + self.total_suspension_ms())
+        Some(
+            self.granted_at_ms
+                .saturating_add(self.ttl_ms)
+                .saturating_add(self.total_suspension_ms()),
+        )
     }
 
     /// Poll the lease for timer events the session layer needs to act on.
@@ -209,9 +228,13 @@ impl<C: Clock> TtlState<C> {
             return TtlCheck::Expired;
         }
         // Auto-renewal: fire when 75% of TTL has elapsed, once per window.
+        // Use integer math (ttl_ms * 3 / 4) to avoid floating-point rounding
+        // and edge cases with very small TTLs.  The constant AUTO_RENEW_THRESHOLD
+        // documents the spec value (0.75) but the enforcement uses integer
+        // arithmetic for determinism.
         if self.auto_renewal_arm == AutoRenewalArm::Armed && !self.renewal_fired {
             let elapsed = self.ttl_ms.saturating_sub(remaining);
-            let threshold = (self.ttl_ms as f64 * AUTO_RENEW_THRESHOLD) as u64;
+            let threshold = self.ttl_ms.saturating_mul(3) / 4;
             if elapsed >= threshold {
                 self.renewal_fired = true;
                 return TtlCheck::AutoRenewDue;
@@ -224,24 +247,41 @@ impl<C: Clock> TtlState<C> {
 
     /// Called when the lease enters SUSPENDED state (safe mode entry).
     ///
-    /// Freezes the TTL clock and disarms the auto-renewal timer.
+    /// Freezes the TTL clock and disarms the auto-renewal timer (if it was
+    /// Armed).  The disarm reason is recorded as `SafeMode` so that `on_resume`
+    /// can correctly re-arm only safe-mode-caused disarms.
+    ///
+    /// This method is idempotent: if the lease is already suspended, it
+    /// returns immediately without overwriting the original suspension timestamp
+    /// or TTL snapshot.
+    ///
     /// Spec §Auto-Renewal Policy: "timer is also paused and resumes with
     /// the TTL clock on safe mode exit".
     pub fn on_suspend(&mut self) {
+        // Idempotent: do not overwrite the original suspension timestamp.
+        if self.suspended_at_ms.is_some() {
+            return;
+        }
         let now_ms = self.clock.now_millis();
         let remaining = self.remaining_ms_at(now_ms);
         self.suspended_at_ms = Some(now_ms);
         self.ttl_remaining_at_suspend_ms = Some(remaining);
-        // Disarm auto-renewal timer (resumes on safe-mode exit).
+        // Disarm auto-renewal timer and record the reason as SafeMode, so
+        // that on_resume() knows it can safely re-arm when safe mode exits.
         if self.auto_renewal_arm == AutoRenewalArm::Armed {
             self.auto_renewal_arm = AutoRenewalArm::Disarmed;
+            self.disarm_reason = Some(DisarmReason::SafeMode);
         }
     }
 
     /// Called when the lease exits SUSPENDED state (safe mode exit).
     ///
-    /// Resumes the TTL clock and re-arms the auto-renewal timer (if policy is
-    /// AUTO_RENEW and the lease was not disarmed for budget reasons).
+    /// Resumes the TTL clock.  Re-arms the auto-renewal timer **only** if the
+    /// timer was disarmed specifically because of safe mode entry (`DisarmReason::SafeMode`).
+    ///
+    /// A timer disarmed for `BudgetWarning` or `SessionDisconnecting` is NOT
+    /// automatically re-armed here — the session layer must call `rearm_renewal`
+    /// when the condition clears.
     pub fn on_resume(&mut self) {
         let now_ms = self.clock.now_millis();
         if let Some(susp_at) = self.suspended_at_ms {
@@ -249,21 +289,27 @@ impl<C: Clock> TtlState<C> {
         }
         self.suspended_at_ms = None;
         self.ttl_remaining_at_suspend_ms = None;
-        // Re-arm the renewal timer if it was only disarmed due to safe mode.
-        // (Budget-warning disarming is handled separately via disarm_renewal.)
+        // Re-arm ONLY if the disarm was caused by safe-mode entry.
+        // Budget-warning and session-disconnecting disarms are NOT reversed here.
         if self.renewal_policy == RenewalPolicy::AutoRenew
             && self.auto_renewal_arm == AutoRenewalArm::Disarmed
+            && self.disarm_reason == Some(DisarmReason::SafeMode)
         {
             self.auto_renewal_arm = AutoRenewalArm::Armed;
+            self.disarm_reason = None;
         }
     }
 
     /// Disarm the auto-renewal timer (budget warning, session disconnecting, etc.).
     ///
+    /// The `reason` is stored in state and used by `on_resume` to determine
+    /// whether the timer should be re-armed automatically on safe-mode exit.
+    ///
     /// Has no effect for `Manual` or `OneShot` policies.
-    pub fn disarm_renewal(&mut self, _reason: DisarmReason) {
+    pub fn disarm_renewal(&mut self, reason: DisarmReason) {
         if self.auto_renewal_arm == AutoRenewalArm::Armed {
             self.auto_renewal_arm = AutoRenewalArm::Disarmed;
+            self.disarm_reason = Some(reason);
         }
     }
 
@@ -276,6 +322,7 @@ impl<C: Clock> TtlState<C> {
             && self.auto_renewal_arm == AutoRenewalArm::Disarmed
         {
             self.auto_renewal_arm = AutoRenewalArm::Armed;
+            self.disarm_reason = None;
         }
     }
 
@@ -631,5 +678,101 @@ mod tests {
         // total_suspension_ms should be ≈3_000 (ongoing)
         let total = ttl.total_suspension_ms();
         assert!(total >= 2_900 && total <= 3_100, "expected ≈3_000ms, got {total}");
+    }
+
+    // ── Idempotent on_suspend ─────────────────────────────────────────────────
+
+    /// on_suspend is idempotent: calling it twice preserves the original timestamp.
+    #[test]
+    fn on_suspend_idempotent_preserves_original_timestamp() {
+        let clock = TestClock::new(0);
+        let mut ttl = TtlState::new_activated(60_000, RenewalPolicy::Manual, clock.clone());
+
+        clock.advance(5_000);
+        ttl.on_suspend();
+        // Capture state after first suspend
+        let remaining_after_first = ttl.remaining_ms().unwrap();
+
+        // Advance time while "suspended" and call on_suspend again
+        clock.advance(3_000);
+        ttl.on_suspend(); // should be a no-op
+
+        // Remaining TTL should still be the value from the first suspend
+        let remaining_after_second = ttl.remaining_ms().unwrap();
+        assert_eq!(
+            remaining_after_first, remaining_after_second,
+            "on_suspend must be idempotent: second call should not change frozen TTL"
+        );
+
+        // After resume, TTL accounts for total suspension (8s), not just 3s
+        ttl.on_resume();
+        let remaining = ttl.remaining_ms().unwrap();
+        // effective elapsed = 5s (before first suspend); suspension = 8s counted
+        // remaining = 60_000 - 5_000 = 55_000ms
+        assert!(
+            remaining >= 54_900 && remaining <= 55_100,
+            "expected ≈55_000ms after resume, got {remaining}"
+        );
+    }
+
+    // ── Budget-warning disarm not re-armed on safe-mode exit ──────────────────
+
+    /// Spec §Auto-Renewal Policy: a timer disarmed for budget warning MUST NOT
+    /// be re-armed on safe-mode exit.  Only SafeMode-caused disarms resume automatically.
+    #[test]
+    fn budget_warning_disarm_not_rearmed_on_safe_mode_exit() {
+        let clock = TestClock::new(0);
+        let mut ttl = TtlState::new_activated(60_000, RenewalPolicy::AutoRenew, clock.clone());
+
+        // Disarm for budget warning BEFORE entering safe mode
+        ttl.disarm_renewal(DisarmReason::BudgetWarning);
+        assert_eq!(ttl.auto_renewal_arm(), AutoRenewalArm::Disarmed);
+
+        // Enter safe mode (timer already disarmed — on_suspend should not overwrite reason)
+        clock.advance(10_000);
+        ttl.on_suspend();
+        clock.advance(5_000);
+
+        // Exit safe mode — timer must NOT be re-armed (disarm was for budget, not safe mode)
+        ttl.on_resume();
+        assert_eq!(
+            ttl.auto_renewal_arm(),
+            AutoRenewalArm::Disarmed,
+            "budget-warning disarm must survive safe-mode exit"
+        );
+
+        // No auto-renewal should fire past 75%
+        clock.advance(40_000); // 50s elapsed effective
+        assert_eq!(
+            ttl.poll(),
+            TtlCheck::Ok,
+            "budget-warning disarm should still prevent auto-renewal after safe-mode exit"
+        );
+    }
+
+    /// Spec §Auto-Renewal Policy: a timer disarmed for safe-mode MUST be re-armed
+    /// on safe-mode exit (normal happy-path case).
+    #[test]
+    fn safe_mode_disarm_is_rearmed_on_safe_mode_exit() {
+        let clock = TestClock::new(0);
+        let mut ttl = TtlState::new_activated(60_000, RenewalPolicy::AutoRenew, clock.clone());
+
+        // Timer is armed; enter safe mode (which should disarm it with SafeMode reason)
+        clock.advance(30_000);
+        ttl.on_suspend();
+        assert_eq!(ttl.auto_renewal_arm(), AutoRenewalArm::Disarmed);
+
+        clock.advance(5_000);
+        // Exit safe mode — timer MUST be re-armed (disarm was SafeMode)
+        ttl.on_resume();
+        assert_eq!(
+            ttl.auto_renewal_arm(),
+            AutoRenewalArm::Armed,
+            "safe-mode disarm must be re-armed on safe-mode exit"
+        );
+
+        // Auto-renewal fires at 75% of effective elapsed (30s already past)
+        clock.advance(15_001); // total effective = 45_001ms ≥ 75%
+        assert_eq!(ttl.poll(), TtlCheck::AutoRenewDue);
     }
 }
