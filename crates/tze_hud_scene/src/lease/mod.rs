@@ -1,8 +1,14 @@
-//! Lease state machine trait for v1 governance.
+//! Lease state machine trait and implementation for v1 governance.
 //!
 //! Encodes the lease lifecycle from lease-governance/spec.md §Requirement: Lease State Machine
-//! and related requirements.  This module defines **only** the trait contract and supporting
-//! types — no implementation is provided here.
+//! and related requirements.  The trait contract is defined here; the concrete
+//! implementation lives in `state_machine.rs`.
+
+pub mod types;
+pub mod state_machine;
+
+pub use types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
+pub use state_machine::LeaseImpl;
 
 use crate::clock::Clock;
 
@@ -88,6 +94,8 @@ pub enum TransitionError {
     SafeModeActive,
     /// Lease not found / not active for zone publish.
     LeaseNotActive,
+    /// Budget hard limit (100%) exceeded — entire MutationBatch must be rejected.
+    BudgetHardLimitExceeded,
 }
 
 // ─── Resource Budget ─────────────────────────────────────────────────────────
@@ -220,33 +228,8 @@ pub mod tests {
 
     /// WHEN a lease is REQUESTED and activate() called THEN state becomes ACTIVE.
     #[test]
-    #[ignore = "no implementation yet"]
     fn test_requested_to_active() {
-        struct Impl;
-        impl LeaseStateMachine<TestClock> for Impl {
-            fn new_requested(_ttl_ms: u64, _policy: RenewalPolicy, _clock: TestClock) -> Self { Impl }
-            fn activate(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn suspend(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn resume(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn orphan(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn reconnect(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn expire(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn revoke(&mut self, _: RevokeReason) -> Result<(), TransitionError> { todo!() }
-            fn release(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn deny(&mut self) -> Result<(), TransitionError> { todo!() }
-            fn state(&self) -> LeaseState { todo!() }
-            fn ttl_remaining_ms(&self) -> Option<u64> { todo!() }
-            fn is_terminal(&self) -> bool { todo!() }
-            fn can_transition_to(&self, _: LeaseState) -> bool { todo!() }
-            fn budget_tier(&self) -> BudgetTier { todo!() }
-            fn suspension_duration_ms(&self) -> u64 { todo!() }
-            fn update_budget_usage(&mut self, _: f64) -> Result<(), TransitionError> { todo!() }
-        }
-        let clock = TestClock::new(0);
-        let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
-        assert_eq!(lease.state(), LeaseState::Requested);
-        lease.activate().expect("activate should succeed");
-        assert_eq!(lease.state(), LeaseState::Active);
+        test_requested_to_active_generic::<super::LeaseImpl<TestClock>>();
     }
 
     /// Generic form used by real test — call from a concrete test once an impl exists.
@@ -437,11 +420,11 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut lease: S = make_active(clock);
         let result = lease.update_budget_usage(1.0);
-        // Hard limit: must either return an error or set tier to Revocation.
-        assert!(
-            result.is_err() || lease.budget_tier() == BudgetTier::Revocation,
-            "100% usage should set Revocation tier or return error"
-        );
+        // Hard limit: must return BudgetHardLimitExceeded and set Revocation tier.
+        assert_eq!(result, Err(TransitionError::BudgetHardLimitExceeded),
+            "100% usage should return BudgetHardLimitExceeded");
+        assert_eq!(lease.budget_tier(), BudgetTier::Revocation,
+            "tier must be Revocation after hard limit");
     }
 
     // ── 5. ONE_SHOT specifics ────────────────────────────────────────────────
@@ -497,5 +480,187 @@ pub mod tests {
         // Implementations must expose a `budget()` or similar; here we just assert
         // that the type compiles against the trait.
         // A concrete companion test would call `lease.budget().max_concurrent_streams == 0`.
+    }
+
+    // ─── Concrete tests using LeaseImpl ──────────────────────────────────────
+    // Each function below drives a `pub fn test_*_generic<S>()` above with the
+    // concrete `LeaseImpl<TestClock>` implementation.
+
+    type Impl = super::LeaseImpl<TestClock>;
+
+    #[test]
+    fn impl_denied_is_terminal() {
+        test_denied_is_terminal::<Impl>();
+    }
+
+    #[test]
+    fn impl_active_to_suspended_on_safe_mode() {
+        test_active_to_suspended_on_safe_mode::<Impl>();
+    }
+
+    #[test]
+    fn impl_suspended_to_active_on_resume() {
+        test_suspended_to_active_on_resume::<Impl>();
+    }
+
+    #[test]
+    fn impl_active_to_orphaned_on_disconnect() {
+        test_active_to_orphaned_on_disconnect::<Impl>();
+    }
+
+    #[test]
+    fn impl_orphaned_to_active_within_grace_period() {
+        test_orphaned_to_active_within_grace_period::<Impl>();
+    }
+
+    #[test]
+    fn impl_orphaned_expires_after_grace_period() {
+        test_orphaned_expires_after_grace_period::<Impl>();
+    }
+
+    #[test]
+    fn impl_expired_is_terminal_no_further_transitions() {
+        test_expired_is_terminal_no_further_transitions::<Impl>();
+    }
+
+    #[test]
+    fn impl_revoked_is_terminal() {
+        test_revoked_is_terminal::<Impl>();
+    }
+
+    #[test]
+    fn impl_active_to_released() {
+        test_active_to_released::<Impl>();
+    }
+
+    #[test]
+    fn impl_ttl_paused_during_suspension() {
+        test_ttl_paused_during_suspension::<Impl>();
+    }
+
+    #[test]
+    fn impl_ttl_adjusted_after_suspension_exact() {
+        test_ttl_adjusted_after_suspension_exact::<Impl>();
+    }
+
+    #[test]
+    fn impl_suspension_timeout_triggers_revocation() {
+        test_suspension_timeout_triggers_revocation::<Impl>();
+    }
+
+    #[test]
+    fn impl_budget_normal_tier_below_80_percent() {
+        test_budget_normal_tier_below_80_percent::<Impl>();
+    }
+
+    #[test]
+    fn impl_budget_warning_at_80_percent() {
+        test_budget_warning_at_80_percent::<Impl>();
+    }
+
+    #[test]
+    fn impl_budget_throttle_after_5s_warning() {
+        test_budget_throttle_after_5s_warning::<Impl>();
+    }
+
+    #[test]
+    fn impl_budget_hard_limit_at_100_percent() {
+        test_budget_hard_limit_at_100_percent::<Impl>();
+    }
+
+    #[test]
+    fn impl_one_shot_ttl_paused_during_suspension() {
+        test_one_shot_ttl_paused_during_suspension::<Impl>();
+    }
+
+    #[test]
+    fn impl_one_shot_expires_at_ttl() {
+        test_one_shot_expires_at_ttl::<Impl>();
+    }
+
+    #[test]
+    fn impl_grace_period_not_premature() {
+        test_grace_period_not_premature::<Impl>();
+    }
+
+    // ─── Additional implementation-specific tests ─────────────────────────────
+
+    /// WHEN can_transition_to() is queried THEN valid transitions are reported correctly.
+    #[test]
+    fn impl_can_transition_to_all_valid() {
+        use LeaseState::*;
+        let clock = TestClock::new(0);
+        let lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock.clone());
+        assert!(lease.can_transition_to(Active));
+        assert!(lease.can_transition_to(Denied));
+        assert!(!lease.can_transition_to(Suspended)); // REQUESTED cannot go to SUSPENDED
+        assert!(!lease.can_transition_to(Revoked));   // REQUESTED cannot go to REVOKED
+    }
+
+    /// WHEN lease is terminal THEN can_transition_to() always returns false.
+    #[test]
+    fn impl_terminal_cannot_transition_to_anything() {
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock);
+        lease.expire().unwrap();
+        for target in [
+            LeaseState::Active,
+            LeaseState::Suspended,
+            LeaseState::Orphaned,
+            LeaseState::Revoked,
+            LeaseState::Expired,
+            LeaseState::Released,
+            LeaseState::Denied,
+        ] {
+            assert!(!lease.can_transition_to(target), "terminal lease should not transition to {:?}", target);
+        }
+    }
+
+    /// WHEN suspension_duration_ms queried while ACTIVE THEN returns 0.
+    #[test]
+    fn impl_suspension_duration_zero_when_active() {
+        let clock = TestClock::new(0);
+        let lease: Impl = make_active(clock);
+        assert_eq!(lease.suspension_duration_ms(), 0);
+    }
+
+    /// WHEN suspension_duration_ms queried while SUSPENDED THEN returns elapsed time.
+    #[test]
+    fn impl_suspension_duration_increases_while_suspended() {
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock.clone());
+        lease.suspend().unwrap();
+        clock.advance(5_000);
+        let dur = lease.suspension_duration_ms();
+        assert!(dur >= 4_900 && dur <= 5_100, "expected ≈5000ms, got {dur}ms");
+    }
+
+    /// WHEN indefinite lease (ttl_ms=0) THEN ttl_remaining_ms returns None.
+    #[test]
+    fn impl_indefinite_lease_ttl_remaining_none() {
+        let clock = TestClock::new(0);
+        let mut lease = Impl::new_requested(0, RenewalPolicy::Manual, clock);
+        lease.activate().unwrap();
+        assert_eq!(lease.ttl_remaining_ms(), None);
+    }
+
+    /// WHEN ACTIVE → REVOKED (viewer dismissed) THEN state is REVOKED.
+    #[test]
+    fn impl_active_to_revoked_viewer_dismissed() {
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock);
+        lease.revoke(RevokeReason::ViewerDismissed).expect("revoke from ACTIVE");
+        assert_eq!(lease.state(), LeaseState::Revoked);
+        assert!(lease.is_terminal());
+    }
+
+    /// WHEN SUSPENDED → REVOKED (suspension timeout) THEN state is REVOKED.
+    #[test]
+    fn impl_suspended_to_revoked_suspension_timeout() {
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock);
+        lease.suspend().unwrap();
+        lease.revoke(RevokeReason::SuspensionTimeout).expect("revoke suspended");
+        assert_eq!(lease.state(), LeaseState::Revoked);
     }
 }

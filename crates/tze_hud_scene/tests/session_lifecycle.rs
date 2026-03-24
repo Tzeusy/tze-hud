@@ -142,7 +142,7 @@ fn apply_set_tile_root(scene: &mut SceneGraph, tile_id: SceneId, namespace: &str
 // ─── Test 1: Full session lifecycle state transitions ────────────────────────
 
 /// Validates the complete session lifecycle state machine:
-/// lease grant (Active) → mutate → disconnect (Disconnected) → reconnect
+/// lease grant (Active) → mutate → disconnect (Orphaned) → reconnect
 /// (Active) → safe mode (Suspended) → safe mode exit (Active) → close (Revoked)
 ///
 /// Produces a state-transition log in JSON format.
@@ -188,7 +188,7 @@ fn test_full_session_lifecycle_state_transitions() {
     clock.advance(500);
     let disconnect_time = clock.now_millis();
     scene.disconnect_lease(&lease_id, disconnect_time).expect("disconnect_lease");
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Disconnected);
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
     // Tile still exists during grace period
     assert_eq!(scene.tile_count(), 1, "tile must persist during grace period");
     log.record("disconnect", disconnect_time, &scene, Some(lease_id), "entered grace period");
@@ -295,7 +295,7 @@ fn test_reconnect_within_grace_period_delivers_snapshot() {
     // Disconnect
     clock.advance(1_000);
     scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Disconnected);
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Snapshot taken while in grace period — tiles still exist.
     // Deserialize the snapshot to validate it faithfully captures the scene state.
@@ -348,7 +348,7 @@ fn test_reconnect_after_grace_period_expiry_clears_state() {
     // Disconnect agent
     clock.advance(1_000);
     scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Disconnected);
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Advance past grace period (default 30 s)
     clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1_000);
@@ -625,7 +625,7 @@ fn test_disconnect_reclaim_multiagent_scene() {
     // ── Step: agent.one disconnects ────────────────────────────────────────
     let now_ms = ClockMs::FIXED.0 + 1_000;
     scene.disconnect_lease(&lease_one, now_ms).expect("disconnect agent.one");
-    assert_eq!(scene.leases[&lease_one].state, LeaseState::Disconnected);
+    assert_eq!(scene.leases[&lease_one].state, LeaseState::Orphaned);
 
     // agent.two and agent.three are unaffected
     assert_eq!(scene.leases[&lease_two].state, LeaseState::Active, "agent.two unaffected by agent.one disconnect");
@@ -807,14 +807,14 @@ fn test_lease_lifecycle_timeline_artifact() {
     // Disconnect (grace period start)
     clock.advance(500);
     scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Disconnected);
-    record!("disconnect — ACTIVE → DISCONNECTED");
+    assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
+    record!("disconnect — ACTIVE → ORPHANED");
 
     // Reconnect (within grace)
     clock.advance(3_000);
     scene.reconnect_lease(&lease_id, clock.now_millis()).expect("reconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
-    record!("reconnect — DISCONNECTED → ACTIVE");
+    record!("reconnect — ORPHANED → ACTIVE");
 
     // Revoke (viewer dismiss / close)
     clock.advance(1_000);
@@ -826,12 +826,12 @@ fn test_lease_lifecycle_timeline_artifact() {
     let json = serde_json::to_string_pretty(&timeline).expect("timeline serialisation");
     assert!(json.contains("ACTIVE"), "timeline must contain ACTIVE state");
     assert!(json.contains("SUSPENDED"), "timeline must contain SUSPENDED state");
-    assert!(json.contains("DISCONNECTED"), "timeline must contain DISCONNECTED state");
+    assert!(json.contains("ORPHANED"), "timeline must contain ORPHANED state");
     assert!(json.contains("REVOKED"), "timeline must contain REVOKED state");
 
     // Verify all transitions occurred in the expected order
     let states: Vec<&str> = timeline.iter().map(|e| e.state.as_str()).collect();
-    assert_eq!(states, vec!["Active", "Suspended", "Active", "Disconnected", "Active", "Revoked"]);
+    assert_eq!(states, vec!["Active", "Suspended", "Active", "Orphaned", "Active", "Revoked"]);
 
     // Revoked is terminal — reconnect must fail
     assert!(scene.reconnect_lease(&lease_id, clock.now_millis()).is_err(),
@@ -905,10 +905,10 @@ fn test_resource_footprint_measurements() {
     sample!("resumed");
     assert_eq!(scene.tile_count(), 5);
 
-    // Disconnected
+    // Orphaned (grace period)
     clock.advance(500);
     scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
-    sample!("disconnected_grace_period");
+    sample!("orphaned_grace_period");
     assert_eq!(scene.tile_count(), 5, "tiles persist during grace period");
 
     // Expired (after grace)
