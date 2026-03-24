@@ -80,7 +80,10 @@ impl WallUs {
     /// `offset = wall_us - mono_us` at the calibration point.
     #[inline]
     pub fn to_mono(self, offset: ClockOffset) -> MonoUs {
-        MonoUs(self.0.saturating_add_signed(-offset.0))
+        // Use saturating_neg() instead of the unary `-` operator to avoid
+        // overflow when offset.0 == i64::MIN (which would panic in debug
+        // builds and wrap in release).
+        MonoUs(self.0.saturating_add_signed(offset.0.saturating_neg()))
     }
 }
 

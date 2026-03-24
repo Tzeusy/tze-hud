@@ -91,14 +91,23 @@ impl Default for SystemClock {
 
 impl Clock for SystemClock {
     fn now_us(&self) -> u64 {
+        // Clamp to 1 so that 0 is never returned. Zero is the spec-defined
+        // "not set" sentinel (spec lines 68-70) and MUST NOT be returned by
+        // production implementations. A system clock before UNIX_EPOCH is
+        // pathological; returning 1 is safer than panicking or silently
+        // emitting the forbidden sentinel.
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_micros() as u64
+            | 1
     }
 
     fn monotonic_us(&self) -> u64 {
-        self.mono_origin.elapsed().as_micros() as u64
+        // Bias by +1 so the first sub-microsecond call never returns 0.
+        // MonoUs(0) is the "not set" sentinel; a real timestamp of 0 is
+        // ambiguous with "not set" and MUST be avoided.
+        self.mono_origin.elapsed().as_micros() as u64 + 1
     }
 }
 
