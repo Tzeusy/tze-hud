@@ -9,7 +9,7 @@
 //!
 //! * The `ResourceBudget` struct lives in the parent module (`super`); this
 //!   file adds the *checking* layer on top of it.
-//! * Soft-limit (80%) checks return `BudgetWarningDimension` values but do
+//! * Soft-limit (80%) checks return `BudgetDimension` values but do
 //!   **not** reject the mutation — callers must send a `BudgetWarning` event.
 //! * Hard-limit (100%) checks reject the entire `MutationBatch` atomically.
 //! * `max_concurrent_streams` is always 0 in v1; it is never checked here.
@@ -17,8 +17,8 @@
 //! ## Latency requirement
 //!
 //! Per spec §Budget Enforcement Latency: each per-mutation budget check MUST
-//! complete within 50µs.  All arithmetic here is branchless integer math with
-//! no allocations on the hot path.
+//! complete within 50µs.  The soft-limit check uses integer arithmetic on the
+//! hot path; the hard-limit check is also allocation-free integer arithmetic.
 
 use super::ResourceBudget;
 
@@ -27,7 +27,8 @@ use super::ResourceBudget;
 /// Current resource usage snapshot for a single lease.
 ///
 /// Values are maintained by the session layer and passed in on every call to
-/// [`check_mutation`] so that the hot path never traverses the scene graph.
+/// [`check_budget_soft`] / [`check_budget_hard`] so that the hot path never
+/// traverses the scene graph.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BudgetUsage {
     /// Number of tiles currently held by this lease.
@@ -97,33 +98,31 @@ pub fn check_budget_soft(
     budget: &ResourceBudget,
     usage: &BudgetUsage,
 ) -> [Option<BudgetDimension>; 4] {
-    const SOFT_PCT: f64 = 0.80;
+    // Use integer arithmetic (usage * 5 >= limit * 4) to represent the 80% threshold.
+    // This avoids floating-point division on the hot path and eliminates precision edge cases.
 
     let mut result = [None; 4];
     let mut idx = 0;
 
-    let tile_pct = usage.tile_count as f64 / budget.max_tiles.max(1) as f64;
-    if tile_pct >= SOFT_PCT {
+    if u64::from(usage.tile_count) * 5 >= u64::from(budget.max_tiles.max(1)) * 4 {
         result[idx] = Some(BudgetDimension::TileCount);
         idx += 1;
     }
 
-    let node_pct = usage.max_nodes_per_tile as f64 / budget.max_nodes_per_tile.max(1) as f64;
-    if node_pct >= SOFT_PCT {
+    if u64::from(usage.max_nodes_per_tile) * 5 >= u64::from(budget.max_nodes_per_tile.max(1)) * 4 {
         result[idx] = Some(BudgetDimension::NodesPerTile);
         idx += 1;
     }
 
-    let tex_pct = usage.texture_bytes_used as f64 / budget.texture_bytes_total.max(1) as f64;
-    if tex_pct >= SOFT_PCT {
+    if usage.texture_bytes_used * 5 >= budget.texture_bytes_total.max(1) * 4 {
         result[idx] = Some(BudgetDimension::TextureBytes);
         idx += 1;
     }
 
-    let lease_pct = usage.active_lease_count as f64 / budget.max_active_leases.max(1) as f64;
-    if lease_pct >= SOFT_PCT {
+    if u64::from(usage.active_lease_count) * 5 >= u64::from(budget.max_active_leases.max(1)) * 4 {
         result[idx] = Some(BudgetDimension::ActiveLeases);
         // idx += 1; // idx only matters while building the array
+        let _ = idx; // suppress unused_assignments warning
     }
 
     result
@@ -219,14 +218,17 @@ pub fn check_budget_hard(
 
 // ─── Shared-resource anti-collusion helper ────────────────────────────────────
 
-/// Compute the double-counted texture usage for shared resources.
+/// Compute the effective texture usage for this agent including shared resources.
 ///
 /// Per spec §Shared Resources and Anti-Collusion: shared resources are
-/// double-counted per agent to prevent cross-agent budget collusion.
+/// counted once per agent that references them.  Because *each* agent
+/// independently counts the same shared bytes, the system-wide effect is that
+/// the shared resource is effectively double-counted across the two agents,
+/// which discourages collusion.
 ///
 /// `base_bytes`: bytes used by this agent's exclusive resources.
-/// `shared_bytes`: bytes used by resources that are also referenced by
-///   other agents (counted twice).
+/// `shared_bytes`: bytes used by resources also referenced by other agents
+///   (counted once here, but also counted once by each other referencing agent).
 #[inline]
 pub fn anti_collusion_texture_bytes(base_bytes: u64, shared_bytes: u64) -> u64 {
     base_bytes.saturating_add(shared_bytes)
@@ -301,9 +303,9 @@ mod tests {
     #[test]
     fn test_soft_warning_texture_at_80pct_exact() {
         let budget = default_budget(); // texture_bytes_total = 64 MiB
-        // Ceiling division: round up so that the fraction is >= 0.80 exactly.
+        // Use integer arithmetic: ceiling of (total * 4 / 5) ensures usage * 5 >= total * 4.
         let total = budget.texture_bytes_total;
-        let eighty_pct = (total as f64 * 0.80).ceil() as u64;
+        let eighty_pct = (total * 4 + 4) / 5;
         let usage = BudgetUsage {
             texture_bytes_used: eighty_pct,
             ..BudgetUsage::default()
@@ -541,8 +543,9 @@ mod tests {
     fn test_anti_collusion_double_counts_shared_bytes() {
         let exclusive = 100u64;
         let shared = 50u64;
-        // Anti-collusion: the agent "owns" exclusive + shared (shared counted once for this agent).
-        // The other agent also counts the same shared bytes → effective load is double.
+        // Each agent counts shared bytes once; the "double counting" occurs because the
+        // other agent(s) also add the same shared bytes to their own usage total.
+        // This function returns exclusive + shared (= 150) for this agent's view.
         let counted = anti_collusion_texture_bytes(exclusive, shared);
         assert_eq!(counted, 150, "exclusive({exclusive}) + shared({shared}) should be 150");
     }

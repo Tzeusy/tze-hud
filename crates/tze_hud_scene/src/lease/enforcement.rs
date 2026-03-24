@@ -76,9 +76,9 @@ pub enum EnforcementAction {
 ///
 /// The caller must:
 /// 1. Create one `EnforcementLadder` per lease when the lease is granted.
-/// 2. Call `tick(usage_fraction, now_ms)` on every mutation intake (or polling
-///    cycle) to advance the ladder based on the current budget fraction and
-///    elapsed time.
+/// 2. Call `tick(usage_fraction)` on every mutation intake (or polling
+///    cycle) to advance the ladder based on the current budget fraction;
+///    elapsed time is derived from the injected `Clock`.
 /// 3. Act on the returned `EnforcementAction`.
 /// 4. Call `report_critical_bypass()` when a critical violation is detected.
 ///
@@ -131,12 +131,22 @@ impl<C: Clock> EnforcementLadder<C> {
     ///
     /// Returns the `EnforcementAction` the caller should take.
     ///
-    /// # Hard limit
+    /// # Hard limit and relationship to the lease state machine
+    ///
+    /// This ladder models only the *soft*, time-based escalation (Normal →
+    /// Warning → Throttle → Revocation).  It deliberately does **not** duplicate
+    /// the *hard* budget cutoff implemented by the lease state machine
+    /// (`lease/state_machine.rs`), which revokes immediately and returns
+    /// `BudgetHardLimitExceeded` when `usage_fraction >= 1.0`.
     ///
     /// Callers must invoke [`check_budget_hard`][super::budget::check_budget_hard]
     /// **before** calling `tick`; `tick` only manages the time-based tier ladder.
-    /// Passing `usage_fraction >= 1.0` does NOT by itself set `Revocation` tier —
-    /// that happens via `report_critical_bypass()` or sustained throttle.
+    /// Consequently, passing `usage_fraction >= 1.0` to `tick` does *not* by
+    /// itself set the tier to `Revocation` — the ladder only reaches `Revocation`
+    /// via an explicit critical bypass (`report_critical_bypass()`) or via
+    /// sustained `Throttle` for the configured grace period.  This difference
+    /// from the `state_machine.rs` behavior is intentional to avoid double
+    /// enforcement of the hard limit.
     pub fn tick(&mut self, usage_fraction: f64) -> EnforcementAction {
         let now_ms = self.clock.now_millis();
 
@@ -165,6 +175,7 @@ impl<C: Clock> EnforcementLadder<C> {
                     if now_ms.saturating_sub(warn_start) >= WARNING_GRACE_MS {
                         // Grace period elapsed → Throttle.
                         self.tier = BudgetTier::Throttle;
+                        self.warning_started_ms = None; // clear Warning state on exit
                         self.throttle_started_ms = Some(now_ms);
                         return EnforcementAction::Throttle;
                     }
@@ -173,12 +184,11 @@ impl<C: Clock> EnforcementLadder<C> {
             }
             BudgetTier::Throttle => {
                 if usage_fraction < 0.80 {
-                    // Throttle is NOT sticky if the violation is resolved — back to Normal.
-                    // (spec is silent on this; we follow the model in state_machine.rs)
-                    self.tier = BudgetTier::Normal;
-                    self.warning_started_ms = None;
-                    self.throttle_started_ms = None;
-                    return EnforcementAction::None;
+                    // Throttle is sticky — once the agent has been throttled, the runtime
+                    // must explicitly reset the ladder (e.g. via a new lease grant).
+                    // This matches LeaseImpl::update_budget_usage in state_machine.rs:
+                    // "Throttle and Revocation are sticky (require explicit resolution)."
+                    return EnforcementAction::Throttle;
                 }
                 // Throttle sustained — check if we have reached 30s.
                 if let Some(throttle_start) = self.throttle_started_ms {
@@ -344,16 +354,18 @@ mod tests {
             "throttle should halve effective rate");
     }
 
-    /// WHEN throttle resolved (usage drops) THEN back to Normal.
+    /// WHEN throttle is active and usage drops THEN Throttle remains sticky (not auto-reset).
+    /// Throttle requires explicit runtime intervention to clear, matching LeaseImpl semantics.
     #[test]
-    fn test_throttle_resolved_returns_to_normal() {
+    fn test_throttle_sticky_when_usage_drops() {
         let (mut ladder, clock) = make_ladder(0);
         ladder.tick(0.85);
         clock.advance(5_001);
         ladder.tick(0.85); // Throttle
-        let action = ladder.tick(0.50); // resolved
-        assert_eq!(ladder.tier(), BudgetTier::Normal);
-        assert_eq!(action, EnforcementAction::None);
+        let action = ladder.tick(0.50); // usage drops but Throttle stays
+        assert_eq!(ladder.tier(), BudgetTier::Throttle,
+            "Throttle is sticky — does not auto-reset when usage drops");
+        assert_eq!(action, EnforcementAction::Throttle);
     }
 
     // ── 4. Revocation tier ────────────────────────────────────────────────
