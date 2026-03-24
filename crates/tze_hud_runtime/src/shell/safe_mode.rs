@@ -157,8 +157,9 @@ pub enum SafeModeInputResult {
 
 /// Classify a raw input event for safe mode processing.
 ///
-/// During safe mode all input is captured by the chrome layer.  Only the three
-/// "exit" gestures produce `ExitSafeMode`; everything else is `Captured`.
+/// During safe mode all input is captured by the chrome layer.  Only the exit
+/// gestures (`ResumeAction` and `CtrlShiftEscape`) produce `ExitSafeMode`;
+/// everything else is `Captured`.
 pub fn classify_safe_mode_input(
     input: SafeModeInput,
     safe_mode_active: bool,
@@ -180,13 +181,21 @@ pub fn classify_safe_mode_input(
 ///
 /// This is the SOLE writer of `ShellOverrideState.safe_mode_active` and
 /// `ShellOverrideState.freeze_active`.
+///
+/// `override_state` is kept private to enforce the ownership contract:
+/// no external code can mutate `safe_mode_active`/`freeze_active` and
+/// violate the state invariant. Use the read-only accessor `override_state()`
+/// or the public convenience methods (`is_safe_mode_active`, `is_freeze_active`).
+/// Tests that need to set up initial state (e.g., `freeze_active = true`) must
+/// use `set_freeze_active_for_test` (cfg(test) only).
 pub struct SafeModeController {
     /// Shared protocol state (scene graph + sessions).
     pub shared_state: Arc<Mutex<SharedState>>,
     /// Chrome rendering state (for overlay visibility).
     pub chrome_state: Arc<RwLock<ChromeState>>,
     /// Shell-owned override state — authoritative source.
-    pub override_state: ShellOverrideState,
+    /// Private: only `SafeModeController` methods may write this.
+    override_state: ShellOverrideState,
     /// Audit sink for shell events (never routed to agents).
     audit_sink: Arc<dyn ShellAuditSink>,
 }
@@ -260,7 +269,7 @@ impl SafeModeController {
         }
 
         let now_ms = now_wall_ms();
-        let now_us = now_ms * 1_000;
+        let now_us = now_ms.saturating_mul(1_000);
 
         // Step 1: Cancel freeze BEFORE any other safe mode entry steps.
         // The state invariant safe_mode=true ⟹ freeze_active=false must hold.
@@ -291,8 +300,17 @@ impl SafeModeController {
 
             // Step 4: Broadcast SessionSuspended to all connected sessions.
             // Sessions that are subscribed receive this via their server_message_tx.
+            //
+            // sequence = 0: the protocol assigns per-session monotonically increasing
+            // sequence numbers to server messages.  The session handler is responsible
+            // for stamping the correct sequence before sending to a client.  Broadcasting
+            // a shared `ServerMessage` means we cannot assign per-session sequences here;
+            // callers that care about sequencing (e.g., integration tests) must rewrite
+            // the field when delivering to individual sessions.  This is a known limitation
+            // tracked as a follow-up: the session registry should wrap each message with
+            // a per-session sequence before delivery instead of broadcasting a shared struct.
             let suspended_msg = ServerMessage {
-                sequence: 0, // sequence is managed per-session by the session handler
+                sequence: 0, // see comment above — to be fixed when per-session sequencing lands
                 timestamp_wall_us: now_us,
                 payload: Some(ServerPayload::SessionSuspended(SessionSuspended {
                     reason: "safe_mode_entered".to_string(),
@@ -305,8 +323,13 @@ impl SafeModeController {
         };
 
         // Step 5: Set ChromeState → overlay visible on next compositor frame.
+        // Recover from a poisoned lock rather than panicking: safe mode is a
+        // failure-recovery path and must remain resilient after a prior panic.
         {
-            let mut chrome = self.chrome_state.write().expect("ChromeState RwLock poisoned");
+            let mut chrome = self
+                .chrome_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             chrome.safe_mode_active = true;
         }
 
@@ -317,6 +340,10 @@ impl SafeModeController {
         self.override_state.assert_invariant();
 
         // Emit audit event (telemetry thread only — never routed to agents).
+        // Note: `timestamp_mono_us` is populated with a wall-clock value here.
+        // `ShellAuditEvent` calls this field "monotonic", but the safe mode controller
+        // does not yet hold an `Instant`-based epoch.  A future refactor should inject
+        // a monotonic clock source to prevent backward-going timestamps on NTP adjustments.
         self.audit_sink.emit(ShellAuditEvent {
             timestamp_mono_us: now_us,
             trigger,
@@ -366,13 +393,16 @@ impl SafeModeController {
         }
 
         let now_ms = now_wall_ms();
-        let now_us = now_ms * 1_000;
-        let entered_at_us = self.override_state.safe_mode_entered_at_ms * 1_000;
+        let now_us = now_ms.saturating_mul(1_000);
+        let entered_at_us = self.override_state.safe_mode_entered_at_ms.saturating_mul(1_000);
         let suspension_duration_us = now_us.saturating_sub(entered_at_us);
 
         // Step 1: Dismiss overlay immediately so the next compositor frame has no overlay.
         {
-            let mut chrome = self.chrome_state.write().expect("ChromeState RwLock poisoned");
+            let mut chrome = self
+                .chrome_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             chrome.safe_mode_active = false;
         }
 
@@ -390,14 +420,14 @@ impl SafeModeController {
                 .map(|l| {
                     // suspension start time (use recorded suspended_at_ms or safe mode entry).
                     let susp_at_ms = l.suspended_at_ms.unwrap_or(safe_mode_entered_ms);
-                    let susp_dur_us = now_ms.saturating_sub(susp_at_ms) * 1_000;
+                    let susp_dur_us = now_ms.saturating_sub(susp_at_ms).saturating_mul(1_000);
                     // Adjusted expiry = now_us + remaining TTL (in us).
                     // For indefinite TTL (ttl_ms == 0), we use 0 as "no expiry" sentinel.
                     let adjusted_expires_wall_us = if l.ttl_ms == 0 {
                         0 // sentinel for indefinite
                     } else {
                         let remaining_ms = l.ttl_remaining_at_suspend_ms.unwrap_or(l.ttl_ms);
-                        now_us + remaining_ms * 1_000
+                        now_us.saturating_add(remaining_ms.saturating_mul(1_000))
                     };
                     (l.id, l.namespace.clone(), adjusted_expires_wall_us, susp_dur_us)
                 })
@@ -428,6 +458,8 @@ impl SafeModeController {
             st.safe_mode_active = false;
 
             // Step 4: Broadcast SessionResumed to all connected sessions.
+            // sequence = 0: same known limitation as SessionSuspended above — per-session
+            // sequencing must be assigned by the session handler, not the broadcaster.
             let resumed_msg = ServerMessage {
                 sequence: 0,
                 timestamp_wall_us: now_us,
@@ -512,6 +544,22 @@ impl SafeModeController {
         )
         .await
     }
+
+    /// Directly set freeze state for testing only.
+    ///
+    /// This exists solely to set up pre-condition state in unit tests (e.g.,
+    /// `freeze_active = true` before entering safe mode).  Production code
+    /// MUST use the freeze module (bead #3) to manage freeze state.
+    #[cfg(test)]
+    pub fn set_freeze_active_for_test(&mut self, active: bool) {
+        self.override_state.freeze_active = active;
+    }
+
+    /// Expose the override state for read-only use in tests.
+    #[cfg(test)]
+    pub fn override_state_for_test(&self) -> &ShellOverrideState {
+        &self.override_state
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -546,6 +594,7 @@ mod tests {
             scene: SceneGraph::new(1920.0, 1080.0),
             sessions: SessionRegistry::new("test-key"),
             safe_mode_active: false,
+            freeze_active: false,
             token_store: TokenStore::new(),
         }))
     }
@@ -623,7 +672,7 @@ mod tests {
 
         assert!(ctrl.is_safe_mode_active());
         assert_eq!(
-            ctrl.override_state.safe_mode_entry_reason,
+            ctrl.override_state_for_test().safe_mode_entry_reason,
             Some(SafeModeEntryReason::CriticalError)
         );
     }
@@ -647,14 +696,14 @@ mod tests {
     #[tokio::test]
     async fn test_safe_mode_cancels_freeze_manual_trigger() {
         let mut ctrl = make_controller();
-        ctrl.override_state.freeze_active = true;
+        ctrl.set_freeze_active_for_test(true);
 
         let result = ctrl.enter_safe_mode_viewer_action().await;
 
         assert!(ctrl.is_safe_mode_active());
         assert!(!ctrl.is_freeze_active(), "freeze MUST be false after safe mode entry");
         assert!(result.freeze_was_cancelled);
-        ctrl.override_state.assert_invariant();
+        ctrl.override_state_for_test().assert_invariant();
     }
 
     /// Scenario: Safe mode cancels freeze (automatic trigger) (spec line 129)
@@ -663,7 +712,7 @@ mod tests {
     #[tokio::test]
     async fn test_safe_mode_cancels_freeze_auto_trigger() {
         let mut ctrl = make_controller();
-        ctrl.override_state.freeze_active = true;
+        ctrl.set_freeze_active_for_test(true);
 
         let result = ctrl
             .enter_safe_mode_on_gpu_loss(Some("GPU error".into()))
@@ -672,20 +721,20 @@ mod tests {
         assert!(ctrl.is_safe_mode_active());
         assert!(!ctrl.is_freeze_active());
         assert!(result.freeze_was_cancelled);
-        ctrl.override_state.assert_invariant();
+        ctrl.override_state_for_test().assert_invariant();
     }
 
     /// State invariant enforced: safe_mode=true ⟹ freeze_active=false.
     #[tokio::test]
     async fn test_shell_state_invariant_enforced() {
         let mut ctrl = make_controller();
-        ctrl.override_state.freeze_active = true;
+        ctrl.set_freeze_active_for_test(true);
         ctrl.enter_safe_mode_viewer_action().await;
 
         // Both: safe_mode must be true and freeze must be false.
         assert!(ctrl.is_safe_mode_active());
         assert!(!ctrl.is_freeze_active());
-        ctrl.override_state.assert_invariant();
+        ctrl.override_state_for_test().assert_invariant();
     }
 
     /// Scenario: Freeze ignored during safe mode (spec line 137)
@@ -711,7 +760,7 @@ mod tests {
 
         assert!(!ctrl.is_safe_mode_active());
         assert!(!ctrl.is_freeze_active(), "freeze must be inactive after safe mode exit");
-        ctrl.override_state.assert_invariant();
+        ctrl.override_state_for_test().assert_invariant();
     }
 
     // ── 3. Exit protocol (spec lines 115–123) ─────────────────────────────────
@@ -952,7 +1001,7 @@ mod tests {
         let sink = Arc::new(CollectingAuditSink::new());
         let mut ctrl = make_controller_with_sink(Arc::clone(&sink));
 
-        ctrl.override_state.freeze_active = true;
+        ctrl.set_freeze_active_for_test(true);
         ctrl.enter_safe_mode_viewer_action().await;
 
         let events = sink.drain();
@@ -1034,5 +1083,64 @@ mod tests {
             c.x == 0.0 && c.y == 0.0 && c.width == 1920.0 && c.height == 1080.0
         });
         assert!(has_full_overlay, "full-viewport overlay must be present");
+    }
+
+    // ── 10. Session notification path ─────────────────────────────────────────
+
+    /// Safe mode controller broadcasts SessionSuspended and SessionResumed to sessions
+    /// that have a registered `server_message_tx`.
+    ///
+    /// This exercises the out-of-band broadcast mechanism end-to-end:
+    ///   1. Register a `server_message_tx` for a session.
+    ///   2. Enter safe mode → assert `SessionSuspended` is received.
+    ///   3. Exit safe mode → assert `SessionResumed` is received.
+    #[tokio::test]
+    async fn test_session_notification_broadcast() {
+        use tokio::sync::mpsc;
+        use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
+
+        let shared = make_shared_state();
+        let chrome = Arc::new(RwLock::new(ChromeState::new()));
+        let mut ctrl = SafeModeController::new_headless(Arc::clone(&shared), chrome);
+
+        // Authenticate a session and register a server_message_tx.
+        let (tx, mut rx) = mpsc::channel(8);
+        {
+            let mut st = shared.lock().await;
+            let session = st
+                .sessions
+                .authenticate("agent.notify_test", "test-key", &[])
+                .expect("auth should succeed");
+            let registered = st
+                .sessions
+                .register_server_message_tx(&session.session_id, tx);
+            assert!(registered, "register_server_message_tx must return true for known session");
+        }
+
+        // Enter safe mode — expect SessionSuspended.
+        let entry = ctrl.enter_safe_mode_viewer_action().await;
+        assert_eq!(
+            entry.sessions_notified, 1,
+            "one session should receive SessionSuspended"
+        );
+        let msg = rx.try_recv().expect("SessionSuspended must be in channel");
+        let msg = msg.expect("message must be Ok");
+        assert!(
+            matches!(msg.payload, Some(ServerPayload::SessionSuspended(_))),
+            "payload must be SessionSuspended"
+        );
+
+        // Exit safe mode — expect SessionResumed.
+        let exit_result = ctrl.exit_safe_mode().await;
+        assert_eq!(
+            exit_result.sessions_notified, 1,
+            "one session should receive SessionResumed"
+        );
+        let msg = rx.try_recv().expect("SessionResumed must be in channel");
+        let msg = msg.expect("message must be Ok");
+        assert!(
+            matches!(msg.payload, Some(ServerPayload::SessionResumed(_))),
+            "payload must be SessionResumed"
+        );
     }
 }

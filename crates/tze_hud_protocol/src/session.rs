@@ -163,15 +163,21 @@ impl SessionRegistry {
     ///
     /// Used by the safe mode controller to deliver `SessionSuspended` and `SessionResumed`
     /// to all active session streams.  These messages are transactional (RFC 0005 §3.1) and
-    /// must not be dropped; if the channel is full the send fails silently (the session's
-    /// backpressure signal path handles overflow).
+    /// must not be dropped; if the channel is full the send will fail and the drop is logged
+    /// as a warning (the session's backpressure signal path handles overflow recovery).
     ///
     /// Returns the count of sessions that received the message.
     pub fn broadcast_server_message(&self, msg: ServerMessage) -> usize {
         let mut sent = 0;
         for session in self.sessions.values() {
             if let Some(tx) = &session.server_message_tx {
-                if tx.try_send(Ok(msg.clone())).is_ok() {
+                if let Err(e) = tx.try_send(Ok(msg.clone())) {
+                    tracing::warn!(
+                        session_id = %session.session_id,
+                        "Failed to deliver transactional ServerMessage (channel full or closed); message dropped: {}",
+                        e
+                    );
+                } else {
                     sent += 1;
                 }
             }
@@ -184,13 +190,19 @@ impl SessionRegistry {
     /// Called by the session handler when a new session stream is established.
     /// Allows the safe mode controller to deliver out-of-band control messages
     /// (`SessionSuspended`, `SessionResumed`) to all active sessions.
+    ///
+    /// Returns `true` if the sender was registered successfully, `false` if the
+    /// `session_id` is not found in the registry.
     pub fn register_server_message_tx(
         &mut self,
         session_id: &str,
         tx: mpsc::Sender<Result<ServerMessage, Status>>,
-    ) {
+    ) -> bool {
         if let Some(session) = self.sessions.get_mut(session_id) {
             session.server_message_tx = Some(tx);
+            true
+        } else {
+            false
         }
     }
 }
