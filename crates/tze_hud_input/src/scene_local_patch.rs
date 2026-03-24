@@ -93,39 +93,40 @@ impl LocalStateUpdate {
 
 /// Per-tile scroll offset update.
 ///
-/// Produced when a scroll event is processed locally. The compositor maintains
-/// the canonical scroll offset per tile and applies this update before rendering
-/// without any agent roundtrip.
+/// Carries the **absolute** post-update scroll offset for the tile, per
+/// spec §Local Feedback Rendering via SceneLocalPatch:
+/// `ScrollOffsetUpdate(tile_id, offset_x, offset_y)`.
+///
+/// Produced after `ScrollState` applies a user scroll or agent request.
+/// The compositor sets the tile's scroll offset directly to `(offset_x, offset_y)`;
+/// it does not accumulate deltas.
 ///
 /// # Priority rule (spec §Scroll Local Feedback)
 /// If an agent-set `SetScrollOffsetRequest` and a user scroll arrive in the same
 /// frame, the **user scroll takes priority** and the agent request is discarded.
-/// The compositor enforces this; the input pipeline always produces a
-/// `ScrollOffsetUpdate` for user scroll events regardless of pending agent requests.
+/// This is enforced by `ScrollState::commit_all_frames` before the patch is built.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScrollOffsetUpdate {
     /// The tile whose scroll offset changed.
     pub tile_id: SceneId,
-    /// Delta applied to the horizontal scroll offset (pixels, positive = right).
-    pub delta_x: f32,
-    /// Delta applied to the vertical scroll offset (pixels, positive = down).
-    pub delta_y: f32,
+    /// New absolute horizontal scroll offset (pixels from content origin).
+    pub offset_x: f32,
+    /// New absolute vertical scroll offset (pixels from content origin).
+    pub offset_y: f32,
     /// Origin of this update — `true` = user input, `false` = agent request.
-    /// User-origin updates always win over agent-origin updates in the same frame.
+    /// Used by `SceneLocalPatch::merge_from` to enforce user-wins priority.
     pub user_initiated: bool,
 }
 
 impl ScrollOffsetUpdate {
-    /// Construct a user-initiated scroll delta.
-    pub fn from_user(tile_id: SceneId, delta_x: f32, delta_y: f32) -> Self {
-        Self { tile_id, delta_x, delta_y, user_initiated: true }
+    /// Construct a user-initiated scroll offset update (absolute).
+    pub fn from_user(tile_id: SceneId, offset_x: f32, offset_y: f32) -> Self {
+        Self { tile_id, offset_x, offset_y, user_initiated: true }
     }
 
-    /// Construct an agent-requested absolute scroll offset as a delta-from-zero.
-    ///
-    /// The caller is expected to compute the delta relative to the current offset.
-    pub fn from_agent(tile_id: SceneId, delta_x: f32, delta_y: f32) -> Self {
-        Self { tile_id, delta_x, delta_y, user_initiated: false }
+    /// Construct an agent-requested scroll offset update (absolute).
+    pub fn from_agent(tile_id: SceneId, offset_x: f32, offset_y: f32) -> Self {
+        Self { tile_id, offset_x, offset_y, user_initiated: false }
     }
 }
 
@@ -177,19 +178,43 @@ impl SceneLocalPatch {
 
     /// Merge another patch into this one (in-place coalescing).
     ///
-    /// For state updates: later entries override earlier ones for the same `node_id`.
-    /// For scroll updates: deltas are accumulated per `tile_id`; if a user update
-    /// coexists with an agent update, the user update wins and the agent update is
-    /// dropped (spec §Scroll Local Feedback: user scroll takes priority).
+    /// For state updates: the incoming update for a `node_id` replaces any
+    /// existing entry for the same `node_id` (last-write-wins per node).
+    ///
+    /// For scroll updates: per-tile coalescing with user-priority semantics.
+    /// Since offsets are absolute, same-origin updates for the same tile also
+    /// follow last-write-wins:
+    /// - If an existing **agent** update and an incoming **user** update target
+    ///   the same tile, the agent update is discarded and the user update takes
+    ///   its place (spec §Scroll Local Feedback: user scroll takes priority).
+    /// - If an existing **user** update and an incoming **agent** update target
+    ///   the same tile, the agent update is dropped (user wins).
+    /// - Two updates of the same origin for the same tile: the incoming one
+    ///   replaces the existing one (last-write-wins on absolute offsets).
     pub fn merge_from(&mut self, other: SceneLocalPatch) {
-        self.state_updates.extend(other.state_updates);
+        // State updates: last-write-wins per node_id.
+        for incoming in other.state_updates {
+            self.state_updates.retain(|u| u.node_id != incoming.node_id);
+            self.state_updates.push(incoming);
+        }
+        // Scroll updates: coalesce per tile_id with user-priority.
         for incoming in other.scroll_updates {
-            // If the incoming update is user-initiated, discard any pending
-            // agent update for the same tile (user wins).
-            if incoming.user_initiated {
-                self.scroll_updates.retain(|u| u.tile_id != incoming.tile_id || u.user_initiated);
+            if let Some(existing) = self.scroll_updates.iter_mut().find(|u| u.tile_id == incoming.tile_id) {
+                match (existing.user_initiated, incoming.user_initiated) {
+                    // Existing agent, incoming user: user replaces agent.
+                    (false, true) => {
+                        *existing = incoming;
+                    }
+                    // Existing user, incoming agent: drop agent, keep user.
+                    (true, false) => {}
+                    // Same origin: last-write-wins on absolute offsets.
+                    _ => {
+                        *existing = incoming;
+                    }
+                }
+            } else {
+                self.scroll_updates.push(incoming);
             }
-            self.scroll_updates.push(incoming);
         }
     }
 }
@@ -238,15 +263,15 @@ mod tests {
         let tile_id = SceneId::new();
         let update = ScrollOffsetUpdate::from_user(tile_id, 0.0, 20.0);
         assert!(update.user_initiated);
-        assert_eq!(update.delta_y, 20.0);
+        assert_eq!(update.offset_y, 20.0);
     }
 
     #[test]
     fn test_scroll_offset_update_agent() {
         let tile_id = SceneId::new();
-        let update = ScrollOffsetUpdate::from_agent(tile_id, 0.0, -10.0);
+        let update = ScrollOffsetUpdate::from_agent(tile_id, 0.0, 300.0);
         assert!(!update.user_initiated);
-        assert_eq!(update.delta_y, -10.0);
+        assert_eq!(update.offset_y, 300.0);
     }
 
     #[test]
@@ -283,11 +308,12 @@ mod tests {
             assert!(u.user_initiated, "agent scroll should have been evicted");
         }
         // The user update should be present
-        assert!(scroll_for_tile.iter().any(|u| (u.delta_y - 20.0).abs() < f32::EPSILON));
+        assert!(scroll_for_tile.iter().any(|u| (u.offset_y - 20.0).abs() < f32::EPSILON));
     }
 
     #[test]
-    fn test_scene_local_patch_merge_agent_does_not_evict_user() {
+    fn test_scene_local_patch_merge_agent_dropped_when_user_exists() {
+        // User update exists; incoming agent update should be dropped (user wins).
         let tile_id = SceneId::new();
         let mut base = SceneLocalPatch::new();
         base.push_scroll(ScrollOffsetUpdate::from_user(tile_id, 0.0, 20.0));
@@ -297,10 +323,48 @@ mod tests {
 
         base.merge_from(incoming);
 
-        // Both should be present — agent does not evict user
+        // Only the user entry remains; agent was dropped.
         let scroll_for_tile: Vec<_> = base.scroll_updates.iter()
             .filter(|u| u.tile_id == tile_id)
             .collect();
-        assert_eq!(scroll_for_tile.len(), 2);
+        assert_eq!(scroll_for_tile.len(), 1, "agent update should be dropped; only user remains");
+        assert!(scroll_for_tile[0].user_initiated, "surviving entry must be user-initiated");
+        assert!((scroll_for_tile[0].offset_y - 20.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_scene_local_patch_merge_same_origin_last_write_wins() {
+        // Two user scrolls for the same tile: last absolute offset wins.
+        let tile_id = SceneId::new();
+        let mut base = SceneLocalPatch::new();
+        base.push_scroll(ScrollOffsetUpdate::from_user(tile_id, 0.0, 10.0));
+
+        let mut incoming = SceneLocalPatch::new();
+        incoming.push_scroll(ScrollOffsetUpdate::from_user(tile_id, 0.0, 25.0));
+
+        base.merge_from(incoming);
+
+        let scroll_for_tile: Vec<_> = base.scroll_updates.iter()
+            .filter(|u| u.tile_id == tile_id)
+            .collect();
+        assert_eq!(scroll_for_tile.len(), 1, "should be coalesced to one entry");
+        assert!((scroll_for_tile[0].offset_y - 25.0).abs() < f32::EPSILON,
+            "last absolute offset should win: expected 25.0, got {}", scroll_for_tile[0].offset_y);
+    }
+
+    #[test]
+    fn test_scene_local_patch_merge_state_last_write_wins() {
+        // Later state update for the same node_id should replace the earlier one.
+        let node_id = SceneId::new();
+        let mut base = SceneLocalPatch::new();
+        base.push_state(LocalStateUpdate::new(node_id).with_pressed(true));
+
+        let mut incoming = SceneLocalPatch::new();
+        incoming.push_state(LocalStateUpdate::new(node_id).with_pressed(false));
+
+        base.merge_from(incoming);
+
+        assert_eq!(base.state_updates.len(), 1, "should be coalesced to one entry");
+        assert_eq!(base.state_updates[0].pressed, Some(false), "last-write should win");
     }
 }

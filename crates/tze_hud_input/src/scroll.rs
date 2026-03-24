@@ -13,8 +13,9 @@
 //! # Priority rule
 //!
 //! If a user scroll event and an agent `SetScrollOffsetRequest` arrive in the same
-//! frame, the **user scroll delta takes priority** and the agent request is
-//! discarded. This is enforced in `ScrollState::apply_frame`.
+//! frame, the **user scroll takes priority** and the agent request is
+//! discarded. This is enforced in `ScrollTileState::commit_frame` and
+//! `ScrollState::commit_all_frames`.
 //!
 //! # Latency invariant
 //!
@@ -194,7 +195,12 @@ impl ScrollTileState {
         changed
     }
 
-    /// Clamp offsets to [0, content_size - viewport_size] range.
+    /// Clamp offsets to [0, content_size] range.
+    ///
+    /// `content_width`/`content_height` in `ScrollConfig` represent the maximum
+    /// scroll offset (i.e. the content boundary), not viewport-subtracted values.
+    /// If viewport-aware clamping is needed in the future, `ScrollConfig` must
+    /// carry viewport dimensions and this method updated accordingly.
     fn clamp_offsets(&mut self) {
         if let Some(config) = &self.config {
             self.offset_x = self.offset_x.max(0.0);
@@ -222,8 +228,10 @@ impl ScrollTileState {
 
 /// Scroll state registry for all scrollable tiles.
 ///
-/// Owned by `InputProcessor`. Scroll events are routed here; results are encoded
-/// as `ScrollOffsetUpdate` entries in the `SceneLocalPatch`.
+/// Owned by the local scroll subsystem (compositor or input kernel). Scroll
+/// events are applied here to update per-tile offsets; the caller is responsible
+/// for encoding changed offsets as `ScrollOffsetUpdate` entries in the
+/// `SceneLocalPatch` and for emitting `ScrollOffsetChangedEvent`s to agents.
 #[derive(Default)]
 pub struct ScrollState {
     tiles: std::collections::HashMap<SceneId, ScrollTileState>,

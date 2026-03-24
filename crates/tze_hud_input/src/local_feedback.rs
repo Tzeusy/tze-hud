@@ -89,7 +89,7 @@ impl Default for LocalFeedbackStyle {
 
 /// Compositor-visible resolved feedback parameters for a single node.
 ///
-/// The input pipeline produces `ResolvedFeedback` by merging node-level
+/// The input pipeline produces `ResolvedFeedbackStyle` by merging node-level
 /// `LocalFeedbackStyle` with the system defaults. The compositor reads this to
 /// know exactly what to render — no further style resolution needed.
 #[derive(Clone, Debug, PartialEq)]
@@ -184,7 +184,8 @@ impl RollbackAnimation {
 /// returns a `LocalStateUpdate` with `rollback=true` to be included in the
 /// next `SceneLocalPatch`.
 ///
-/// Expired animations are pruned lazily on `begin_rollback` and `is_rolling_back`.
+/// Expired animations are pruned lazily on `begin_rollback` only (not on `is_rolling_back`,
+/// which takes `&self` and cannot mutate).
 #[derive(Default)]
 pub struct RollbackTracker {
     active: Vec<RollbackAnimation>,
