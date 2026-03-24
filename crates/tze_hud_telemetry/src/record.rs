@@ -269,6 +269,33 @@ pub struct FrameTimeShedEvent {
     pub consecutive_shed_frames: u32,
 }
 
+/// Telemetry event emitted when the degradation level changes.
+///
+/// Emitted on every level transition (both advance and recovery).
+/// Consumers use this to track degradation history and tune thresholds.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DegradationEvent {
+    /// Frame number when the transition occurred.
+    pub frame_number: u64,
+    /// Previous degradation level (0 = Normal, 5 = Emergency).
+    pub previous_level: u8,
+    /// New degradation level after transition.
+    pub new_level: u8,
+    /// The rolling-window p95 frame time (µs) that triggered this transition.
+    pub frame_time_p95_us: u64,
+    /// Direction of the transition.
+    pub direction: DegradationDirection,
+}
+
+/// Direction of a degradation level transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DegradationDirection {
+    /// Level worsened (frame_time_p95 > 14ms trigger threshold).
+    Advance,
+    /// Level improved (frame_time_p95 < 12ms sustained over 30 frames).
+    Recover,
+}
+
 /// Per-session aggregated telemetry summary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSummary {
