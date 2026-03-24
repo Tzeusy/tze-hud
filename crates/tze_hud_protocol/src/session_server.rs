@@ -242,9 +242,9 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
 /// Source: system-shell/spec.md §Freeze Scene (default 1000).
 const FREEZE_QUEUE_CAPACITY: usize = 1_000;
 
-/// Queue pressure threshold (80% of capacity).
+/// Queue pressure threshold fraction (80% of capacity).
 /// Source: system-shell/spec.md §Freeze Backpressure Signal.
-const FREEZE_QUEUE_PRESSURE_THRESHOLD: usize = (FREEZE_QUEUE_CAPACITY as f32 * 0.80) as usize;
+const FREEZE_QUEUE_PRESSURE_FRACTION: f32 = 0.80;
 
 /// A queued mutation entry for the per-session freeze queue.
 #[derive(Clone, Debug)]
@@ -301,8 +301,7 @@ impl SessionFreezeQueue {
     }
 
     fn pressure_warning_threshold(&self) -> usize {
-        // 80% of capacity
-        (self.capacity as f32 * 0.80) as usize
+        (self.capacity as f32 * FREEZE_QUEUE_PRESSURE_FRACTION) as usize
     }
 
     fn crosses_pressure_threshold_after_add(&self, before_len: usize) -> bool {
@@ -829,12 +828,18 @@ impl HudSession for HudSessionImpl {
                 // so they are delivered in the next available frame batch
                 // (system-shell/spec.md §Freeze Scene: "Unfreeze applies queued
                 //  mutations in submission order in the next available frame batch").
+                //
+                // IMPORTANT: Use `apply_queued_batch_to_scene` (not
+                // `handle_mutation_batch`) here. Each queued batch has already
+                // received an immediate `MutationResult(accepted=true)` when it
+                // was enqueued. Re-using `handle_mutation_batch` would send a
+                // second result for the same batch_id, violating RFC 0005 §2.1.
                 {
                     let freeze_active = state.lock().await.freeze_active;
                     if !freeze_active && !session.freeze_queue.is_empty() {
                         let queued = session.freeze_queue.drain();
                         for queued_batch in queued {
-                            handle_mutation_batch(&state, session, &tx, queued_batch).await;
+                            apply_queued_batch_to_scene(&state, session, queued_batch).await;
                         }
                     }
                 }
@@ -1659,6 +1664,117 @@ async fn handle_mutation_batch(
             }))
             .await;
     }
+}
+
+/// Apply a previously-queued mutation batch to the scene without sending a
+/// `MutationResult` response.
+///
+/// This is called during the unfreeze drain. The initial `MutationResult`
+/// (with `accepted = true`) was already sent when the batch was enqueued;
+/// sending a second one would violate the "one response per request" contract
+/// (RFC 0005 §2.1).
+///
+/// Safe mode and freeze checks are intentionally skipped here: the spec
+/// invariant (`safe_mode = true → freeze_active = false`) guarantees that
+/// safe mode cannot activate between freeze deactivation and the drain.
+async fn apply_queued_batch_to_scene(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    batch: MutationBatch,
+) {
+    let mut st = state.lock().await;
+
+    let lease_id = match bytes_to_scene_id(&batch.lease_id) {
+        Ok(id) => id,
+        Err(_) => return, // invalid lease_id — silently skip (already acked)
+    };
+
+    let tab_id = match st.scene.active_tab {
+        Some(id) => id,
+        None => return, // no active tab — skip silently
+    };
+
+    let mut scene_mutations = Vec::new();
+    for m in &batch.mutations {
+        match &m.mutation {
+            Some(crate::proto::mutation_proto::Mutation::CreateTile(ct)) => {
+                let bounds = ct
+                    .bounds
+                    .as_ref()
+                    .map(convert::proto_rect_to_scene)
+                    .unwrap_or(tze_hud_scene::Rect::new(0.0, 0.0, 200.0, 150.0));
+                scene_mutations.push(SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: session.namespace.clone(),
+                    lease_id,
+                    bounds,
+                    z_order: ct.z_order,
+                });
+            }
+            Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
+                if let Ok(tile_id) = uuid::Uuid::parse_str(&str_.tile_id)
+                    .map(tze_hud_scene::SceneId::from_uuid)
+                {
+                    if let Some(ref node_proto) = str_.node
+                        && let Some(node) = convert::proto_node_to_scene(node_proto)
+                    {
+                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::PublishToZone(pz)) => {
+                let content = pz
+                    .content
+                    .as_ref()
+                    .and_then(convert::proto_zone_content_to_scene);
+                if let Some(content) = content {
+                    let token = tze_hud_scene::types::ZonePublishToken {
+                        token: pz
+                            .publish_token
+                            .as_ref()
+                            .map(|t| t.token.clone())
+                            .unwrap_or_default(),
+                    };
+                    let merge_key = if pz.merge_key.is_empty() {
+                        None
+                    } else {
+                        Some(pz.merge_key.clone())
+                    };
+                    scene_mutations.push(SceneMutation::PublishToZone {
+                        zone_name: pz.zone_name.clone(),
+                        content,
+                        publish_token: token,
+                        merge_key,
+                    });
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::ClearZone(cz)) => {
+                let token = tze_hud_scene::types::ZonePublishToken {
+                    token: cz
+                        .publish_token
+                        .as_ref()
+                        .map(|t| t.token.clone())
+                        .unwrap_or_default(),
+                };
+                scene_mutations.push(SceneMutation::ClearZone {
+                    zone_name: cz.zone_name.clone(),
+                    publish_token: token,
+                });
+            }
+            None => {}
+        }
+    }
+
+    let scene_batch = SceneMutationBatch {
+        batch_id: tze_hud_scene::SceneId::new(),
+        agent_namespace: session.namespace.clone(),
+        mutations: scene_mutations,
+        timing_hints: None,
+        lease_id: None,
+    };
+
+    // Apply to scene; result is intentionally discarded — response already sent.
+    let _ = st.scene.apply_batch(&scene_batch);
 }
 
 async fn handle_lease_request(
@@ -3900,6 +4016,7 @@ mod tests {
             safe_mode_active: false,
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
+            freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         };
 
         handle_capability_request(
@@ -3956,6 +4073,7 @@ mod tests {
             safe_mode_active: false,
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
+            freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -4019,6 +4137,7 @@ mod tests {
             safe_mode_active: false,
             expect_resume: false,
             agent_event_rate_limiter: SessionEventRateLimiter::new(),
+            freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         };
 
         handle_capability_request(

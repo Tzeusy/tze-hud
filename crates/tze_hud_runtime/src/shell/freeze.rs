@@ -92,12 +92,13 @@ pub enum MutationTrafficClass {
 /// stable coalesce key (used for StateStream coalescing).
 #[derive(Clone, Debug)]
 pub struct QueuedMutation {
-    /// The raw proto `MutationBatch` bytes — stored as an opaque payload so
-    /// this module has no compile-time dependency on `tze_hud_protocol`.
-    ///
-    /// Callers encode the batch before enqueuing and decode it on drain.
+    /// The request's `batch_id` bytes (from the proto `MutationBatch`),
+    /// used for error correlation and identifying which response belongs to
+    /// which request.
     pub batch_id: Vec<u8>,
-    /// Original `batch_id` bytes for deduplication and error correlation.
+    /// Preserved copy of `batch_id` for eviction/drop error reporting.
+    /// Kept separate so in-place coalescing (which replaces the entry) can
+    /// still reference the original batch identity.
     pub original_batch_id: Vec<u8>,
     /// Traffic class inferred at enqueue time.
     pub traffic_class: MutationTrafficClass,
@@ -107,7 +108,8 @@ pub struct QueuedMutation {
     pub coalesce_key: Option<String>,
     /// Wall-clock time of original submission (UTC µs since epoch).
     pub submitted_at_wall_us: u64,
-    /// Opaque payload: the serialised proto `MutationBatch`.
+    /// Opaque payload: the serialised proto `MutationBatch` bytes.
+    /// Callers encode before enqueue and decode on drain.
     pub payload: Vec<u8>,
 }
 
@@ -123,18 +125,20 @@ pub struct FreezeQueue {
     capacity: usize,
     /// Ordered list of queued mutations (submission order preserved).
     queue: VecDeque<QueuedMutation>,
-    /// Total number of transactional entries in the queue.
-    /// Used to determine whether overflow will hit Transactional items.
-    transactional_count: usize,
 }
 
 impl FreezeQueue {
     /// Create a new freeze queue with the given capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `capacity == 0`. A zero-capacity queue cannot
+    /// accept any mutations and makes backpressure calculations meaningless.
     pub fn new(capacity: usize) -> Self {
+        debug_assert!(capacity > 0, "FreezeQueue capacity must be > 0");
         Self {
-            capacity,
+            capacity: capacity.max(1),
             queue: VecDeque::with_capacity(capacity.min(256)),
-            transactional_count: 0,
         }
     }
 
@@ -194,7 +198,6 @@ impl FreezeQueue {
                     };
                 }
                 self.queue.push_back(mutation);
-                self.transactional_count += 1;
                 if !was_at_pressure && self.is_pressure_threshold_reached() {
                     EnqueueResult::QueuedWithPressure
                 } else {
@@ -290,7 +293,6 @@ impl FreezeQueue {
     /// Called on unfreeze. The caller applies the returned batches in the
     /// returned order.
     pub fn drain(&mut self) -> Vec<QueuedMutation> {
-        self.transactional_count = 0;
         self.queue.drain(..).collect()
     }
 
@@ -299,7 +301,6 @@ impl FreezeQueue {
     /// Called when safe mode cancels freeze.
     pub fn discard(&mut self) {
         self.queue.clear();
-        self.transactional_count = 0;
     }
 
     /// Queue capacity.
