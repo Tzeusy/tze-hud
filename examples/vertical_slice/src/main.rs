@@ -94,6 +94,9 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
             },
         )),
     })
@@ -779,6 +782,9 @@ mod tests {
                     initial_subscriptions: vec![],
                     resume_token: Vec::new(),
                     agent_timestamp_wall_us: now_wall_us(),
+                    min_protocol_version: 1000,
+                    max_protocol_version: 1001,
+                    auth_credential: None,
                 },
             )),
         }).await.unwrap();
