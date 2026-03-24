@@ -202,7 +202,7 @@ impl SceneGraph {
         if !self.tabs.contains_key(&tab_id) {
             return Err(ValidationError::TabNotFound { id: tab_id });
         }
-        // Remove all tiles in this tab
+        // Remove all tiles in this tab (leave sync groups first to avoid dangling members)
         let tab_tiles: Vec<SceneId> = self
             .tiles
             .values()
@@ -210,6 +210,9 @@ impl SceneGraph {
             .map(|t| t.id)
             .collect();
         for tile_id in tab_tiles {
+            // Remove tile from its sync group before deleting the tile itself,
+            // so sync_group.members does not retain a dangling tile ID.
+            let _ = self.leave_sync_group(tile_id);
             self.remove_tile_and_nodes(tile_id);
         }
         self.tabs.remove(&tab_id);
@@ -346,10 +349,11 @@ impl SceneGraph {
 
     // ─── Capability helpers ──────────────────────────────────────────────
 
-    /// Check that the lease exists, is active, and has the given capability.
+    /// Check that the lease exists, is active (not expired, not suspended), and has the given capability.
     ///
     /// Returns `CapabilityMissing` if the capability is absent, `LeaseExpired`
-    /// if the lease TTL has elapsed, and `LeaseNotFound` if the ID is unknown.
+    /// if the lease TTL has elapsed, `LeaseNotFound` if the ID is unknown,
+    /// or `InvalidField` if the lease is in a non-Active state that disallows mutations.
     fn require_capability(
         &self,
         lease_id: SceneId,
@@ -369,6 +373,16 @@ impl SceneGraph {
         let now = self.clock.now_millis();
         if lease.is_expired(now) {
             return Err(ValidationError::LeaseExpired { id: lease_id });
+        }
+        // Check lease state allows mutations (Active only; Suspended/Disconnected block mutations)
+        if !lease.is_mutations_allowed() {
+            return Err(ValidationError::InvalidField {
+                field: "lease_state".into(),
+                reason: format!(
+                    "lease {} is in {:?} state; mutations require Active state",
+                    lease_id, lease.state
+                ),
+            });
         }
         Ok(())
     }
@@ -868,17 +882,22 @@ impl SceneGraph {
         1
     }
 
-    /// Count all nodes in an in-memory node tree (including the root).
+    /// Count the incoming node plus any of its children that are already in the graph.
     ///
-    /// Used to validate the node count before inserting a subtree. Children
-    /// that are referenced by SceneId are not resolved here; we count only
-    /// the root node since the caller should count inline nodes separately.
-    /// For a fully in-memory tree constructed in tests, this returns 1.
-    fn count_node_tree_deep(&self, _node: &Node) -> usize {
-        // In the current model, a Node's `children` are SceneIds referencing
-        // nodes already in the graph. When inserting a brand-new tree from a
-        // batch, each node is a separate insertion, so this method counts 1.
-        1
+    /// Used by `set_tile_root_impl` to validate the post-insert node count before
+    /// replacing the tile root. The incoming `node` is counted as 1, and any of its
+    /// `children` SceneIds that already exist in `self.nodes` are recursively counted.
+    ///
+    /// For a brand-new node with no pre-existing children, this returns 1 (correct).
+    /// For a node whose `children` already reference persisted nodes (e.g., re-attaching
+    /// an existing subtree), this returns the full subtree size, preventing the node
+    /// count limit from being bypassed.
+    fn count_node_tree_deep(&self, node: &Node) -> usize {
+        1 + node
+            .children
+            .iter()
+            .map(|child_id| self.count_node_subtree(*child_id) as usize)
+            .sum::<usize>()
     }
 
     /// Count texture bytes in a node (not yet inserted into the graph).
@@ -944,6 +963,22 @@ impl SceneGraph {
             self.require_active_lease(lease_id)?;
             self.require_capability(lease_id, Capability::CreateTiles)?;
             self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+
+            // Namespace isolation: the caller's namespace must match the lease's namespace.
+            // This prevents an agent from creating tiles in another agent's namespace
+            // using their own (valid) lease. RFC 0001 §1.2.
+            let lease_namespace = self
+                .leases
+                .get(&lease_id)
+                .map(|l| l.namespace.as_str())
+                .unwrap_or("");
+            if namespace != lease_namespace {
+                return Err(ValidationError::NamespaceMismatch {
+                    tile_id: lease_id, // use lease_id as context; tile not created yet
+                    tile_namespace: lease_namespace.to_string(),
+                    agent_namespace: namespace.to_string(),
+                });
+            }
         } else {
             // Validate lease exists at minimum
             if !self.leases.contains_key(&lease_id) {
@@ -1166,6 +1201,8 @@ impl SceneGraph {
         self.require_active_lease(lease_id)?;
         self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
 
+        // Leave sync group before removing the tile to avoid dangling member entries.
+        let _ = self.leave_sync_group(tile_id);
         self.remove_tile_and_nodes(tile_id);
         self.version += 1;
         Ok(())
@@ -1223,6 +1260,11 @@ impl SceneGraph {
         // Check for duplicate node ID (scene-globally unique per RFC 0001 §2.1)
         if self.nodes.contains_key(&node.id) {
             return Err(ValidationError::DuplicateId { id: node.id });
+        }
+
+        // Validate node data constraints (e.g. TextMarkdownNode content size limit)
+        if let Some(err) = validate_text_markdown_node_data(&node.data) {
+            return Err(err);
         }
 
         // Node count limit: SetTileRoot replaces the whole tree.
@@ -1307,6 +1349,11 @@ impl SceneGraph {
         // Check for duplicate node ID (RFC 0001 §2.1: NodeIds must be scene-globally unique)
         if self.nodes.contains_key(&node.id) {
             return Err(ValidationError::DuplicateId { id: node.id });
+        }
+
+        // Validate node data constraints (e.g. TextMarkdownNode content size limit)
+        if let Some(err) = validate_text_markdown_node_data(&node.data) {
+            return Err(err);
         }
 
         // Enforce per-tile node count limit (RFC 0001 §2.1: max 64 nodes)
@@ -3577,8 +3624,8 @@ mod spec_scenarios {
         );
     }
 
-    // ─ Duplicate ID rejection (spec line 62) ─────────────────────────────────
-    // WHEN an agent submits CreateTile with a TileId that already exists
+    // ─ Duplicate NodeId rejection (spec line 62) ─────────────────────────────
+    // WHEN an agent attempts to add a node with a NodeId that already exists in the scene
     // THEN the runtime MUST reject with DuplicateId
 
     #[test]
@@ -3795,7 +3842,10 @@ mod spec_scenarios {
     fn zero_size_bounds_rejected() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
+
+        // create_tile_checked requires CreateTiles + ModifyOwnTiles; use correct capabilities
+        // so the bounds check is reached (not capability check).
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
 
         let err = scene
             .create_tile_checked(
@@ -3807,13 +3857,14 @@ mod spec_scenarios {
             )
             .unwrap_err();
         assert!(
-            matches!(err, ValidationError::CapabilityMissing { .. } | ValidationError::BoundsOutOfRange { .. }),
-            "got {:?}", err
+            matches!(err, ValidationError::BoundsOutOfRange { .. }),
+            "expected BoundsOutOfRange, got {:?}", err
         );
 
-        // Use the basic create_tile (no capability check) to test bounds directly
+        // Use the basic create_tile (no capability check) to also confirm bounds are rejected
+        let lease_unchecked = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
         let err2 = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 0.0, 100.0), 1)
+            .create_tile(tab_id, "agent", lease_unchecked, Rect::new(0.0, 0.0, 0.0, 100.0), 1)
             .unwrap_err();
         assert!(
             matches!(err2, ValidationError::BoundsOutOfRange { .. }),

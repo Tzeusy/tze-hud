@@ -16,7 +16,18 @@ pub struct MutationBatch {
 /// Individual scene mutations per RFC 0001 §3.1.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SceneMutation {
-    // ── Tab mutations (require manage_tabs capability) ────────────────────
+    // ── Tab mutations ─────────────────────────────────────────────────────
+    // NOTE: Tab mutations require the `manage_tabs` capability per RFC 0001
+    // §2.2, §3.3. However, `SceneMutation` variants do not carry a `lease_id`
+    // field, so capability enforcement at the batch-apply layer must be done
+    // by the transport/session layer (gRPC handler) before calling
+    // `apply_batch`. The scene graph's `create_tab_with_lease` /
+    // `delete_tab_with_lease` / etc. checked variants are available for
+    // direct callers that have a lease in scope.
+    //
+    // Tab mutations in `apply_single_mutation` call the unchecked graph
+    // methods; the gRPC layer is responsible for verifying `manage_tabs`
+    // before dispatching the batch.
     /// Create a new tab. RFC 0001 §2.2.
     CreateTab {
         name: String,
@@ -297,64 +308,21 @@ impl SceneGraph {
                 Ok(vec![id])
             }
             SceneMutation::UpdateTileBounds { tile_id, bounds } => {
-                // Use the unchecked path (capability enforcement is the gRPC layer's job).
-                let tile = self
-                    .tiles
-                    .get_mut(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                if bounds.width <= 0.0 || bounds.height <= 0.0 {
-                    return Err(ValidationError::BoundsOutOfRange {
-                        reason: format!(
-                            "tile bounds width ({}) and height ({}) must be > 0.0",
-                            bounds.width, bounds.height
-                        ),
-                    });
-                }
-                tile.bounds = *bounds;
-                self.version += 1;
+                // Route through the checked method to enforce namespace isolation,
+                // lease/capability checks, and the within-display-area invariant.
+                self.update_tile_bounds(*tile_id, *bounds, namespace)?;
                 Ok(vec![])
             }
             SceneMutation::UpdateTileZOrder { tile_id, z_order } => {
-                let tile = self
-                    .tiles
-                    .get_mut(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                use crate::graph::ZONE_TILE_Z_MIN;
-                if *z_order >= ZONE_TILE_Z_MIN {
-                    return Err(ValidationError::InvalidField {
-                        field: "z_order".into(),
-                        reason: format!(
-                            "z_order 0x{:08X} is >= ZONE_TILE_Z_MIN (0x{:08X})",
-                            z_order, ZONE_TILE_Z_MIN
-                        ),
-                    });
-                }
-                tile.z_order = *z_order;
-                self.version += 1;
+                self.update_tile_z_order(*tile_id, *z_order, namespace)?;
                 Ok(vec![])
             }
             SceneMutation::UpdateTileOpacity { tile_id, opacity } => {
-                let tile = self
-                    .tiles
-                    .get_mut(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                if !(0.0..=1.0).contains(opacity) {
-                    return Err(ValidationError::InvalidField {
-                        field: "opacity".into(),
-                        reason: format!("opacity {} is not in [0.0, 1.0]", opacity),
-                    });
-                }
-                tile.opacity = *opacity;
-                self.version += 1;
+                self.update_tile_opacity(*tile_id, *opacity, namespace)?;
                 Ok(vec![])
             }
             SceneMutation::UpdateTileInputMode { tile_id, input_mode } => {
-                let tile = self
-                    .tiles
-                    .get_mut(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                tile.input_mode = *input_mode;
-                self.version += 1;
+                self.update_tile_input_mode(*tile_id, *input_mode, namespace)?;
                 Ok(vec![])
             }
             SceneMutation::UpdateTileSyncGroup { tile_id, sync_group } => {
@@ -367,25 +335,18 @@ impl SceneGraph {
                 Ok(vec![])
             }
             SceneMutation::UpdateTileExpiry { tile_id, expires_at } => {
-                let tile = self
-                    .tiles
-                    .get_mut(tile_id)
-                    .ok_or(ValidationError::TileNotFound { id: *tile_id })?;
-                tile.expires_at = *expires_at;
-                self.version += 1;
+                self.update_tile_expiry(*tile_id, *expires_at, namespace)?;
                 Ok(vec![])
             }
             SceneMutation::DeleteTile { tile_id } => {
-                if !self.tiles.contains_key(tile_id) {
-                    return Err(ValidationError::TileNotFound { id: *tile_id });
-                }
-                self.remove_tile_and_nodes(*tile_id);
-                self.version += 1;
+                // Use the checked delete which enforces namespace isolation and capabilities.
+                self.delete_tile(*tile_id, namespace)?;
                 Ok(vec![])
             }
             // ── Node mutations ────────────────────────────────────────────────
             SceneMutation::SetTileRoot { tile_id, node } => {
-                self.set_tile_root(*tile_id, node.clone())?;
+                // Use checked variant to enforce namespace isolation and ModifyOwnTiles capability.
+                self.set_tile_root_checked(*tile_id, node.clone(), namespace)?;
                 Ok(vec![node.id])
             }
             SceneMutation::AddNode {
@@ -393,7 +354,8 @@ impl SceneGraph {
                 parent_id,
                 node,
             } => {
-                self.add_node_to_tile(*tile_id, *parent_id, node.clone())?;
+                // Use checked variant to enforce namespace isolation and ModifyOwnTiles capability.
+                self.add_node_to_tile_checked(*tile_id, *parent_id, node.clone(), namespace)?;
                 Ok(vec![node.id])
             }
             // ── Zone mutations ────────────────────────────────────────────────

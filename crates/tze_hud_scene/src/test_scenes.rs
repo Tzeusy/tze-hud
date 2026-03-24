@@ -1318,7 +1318,15 @@ impl TestSceneRegistry {
     /// - Thesis 3: Multiple agents coexist (disconnect/reconnect does not affect others)
     /// - validation-framework spec §Test Scene Registry lines 160-172
     fn build_disconnect_reclaim_multiagent(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
-        let mut graph = SceneGraph::new(self.display_width, self.display_height);
+        // Use a SimulatedClock fixed at `clock.0` so that lease-expiry checks
+        // compare against the scene's construction timestamp rather than the real system
+        // clock. This avoids false `LeaseExpired` errors when session_lifecycle tests run
+        // years after the lease `granted_at_ms` (ClockMs::FIXED = Jan 2025).
+        use crate::clock::SimulatedClock;
+        use std::sync::Arc;
+        // SimulatedClock::new takes microseconds; ClockMs stores milliseconds.
+        let sim_clock = Arc::new(SimulatedClock::new(clock.0 * 1_000));
+        let mut graph = SceneGraph::new_with_clock(self.display_width, self.display_height, sim_clock);
 
         let tab_id = graph.create_tab("MultiAgent", 0).expect("create_tab failed");
 

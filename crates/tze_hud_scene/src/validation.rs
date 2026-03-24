@@ -1,6 +1,6 @@
 //! Validation errors for scene graph operations.
 
-use crate::types::SceneId;
+use crate::types::{ResourceId, SceneId};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -49,7 +49,7 @@ pub enum ValidationError {
     /// A mutation referenced a ResourceId that is not registered with the runtime.
     /// RFC 0001 §2.4: StaticImageNode referencing unknown ResourceId.
     #[error("resource not found: {id}")]
-    ResourceNotFound { id: String },
+    ResourceNotFound { id: ResourceId },
 
     #[error("zone not found: {name}")]
     ZoneNotFound { name: String },

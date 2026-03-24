@@ -643,7 +643,11 @@ pub struct Lease {
 /// RFC 0001 §3.1, §3.3 defines the canonical capability names.
 /// `manage_tabs`, `create_tiles`, and `modify_own_tiles` are the three
 /// v1-mandatory capability names for scene-hierarchy mutations.
+///
+/// Serde renames use snake_case to match the canonical wire-format names
+/// used in config capability strings and gRPC metadata (RFC 0001 §3.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Capability {
     /// `manage_tabs` — required for all Tab mutations (CreateTab, DeleteTab,
     /// RenameTab, ReorderTab, SwitchActiveTab). RFC 0001 §2.2, §3.3.
@@ -688,8 +692,33 @@ impl Lease {
         }
     }
 
+    /// Check whether this lease grants the requested capability.
+    ///
+    /// The v1-canonical capabilities (`ManageTabs`, `CreateTiles`, `ModifyOwnTiles`) are
+    /// checked exactly. Legacy broad variants act as aliases:
+    ///
+    /// - `CreateTile` covers `CreateTiles` + `ModifyOwnTiles` (legacy: create implied mutate)
+    /// - `UpdateTile` covers `ModifyOwnTiles`
+    /// - `DeleteTile` covers `ModifyOwnTiles`
+    ///
+    /// This ensures test code using the legacy variant names is not broken by the introduction
+    /// of the v1-canonical names.
     pub fn has_capability(&self, cap: Capability) -> bool {
-        self.capabilities.contains(&cap)
+        if self.capabilities.contains(&cap) {
+            return true;
+        }
+        // Legacy capability aliases
+        match cap {
+            Capability::CreateTiles => {
+                self.capabilities.contains(&Capability::CreateTile)
+            }
+            Capability::ModifyOwnTiles => {
+                self.capabilities.contains(&Capability::CreateTile)
+                    || self.capabilities.contains(&Capability::UpdateTile)
+                    || self.capabilities.contains(&Capability::DeleteTile)
+            }
+            _ => false,
+        }
     }
 
     /// Remaining TTL in milliseconds (0 if expired).
