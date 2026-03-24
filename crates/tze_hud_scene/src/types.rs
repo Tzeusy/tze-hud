@@ -1080,6 +1080,11 @@ pub struct ZoneDefinition {
     pub transport_constraint: Option<TransportConstraint>,
     /// Auto-clear timeout in milliseconds; None = no auto-clear.
     pub auto_clear_ms: Option<u64>,
+    /// When true, publishes to this zone are fire-and-forget (no ZonePublishResult).
+    /// When false (default), publishes are transactional and receive a ZonePublishResult.
+    /// Per RFC 0005 §3.1, §8.6.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 // ─── Zone publish token ──────────────────────────────────────────────────────
@@ -1181,6 +1186,7 @@ impl ZoneRegistry {
             max_publishers: 16,
             transport_constraint: None,
             auto_clear_ms: None,
+            ephemeral: false,
         });
 
         // notification-area zone: edge-anchored top-right, Stack
@@ -1200,6 +1206,7 @@ impl ZoneRegistry {
             max_publishers: 16,
             transport_constraint: None,
             auto_clear_ms: Some(5_000),
+            ephemeral: false,
         });
 
         // subtitle zone: edge-anchored bottom, LatestWins
@@ -1219,6 +1226,7 @@ impl ZoneRegistry {
             max_publishers: 1,
             transport_constraint: None,
             auto_clear_ms: None,
+            ephemeral: false,
         });
 
         registry

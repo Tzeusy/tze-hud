@@ -2461,6 +2461,7 @@ mod tests {
             max_publishers: 2,
             transport_constraint: None,
             auto_clear_ms: None,
+            ephemeral: false,
         }
     }
 
@@ -2481,6 +2482,7 @@ mod tests {
             max_publishers: 4,
             transport_constraint: None,
             auto_clear_ms: Some(5_000),
+            ephemeral: false,
         }
     }
 
@@ -2501,6 +2503,7 @@ mod tests {
             max_publishers: 8,
             transport_constraint: None,
             auto_clear_ms: None,
+            ephemeral: false,
         }
     }
 
@@ -2842,6 +2845,7 @@ mod tests {
             max_publishers: 1,
             transport_constraint: None,
             auto_clear_ms: None,
+            ephemeral: false,
         };
         scene.register_zone(zone);
 
