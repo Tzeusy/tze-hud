@@ -409,12 +409,295 @@ pub struct TextMarkdownNode {
     pub overflow: TextOverflow,
 }
 
+/// Cursor style hint forwarded to the host OS pointer layer.
+///
+/// The runtime updates the system cursor to the resolved style whenever
+/// the pointer hovers over a HitRegionNode — no agent roundtrip required.
+/// Source: RFC 0004 §7.1, input-model/spec.md line 249.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CursorStyle {
+    /// Platform default arrow cursor.
+    #[default]
+    Default,
+    /// Text-insertion I-beam.
+    Text,
+    /// Pointer (pointing hand) — conventional for links/buttons.
+    Pointer,
+    /// Move cursor (four-directional arrows).
+    Move,
+    /// Crosshair for precision targeting.
+    Crosshair,
+    /// Grab (open hand).
+    Grab,
+    /// Grabbing (closed hand).
+    Grabbing,
+    /// Not-allowed / forbidden.
+    NotAllowed,
+    /// Resize — north-south.
+    ResizeNS,
+    /// Resize — east-west.
+    ResizeEW,
+    /// Resize — northwest-southeast diagonal.
+    ResizeNWSE,
+    /// Resize — northeast-southwest diagonal.
+    ResizeNESW,
+}
+
+/// Event delivery filter mask for a HitRegionNode.
+///
+/// When a flag is `false` the corresponding event type is suppressed before it
+/// reaches the owning agent's EventBatch — saving agent bandwidth for nodes
+/// that don't need every event type.  All flags default to `true`.
+///
+/// Note: The runtime still performs hit-testing and local-state updates even
+/// when agent delivery is suppressed.  `event_mask` controls agent delivery
+/// only; it is not consulted by the hit-test spatial query.
+///
+/// Source: RFC 0004 §7.1, input-model/spec.md lines 249, 253-255.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventMask {
+    /// Deliver PointerDownEvent to the owning agent.
+    pub pointer_down: bool,
+    /// Deliver PointerUpEvent to the owning agent.
+    pub pointer_up: bool,
+    /// Deliver PointerMoveEvent to the owning agent.
+    pub pointer_move: bool,
+    /// Deliver PointerEnterEvent to the owning agent.
+    pub pointer_enter: bool,
+    /// Deliver PointerLeaveEvent to the owning agent.
+    pub pointer_leave: bool,
+    /// Deliver ClickEvent to the owning agent.
+    pub click: bool,
+    /// Deliver DoubleClickEvent to the owning agent.
+    pub double_click: bool,
+    /// Deliver ContextMenuEvent to the owning agent.
+    pub context_menu: bool,
+    /// Deliver KeyDownEvent / KeyUpEvent / CharacterEvent to the owning agent.
+    pub keyboard: bool,
+}
+
+impl Default for EventMask {
+    /// All event types delivered by default.
+    fn default() -> Self {
+        Self {
+            pointer_down: true,
+            pointer_up: true,
+            pointer_move: true,
+            pointer_enter: true,
+            pointer_leave: true,
+            click: true,
+            double_click: true,
+            context_menu: true,
+            keyboard: true,
+        }
+    }
+}
+
+/// ARIA-compatible accessibility metadata for a HitRegionNode.
+///
+/// Enables screen readers and assistive technologies to understand the
+/// interactive element's role, label, and state.
+/// Source: RFC 0004 §7.1, input-model/spec.md line 249.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessibilityMeta {
+    /// ARIA role string (e.g., "button", "link", "checkbox").
+    /// Empty string means no explicit role — inferred from context.
+    pub role: String,
+    /// Accessible label.  Used by screen readers as the element's name.
+    pub label: String,
+    /// ARIA description (longer contextual hint, supplemental to label).
+    pub description: String,
+    /// Whether the element is currently disabled from an accessibility standpoint.
+    pub disabled: bool,
+}
+
+/// Per-node visual style overrides applied locally without an agent roundtrip.
+///
+/// These are compositor-managed overrides — the agent provides the values; the
+/// compositor applies them in real time based on `HitRegionLocalState`.
+/// Source: RFC 0004 §7.1, input-model/spec.md line 249.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LocalStyle {
+    /// Highlight tint applied while the pointer hovers over the node.
+    /// `None` means no hover highlight.
+    pub hover_tint: Option<Rgba>,
+    /// Highlight tint applied while the node is pressed / active.
+    pub pressed_tint: Option<Rgba>,
+    /// Highlight tint applied while the node has keyboard focus.
+    pub focus_outline_color: Option<Rgba>,
+}
+
+/// Hit-test spatial query result.
+///
+/// Returned by [`SceneGraph::hit_test`].  Represents the outcome of mapping a
+/// 2D display-coordinate point to the deepest interactive scene element per the
+/// traversal contract:
+///
+/// 1. Chrome layer tiles (lease priority 0) checked first.
+/// 2. Content layer tiles in z-order descending; passthrough tiles skipped.
+/// 3. Within each tile, nodes in reverse tree order (last sibling first, depth-first).
+/// 4. Only [`NodeData::HitRegion`] nodes whose `bounds` contain the point qualify.
+///
+/// Source: RFC 0001 §5.1-5.2, scene-graph/spec.md lines 250-265,
+///         input-model/spec.md lines 263-274.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HitResult {
+    /// A [`NodeData::HitRegion`] node was hit.
+    ///
+    /// This is the most specific result: a named interactive region on a tile
+    /// accepted the point.
+    NodeHit {
+        /// The tile that owns the hit node.
+        tile_id: SceneId,
+        /// The `HitRegionNode`'s scene ID.
+        node_id: SceneId,
+        /// The `interaction_id` string from the `HitRegionNode` — forwarded in
+        /// all events dispatched from this hit.
+        interaction_id: String,
+    },
+    /// A tile was hit but no `HitRegionNode` within it accepted the point.
+    ///
+    /// The tile itself absorbs the event (input_mode != Passthrough).
+    TileHit {
+        /// The tile that absorbed the point.
+        tile_id: SceneId,
+    },
+    /// The point landed on a passthrough tile (or all tiles are passthrough at
+    /// this coordinate).
+    ///
+    /// The event should be forwarded to the desktop in overlay mode or discarded
+    /// in fullscreen.
+    Passthrough,
+    /// The point hit a chrome-layer element (lease priority 0).
+    ///
+    /// Chrome always wins; no content-layer tile receives the event.
+    Chrome {
+        /// The scene ID of the chrome tile (or node, for chrome HitRegionNodes).
+        element_id: SceneId,
+    },
+}
+
+/// HitRegionNode is the sole interactive primitive in v1.
+///
+/// It defines a rectangular interactive region within a tile.  The runtime
+/// performs hit-testing against `bounds` (tile-local coordinates) during
+/// Stage 2 of the input dispatch pipeline.
+///
+/// # Local feedback
+/// The runtime updates `HitRegionLocalState` (`hovered`, `pressed`) immediately
+/// on hit, without waiting for the owning agent to acknowledge.  This satisfies
+/// the "local feedback first" doctrine.
+///
+/// # Event filtering
+/// `event_mask` controls which event types are forwarded to the owning agent.
+/// The runtime always performs the spatial query and local-state update;
+/// `event_mask` only suppresses agent delivery.
+///
+/// Source: RFC 0004 §7.1, RFC 0001 §2.4, input-model/spec.md lines 248-259.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HitRegionNode {
+    /// Bounding rectangle in tile-local coordinates (origin = tile top-left).
     pub bounds: Rect,
+    /// Agent-defined interaction identifier forwarded in all events from this node.
+    /// Must be non-empty; the runtime treats an empty string as "unnamed".
     pub interaction_id: String,
+    /// Whether this node participates in keyboard focus cycling.
     pub accepts_focus: bool,
+    /// Whether this node accepts pointer events (hit-test only qualifies nodes
+    /// where `accepts_pointer = true`).
     pub accepts_pointer: bool,
+    /// When `true`, the runtime automatically acquires pointer capture for this
+    /// node on PointerDownEvent without requiring an explicit CaptureRequest.
+    /// Source: RFC 0004 §7.1 / input-model/spec.md line 142.
+    #[serde(default)]
+    pub auto_capture: bool,
+    /// When `true`, pointer capture is released automatically on PointerUpEvent.
+    /// Source: RFC 0004 §7.1 / input-model/spec.md line 120.
+    #[serde(default)]
+    pub release_on_up: bool,
+    /// Cursor style hint shown while the pointer hovers over this node.
+    #[serde(default)]
+    pub cursor_style: CursorStyle,
+    /// Tooltip text shown after the pointer has hovered for 500 ms.
+    /// `None` means no tooltip.
+    #[serde(default)]
+    pub tooltip: Option<String>,
+    /// Per-event-type delivery filter.  All events enabled by default.
+    #[serde(default)]
+    pub event_mask: EventMask,
+    /// ARIA-compatible accessibility metadata.
+    #[serde(default)]
+    pub accessibility: AccessibilityMeta,
+    /// Compositor-applied visual style overrides for hover/press/focus states.
+    #[serde(default)]
+    pub local_style: LocalStyle,
+}
+
+impl HitResult {
+    /// Returns `true` if the point hit any interactive element (node, tile, or chrome).
+    ///
+    /// Returns `false` only for [`HitResult::Passthrough`].
+    pub fn is_some(&self) -> bool {
+        !matches!(self, HitResult::Passthrough)
+    }
+
+    /// Returns `true` if the point did not hit any interactive element.
+    ///
+    /// Equivalent to `!self.is_some()`.
+    pub fn is_none(&self) -> bool {
+        matches!(self, HitResult::Passthrough)
+    }
+
+    /// Returns `true` if this is a [`HitResult::NodeHit`].
+    pub fn is_node_hit(&self) -> bool {
+        matches!(self, HitResult::NodeHit { .. })
+    }
+
+    /// Returns `true` if this is a [`HitResult::Chrome`] hit.
+    pub fn is_chrome(&self) -> bool {
+        matches!(self, HitResult::Chrome { .. })
+    }
+
+    /// Extract the `(tile_id, node_id)` pair for `NodeHit` results.
+    ///
+    /// Returns `None` for all other variants.
+    pub fn node_hit_ids(&self) -> Option<(SceneId, SceneId)> {
+        if let HitResult::NodeHit { tile_id, node_id, .. } = self {
+            Some((*tile_id, *node_id))
+        } else {
+            None
+        }
+    }
+
+    /// Extract the tile_id for `NodeHit` or `TileHit` results.
+    ///
+    /// Returns `None` for `Chrome` and `Passthrough`.
+    pub fn tile_id(&self) -> Option<SceneId> {
+        match self {
+            HitResult::NodeHit { tile_id, .. } | HitResult::TileHit { tile_id } => {
+                Some(*tile_id)
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Default for HitRegionNode {
+    fn default() -> Self {
+        Self {
+            bounds: Rect::new(0.0, 0.0, 0.0, 0.0),
+            interaction_id: String::new(),
+            accepts_focus: false,
+            accepts_pointer: false,
+            auto_capture: false,
+            release_on_up: false,
+            cursor_style: CursorStyle::Default,
+            tooltip: None,
+            event_mask: EventMask::default(),
+            accessibility: AccessibilityMeta::default(),
+            local_style: LocalStyle::default(),
+        }
+    }
 }
 
 /// A static image node that references a resource by its content-addressed identity.
