@@ -344,9 +344,12 @@ impl ArbitrationStack {
                     });
                 }
                 InterruptionClass::High => {
-                    // HIGH passes if pass_through_class <= HIGH (default).
-                    // If pass_through_class > HIGH (i.e., Critical), HIGH is also queued.
-                    if ctx.pass_through_class > InterruptionClass::High {
+                    // Queue HIGH if the mutation's interruption class is less urgent than the
+                    // zone's pass-through threshold (spec §4.2).
+                    // InterruptionClass ordering: Critical(0) < High(1) < Normal(2) < Low(3).
+                    // "Less urgent" means numerically greater. So if interruption_class > pass_through_class,
+                    // the mutation does not meet the threshold and must be queued.
+                    if ctx.interruption_class > ctx.pass_through_class {
                         return Some(ArbitrationOutcome::Queue {
                             queue_reason: QueueReason::QuietHours {
                                 window_end_us: ctx.quiet_hours_end_us,
@@ -355,7 +358,7 @@ impl ArbitrationStack {
                             redacted: false,
                         });
                     }
-                    // Otherwise HIGH passes quiet hours.
+                    // Otherwise HIGH meets the threshold and passes quiet hours.
                 }
             }
         }
@@ -381,13 +384,15 @@ impl ArbitrationStack {
 
     /// Level 5: Resource gate.
     ///
-    /// Returns `Some(Shed)` or `Some(Reject)` if resource constraints are violated.
+    /// Returns `Some(Reject(TileBudgetExceeded))` if the per-agent tile budget is exceeded
+    /// (spec §7.2 line 169: "Over-budget batches MUST be rejected atomically" — agent informed).
+    /// Returns `Some(Shed)` if degradation shedding applies.
     /// Transactional mutations are NEVER shed (spec §11.6).
     /// Returns `None` if budgets are paused (during freeze) or all checks pass.
     fn evaluate_level5_resource(
         &self,
         ctx: &ResourceContext,
-        _mutation_ref: SceneId,
+        mutation_ref: SceneId,
         is_transactional: bool,
     ) -> Option<ArbitrationOutcome> {
         // During freeze, resource budgets are paused (spec §6.2).
@@ -395,24 +400,18 @@ impl ArbitrationStack {
             return None;
         }
 
-        // Per-agent budget exceeded → reject the batch.
+        // Per-agent budget exceeded → reject the batch atomically (spec §7.2 line 169).
+        // "Over-budget batches MUST be rejected atomically." The agent IS informed via structured
+        // error (Reject, not Shed). Shed means no error to agent; Reject means agent is informed.
         if ctx.budget_exceeded {
-            // Budget exceeded is a suppress (batch rejected with error).
-            // However, the issue description says "Over-budget batches MUST be rejected atomically."
-            // We return Shed here to avoid needing a mutation ref, since budget check is per-batch.
-            // The spec says Reject for budget exceeded at Level 5 in §3.4:
-            // "If budget exceeded: reject the batch."
-            // But since Reject needs an ArbitrationError, and budget exceeded is a batch-level check,
-            // we use Shed which signals "no error to agent" — but spec says budget exceeded IS
-            // reported. Let's use Reject with a budget-specific message.
-            // Actually re-reading: "Over-budget batches MUST be rejected atomically" with no error
-            // code defined. Use Shed since budget-exceeded at Level 5 maps to Suppress in spec §7.2,
-            // which says "Budget exceeded = suppress (batch rejected)". Suppress = agent IS informed.
-            // We'll use a Reject with a synthetic mutation_ref (nil) as this is batch-level.
-            // In production the pipeline bead (#2) wraps this properly.
-            return Some(ArbitrationOutcome::Shed {
-                degradation_level: ctx.degradation_level,
-            });
+            return Some(ArbitrationOutcome::Reject(ArbitrationError {
+                code: ArbitrationErrorCode::TileBudgetExceeded,
+                agent_id: String::new(), // filled by pipeline layer
+                mutation_ref,
+                message: "Per-agent tile budget exceeded; batch rejected atomically".to_string(),
+                hint: Some("Reduce tile count or wait for budget refill".to_string()),
+                level: ArbitrationLevel::Resource.index(),
+            }));
         }
 
         // Degradation shedding — transactional mutations are never shed.

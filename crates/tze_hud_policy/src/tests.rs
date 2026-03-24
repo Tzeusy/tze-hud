@@ -6,10 +6,10 @@
 #[cfg(test)]
 mod arbitration_stack_tests {
     use crate::{
-        ArbitrationLevel, ArbitrationOutcome, ArbitrationStack, AttentionContext, BlockReason,
-        ContentContext, InterruptionClass, MutationKind, OverrideState, PolicyContext, PrivacyContext,
-        ResourceContext, SafetyState, SecurityContext, VisibilityClassification,
-        ViewerClass,
+        ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, ArbitrationStack,
+        AttentionContext, BlockReason, ContentContext, InterruptionClass, MutationKind, OverrideState,
+        PolicyContext, PrivacyContext, ResourceContext, SafetyState, SecurityContext,
+        VisibilityClassification, ViewerClass,
     };
     use tze_hud_scene::{SceneId, types::ContentionPolicy};
 
@@ -1042,5 +1042,82 @@ mod arbitration_stack_tests {
         } else {
             panic!("Expected Reject");
         }
+    }
+
+    // ─── Bug fixes: spec compliance ───────────────────────────────────────────
+
+    /// WHEN the per-agent tile budget is exceeded
+    /// THEN the batch is rejected atomically with TileBudgetExceeded (spec §7.2 line 169).
+    ///
+    /// "Over-budget batches MUST be rejected atomically." The agent IS informed via a structured
+    /// Reject error. Shed would NOT inform the agent — that is spec non-compliant.
+    #[test]
+    fn test_budget_exceeded_returns_reject_not_shed() {
+        let stack = make_stack();
+        let mut ctx = default_policy_context();
+        ctx.resource_context.budget_exceeded = true;
+
+        let outcome = stack.evaluate(
+            &ctx,
+            SceneId::new(),
+            VisibilityClassification::Public,
+            &["create_tiles"],
+            "agent_a",
+            MutationKind::TileMutation,
+        );
+
+        assert!(
+            matches!(
+                &outcome,
+                ArbitrationOutcome::Reject(err)
+                    if err.code == ArbitrationErrorCode::TileBudgetExceeded
+                    && err.level == ArbitrationLevel::Resource.index()
+            ),
+            "Over-budget batch must be Reject(TileBudgetExceeded) at Level 5, got {:?}",
+            outcome
+        );
+        // Explicitly confirm it is NOT Shed — agent must be informed.
+        assert!(
+            !matches!(&outcome, ArbitrationOutcome::Shed { .. }),
+            "Budget exceeded must NOT return Shed (agent must be informed)"
+        );
+    }
+
+    /// WHEN quiet hours are active and interruption_class is HIGH but pass_through_class is CRITICAL
+    /// THEN the HIGH mutation is queued (it does not meet the stricter Critical-only threshold).
+    ///
+    /// Spec §4.2: mutations LESS urgent than the zone's pass-through threshold are queued.
+    /// InterruptionClass ordering: Critical(0) < High(1) — so High is less urgent than Critical.
+    /// If pass_through_class=Critical(0), then High(1) > Critical(0) → queued.
+    #[test]
+    fn test_pass_through_class_high_queued_when_threshold_is_critical() {
+        let stack = make_stack();
+        let mut ctx = default_policy_context();
+        ctx.attention_context.quiet_hours_active = true;
+        ctx.attention_context.quiet_hours_end_us = Some(7_200_000_000);
+        ctx.attention_context.interruption_class = InterruptionClass::High;
+        // Only Critical passes through — stricter than the default High threshold.
+        ctx.attention_context.pass_through_class = InterruptionClass::Critical;
+
+        let outcome = stack.evaluate(
+            &ctx,
+            SceneId::new(),
+            VisibilityClassification::Public,
+            &["publish_zone:subtitle"],
+            "agent_a",
+            MutationKind::ZonePublication,
+        );
+
+        assert!(
+            matches!(
+                &outcome,
+                ArbitrationOutcome::Queue {
+                    queue_reason: crate::QueueReason::QuietHours { .. },
+                    ..
+                }
+            ),
+            "HIGH must be queued when pass_through_class=Critical (threshold not met); got {:?}",
+            outcome
+        );
     }
 }

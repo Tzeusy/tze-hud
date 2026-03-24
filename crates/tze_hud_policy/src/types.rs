@@ -250,6 +250,10 @@ pub enum ArbitrationErrorCode {
     CapabilityScopeInsufficient,
     NamespaceViolation,
     LeaseInvalid,
+    // Level 5: Resource
+    /// Per-agent tile budget exceeded. Over-budget batches are rejected atomically (spec §7.2 line 169).
+    /// The agent IS informed via structured error (Reject, not Shed).
+    TileBudgetExceeded,
     // Level 6: Content
     ZoneEvictionDenied,
 }
@@ -307,6 +311,11 @@ pub struct SafetyState {
 
 impl SafetyState {
     /// Returns true if the safety level would trigger an emergency response.
+    ///
+    /// Currently unused by the arbitration stack itself (Level 1 emergency handling is performed
+    /// by the system shell, which writes `PolicyContext` before passing it in). This method is
+    /// intentionally `pub` and kept available for the shell layer and future callers.
+    #[allow(dead_code)]
     pub fn is_emergency(&self) -> bool {
         !self.gpu_healthy
             || !self.scene_graph_intact
