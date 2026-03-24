@@ -211,3 +211,15 @@ git push                # Push to remote
 - Always `bd sync` before ending session
 
 <!-- end-bv-agent-instructions -->
+
+# Notes to self
+
+- `size_of::<Node>()` is tested against a 150-byte limit (scene-graph/spec.md line 302). Adding heap-allocated fields to `HitRegionNode` (which is a variant of `NodeData`) inflates `Node` inline. Box large optional structs (`AccessibilityMeta`, `LocalStyle`) to stay under budget.
+- `gh pr merge <N> --squash --delete-branch` fails with "already checked out" when a worktree has the base branch checked out. The merge still succeeds via the API; the error is only about the local git cleanup. Verify with `gh pr view <N> --json state,mergedAt`.
+- `beads-pr-reviewer-worker`: automated reviewer threads (Copilot, Gemini) are left by bots and count toward `UNRESOLVED_COUNT`; they must be replied to and resolved before merge just like human threads.
+- When `HitRegionNode` gains new fields with `#[serde(default)]`, all existing struct literal constructions in tests and production code must add `..Default::default()`. Grep for `HitRegion(HitRegionNode {` across the workspace to find them all.
+- `update_hover_state` should use `entry().or_insert_with()` rather than `get_mut` so that HitRegionNodes inserted directly into `self.nodes` (bypassing `set_tile_root`/`add_node_to_tile`) still get local state initialized on first hit.
+- Zone ontology (rig-ar23): `ZoneDefinition` needs `#[serde(default)]` on `layer_attachment` and a `Default` impl returning `Content` so older serialized defs without the field still deserialize correctly.
+- In `session_server.rs` tests, `LeaseStateChange` events can interleave before `MutationResult`/`RuntimeError` responses; add a `next_non_state_change()` helper that drains `LeaseStateChange` payloads before asserting.
+- When `publish_to_zone` signature grows (e.g., adding `expires_at_wall_us`, `content_classification`), any main-branch wrapper that calls it (e.g., `publish_to_zone_with_lease`) will fail to compile — grep for all call sites.
+- `tests/integration/multi_agent.rs` has pre-existing compilation failures (missing `auth_credential`, `max_protocol_version`, `min_protocol_version` on `SessionInit`, and `timing` on `MutationBatch`) unrelated to zone ontology; exclude with `--exclude integration` when running tests for zone work.
