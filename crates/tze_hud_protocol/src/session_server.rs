@@ -28,7 +28,10 @@ use crate::auth::{
 };
 use crate::convert;
 use crate::dedup::{CachedResult, DedupWindow};
-use crate::lease::{LeaseCorrelationCache, CachedLeaseResponse, effective_priority};
+use crate::lease::{
+    LeaseCorrelationCache, CachedLeaseResponse, effective_priority,
+    DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+};
 use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::*;
 use crate::proto::session::client_message::Payload as ClientPayload;
@@ -1230,7 +1233,7 @@ async fn handle_session_init(
         freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         session_open_at_wall_us: session_open_at,
         dedup_window: DedupWindow::new(1000, 60),
-        lease_correlation_cache: LeaseCorrelationCache::new(256),
+        lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -1378,7 +1381,7 @@ async fn handle_session_resume(
         freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         session_open_at_wall_us: session_open_at,
         dedup_window: DedupWindow::new(1000, 60),
-        lease_correlation_cache: LeaseCorrelationCache::new(256),
+        lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
     };
 
     let compositor_ts = now_wall_us();
@@ -2150,9 +2153,21 @@ async fn handle_lease_request(
 
     let mut st = state.lock().await;
 
-    // Parse capabilities
-    let capabilities: Vec<Capability> = req
+    // Parse capabilities — filter_map discards unknown strings.
+    // Track the normalized (valid) capability names alongside the enum values
+    // so that `granted_capabilities` in the response reflects what was actually
+    // granted, not the raw request strings (which may include unknowns).
+    let known_cap_names = [
+        "create_tile", "update_tile", "delete_tile",
+        "create_node", "update_node", "delete_node", "receive_input",
+    ];
+    let granted_capabilities: Vec<String> = req
         .capabilities
+        .iter()
+        .filter(|c| known_cap_names.contains(&c.as_str()))
+        .cloned()
+        .collect();
+    let capabilities: Vec<Capability> = granted_capabilities
         .iter()
         .filter_map(|c| match c.as_str() {
             "create_tile" => Some(Capability::CreateTile),
@@ -2170,6 +2185,11 @@ async fn handle_lease_request(
 
     // Enforce priority rules per lease-governance spec §Priority Assignment.
     let granted_priority = effective_priority(req.lease_priority, &session.capabilities);
+    // NOTE: `SceneGraph::grant_lease` does not currently persist `granted_priority` in
+    // the lease record (the scene-graph API predates the priority system).  The
+    // `granted_priority` value is returned to the agent in `LeaseResponse` and
+    // honored at the session layer, but arbitration based on stored priority is a
+    // follow-up task (see Epic 4 / lease-governance bead).
 
     let lease_id = st.scene.grant_lease(&session.namespace, ttl, capabilities);
     session.lease_ids.push(lease_id);
@@ -2178,12 +2198,11 @@ async fn handle_lease_request(
     // Cache the response for retransmit handling (RFC 0005 §5.3).
     if client_sequence > 0 {
         session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-            server_sequence: 0, // placeholder — updated after send
             granted: true,
             lease_id: lease_id_bytes.clone(),
             granted_ttl_ms: ttl,
             granted_priority,
-            granted_capabilities: req.capabilities.clone(),
+            granted_capabilities: granted_capabilities.clone(),
             deny_reason: String::new(),
             deny_code: String::new(),
         });
@@ -2200,7 +2219,7 @@ async fn handle_lease_request(
                 lease_id: lease_id_bytes.clone(),
                 granted_ttl_ms: ttl,
                 granted_priority,
-                granted_capabilities: req.capabilities.clone(),
+                granted_capabilities,
                 ..Default::default()
             })),
         }))
@@ -2264,7 +2283,6 @@ async fn handle_lease_renew(
             let deny_code = "INVALID_ARGUMENT".to_string();
             if client_sequence > 0 {
                 session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    server_sequence: seq,
                     granted: false,
                     lease_id: Vec::new(),
                     granted_ttl_ms: 0,
@@ -2302,29 +2320,33 @@ async fn handle_lease_renew(
         Ok(()) => {
             // Spec: "runtime SHALL respond with LeaseResponse" for lease operations.
             // For renewal success, return LeaseResponse(granted=true) with the updated TTL.
+            // Note: granted_priority and granted_capabilities reflect the renewal response
+            // (not the original grant; the scene-graph does not expose them on renew).
+            // Priority and capability assignment belong to the original acquisition path.
             let seq = session.next_server_seq();
+            let lease_response = LeaseResponse {
+                granted: true,
+                lease_id: lease_id_bytes.clone(),
+                granted_ttl_ms: ttl,
+                ..Default::default()
+            };
+            // Cache exactly what we send, so retransmit replays the same response.
             if client_sequence > 0 {
                 session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    server_sequence: seq,
-                    granted: true,
-                    lease_id: lease_id_bytes.clone(),
-                    granted_ttl_ms: ttl,
-                    granted_priority: 2, // preserved from original grant; renewal keeps same priority
-                    granted_capabilities: Vec::new(),
-                    deny_reason: String::new(),
-                    deny_code: String::new(),
+                    granted: lease_response.granted,
+                    lease_id: lease_response.lease_id.clone(),
+                    granted_ttl_ms: lease_response.granted_ttl_ms,
+                    granted_priority: lease_response.granted_priority,
+                    granted_capabilities: lease_response.granted_capabilities.clone(),
+                    deny_reason: lease_response.deny_reason.clone(),
+                    deny_code: lease_response.deny_code.clone(),
                 });
             }
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
                     timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
-                        granted: true,
-                        lease_id: lease_id_bytes.clone(),
-                        granted_ttl_ms: ttl,
-                        ..Default::default()
-                    })),
+                    payload: Some(ServerPayload::LeaseResponse(lease_response)),
                 }))
                 .await;
 
@@ -2352,7 +2374,6 @@ async fn handle_lease_renew(
             let deny_code = "LEASE_NOT_FOUND".to_string();
             if client_sequence > 0 {
                 session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    server_sequence: seq,
                     granted: false,
                     lease_id: Vec::new(),
                     granted_ttl_ms: 0,
@@ -2386,40 +2407,28 @@ async fn handle_lease_release(
     release: LeaseRelease,
 ) {
     // Retransmit dedup (RFC 0005 §5.3).
+    // Replay the cached LeaseResponse for both success and denial paths so the
+    // client always receives a LeaseResponse on retransmit (consistent with the
+    // original send).  Emitting a new LeaseStateChange on retransmit would
+    // produce duplicate state-change notifications.
     if client_sequence > 0 {
         if let Some(cached) = session.lease_correlation_cache.get(client_sequence).cloned() {
             let seq = session.next_server_seq();
-            // On retransmit of a release, replay the LeaseStateChange notification.
-            // The cached `granted` field indicates success; if granted=true a
-            // RELEASED state change was already sent, so we send a fresh one.
-            if cached.granted {
-                let _ = tx
-                    .send(Ok(ServerMessage {
-                        sequence: seq,
-                        timestamp_wall_us: now_wall_us(),
-                        payload: Some(ServerPayload::LeaseStateChange(LeaseStateChange {
-                            lease_id: cached.lease_id,
-                            previous_state: "ACTIVE".to_string(),
-                            new_state: "RELEASED".to_string(),
-                            reason: "Agent released lease (retransmit replay)".to_string(),
-                            timestamp_wall_us: now_wall_us(),
-                        })),
-                    }))
-                    .await;
-            } else {
-                let _ = tx
-                    .send(Ok(ServerMessage {
-                        sequence: seq,
-                        timestamp_wall_us: now_wall_us(),
-                        payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
-                            granted: false,
-                            deny_reason: cached.deny_reason,
-                            deny_code: cached.deny_code,
-                            ..Default::default()
-                        })),
-                    }))
-                    .await;
-            }
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                        granted: cached.granted,
+                        lease_id: cached.lease_id,
+                        granted_ttl_ms: cached.granted_ttl_ms,
+                        granted_priority: cached.granted_priority,
+                        granted_capabilities: cached.granted_capabilities,
+                        deny_reason: cached.deny_reason,
+                        deny_code: cached.deny_code,
+                    })),
+                }))
+                .await;
             return;
         }
     }
@@ -2432,7 +2441,6 @@ async fn handle_lease_release(
             let deny_code = "INVALID_ARGUMENT".to_string();
             if client_sequence > 0 {
                 session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    server_sequence: seq,
                     granted: false,
                     lease_id: Vec::new(),
                     granted_ttl_ms: 0,
@@ -2466,22 +2474,41 @@ async fn handle_lease_release(
             // Remove from session's tracked leases
             session.lease_ids.retain(|&id| id != lease_id);
 
-            let seq = session.next_server_seq();
+            // Spec: every lease operation SHALL be answered with LeaseResponse.
+            // Send LeaseResponse(granted=true) first (transactional), then
+            // LeaseStateChange(ACTIVE→RELEASED) (also transactional).
+            let release_response = LeaseResponse {
+                granted: true,
+                lease_id: lease_id_bytes.clone(),
+                ..Default::default()
+            };
+            // Cache the LeaseResponse so retransmits replay it.
             if client_sequence > 0 {
                 session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    server_sequence: seq,
-                    granted: true, // success — used by retransmit handler to replay LeaseStateChange
-                    lease_id: lease_id_bytes.clone(),
-                    granted_ttl_ms: 0,
-                    granted_priority: 0,
-                    granted_capabilities: Vec::new(),
-                    deny_reason: String::new(),
-                    deny_code: String::new(),
+                    granted: release_response.granted,
+                    lease_id: release_response.lease_id.clone(),
+                    granted_ttl_ms: release_response.granted_ttl_ms,
+                    granted_priority: release_response.granted_priority,
+                    granted_capabilities: release_response.granted_capabilities.clone(),
+                    deny_reason: release_response.deny_reason.clone(),
+                    deny_code: release_response.deny_code.clone(),
                 });
             }
+            let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
                     sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::LeaseResponse(release_response)),
+                }))
+                .await;
+
+            // LeaseStateChange notification: ACTIVE→RELEASED.
+            // Transactional and always delivered (LEASE_CHANGES is unconditional).
+            let change_seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: change_seq,
                     timestamp_wall_us: now_wall_us(),
                     payload: Some(ServerPayload::LeaseStateChange(LeaseStateChange {
                         lease_id: lease_id_bytes,
@@ -2499,7 +2526,6 @@ async fn handle_lease_release(
             let deny_code = "LEASE_NOT_FOUND".to_string();
             if client_sequence > 0 {
                 session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    server_sequence: seq,
                     granted: false,
                     lease_id: Vec::new(),
                     granted_ttl_ms: 0,
@@ -2524,6 +2550,7 @@ async fn handle_lease_release(
         }
     }
 }
+
 
 async fn handle_subscription_change(
     session: &mut StreamSession,
@@ -3214,8 +3241,6 @@ mod tests {
             Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
             other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
         };
-        // Consume LeaseStateChange (REQUESTED→ACTIVE) that follows the grant
-        let _sc = stream.next().await.unwrap().unwrap();
 
         // Create a tab in the scene (needed for mutations)
         // We need to do this through shared state since tab creation
@@ -3295,8 +3320,6 @@ mod tests {
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
         }
-        // Consume LeaseStateChange (REQUESTED→ACTIVE) that follows the grant
-        let _sc = stream.next().await.unwrap().unwrap();
     }
 
     #[tokio::test]
@@ -3738,8 +3761,6 @@ mod tests {
             Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
             other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
         };
-        // Consume LeaseStateChange (REQUESTED→ACTIVE)
-        let _sc = stream.next().await.unwrap().unwrap();
 
         // Send MutationBatch while safe mode is active — should be rejected
         let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
@@ -4368,7 +4389,7 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: now_wall_us(),
             dedup_window: DedupWindow::new(1000, 60),
-            lease_correlation_cache: LeaseCorrelationCache::new(16),
+            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
         };
 
         // seq=2 (gap=1): OK
@@ -5279,28 +5300,6 @@ mod tests {
                 min_protocol_version: 1000,
                 max_protocol_version: 1001,
                 auth_credential: None,
-
-    // ─── Lease management tests (rig-7bho) ───────────────────────────────────
-
-    /// Scenario: Lease acquisition via session stream (spec §Lease Management RPCs,
-    /// lease-governance spec §Lease State Machine).
-    ///
-    /// WHEN agent sends LeaseRequest(action=ACQUIRE) on session stream,
-    /// THEN runtime responds with LeaseResponse(granted=true) AND
-    ///      a LeaseStateChange(REQUESTED→ACTIVE) notification.
-    #[tokio::test]
-    async fn test_lease_acquire_sends_lease_response_and_state_change() {
-        let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "lease-acquire-agent", "test-key").await;
-
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
-                ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string()],
-                lease_priority: 2,
             })),
         })
         .await
@@ -5385,330 +5384,6 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let _server = tokio::spawn(async move {
-
-        // First response: LeaseResponse(granted=true)
-        let resp_msg = stream.next().await.unwrap().unwrap();
-        let lease_id = match &resp_msg.payload {
-            Some(ServerPayload::LeaseResponse(resp)) => {
-                assert!(resp.granted, "Lease should be granted");
-                assert_eq!(resp.lease_id.len(), 16, "lease_id must be 16-byte UUIDv7");
-                assert_eq!(resp.granted_ttl_ms, 30_000);
-                assert_eq!(resp.granted_priority, 2);
-                assert!(resp.granted_capabilities.contains(&"create_tile".to_string()));
-                resp.lease_id.clone()
-            }
-            other => panic!("Expected LeaseResponse, got: {other:?}"),
-        };
-
-        // Second response: LeaseStateChange(REQUESTED→ACTIVE)
-        let change_msg = stream.next().await.unwrap().unwrap();
-        match &change_msg.payload {
-            Some(ServerPayload::LeaseStateChange(change)) => {
-                assert_eq!(change.lease_id, lease_id, "LeaseStateChange must reference same lease");
-                assert_eq!(change.previous_state, "REQUESTED");
-                assert_eq!(change.new_state, "ACTIVE");
-                assert!(change.timestamp_wall_us > 0);
-            }
-            other => panic!("Expected LeaseStateChange, got: {other:?}"),
-        }
-    }
-
-    /// Scenario: lease_id is always a 16-byte UUIDv7 (SceneId spec §SceneId for Scene-Object Identifiers).
-    ///
-    /// WHEN agent requests a lease,
-    /// THEN all lease_id fields in responses are exactly 16 bytes.
-    #[tokio::test]
-    async fn test_lease_id_is_16_byte_uuidv7() {
-        let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "sceneid-agent", "test-key").await;
-
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
-                ttl_ms: 10_000,
-                capabilities: Vec::new(),
-                lease_priority: 2,
-            })),
-        })
-        .await
-        .unwrap();
-
-        // LeaseResponse
-        let resp_msg = stream.next().await.unwrap().unwrap();
-        match &resp_msg.payload {
-            Some(ServerPayload::LeaseResponse(resp)) => {
-                assert!(resp.granted);
-                assert_eq!(resp.lease_id.len(), 16, "lease_id in LeaseResponse must be 16 bytes (SceneId UUIDv7)");
-            }
-            other => panic!("Expected LeaseResponse, got: {other:?}"),
-        }
-
-        // LeaseStateChange — also carries lease_id
-        let change_msg = stream.next().await.unwrap().unwrap();
-        match &change_msg.payload {
-            Some(ServerPayload::LeaseStateChange(change)) => {
-                assert_eq!(change.lease_id.len(), 16, "lease_id in LeaseStateChange must be 16 bytes");
-            }
-            other => panic!("Expected LeaseStateChange, got: {other:?}"),
-        }
-    }
-
-    /// Scenario: Priority 0 request downgraded to priority 2 (lease-governance spec
-    /// §Priority Assignment: "agent requesting priority 0 MUST receive priority 2").
-    #[tokio::test]
-    async fn test_lease_priority_zero_downgraded() {
-        let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "prio-agent", "test-key").await;
-
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
-                ttl_ms: 10_000,
-                capabilities: Vec::new(),
-                lease_priority: 0, // Priority 0 reserved for system — must be downgraded
-            })),
-        })
-        .await
-        .unwrap();
-
-        let resp_msg = stream.next().await.unwrap().unwrap();
-        match &resp_msg.payload {
-            Some(ServerPayload::LeaseResponse(resp)) => {
-                assert!(resp.granted);
-                assert_eq!(
-                    resp.granted_priority, 2,
-                    "Priority 0 request must be downgraded to priority 2"
-                );
-            }
-            other => panic!("Expected LeaseResponse, got: {other:?}"),
-        }
-    }
-
-    /// Scenario: Priority 1 without capability is downgraded to 2.
-    #[tokio::test]
-    async fn test_lease_priority_one_without_capability_downgraded() {
-        let (mut client, _server) = setup_test().await;
-        // Agent does not request lease:priority:1 capability
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "prio1-agent", "test-key").await;
-
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
-                ttl_ms: 10_000,
-                capabilities: Vec::new(),
-                lease_priority: 1, // Requires lease:priority:1 cap — not granted
-            })),
-        })
-        .await
-        .unwrap();
-
-        let resp_msg = stream.next().await.unwrap().unwrap();
-        match &resp_msg.payload {
-            Some(ServerPayload::LeaseResponse(resp)) => {
-                assert!(resp.granted);
-                assert_eq!(
-                    resp.granted_priority, 2,
-                    "Priority 1 without lease:priority:1 capability must be downgraded to 2"
-                );
-            }
-            other => panic!("Expected LeaseResponse, got: {other:?}"),
-        }
-    }
-
-    /// Scenario: LeaseRenew responds with LeaseResponse(granted=true) AND LeaseStateChange.
-    ///
-    /// Spec §Lease Management RPCs: "runtime SHALL respond with LeaseResponse".
-    /// On renewal, LeaseResponse with granted=true and the updated TTL is expected,
-    /// followed by a LeaseStateChange(ACTIVE→ACTIVE) notification.
-    #[tokio::test]
-    async fn test_lease_renew_returns_lease_response_and_state_change() {
-        let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "renew-agent", "test-key").await;
-
-        // Acquire a lease
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
-                ttl_ms: 60_000,
-                capabilities: vec!["create_tile".to_string()],
-                lease_priority: 2,
-            })),
-        })
-        .await
-        .unwrap();
-
-        // Consume LeaseResponse and LeaseStateChange from acquire
-        let resp = stream.next().await.unwrap().unwrap();
-        let lease_id = match &resp.payload {
-            Some(ServerPayload::LeaseResponse(r)) if r.granted => r.lease_id.clone(),
-            other => panic!("Expected LeaseResponse(granted), got: {other:?}"),
-        };
-        let _state_change = stream.next().await.unwrap().unwrap(); // consume REQUESTED→ACTIVE
-
-        // Renew the lease
-        tx.send(ClientMessage {
-            sequence: 3,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRenew(LeaseRenew {
-                lease_id: lease_id.clone(),
-                new_ttl_ms: 120_000,
-            })),
-        })
-        .await
-        .unwrap();
-
-        // First: LeaseResponse(granted=true) with updated TTL
-        let renew_resp = stream.next().await.unwrap().unwrap();
-        match &renew_resp.payload {
-            Some(ServerPayload::LeaseResponse(resp)) => {
-                assert!(resp.granted, "Renewal should be granted");
-                assert_eq!(resp.lease_id, lease_id, "Same lease_id in renewal response");
-                assert_eq!(resp.granted_ttl_ms, 120_000, "TTL should reflect renewal");
-            }
-            other => panic!("Expected LeaseResponse(granted) on renew, got: {other:?}"),
-        }
-
-        // Second: LeaseStateChange(ACTIVE→ACTIVE)
-        let change = stream.next().await.unwrap().unwrap();
-        match &change.payload {
-            Some(ServerPayload::LeaseStateChange(sc)) => {
-                assert_eq!(sc.lease_id, lease_id);
-                assert_eq!(sc.previous_state, "ACTIVE");
-                assert_eq!(sc.new_state, "ACTIVE");
-            }
-            other => panic!("Expected LeaseStateChange on renew, got: {other:?}"),
-        }
-    }
-
-    /// Scenario: LeaseRelease sends LeaseStateChange(ACTIVE→RELEASED).
-    ///
-    /// WHEN agent sends LeaseRelease,
-    /// THEN runtime sends LeaseStateChange(new_state=RELEASED).
-    #[tokio::test]
-    async fn test_lease_release_sends_state_change_released() {
-        let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "release-agent", "test-key").await;
-
-        // Acquire a lease
-        tx.send(ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
-                ttl_ms: 60_000,
-                capabilities: Vec::new(),
-                lease_priority: 2,
-            })),
-        })
-        .await
-        .unwrap();
-
-        let resp = stream.next().await.unwrap().unwrap();
-        let lease_id = match &resp.payload {
-            Some(ServerPayload::LeaseResponse(r)) if r.granted => r.lease_id.clone(),
-            other => panic!("Expected LeaseResponse(granted), got: {other:?}"),
-        };
-        let _sc = stream.next().await.unwrap().unwrap(); // consume REQUESTED→ACTIVE
-
-        // Release the lease
-        tx.send(ClientMessage {
-            sequence: 3,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRelease(LeaseRelease {
-                lease_id: lease_id.clone(),
-            })),
-        })
-        .await
-        .unwrap();
-
-        let release_msg = stream.next().await.unwrap().unwrap();
-        match &release_msg.payload {
-            Some(ServerPayload::LeaseStateChange(sc)) => {
-                assert_eq!(sc.lease_id, lease_id);
-                assert_eq!(sc.previous_state, "ACTIVE");
-                assert_eq!(sc.new_state, "RELEASED");
-                assert!(sc.timestamp_wall_us > 0);
-            }
-            other => panic!("Expected LeaseStateChange(RELEASED), got: {other:?}"),
-        }
-    }
-
-    /// Scenario: Retransmit correlation — sending a lease request with the same
-    /// client sequence number returns the cached response (RFC 0005 §5.3).
-    ///
-    /// The server must detect retransmits (same sequence) and replay the response
-    /// without re-applying the operation.
-    #[tokio::test]
-    async fn test_lease_retransmit_correlation_returns_cached_response() {
-        let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "retransmit-agent", "test-key").await;
-
-        let lease_req = ClientMessage {
-            sequence: 2,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
-                ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string()],
-                lease_priority: 2,
-            })),
-        };
-
-        // Original request
-        tx.send(lease_req.clone()).await.unwrap();
-
-        // Consume the original LeaseResponse + LeaseStateChange
-        let orig_resp = stream.next().await.unwrap().unwrap();
-        let orig_lease_id = match &orig_resp.payload {
-            Some(ServerPayload::LeaseResponse(r)) => {
-                assert!(r.granted);
-                r.lease_id.clone()
-            }
-            other => panic!("Expected LeaseResponse, got: {other:?}"),
-        };
-        let _orig_sc = stream.next().await.unwrap().unwrap(); // REQUESTED→ACTIVE
-
-        // Retransmit with same sequence number (simulates no-ack / lost response)
-        tx.send(lease_req).await.unwrap();
-
-        // The retransmit should return the cached LeaseResponse (no duplicate lease created)
-        let retx_resp = stream.next().await.unwrap().unwrap();
-        match &retx_resp.payload {
-            Some(ServerPayload::LeaseResponse(r)) => {
-                assert!(r.granted, "Retransmit should return cached grant");
-                assert_eq!(
-                    r.lease_id, orig_lease_id,
-                    "Retransmit must return the same lease_id as the original response"
-                );
-                assert_eq!(r.granted_ttl_ms, 30_000);
-            }
-            other => panic!("Expected LeaseResponse on retransmit, got: {other:?}"),
-        }
-    }
-
-    /// Scenario: Three agents contending for leases.
-    ///
-    /// Validates concurrent lease acquisition: all three agents can independently
-    /// acquire leases from the same runtime with unique lease IDs.
-    #[tokio::test]
-    async fn test_three_agents_lease_contention() {
-        let (mut client1, _server) = setup_test().await;
-
-        // Use a single shared server — connect 3 clients to the same port.
-        let scene = SceneGraph::new(800.0, 600.0);
-        let service = HudSessionImpl::new(scene, "test-key");
-
-        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let _handle = tokio::spawn(async move {
             let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
             tonic::transport::Server::builder()
                 .add_service(HudSessionServer::new(service))
@@ -6058,7 +5733,6 @@ mod tests {
 
         drop(tx);
     }
-}
 
     // ─── Zone durability tests (RFC 0005 §3.1, §8.6) ─────────────────────────
 
@@ -6399,6 +6073,400 @@ mod tests {
                 tile_id: vec![4u8; 16],
                 x: 100.0,
                 y: 200.0,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Send a heartbeat immediately after — should receive heartbeat echo, NOT any IME response
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 88888,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::Heartbeat(hb)) => {
+                assert_eq!(hb.timestamp_mono_us, 88888, "expected heartbeat echo after SetImePosition");
+            }
+            other => panic!("Expected Heartbeat (no IME response), got: {other:?}"),
+        }
+    }
+
+    // ─── Lease management tests (rig-7bho) ───────────────────────────────────
+
+    /// Scenario: Lease acquisition via session stream (spec §Lease Management RPCs,
+    /// lease-governance spec §Lease State Machine).
+    ///
+    /// WHEN agent sends LeaseRequest(action=ACQUIRE) on session stream,
+    /// THEN runtime responds with LeaseResponse(granted=true) AND
+    ///      a LeaseStateChange(REQUESTED→ACTIVE) notification.
+    #[tokio::test]
+    async fn test_lease_acquire_sends_lease_response_and_state_change() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "lease-acquire-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 30_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // First response: LeaseResponse(granted=true)
+        let resp_msg = stream.next().await.unwrap().unwrap();
+        let lease_id = match &resp_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(resp.granted, "Lease should be granted");
+                assert_eq!(resp.lease_id.len(), 16, "lease_id must be 16-byte UUIDv7");
+                assert_eq!(resp.granted_ttl_ms, 30_000);
+                assert_eq!(resp.granted_priority, 2);
+                assert!(resp.granted_capabilities.contains(&"create_tile".to_string()));
+                resp.lease_id.clone()
+            }
+            other => panic!("Expected LeaseResponse, got: {other:?}"),
+        };
+
+        // Second response: LeaseStateChange(REQUESTED→ACTIVE)
+        let change_msg = stream.next().await.unwrap().unwrap();
+        match &change_msg.payload {
+            Some(ServerPayload::LeaseStateChange(change)) => {
+                assert_eq!(change.lease_id, lease_id, "LeaseStateChange must reference same lease");
+                assert_eq!(change.previous_state, "REQUESTED");
+                assert_eq!(change.new_state, "ACTIVE");
+                assert!(change.timestamp_wall_us > 0);
+            }
+            other => panic!("Expected LeaseStateChange, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: lease_id is always a 16-byte UUIDv7 (SceneId spec §SceneId for Scene-Object Identifiers).
+    ///
+    /// WHEN agent requests a lease,
+    /// THEN all lease_id fields in responses are exactly 16 bytes.
+    #[tokio::test]
+    async fn test_lease_id_is_16_byte_uuidv7() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "sceneid-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 10_000,
+                capabilities: Vec::new(),
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // LeaseResponse
+        let resp_msg = stream.next().await.unwrap().unwrap();
+        match &resp_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(resp.granted);
+                assert_eq!(resp.lease_id.len(), 16, "lease_id in LeaseResponse must be 16 bytes (SceneId UUIDv7)");
+            }
+            other => panic!("Expected LeaseResponse, got: {other:?}"),
+        }
+
+        // LeaseStateChange — also carries lease_id
+        let change_msg = stream.next().await.unwrap().unwrap();
+        match &change_msg.payload {
+            Some(ServerPayload::LeaseStateChange(change)) => {
+                assert_eq!(change.lease_id.len(), 16, "lease_id in LeaseStateChange must be 16 bytes");
+            }
+            other => panic!("Expected LeaseStateChange, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Priority 0 request downgraded to priority 2 (lease-governance spec
+    /// §Priority Assignment: "agent requesting priority 0 MUST receive priority 2").
+    #[tokio::test]
+    async fn test_lease_priority_zero_downgraded() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "prio-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 10_000,
+                capabilities: Vec::new(),
+                lease_priority: 0, // Priority 0 reserved for system — must be downgraded
+            })),
+        })
+        .await
+        .unwrap();
+
+        let resp_msg = stream.next().await.unwrap().unwrap();
+        match &resp_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(resp.granted);
+                assert_eq!(
+                    resp.granted_priority, 2,
+                    "Priority 0 request must be downgraded to priority 2"
+                );
+            }
+            other => panic!("Expected LeaseResponse, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Priority 1 without capability is downgraded to 2.
+    #[tokio::test]
+    async fn test_lease_priority_one_without_capability_downgraded() {
+        let (mut client, _server) = setup_test().await;
+        // Agent does not request lease:priority:1 capability
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "prio1-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 10_000,
+                capabilities: Vec::new(),
+                lease_priority: 1, // Requires lease:priority:1 cap — not granted
+            })),
+        })
+        .await
+        .unwrap();
+
+        let resp_msg = stream.next().await.unwrap().unwrap();
+        match &resp_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(resp.granted);
+                assert_eq!(
+                    resp.granted_priority, 2,
+                    "Priority 1 without lease:priority:1 capability must be downgraded to 2"
+                );
+            }
+            other => panic!("Expected LeaseResponse, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: LeaseRenew responds with LeaseResponse(granted=true) AND LeaseStateChange.
+    ///
+    /// Spec §Lease Management RPCs: "runtime SHALL respond with LeaseResponse".
+    /// On renewal, LeaseResponse with granted=true and the updated TTL is expected,
+    /// followed by a LeaseStateChange(ACTIVE→ACTIVE) notification.
+    #[tokio::test]
+    async fn test_lease_renew_returns_lease_response_and_state_change() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "renew-agent", "test-key").await;
+
+        // Acquire a lease
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Consume LeaseResponse and LeaseStateChange from acquire
+        let resp = stream.next().await.unwrap().unwrap();
+        let lease_id = match &resp.payload {
+            Some(ServerPayload::LeaseResponse(r)) if r.granted => r.lease_id.clone(),
+            other => panic!("Expected LeaseResponse(granted), got: {other:?}"),
+        };
+        let _state_change = stream.next().await.unwrap().unwrap(); // consume REQUESTED→ACTIVE
+
+        // Renew the lease
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRenew(LeaseRenew {
+                lease_id: lease_id.clone(),
+                new_ttl_ms: 120_000,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // First: LeaseResponse(granted=true) with updated TTL
+        let renew_resp = stream.next().await.unwrap().unwrap();
+        match &renew_resp.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(resp.granted, "Renewal should be granted");
+                assert_eq!(resp.lease_id, lease_id, "Same lease_id in renewal response");
+                assert_eq!(resp.granted_ttl_ms, 120_000, "TTL should reflect renewal");
+            }
+            other => panic!("Expected LeaseResponse(granted) on renew, got: {other:?}"),
+        }
+
+        // Second: LeaseStateChange(ACTIVE→ACTIVE)
+        let change = stream.next().await.unwrap().unwrap();
+        match &change.payload {
+            Some(ServerPayload::LeaseStateChange(sc)) => {
+                assert_eq!(sc.lease_id, lease_id);
+                assert_eq!(sc.previous_state, "ACTIVE");
+                assert_eq!(sc.new_state, "ACTIVE");
+            }
+            other => panic!("Expected LeaseStateChange on renew, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: LeaseRelease sends LeaseResponse(granted=true) then LeaseStateChange(ACTIVE→RELEASED).
+    ///
+    /// WHEN agent sends LeaseRelease,
+    /// THEN runtime first sends LeaseResponse(granted=true) (spec: every lease op answered by LeaseResponse),
+    ///      then LeaseStateChange(new_state=RELEASED) (transactional notification).
+    #[tokio::test]
+    async fn test_lease_release_sends_state_change_released() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "release-agent", "test-key").await;
+
+        // Acquire a lease
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: Vec::new(),
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let resp = stream.next().await.unwrap().unwrap();
+        let lease_id = match &resp.payload {
+            Some(ServerPayload::LeaseResponse(r)) if r.granted => r.lease_id.clone(),
+            other => panic!("Expected LeaseResponse(granted), got: {other:?}"),
+        };
+        let _sc = stream.next().await.unwrap().unwrap(); // consume REQUESTED→ACTIVE
+
+        // Release the lease
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRelease(LeaseRelease {
+                lease_id: lease_id.clone(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        // First: LeaseResponse(granted=true)
+        let release_resp = stream.next().await.unwrap().unwrap();
+        match &release_resp.payload {
+            Some(ServerPayload::LeaseResponse(r)) => {
+                assert!(r.granted, "LeaseRelease success must return LeaseResponse(granted=true)");
+                assert_eq!(r.lease_id, lease_id, "lease_id must match in LeaseResponse");
+            }
+            other => panic!("Expected LeaseResponse(granted) for release, got: {other:?}"),
+        }
+
+        // Second: LeaseStateChange(ACTIVE→RELEASED).
+        let sc_msg = stream.next().await.unwrap().unwrap();
+        match &sc_msg.payload {
+            Some(ServerPayload::LeaseStateChange(sc)) => {
+                assert_eq!(sc.lease_id, lease_id);
+                assert_eq!(sc.previous_state, "ACTIVE");
+                assert_eq!(sc.new_state, "RELEASED");
+                assert!(sc.timestamp_wall_us > 0);
+            }
+            other => panic!("Expected LeaseStateChange(RELEASED), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Retransmit correlation — sending a lease request with the same
+    /// client sequence number returns the cached response (RFC 0005 §5.3).
+    ///
+    /// The server must detect retransmits (same sequence) and replay the response
+    /// without re-applying the operation.
+    #[tokio::test]
+    async fn test_lease_retransmit_correlation_returns_cached_response() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "retransmit-agent", "test-key").await;
+
+        let lease_req = ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 30_000,
+                capabilities: vec!["create_tile".to_string()],
+                lease_priority: 2,
+            })),
+        };
+
+        // Original request
+        tx.send(lease_req.clone()).await.unwrap();
+
+        // Consume the original LeaseResponse + LeaseStateChange
+        let orig_resp = stream.next().await.unwrap().unwrap();
+        let orig_lease_id = match &orig_resp.payload {
+            Some(ServerPayload::LeaseResponse(r)) => {
+                assert!(r.granted);
+                r.lease_id.clone()
+            }
+            other => panic!("Expected LeaseResponse, got: {other:?}"),
+        };
+        let _orig_sc = stream.next().await.unwrap().unwrap(); // REQUESTED→ACTIVE
+
+        // Retransmit with same sequence number (simulates no-ack / lost response)
+        tx.send(lease_req).await.unwrap();
+
+        // The retransmit should return the cached LeaseResponse (no duplicate lease created)
+        let retx_resp = stream.next().await.unwrap().unwrap();
+        match &retx_resp.payload {
+            Some(ServerPayload::LeaseResponse(r)) => {
+                assert!(r.granted, "Retransmit should return cached grant");
+                assert_eq!(
+                    r.lease_id, orig_lease_id,
+                    "Retransmit must return the same lease_id as the original response"
+                );
+                assert_eq!(r.granted_ttl_ms, 30_000);
+            }
+            other => panic!("Expected LeaseResponse on retransmit, got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Three agents contending for leases.
+    ///
+    /// Validates concurrent lease acquisition: all three agents can independently
+    /// acquire leases from the same runtime with unique lease IDs.
+    #[tokio::test]
+    async fn test_three_agents_lease_contention() {
+        let (mut client1, _server) = setup_test().await;
+
+        // Use a single shared server — connect 3 clients to the same port.
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         let url = format!("http://[::1]:{}", addr.port());
         let mut c1 = HudSessionClient::connect(url.clone()).await.unwrap();
@@ -6438,10 +6506,7 @@ mod tests {
             }
         }
 
-        // All lease IDs must be unique
-        let mut unique = lease_ids.clone();
-        unique.dedup();
-        // Note: dedup only removes consecutive duplicates, so use a HashSet check
+        // All lease IDs must be unique — use a HashSet for correct deduplication.
         let set: std::collections::HashSet<Vec<u8>> = lease_ids.iter().cloned().collect();
         assert_eq!(set.len(), 3, "All three agents must receive unique lease IDs");
 
@@ -6473,13 +6538,6 @@ mod tests {
         })
         .await
         .unwrap();
-
-        // Send a heartbeat immediately after — should receive heartbeat echo, NOT any IME response
-        tx.send(ClientMessage {
-            sequence: 3,
-            timestamp_wall_us: now_wall_us(),
-            payload: Some(ClientPayload::Heartbeat(Heartbeat {
-                timestamp_mono_us: 88888,
 
         let resp = stream.next().await.unwrap().unwrap();
         match &resp.payload {
@@ -6532,14 +6590,6 @@ mod tests {
 
         let msg = stream.next().await.unwrap().unwrap();
         match &msg.payload {
-            Some(ServerPayload::Heartbeat(hb)) => {
-                assert_eq!(hb.timestamp_mono_us, 88888, "expected heartbeat echo after SetImePosition");
-            }
-            other => panic!("Expected Heartbeat (no IME response), got: {other:?}"),
-        }
-    }
-}
-
             Some(ServerPayload::LeaseResponse(resp)) => {
                 assert!(!resp.granted, "Renew on unknown lease must be denied");
                 assert!(!resp.deny_code.is_empty(), "deny_code must be populated");
@@ -6616,4 +6666,5 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         // If we reach here without a panic, the cleanup path is safe.
     }
+
 }
