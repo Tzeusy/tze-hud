@@ -211,8 +211,12 @@ impl FocusManager {
         node_id: Option<SceneId>,
         scene: &SceneGraph,
     ) -> FocusTransition {
-        // Passthrough tiles do not acquire focus (spec line 37).
+        // Validate tile exists and belongs to this tab (prevents cross-tab focus corruption).
         if let Some(tile) = scene.tiles.get(&tile_id) {
+            if tile.tab_id != tab_id {
+                return FocusTransition::default();
+            }
+            // Passthrough tiles do not acquire focus (spec line 37).
             if tile.input_mode == InputMode::Passthrough {
                 return FocusTransition::default();
             }
@@ -265,7 +269,8 @@ impl FocusManager {
             return (FocusResult::Invalid, FocusTransition::default());
         }
 
-        // Validate node if provided.
+        // Validate node if provided: must exist, be a focusable HitRegion,
+        // and be reachable from this tile's root (prevents cross-tile node injection).
         if let Some(nid) = req.node_id {
             match scene.nodes.get(&nid) {
                 Some(node) => {
@@ -278,6 +283,19 @@ impl FocusManager {
                     }
                 }
                 None => return (FocusResult::Invalid, FocusTransition::default()),
+            }
+            // Verify the node is reachable from this tile's root tree.
+            let tile = scene.tiles.get(&req.tile_id).unwrap(); // validated above
+            let reachable = collect_focusable_nodes(tile.root_node, &scene.nodes)
+                .contains(&nid)
+                || {
+                    // collect_focusable_nodes only returns accepts_focus nodes;
+                    // do a full DFS to check reachability regardless of accepts_focus.
+                    let mut visited = std::collections::HashSet::new();
+                    node_reachable_from(tile.root_node, nid, &scene.nodes, &mut visited)
+                };
+            if !reachable {
+                return (FocusResult::Invalid, FocusTransition::default());
             }
         }
 
@@ -362,6 +380,10 @@ impl FocusManager {
     /// Called when a tile is destroyed. If the destroyed tile holds focus,
     /// focus falls back to the previously focused element.
     ///
+    /// **MUST be called before the tile is removed from `scene.tiles`** so that
+    /// the tile's namespace can be looked up for `FocusLostEvent` dispatch.
+    /// If called after removal the `FocusLostEvent` will be silently dropped.
+    ///
     /// Returns the focus transition (may be empty if tile did not hold focus).
     pub fn on_tile_destroyed(
         &mut self,
@@ -418,41 +440,14 @@ impl FocusManager {
         }
 
         // Build gained event if fallback is a real tile/node.
-        match &fallback {
-            FocusOwner::Node { tile_id: t, node_id: n } => {
-                let ns = scene.tiles.get(t).map(|tile| tile.namespace.clone());
-                if let Some(ns) = ns {
-                    transition.gained = Some((
-                        FocusGainedEvent {
-                            tile_id: *t,
-                            node_id: Some(*n),
-                            source: FocusSource::Programmatic,
-                        },
-                        ns,
-                    ));
-                }
-            }
-            FocusOwner::Tile(t) => {
-                let ns = scene.tiles.get(t).map(|tile| tile.namespace.clone());
-                if let Some(ns) = ns {
-                    transition.gained = Some((
-                        FocusGainedEvent {
-                            tile_id: *t,
-                            node_id: None,
-                            source: FocusSource::Programmatic,
-                        },
-                        ns,
-                    ));
-                }
-            }
-            _ => {}
-        }
+        transition.gained = build_gained_event(&fallback, FocusSource::Programmatic, scene);
 
         transition.ring_update = Some(self.compute_ring_update(tab_id, scene));
         transition
     }
 
-    /// Called when a lease is revoked. Clears focus on all tiles owned by the lease.
+    /// Called when a lease is revoked. Clears focus on the focused tile (if any)
+    /// owned by the lease, and purges all leased tiles from focus history.
     pub fn on_lease_revoked(
         &mut self,
         tab_id: SceneId,
@@ -467,78 +462,91 @@ impl FocusManager {
             .map(|t| t.id)
             .collect();
 
-        for tile_id in &leased_tiles {
-            let was_focused = {
-                let tree = self.tree_for(tab_id);
-                tree.current().is_on_tile(*tile_id)
-            };
-            if was_focused {
-                // Build lost event.
-                let tree = self.tree_for(tab_id);
-                let lost_node = match tree.current() {
-                    FocusOwner::Node { node_id, .. } => Some(*node_id),
-                    _ => None,
-                };
-                let ns = scene.tiles.get(tile_id).map(|t| t.namespace.clone());
-                tree.set_focus(FocusOwner::None);
-                tree.remove_from_history(*tile_id);
+        // Find the focused tile (if any) among leased tiles and capture lost event.
+        let lost_event: Option<(FocusLostEvent, String)>;
+        {
+            let tree = self.tree_for(tab_id);
+            let focused_leased = leased_tiles
+                .iter()
+                .find(|&&tid| tree.current().is_on_tile(tid))
+                .copied();
 
-                let ring_update = Some(self.compute_ring_update(tab_id, scene));
-                let lost = ns.map(|ns| (
-                    FocusLostEvent {
-                        tile_id: *tile_id,
-                        node_id: lost_node,
-                        reason: FocusLostReason::LeaseRevoked,
-                    },
-                    ns,
-                ));
-                return FocusTransition { lost, gained: None, ring_update };
+            lost_event = if let Some(_tile_id) = focused_leased {
+                let old_owner = tree.current().clone();
+                let ev = build_lost_event(&old_owner, FocusLostReason::LeaseRevoked, scene);
+                tree.set_focus(FocusOwner::None);
+                ev
+            } else {
+                None
+            };
+
+            // Purge all leased tiles from history regardless of whether they were focused.
+            for tile_id in &leased_tiles {
+                tree.remove_from_history(*tile_id);
             }
+        }
+
+        if lost_event.is_some() {
+            let ring_update = Some(self.compute_ring_update(tab_id, scene));
+            return FocusTransition { lost: lost_event, gained: None, ring_update };
         }
         FocusTransition::default()
     }
 
-    /// Called when an agent disconnects. Clears focus for any tiles the agent owns.
+    /// Called when an agent disconnects. Clears focus for any tiles the agent owns
+    /// and purges all of the agent's tiles from focus history.
     pub fn on_agent_disconnected(
         &mut self,
         tab_id: SceneId,
         namespace: &str,
         scene: &SceneGraph,
     ) -> FocusTransition {
-        let tree = self.tree_for(tab_id);
-        let is_focused_on_agent = match tree.current() {
-            FocusOwner::Tile(tid) => {
-                scene.tiles.get(tid).map(|t| t.namespace.as_str()) == Some(namespace)
-            }
-            FocusOwner::Node { tile_id, .. } => {
-                scene.tiles.get(tile_id).map(|t| t.namespace.as_str()) == Some(namespace)
-            }
-            _ => false,
-        };
+        // Collect all tiles owned by the disconnecting agent on this tab.
+        let agent_tiles: Vec<SceneId> = scene
+            .tiles
+            .values()
+            .filter(|t| t.tab_id == tab_id && t.namespace == namespace)
+            .map(|t| t.id)
+            .collect();
 
-        if !is_focused_on_agent {
-            return FocusTransition::default();
+        let lost_event: Option<(FocusLostEvent, String)>;
+        {
+            let tree = self.tree_for(tab_id);
+
+            let is_focused_on_agent = match tree.current() {
+                FocusOwner::Tile(tid) => {
+                    scene.tiles.get(tid).map(|t| t.namespace.as_str()) == Some(namespace)
+                }
+                FocusOwner::Node { tile_id, .. } => {
+                    scene.tiles.get(tile_id).map(|t| t.namespace.as_str()) == Some(namespace)
+                }
+                _ => false,
+            };
+
+            lost_event = if is_focused_on_agent {
+                let old_owner = tree.current().clone();
+                let ev = build_lost_event(&old_owner, FocusLostReason::AgentDisconnected, scene);
+                tree.set_focus(FocusOwner::None);
+                ev
+            } else {
+                None
+            };
+
+            // Purge all of this agent's tiles from history so fallback never points
+            // to a disconnected agent's tile.
+            for tile_id in &agent_tiles {
+                tree.remove_from_history(*tile_id);
+            }
         }
 
-        let lost_tile = tree.current().tile_id().unwrap();
-        let lost_node = match tree.current() {
-            FocusOwner::Node { node_id, .. } => Some(*node_id),
-            _ => None,
-        };
-        tree.set_focus(FocusOwner::None);
-
-        FocusTransition {
-            lost: Some((
-                FocusLostEvent {
-                    tile_id: lost_tile,
-                    node_id: lost_node,
-                    reason: FocusLostReason::AgentDisconnected,
-                },
-                namespace.to_string(),
-            )),
-            gained: None,
-            ring_update: Some(self.compute_ring_update(tab_id, scene)),
+        if lost_event.is_some() {
+            return FocusTransition {
+                lost: lost_event,
+                gained: None,
+                ring_update: Some(self.compute_ring_update(tab_id, scene)),
+            };
         }
+        FocusTransition::default()
     }
 
     // ─── Focus isolation (spec lines 67-69) ─────────────────────────────
@@ -738,6 +746,33 @@ fn collect_dfs(
     }
 }
 
+/// Check whether `target` is reachable from `root` in the node tree.
+///
+/// Used by `request_focus` to reject node IDs that are not part of the
+/// requested tile's node tree, preventing cross-tile node injection.
+fn node_reachable_from(
+    root: Option<SceneId>,
+    target: SceneId,
+    nodes: &std::collections::HashMap<SceneId, tze_hud_scene::types::Node>,
+    visited: &mut std::collections::HashSet<SceneId>,
+) -> bool {
+    let root_id = match root {
+        Some(id) => id,
+        None => return false,
+    };
+    if root_id == target {
+        return true;
+    }
+    if !visited.insert(root_id) {
+        return false; // cycle guard
+    }
+    let node = match nodes.get(&root_id) {
+        Some(n) => n,
+        None => return false,
+    };
+    node.children.iter().any(|&child| node_reachable_from(Some(child), target, nodes, visited))
+}
+
 /// Advance to the next/previous step in the cycle.
 fn advance_in_cycle(cycle: &[CycleStep], current: &FocusOwner, reverse: bool) -> FocusOwner {
     if cycle.is_empty() {
@@ -885,6 +920,7 @@ mod tests {
                 interaction_id: interaction_id.to_string(),
                 accepts_focus,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         scene.set_tile_root(tile_id, node).unwrap();
@@ -1167,6 +1203,7 @@ mod tests {
                 interaction_id: "n1".into(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         let node_n2 = Node {
@@ -1177,6 +1214,7 @@ mod tests {
                 interaction_id: "n2".into(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         scene.nodes.insert(n1, node_n1);
@@ -1193,6 +1231,7 @@ mod tests {
                 interaction_id: "n3".into(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         });
         scene.tiles.get_mut(&t3).unwrap().root_node = Some(n3);
@@ -1284,6 +1323,7 @@ mod tests {
                 interaction_id: interaction_id.into(),
                 accepts_focus,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         });
         scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(id);

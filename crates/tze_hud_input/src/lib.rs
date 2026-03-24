@@ -111,10 +111,11 @@ impl InputProcessor {
     /// Returns the result including timing measurements and an optional
     /// `AgentDispatch` descriptor for forwarding the event to the owning agent.
     ///
-    /// When `focus_manager` and `tab_id` are provided, click-to-focus is
-    /// applied **before** the pointer event is forwarded to the agent, per
-    /// spec §1.2 (lines 27-29). The returned `FocusTransition` (if any) must
-    /// be dispatched to agents before the `AgentDispatch` payload.
+    /// In this variant, click-to-focus is applied **before** the pointer
+    /// event is forwarded to the agent, using the provided `focus_manager`
+    /// and `tab_id`, per spec §1.2 (lines 27-29). The returned
+    /// `FocusTransition` (if any) must be dispatched to agents before the
+    /// `AgentDispatch` payload.
     pub fn process_with_focus(
         &mut self,
         event: &PointerEvent,
@@ -124,21 +125,22 @@ impl InputProcessor {
     ) -> (InputResult, Option<FocusTransition>) {
         let focus_transition = if event.kind == PointerEventKind::Down {
             let hit = scene.hit_test(event.x, event.y);
-            if let Some((tile_id, node_id)) = hit {
+            if let HitResult::NodeHit { tile_id, node_id, .. } = hit {
                 let transition = focus_manager.on_click(tab_id, tile_id, Some(node_id), scene);
-                // Update focused local state in hit_region_states.
-                if let FocusOwner::Node { node_id: fid, .. } = focus_manager
-                    .trees()
-                    .get(&tab_id)
-                    .map(|t| t.current().clone())
-                    .unwrap_or(FocusOwner::None)
-                {
-                    // Clear old focused state, set new.
-                    for (_, state) in scene.hit_region_states.iter_mut() {
-                        state.focused = false;
+                // Update focused local state in hit_region_states based on transition.
+                // Clear the node that lost focus (if any) and set the one that gained.
+                if let Some((lost_ev, _)) = &transition.lost {
+                    if let Some(lost_node_id) = lost_ev.node_id {
+                        if let Some(state) = scene.hit_region_states.get_mut(&lost_node_id) {
+                            state.focused = false;
+                        }
                     }
-                    if let Some(state) = scene.hit_region_states.get_mut(&fid) {
-                        state.focused = true;
+                }
+                if let Some((gained_ev, _)) = &transition.gained {
+                    if let Some(gained_node_id) = gained_ev.node_id {
+                        if let Some(state) = scene.hit_region_states.get_mut(&gained_node_id) {
+                            state.focused = true;
+                        }
                     }
                 }
                 if transition.gained.is_some() || transition.lost.is_some() {

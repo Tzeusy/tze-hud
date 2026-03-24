@@ -20,6 +20,7 @@
 //! - Lines 11-13 (Focus Tree Structure)
 //! - Lines 57-58 (Focus Transfer on Destruction)
 
+use std::collections::VecDeque;
 use tze_hud_scene::SceneId;
 
 /// Maximum depth of per-tab focus history for fallback-on-destruction.
@@ -65,10 +66,11 @@ impl FocusOwner {
 pub struct FocusTree {
     /// The current focus owner on this tab.
     pub current: FocusOwner,
-    /// Bounded history of prior focus owners (newest last).
+    /// Bounded history of prior focus owners (newest at back).
     ///
     /// Used for fallback when the focused tile/node is destroyed (spec line 57).
-    history: Vec<FocusOwner>,
+    /// Implemented as a `VecDeque` for O(1) front-eviction when the bound is hit.
+    history: VecDeque<FocusOwner>,
 }
 
 impl FocusTree {
@@ -76,7 +78,7 @@ impl FocusTree {
     pub fn new() -> Self {
         Self {
             current: FocusOwner::None,
-            history: Vec::with_capacity(HISTORY_DEPTH),
+            history: VecDeque::with_capacity(HISTORY_DEPTH),
         }
     }
 
@@ -93,9 +95,9 @@ impl FocusTree {
         let prev = std::mem::replace(&mut self.current, next);
         if prev != FocusOwner::None {
             if self.history.len() == HISTORY_DEPTH {
-                self.history.remove(0);
+                self.history.pop_front();
             }
-            self.history.push(prev);
+            self.history.push_back(prev);
         }
     }
 
@@ -104,7 +106,7 @@ impl FocusTree {
     /// Used when the current focus owner is destroyed to fall back to the
     /// previous element (spec lines 57-58).
     pub fn previous(&self) -> Option<&FocusOwner> {
-        self.history.last()
+        self.history.back()
     }
 
     /// Remove `owner` from history (called when a tile/node is destroyed so
@@ -123,7 +125,7 @@ impl FocusTree {
     /// Returns `FocusOwner::None` if no valid history entry exists.
     pub fn pop_fallback(&mut self, destroyed_tile_id: SceneId) -> FocusOwner {
         // Walk history from newest to oldest, skipping the destroyed tile.
-        while let Some(prev) = self.history.pop() {
+        while let Some(prev) = self.history.pop_back() {
             match &prev {
                 FocusOwner::Tile(id) if *id == destroyed_tile_id => continue,
                 FocusOwner::Node { tile_id: t, .. } if *t == destroyed_tile_id => continue,
