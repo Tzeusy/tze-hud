@@ -1792,51 +1792,181 @@ impl SceneGraph {
         tiles
     }
 
-    /// Find the node at a given point, returning (tile_id, node_id) for hit-test.
-    /// Searches front-to-back (highest z_order first).
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<(SceneId, SceneId)> {
-        let active = self.active_tab?;
-        let mut tiles: Vec<&Tile> = self
-            .tiles
-            .values()
-            .filter(|t| t.tab_id == active && t.input_mode != InputMode::Passthrough)
-            .collect();
-        // Sort highest z_order first for front-to-back traversal
-        tiles.sort_by(|a, b| b.z_order.cmp(&a.z_order));
+    /// Map a 2D display-coordinate point to the deepest interactive element.
+    ///
+    /// Traversal order (per scene-graph/spec.md §Requirement: Hit-Testing Contract,
+    /// RFC 0001 §5.1-5.2, and input-model/spec.md lines 263-274):
+    ///
+    /// 1. **Chrome layer first** — tiles whose lease has priority 0 are checked
+    ///    before any content-layer tile, regardless of z-order.  The first
+    ///    non-passthrough chrome tile whose bounds contain the point wins and
+    ///    returns [`HitResult::Chrome`].
+    /// 2. **Content layer tiles by z-order descending** — remaining (non-chrome)
+    ///    tiles sorted highest z-order first.  Passthrough tiles are skipped.
+    /// 3. **Within each tile, reverse tree order** — node children visited
+    ///    last-first (last sibling = front-most); depth-first.  Only
+    ///    [`NodeData::HitRegion`] nodes with `accepts_pointer = true` qualify.
+    ///
+    /// # Return value
+    /// - [`HitResult::Chrome`]   — chrome-layer tile/node absorbed the point.
+    /// - [`HitResult::NodeHit`]  — a `HitRegionNode` within a content tile matched.
+    /// - [`HitResult::TileHit`]  — the tile absorbed the point but no node matched.
+    /// - [`HitResult::Passthrough`] — only passthrough tiles at this coordinate.
+    ///
+    /// Returns [`HitResult::Passthrough`] when no tile covers the point.
+    ///
+    /// # Performance
+    /// Pure geometry — no GPU involvement.  Target: < 100 µs for 50 tiles
+    /// (scene-graph/spec.md line 267, RFC 0001 §10).
+    pub fn hit_test(&self, x: f32, y: f32) -> HitResult {
+        let Some(active) = self.active_tab else {
+            return HitResult::Passthrough;
+        };
 
-        for tile in tiles {
-            // Transform point to tile-local coordinates
-            let local_x = x - tile.bounds.x;
-            let local_y = y - tile.bounds.y;
+        // Gather all tiles on the active tab that cover the point.
+        // Partition into chrome (priority-0 lease) and content.
+        let mut chrome_tiles: Vec<&Tile> = Vec::new();
+        let mut content_tiles: Vec<&Tile> = Vec::new();
 
+        for tile in self.tiles.values().filter(|t| t.tab_id == active) {
             if !tile.bounds.contains_point(x, y) {
                 continue;
             }
+            let is_chrome = self
+                .leases
+                .get(&tile.lease_id)
+                .map(|l| l.priority == 0)
+                .unwrap_or(false);
+            if is_chrome {
+                chrome_tiles.push(tile);
+            } else {
+                content_tiles.push(tile);
+            }
+        }
 
-            // Check hit regions within this tile (depth-first, front-to-back)
-            if let Some(root_id) = tile.root_node
-                && let Some(node_id) = self.hit_test_node(root_id, local_x, local_y)
-            {
-                return Some((tile.id, node_id));
+        // ── Phase 1: Chrome layer ────────────────────────────────────────
+        // Sort chrome tiles highest z-order first; passthrough chrome tiles
+        // do NOT block (they are skipped), but a non-passthrough chrome tile
+        // wins immediately.
+        chrome_tiles.sort_by(|a, b| b.z_order.cmp(&a.z_order));
+        for tile in &chrome_tiles {
+            if tile.input_mode == InputMode::Passthrough {
+                continue;
+            }
+            // Chrome tile absorbs the hit.  If it has a HitRegionNode, report
+            // its node_id as the element_id for richer routing; otherwise use
+            // the tile id.
+            let local_x = x - tile.bounds.x;
+            let local_y = y - tile.bounds.y;
+            let element_id = tile
+                .root_node
+                .and_then(|root| self.hit_test_node(root, local_x, local_y))
+                .unwrap_or(tile.id);
+            return HitResult::Chrome { element_id };
+        }
+
+        // ── Phase 2: Content layer tiles (z-order descending) ────────────
+        content_tiles.sort_by(|a, b| b.z_order.cmp(&a.z_order));
+        for tile in &content_tiles {
+            if tile.input_mode == InputMode::Passthrough {
+                continue; // Skip passthrough tiles per spec.
+            }
+            let local_x = x - tile.bounds.x;
+            let local_y = y - tile.bounds.y;
+
+            // ── Phase 3: Within the tile — reverse tree order ────────────
+            if let Some(root_id) = tile.root_node {
+                if let Some(node_id) = self.hit_test_node(root_id, local_x, local_y) {
+                    // Retrieve interaction_id from the node (it must be HitRegionNode).
+                    let interaction_id = self
+                        .nodes
+                        .get(&node_id)
+                        .and_then(|n| {
+                            if let NodeData::HitRegion(hr) = &n.data {
+                                Some(hr.interaction_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_default();
+                    return HitResult::NodeHit { tile_id: tile.id, node_id, interaction_id };
+                }
             }
 
-            // If the tile itself was hit (but no specific node), return tile-level hit
-            return Some((tile.id, tile.id));
+            // Tile absorbed the point but no HitRegionNode matched.
+            return HitResult::TileHit { tile_id: tile.id };
         }
-        None
+
+        // Only passthrough tiles covered the point, or no tiles at all.
+        HitResult::Passthrough
+    }
+
+    /// Update `HitRegionLocalState` for the given point.
+    ///
+    /// Called by the input pipeline (Stage 2) immediately after hit-testing to
+    /// provide local visual feedback without waiting for the owning agent.
+    /// Sets `hovered = true` on the newly-hit node and `hovered = false` on the
+    /// previous hover node (if it changed).
+    ///
+    /// `prev_hover` — the node that was previously hovered (cleared on transition).
+    /// `result`     — the current hit-test result.
+    ///
+    /// Returns the newly-hovered node ID (if any) for the caller to track.
+    pub fn update_hover_state(
+        &mut self,
+        prev_hover: Option<SceneId>,
+        result: &HitResult,
+    ) -> Option<SceneId> {
+        // Clear old hover.
+        if let Some(old_id) = prev_hover {
+            if let Some(state) = self.hit_region_states.get_mut(&old_id) {
+                state.hovered = false;
+            }
+        }
+        // Set new hover.
+        let new_hover = if let HitResult::NodeHit { node_id, .. } = result {
+            if let Some(state) = self.hit_region_states.get_mut(node_id) {
+                state.hovered = true;
+            }
+            Some(*node_id)
+        } else {
+            None
+        };
+        new_hover
+    }
+
+    /// Update pressed state for a node.
+    ///
+    /// Call with `pressed = true` on PointerDown and `pressed = false` on
+    /// PointerUp / capture release.  No-op if the node has no local state entry.
+    pub fn update_pressed_state(&mut self, node_id: SceneId, pressed: bool) {
+        if let Some(state) = self.hit_region_states.get_mut(&node_id) {
+            state.pressed = pressed;
+        }
+    }
+
+    /// Update focused state for a node.
+    ///
+    /// The focus state machine is owned by the input epic; this helper allows
+    /// the compositor to reflect focus changes into local state without a full
+    /// state-machine transition.
+    pub fn update_focused_state(&mut self, node_id: SceneId, focused: bool) {
+        if let Some(state) = self.hit_region_states.get_mut(&node_id) {
+            state.focused = focused;
+        }
     }
 
     fn hit_test_node(&self, node_id: SceneId, x: f32, y: f32) -> Option<SceneId> {
         let node = self.nodes.get(&node_id)?;
 
-        // Check children in reverse order (last child = front-most)
+        // Check children in reverse order (last child = front-most) — depth first.
         for child_id in node.children.iter().rev() {
             if let Some(hit) = self.hit_test_node(*child_id, x, y) {
                 return Some(hit);
             }
         }
 
-        // Check this node
+        // Check this node — only HitRegionNode with accepts_pointer qualifies.
         match &node.data {
             NodeData::HitRegion(hr) if hr.accepts_pointer && hr.bounds.contains_point(x, y) => {
                 Some(node_id)
@@ -2293,6 +2423,7 @@ mod tests {
                 interaction_id: "btn-click".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         scene.set_tile_root(tile2_id, hit_node.clone()).unwrap();
@@ -2320,21 +2451,29 @@ mod tests {
                 interaction_id: "btn".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
+                ..Default::default()
             }),
         };
         scene.set_tile_root(tile_id, hit_node).unwrap();
 
         // Hit the hit region (tile at 100,100; region at 50,50 within tile = 150,150 global)
         let result = scene.hit_test(200.0, 180.0);
-        assert_eq!(result, Some((tile_id, hr_node_id)));
+        assert_eq!(
+            result,
+            HitResult::NodeHit {
+                tile_id,
+                node_id: hr_node_id,
+                interaction_id: "btn".to_string(),
+            }
+        );
 
         // Miss the hit region but hit the tile
         let result = scene.hit_test(110.0, 110.0);
-        assert_eq!(result, Some((tile_id, tile_id)));
+        assert_eq!(result, HitResult::TileHit { tile_id });
 
         // Miss everything
         let result = scene.hit_test(10.0, 10.0);
-        assert_eq!(result, None);
+        assert_eq!(result, HitResult::Passthrough);
     }
 
     #[test]
