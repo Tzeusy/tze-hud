@@ -1297,82 +1297,144 @@ impl TestSceneRegistry {
         (graph, spec)
     }
 
-    /// `disconnect_reclaim_multiagent` — 3 agents where 1 agent is in Disconnected state.
+    /// `disconnect_reclaim_multiagent` — three agents hold tiles simultaneously,
+    /// all starting in Active state.
     ///
-    /// Validates orphan detection and the 30,000ms grace period per
-    /// lease-governance/spec.md lines 132-155.
+    /// This scene provides the initial state for disconnect/reconnect reclaim tests.
+    /// All three agents start Active so tests can exercise the full lifecycle:
+    /// disconnect one agent, verify others are unaffected, reconnect within grace.
+    ///
+    /// - `agent.one` holds two tiles (left third of screen)
+    /// - `agent.two` holds one tile (middle third)
+    /// - `agent.three` holds one tile (right third)
+    ///
+    /// Validates:
+    /// - V1 Success Criterion: Live Multi-Agent Presence
+    /// - Thesis 2: The lease model works (lease reclaim on reconnect)
+    /// - Thesis 3: Multiple agents coexist (disconnect/reconnect does not affect others)
+    /// - validation-framework spec §Test Scene Registry lines 160-172
     fn build_disconnect_reclaim_multiagent(&self, clock: ClockMs) -> (SceneGraph, SceneSpec) {
         let mut graph = SceneGraph::new(self.display_width, self.display_height);
 
         let tab_id = graph.create_tab("MultiAgent", 0).expect("create_tab failed");
 
-        // Agent A and B — still active
-        let lease_a = graph.grant_lease_at(
-            "agent.alpha",
+        // Three agents — all start Active
+        let lease_one = graph.grant_lease_at(
+            "agent.one",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTile, Capability::UpdateTile, Capability::DeleteTile],
         );
-        let lease_b = graph.grant_lease_at(
-            "agent.beta",
+        let lease_two = graph.grant_lease_at(
+            "agent.two",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTile, Capability::UpdateTile],
         );
-
-        // Agent C — will be disconnected
-        let lease_c = graph.grant_lease_at(
-            "agent.gamma",
+        let lease_three = graph.grant_lease_at(
+            "agent.three",
             clock.0,
             300_000,
-            vec![Capability::CreateTile, Capability::CreateNode],
+            vec![Capability::CreateTile, Capability::UpdateTile],
         );
 
-        let agents_data = [
-            ("agent.alpha", lease_a, Rect::new(10.0, 10.0, 600.0, 500.0), 1u32),
-            ("agent.beta", lease_b, Rect::new(660.0, 10.0, 600.0, 500.0), 2u32),
-            ("agent.gamma", lease_c, Rect::new(10.0, 560.0, 600.0, 500.0), 3u32),
-        ];
+        // Agent One: two tiles on the left third of the screen
+        let one_bounds_a = Rect::new(10.0, 10.0, 600.0, 500.0);
+        let tile_one_a = graph
+            .create_tile(tab_id, "agent.one", lease_one, one_bounds_a, 1)
+            .expect("create_tile agent.one tile_a failed");
+        graph
+            .set_tile_root(
+                tile_one_a,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.8, 0.2, 0.2, 1.0),
+                        bounds: Rect::new(0.0, 0.0, one_bounds_a.width, one_bounds_a.height),
+                    }),
+                },
+            )
+            .expect("set_tile_root agent.one tile_a failed");
 
-        for (ns, lease_id, bounds, z) in agents_data {
-            let tile_id = graph
-                .create_tile(tab_id, ns, lease_id, bounds, z)
-                .expect("create_tile failed");
-            graph
-                .set_tile_root(
-                    tile_id,
-                    Node {
-                        id: SceneId::new(),
-                        children: vec![],
-                        data: NodeData::TextMarkdown(TextMarkdownNode {
-                            content: format!("{ns} — connected"),
-                            bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
-                            font_size_px: 16.0,
-                            font_family: FontFamily::SystemSansSerif,
-                            color: Rgba::WHITE,
-                            background: Some(Rgba::new(0.1, 0.15, 0.2, 1.0)),
-                            alignment: TextAlign::Start,
-                            overflow: TextOverflow::Clip,
-                        }),
-                    },
-                )
-                .expect("set_tile_root failed");
-        }
+        let one_bounds_b = Rect::new(10.0, 520.0, 600.0, 200.0);
+        let tile_one_b = graph
+            .create_tile(tab_id, "agent.one", lease_one, one_bounds_b, 2)
+            .expect("create_tile agent.one tile_b failed");
+        graph
+            .set_tile_root(
+                tile_one_b,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "agent.one — second tile".to_string(),
+                        bounds: Rect::new(0.0, 0.0, one_bounds_b.width, one_bounds_b.height),
+                        font_size_px: 14.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.4, 0.1, 0.1, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .expect("set_tile_root agent.one tile_b failed");
 
-        // Disconnect agent.gamma — enters 30,000ms grace period
-        graph.disconnect_lease(&lease_c, clock.0).expect("disconnect_lease failed");
+        // Agent Two: one tile in the middle third
+        let two_bounds = Rect::new(660.0, 10.0, 580.0, 700.0);
+        let tile_two = graph
+            .create_tile(tab_id, "agent.two", lease_two, two_bounds, 3)
+            .expect("create_tile agent.two failed");
+        graph
+            .set_tile_root(
+                tile_two,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.2, 0.7, 0.2, 1.0),
+                        bounds: Rect::new(0.0, 0.0, two_bounds.width, two_bounds.height),
+                    }),
+                },
+            )
+            .expect("set_tile_root agent.two failed");
+
+        // Agent Three: one tile on the right third
+        let three_bounds = Rect::new(1290.0, 10.0, 580.0, 700.0);
+        let tile_three = graph
+            .create_tile(tab_id, "agent.three", lease_three, three_bounds, 4)
+            .expect("create_tile agent.three failed");
+        graph
+            .set_tile_root(
+                tile_three,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(0.2, 0.4, 0.9, 1.0),
+                        bounds: Rect::new(0.0, 0.0, three_bounds.width, three_bounds.height),
+                    }),
+                },
+            )
+            .expect("set_tile_root agent.three failed");
 
         let spec = SceneSpec {
             name: "disconnect_reclaim_multiagent",
-            description: "Three agents: alpha and beta are ACTIVE, gamma is DISCONNECTED \
-                          (entered grace period at clock.0). After 30,000ms the grace period \
-                          expires and gamma's tiles can be reclaimed. \
-                          Per lease-governance/spec.md lines 132-155.",
+            description:
+                "Three agents (agent.one, agent.two, agent.three) each hold tiles simultaneously. \
+                 agent.one has two tiles; agent.two and agent.three each have one. \
+                 All start Active. Used to test disconnect/reconnect reclaim without disrupting \
+                 other agents. Validates V1 thesis: multi-agent coexistence and lease reclaim. \
+                 Per validation-framework spec §Test Scene Registry lines 160-172.",
             expected_tab_count: 1,
-            expected_tile_count: 3,
+            expected_tile_count: 4, // 2 + 1 + 1
             has_hit_regions: false,
             has_zones: false,
         };
+
+        // Suppress unused variable warnings — tile IDs are not needed in the spec
+        let _ = (tile_one_a, tile_one_b, tile_two, tile_three);
 
         (graph, spec)
     }
@@ -3512,26 +3574,34 @@ mod tests {
         let (graph, spec) =
             registry.build("disconnect_reclaim_multiagent", ClockMs::FIXED).unwrap();
         assert_eq!(graph.tiles.len(), spec.expected_tile_count, "tile count");
-        assert_eq!(spec.expected_tile_count, 3, "must have 3 tiles");
+        assert_eq!(spec.expected_tile_count, 4, "must have 4 tiles (2+1+1)");
     }
 
     #[test]
-    fn disconnect_reclaim_multiagent_gamma_is_disconnected() {
+    fn disconnect_reclaim_multiagent_all_agents_start_active() {
         use crate::types::LeaseState;
         let registry = TestSceneRegistry::new();
         let (graph, _spec) =
             registry.build("disconnect_reclaim_multiagent", ClockMs::FIXED).unwrap();
-        let gamma_lease = graph
-            .leases
-            .values()
-            .find(|l| l.namespace == "agent.gamma")
-            .expect("must have agent.gamma lease");
-        assert_eq!(
-            gamma_lease.state,
-            LeaseState::Disconnected,
-            "gamma lease must be Disconnected"
-        );
-        assert!(gamma_lease.disconnected_at_ms.is_some(), "must have disconnected_at_ms");
+        for ns in ["agent.one", "agent.two", "agent.three"] {
+            let lease = graph
+                .leases
+                .values()
+                .find(|l| l.namespace == ns)
+                .unwrap_or_else(|| panic!("must have {ns} lease"));
+            assert_eq!(
+                lease.state,
+                LeaseState::Active,
+                "{ns} lease must start Active (tests drive disconnection)"
+            );
+        }
+        // agent.one has 2 tiles; agent.two and agent.three each have 1
+        let one_tiles = graph.tiles.values().filter(|t| t.namespace == "agent.one").count();
+        let two_tiles = graph.tiles.values().filter(|t| t.namespace == "agent.two").count();
+        let three_tiles = graph.tiles.values().filter(|t| t.namespace == "agent.three").count();
+        assert_eq!(one_tiles, 2, "agent.one must have 2 tiles");
+        assert_eq!(two_tiles, 1, "agent.two must have 1 tile");
+        assert_eq!(three_tiles, 1, "agent.three must have 1 tile");
     }
 
     #[test]
