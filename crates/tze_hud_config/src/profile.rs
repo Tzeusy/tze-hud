@@ -186,8 +186,8 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
     // ── Rule: profile/extends conflict ────────────────────────────────────────
     // If [runtime].profile names a built-in (not "custom") and [display_profile].extends
     // names a DIFFERENT built-in, that's a conflict.
-    if let Some(p) = runtime_profile {
-        if matches!(p, "full-display" | "headless") && p != extends {
+    if let Some(p) = runtime_profile
+        && matches!(p, "full-display" | "headless") && p != extends {
             errors.push(ConfigError {
                 code: ConfigErrorCode::ProfileExtendsConflictsWithProfile,
                 field_path: "display_profile.extends".into(),
@@ -195,13 +195,10 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
                     "extends must be absent or match the built-in profile ({p:?})"
                 ),
                 got: format!("profile={p:?}, extends={extends:?}"),
-                hint: format!(
-                    "set [runtime].profile = \"custom\" to use extends, or remove the extends field"
-                ),
+                hint: "set [runtime].profile = \"custom\" to use extends, or remove the extends field".to_string(),
             });
             return;
         }
-    }
 
     // ── Budget and capability escalation checks ───────────────────────────────
     // Only run if the base profile is known (already checked above).
@@ -223,8 +220,8 @@ fn validate_budget_escalation(
     ];
 
     for (field, override_val, base_val) in numeric_checks {
-        if let Some(ov) = override_val {
-            if *ov > *base_val {
+        if let Some(ov) = override_val
+            && *ov > *base_val {
                 errors.push(ConfigError {
                     code: ConfigErrorCode::ProfileBudgetEscalation,
                     field_path: field.to_string(),
@@ -236,7 +233,6 @@ fn validate_budget_escalation(
                     ),
                 });
             }
-        }
     }
 
     // max_media_streams and max_agent_update_hz — no corresponding field in DisplayProfile yet,
@@ -249,22 +245,19 @@ fn validate_budget_escalation(
     // We therefore skip those checks until DisplayProfile adds those fields (tracked separately).
 
     // Boolean capability fields.
-    if let Some(allow_bg) = dp.allow_background_zones {
-        if allow_bg && !base.allow_background_zones {
+    if let Some(allow_bg) = dp.allow_background_zones
+        && allow_bg && !base.allow_background_zones {
             errors.push(ConfigError {
                 code: ConfigErrorCode::ProfileCapabilityEscalation,
                 field_path: "display_profile.allow_background_zones".into(),
-                expected: format!(
-                    "false (base profile disallows background zones)"
-                ),
+                expected: "false (base profile disallows background zones)".to_string(),
                 got: "true".into(),
                 hint: "cannot enable allow_background_zones when the base profile disables it".into(),
             });
         }
-    }
 
-    if let Some(allow_chrome) = dp.allow_chrome_zones {
-        if allow_chrome && !base.allow_chrome_zones {
+    if let Some(allow_chrome) = dp.allow_chrome_zones
+        && allow_chrome && !base.allow_chrome_zones {
             errors.push(ConfigError {
                 code: ConfigErrorCode::ProfileCapabilityEscalation,
                 field_path: "display_profile.allow_chrome_zones".into(),
@@ -273,7 +266,6 @@ fn validate_budget_escalation(
                 hint: "cannot enable allow_chrome_zones when the base profile disables it".into(),
             });
         }
-    }
 }
 
 // ─── Profile resolution ───────────────────────────────────────────────────────

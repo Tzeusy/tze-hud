@@ -29,24 +29,40 @@
 //! - Profile Extends Conflict Detection (v1-mandatory)
 //! - Headless Virtual Display (v1-mandatory)
 //!
+//! ### rig-mop4 (Privacy, zone registry, agent registration, hot-reload)
+//! - Privacy Configuration Defaults (v1-mandatory)
+//! - Quiet Hours Configuration (v1-mandatory)
+//! - Redaction Style Ownership (v1-mandatory)
+//! - Zone Registry Configuration (v1-mandatory)
+//! - Agent Registration with Per-Agent Budget Overrides (v1-mandatory)
+//! - Dynamic Agent Policy (v1-mandatory)
+//! - Authentication Secret Indirection (v1-mandatory)
+//! - Configuration Reload (v1-mandatory)
+//!
 //! ## Does NOT include
 //! - Capability vocabulary validation (rig-9yfh)
-//! - Privacy, zone registry, agent registration (rig-mop4)
-//! - Hot-reload (rig-mop4)
 
+pub mod agents;
 pub mod capability;
 pub mod loader;
+pub mod privacy;
 pub mod profile;
 pub mod raw;
+pub mod reload;
 pub mod resolver;
 pub mod schema;
+pub mod zones;
 #[cfg(test)]
 mod tests;
 
+pub use agents::{AuthEnvWarning, check_agent_auth_env_vars, dynamic_agents_allowed, validate_agents};
 pub use loader::TzeHudConfig;
+pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{
     HeadlessSignal, AutoDetectResult, auto_detect_profile, resolve_headless_dimensions,
     resolve_profile, validate_display_profile,
 };
+pub use reload::{FieldClassification, HotReloadableConfig, SighupHandler, reload_config, section_classification};
 pub use resolver::resolve_config_path;
 pub use schema::print_schema;
+pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};
