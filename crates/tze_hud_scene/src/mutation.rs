@@ -828,7 +828,7 @@ mod tests {
         // Structured rejection must be present
         assert!(result.rejection.is_some());
         let rej = result.rejection.unwrap();
-        assert_eq!(rej.errors[0].mutation_index, 1);
+        assert_eq!(rej.errors[0].mutation_index, Some(1));
         // Zero-size bounds is a BoundsInvalid violation (width/height must be > 0.0)
         assert_eq!(rej.errors[0].code, ValidationErrorCode::BoundsInvalid);
     }
@@ -1068,7 +1068,7 @@ mod tests {
         assert!(!result.applied);
         let rej = result.rejection.unwrap();
         let err = &rej.errors[0];
-        assert_eq!(err.mutation_index, 1);
+        assert_eq!(err.mutation_index, Some(1));
         assert_eq!(err.mutation_type, "UpdateTileBounds");
         assert!(!err.message.is_empty());
         // Context must be a JSON object

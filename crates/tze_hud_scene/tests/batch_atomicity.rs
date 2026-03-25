@@ -101,7 +101,7 @@ fn spec_all_or_nothing_batch_rejection() {
 
     // Error must be at mutation_index=2
     let rej = result.rejection.expect("rejection must be present");
-    assert_eq!(rej.errors[0].mutation_index, 2, "error at mutation_index=2");
+    assert_eq!(rej.errors[0].mutation_index, Some(2), "error at mutation_index=2");
     assert_eq!(rej.errors[0].mutation_type, "CreateTile");
 
     // Layer 0 invariants still hold
@@ -451,7 +451,7 @@ fn spec_structured_validation_error_on_bounds_failure() {
     let err = &rej.errors[0];
 
     // Required fields per RFC 0001 §3.4
-    assert_eq!(err.mutation_index, 1, "error at mutation_index=1");
+    assert_eq!(err.mutation_index, Some(1), "error at mutation_index=1");
     assert_eq!(err.mutation_type, "CreateTile");
     assert_eq!(err.code, ValidationErrorCode::BoundsInvalid);
     assert!(!err.message.is_empty(), "message must be non-empty");
