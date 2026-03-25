@@ -19,7 +19,7 @@ use tze_hud_scene::{
     graph::SceneGraph,
     types::{
         Capability, FontFamily, Node, NodeData, Rect, Rgba, SceneId, TextAlign,
-        TextMarkdownNode, TextOverflow,
+        TextMarkdownNode, TextOverflow, ZoneContent,
     },
 };
 use crate::{error::McpError, types::McpResult};
@@ -379,12 +379,6 @@ fn default_mcp_namespace() -> String {
 pub struct PublishToZoneResult {
     /// The zone name content was published to.
     pub zone_name: String,
-    /// UUID of the tab used (active tab or first available).
-    pub tab_id: String,
-    /// UUID of the tile created for the zone content.
-    pub tile_id: String,
-    /// UUID of the node holding the content.
-    pub node_id: String,
     /// Effective TTL in microseconds applied to the lease (never 0 in response).
     pub ttl_us: u64,
     /// Echo of the merge key, if provided.
@@ -395,17 +389,20 @@ pub struct PublishToZoneResult {
 /// Publish markdown content to a named zone.
 ///
 /// This is the primary LLM-first tool: a single call with zero scene context
-/// required. It looks up the zone by name, creates a new tile in the active
-/// tab, and sets the markdown content.
+/// required. It looks up the zone by name, grants a lease, and delegates to
+/// the zone publishing engine (`SceneGraph::publish_to_zone_with_lease`), which
+/// enforces contention policies, validates media types, respects
+/// `geometry_policy`, and stores the publication in `zone_registry.active_publishes`.
+/// Tile creation is deferred to the compositor, which resolves zone publishes
+/// to tiles at render time.
 ///
-/// Each call always creates a new tile. Update-in-place semantics (via
-/// `merge_key`) are reserved for a future version. For now, `merge_key` is
-/// accepted and echoed but does not affect scene mutation behavior.
+/// Zone publishes are global (not tab-scoped in v1). No active tab is required.
 ///
 /// # Errors
 /// - `invalid_params` if `zone_name` or `content` is empty.
 /// - `zone_not_found` if the zone name is not registered.
-/// - `no_active_tab` if no tab exists in the scene.
+/// - `scene_error` for contention policy violations (max publishers, max keys)
+///   or lease enforcement failures (no active lease, orphaned/suspended lease).
 pub fn handle_publish_to_zone(
     params: Value,
     scene: &mut SceneGraph,
@@ -419,13 +416,10 @@ pub fn handle_publish_to_zone(
         return Err(McpError::InvalidParams("content must be non-empty".to_string()));
     }
 
-    // Validate zone exists
+    // Validate zone exists before granting a lease, to fail fast on bad zone names.
     if !scene.zone_registry.zones.contains_key(&p.zone_name) {
         return Err(McpError::ZoneNotFound(p.zone_name));
     }
-
-    // Require an active tab
-    let tab_id = scene.active_tab.ok_or(McpError::NoActiveTab)?;
 
     // Convert ttl_us to ttl_ms for lease grant; 0 means use a sensible default.
     // Use div_ceil to ensure any positive sub-millisecond TTL rounds up to at
@@ -436,8 +430,10 @@ pub fn handle_publish_to_zone(
         p.ttl_us.div_ceil(1_000)
     };
 
-    // Grant lease
-    let lease_id = scene.grant_lease(
+    // Grant lease for MCP session tracking. Zone publishing requires an active
+    // lease (spec §Zone Publish Requires Active Lease); we grant one here so
+    // that publish_to_zone_with_lease can verify it.
+    let _lease_id = scene.grant_lease(
         &p.namespace,
         ttl_ms,
         vec![
@@ -448,35 +444,14 @@ pub fn handle_publish_to_zone(
         ],
     );
 
-    // Default zone bounds: full display width, one third height at the top
-    let display = scene.display_area;
-    let bounds = Rect::new(0.0, 0.0, display.width, display.height / 3.0);
-
-    let tile_id = scene.create_tile(tab_id, &p.namespace, lease_id, bounds, 10)?;
-
-    let node_id = SceneId::new();
-    let node = Node {
-        id: node_id,
-        children: vec![],
-        data: NodeData::TextMarkdown(TextMarkdownNode {
-            content: p.content,
-            bounds: Rect::new(0.0, 0.0, bounds.width, bounds.height),
-            font_size_px: p.font_size_px,
-            font_family: FontFamily::SystemSansSerif,
-            color: Rgba::WHITE,
-            background: None,
-            alignment: TextAlign::Start,
-            overflow: TextOverflow::Clip,
-        }),
-    };
-
-    scene.set_tile_root(tile_id, node)?;
+    // Delegate to the real zone engine. This enforces contention policy
+    // (LatestWins / Stack / MergeByKey), validates accepted_media_types,
+    // and stores the record in zone_registry.active_publishes.
+    let content = ZoneContent::StreamText(p.content);
+    scene.publish_to_zone_with_lease(&p.zone_name, content, &p.namespace, p.merge_key.clone())?;
 
     Ok(PublishToZoneResult {
         zone_name: p.zone_name,
-        tab_id: tab_id.to_string(),
-        tile_id: tile_id.to_string(),
-        node_id: node_id.to_string(),
         // Return the effective TTL used for the lease (ttl_ms converted back to
         // microseconds), not the raw request value, so callers know what was applied.
         ttl_us: ttl_ms * 1_000,
@@ -514,22 +489,16 @@ pub struct ListZonesResult {
 
 /// List all available zones and their current state.
 ///
-/// `has_content` is true when at least one tile is present in the scene on
-/// the active tab (it is a scene-presence indicator, not a semantic guarantee).
+/// `has_content` is true when `zone_registry.active_publishes` contains at
+/// least one record for the zone — i.e., something has been published to the
+/// zone and the record has not been evicted by contention policy or expiry.
+/// This is the authoritative occupancy check, not a tile-namespace heuristic.
 ///
 /// # Errors
 /// - None (always succeeds; returns an empty list if no zones are registered).
 pub fn handle_list_zones(params: Value, scene: &SceneGraph) -> McpResult<ListZonesResult> {
     // Use the same parse_params helper as other tool handlers; tolerates null → {}
     let _: ListZonesParams = parse_params(params)?;
-
-    let active_tab = scene.active_tab;
-    let tiles_on_active: std::collections::HashSet<&str> = scene
-        .tiles
-        .values()
-        .filter(|t| active_tab.is_some_and(|at| t.tab_id == at))
-        .map(|t| t.namespace.as_str())
-        .collect();
 
     let mut zones: Vec<ZoneEntry> = scene
         .zone_registry
@@ -539,10 +508,14 @@ pub fn handle_list_zones(params: Value, scene: &SceneGraph) -> McpResult<ListZon
             name: z.name.clone(),
             description: z.description.clone(),
             id: z.id.to_string(),
-            // A zone "has content" when any tile on the active tab shares the zone name
-            // as its namespace. This is a lightweight heuristic; full zone→tile mapping
-            // is tracked in the zone registry in a future iteration.
-            has_content: tiles_on_active.contains(z.name.as_str()),
+            // A zone has content when zone_registry.active_publishes contains
+            // at least one record for it. This is the authoritative source of
+            // zone occupancy (not a tile-namespace heuristic).
+            has_content: scene
+                .zone_registry
+                .active_publishes
+                .get(&z.name)
+                .is_some_and(|v| !v.is_empty()),
         })
         .collect();
 
@@ -909,8 +882,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.zone_name, zone);
-        assert_eq!(scene.tile_count(), 1);
-        assert_eq!(scene.node_count(), 1);
+        // Publishing goes to zone_registry.active_publishes; tiles are compositor-resolved.
+        assert_eq!(scene.tile_count(), 0);
+        assert_eq!(scene.node_count(), 0);
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1);
+        assert!(matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "## Status: OK"));
     }
 
     #[test]
@@ -947,7 +924,8 @@ mod tests {
     }
 
     #[test]
-    fn test_publish_to_zone_no_tab_fails() {
+    fn test_publish_to_zone_no_tab_succeeds() {
+        // Zone publishing is global (not tab-scoped) in v1. No active tab is required.
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let zone_name = "z".to_string();
         scene.zone_registry.zones.insert(
@@ -967,10 +945,34 @@ mod tests {
                 layer_attachment: LayerAttachment::Content,
             },
         );
-        let err =
+        let result =
             handle_publish_to_zone(json!({"zone_name": zone_name, "content": "hi"}), &mut scene)
-                .unwrap_err();
-        assert!(matches!(err, McpError::NoActiveTab));
+                .unwrap();
+        assert_eq!(result.zone_name, zone_name);
+        assert!(scene.zone_registry.active_publishes.contains_key(&zone_name));
+    }
+
+    #[test]
+    fn test_publish_to_zone_contention_policy_latest_wins() {
+        // scene_with_zone creates a LatestWins zone; a second publish must replace
+        // the first (single record in active_publishes after both calls).
+        let (mut scene, _, zone) = scene_with_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "first"}),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "second"}),
+            &mut scene,
+        )
+        .unwrap();
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1, "LatestWins must replace old record");
+        assert!(
+            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "second"),
+            "latest content must win"
+        );
     }
 
     #[test]
@@ -1005,11 +1007,12 @@ mod tests {
     #[test]
     fn test_list_zones_has_content_flag() {
         let (mut scene, _, zone) = scene_with_zone();
-        // Before publishing: no content
+        // Before publishing: zone_registry.active_publishes is empty → no content
         let before = handle_list_zones(json!(null), &scene).unwrap();
         assert!(!before.zones[0].has_content);
 
-        // After publishing: has_content = true
+        // After publishing: active_publishes contains a record → has_content = true
+        // (namespace argument is used for the lease; the zone name drives the publish)
         handle_publish_to_zone(
             json!({"zone_name": zone.clone(), "content": "hi", "namespace": zone.clone()}),
             &mut scene,
