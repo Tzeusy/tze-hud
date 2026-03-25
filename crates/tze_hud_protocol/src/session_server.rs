@@ -1897,9 +1897,8 @@ async fn handle_mutation_batch(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                if let Ok(tile_id) = uuid::Uuid::parse_str(&str_.tile_id)
-                    .map(tze_hud_scene::SceneId::from_uuid)
-                {
+                // tile_id is 16-byte UUIDv7 bytes (SceneId wire format).
+                if let Some(tile_id) = tze_hud_scene::SceneId::from_bytes_le(&str_.tile_id) {
                     if let Some(ref node_proto) = str_.node
                         && let Some(node) = convert::proto_node_to_scene(node_proto)
                     {
@@ -2085,9 +2084,8 @@ async fn apply_queued_batch_to_scene(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                if let Ok(tile_id) = uuid::Uuid::parse_str(&str_.tile_id)
-                    .map(tze_hud_scene::SceneId::from_uuid)
-                {
+                // tile_id is 16-byte UUIDv7 bytes (SceneId wire format).
+                if let Some(tile_id) = tze_hud_scene::SceneId::from_bytes_le(&str_.tile_id) {
                     if let Some(ref node_proto) = str_.node
                         && let Some(node) = convert::proto_node_to_scene(node_proto)
                     {
@@ -3314,7 +3312,7 @@ mod tests {
                     mutation: Some(
                         crate::proto::mutation_proto::Mutation::CreateTile(
                             crate::proto::CreateTileMutation {
-                                tab_id: String::new(),
+                                tab_id: vec![],  // empty = server infers active tab
                                 bounds: Some(crate::proto::Rect {
                                     x: 0.0,
                                     y: 0.0,
@@ -4142,7 +4140,7 @@ mod tests {
             lease_id: vec![0u8; 16],
             mutations: vec![MutationProto {
                 mutation: Some(Mutation::CreateTile(CreateTileMutation {
-                    tab_id: String::new(),
+                    tab_id: vec![],  // empty = server infers active tab
                     bounds: None,
                     z_order: 0,
                     ..Default::default()

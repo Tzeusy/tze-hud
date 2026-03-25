@@ -36,7 +36,7 @@ message Rgba {
 // ─── Node Types ───────────────────────────────────────────────────────────────
 
 message NodeProto {
-  string id = 1;
+  bytes id = 1;  // 16-byte UUIDv7 SceneId (little-endian); all-zero = absent/null
   oneof data {
     SolidColorNodeProto solid_color = 10;
     TextMarkdownNodeProto text_markdown = 11;
@@ -95,13 +95,13 @@ message StaticImageNodeProto {
 // ─── Mutation Types ───────────────────────────────────────────────────────────
 
 message CreateTileMutation {
-  string tab_id = 1;
+  bytes tab_id = 1;  // 16-byte UUIDv7 SceneId of the target tab; empty = server-infers active tab
   Rect bounds = 2;
   uint32 z_order = 3;
 }
 
 message SetTileRootMutation {
-  string tile_id = 1;
+  bytes tile_id = 1;  // 16-byte UUIDv7 SceneId of the tile
   NodeProto node = 2;
 }
 
