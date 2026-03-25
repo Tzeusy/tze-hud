@@ -5,12 +5,18 @@
 //!
 //! ## Authentication
 //!
-//! Every call must carry a pre-shared key (PSK).  The PSK may be supplied as:
+//! Authentication is **always enforced** — there is no bypass mode.  Every
+//! call must carry a valid pre-shared key (PSK), even for guest tools.  The
+//! PSK may be supplied as:
 //!
 //! 1. A JSON-RPC `params` top-level field `"_auth"` (string): preferred for
 //!    stdio/NDJSON transports where custom headers are unavailable.
 //! 2. An HTTP `Authorization: Bearer <key>` header value passed by the caller
 //!    via [`CallerContext::with_bearer`].
+//!
+//! When no PSK is configured (`McpConfig::pre_shared_key` is `None`), every
+//! call is rejected.  This is intentional — sovereignty must be enforced by
+//! mechanism, not convention (heart-and-soul/security.md).
 //!
 //! Each call is authenticated independently — there is no persistent session
 //! state.  The PSK is never echoed in responses.
@@ -102,12 +108,30 @@ impl CallerContext {
 
 /// Server-level configuration.
 ///
-/// If `pre_shared_key` is `None`, authentication is skipped and all calls
-/// are treated as authenticated (useful for tests and local-only deployments).
+/// Authentication is **always enforced** for every well-formed JSON-RPC 2.0
+/// tool call dispatched via [`McpServer::dispatch`].  When `pre_shared_key`
+/// is `None`, every such call is rejected with an `Unauthenticated` JSON-RPC
+/// error.  There is no bypass mode.  Note that requests that fail JSON
+/// parsing or JSON-RPC version validation are rejected before auth is
+/// evaluated (returning `Parse error` or `Invalid Request` respectively).
+///
+/// Production deployments must supply a PSK via [`McpConfig::with_psk`];
+/// test harnesses should use [`McpConfig::from_env`] or supply an explicit
+/// test key.
+///
+/// Per spec §8.4, an MCP runtime is expected to evaluate authentication
+/// during session establishment and, on failure, send `SessionError` and
+/// close the stream.  This crate does **not** implement the session handshake
+/// or manage stream lifecycles; it only enforces the configured policy on
+/// each JSON-RPC request dispatched via [`McpServer::dispatch`].  Any
+/// handshake-time authentication and mapping of failures to `SessionError` /
+/// stream closure must be implemented by the higher-level transport/runtime
+/// that integrates this server.
 #[derive(Clone, Debug, Default)]
 pub struct McpConfig {
-    /// Optional pre-shared key for MCP authentication.  When set, every call
-    /// must supply a matching key via bearer token or `_auth` param.
+    /// Pre-shared key for MCP authentication.  When `Some`, every call must
+    /// supply a matching key via bearer token or `_auth` param.  When `None`,
+    /// every call is rejected (no bypass — sovereignty enforced by mechanism).
     pub pre_shared_key: Option<String>,
 }
 
@@ -116,6 +140,17 @@ impl McpConfig {
     pub fn with_psk(key: impl Into<String>) -> Self {
         Self {
             pre_shared_key: Some(key.into()),
+        }
+    }
+
+    /// Load PSK from the `MCP_TEST_PSK` environment variable.
+    ///
+    /// Intended for test harnesses that need a valid PSK without hard-coding
+    /// secrets in source.  If the variable is unset, returns a config with
+    /// `pre_shared_key = None` (all calls rejected).
+    pub fn from_env() -> Self {
+        Self {
+            pre_shared_key: std::env::var("MCP_TEST_PSK").ok(),
         }
     }
 }
@@ -153,7 +188,13 @@ pub struct McpServer {
 }
 
 impl McpServer {
-    /// Create a new server backed by the given scene graph with no auth.
+    /// Create a new server backed by the given scene graph.
+    ///
+    /// The server is created with no PSK configured.  **All calls will be
+    /// rejected** until a PSK is attached via [`.with_config`].  This is
+    /// intentional: authentication is mandatory with no bypass mode.
+    ///
+    /// For tests, use `McpServer::new(scene).with_config(McpConfig::with_psk("test-key"))`.
     pub fn new(scene: SceneGraph) -> Self {
         Self {
             scene: Arc::new(Mutex::new(scene)),
@@ -164,6 +205,8 @@ impl McpServer {
     /// Create a new server sharing an existing arc-wrapped scene graph.
     ///
     /// Use this when the scene is also shared with the gRPC control plane.
+    /// As with [`Self::new`], all calls are rejected until a PSK is configured
+    /// via [`.with_config`].
     pub fn with_shared_scene(scene: Arc<Mutex<SceneGraph>>) -> Self {
         Self {
             scene,
@@ -209,45 +252,61 @@ impl McpServer {
         }
 
         // ── Per-call authentication (spec §8.4) ──────────────────────────────
-        if let Some(ref expected) = self.config.pre_shared_key {
-            // Attempt auth from two independent sources (spec §8.4: either is valid):
-            // 1. CallerContext bearer token (from HTTP Authorization header).
-            // 2. `_auth` param field in the JSON-RPC params object.
-            //
-            // Both are checked independently — if a bearer token is present but
-            // wrong, the `_auth` param can still authenticate the call.  This
-            // prevents a rogue/stale transport header from blocking valid in-params auth.
-            //
-            // Constant-time comparison (via `subtle`) prevents timing side-channels.
-            let bearer_key = ctx.bearer_token.as_deref();
-            let param_key = request
-                .params
-                .as_object()
-                .and_then(|o| o.get("_auth"))
-                .and_then(|v| v.as_str());
+        //
+        // Authentication is ALWAYS evaluated — there is no bypass mode.
+        // When no PSK is configured (`pre_shared_key` is `None`), all calls
+        // are rejected.  This enforces the spec requirement: "sovereignty must
+        // be enforced by mechanism, not convention" (heart-and-soul/security.md).
+        //
+        // Attempt auth from two independent sources (spec §8.4: either is valid):
+        // 1. CallerContext bearer token (from HTTP Authorization header).
+        // 2. `_auth` param field in the JSON-RPC params object.
+        //
+        // Both are checked independently — if a bearer token is present but
+        // wrong, the `_auth` param can still authenticate the call.  This
+        // prevents a rogue/stale transport header from blocking valid in-params auth.
+        //
+        // Constant-time comparison (via `subtle`) prevents timing side-channels.
+        // When no PSK is configured, reject immediately with a single warning
+        // (avoids emitting two warn entries for the same event).
+        if self.config.pre_shared_key.is_none() {
+            warn!(method = %request.method, "MCP: authentication rejected (no PSK configured)");
+            let resp = McpResponse::err(
+                request.id.clone(),
+                JsonRpcError::from(McpError::Unauthenticated),
+            );
+            return serde_json::to_string(&resp).unwrap_or_default();
+        }
 
-            let expected_bytes = expected.as_bytes();
-            let authenticated = bearer_key
+        let expected = self.config.pre_shared_key.as_deref().unwrap();
+        let bearer_key = ctx.bearer_token.as_deref();
+        let param_key = request
+            .params
+            .as_object()
+            .and_then(|o| o.get("_auth"))
+            .and_then(|v| v.as_str());
+
+        let expected_bytes = expected.as_bytes();
+        let authenticated = bearer_key
+            .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
+            .unwrap_or(false)
+            || param_key
                 .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
-                .unwrap_or(false)
-                || param_key
-                    .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
-                    .unwrap_or(false);
+                .unwrap_or(false);
 
-            if authenticated {
-                // Authenticated. Strip _auth from params so handlers never
-                // see it (avoids unknown-field errors in typed params structs).
-                if let Some(obj) = request.params.as_object_mut() {
-                    obj.remove("_auth");
-                }
-            } else {
-                warn!(method = %request.method, "MCP: authentication failed");
-                let resp = McpResponse::err(
-                    request.id.clone(),
-                    JsonRpcError::from(McpError::Unauthenticated),
-                );
-                return serde_json::to_string(&resp).unwrap_or_default();
+        if authenticated {
+            // Authenticated. Strip _auth from params so handlers never
+            // see it (avoids unknown-field errors in typed params structs).
+            if let Some(obj) = request.params.as_object_mut() {
+                obj.remove("_auth");
             }
+        } else {
+            warn!(method = %request.method, "MCP: authentication failed");
+            let resp = McpResponse::err(
+                request.id.clone(),
+                JsonRpcError::from(McpError::Unauthenticated),
+            );
+            return serde_json::to_string(&resp).unwrap_or_default();
         }
 
         debug!(method = %request.method, "MCP: dispatching tool call");
@@ -435,10 +494,22 @@ mod tests {
     use serde_json::json;
     use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy, LayerAttachment}, SceneId};
 
+    /// PSK used across all tests.  Tests set this via `MCP_TEST_PSK` env var or
+    /// fall back to this compile-time constant.  Either way, auth is always
+    /// exercised — there is no bypass.
+    const TEST_PSK: &str = "test-psk-do-not-use-in-production";
+
+    /// Build a test server with the test PSK configured.
+    fn test_server(scene: SceneGraph) -> McpServer {
+        let psk = std::env::var("MCP_TEST_PSK")
+            .unwrap_or_else(|_| TEST_PSK.to_string());
+        McpServer::new(scene).with_config(McpConfig::with_psk(psk))
+    }
+
     async fn server_with_tab() -> (McpServer, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).expect("create tab");
-        let server = McpServer::new(scene);
+        let server = test_server(scene);
         (server, tab_id)
     }
 
@@ -446,19 +517,25 @@ mod tests {
         serde_json::from_str(raw).expect("valid JSON response")
     }
 
+    /// Authenticated guest context (no resident_mcp capability).
     fn guest() -> CallerContext {
-        CallerContext::guest()
+        let psk = std::env::var("MCP_TEST_PSK")
+            .unwrap_or_else(|_| TEST_PSK.to_string());
+        CallerContext::with_bearer(psk)
     }
 
+    /// Authenticated resident context (has resident_mcp capability).
     fn resident() -> CallerContext {
-        CallerContext::guest().with_resident_mcp()
+        let psk = std::env::var("MCP_TEST_PSK")
+            .unwrap_or_else(|_| TEST_PSK.to_string());
+        CallerContext::with_bearer(psk).with_resident_mcp()
     }
 
     // ── JSON-RPC protocol compliance ─────────────────────────────────────────
 
     #[tokio::test]
     async fn test_malformed_json_returns_parse_error() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server.dispatch("{not valid json", &guest()).await;
         let resp = parse_response(&raw);
         assert_eq!(resp["error"]["code"], -32700);
@@ -466,7 +543,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wrong_jsonrpc_version_returns_invalid_request() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(r#"{"jsonrpc":"1.0","method":"list_zones","id":1}"#, &guest())
             .await;
@@ -487,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_id_echoed_in_response() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":42}"#, &guest())
             .await;
@@ -499,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_create_tab() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(
                 r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"Alerts"},"id":1}"#,
@@ -601,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dispatch_list_zones_empty() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":4}"#, &guest())
             .await;
@@ -665,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_guest_cannot_call_create_tab() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(
                 r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"X"},"id":11}"#,
@@ -680,7 +757,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_guest_cannot_call_set_content() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let fake_id = SceneId::new().to_string();
         let req = json!({
             "jsonrpc": "2.0",
@@ -696,7 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_guest_cannot_call_dismiss() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let fake_id = SceneId::new().to_string();
         let req = json!({
             "jsonrpc": "2.0",
@@ -727,28 +804,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_guest_can_call_list_zones() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":20}"#, &guest())
             .await;
         let resp = parse_response(&raw);
-        // Should succeed with no error
-        assert!(resp["error"].is_null(), "guest should be able to call list_zones");
+        // Should succeed with no error — authenticated guest can use guest tools
+        assert!(resp["error"].is_null(), "authenticated guest should be able to call list_zones");
     }
 
     #[tokio::test]
     async fn test_guest_can_call_list_scene() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(r#"{"jsonrpc":"2.0","method":"list_scene","params":null,"id":21}"#, &guest())
             .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "guest should be able to call list_scene");
+        assert!(resp["error"].is_null(), "authenticated guest should be able to call list_scene");
     }
 
     #[tokio::test]
     async fn test_resident_can_call_resident_tools() {
-        let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
             .dispatch(
                 r#"{"jsonrpc":"2.0","method":"create_tab","params":{"name":"T"},"id":22}"#,
@@ -756,7 +833,7 @@ mod tests {
             )
             .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "resident should be able to call create_tab");
+        assert!(resp["error"].is_null(), "authenticated resident should be able to call create_tab");
     }
 
     // ── Per-call authentication (spec §8.4) ──────────────────────────────────
@@ -838,14 +915,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_no_psk_config_skips_auth() {
-        // When no PSK is configured, all calls are accepted.
+    async fn test_no_psk_config_rejects_all_calls() {
+        // Security: when no PSK is configured, ALL calls are rejected.
+        // There is no bypass mode — sovereignty enforced by mechanism, not convention.
+        // (Spec: heart-and-soul/security.md, session-protocol/spec.md §Auth)
         let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
-        // No auth in context
+        // Even with no PSK configured, calls must be rejected
         let raw = server
             .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":50}"#, &CallerContext::guest())
             .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "unauthenticated call should succeed when no PSK configured");
+        assert_eq!(
+            resp["error"]["code"], -32004,
+            "call must be rejected when no PSK is configured (no bypass mode)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unauthenticated_call_rejected_even_for_guest_tools() {
+        // Spec §8.4: guest tools are unconditionally accessible but STILL require
+        // authentication.  An unauthenticated caller cannot reach any tool.
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
+        // CallerContext::guest() has no bearer token — unauthenticated
+        let raw = server
+            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":51}"#, &CallerContext::guest())
+            .await;
+        let resp = parse_response(&raw);
+        assert_eq!(
+            resp["error"]["code"], -32004,
+            "unauthenticated caller must be rejected even for guest tools"
+        );
     }
 }
