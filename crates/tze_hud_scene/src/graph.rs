@@ -520,7 +520,7 @@ impl SceneGraph {
         ttl_ms: u64,
         capabilities: Vec<Capability>,
     ) -> SceneId {
-        self.grant_lease_for_session(namespace, SceneId::nil(), ttl_ms, 2, capabilities)
+        self.grant_lease_for_session(namespace, SceneId::nil(), ttl_ms, crate::lease::priority::PRIORITY_DEFAULT, capabilities)
     }
 
     /// Grant a lease with an explicit priority and default (nil) session_id.
