@@ -4,8 +4,8 @@
 //! deserialize (prost::Message::decode) → assert field equality.
 //!
 //! Edge cases: empty fields, max u64/u32/float values, all enum variants,
-//! nested messages. Proto3 forward-compatibility: unknown fields are preserved
-//! on round-trip (tested via raw bytes).
+//! nested messages. Proto3 forward-compatibility: decoding tolerates unknown
+//! fields (validated via raw bytes), but prost does not preserve them on re-encode.
 //!
 //! Test count target: ≥30 functions.
 
@@ -1178,8 +1178,8 @@ fn roundtrip_decode_with_unknown_fields_succeeds() {
 
     // Append a synthetic unknown field: field 9999, wire type 0 (varint), value 42.
     // Proto3 tag encoding: tag = (9999 << 3) | 0 = 79992
-    // LEB128 of 79992: 0xF8, 0xE8, 0x04; varint 42 = 0x2A
-    buf.extend_from_slice(&[0xF8, 0xE8, 0x04, 0x2A]);
+    // LEB128 of 79992: 0xF8, 0xF0, 0x04; varint 42 = 0x2A
+    buf.extend_from_slice(&[0xF8, 0xF0, 0x04, 0x2A]);
 
     // Decode MUST succeed even with unknown fields present
     let decoded = Heartbeat::decode(buf.as_slice())

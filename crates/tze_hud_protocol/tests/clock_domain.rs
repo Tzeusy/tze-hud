@@ -1,8 +1,10 @@
 //! Clock domain naming validation tests.
 //!
 //! Tests that all timestamp fields in proto definitions use correct _wall_us or _mono_us suffix.
-//! Performs a reflective check by listing known timestamp field names from the generated
-//! protobuf types and verifying naming convention compliance.
+//! Performs a curated allowlist check: all known timestamp field names from the generated
+//! protobuf types are listed here and verified for naming convention compliance.
+//! Note: this is a maintained list, not a runtime-reflective check — new timestamp fields
+//! must be added here manually to be covered.
 //!
 //! Based on session-protocol/spec.md lines 227-234 and timing-model/spec.md lines 10-21.
 //!
@@ -39,7 +41,8 @@ impl TimestampField {
     }
 }
 
-/// All timestamp fields across the v1 proto surface.
+/// Curated list of all known timestamp fields across the v1 proto surface.
+/// New timestamp fields must be added here manually when introduced.
 ///
 /// WHEN proto field carries wall-clock time THEN field name ends in _wall_us.
 /// WHEN proto field carries monotonic time THEN field name ends in _mono_us.
