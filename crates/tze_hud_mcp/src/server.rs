@@ -108,15 +108,25 @@ impl CallerContext {
 
 /// Server-level configuration.
 ///
-/// Authentication is **always enforced**: when `pre_shared_key` is `None`,
-/// every call is rejected with an `Unauthenticated` error.  There is no
-/// bypass mode.  Production deployments must supply a PSK via [`McpConfig::with_psk`];
+/// Authentication is **always enforced** for every well-formed JSON-RPC 2.0
+/// tool call dispatched via [`McpServer::dispatch`].  When `pre_shared_key`
+/// is `None`, every such call is rejected with an `Unauthenticated` JSON-RPC
+/// error.  There is no bypass mode.  Note that requests that fail JSON
+/// parsing or JSON-RPC version validation are rejected before auth is
+/// evaluated (returning `Parse error` or `Invalid Request` respectively).
+///
+/// Production deployments must supply a PSK via [`McpConfig::with_psk`];
 /// test harnesses should use [`McpConfig::from_env`] or supply an explicit
 /// test key.
 ///
-/// Per spec §8.4: authentication SHALL be evaluated synchronously during
-/// handshake before `SessionEstablished` is sent.  If authentication fails,
-/// the runtime SHALL send `SessionError` and close the stream.
+/// Per spec §8.4, an MCP runtime is expected to evaluate authentication
+/// during session establishment and, on failure, send `SessionError` and
+/// close the stream.  This crate does **not** implement the session handshake
+/// or manage stream lifecycles; it only enforces the configured policy on
+/// each JSON-RPC request dispatched via [`McpServer::dispatch`].  Any
+/// handshake-time authentication and mapping of failures to `SessionError` /
+/// stream closure must be implemented by the higher-level transport/runtime
+/// that integrates this server.
 #[derive(Clone, Debug, Default)]
 pub struct McpConfig {
     /// Pre-shared key for MCP authentication.  When `Some`, every call must
@@ -257,29 +267,32 @@ impl McpServer {
         // prevents a rogue/stale transport header from blocking valid in-params auth.
         //
         // Constant-time comparison (via `subtle`) prevents timing side-channels.
-        let authenticated = match self.config.pre_shared_key.as_deref() {
-            None => {
-                // No PSK configured — reject all calls.
-                warn!(method = %request.method, "MCP: authentication rejected (no PSK configured)");
-                false
-            }
-            Some(expected) => {
-                let bearer_key = ctx.bearer_token.as_deref();
-                let param_key = request
-                    .params
-                    .as_object()
-                    .and_then(|o| o.get("_auth"))
-                    .and_then(|v| v.as_str());
+        // When no PSK is configured, reject immediately with a single warning
+        // (avoids emitting two warn entries for the same event).
+        if self.config.pre_shared_key.is_none() {
+            warn!(method = %request.method, "MCP: authentication rejected (no PSK configured)");
+            let resp = McpResponse::err(
+                request.id.clone(),
+                JsonRpcError::from(McpError::Unauthenticated),
+            );
+            return serde_json::to_string(&resp).unwrap_or_default();
+        }
 
-                let expected_bytes = expected.as_bytes();
-                bearer_key
-                    .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
-                    .unwrap_or(false)
-                    || param_key
-                        .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
-                        .unwrap_or(false)
-            }
-        };
+        let expected = self.config.pre_shared_key.as_deref().unwrap();
+        let bearer_key = ctx.bearer_token.as_deref();
+        let param_key = request
+            .params
+            .as_object()
+            .and_then(|o| o.get("_auth"))
+            .and_then(|v| v.as_str());
+
+        let expected_bytes = expected.as_bytes();
+        let authenticated = bearer_key
+            .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
+            .unwrap_or(false)
+            || param_key
+                .map(|k| k.as_bytes().ct_eq(expected_bytes).into())
+                .unwrap_or(false);
 
         if authenticated {
             // Authenticated. Strip _auth from params so handlers never
