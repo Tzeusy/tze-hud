@@ -392,14 +392,18 @@ async fn create_tile(
     }
 }
 
-/// Convert raw UUID bytes (16 bytes, little-endian) to hyphenated UUID string.
+/// Convert raw UUID bytes (16 bytes, big-endian) to hyphenated UUID string.
 ///
-/// `created_ids` in `MutationResult` returns raw 16-byte SceneId (LE). The
-/// `SetTileRootMutation::tile_id` expects a hyphenated UUID string as parsed
-/// by `Uuid::parse_str`. This helper bridges the two formats.
+/// `created_ids` in `MutationResult` are encoded by the server via
+/// `scene_id_to_bytes` → `id.as_uuid().as_bytes().to_vec()`, which uses
+/// `Uuid::as_bytes()` (big-endian / network byte order). Decoding must use
+/// `Uuid::from_bytes` (big-endian), not `from_bytes_le`, to recover the
+/// same UUID. `SetTileRootMutation::tile_id` then parses the hyphenated
+/// UUID string via `Uuid::parse_str`.
 fn tile_id_bytes_to_string(bytes: &[u8]) -> String {
-    if let Some(scene_id) = tze_hud_scene::SceneId::from_bytes_le(bytes) {
-        scene_id.as_uuid().hyphenated().to_string()
+    if bytes.len() == 16 {
+        let arr: [u8; 16] = bytes.try_into().unwrap();
+        uuid::Uuid::from_bytes(arr).hyphenated().to_string()
     } else {
         String::new()
     }
