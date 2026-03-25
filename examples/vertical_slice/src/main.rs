@@ -17,22 +17,53 @@ use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
+use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
+use tze_hud_runtime::window::{WindowConfig, WindowMode};
 
 use tze_hud_scene::types::*;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
 
     if headless {
-        run_headless().await
+        // Run headless inside a Tokio runtime.
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(run_headless())
     } else {
-        // For now, default to headless as well (windowed requires event loop)
-        println!("Windowed mode not yet implemented; running headless demo.");
-        run_headless().await
+        run_windowed()
     }
+}
+
+/// Run the windowed display runtime.
+///
+/// Creates a `WindowedRuntime` and runs the winit event loop on the main thread.
+/// This call blocks until the window is closed.
+///
+/// Per spec §Main Thread Responsibilities (line 33): "The main thread MUST run
+/// the winit event loop." Winit requires the event loop to run on the main thread,
+/// hence this function is called directly from `main()` without a Tokio wrapper.
+fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== tze_hud windowed runtime ===");
+    println!("Close the window to exit.");
+
+    let config = WindowedConfig {
+        window: WindowConfig {
+            mode: WindowMode::Fullscreen,
+            width: 800,
+            height: 600,
+            title: "tze_hud — vertical slice".to_string(),
+        },
+        grpc_port: 0, // Disabled for the standalone windowed demo.
+        psk: "vertical-slice-key".to_string(),
+        target_fps: 60,
+    };
+
+    let runtime = WindowedRuntime::new(config);
+    runtime.run()
 }
 
 fn now_wall_us() -> u64 {
