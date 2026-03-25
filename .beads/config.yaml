@@ -50,5 +50,3 @@ backup:
 # - linear.api-key
 # - github.org
 # - github.repo
-
-dolt.database: "hud"
