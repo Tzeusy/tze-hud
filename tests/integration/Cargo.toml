@@ -8,6 +8,10 @@ edition.workspace = true
 name = "multi_agent"
 path = "multi_agent.rs"
 
+[[test]]
+name = "trace_regression"
+path = "trace_regression.rs"
+
 # Integration tests always run headless (no display server required).
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`
