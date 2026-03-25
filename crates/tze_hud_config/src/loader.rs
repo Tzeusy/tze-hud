@@ -35,10 +35,13 @@ use tze_hud_scene::config::{
     is_canonical_capability,
 };
 
+use crate::agents;
 use crate::capability::{capability_hint, has_reserved_event_prefix};
+use crate::privacy;
 use crate::profile;
 use crate::raw::{RawConfig, RawDegradation};
 use crate::resolver;
+use crate::zones;
 
 // ─── Regex helper ────────────────────────────────────────────────────────────
 
@@ -73,7 +76,7 @@ fn is_valid_event_name(name: &str) -> bool {
 ///
 /// Created via `TzeHudConfig::parse(toml_src)`.
 pub struct TzeHudConfig {
-    raw: RawConfig,
+    pub(crate) raw: RawConfig,
 }
 
 impl ConfigLoader for TzeHudConfig {
@@ -180,8 +183,8 @@ impl ConfigLoader for TzeHudConfig {
 
         // ── (8) Scene event naming convention (tab_switch_on_event) ──────────
         for (i, tab) in self.raw.tabs.iter().enumerate() {
-            if let Some(event) = &tab.tab_switch_on_event {
-                if !is_valid_event_name(event) {
+            if let Some(event) = &tab.tab_switch_on_event
+                && !is_valid_event_name(event) {
                     errors.push(ConfigError {
                         code: ConfigErrorCode::InvalidEventName,
                         field_path: format!("tabs[{i}].tab_switch_on_event"),
@@ -193,12 +196,40 @@ impl ConfigLoader for TzeHudConfig {
                         ),
                     });
                 }
-            }
         }
 
-        // ── (9) Capability vocabulary ─────────────────────────────────────────
-        if let Some(agents) = &self.raw.agents {
-            if let Some(registered) = &agents.registered {
+        // ── (9) Privacy section ───────────────────────────────────────────────
+        if let Some(priv_cfg) = &self.raw.privacy {
+            privacy::validate_privacy(priv_cfg, &mut errors);
+        }
+
+        // ── (10) Zone registry ────────────────────────────────────────────────
+        if let Some(zone_registry) = &self.raw.zones {
+            zones::validate_zones(zone_registry, &mut errors);
+        }
+
+        // ── (11) Agent registration budgets ───────────────────────────────────
+        // We need the resolved profile for budget ceiling checks.  Derive it
+        // here from the raw config (best-effort; skip if profile is invalid).
+        if let Some(raw_agents) = &self.raw.agents {
+            // Only validate budgets when we can resolve the profile.
+            // profile::resolve_profile performs its own error collection
+            // separately; we pass synthetic GPU values to avoid display
+            // dependency during pure validation.
+            if let Ok(resolved_profile) = profile::resolve_profile(
+                &self.raw,
+                /*gpu_vram_mb=*/ 8192,
+                /*refresh_hz=*/ 60,
+            ) {
+                agents::validate_agents(raw_agents, &resolved_profile, &mut errors);
+            }
+            // If profile resolution fails, its errors were already added in step (2)/(3).
+            // Skip agent budget checks to avoid duplicate/misleading errors.
+        }
+
+        // ── (12) Capability vocabulary ────────────────────────────────────────
+        if let Some(agents) = &self.raw.agents
+            && let Some(registered) = &agents.registered {
                 for (agent_name, agent) in registered {
                     if let Some(caps) = &agent.capabilities {
                         for cap in caps {
@@ -234,7 +265,6 @@ impl ConfigLoader for TzeHudConfig {
                     }
                 }
             }
-        }
 
         errors
     }
@@ -274,8 +304,8 @@ impl ConfigLoader for TzeHudConfig {
             .collect();
 
         let mut agent_capabilities: HashMap<String, Vec<String>> = HashMap::new();
-        if let Some(agents) = &self.raw.agents {
-            if let Some(registered) = &agents.registered {
+        if let Some(agents) = &self.raw.agents
+            && let Some(registered) = &agents.registered {
                 for (name, agent) in registered {
                     agent_capabilities.insert(
                         name.clone(),
@@ -283,7 +313,6 @@ impl ConfigLoader for TzeHudConfig {
                     );
                 }
             }
-        }
 
         let source_path = None; // Set by caller after file load.
 
@@ -515,8 +544,8 @@ fn validate_fps_range(
     min_fps: Option<u32>,
     errors: &mut Vec<ConfigError>,
 ) {
-    if let (Some(target), Some(min)) = (target_fps, min_fps) {
-        if target < min {
+    if let (Some(target), Some(min)) = (target_fps, min_fps)
+        && target < min {
             errors.push(ConfigError {
                 code: ConfigErrorCode::InvalidFpsRange,
                 field_path: "display_profile".into(),
@@ -527,7 +556,6 @@ fn validate_fps_range(
                 ),
             });
         }
-    }
 }
 
 /// Validate degradation threshold ordering.
@@ -564,8 +592,8 @@ fn check_monotone_non_decreasing(fields: &[(&str, Option<f64>)], errors: &mut Ve
     let mut prev: Option<(&str, f64)> = None;
     for (name, val_opt) in fields {
         if let Some(val) = *val_opt {
-            if let Some((prev_name, prev_val)) = prev {
-                if val < prev_val {
+            if let Some((prev_name, prev_val)) = prev
+                && val < prev_val {
                     errors.push(ConfigError {
                         code: ConfigErrorCode::DegradationThresholdOrder,
                         field_path: format!("degradation.{name}"),
@@ -579,7 +607,6 @@ fn check_monotone_non_decreasing(fields: &[(&str, Option<f64>)], errors: &mut Ve
                         ),
                     });
                 }
-            }
             prev = Some((name, val));
         }
     }

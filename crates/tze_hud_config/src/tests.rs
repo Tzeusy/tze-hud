@@ -894,3 +894,351 @@ name = "T"
     // Other values fall back to base.
     assert_eq!(resolved.profile.max_texture_mb, 2048, "non-overridden fields use base values");
 }
+
+// ── Spec §Privacy Configuration Defaults (rig-mop4) ──────────────────────────
+
+/// WHEN default_classification = "top_secret" THEN CONFIG_UNKNOWN_CLASSIFICATION.
+#[test]
+fn spec_unknown_classification_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+default_classification = "top_secret"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
+        "default_classification=top_secret should produce CONFIG_UNKNOWN_CLASSIFICATION, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
+/// WHEN default_viewer_class = "admin" THEN CONFIG_UNKNOWN_VIEWER_CLASS.
+#[test]
+fn spec_unknown_viewer_class_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+default_viewer_class = "admin"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownViewerClass)),
+        "default_viewer_class=admin should produce CONFIG_UNKNOWN_VIEWER_CLASS"
+    );
+}
+
+/// WHEN privacy section has valid fields THEN no errors.
+#[test]
+fn spec_valid_privacy_section_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+default_classification = "private"
+default_viewer_class = "unknown"
+redaction_style = "pattern"
+multi_viewer_policy = "most_restrictive"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let privacy_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.code,
+                ConfigErrorCode::UnknownClassification
+                    | ConfigErrorCode::UnknownViewerClass
+                    | ConfigErrorCode::UnknownInterruptionClass
+            )
+        })
+        .collect();
+    assert!(privacy_errors.is_empty(), "valid privacy section should not produce errors, got: {:?}", privacy_errors);
+}
+
+// ── Spec §Quiet Hours Configuration (rig-mop4) ────────────────────────────────
+
+/// WHEN pass_through_class = "urgent" (doctrine name) THEN CONFIG_UNKNOWN_INTERRUPTION_CLASS
+/// with hint suggesting canonical name.
+#[test]
+fn spec_quiet_hours_doctrine_name_rejected_with_hint() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy.quiet_hours]
+enabled = true
+pass_through_class = "urgent"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass)),
+        "doctrine name 'urgent' should produce CONFIG_UNKNOWN_INTERRUPTION_CLASS"
+    );
+    let err = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass)).unwrap();
+    // Per spec line 239 and RFC 0010 §3.1: "urgent" → canonical "HIGH".
+    assert!(
+        err.hint.contains("HIGH"),
+        "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}", err.hint
+    );
+}
+
+/// WHEN pass_through_class = "HIGH" THEN quiet hours semantics correct.
+#[test]
+fn spec_quiet_hours_high_pass_through_class_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy.quiet_hours]
+enabled = true
+pass_through_class = "HIGH"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let qh_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass))
+        .collect();
+    assert!(qh_errors.is_empty(), "HIGH is a valid pass_through_class, got errors: {:?}", qh_errors);
+}
+
+// ── Spec §Redaction Style Ownership (rig-mop4) ────────────────────────────────
+
+/// WHEN privacy.redaction_style = "pattern" and [chrome] has no redaction_style THEN accepted.
+#[test]
+fn spec_redaction_style_in_privacy_section_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+redaction_style = "pattern"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let redaction_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| e.field_path.contains("redaction_style"))
+        .collect();
+    assert!(
+        redaction_errors.is_empty(),
+        "redaction_style in [privacy] should be accepted, got: {:?}", redaction_errors
+    );
+}
+
+// ── Spec §Zone Registry Configuration (rig-mop4) ─────────────────────────────
+
+/// WHEN a tab references zone type "news_ticker" not defined in [zones] and not built-in
+/// THEN CONFIG_UNKNOWN_ZONE_TYPE.
+///
+/// This is tested at the zones module level since tab zone references are
+/// validated by the zones module directly.
+#[test]
+fn spec_unknown_zone_type_produces_error() {
+    use crate::zones::validate_zone_type_ref;
+
+    let mut errors = Vec::new();
+    validate_zone_type_ref("news_ticker", "tabs[0].zones.news_ticker", &[], &mut errors);
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
+        "unknown zone type should produce CONFIG_UNKNOWN_ZONE_TYPE"
+    );
+}
+
+/// WHEN a tab defines subtitle = { ... } without custom [zones.subtitle] THEN built-in used.
+#[test]
+fn spec_builtin_zone_type_subtitle_accepted() {
+    use crate::zones::validate_zone_type_ref;
+
+    let mut errors = Vec::new();
+    validate_zone_type_ref("subtitle", "tabs[0].zones.subtitle", &[], &mut errors);
+    assert!(
+        errors.is_empty(),
+        "built-in subtitle zone type should be accepted without custom definition"
+    );
+}
+
+// ── Spec §Agent Registration with Per-Agent Budget Overrides (rig-mop4) ───────
+
+/// WHEN agent sets max_tiles = 4 and profile has max_tiles = 1024 THEN accepted.
+#[test]
+fn spec_agent_budget_within_ceiling_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.my_agent]
+max_tiles = 4
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let budget_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile))
+        .collect();
+    assert!(
+        budget_errors.is_empty(),
+        "max_tiles=4 within profile ceiling should be accepted, got: {:?}", budget_errors
+    );
+}
+
+/// WHEN agent sets max_tiles = 2048 and profile has max_tiles = 1024 THEN
+/// CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE identifying agent, field, and ceiling.
+#[test]
+fn spec_agent_budget_exceeds_ceiling_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.big_agent]
+max_tiles = 2048
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)),
+        "max_tiles=2048 exceeding profile ceiling 1024 should produce CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE"
+    );
+    let err = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)).unwrap();
+    // Must identify the agent.
+    assert!(err.hint.contains("big_agent"), "error hint should identify agent, got: {:?}", err.hint);
+    // Must identify the field.
+    assert!(err.field_path.contains("max_tiles"), "error path should identify field, got: {:?}", err.field_path);
+    // Must identify the ceiling.
+    assert!(err.expected.contains("1024"), "error should identify ceiling 1024, got: {:?}", err.expected);
+}
+
+// ── Spec §Dynamic Agent Policy (rig-mop4) ────────────────────────────────────
+
+/// WHEN no [agents.dynamic_policy] section present THEN connections from
+/// unregistered agents rejected (dynamic_agents_allowed = false).
+#[test]
+fn spec_no_dynamic_policy_dynamic_agents_disabled() {
+    use crate::agents::dynamic_agents_allowed;
+    use crate::raw::RawAgents;
+
+    let agents = RawAgents::default();
+    assert!(
+        !dynamic_agents_allowed(&agents),
+        "no [agents.dynamic_policy] should mean dynamic agents are disabled"
+    );
+}
+
+// ── Spec §Authentication Secret Indirection (rig-mop4) ───────────────────────
+
+/// WHEN agent sets auth_psk_env and env var is unset THEN warning logged.
+#[test]
+fn spec_auth_psk_unset_env_produces_warning() {
+    use crate::agents::check_agent_auth_env_vars;
+    use crate::raw::{RawAgents, RawRegisteredAgent};
+    use std::collections::HashMap;
+
+    let env_var = "SPEC_TEST_AGENT_KEY_UNSET_MOP4_ABC999";
+    // SAFETY: test-only; ensure not set.
+    unsafe { std::env::remove_var(env_var) };
+
+    let mut registered = HashMap::new();
+    registered.insert(
+        "spec_agent".to_string(),
+        RawRegisteredAgent {
+            auth_psk_env: Some(env_var.into()),
+            ..Default::default()
+        },
+    );
+    let agents = RawAgents {
+        registered: Some(registered),
+        ..Default::default()
+    };
+    let warnings = check_agent_auth_env_vars(&agents);
+    assert!(
+        !warnings.is_empty(),
+        "unset auth_psk_env should produce a warning"
+    );
+    assert_eq!(warnings[0].env_var_name, env_var);
+}
+
+// ── Spec §Configuration Reload (rig-mop4) ────────────────────────────────────
+
+/// WHEN SIGHUP received and updated config changes privacy.redaction_style THEN
+/// new style takes effect without restart.
+#[test]
+fn spec_reload_privacy_redaction_style_change() {
+    use crate::reload::reload_config;
+
+    let new_toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+redaction_style = "blank"
+"#;
+    let result = reload_config(new_toml);
+    assert!(result.is_ok(), "valid reload config should succeed");
+    let hot = result.unwrap();
+    assert_eq!(
+        hot.privacy.redaction_style,
+        Some("blank".into()),
+        "reload should apply new redaction_style"
+    );
+}
+
+/// WHEN SIGHUP received and updated config has validation errors THEN
+/// errors returned and running config unchanged.
+#[test]
+fn spec_reload_validation_failure_leaves_config_unchanged() {
+    use crate::reload::reload_config;
+
+    let bad_toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+default_classification = "top_secret"
+"#;
+    let result = reload_config(bad_toml);
+    assert!(result.is_err(), "reload with validation error should return Err");
+    let errors = result.unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
+        "should return validation error from reload, got: {:?}", errors
+    );
+}
