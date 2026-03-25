@@ -412,6 +412,7 @@ async fn test_input_to_scene_commit_p99_within_budget() {
         height: 600,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -472,6 +473,7 @@ async fn test_input_to_next_present_p99_within_budget() {
         height: 600,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 

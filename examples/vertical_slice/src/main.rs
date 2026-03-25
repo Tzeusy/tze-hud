@@ -1,13 +1,46 @@
-//! # Vertical Slice Example
+//! # Vertical Slice Example — v1 Canonical Conformance Reference
 //!
-//! Reference binary demonstrating the full tze_hud contract path:
+//! This binary is the **primary reference** for how an agent interacts with
+//! the tze_hud runtime. Every interaction pattern demonstrated here follows
+//! the v1 spec directly and is linked to the relevant spec requirement.
 //!
-//! **Phase 1** — Session + Lease: bidirectional streaming handshake, lease grant
-//! **Phase 2** — Scene Setup: tab, tiles (hit region + text), zone publish
+//! **Phase 1** — Session + Lease
+//!   - Session init with canonical capability names (`create_tiles`,
+//!     `modify_own_tiles`, `access_input_events`, `read_scene_topology`)
+//!   - Capability negotiation: shows granted vs denied capabilities
+//!   - Mandatory subscription categories: `LEASE_CHANGES`, `SCENE_TOPOLOGY`,
+//!     `ZONE_EVENTS`
+//!   - Lease acquisition with priority (spec §Priority Assignment)
+//!   - Structured error handling: capability denied, budget exceeded
+//!
+//! **Phase 2** — Scene Setup
+//!   - Tab creation and zone registry initialization
+//!   - Tile creation and mutation via resident capabilities
+//!   - Zone publishing via `publish_to_zone` — the LLM-first surface
+//!     (spec §Zone Publishing, the preferred way for LLMs to surface content)
+//!
 //! **Phase 3** — Input Loop: pointer events, hit-test, local ack, agent dispatch
+//!
 //! **Phase 4** — Telemetry: frame metrics, telemetry frame over session stream
+//!
 //! **Phase 5** — Safe Mode: suspend all leases, verify mutation rejection, resume
+//!
 //! **Phase 6** — Graceful Shutdown: SessionClose, cleanup verification
+//!
+//! ## Registered-agent config flow
+//!
+//! The headless demo runs with `config_toml: None` (dev mode — all capabilities
+//! granted to any agent). In production, pass a TOML config string via
+//! `HeadlessConfig { config_toml: Some(AGENT_CONFIG_TOML), .. }`. The agent
+//! must appear in `[agents.registered]` with its allowed capability set; unknown
+//! agents get guest policy (no capabilities). See the comment at the
+//! `HeadlessConfig` construction site below for the exact TOML schema.
+//!
+//! ## Spec references
+//!
+//! - `session-protocol/spec.md` §Requirement: MCP Bridge Guest Tools (lines 487-502)
+//! - `configuration/spec.md` §Requirement: Capability Vocabulary (lines 149-164)
+//! - `validation-framework/spec.md`: "Tests SHALL read like usage examples" (line 398)
 //!
 //! Run headless:  cargo run -p vertical_slice -- --headless
 //! Run windowed:  cargo run -p vertical_slice
@@ -84,12 +117,41 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== tze_hud vertical slice (full contract path) ===\n");
 
     // ─── Initialize runtime ────────────────────────────────────────────────
+    //
+    // `config_toml: None` runs in dev mode: all capabilities are granted
+    // to any agent (fallback_unrestricted = true). This is the right choice
+    // for the headless reference demo.
+    //
+    // For a registered-agent flow (production), set config_toml to a TOML
+    // string that lists the agent in `[agents.registered]` with its allowed
+    // capability set. Example:
+    //
+    //   let config_toml = r#"
+    //   [runtime]
+    //   profile = "headless"
+    //
+    //   [[tabs]]
+    //   name = "Main"
+    //   default_tab = true
+    //
+    //   [agents.registered.vertical-slice-agent]
+    //   capabilities = [
+    //       "create_tiles",
+    //       "modify_own_tiles",
+    //       "access_input_events",
+    //       "read_scene_topology",
+    //   ]
+    //   "#;
+    //   HeadlessConfig { config_toml: Some(config_toml.to_string()), .. }
+    //
+    // With a registered-agent config, an unregistered agent receives guest
+    // policy (no capabilities) instead of the unrestricted dev grant.
     let config = HeadlessConfig {
         width: 800,
         height: 600,
         grpc_port: 50051,
         psk: "vertical-slice-key".to_string(),
-        config_toml: None,
+        config_toml: None, // dev mode — all capabilities granted
     };
 
     let mut runtime = HeadlessRuntime::new(config).await?;
@@ -109,7 +171,17 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
 
     let now_us = now_wall_us();
 
-    // Send SessionInit
+    // Send SessionInit with canonical capability names and mandatory subscriptions.
+    //
+    // Canonical capability vocabulary (configuration/spec.md §Capability Vocabulary,
+    // lines 149-164). Legacy names like `create_tile` or `receive_input` are rejected
+    // with CONFIG_UNKNOWN_CAPABILITY — always use the canonical plural forms.
+    //
+    // Mandatory subscription categories (session-protocol/spec.md §Subscriptions):
+    // - LEASE_CHANGES: always delivered regardless of capability gating; demonstrates
+    //   spec requirement that agents MUST subscribe to lease state changes.
+    // - SCENE_TOPOLOGY: requires `read_scene_topology` capability.
+    // - ZONE_EVENTS: requires any `publish_zone:<zone>` capability; not open to all.
     tx.send(session_proto::ClientMessage {
         sequence: 1,
         timestamp_wall_us: now_us,
@@ -118,12 +190,25 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 agent_id: "vertical-slice-agent".to_string(),
                 agent_display_name: "Vertical Slice Agent".to_string(),
                 pre_shared_key: "vertical-slice-key".to_string(),
+                // Canonical v1 capability names. The runtime validates these against
+                // the canonical vocabulary; non-canonical names are rejected with a
+                // CONFIG_UNKNOWN_CAPABILITY error and a hint pointing to the canonical
+                // replacement (see the structured error handling demo below).
                 requested_capabilities: vec![
-                    "create_tiles".to_string(),
-                    "modify_own_tiles".to_string(),
-                    "access_input_events".to_string(),
+                    "create_tiles".to_string(),          // create tiles in leased area
+                    "modify_own_tiles".to_string(),      // mutate tiles owned by this agent
+                    "access_input_events".to_string(),   // receive pointer / keyboard events
+                    "read_scene_topology".to_string(),   // required to subscribe SCENE_TOPOLOGY
+                    "publish_zone:status-bar".to_string(), // required to subscribe ZONE_EVENTS
                 ],
-                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
+                // LEASE_CHANGES is mandatory (always active). Listing it in
+                // initial_subscriptions is spec-compliant and demonstrates
+                // that agents should explicitly declare their intent.
+                initial_subscriptions: vec![
+                    "SCENE_TOPOLOGY".to_string(),  // requires read_scene_topology
+                    "LEASE_CHANGES".to_string(),   // mandatory: always active
+                    "ZONE_EVENTS".to_string(),     // requires publish_zone:<zone> capability
+                ],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000,
@@ -136,16 +221,56 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut response_stream = session_client.session(stream).await?.into_inner();
 
-    // Read SessionEstablished
+    // Read SessionEstablished — capability negotiation result.
+    //
+    // The runtime intersects the agent's requested capabilities with what its
+    // authorization policy allows. In dev mode (config_toml = None), all
+    // canonical capabilities are granted. With a registered-agent config, only
+    // the agent's configured capability set is granted; anything else is denied.
+    //
+    // `granted_capabilities` lists what was actually granted — agents MUST
+    // only exercise capabilities present in this list (spec §Capability Gating).
+    // `active_subscriptions` lists which subscription categories are live.
     use tokio_stream::StreamExt;
     let msg = response_stream.next().await.unwrap()?;
     let namespace = match &msg.payload {
         Some(session_proto::server_message::Payload::SessionEstablished(established)) => {
             println!("  Session established:");
-            println!("    namespace       = {}", established.namespace);
-            println!("    heartbeat_ms    = {}", established.heartbeat_interval_ms);
-            println!("    capabilities    = {:?}", established.granted_capabilities);
-            println!("    clock_skew      = {}us", established.estimated_skew_us);
+            println!("    namespace             = {}", established.namespace);
+            println!("    heartbeat_ms          = {}", established.heartbeat_interval_ms);
+            println!("    granted_capabilities  = {:?}", established.granted_capabilities);
+            println!("    active_subscriptions  = {:?}", established.active_subscriptions);
+            println!("    clock_skew            = {}us", established.estimated_skew_us);
+
+            // Capability negotiation: verify the expected capabilities were granted.
+            // In dev mode all requested caps are granted; with a restricted config
+            // only the registered set would be granted and others would be absent.
+            let granted = &established.granted_capabilities;
+            assert!(granted.contains(&"create_tiles".to_string()),
+                "create_tiles must be granted");
+            assert!(granted.contains(&"modify_own_tiles".to_string()),
+                "modify_own_tiles must be granted");
+            assert!(granted.contains(&"access_input_events".to_string()),
+                "access_input_events must be granted");
+            assert!(granted.contains(&"read_scene_topology".to_string()),
+                "read_scene_topology must be granted (needed for SCENE_TOPOLOGY subscription)");
+            assert!(granted.contains(&"publish_zone:status-bar".to_string()),
+                "publish_zone:status-bar must be granted (needed for ZONE_EVENTS subscription)");
+            println!("  Capability negotiation: all 5 requested capabilities granted.");
+
+            // Subscription negotiation:
+            // - LEASE_CHANGES: mandatory, always active regardless of capabilities
+            // - SCENE_TOPOLOGY: active because agent has read_scene_topology
+            // - ZONE_EVENTS: active because agent has publish_zone:status-bar
+            let subs = &established.active_subscriptions;
+            assert!(subs.contains(&"LEASE_CHANGES".to_string()),
+                "LEASE_CHANGES must be active (mandatory category)");
+            assert!(subs.contains(&"SCENE_TOPOLOGY".to_string()),
+                "SCENE_TOPOLOGY must be active (agent has read_scene_topology)");
+            assert!(subs.contains(&"ZONE_EVENTS".to_string()),
+                "ZONE_EVENTS must be active (agent has publish_zone:status-bar)");
+            println!("  Subscription negotiation: LEASE_CHANGES + SCENE_TOPOLOGY + ZONE_EVENTS active.");
+
             established.namespace.clone()
         }
         other => {
@@ -165,7 +290,13 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Request lease
+    // Request lease with priority.
+    //
+    // `lease_priority` controls arbitration when the runtime must shed leases under
+    // resource pressure (spec §Priority Assignment). Priority 2 is the default;
+    // priority 1 (high) requires the `lease:priority:1` capability.
+    // Capabilities listed here are scoped to this lease — the agent can only
+    // exercise these capabilities while the lease is active.
     tx.send(session_proto::ClientMessage {
         sequence: 2,
         timestamp_wall_us: now_wall_us(),
@@ -176,8 +307,10 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                     "create_tiles".to_string(),
                     "modify_own_tiles".to_string(),
                     "access_input_events".to_string(),
+                    "read_scene_topology".to_string(),
+                    "publish_zone:status-bar".to_string(),
                 ],
-                lease_priority: 2,
+                lease_priority: 2, // default priority; 1=high requires lease:priority:1 cap
             },
         )),
     })
@@ -189,8 +322,18 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
             println!("  Lease granted: ttl={}ms, priority={}", resp.granted_ttl_ms, resp.granted_priority);
             resp.lease_id.clone()
         }
+        Some(session_proto::server_message::Payload::LeaseResponse(resp)) => {
+            // Lease denied — structured error:
+            //   deny_code:   machine-readable error code (e.g. CONFIG_UNKNOWN_CAPABILITY)
+            //   deny_reason: human-readable explanation
+            // See the structured error handling demo below for how to handle this.
+            return Err(format!(
+                "Lease denied: code={}, reason={}",
+                resp.deny_code, resp.deny_reason
+            ).into());
+        }
         other => {
-            return Err(format!("Expected LeaseResponse (granted), got: {other:?}").into());
+            return Err(format!("Expected LeaseResponse, got: {other:?}").into());
         }
     };
 
@@ -229,6 +372,112 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n  Phase 1 PASSED: session established, lease active, heartbeat verified.\n");
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PHASE 1.5: Structured Error Handling
+    //
+    // The runtime returns structured errors in two forms:
+    //
+    // 1. `LeaseResponse { granted: false, deny_code, deny_reason }` — when a
+    //    LeaseRequest is denied. `deny_code` is a machine-readable constant:
+    //    - CONFIG_UNKNOWN_CAPABILITY — one or more capability names are not in
+    //      the canonical vocabulary (legacy names like `create_tile` trigger this)
+    //    - CAPABILITY_DENIED — agent's policy doesn't permit the capability
+    //
+    // 2. `RuntimeError { error_code, message, hint }` — advisory errors sent
+    //    alongside a LeaseResponse denial when the server wants to give the
+    //    agent actionable hints (e.g. the canonical replacement for a legacy name).
+    //
+    // This section demonstrates the capability-denied and budget-exceeded paths
+    // using direct scene graph calls (no second gRPC session needed).
+    // ─────────────────────────────────────────────────────────────────────────
+    println!("=== Phase 1.5: Structured Error Handling Demo ===\n");
+
+    // 1. Capability denied: demonstrate that requesting an unknown capability
+    //    name returns CONFIG_UNKNOWN_CAPABILITY via the scene graph.
+    //    (Over gRPC this would be a LeaseResponse denial.)
+    {
+        use tze_hud_protocol::auth::validate_canonical_capabilities;
+        let result = validate_canonical_capabilities(&[
+            "create_tile".to_string(),    // legacy — rejected
+            "receive_input".to_string(),  // legacy — rejected
+        ]);
+        let unknowns = result.expect_err("legacy names must be rejected");
+        println!("  Capability denied (CONFIG_UNKNOWN_CAPABILITY):");
+        for u in &unknowns {
+            println!("    unknown={:?}  hint={:?}", u.unknown, u.hint);
+        }
+        assert!(unknowns.iter().any(|u| u.hint.contains("create_tiles")),
+            "hint must point to create_tiles for legacy create_tile");
+        assert!(unknowns.iter().any(|u| u.hint.contains("access_input_events")),
+            "hint must point to access_input_events for legacy receive_input");
+        println!("  CONFIG_UNKNOWN_CAPABILITY validated: hints contain canonical replacements.");
+    }
+
+    // 2. Budget exceeded: demonstrate that mutation batches are rejected
+    //    when an agent's tile budget is exhausted.
+    //    Over gRPC this produces MutationResult { applied: false } with an error.
+    {
+        use tze_hud_scene::mutation::{MutationBatch as DemoBatch, SceneMutation as DemoMutation};
+
+        let mut state = runtime.shared_state().lock().await;
+        let demo_tab = state.scene.create_tab("BudgetDemo", 1).unwrap();
+        let demo_lease = state.scene.grant_lease(
+            "budget-demo-agent",
+            5_000,
+            vec![tze_hud_scene::types::Capability::CreateTiles],
+        );
+        // Shrink the budget to 2 tiles for demonstration purposes.
+        state.scene.leases.get_mut(&demo_lease).unwrap().resource_budget.max_tiles = 2;
+
+        // First two tiles succeed via apply_batch (within budget).
+        for i in 0..2u32 {
+            let batch = DemoBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "budget-demo-agent".to_string(),
+                mutations: vec![DemoMutation::CreateTile {
+                    tab_id: demo_tab,
+                    namespace: "budget-demo-agent".to_string(),
+                    lease_id: demo_lease,
+                    bounds: tze_hud_scene::types::Rect::new(i as f32 * 100.0, 400.0, 90.0, 50.0),
+                    z_order: i + 10,
+                }],
+                timing_hints: None,
+                lease_id: Some(demo_lease),
+            };
+            let result = state.scene.apply_batch(&batch);
+            assert!(result.applied, "tile {} within budget should succeed", i);
+        }
+
+        // Third tile exceeds budget — apply_batch returns a structured rejection.
+        let over_batch = DemoBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "budget-demo-agent".to_string(),
+            mutations: vec![DemoMutation::CreateTile {
+                tab_id: demo_tab,
+                namespace: "budget-demo-agent".to_string(),
+                lease_id: demo_lease,
+                bounds: tze_hud_scene::types::Rect::new(200.0, 400.0, 90.0, 50.0),
+                z_order: 12,
+            }],
+            timing_hints: None,
+            lease_id: Some(demo_lease),
+        };
+        let result = state.scene.apply_batch(&over_batch);
+        assert!(!result.applied, "third tile must be rejected (budget exceeded)");
+        let err_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        println!("  Budget exceeded (MUTATION_REJECTED):");
+        println!("    error: {}", err_msg);
+        assert!(err_msg.contains("tiles") || err_msg.contains("budget"),
+            "error must reference tile budget: {}", err_msg);
+
+        // Clean up the demo tab and lease.
+        state.scene.revoke_lease(demo_lease).ok();
+        state.scene.tabs.remove(&demo_tab);
+        println!("  Budget enforcement validated: tile budget rejection confirmed.");
+    }
+
+    println!("\n  Phase 1.5 PASSED: structured error handling validated (capability denied + budget exceeded).\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 2: Scene Setup — tab, tiles, zone publish
@@ -321,7 +570,23 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
         (tile_id, node_id)
     };
 
-    // Publish to status-bar zone
+    // Zone publishing via publish_to_zone — the LLM-first surface.
+    //
+    // `publish_to_zone` is the preferred way for LLMs to surface content. Zones are
+    // named slots on the display (e.g. "status-bar", "notification-area", "subtitle")
+    // with defined layout semantics. LLMs publish into zones; the runtime composits
+    // the final display. This is distinct from direct tile creation (which gives more
+    // control but requires a lease and explicit tile management).
+    //
+    // publish_to_zone arguments:
+    //   zone_name         — must match a registered zone
+    //   content           — ZoneContent variant matching the zone's accepted types
+    //   publisher_ns      — the publishing agent's namespace
+    //   merge_key         — optional; same key = replace existing publish (MergeByKey)
+    //   expires_at_wall_us— optional; publication expires at this wall-clock time
+    //   content_class     — optional; content classification for privacy/redaction
+
+    // Publish to status-bar zone (MergeByKey: same key replaces, does not accumulate)
     {
         let mut state = runtime.shared_state().lock().await;
         let mut entries = std::collections::HashMap::new();
@@ -332,19 +597,19 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
             "status-bar",
             ZoneContent::StatusBar(StatusBarPayload { entries }),
             &namespace,
-            Some("agent-status".to_string()),
-            None,
-            None,
+            Some("agent-status".to_string()), // merge_key: subsequent publishes with same key replace this one
+            None,                              // no expiry
+            None,                              // no content classification
         ).unwrap();
         println!("  Published to status-bar zone (MergeByKey, key=agent-status)");
 
-        // Verify the publish is active
+        // Verify the publish is active — confirms zone routing is working.
         let active = state.scene.zone_registry.active_for_zone("status-bar");
         assert!(!active.is_empty(), "status-bar should have active publishes");
         println!("  status-bar active publishes: {}", active.len());
     }
 
-    // Publish to notification-area zone
+    // Publish to notification-area zone (no merge key — each publish is independent)
     {
         let mut state = runtime.shared_state().lock().await;
         state.scene.publish_to_zone(
@@ -355,7 +620,7 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
                 urgency: 1,
             }),
             &namespace,
-            None,
+            None, // no merge key — stacks alongside other notifications
             None,
             None,
         ).unwrap();
@@ -728,14 +993,15 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
 
     // ─── Final Summary ─────────────────────────────────────────────────────
     println!("===================================================");
-    println!("  VERTICAL SLICE COMPLETE -- ALL 6 PHASES PASSED");
+    println!("  VERTICAL SLICE COMPLETE — ALL PHASES PASSED");
     println!();
-    println!("  Phase 1: Session handshake + lease acquisition");
-    println!("  Phase 2: Scene setup (tab + tiles + zone publish)");
-    println!("  Phase 3: Input loop (pointer events + hit-test + dispatch)");
-    println!("  Phase 4: Telemetry (frame metrics + stream telemetry)");
-    println!("  Phase 5: Safe mode (suspend + rejection + resume)");
-    println!("  Phase 6: Graceful shutdown");
+    println!("  Phase 1:   Session init (canonical caps + mandatory subs)");
+    println!("  Phase 1.5: Structured error handling (cap denied + budget)");
+    println!("  Phase 2:   Scene setup (tab + tiles + zone publish)");
+    println!("  Phase 3:   Input loop (pointer events + hit-test + dispatch)");
+    println!("  Phase 4:   Telemetry (frame metrics + stream telemetry)");
+    println!("  Phase 5:   Safe mode (suspend + rejection + resume)");
+    println!("  Phase 6:   Graceful shutdown");
     println!("===================================================");
 
     Ok(())
@@ -772,13 +1038,21 @@ mod tests {
 
     // ─── Helpers ────────────────────────────────────────────────────────────
 
+    /// Create a minimal scene with one tab and one active lease using canonical
+    /// v1 capability variants. Tests that use this helper read like usage
+    /// examples for the spec (validation-framework/spec.md line 398).
     fn setup_scene_with_lease() -> (SceneGraph, SceneId, SceneId) {
         let mut scene = SceneGraph::new(800.0, 600.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease(
             "test-agent",
             60_000,
-            vec![Capability::CreateTile, Capability::CreateNode, Capability::ReceiveInput],
+            // Canonical v1 capability variants (not the legacy CreateTile / ReceiveInput).
+            vec![
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::AccessInputEvents,
+            ],
         );
         (scene, tab_id, lease_id)
     }
@@ -1208,5 +1482,214 @@ mod tests {
         );
 
         assert!(result.is_err(), "should fail for unknown zone");
+    }
+
+    // ─── Structured error handling tests ────────────────────────────────────
+
+    /// GIVEN an agent requests a legacy (non-canonical) capability name
+    /// WHEN the runtime validates the SessionInit or LeaseRequest
+    /// THEN it returns CONFIG_UNKNOWN_CAPABILITY with a canonical hint
+    ///
+    /// (configuration/spec.md §Capability Vocabulary, lines 149-164)
+    #[test]
+    fn test_legacy_capability_names_rejected_with_hint() {
+        use tze_hud_protocol::auth::validate_canonical_capabilities;
+
+        // Legacy names must be rejected — agents that copy old examples will
+        // get clear feedback pointing to the canonical replacement.
+        let result = validate_canonical_capabilities(&[
+            "create_tile".to_string(),   // legacy: should be create_tiles
+            "receive_input".to_string(), // legacy: should be access_input_events
+        ]);
+
+        let unknowns = result.expect_err("legacy names must be rejected with CONFIG_UNKNOWN_CAPABILITY");
+        assert_eq!(unknowns.len(), 2, "both legacy names must be reported (collect-all, not fail-fast)");
+
+        let create_unknown = unknowns.iter().find(|u| u.unknown == "create_tile")
+            .expect("create_tile must appear in unknowns");
+        assert!(create_unknown.hint.contains("create_tiles"),
+            "hint must point to canonical create_tiles: {:?}", create_unknown.hint);
+
+        let receive_unknown = unknowns.iter().find(|u| u.unknown == "receive_input")
+            .expect("receive_input must appear in unknowns");
+        assert!(receive_unknown.hint.contains("access_input_events"),
+            "hint must point to canonical access_input_events: {:?}", receive_unknown.hint);
+    }
+
+    /// GIVEN an agent's canonical capability request
+    /// WHEN the runtime validates it
+    /// THEN all canonical names are accepted without error
+    #[test]
+    fn test_canonical_capability_names_accepted() {
+        use tze_hud_protocol::auth::validate_canonical_capabilities;
+
+        let result = validate_canonical_capabilities(&[
+            "create_tiles".to_string(),
+            "modify_own_tiles".to_string(),
+            "access_input_events".to_string(),
+            "read_scene_topology".to_string(),
+        ]);
+
+        assert!(result.is_ok(),
+            "all canonical v1 capability names must be accepted without error");
+    }
+
+    /// GIVEN an agent has a limited tile budget (max_tiles = 2)
+    /// WHEN the agent submits a mutation batch that would exceed the budget
+    /// THEN the batch is rejected with a structured budget-exceeded error
+    ///
+    /// (session-protocol/spec.md §Resource Budget Enforcement)
+    /// Budget enforcement runs in apply_batch, which is the path used for both
+    /// gRPC MutationBatch messages and internal scene mutations.
+    #[test]
+    fn test_budget_exceeded_returns_structured_error() {
+        let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
+
+        // Constrain the lease to 2 tiles to make the budget easy to exhaust.
+        scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 2;
+
+        // First two batches succeed (within budget).
+        for i in 0..2u32 {
+            let batch = SceneMutationBatch {
+                batch_id: SceneId::new(),
+                agent_namespace: "test-agent".to_string(),
+                mutations: vec![SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: "test-agent".to_string(),
+                    lease_id,
+                    bounds: Rect::new(i as f32 * 100.0, 10.0, 90.0, 50.0),
+                    z_order: i + 1,
+                }],
+                timing_hints: None,
+                lease_id: Some(lease_id),
+            };
+            let result = scene.apply_batch(&batch);
+            assert!(result.applied, "tile {} within budget must succeed", i);
+        }
+
+        // Third batch exceeds budget — must return applied=false with a structured error.
+        let over_budget = SceneMutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "test-agent".to_string(),
+            mutations: vec![SceneMutation::CreateTile {
+                tab_id,
+                namespace: "test-agent".to_string(),
+                lease_id,
+                bounds: Rect::new(200.0, 10.0, 90.0, 50.0),
+                z_order: 3,
+            }],
+            timing_hints: None,
+            lease_id: Some(lease_id),
+        };
+        let result = scene.apply_batch(&over_budget);
+        assert!(!result.applied, "third tile must be rejected (budget exceeded)");
+
+        // Error message must reference the budget constraint so that the caller
+        // can surface actionable feedback to the agent.
+        let err_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            err_msg.contains("tiles") || err_msg.contains("budget"),
+            "error must reference tile budget: {}", err_msg
+        );
+    }
+
+    /// GIVEN an agent subscribes to SCENE_TOPOLOGY and ZONE_EVENTS without the required capabilities
+    /// WHEN the runtime processes the SessionInit
+    /// THEN both gated subscriptions are denied while LEASE_CHANGES remains active (mandatory)
+    ///
+    /// Subscription gating (session-protocol/spec.md §Subscription Categories):
+    /// - SCENE_TOPOLOGY requires `read_scene_topology` capability
+    /// - ZONE_EVENTS requires any `publish_zone:<zone>` capability
+    /// - LEASE_CHANGES is mandatory: always active regardless of capabilities
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_gated_subscriptions_denied_without_required_capabilities() {
+        // Use config_toml to restrict the agent's capabilities.
+        // Without this, dev mode (config_toml = None) grants all capabilities.
+        let toml = r#"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+
+[agents.dynamic_policy]
+allow_dynamic_agents = false
+
+[agents.registered.restricted-agent]
+capabilities = ["create_tiles", "modify_own_tiles"]
+"#;
+        let config = HeadlessConfig {
+            width: 320,
+            height: 240,
+            grpc_port: 50065,
+            psk: "test-key".to_string(),
+            config_toml: Some(toml.to_string()),
+        };
+        let runtime = HeadlessRuntime::new(config).await.unwrap();
+        let _server = runtime.start_grpc_server().await.unwrap();
+
+        let mut client = HudSessionClient::connect("http://[::1]:50065").await.unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(16);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(session_proto::ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(session_proto::client_message::Payload::SessionInit(
+                session_proto::SessionInit {
+                    agent_id: "restricted-agent".to_string(),
+                    agent_display_name: "Restricted Agent".to_string(),
+                    pre_shared_key: "test-key".to_string(),
+                    // Request SCENE_TOPOLOGY and ZONE_EVENTS without the required capabilities.
+                    // This demonstrates the subscription gating behaviour: the agent will
+                    // receive LEASE_CHANGES (mandatory) but not the gated categories.
+                    requested_capabilities: vec![
+                        "create_tiles".to_string(),
+                        "modify_own_tiles".to_string(),
+                        // Intentionally omit read_scene_topology (needed for SCENE_TOPOLOGY)
+                        // Intentionally omit publish_zone:* (needed for ZONE_EVENTS)
+                    ],
+                    initial_subscriptions: vec![
+                        "SCENE_TOPOLOGY".to_string(), // gated: denied (no read_scene_topology)
+                        "LEASE_CHANGES".to_string(),  // mandatory: always active
+                        "ZONE_EVENTS".to_string(),    // gated: denied (no publish_zone:*)
+                    ],
+                    resume_token: Vec::new(),
+                    agent_timestamp_wall_us: now_wall_us(),
+                    min_protocol_version: 1000,
+                    max_protocol_version: 1001,
+                    auth_credential: None,
+                },
+            )),
+        }).await.unwrap();
+
+        let mut response = client.session(stream).await.unwrap().into_inner();
+        use tokio_stream::StreamExt;
+        let msg = response.next().await.unwrap().unwrap();
+
+        match &msg.payload {
+            Some(session_proto::server_message::Payload::SessionEstablished(established)) => {
+                // SCENE_TOPOLOGY must be absent: agent lacks read_scene_topology.
+                assert!(
+                    !established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY must be denied without read_scene_topology capability; \
+                     active: {:?}", established.active_subscriptions
+                );
+                // ZONE_EVENTS must be absent: agent lacks any publish_zone:* capability.
+                assert!(
+                    !established.active_subscriptions.contains(&"ZONE_EVENTS".to_string()),
+                    "ZONE_EVENTS must be denied without publish_zone:* capability; \
+                     active: {:?}", established.active_subscriptions
+                );
+                // LEASE_CHANGES must be active: it is mandatory regardless of capabilities.
+                assert!(
+                    established.active_subscriptions.contains(&"LEASE_CHANGES".to_string()),
+                    "LEASE_CHANGES must always be active (mandatory category); \
+                     active: {:?}", established.active_subscriptions
+                );
+            }
+            other => panic!("Expected SessionEstablished, got: {other:?}"),
+        }
     }
 }
