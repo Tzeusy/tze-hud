@@ -116,8 +116,8 @@ pub fn validate_agents(
 /// # Arguments
 ///
 /// * `agents` - The agents configuration to check
-/// * `env_lookup` - A closure that takes an env var name and returns `Option<String>`;
-///   use `std::env::var` for production, or a mock for tests.
+/// * `env_lookup` - A closure that takes an env var name and returns `Option<String>`.
+///   In production, pass a closure like `|k| std::env::var(k).ok()`, and in tests, a mock.
 pub fn check_agent_auth_env_vars_with_lookup<F>(
     agents: &RawAgents,
     env_lookup: F,
