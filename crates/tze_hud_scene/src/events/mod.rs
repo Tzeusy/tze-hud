@@ -26,12 +26,14 @@
 //! - [`interruption`] — agent CRITICAL downgrade, zone ceiling enforcement
 //!   functions (`apply_agent_class`, `apply_zone_ceiling`, `classify_agent_event`).
 
+pub mod emission;
 pub mod envelope;
 pub mod interruption;
 pub mod naming;
 pub mod taxonomy;
 
 // Re-export the most commonly used types at the module root.
+pub use emission::{AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND, MAX_PAYLOAD_BYTES};
 pub use envelope::{
     EventPayload, EventSource, InterruptionClass, SceneEvent, SceneEventBuilder,
 };
