@@ -619,6 +619,12 @@ struct StreamSession {
     policy_capabilities: Vec<String>,
     lease_ids: Vec<tze_hud_scene::SceneId>,
     subscriptions: Vec<String>,
+    /// Fine-grained event type prefix filters per subscription category (RFC 0010 §7.2).
+    ///
+    /// When an agent subscribes with a `filter_prefix` (via `SubscriptionChange.subscribe_filter`),
+    /// the filter is stored here keyed by category name. Categories not present in this map
+    /// use the category's default prefix. Filters are removed when the category is unsubscribed.
+    subscription_filters: std::collections::HashMap<String, String>,
     server_sequence: u64,
     resume_token: Vec<u8>,
     last_heartbeat_ms: u64,
@@ -1369,6 +1375,7 @@ async fn handle_session_init(
         policy_capabilities: policy_caps.clone(),
         lease_ids: Vec::new(),
         subscriptions: sub_result.active.clone(),
+        subscription_filters: std::collections::HashMap::new(),
         server_sequence: 0,
         resume_token: resume_token.clone(),
         last_heartbeat_ms: now_ms(),
@@ -1528,6 +1535,9 @@ async fn handle_session_resume(
         lease_ids: prior_entry.orphaned_lease_ids.clone(),
         // Restore subscription set from before the disconnect.
         subscriptions: prior_entry.subscriptions.clone(),
+        // Subscription filters are not persisted across reconnects; agents must re-send
+        // subscribe_filter entries after resuming if they still need prefix filtering.
+        subscription_filters: std::collections::HashMap::new(),
         server_sequence: 0,
         resume_token: new_resume_token.clone(),
         last_heartbeat_ms: now_ms(),
@@ -2813,16 +2823,39 @@ async fn handle_subscription_change(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     change: SubscriptionChange,
 ) {
+    // Merge plain subscriptions and filtered subscriptions into a combined add list.
+    // `subscribe` contains category-only adds (use default prefix).
+    // `subscribe_filter` contains category + optional finer-grained prefix (RFC 0010 §7.2).
+    let mut add: Vec<String> = change.subscribe.clone();
+    for entry in &change.subscribe_filter {
+        if !add.contains(&entry.category) {
+            add.push(entry.category.clone());
+        }
+    }
+
     // Apply capability-filtered subscription change (RFC 0005 §7.3).
     // Mandatory subscriptions (DEGRADATION_NOTICES, LEASE_CHANGES) cannot be removed.
     // Additions without the required capability are placed in denied_subscriptions.
     // New subscription set takes effect immediately after the ack is sent.
     let result = subscriptions::apply_subscription_change(
         &session.subscriptions,
-        &change.subscribe,
+        &add,
         &change.unsubscribe,
         &session.capabilities,
     );
+
+    // Persist filter_prefix for each successfully added category from subscribe_filter.
+    // Categories that were denied (missing capability) are not stored.
+    for entry in &change.subscribe_filter {
+        if result.active.contains(&entry.category) && !entry.filter_prefix.is_empty() {
+            session.subscription_filters.insert(entry.category.clone(), entry.filter_prefix.clone());
+        }
+    }
+
+    // Remove filters for unsubscribed categories.
+    for cat in &change.unsubscribe {
+        session.subscription_filters.remove(cat.as_str());
+    }
 
     // Update session's active subscription set
     session.subscriptions = result.active.clone();
@@ -3959,6 +3992,7 @@ mod tests {
             payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
                 subscribe: vec!["INPUT_EVENTS".to_string()],
                 unsubscribe: Vec::new(),
+                subscribe_filter: Vec::new(),
             })),
         })
         .await
@@ -3990,6 +4024,79 @@ mod tests {
                 assert!(
                     result.denied_subscriptions.is_empty(),
                     "no subscriptions should be denied"
+                );
+            }
+            other => panic!("Expected SubscriptionChangeResult, got: {other:?}"),
+        }
+        drop(tx);
+    }
+
+    /// Scenario: SubscriptionChange.subscribe_filter persists filter_prefix (RFC 0010 §7.2, spec line 179).
+    ///
+    /// WHEN agent sends SubscriptionChange with subscribe_filter=[{SCENE_TOPOLOGY, "scene.zone."}]
+    /// THEN runtime accepts the subscription (no denial) and stores the filter_prefix in
+    ///      session.subscription_filters so future event routing can apply the narrower filter.
+    #[tokio::test]
+    async fn test_subscription_change_with_filter_prefix() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "filter-agent".to_string(),
+                agent_display_name: "filter-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec!["read_scene_topology".to_string()],
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+
+        // Collect SessionEstablished and SceneSnapshot
+        for _ in 0..2 {
+            let _ = response_stream.next().await;
+        }
+
+        // Send SubscriptionChange with subscribe_filter: add SCENE_TOPOLOGY with "scene.zone." filter
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
+                subscribe: Vec::new(),
+                unsubscribe: Vec::new(),
+                subscribe_filter: vec![
+                    crate::proto::session::SubscriptionEntry {
+                        category: "SCENE_TOPOLOGY".to_string(),
+                        filter_prefix: "scene.zone.".to_string(),
+                    },
+                ],
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SubscriptionChangeResult(result)) => {
+                // SCENE_TOPOLOGY must be in the active set (subscribe_filter is processed as an add)
+                assert!(
+                    result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY must be active after subscribe_filter"
+                );
+                // No denials (agent has read_scene_topology capability)
+                assert!(
+                    result.denied_subscriptions.is_empty(),
+                    "subscribe_filter with a valid capability must not produce denials"
                 );
             }
             other => panic!("Expected SubscriptionChangeResult, got: {other:?}"),
@@ -4852,6 +4959,7 @@ mod tests {
             policy_capabilities: Vec::new(),
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,
@@ -5467,6 +5575,7 @@ mod tests {
             policy_capabilities: Vec::new(), // guest: no authorization
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,
@@ -5527,6 +5636,7 @@ mod tests {
             policy_capabilities: vec!["read_telemetry".to_string()], // only read_telemetry
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,
@@ -5594,6 +5704,7 @@ mod tests {
             policy_capabilities: Vec::new(),
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,

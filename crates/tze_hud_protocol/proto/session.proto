@@ -470,10 +470,22 @@ message LeaseStateChange {
 
 // ─── Subscription messages ────────────────────────────────────────────────────
 
+// A subscription request pairing a category with an optional finer-grained
+// event type prefix filter (RFC 0010 §7.2, spec line 179).
+//
+// When filter_prefix is non-empty, only events whose type starts with that
+// prefix are delivered (e.g., "scene.zone." within SCENE_TOPOLOGY).
+// When empty, the category's default prefix applies.
+message SubscriptionEntry {
+  string category      = 1;  // Category name (SHOUTY_SNAKE_CASE)
+  string filter_prefix = 2;  // Optional finer-grained prefix; empty = use category default
+}
+
 // Client changes event subscriptions.
 message SubscriptionChange {
-  repeated string subscribe   = 1;  // Categories to add
-  repeated string unsubscribe = 2;  // Categories to remove
+  repeated string            subscribe        = 1;  // Categories to add (no filter; use category default)
+  repeated string            unsubscribe      = 2;  // Categories to remove
+  repeated SubscriptionEntry subscribe_filter = 3;  // Categories to add with explicit prefix filter
 }
 
 // Server acknowledges subscription change (RFC 0005 §7.3).
