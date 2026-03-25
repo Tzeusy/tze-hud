@@ -433,15 +433,14 @@ pub fn handle_publish_to_zone(
     // Grant lease for MCP session tracking. Zone publishing requires an active
     // lease (spec §Zone Publish Requires Active Lease); we grant one here so
     // that publish_to_zone_with_lease can verify it.
+    // We grant PublishZone(<zone_name>) — the zone-specific capability required
+    // by the spec (§Capability Vocabulary: publish_zone:<zone_name>). The
+    // tile/node capabilities previously granted here are vestigial; tile
+    // creation is now deferred to the compositor and never done by this handler.
     let _lease_id = scene.grant_lease(
         &p.namespace,
         ttl_ms,
-        vec![
-            Capability::CreateTile,
-            Capability::UpdateTile,
-            Capability::CreateNode,
-            Capability::UpdateNode,
-        ],
+        vec![Capability::PublishZone(p.zone_name.clone())],
     );
 
     // Delegate to the real zone engine. This enforces contention policy
