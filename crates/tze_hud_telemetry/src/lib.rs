@@ -8,6 +8,7 @@
 pub mod record;
 pub mod collector;
 pub mod resource_monitor;
+pub mod validation;
 
 pub use record::{
     FrameTelemetry, SessionSummary, LatencyBucket,
@@ -17,4 +18,7 @@ pub use record::{
 pub use collector::{FrameRecorder, TelemetryCollector};
 pub use resource_monitor::{
     AgentFootprint, GrowthRatios, ResourceMonitor, ResourceSnapshot, SPEC_GROWTH_TOLERANCE,
+};
+pub use validation::{
+    AssertionOutcome, BudgetAssertion, CalibrationDimension, HardwareFactors, ValidationReport,
 };
