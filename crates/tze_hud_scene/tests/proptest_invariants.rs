@@ -413,19 +413,23 @@ proptest! {
 
     // ── Batch size boundary ───────────────────────────────────────────────────
 
-    /// FOR ALL batches of exactly MAX_BATCH_SIZE valid mutations:
-    /// THEN if the scene has enough budget, the batch succeeds.
+    /// FOR ALL batches of 1..=MAX_BATCH_SIZE mutations:
+    /// THEN the batch must NOT be rejected with `BatchSizeExceeded`.
     ///
-    /// Verifies the boundary: 1000-mutation batch must not be rejected as BATCH_TOO_LARGE.
+    /// Note: batches with n > lease.resource_budget.max_tiles may be rejected for
+    /// TILE_BUDGET_EXCEEDED (budget enforcement), which is correct and expected.
+    /// This test only verifies the batch-size gate: n ≤ MAX_BATCH_SIZE must never
+    /// trigger a BATCH_TOO_LARGE rejection code.
     #[test]
-    fn prop_max_batch_size_accepted(n in 1usize..=MAX_BATCH_SIZE) {
+    fn prop_batch_not_rejected_as_batch_too_large(n in 1usize..=MAX_BATCH_SIZE) {
         let mut graph = SceneGraph::new(10000.0, 10000.0); // large display for many tiles
         let tab_id = graph.create_tab("Stress", 0).unwrap();
-        // Give a large resource budget for this test
+        // Budget cap of 255: batches of n > 255 may fail for TILE_BUDGET_EXCEEDED,
+        // but must never fail for BatchSizeExceeded (n ≤ MAX_BATCH_SIZE = 1000).
         let lease_id = graph.grant_lease("stress.agent", 300_000, vec![Capability::CreateTile]);
         {
             let lease = graph.leases.get_mut(&lease_id).unwrap();
-            lease.resource_budget.max_tiles = 255; // allow up to 255 tiles
+            lease.resource_budget.max_tiles = 255; // tile budget cap (< MAX_BATCH_SIZE)
         }
 
         let tile_w = 50.0f32;

@@ -681,13 +681,19 @@ pub fn check_lease_ttl_nonzero_if_not_terminal(graph: &SceneGraph) -> Vec<Invari
         .collect()
 }
 
-/// Leases not in Requested state must have granted_at_ms > 0.
+/// Leases not in Requested state must have granted_at_ms > 0, unless they were
+/// Denied (rejected before grant) in which case granted_at_ms is legitimately 0.
+///
+/// Spec: lease-governance/spec.md lines 10-25.
 pub fn check_lease_granted_at_nonzero_if_not_requested(graph: &SceneGraph) -> Vec<InvariantViolation> {
     graph
         .leases
         .values()
         .filter(|l| {
-            l.state != LeaseState::Requested && l.granted_at_ms == 0
+            // Requested: no grant yet — OK to have granted_at_ms == 0.
+            // Denied: rejected before grant — also OK to have granted_at_ms == 0.
+            !matches!(l.state, LeaseState::Requested | LeaseState::Denied)
+                && l.granted_at_ms == 0
         })
         .map(|l| {
             InvariantViolation::new(
@@ -2363,6 +2369,45 @@ mod tests {
     }
 
     // ── Budget — additional checks ──────────────────────────────────────────
+
+    /// WHEN a lease owns more tiles than its max_tiles budget THEN tile_count_exceeds_lease_budget fires.
+    #[test]
+    fn tile_count_exceeds_lease_budget_detected() {
+        let mut graph = make_graph();
+        let tab_id = graph.create_tab("Main", 0).unwrap();
+        let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        // Set max_tiles = 1 so the second tile triggers a budget violation
+        graph.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 1;
+        // Insert two tiles directly (bypassing mutation validation) to force the violation
+        use crate::types::Tile;
+        let tile1_id = SceneId::new();
+        let tile2_id = SceneId::new();
+        for (i, tid) in [tile1_id, tile2_id].into_iter().enumerate() {
+            graph.tiles.insert(
+                tid,
+                Tile {
+                    id: tid,
+                    tab_id,
+                    namespace: "agent".into(),
+                    lease_id,
+                    bounds: Rect::new(i as f32 * 110.0, 0.0, 100.0, 100.0),
+                    z_order: (i as u32) + 1,
+                    opacity: 1.0,
+                    input_mode: InputMode::Capture,
+                    sync_group: None,
+                    present_at: None,
+                    expires_at: None,
+                    resource_budget: ResourceBudget::default(),
+                    root_node: None,
+                    visual_hint: Default::default(),
+                },
+            );
+        }
+        graph.version = 1;
+        let v = check_tile_count_within_lease_budget(&graph);
+        assert!(!v.is_empty(), "expected tile_count_exceeds_lease_budget");
+        assert_eq!(v[0].code, "tile_count_exceeds_lease_budget");
+    }
 
     /// WHEN tile has node budget within lease limit THEN no budget violation.
     #[test]
