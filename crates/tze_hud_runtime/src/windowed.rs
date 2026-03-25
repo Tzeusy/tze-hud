@@ -37,9 +37,10 @@
 //! ## Runtime mode switching
 //!
 //! Mode switching is supported but disruptive (requires surface recreation, spec
-//! line 173). Call `WindowedRuntime::switch_mode()` — the event loop signals a
-//! mode change, tears down the existing window and compositor, and re-initialises
-//! with the new mode on the next `resumed()` callback.
+//! line 173). Call `WinitApp::request_mode_switch()` — the event loop stores a
+//! pending mode switch, tears down the existing window and compositor, and
+//! re-initialises with the new mode on the next `RedrawRequested` event (where
+//! the pending switch is detected before the frame is presented).
 //!
 //! ## Main thread event loop
 //!
@@ -202,42 +203,25 @@ struct WinitApp {
 }
 
 impl ApplicationHandler for WinitApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // Handle pending mode switch: tear down current window/compositor so
-        // we can re-initialise with the new mode (surface recreation required,
-        // spec §Window Modes line 173).
-        if let Some(new_mode) = self.state.pending_mode_switch.take() {
-            tracing::info!(
-                old_mode = %self.state.effective_mode,
-                new_mode = %new_mode,
-                "runtime mode switch: tearing down existing window for surface recreation"
-            );
-            // Join the compositor thread before destroying the surface.
-            if let Some(handle) = self.state.compositor_handle.take() {
-                self.state.shutdown.trigger(crate::threads::ShutdownReason::Clean);
-                let _ = handle.join();
-            }
-            // Drop the surface and window handles.
-            self.state.window_surface = None;
-            self.state.window = None;
-            // Re-create the shutdown token for the new session.
-            self.state.shutdown = ShutdownToken::new();
-            // Re-create the frame-ready channel.
-            let (new_tx, new_rx) = frame_ready_channel();
-            self.state.frame_ready_tx = Some(new_tx);
-            self.state.frame_ready_rx = new_rx;
-            // Apply the new mode (with platform fallback check).
-            let (resolved_mode, fallback) = resolve_window_mode(new_mode);
-            if let Some(reason) = fallback {
-                tracing::warn!(
-                    reason = %reason,
-                    "mode switch: overlay unavailable on this platform; using fullscreen"
-                );
-            }
-            self.state.effective_mode = resolved_mode;
-            self.state.config.window.mode = resolved_mode;
+    /// Called by winit when the event loop has processed all pending events for
+    /// the current iteration.  We use this to apply any pending mode switch:
+    /// tearing down the current window/compositor and re-initialising with the
+    /// new mode is safe here because no window events are in flight.
+    ///
+    /// Note: `resumed()` is a *lifecycle* callback (initial app start / app
+    /// resume after suspension) and is NOT triggered by `window.request_redraw()`.
+    /// Pending mode switches must therefore be handled here in `about_to_wait`
+    /// rather than in `resumed()`.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.pending_mode_switch.is_some() {
+            self.apply_pending_mode_switch();
+            // Re-create the window with the new mode by forwarding to the
+            // initialisation path inside resumed().
+            self.resumed(event_loop);
         }
+    }
 
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.window.is_some() {
             return; // Already initialised.
         }
@@ -670,15 +654,20 @@ impl WinitApp {
     /// Replaces the current hit-region set.  The new regions take effect on the
     /// next `CursorMoved` event.
     ///
-    /// No-op in fullscreen mode (all events are always captured).
+    /// No-op in fullscreen mode (all events are always captured; hit-regions
+    /// are not consulted).
     pub fn set_hit_regions(&mut self, regions: Vec<HitRegion>) {
+        if self.state.effective_mode == WindowMode::Fullscreen {
+            return; // Hit-regions unused in fullscreen mode.
+        }
         self.state.hit_regions = regions;
     }
 
     /// Request a runtime mode switch (disruptive — triggers surface recreation).
     ///
-    /// The switch is deferred to the next `resumed()` callback so the winit
-    /// event loop can clean up the existing window safely.
+    /// The switch is deferred to the next `about_to_wait` callback, where
+    /// `apply_pending_mode_switch()` tears down the current window/compositor
+    /// and `resumed()` re-creates them with the new mode.
     ///
     /// Per spec §Window Modes (line 173): "Runtime mode switching MUST be
     /// supported but is a disruptive operation requiring surface recreation."
@@ -690,14 +679,57 @@ impl WinitApp {
         tracing::info!(
             current = %self.state.effective_mode,
             requested = %new_mode,
-            "runtime mode switch requested — surface recreation will occur"
+            "runtime mode switch requested — surface recreation will occur on next about_to_wait"
         );
         self.state.pending_mode_switch = Some(new_mode);
-        // Trigger a resumed() callback by requesting a redraw, which will cause
-        // the event loop to process the pending switch on the next tick.
+        // request_redraw() ensures the event loop stays active (Poll mode),
+        // so about_to_wait fires promptly after the current event batch.
         if let Some(window) = &self.state.window {
             window.request_redraw();
         }
+    }
+
+    /// Tear down the current window/compositor and apply a pending mode switch.
+    ///
+    /// Called from `about_to_wait` when `pending_mode_switch` is `Some`.
+    /// After this returns, `self.state.window` is `None` so that `resumed()`
+    /// will re-create the window with the new effective mode.
+    fn apply_pending_mode_switch(&mut self) {
+        let new_mode = match self.state.pending_mode_switch.take() {
+            Some(m) => m,
+            None => return,
+        };
+
+        tracing::info!(
+            old_mode = %self.state.effective_mode,
+            new_mode = %new_mode,
+            "runtime mode switch: tearing down existing window for surface recreation"
+        );
+
+        // Join the compositor thread before destroying the surface.
+        if let Some(handle) = self.state.compositor_handle.take() {
+            self.state.shutdown.trigger(crate::threads::ShutdownReason::Clean);
+            let _ = handle.join();
+        }
+
+        // Drop the surface and window handles.
+        self.state.window_surface = None;
+        self.state.window = None;
+
+        // Re-create the shutdown token for the new session.
+        self.state.shutdown = ShutdownToken::new();
+
+        // Re-create the frame-ready channel.
+        let (new_tx, new_rx) = frame_ready_channel();
+        self.state.frame_ready_tx = Some(new_tx);
+        self.state.frame_ready_rx = new_rx;
+
+        // Apply the new mode (with platform fallback check).
+        // resolve_window_mode() emits the fallback warning internally;
+        // no duplicate logging needed here.
+        let (resolved_mode, _) = resolve_window_mode(new_mode);
+        self.state.effective_mode = resolved_mode;
+        self.state.config.window.mode = resolved_mode;
     }
 
     /// Check the `FrameReadySignal` and present the frame if the compositor
@@ -777,15 +809,9 @@ impl WindowedRuntime {
         // Resolve the effective window mode, applying platform fallback checks.
         // Spec §Unsupported overlay fallback (line 185): if overlay is requested
         // on GNOME Wayland (no layer-shell), fall back to fullscreen with a
-        // startup warning.
-        let (effective_mode, fallback_reason) = resolve_window_mode(cfg.window.mode);
-        if let Some(reason) = fallback_reason {
-            tracing::warn!(
-                reason = %reason,
-                requested = %cfg.window.mode,
-                "window mode fallback: overlay unavailable — starting in fullscreen"
-            );
-        }
+        // startup warning.  resolve_window_mode() emits the warning internally
+        // when a fallback occurs; no additional logging needed here.
+        let (effective_mode, _fallback_reason) = resolve_window_mode(cfg.window.mode);
 
         // Build shared state (scene + sessions).
         let width = cfg.window.width as f32;
