@@ -41,11 +41,14 @@
 //! Tests that don't exercise the session layer use this to skip server startup.
 
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
+use crate::runtime_context::{FallbackPolicy, RuntimeContext};
 use tze_hud_compositor::{Compositor, HeadlessSurface};
+use tze_hud_config::TzeHudConfig;
 use tze_hud_input::InputProcessor;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
+use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_telemetry::{TelemetryCollector, FrameTelemetry};
 use std::sync::Arc;
@@ -63,6 +66,13 @@ pub struct HeadlessConfig {
     pub grpc_port: u16,
     /// Pre-shared key for session authentication.
     pub psk: String,
+    /// Optional TOML config string to load.
+    ///
+    /// When `Some(toml)`, the runtime parses and validates it, building a
+    /// `RuntimeContext` that drives per-agent capability grants and profile
+    /// budgets.  When `None`, a headless-profile `RuntimeContext` is used with
+    /// `fallback_unrestricted = true` (backwards-compatible dev mode).
+    pub config_toml: Option<String>,
 }
 
 impl Default for HeadlessConfig {
@@ -72,6 +82,64 @@ impl Default for HeadlessConfig {
             height: 1080,
             grpc_port: 50051,
             psk: "test-key".to_string(),
+            config_toml: None,
+        }
+    }
+}
+
+impl HeadlessConfig {
+    /// Build a `RuntimeContext` from the optional TOML config.
+    ///
+    /// If `config_toml` is `None`, returns a headless-default context with
+    /// `fallback_unrestricted = true` (all agents allowed, dev-mode behaviour).
+    ///
+    /// If `config_toml` is `Some(toml)` but parsing or validation fails, logs
+    /// warnings and falls back to the headless default (non-fatal per spec).
+    pub fn build_runtime_context(&self) -> (RuntimeContext, bool) {
+        match &self.config_toml {
+            None => (RuntimeContext::headless_default(), true),
+            Some(toml) => {
+                match TzeHudConfig::parse(toml) {
+                    Err(e) => {
+                        tracing::warn!(
+                            parse_error = %e.message,
+                            line = e.line,
+                            column = e.column,
+                            "HeadlessConfig: TOML parse error; using headless-default RuntimeContext"
+                        );
+                        (RuntimeContext::headless_default(), true)
+                    }
+                    Ok(mut loader) => {
+                        loader.normalize();
+                        let errors = loader.validate();
+                        if !errors.is_empty() {
+                            tracing::warn!(
+                                error_count = errors.len(),
+                                "HeadlessConfig: config validation errors; using headless-default RuntimeContext"
+                            );
+                            return (RuntimeContext::headless_default(), true);
+                        }
+                        match loader.freeze() {
+                            Ok(resolved) => {
+                                tracing::info!(
+                                    profile = %resolved.profile.name,
+                                    agent_count = resolved.agent_capabilities.len(),
+                                    "HeadlessConfig: loaded RuntimeContext from config"
+                                );
+                                let ctx = RuntimeContext::from_config(resolved, FallbackPolicy::Guest);
+                                (ctx, false)
+                            }
+                            Err(errors) => {
+                                tracing::warn!(
+                                    error_count = errors.len(),
+                                    "HeadlessConfig: config freeze errors; using headless-default RuntimeContext"
+                                );
+                                (RuntimeContext::headless_default(), true)
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -91,6 +159,12 @@ pub struct HeadlessRuntime {
     pub config: HeadlessConfig,
     /// The 8-stage frame pipeline orchestrator.
     pub pipeline: FramePipeline,
+    /// Immutable runtime context built from validated config at startup.
+    ///
+    /// Holds profile budgets and per-agent capability grants.
+    pub runtime_context: Arc<RuntimeContext>,
+    /// Whether unknown agents get unrestricted capabilities (true = dev mode).
+    fallback_unrestricted: bool,
 }
 
 impl HeadlessRuntime {
@@ -98,7 +172,16 @@ impl HeadlessRuntime {
     ///
     /// Respects `HEADLESS_FORCE_SOFTWARE=1` — when set, the wgpu adapter
     /// selection uses `force_fallback_adapter = true` (spec line 211).
+    ///
+    /// If `config.config_toml` is provided, the runtime builds an immutable
+    /// `RuntimeContext` from the loaded config (profile budgets, per-agent
+    /// capability grants). If absent or invalid, falls back to headless-default
+    /// context with `fallback_unrestricted = true` (dev mode).
     pub async fn new(config: HeadlessConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        // Build RuntimeContext at startup from loaded config (or default).
+        let (runtime_ctx, fallback_unrestricted) = config.build_runtime_context();
+        let runtime_context = Arc::new(runtime_ctx);
+
         let compositor = Compositor::new_headless(config.width, config.height).await?;
         let surface = HeadlessSurface::new(&compositor.device, config.width, config.height);
 
@@ -121,6 +204,8 @@ impl HeadlessRuntime {
             state,
             config,
             pipeline: FramePipeline::new(),
+            runtime_context,
+            fallback_unrestricted,
         })
     }
 
@@ -269,9 +354,18 @@ impl HeadlessRuntime {
         }
         let addr = format!("[::1]:{}", self.config.grpc_port).parse()?;
 
-        let service = HudSessionImpl::from_shared_state(
+        // Wire config-driven capability registry into the session service.
+        // Snapshot the agent capability map from RuntimeContext (one-time clone at startup).
+        // Per configuration/spec.md §Requirement: Agent Registration (lines 136-147):
+        // registered agents get their configured capability set; unlisted agents get
+        // guest policy (no capabilities) unless fallback_unrestricted is true (dev mode).
+        let agent_caps = self.runtime_context.snapshot_agent_capabilities();
+
+        let service = HudSessionImpl::from_shared_state_with_config(
             self.state.clone(),
             &self.config.psk,
+            agent_caps,
+            self.fallback_unrestricted,
         );
 
         let handle = tokio::spawn(async move {
@@ -301,6 +395,7 @@ mod tests {
             height: 64,
             grpc_port: 0,
             psk: "test".to_string(),
+            config_toml: None,
         };
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         // render_frame should succeed without a gRPC server
@@ -316,6 +411,7 @@ mod tests {
             height: 96,
             grpc_port: 0,
             psk: "test".to_string(),
+            config_toml: None,
         };
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         runtime.render_frame().await;
@@ -342,6 +438,7 @@ mod tests {
             height: 64,
             grpc_port: free_port,
             psk: "test".to_string(),
+            config_toml: None,
         };
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         let _server = runtime.start_grpc_server().await.expect("server start");
@@ -353,5 +450,102 @@ mod tests {
         // Server task is still running (not panicked)
         assert!(!_server.is_finished(), "gRPC server task should still be running");
         _server.abort();
+    }
+
+    /// Verify that config_toml = None produces a headless-default RuntimeContext
+    /// with fallback_unrestricted = true (dev mode).
+    #[test]
+    fn test_build_runtime_context_none_is_dev_mode() {
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            psk: "test".to_string(),
+            config_toml: None,
+        };
+        let (ctx, fallback) = config.build_runtime_context();
+        assert_eq!(ctx.profile.name, "headless");
+        assert!(fallback, "config_toml = None should set fallback_unrestricted = true");
+    }
+
+    /// Verify that a valid TOML config produces a proper RuntimeContext with
+    /// per-agent capabilities and fallback_unrestricted = false.
+    ///
+    /// This test verifies the config-driven capability gating path
+    /// (configuration/spec.md §Requirement: Agent Registration, lines 136-147).
+    #[test]
+    fn test_build_runtime_context_from_valid_toml() {
+        let toml = r#"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+
+[agents.registered.weather-agent]
+capabilities = ["create_tiles", "modify_own_tiles", "read_scene_topology"]
+
+[agents.registered.monitor-agent]
+capabilities = ["read_telemetry", "read_scene_topology"]
+"#;
+
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            psk: "test".to_string(),
+            config_toml: Some(toml.to_string()),
+        };
+
+        let (ctx, fallback) = config.build_runtime_context();
+        assert_eq!(ctx.profile.name, "headless");
+        assert!(!fallback, "valid config should set fallback_unrestricted = false");
+
+        // weather-agent gets its configured capabilities
+        let policy = ctx.capability_policy_for("weather-agent");
+        assert!(!policy.is_unrestricted(), "registered agent should not be unrestricted");
+        assert!(
+            policy.evaluate_capability_request(&["create_tiles".to_string()]).is_ok(),
+            "weather-agent should be granted create_tiles"
+        );
+        assert!(
+            policy.evaluate_capability_request(&["read_telemetry".to_string()]).is_err(),
+            "weather-agent should be denied read_telemetry (not in its list)"
+        );
+
+        // monitor-agent gets its configured capabilities
+        let monitor_policy = ctx.capability_policy_for("monitor-agent");
+        assert!(
+            monitor_policy.evaluate_capability_request(&["read_telemetry".to_string()]).is_ok(),
+            "monitor-agent should be granted read_telemetry"
+        );
+        assert!(
+            monitor_policy.evaluate_capability_request(&["create_tiles".to_string()]).is_err(),
+            "monitor-agent should be denied create_tiles"
+        );
+
+        // unknown agent gets guest policy (no capabilities) since fallback = Guest
+        let guest_policy = ctx.capability_policy_for("unknown-agent");
+        assert!(!guest_policy.is_unrestricted(), "unknown agent should get guest policy");
+        assert!(
+            guest_policy.evaluate_capability_request(&["create_tiles".to_string()]).is_err(),
+            "unknown agent should be denied all capabilities"
+        );
+    }
+
+    /// Verify that a malformed TOML gracefully falls back to dev-mode defaults.
+    #[test]
+    fn test_build_runtime_context_malformed_toml_falls_back() {
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            psk: "test".to_string(),
+            config_toml: Some("this is not valid TOML %%%".to_string()),
+        };
+        let (ctx, fallback) = config.build_runtime_context();
+        assert_eq!(ctx.profile.name, "headless");
+        assert!(fallback, "malformed TOML should fall back to dev mode");
     }
 }
