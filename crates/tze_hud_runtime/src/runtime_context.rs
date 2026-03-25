@@ -1,6 +1,6 @@
 //! # RuntimeContext
 //!
-//! Immutable runtime context built at startup from the validated configuration.
+//! Runtime context built at startup from the validated configuration.
 //!
 //! ## Purpose
 //!
@@ -12,6 +12,42 @@
 //!
 //! - **Profile budgets** — max tiles, max texture MB, max agents, target/min FPS.
 //! - **Agent capability registry** — per-agent capability grants from `[agents.registered]`.
+//! - **Hot-reloadable policy** — privacy, degradation, chrome, and dynamic agent policy
+//!   sections, which can be updated live without restart.
+//!
+//! ## Two-Tier Configuration Model
+//!
+//! Per the configuration spec §Configuration Reload (lines 263-274, v1-mandatory),
+//! configuration sections are divided into two tiers:
+//!
+//! | Section                   | Reload tier           |
+//! |---------------------------|-----------------------|
+//! | `[runtime]`               | Frozen — restart required |
+//! | `[[tabs]]`                | Frozen — restart required |
+//! | `[agents.registered]`     | Frozen — restart required |
+//! | `[privacy]`               | Hot-reloadable via SIGHUP or `ReloadConfig` RPC |
+//! | `[degradation]`           | Hot-reloadable via SIGHUP or `ReloadConfig` RPC |
+//! | `[chrome]`                | Hot-reloadable via SIGHUP or `ReloadConfig` RPC |
+//! | `[agents.dynamic_policy]` | Hot-reloadable via SIGHUP or `ReloadConfig` RPC |
+//!
+//! ### Frozen fields
+//!
+//! `profile`, `agent_capabilities`, and `fallback_policy` are frozen at startup.
+//! A restart is required to change them.
+//!
+//! ### Hot-reloadable fields
+//!
+//! `hot` holds an `Arc<HotReloadableConfig>` stored inside an `ArcSwap`. Call
+//! `reload_hot_config()` with a freshly validated `HotReloadableConfig` to atomically
+//! replace the live policy without locking any subsystem:
+//!
+//! ```rust,ignore
+//! // In the SIGHUP or ReloadConfig handler:
+//! let hot = tze_hud_config::reload_config(&new_toml)?;
+//! ctx.reload_hot_config(hot);
+//! // All subsystems reading ctx.hot().load() will see the new values
+//! // immediately on their next access.
+//! ```
 //!
 //! ## Configuration-Driven Capability Gating
 //!
@@ -34,11 +70,17 @@
 //!
 //! let ctx = RuntimeContext::from_config(resolved_config, FallbackPolicy::Guest);
 //! let policy = ctx.capability_policy_for("my-agent");
+//!
+//! // Hot-reload on SIGHUP:
+//! let hot = tze_hud_config::reload_config(&new_toml).expect("valid toml");
+//! ctx.reload_hot_config(hot);
 //! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+use tze_hud_config::HotReloadableConfig;
 use tze_hud_protocol::auth::CapabilityPolicy;
 use tze_hud_scene::config::{DisplayProfile, ResolvedConfig};
 
@@ -64,14 +106,25 @@ impl Default for FallbackPolicy {
 
 // ─── RuntimeContext ───────────────────────────────────────────────────────────
 
-/// Immutable runtime context derived from validated configuration.
+/// Runtime context derived from validated configuration.
 ///
 /// Built once at startup; shared via `Arc<RuntimeContext>` across all subsystems.
 ///
-/// All fields are read-only after construction. Hot-reload is a post-v1 concern;
-/// for v1 a restart is required to pick up config changes.
+/// **Frozen fields** (`profile`, `agent_capabilities`, `fallback_policy`) are
+/// immutable after construction. A restart is required to change them.
+///
+/// **Hot-reloadable fields** are held in `hot` as an `ArcSwap<HotReloadableConfig>`.
+/// Call `reload_hot_config()` to atomically swap in a freshly validated config subset
+/// (privacy, degradation, chrome, dynamic_policy) with no locks and no restart.
+///
+/// Per spec §Configuration Reload (lines 263-274, v1-mandatory): SIGHUP and the
+/// `RuntimeService.ReloadConfig` gRPC call both trigger a live reload of the
+/// hot-reloadable sections. The frozen sections require a full process restart.
 #[derive(Debug)]
 pub struct RuntimeContext {
+    // ── Frozen fields ─────────────────────────────────────────────────────────
+    // Immutable after construction. Require restart to change.
+
     /// Resolved display profile with budget values.
     pub profile: DisplayProfile,
 
@@ -81,6 +134,16 @@ pub struct RuntimeContext {
 
     /// Policy to apply to agents not listed in `[agents.registered]`.
     pub fallback_policy: FallbackPolicy,
+
+    // ── Hot-reloadable fields ─────────────────────────────────────────────────
+    // Atomically swappable via SIGHUP or ReloadConfig RPC.
+
+    /// Hot-reloadable policy sections: privacy, degradation, chrome,
+    /// and agents.dynamic_policy.
+    ///
+    /// Access the current snapshot via `self.hot.load()`. Update atomically
+    /// via `self.reload_hot_config(new_hot)`.
+    hot: ArcSwap<HotReloadableConfig>,
 }
 
 impl RuntimeContext {
@@ -90,11 +153,34 @@ impl RuntimeContext {
     ///
     /// The `fallback_policy` is applied to any agent whose name is not found
     /// in `[agents.registered]`. For v1 production use, pass `FallbackPolicy::Guest`.
+    ///
+    /// Hot-reloadable sections are initialized to defaults (all `None` / empty).
+    /// They will be populated on the first SIGHUP or `ReloadConfig` RPC call.
     pub fn from_config(config: ResolvedConfig, fallback_policy: FallbackPolicy) -> Self {
         Self {
             profile: config.profile,
             agent_capabilities: config.agent_capabilities,
             fallback_policy,
+            hot: ArcSwap::from_pointee(HotReloadableConfig::default()),
+        }
+    }
+
+    /// Build a `RuntimeContext` from a `ResolvedConfig` and an initial
+    /// `HotReloadableConfig`.
+    ///
+    /// Use this constructor when a config file is available at startup and you
+    /// want the hot-reloadable sections to reflect the initial file contents
+    /// immediately, rather than waiting for the first SIGHUP.
+    pub fn from_config_with_hot(
+        config: ResolvedConfig,
+        fallback_policy: FallbackPolicy,
+        hot: HotReloadableConfig,
+    ) -> Self {
+        Self {
+            profile: config.profile,
+            agent_capabilities: config.agent_capabilities,
+            fallback_policy,
+            hot: ArcSwap::from_pointee(hot),
         }
     }
 
@@ -102,12 +188,57 @@ impl RuntimeContext {
     ///
     /// Used in tests and headless mode when no config file is present.
     /// All unrecognized agents are treated as guests (no capabilities).
+    /// Hot-reloadable sections are initialized to defaults.
     pub fn headless_default() -> Self {
         Self {
             profile: DisplayProfile::headless(),
             agent_capabilities: HashMap::new(),
             fallback_policy: FallbackPolicy::Guest,
+            hot: ArcSwap::from_pointee(HotReloadableConfig::default()),
         }
+    }
+
+    // ── Hot-reload ────────────────────────────────────────────────────────────
+
+    /// Atomically replace the hot-reloadable configuration sections.
+    ///
+    /// This is the integration point for SIGHUP and `RuntimeService.ReloadConfig`.
+    /// The caller is responsible for calling `tze_hud_config::reload_config()` first
+    /// to parse and validate the new TOML; this method only stores the result.
+    ///
+    /// Subsystems that hold a loaded snapshot (via `ctx.hot.load()`) will see stale
+    /// values until their next `load()` call. This is intentional — the swap is
+    /// atomic and lock-free; subsystems do not need to coordinate.
+    ///
+    /// ## What is reloaded
+    ///
+    /// - `[privacy]` — privacy classification, redaction style, quiet hours.
+    /// - `[degradation]` — frame-time and GPU thresholds for degradation steps.
+    /// - `[chrome]` — chrome rendering policy.
+    /// - `[agents.dynamic_policy]` — whether dynamic agents are allowed and their
+    ///   default capabilities.
+    ///
+    /// ## What is NOT reloaded (frozen, restart required)
+    ///
+    /// - `[runtime]` / `profile` — display profile and budget values.
+    /// - `[[tabs]]` — tab layout and zone configuration.
+    /// - `[agents.registered]` — pre-registered agent capability grants.
+    pub fn reload_hot_config(&self, new_hot: HotReloadableConfig) {
+        self.hot.store(Arc::new(new_hot));
+    }
+
+    /// Return a loaded snapshot of the hot-reloadable configuration.
+    ///
+    /// The returned `Guard` keeps the current `HotReloadableConfig` alive for the
+    /// duration of the borrow. Use this to access privacy, degradation, chrome, and
+    /// dynamic policy settings in a lock-free manner.
+    ///
+    /// ```rust,ignore
+    /// let hot = ctx.hot_config();
+    /// let privacy = &hot.privacy;
+    /// ```
+    pub fn hot_config(&self) -> arc_swap::Guard<Arc<HotReloadableConfig>> {
+        self.hot.load()
     }
 
     // ── Capability policy lookup ──────────────────────────────────────────────
@@ -152,7 +283,7 @@ impl RuntimeContext {
 
 // ─── Shared runtime context type alias ───────────────────────────────────────
 
-/// Cheaply-cloneable handle to the shared immutable runtime context.
+/// Cheaply-cloneable handle to the shared runtime context.
 pub type SharedRuntimeContext = Arc<RuntimeContext>;
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -161,6 +292,8 @@ pub type SharedRuntimeContext = Arc<RuntimeContext>;
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use tze_hud_config::HotReloadableConfig;
+    use tze_hud_config::raw::{RawChrome, RawDegradation, RawDynamicPolicy, RawPrivacy};
     use tze_hud_scene::config::ResolvedConfig;
 
     fn make_config(caps: Vec<(&str, Vec<&str>)>) -> ResolvedConfig {
@@ -200,6 +333,35 @@ mod tests {
         assert!(caps.contains(&"modify_own_tiles".to_string()));
     }
 
+    #[test]
+    fn from_config_hot_defaults_are_all_none() {
+        let config = make_config(vec![]);
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+        let hot = ctx.hot_config();
+        assert!(hot.privacy.default_classification.is_none());
+        assert!(hot.privacy.redaction_style.is_none());
+        assert!(hot.dynamic_policy.is_none());
+    }
+
+    // ── from_config_with_hot ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_config_with_hot_stores_initial_hot_config() {
+        let config = make_config(vec![]);
+        let hot = HotReloadableConfig {
+            privacy: RawPrivacy {
+                redaction_style: Some("blank".to_string()),
+                ..Default::default()
+            },
+            degradation: RawDegradation::default(),
+            chrome: RawChrome::default(),
+            dynamic_policy: None,
+        };
+        let ctx = RuntimeContext::from_config_with_hot(config, FallbackPolicy::Guest, hot);
+        let loaded = ctx.hot_config();
+        assert_eq!(loaded.privacy.redaction_style, Some("blank".to_string()));
+    }
+
     // ── headless_default ─────────────────────────────────────────────────────
 
     #[test]
@@ -215,6 +377,143 @@ mod tests {
         // Guest policy: no capabilities
         let result = policy.evaluate_capability_request(&["create_tiles".to_string()]);
         assert!(result.is_err(), "guest policy should deny all capabilities");
+    }
+
+    #[test]
+    fn headless_default_hot_config_all_defaults() {
+        let ctx = RuntimeContext::headless_default();
+        let hot = ctx.hot_config();
+        assert!(hot.privacy.redaction_style.is_none());
+        assert!(hot.dynamic_policy.is_none());
+    }
+
+    // ── reload_hot_config ─────────────────────────────────────────────────────
+
+    /// Spec §Configuration Reload (lines 263-274): SIGHUP or ReloadConfig RPC
+    /// atomically replaces the hot-reloadable sections without restart.
+    #[test]
+    fn reload_hot_config_atomically_replaces_privacy() {
+        let ctx = RuntimeContext::headless_default();
+
+        // Before reload: defaults (all None).
+        assert!(ctx.hot_config().privacy.redaction_style.is_none());
+
+        // Reload with updated privacy.
+        let new_hot = HotReloadableConfig {
+            privacy: RawPrivacy {
+                redaction_style: Some("pattern".to_string()),
+                ..Default::default()
+            },
+            degradation: RawDegradation::default(),
+            chrome: RawChrome::default(),
+            dynamic_policy: None,
+        };
+        ctx.reload_hot_config(new_hot);
+
+        // After reload: new value is visible.
+        assert_eq!(
+            ctx.hot_config().privacy.redaction_style,
+            Some("pattern".to_string()),
+            "reload_hot_config must atomically replace privacy settings"
+        );
+    }
+
+    #[test]
+    fn reload_hot_config_replaces_degradation_thresholds() {
+        let ctx = RuntimeContext::headless_default();
+
+        let new_hot = HotReloadableConfig {
+            privacy: RawPrivacy::default(),
+            degradation: RawDegradation {
+                coalesce_frame_ms: Some(16.0),
+                simplify_rendering_frame_ms: Some(33.0),
+                ..Default::default()
+            },
+            chrome: RawChrome::default(),
+            dynamic_policy: None,
+        };
+        ctx.reload_hot_config(new_hot);
+
+        let hot = ctx.hot_config();
+        assert_eq!(hot.degradation.coalesce_frame_ms, Some(16.0));
+        assert_eq!(hot.degradation.simplify_rendering_frame_ms, Some(33.0));
+    }
+
+    #[test]
+    fn reload_hot_config_enables_dynamic_agents() {
+        let ctx = RuntimeContext::headless_default();
+        assert!(ctx.hot_config().dynamic_policy.is_none(), "dynamic_policy absent by default");
+
+        let new_hot = HotReloadableConfig {
+            privacy: RawPrivacy::default(),
+            degradation: RawDegradation::default(),
+            chrome: RawChrome::default(),
+            dynamic_policy: Some(RawDynamicPolicy {
+                allow_dynamic_agents: true,
+                default_capabilities: Some(vec!["create_tiles".to_string()]),
+                prompt_for_elevated_capabilities: true,
+                dynamic_presence_ceiling: None,
+            }),
+        };
+        ctx.reload_hot_config(new_hot);
+
+        let hot = ctx.hot_config();
+        let dp = hot.dynamic_policy.as_ref().expect("dynamic_policy should be set");
+        assert!(dp.allow_dynamic_agents);
+    }
+
+    #[test]
+    fn reload_hot_config_multiple_reloads_always_returns_latest() {
+        let ctx = RuntimeContext::headless_default();
+
+        for i in 1u32..=5 {
+            let style = format!("style-{i}");
+            ctx.reload_hot_config(HotReloadableConfig {
+                privacy: RawPrivacy {
+                    redaction_style: Some(style.clone()),
+                    ..Default::default()
+                },
+                degradation: RawDegradation::default(),
+                chrome: RawChrome::default(),
+                dynamic_policy: None,
+            });
+            assert_eq!(
+                ctx.hot_config().privacy.redaction_style,
+                Some(style),
+                "after reload {i}, hot_config must return the latest value"
+            );
+        }
+    }
+
+    /// Frozen sections must not change after a reload.
+    #[test]
+    fn reload_hot_config_does_not_touch_frozen_fields() {
+        let config = make_config(vec![
+            ("my-agent", vec!["create_tiles"]),
+        ]);
+        let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
+
+        // Snapshot frozen state before reload.
+        let profile_name_before = ctx.profile.name.clone();
+        let max_tiles_before = ctx.profile.max_tiles;
+
+        // Reload hot config.
+        ctx.reload_hot_config(HotReloadableConfig {
+            privacy: RawPrivacy {
+                redaction_style: Some("blank".to_string()),
+                ..Default::default()
+            },
+            degradation: RawDegradation::default(),
+            chrome: RawChrome::default(),
+            dynamic_policy: None,
+        });
+
+        // Frozen fields unchanged.
+        assert_eq!(ctx.profile.name, profile_name_before);
+        assert_eq!(ctx.profile.max_tiles, max_tiles_before);
+        // Frozen agent registry unchanged.
+        let policy = ctx.capability_policy_for("my-agent");
+        assert!(policy.evaluate_capability_request(&["create_tiles".to_string()]).is_ok());
     }
 
     // ── capability_policy_for ─────────────────────────────────────────────────

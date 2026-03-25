@@ -3114,6 +3114,7 @@ dependencies = [
  "tze_hud_telemetry",
  "uuid",
  "wgpu",
+ "windows",
  "winit",
 ]
 
