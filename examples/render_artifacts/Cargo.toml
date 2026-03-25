@@ -1,0 +1,21 @@
+[package]
+name = "render_artifacts"
+description = "Layer 4 render-artifacts binary — generates developer visibility artifacts"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "render-artifacts"
+path = "src/main.rs"
+
+[features]
+# Enable headless GPU rendering so Layer 1/2 images can be sourced live.
+headless = ["dep:tze_hud_compositor"]
+
+[dependencies]
+tze_hud_validation = { path = "../../crates/tze_hud_validation" }
+tze_hud_scene = { path = "../../crates/tze_hud_scene" }
+tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
+tze_hud_compositor = { path = "../../crates/tze_hud_compositor", features = ["headless"], optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

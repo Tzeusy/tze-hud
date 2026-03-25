@@ -15,6 +15,7 @@ members = [
     "crates/tze_hud_validation",
     "examples/vertical_slice",
     "examples/benchmark",
+    "examples/render_artifacts",
     "tests/integration",
 ]
 
