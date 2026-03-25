@@ -150,7 +150,7 @@ fn proto_rect_negative_dims_does_not_panic() {
 /// NodeProto with no data → proto_node_to_scene must return None (not panic).
 #[test]
 fn proto_node_no_data_returns_none() {
-    let n = NodeProto { id: String::new(), data: None };
+    let n = NodeProto { id: vec![], data: None };
     assert_eq!(proto_node_to_scene(&n), None);
 }
 
@@ -158,7 +158,7 @@ fn proto_node_no_data_returns_none() {
 #[test]
 fn proto_node_static_image_empty_resource_id_returns_none() {
     let n = NodeProto {
-        id: String::new(),
+        id: vec![],
         data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
             resource_id: vec![],
             width: 100,
@@ -175,7 +175,7 @@ fn proto_node_static_image_empty_resource_id_returns_none() {
 #[test]
 fn proto_node_static_image_malformed_resource_id_returns_none() {
     let n = NodeProto {
-        id: String::new(),
+        id: vec![],
         data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
             resource_id: vec![0u8; 31],
             width: 100,
@@ -192,7 +192,7 @@ fn proto_node_static_image_malformed_resource_id_returns_none() {
 #[test]
 fn proto_node_static_image_valid_returns_some() {
     let n = NodeProto {
-        id: String::new(),
+        id: vec![],
         data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
             resource_id: vec![1u8; 32],
             width: 100,
@@ -209,7 +209,7 @@ fn proto_node_static_image_valid_returns_some() {
 #[test]
 fn proto_node_solid_color_no_bounds_returns_some() {
     let n = NodeProto {
-        id: String::new(),
+        id: vec![],
         data: Some(ProtoNodeData::SolidColor(SolidColorNodeProto {
             color: Some(ProtoRgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
             bounds: None, // missing bounds
@@ -223,7 +223,7 @@ fn proto_node_solid_color_no_bounds_returns_some() {
 #[test]
 fn proto_node_text_zero_font_size_defaults_to_16() {
     let n = NodeProto {
-        id: String::new(),
+        id: vec![],
         data: Some(ProtoNodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "hello".into(),
             bounds: Some(ProtoRect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 }),
@@ -585,7 +585,7 @@ proptest! {
         h in 0f32..2000f32,
     ) {
         let n = NodeProto {
-            id: String::new(),
+            id: vec![],
             data: Some(ProtoNodeData::StaticImage(StaticImageNodeProto {
                 resource_id,
                 width: w as u32,
