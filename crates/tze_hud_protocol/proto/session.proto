@@ -4,6 +4,7 @@ package tze_hud.protocol.v1.session;
 
 import "types.proto";
 import "events.proto";
+import "events_legacy.proto";  // DEPRECATED legacy messages used by SceneDelta
 
 // ─── Session Protocol ─────────────────────────────────────────────────────────
 //

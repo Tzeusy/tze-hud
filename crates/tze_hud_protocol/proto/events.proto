@@ -4,96 +4,17 @@ package tze_hud.protocol.v1;
 
 import "types.proto";
 
-// ─── Input Events ─────────────────────────────────────────────────────────────
-
-// Pointer input event dispatched to the agent that owns the hit tile.
-// DEPRECATED: Use InputEnvelope (RFC 0004) for new code.
-// Legacy wire format retained for backwards-compatibility until the
-// InputEnvelope migration is complete; ID fields use old string convention;
-// timestamp has been updated to timestamp_mono_us (microseconds).
-message InputEvent {
-  string tile_id            = 1;
-  string node_id            = 2;
-  string interaction_id     = 3;
-  float  local_x            = 4;  // coordinates relative to tile origin
-  float  local_y            = 5;
-  float  display_x          = 6;  // raw display-space coordinates
-  float  display_y          = 7;
-  InputEventKind kind       = 8;
-  uint64 timestamp_mono_us  = 9;  // monotonic clock µs (renamed from timestamp_ms; field number unchanged)
-}
-
-enum InputEventKind {
-  INPUT_EVENT_KIND_UNSPECIFIED = 0;
-  POINTER_MOVE   = 1;
-  POINTER_DOWN   = 2;
-  POINTER_UP     = 3;
-  POINTER_ENTER  = 4;
-  POINTER_LEAVE  = 5;
-  ACTIVATED      = 6;  // press + release on the same hit region
-}
-
-// ─── Scene Lifecycle Events ───────────────────────────────────────────────────
-
-// Typed scene lifecycle events (runtime → agent).
-// DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
-message TileCreatedEvent {
-  string tile_id          = 1;
-  string namespace        = 2;  // owning agent namespace
-  uint64 timestamp_wall_us = 3;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
-}
-
-message TileDeletedEvent {
-  string tile_id           = 1;
-  uint64 timestamp_wall_us = 2;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
-}
-
-message TileUpdatedEvent {
-  string tile_id           = 1;
-  uint64 timestamp_wall_us = 2;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
-}
-
-// ─── Lease Events ─────────────────────────────────────────────────────────────
-
-// Lease lifecycle events dispatched to the owning agent.
-// DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
-message LeaseEvent {
-  string lease_id          = 1;
-  string namespace         = 2;
-  LeaseEventKind kind      = 3;
-  uint64 timestamp_wall_us = 4;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
-}
-
-enum LeaseEventKind {
-  LEASE_EVENT_KIND_UNSPECIFIED = 0;
-  LEASE_GRANTED  = 1;
-  LEASE_RENEWED  = 2;
-  LEASE_REVOKED  = 3;
-  LEASE_EXPIRED  = 4;
-}
-
-// ─── Event Envelope ───────────────────────────────────────────────────────────
-
-// Envelope sent on the server-streaming SubscribeEvents RPC.
-// Each message carries exactly one event via the oneof.
-// DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
-message SceneEvent {
-  uint64 timestamp_wall_us = 1;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
-  oneof event {
-    TileCreatedEvent tile_created = 10;
-    TileDeletedEvent tile_deleted = 11;
-    TileUpdatedEvent tile_updated = 12;
-    InputEvent       input        = 20;
-    LeaseEvent       lease        = 30;
-  }
-}
+// NOTE: Deprecated legacy wire messages (InputEvent, InputEventKind,
+// TileCreatedEvent, TileDeletedEvent, TileUpdatedEvent, LeaseEvent,
+// LeaseEventKind, SceneEvent) have been moved to events_legacy.proto.
+// Do not import or use those types in new code.
 
 // ─── Input Event Types (RFC 0004) ─────────────────────────────────────────────
 //
 // The RFC 0004 input event messages below encode tile_id and node_id as raw 16-byte
-// UUIDv7 (bytes). This diverges from the older InputEvent/SceneEvent messages above,
-// which use string IDs. The bytes encoding matches RFC 0006 §9.1 and the SceneId
-// convention in types.proto.
+// UUIDv7 (bytes). This is the authoritative wire format. The older legacy messages
+// in events_legacy.proto used string IDs; those are deprecated.
+// The bytes encoding matches RFC 0006 §9.1 and the SceneId convention in types.proto.
 //
 // All hardware timestamps use the _mono_us suffix (monotonic domain per RFC 0005 §2.4).
 
