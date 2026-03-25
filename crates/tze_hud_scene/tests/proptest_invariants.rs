@@ -395,7 +395,7 @@ proptest! {
                     zone_name: zone_name.clone(),
                     publisher_namespace: "agent.alpha".into(),
                     content: ZoneContent::StreamText("hello world".into()),
-                    published_at_ms: 1_000_000,
+                    published_at_wall_us: 1_000_000_000,  // microseconds
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
