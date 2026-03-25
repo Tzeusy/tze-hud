@@ -28,8 +28,9 @@ pub use rate_limiter::{AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-/// Maximum allowed payload size in bytes (spec line 122: "limited to 4KB maximum").
-pub const MAX_PAYLOAD_BYTES: usize = 4096;
+// Re-export the shared constants from tze_hud_scene so that callers of
+// tze_hud_runtime can reach them at their usual paths.
+pub use tze_hud_scene::events::emission::MAX_PAYLOAD_BYTES;
 
 /// Capability prefix for agent event emission (spec line 108).
 const EMIT_CAPABILITY_PREFIX: &str = "emit_scene_event:";
