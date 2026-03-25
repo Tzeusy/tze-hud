@@ -200,24 +200,41 @@ impl AgentSubscriptions {
                 continue;
             }
 
-            // If already subscribed, update the filter_prefix and continue.
-            // This allows an agent to refine its filter without re-subscribing.
-            if let Some(existing) = self.entries.get_mut(cat.as_str()) {
-                existing.filter_prefix = filter_prefix.clone();
-                continue;
+            // Validate filter_prefix: if provided, it must start with the
+            // category's default prefix (RFC 0010 §7.2). A filter that escapes
+            // the category boundary could route events outside the agent's
+            // granted capability scope.
+            if let Some(fp) = filter_prefix {
+                let default_prefix = category_prefix(cat.as_str()).unwrap_or("");
+                if !fp.starts_with(default_prefix) {
+                    denied.push(cat.clone());
+                    continue;
+                }
+                // If already subscribed, update the filter_prefix.
+                // This allows an agent to refine its filter without re-subscribing.
+                if let Some(existing) = self.entries.get_mut(cat.as_str()) {
+                    existing.filter_prefix = Some(fp.clone());
+                    continue;
+                }
+                // Enforce the 32-subscription limit
+                if self.entries.len() >= MAX_SUBSCRIPTIONS_PER_AGENT {
+                    denied.push(cat.clone());
+                    continue;
+                }
+                self.entries.insert(cat.clone(), Subscription::with_filter(cat.clone(), fp.clone()));
+            } else {
+                // If already subscribed, clear any stored filter (reset to default).
+                if let Some(existing) = self.entries.get_mut(cat.as_str()) {
+                    existing.filter_prefix = None;
+                    continue;
+                }
+                // Enforce the 32-subscription limit
+                if self.entries.len() >= MAX_SUBSCRIPTIONS_PER_AGENT {
+                    denied.push(cat.clone());
+                    continue;
+                }
+                self.entries.insert(cat.clone(), Subscription::new(cat.clone()));
             }
-
-            // Enforce the 32-subscription limit
-            if self.entries.len() >= MAX_SUBSCRIPTIONS_PER_AGENT {
-                denied.push(cat.clone());
-                continue;
-            }
-
-            let sub = match filter_prefix {
-                Some(fp) => Subscription::with_filter(cat.clone(), fp.clone()),
-                None => Subscription::new(cat.clone()),
-            };
-            self.entries.insert(cat.clone(), sub);
         }
 
         SubscriptionChangeOutcome {
@@ -662,6 +679,49 @@ mod tests {
         // Only zone events should reach agent_x
         assert!(agent_subs.should_receive("scene.zone.occupancy_changed"));
         assert!(!agent_subs.should_receive("scene.tile.created"));
+    }
+
+    #[test]
+    fn test_filter_prefix_must_stay_within_category_default_prefix() {
+        // A filter_prefix that escapes the category's allowed prefix boundary must be denied.
+        // SCENE_TOPOLOGY has default prefix "scene."; "system." is outside that boundary.
+        let mut subs = AgentSubscriptions::new();
+        let outcome = subs.apply_change(
+            &subscribe_with_filter(CATEGORY_SCENE_TOPOLOGY, "system."),
+            &[],
+            &caps(&[]),
+        );
+        assert!(outcome.denied.contains(&CATEGORY_SCENE_TOPOLOGY.to_string()),
+            "filter_prefix outside category boundary must be denied");
+        // Category must not be subscribed
+        assert!(!outcome.active.contains(&CATEGORY_SCENE_TOPOLOGY.to_string()),
+            "subscription must not be active after denied filter_prefix");
+    }
+
+    #[test]
+    fn test_filter_prefix_reset_via_none_clears_stored_filter() {
+        // Sending a None filter_prefix for an already-subscribed category must reset
+        // the filter to the category default (i.e., clear any stored filter_prefix).
+        let mut subs = AgentSubscriptions::new();
+        // Subscribe with a narrow filter first
+        subs.apply_change(
+            &subscribe_with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.zone."),
+            &[],
+            &caps(&[]),
+        );
+        assert!(!subs.should_receive("scene.tile.created"),
+            "narrow filter: tile events must be excluded");
+
+        // Re-subscribe with no filter (None) — should reset to default
+        subs.apply_change(
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
+            &[],
+            &caps(&[]),
+        );
+        assert!(subs.should_receive("scene.tile.created"),
+            "after filter reset: tile events must be delivered");
+        assert!(subs.should_receive("scene.zone.occupancy_changed"),
+            "after filter reset: zone events must also be delivered");
     }
 
     // ── Dual-routing deduplication ────────────────────────────────────────────
