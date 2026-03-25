@@ -171,19 +171,19 @@ async fn test_input_to_local_ack_p99_within_budget() {
 
 /// Assert that input_to_scene_commit p99 is under the 50ms budget.
 ///
-/// Simulates 30 mutation-commit cycles: each iteration applies a `MutationBatch`
-/// to the scene via the headless pipeline and records the elapsed time from
-/// mutation submission to Stage 4 completion (scene commit boundary). This
-/// corresponds to the agent-response path: input arrives, agent applies a
-/// mutation, scene graph reflects the change.
+/// Runs 30 headless frames and records the `input_to_scene_commit_us` field
+/// emitted by `render_frame()`. Note: in the headless pipeline there is no
+/// live agent applying mutations between frames, so `input_to_scene_commit_us`
+/// will be 0 on frames with no applied mutations (see
+/// `headless.rs` — the field is gated on `mutations_applied > 0`). This test
+/// therefore validates the timing infrastructure plumbing rather than asserting
+/// a representative agent round-trip latency. Budget assertion checks that any
+/// non-zero samples are under 50ms (which they should be, even on slow CI).
 ///
 /// ## Pipeline derivation
-/// The `render_frame()` headless pipeline reports `input_to_scene_commit_us`
-/// as the sum of stages 1–4 (frame-start to Stage 4 end), which is the proxy
-/// for the full input-to-commit path in the absence of real inter-thread
-/// round-trips. On real hardware with network agents the actual budget is 50ms;
-/// the headless path measures the local commit overhead, which must be well
-/// under the budget.
+/// `render_frame()` sets `input_to_scene_commit_us` as wall time from
+/// `frame_start` to end of Stage 4, which is the proxy for the
+/// input-to-commit path from the frame start boundary.
 ///
 /// ## CI note
 /// The 50ms budget includes agent network round-trip time. The headless path

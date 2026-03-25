@@ -173,7 +173,7 @@ impl FrameTelemetry {
 }
 
 /// Latency measurement bucket.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LatencyBucket {
     pub name: String,
     pub samples: Vec<u64>, // microseconds
@@ -338,13 +338,16 @@ pub struct SessionSummary {
     pub frame_time: LatencyBucket,
     /// input_to_local_ack — time from input event to Stage 2 completion.
     /// Spec: p99 < 4ms (4_000 µs). Purely local, no network.
+    #[serde(default)]
     pub input_to_local_ack: LatencyBucket,
     /// input_to_scene_commit — time from input event to Stage 4 completion.
     /// Spec: p99 < 50ms (50_000 µs). Covers agent response round-trip.
+    #[serde(default)]
     pub input_to_scene_commit: LatencyBucket,
     /// input_to_next_present — time from input event to Stage 7 completion
     /// (GPU present of frame containing agent response).
     /// Spec: p99 < 33ms (33_000 µs) at 60Hz (two frames).
+    #[serde(default)]
     pub input_to_next_present: LatencyBucket,
     pub hit_test_latency: LatencyBucket,
     pub validation_latency: LatencyBucket,
