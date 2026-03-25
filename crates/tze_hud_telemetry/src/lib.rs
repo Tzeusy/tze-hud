@@ -3,9 +3,11 @@
 //! Structured telemetry for tze_hud. Per-frame timing, throughput,
 //! and resource metrics emitted as machine-readable JSON.
 //! Satisfies DR-V3: Structured telemetry.
+//! Satisfies DR-V8: Soak and leak test resource monitoring.
 
 pub mod record;
 pub mod collector;
+pub mod resource_monitor;
 
 pub use record::{
     FrameTelemetry, SessionSummary, LatencyBucket,
@@ -13,3 +15,6 @@ pub use record::{
     DegradationEvent, DegradationDirection,
 };
 pub use collector::{FrameRecorder, TelemetryCollector};
+pub use resource_monitor::{
+    AgentFootprint, GrowthRatios, ResourceMonitor, ResourceSnapshot, SPEC_GROWTH_TOLERANCE,
+};

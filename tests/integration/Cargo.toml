@@ -12,6 +12,20 @@ path = "multi_agent.rs"
 name = "trace_regression"
 path = "trace_regression.rs"
 
+# Soak and leak test suite (validation-framework/spec.md lines 298-310).
+#
+# Default run (fast CI, 10 seconds):
+#   cargo test --test soak
+#
+# 1-hour CI run:
+#   TZE_HUD_SOAK_SECS=3600 cargo test --test soak -- --nocapture
+#
+# 6-hour nightly run:
+#   TZE_HUD_SOAK_SECS=21600 cargo test --test soak -- --nocapture
+[[test]]
+name = "soak"
+path = "soak.rs"
+
 # Integration tests always run headless (no display server required).
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`
