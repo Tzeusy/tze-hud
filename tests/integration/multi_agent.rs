@@ -276,7 +276,7 @@ async fn create_tile_via_grpc(
                         mutation: Some(
                             proto::mutation_proto::Mutation::CreateTile(
                                 proto::CreateTileMutation {
-                                    tab_id: String::new(),
+                                    tab_id: vec![],  // empty = server infers active tab
                                     bounds: Some(proto::Rect {
                                         x: bounds[0],
                                         y: bounds[1],

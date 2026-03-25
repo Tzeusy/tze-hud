@@ -7,16 +7,20 @@ import "types.proto";
 // ─── Input Events ─────────────────────────────────────────────────────────────
 
 // Pointer input event dispatched to the agent that owns the hit tile.
+// DEPRECATED: Use InputEnvelope (RFC 0004) for new code.
+// Legacy wire format retained for backwards-compatibility until the
+// InputEnvelope migration is complete; ID fields use old string convention;
+// timestamp has been updated to timestamp_mono_us (microseconds).
 message InputEvent {
-  string tile_id       = 1;
-  string node_id       = 2;
-  string interaction_id = 3;
-  float  local_x       = 4;  // coordinates relative to tile origin
-  float  local_y       = 5;
-  float  display_x     = 6;  // raw display-space coordinates
-  float  display_y     = 7;
-  InputEventKind kind  = 8;
-  uint64 timestamp_ms  = 9;
+  string tile_id            = 1;
+  string node_id            = 2;
+  string interaction_id     = 3;
+  float  local_x            = 4;  // coordinates relative to tile origin
+  float  local_y            = 5;
+  float  display_x          = 6;  // raw display-space coordinates
+  float  display_y          = 7;
+  InputEventKind kind       = 8;
+  uint64 timestamp_mono_us  = 9;  // monotonic clock µs (renamed from timestamp_ms; field number unchanged)
 }
 
 enum InputEventKind {
@@ -32,30 +36,32 @@ enum InputEventKind {
 // ─── Scene Lifecycle Events ───────────────────────────────────────────────────
 
 // Typed scene lifecycle events (runtime → agent).
+// DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
 message TileCreatedEvent {
-  string tile_id    = 1;
-  string namespace  = 2;  // owning agent namespace
-  uint64 timestamp_ms = 3;
+  string tile_id          = 1;
+  string namespace        = 2;  // owning agent namespace
+  uint64 timestamp_wall_us = 3;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
 }
 
 message TileDeletedEvent {
-  string tile_id    = 1;
-  uint64 timestamp_ms = 2;
+  string tile_id           = 1;
+  uint64 timestamp_wall_us = 2;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
 }
 
 message TileUpdatedEvent {
-  string tile_id    = 1;
-  uint64 timestamp_ms = 2;
+  string tile_id           = 1;
+  uint64 timestamp_wall_us = 2;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
 }
 
 // ─── Lease Events ─────────────────────────────────────────────────────────────
 
 // Lease lifecycle events dispatched to the owning agent.
+// DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
 message LeaseEvent {
-  string lease_id     = 1;
-  string namespace    = 2;
-  LeaseEventKind kind = 3;
-  uint64 timestamp_ms = 4;
+  string lease_id          = 1;
+  string namespace         = 2;
+  LeaseEventKind kind      = 3;
+  uint64 timestamp_wall_us = 4;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
 }
 
 enum LeaseEventKind {
@@ -70,8 +76,9 @@ enum LeaseEventKind {
 
 // Envelope sent on the server-streaming SubscribeEvents RPC.
 // Each message carries exactly one event via the oneof.
+// DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
 message SceneEvent {
-  uint64 timestamp_ms = 1;
+  uint64 timestamp_wall_us = 1;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
   oneof event {
     TileCreatedEvent tile_created = 10;
     TileDeletedEvent tile_deleted = 11;
