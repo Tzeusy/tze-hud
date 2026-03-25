@@ -15,6 +15,7 @@ pub mod mutation;
 pub mod diff;
 pub mod validation;
 pub mod test_scenes;
+pub mod invariants;
 pub mod calibration;
 pub mod trace;
 pub mod replay;

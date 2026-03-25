@@ -92,7 +92,7 @@ pub struct InvariantViolation {
 }
 
 impl InvariantViolation {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self { code, message: message.into() }
     }
 }
