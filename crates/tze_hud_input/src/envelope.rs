@@ -14,7 +14,7 @@
 //!   state changes, GestureEvent, ScrollOffsetChanged.
 //!   May be coalesced or dropped under backpressure.
 
-use tze_hud_scene::SceneId;
+use tze_hud_scene::{MonoUs, SceneId};
 
 // ─── Per-event payload types ──────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ pub struct PointerMoveData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub local_x: f32,
     pub local_y: f32,
@@ -36,7 +36,7 @@ pub struct PointerEnterData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub local_x: f32,
     pub local_y: f32,
@@ -47,7 +47,7 @@ pub struct PointerLeaveData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
 }
 
@@ -56,7 +56,7 @@ pub struct PointerDownData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub local_x: f32,
     pub local_y: f32,
@@ -70,7 +70,7 @@ pub struct PointerUpData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub local_x: f32,
     pub local_y: f32,
@@ -84,7 +84,7 @@ pub struct ClickData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub local_x: f32,
     pub local_y: f32,
@@ -96,7 +96,7 @@ pub struct PointerCancelData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
 }
 
@@ -104,7 +104,7 @@ pub struct PointerCancelData {
 pub struct KeyDownData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub key_code: String,
     pub key: String,
     pub repeat: bool,
@@ -118,7 +118,7 @@ pub struct KeyDownData {
 pub struct KeyUpData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub key_code: String,
     pub key: String,
     pub ctrl: bool,
@@ -131,7 +131,7 @@ pub struct KeyUpData {
 pub struct CharacterData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub character: String,
 }
 
@@ -139,7 +139,7 @@ pub struct CharacterData {
 pub struct FocusGainedData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub source: FocusSource,
 }
 
@@ -156,7 +156,7 @@ pub enum FocusSource {
 pub struct FocusLostData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub reason: FocusLostReason,
 }
 
@@ -177,7 +177,7 @@ pub enum FocusLostReason {
 pub struct CaptureReleasedData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub reason: CaptureReleasedReason,
 }
@@ -195,14 +195,14 @@ pub enum CaptureReleasedReason {
 pub struct ImeCompositionStartData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
 }
 
 #[derive(Clone, Debug)]
 pub struct ImeCompositionUpdateData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub composition_text: String,
 }
 
@@ -210,7 +210,7 @@ pub struct ImeCompositionUpdateData {
 pub struct ImeCompositionEndData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub committed_text: String,
 }
 
@@ -219,7 +219,7 @@ pub struct GestureData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub gesture_kind: String,
     pub scale: f32,
@@ -231,7 +231,7 @@ pub struct GestureData {
 #[derive(Clone, Debug)]
 pub struct ScrollOffsetChangedData {
     pub tile_id: SceneId,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub offset_x: f32,
     pub offset_y: f32,
 }
@@ -241,7 +241,7 @@ pub struct CommandInputData {
     pub tile_id: SceneId,
     pub node_id: SceneId,
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub action: CommandAction,
     pub source: CommandSource,
@@ -347,7 +347,7 @@ impl InputEnvelope {
     }
 
     /// Extract the hardware timestamp (monotonic microseconds) from any event variant.
-    pub fn timestamp_mono_us(&self) -> u64 {
+    pub fn timestamp_mono_us(&self) -> MonoUs {
         match self {
             InputEnvelope::PointerDown(d) => d.timestamp_mono_us,
             InputEnvelope::PointerUp(d) => d.timestamp_mono_us,
@@ -375,7 +375,7 @@ impl InputEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tze_hud_scene::SceneId;
+    use tze_hud_scene::{MonoUs, SceneId};
 
     fn null_id() -> SceneId { SceneId::null() }
 
@@ -383,26 +383,27 @@ mod tests {
     fn test_transactional_classification() {
         let down = InputEnvelope::PointerDown(PointerDownData {
             tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: 0, device_id: String::new(),
+            timestamp_mono_us: MonoUs::NOT_SET, device_id: String::new(),
             local_x: 0.0, local_y: 0.0, display_x: 0.0, display_y: 0.0, button: 0,
         });
         assert!(down.is_transactional());
 
         let mv = InputEnvelope::PointerMove(PointerMoveData {
             tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: 0, device_id: String::new(),
+            timestamp_mono_us: MonoUs::NOT_SET, device_id: String::new(),
             local_x: 0.0, local_y: 0.0, display_x: 0.0, display_y: 0.0,
         });
         assert!(!mv.is_transactional());
 
         let scroll = InputEnvelope::ScrollOffsetChanged(ScrollOffsetChangedData {
-            tile_id: null_id(), timestamp_mono_us: 0, offset_x: 0.0, offset_y: 0.0,
+            tile_id: null_id(), timestamp_mono_us: MonoUs::NOT_SET,
+            offset_x: 0.0, offset_y: 0.0,
         });
         assert!(!scroll.is_transactional());
 
         let cmd = InputEnvelope::CommandInput(CommandInputData {
             tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: 0, device_id: String::new(),
+            timestamp_mono_us: MonoUs::NOT_SET, device_id: String::new(),
             action: CommandAction::Activate, source: CommandSource::Keyboard,
         });
         assert!(cmd.is_transactional());
@@ -412,9 +413,9 @@ mod tests {
     fn test_timestamp_extraction() {
         let mv = InputEnvelope::PointerMove(PointerMoveData {
             tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: 42_000, device_id: String::new(),
+            timestamp_mono_us: MonoUs(42_000), device_id: String::new(),
             local_x: 0.0, local_y: 0.0, display_x: 0.0, display_y: 0.0,
         });
-        assert_eq!(mv.timestamp_mono_us(), 42_000);
+        assert_eq!(mv.timestamp_mono_us(), MonoUs(42_000));
     }
 }

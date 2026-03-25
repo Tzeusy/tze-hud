@@ -10,7 +10,7 @@
 //! - Multiple events for the same agent in a single frame → one `EventBatch`.
 //! - Events within a batch are sorted by `timestamp_mono_us` ascending.
 //! - `EventBatch.frame_number` = compositor frame counter.
-//! - `EventBatch.batch_ts_us` = wall-clock UTC µs at batch assembly time.
+//! - `EventBatch.batch_ts_wall_us` = wall-clock UTC µs at batch assembly time.
 //! - Events are coalesced (via `FrameCoalescer`) before sorting.
 //!
 //! ## Latency
@@ -20,6 +20,8 @@
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use tze_hud_scene::WallUs;
 
 use crate::coalescing::FrameCoalescer;
 use crate::envelope::InputEnvelope;
@@ -34,7 +36,7 @@ pub struct EventBatch {
     /// Compositor frame number (monotonically increasing).
     pub frame_number: u64,
     /// Batch assembly timestamp: wall-clock UTC microseconds (RFC 0003 §1.1).
-    pub batch_ts_us: u64,
+    pub batch_ts_wall_us: WallUs,
     /// Events sorted by `timestamp_mono_us` ascending.
     pub events: Vec<InputEnvelope>,
 }
@@ -94,7 +96,7 @@ impl EventBatchAssembler {
             return Vec::new();
         }
 
-        let batch_ts_us = wall_clock_us();
+        let batch_ts_wall_us = wall_clock_us();
         let pending = std::mem::take(&mut self.pending);
 
         pending
@@ -106,7 +108,7 @@ impl EventBatchAssembler {
                 EventBatch {
                     namespace,
                     frame_number,
-                    batch_ts_us,
+                    batch_ts_wall_us,
                     events,
                 }
             })
@@ -133,13 +135,14 @@ impl Default for EventBatchAssembler {
 /// Returns current wall-clock time as UTC microseconds since Unix epoch.
 ///
 /// Guaranteed non-zero: `0` is the "not set" sentinel (timing-model/spec.md
-/// §Zero-value semantics). On clock error (pre-epoch), returns `1`.
-fn wall_clock_us() -> u64 {
+/// §Zero-value semantics). On clock error (pre-epoch), returns `WallUs(1)`.
+fn wall_clock_us() -> WallUs {
     let us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_micros()).ok())
         .unwrap_or(1);
-    if us == 0 { 1 } else { us }
+    WallUs(if us == 0 { 1 } else { us })
 }
 
 #[cfg(test)]
@@ -148,7 +151,7 @@ mod tests {
     use crate::envelope::{
         InputEnvelope, PointerDownData, PointerMoveData, PointerUpData,
     };
-    use tze_hud_scene::SceneId;
+    use tze_hud_scene::{MonoUs, SceneId};
 
     fn null_id() -> SceneId {
         SceneId::null()
@@ -159,7 +162,7 @@ mod tests {
             tile_id: null_id(),
             node_id: null_id(),
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
             local_x: x,
             local_y: y,
@@ -173,7 +176,7 @@ mod tests {
             tile_id: null_id(),
             node_id: null_id(),
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
@@ -188,7 +191,7 @@ mod tests {
             tile_id: null_id(),
             node_id: null_id(),
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
@@ -214,8 +217,8 @@ mod tests {
         assert_eq!(batch.frame_number, 42);
         assert_eq!(batch.events.len(), 2, "both events should be in the batch");
         // Events ordered by timestamp ascending
-        assert_eq!(batch.events[0].timestamp_mono_us(), 1000);
-        assert_eq!(batch.events[1].timestamp_mono_us(), 2000);
+        assert_eq!(batch.events[0].timestamp_mono_us(), MonoUs(1000));
+        assert_eq!(batch.events[1].timestamp_mono_us(), MonoUs(2000));
     }
 
     // ─── Events sorted by timestamp_mono_us ascending ───────────────────────
@@ -229,8 +232,8 @@ mod tests {
 
         let batches = assembler.assemble_frame(1);
         let batch = &batches[0];
-        assert_eq!(batch.events[0].timestamp_mono_us(), 1000);
-        assert_eq!(batch.events[1].timestamp_mono_us(), 3000);
+        assert_eq!(batch.events[0].timestamp_mono_us(), MonoUs(1000));
+        assert_eq!(batch.events[1].timestamp_mono_us(), MonoUs(3000));
     }
 
     // ─── Two agents → two separate batches ──────────────────────────────────

@@ -113,14 +113,14 @@ impl Default for AgentEventQueue {
 mod tests {
     use super::*;
     use crate::envelope::{InputEnvelope, PointerMoveData, PointerDownData};
-    use tze_hud_scene::SceneId;
+    use tze_hud_scene::{MonoUs, SceneId};
 
     fn make_move(ts: u64) -> InputEnvelope {
         InputEnvelope::PointerMove(PointerMoveData {
             tile_id: SceneId::null(),
             node_id: SceneId::null(),
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
@@ -134,7 +134,7 @@ mod tests {
             tile_id: SceneId::null(),
             node_id: SceneId::null(),
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
@@ -183,8 +183,8 @@ mod tests {
         let events = q.drain();
         // The oldest move (ts=1) was evicted; remaining is move(ts=2) + down(ts=3)
         assert_eq!(events.len(), 2);
-        assert_eq!(events[0].timestamp_mono_us(), 2);
-        assert_eq!(events[1].timestamp_mono_us(), 3);
+        assert_eq!(events[0].timestamp_mono_us(), MonoUs(2));
+        assert_eq!(events[1].timestamp_mono_us(), MonoUs(3));
     }
 
     #[test]
