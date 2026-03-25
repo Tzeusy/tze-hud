@@ -143,18 +143,18 @@ pub fn reload_config(new_toml: &str) -> Result<HotReloadableConfig, Vec<ConfigEr
 /// It is responsible for calling `reload_config` and applying the result.
 pub type SighupCallback = Box<dyn Fn(&str) + Send + Sync>;
 
-/// SIGHUP handler stub.
+/// SIGHUP reload coordinator.
 ///
-/// On Unix targets, this installs a signal handler.
-/// On non-Unix targets (Windows, etc.), this is a no-op stub.
+/// This struct **does not** install a real OS signal handler. It stores the
+/// config file path and exposes `trigger_reload()` for programmatic invocation.
 ///
-/// The handler calls `callback` with the current config file path.
+/// Production runtimes MUST integrate with `tokio::signal::unix::signal(SignalKind::hangup())`
+/// to receive OS SIGHUP signals asynchronously. When the signal fires, call
+/// `trigger_reload()` on this struct from the signal handling task.
 ///
-/// **Safety / Design note**: Real async runtimes should use
-/// `tokio::signal::unix::signal(SignalKind::hangup())` instead of a blocking
-/// signal handler. This struct is intentionally minimal — it documents the
-/// interface contract for v1 and provides a testable wrapper. Production
-/// integration should replace or extend this with an async version.
+/// The separation keeps signal delivery (async runtime concern) separate from
+/// config parsing/validation (pure logic concern), making both independently
+/// testable.
 pub struct SighupHandler {
     config_path: String,
 }
@@ -204,7 +204,10 @@ impl SighupHandler {
 // Add a `into_raw` method to `TzeHudConfig` via a dedicated trait.
 
 /// Extension that exposes the inner `RawConfig` for extraction.
-pub trait IntoRaw {
+///
+/// Intentionally crate-private — `reload_config` is the public API for reload.
+/// External callers have no need to access the raw TOML representation directly.
+pub(crate) trait IntoRaw {
     fn into_raw(self) -> crate::raw::RawConfig;
 }
 

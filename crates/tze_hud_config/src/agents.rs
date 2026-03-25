@@ -40,9 +40,13 @@ struct AgentBudgetField<'a> {
 /// Validate `[agents]` section against the active display profile.
 ///
 /// Checks:
-/// 1. Per-agent budget overrides do not exceed profile ceilings.
-/// 2. Auth PSK env var indirection — warn if env var is unset.
-/// 3. Dynamic agent policy defaults (structural only; runtime enforcement is post-v1).
+/// 1. Per-agent budget overrides do not exceed profile ceilings
+///    (`max_tiles`, `max_texture_mb`).
+///
+/// Note: Auth PSK env-var indirection and dynamic agent policy structural checks
+/// are intentionally separate concerns handled by `check_agent_auth_env_vars()`
+/// and `dynamic_agents_allowed()` respectively. They are not startup-blocking
+/// validation errors; the caller invokes them independently.
 pub fn validate_agents(
     agents: &RawAgents,
     profile: &DisplayProfile,

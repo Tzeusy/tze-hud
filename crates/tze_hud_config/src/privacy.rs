@@ -57,13 +57,17 @@ pub const VALID_INTERRUPTION_CLASSES: &[&str] =
 
 /// Maps doctrine names to their canonical interruption class equivalents.
 /// Used to produce helpful hints when a doctrine name is provided.
+///
+/// Source: RFC 0010 §3.1 — "Urgent" renamed to HIGH for consistency with RFC 0009
+/// severity levels; "gentle" renamed to LOW.
 const DOCTRINE_TO_CANONICAL: &[(&str, &str)] = &[
-    ("urgent", "CRITICAL"),
+    ("urgent", "HIGH"),   // RFC 0010 §3.1: "Urgent" → HIGH
     ("high", "HIGH"),
     ("normal", "NORMAL"),
     ("low", "LOW"),
-    ("gentle", "LOW"),
+    ("gentle", "LOW"),    // RFC 0010 §3.1: "Gentle" → LOW
     ("silent", "SILENT"),
+    ("critical", "CRITICAL"),
 ];
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -351,11 +355,12 @@ mod tests {
             .filter(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass))
             .collect();
         assert!(!ptc_errors.is_empty(), "doctrine name 'urgent' should produce CONFIG_UNKNOWN_INTERRUPTION_CLASS");
-        // Hint should suggest the canonical name.
+        // Per spec line 239 and RFC 0010 §3.1: "urgent" maps to canonical "HIGH".
+        // The hint must suggest "HIGH" specifically.
         let hint = &ptc_errors[0].hint;
         assert!(
-            hint.contains("CRITICAL") || hint.contains("HIGH"),
-            "hint should suggest a canonical name, got: {:?}", hint
+            hint.contains("HIGH"),
+            "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}", hint
         );
     }
 

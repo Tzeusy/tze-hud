@@ -996,10 +996,10 @@ pass_through_class = "urgent"
         "doctrine name 'urgent' should produce CONFIG_UNKNOWN_INTERRUPTION_CLASS"
     );
     let err = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass)).unwrap();
-    // Hint should suggest the canonical equivalent.
+    // Per spec line 239 and RFC 0010 §3.1: "urgent" → canonical "HIGH".
     assert!(
-        err.hint.contains("CRITICAL") || err.hint.contains("HIGH"),
-        "hint should suggest canonical name, got: {:?}", err.hint
+        err.hint.contains("HIGH"),
+        "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}", err.hint
     );
 }
 
