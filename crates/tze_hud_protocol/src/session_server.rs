@@ -619,6 +619,12 @@ struct StreamSession {
     policy_capabilities: Vec<String>,
     lease_ids: Vec<tze_hud_scene::SceneId>,
     subscriptions: Vec<String>,
+    /// Fine-grained event type prefix filters per subscription category (RFC 0010 §7.2).
+    ///
+    /// When an agent subscribes with a `filter_prefix` (via `SubscriptionChange.subscribe_filter`),
+    /// the filter is stored here keyed by category name. Categories not present in this map
+    /// use the category's default prefix. Filters are removed when the category is unsubscribed.
+    subscription_filters: std::collections::HashMap<String, String>,
     server_sequence: u64,
     resume_token: Vec<u8>,
     last_heartbeat_ms: u64,
@@ -1369,6 +1375,7 @@ async fn handle_session_init(
         policy_capabilities: policy_caps.clone(),
         lease_ids: Vec::new(),
         subscriptions: sub_result.active.clone(),
+        subscription_filters: std::collections::HashMap::new(),
         server_sequence: 0,
         resume_token: resume_token.clone(),
         last_heartbeat_ms: now_ms(),
@@ -1528,6 +1535,9 @@ async fn handle_session_resume(
         lease_ids: prior_entry.orphaned_lease_ids.clone(),
         // Restore subscription set from before the disconnect.
         subscriptions: prior_entry.subscriptions.clone(),
+        // Subscription filters are not persisted across reconnects; agents must re-send
+        // subscribe_filter entries after resuming if they still need prefix filtering.
+        subscription_filters: std::collections::HashMap::new(),
         server_sequence: 0,
         resume_token: new_resume_token.clone(),
         last_heartbeat_ms: now_ms(),
@@ -2813,16 +2823,63 @@ async fn handle_subscription_change(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     change: SubscriptionChange,
 ) {
+    // Merge plain subscriptions and filtered subscriptions into a combined add list.
+    // `subscribe` contains category-only adds (use default prefix).
+    // `subscribe_filter` contains category + optional finer-grained prefix (RFC 0010 §7.2).
+    // Use a HashSet to deduplicate in O(n) rather than O(n²).
+    let mut seen: std::collections::HashSet<&str> = change.subscribe.iter().map(String::as_str).collect();
+    let mut add: Vec<String> = change.subscribe.clone();
+    for entry in &change.subscribe_filter {
+        if seen.insert(entry.category.as_str()) {
+            add.push(entry.category.clone());
+        }
+    }
+
     // Apply capability-filtered subscription change (RFC 0005 §7.3).
     // Mandatory subscriptions (DEGRADATION_NOTICES, LEASE_CHANGES) cannot be removed.
     // Additions without the required capability are placed in denied_subscriptions.
     // New subscription set takes effect immediately after the ack is sent.
     let result = subscriptions::apply_subscription_change(
         &session.subscriptions,
-        &change.subscribe,
+        &add,
         &change.unsubscribe,
         &session.capabilities,
     );
+
+    // Update per-category subscription filters to match the new active set.
+    //
+    // Semantics:
+    // - Plain `subscribe` for a category implies default behavior (no stored filter),
+    //   so any existing filter for that category is cleared when the subscription is active.
+    // - `subscribe_filter` with a non-empty filter_prefix stores/updates the filter
+    //   for that category, but only if the subscription is active (not denied).
+    // - `subscribe_filter` with an empty filter_prefix explicitly resets to default:
+    //   any stored filter for that category is removed.
+    // - Unsubscribed categories always have their filters removed.
+
+    // Clear filters for categories in plain `subscribe` that are now active.
+    for cat in &change.subscribe {
+        if result.active.contains(cat) {
+            session.subscription_filters.remove(cat.as_str());
+        }
+    }
+
+    // Apply filtered subscriptions: store, update, or clear filter per entry.
+    for entry in &change.subscribe_filter {
+        if result.active.contains(&entry.category) {
+            if entry.filter_prefix.is_empty() {
+                // Empty prefix for an active subscription resets to default behavior.
+                session.subscription_filters.remove(entry.category.as_str());
+            } else {
+                session.subscription_filters.insert(entry.category.clone(), entry.filter_prefix.clone());
+            }
+        }
+    }
+
+    // Remove filters for unsubscribed categories.
+    for cat in &change.unsubscribe {
+        session.subscription_filters.remove(cat.as_str());
+    }
 
     // Update session's active subscription set
     session.subscriptions = result.active.clone();
@@ -3959,6 +4016,7 @@ mod tests {
             payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
                 subscribe: vec!["INPUT_EVENTS".to_string()],
                 unsubscribe: Vec::new(),
+                subscribe_filter: Vec::new(),
             })),
         })
         .await
@@ -3994,6 +4052,147 @@ mod tests {
             }
             other => panic!("Expected SubscriptionChangeResult, got: {other:?}"),
         }
+        drop(tx);
+    }
+
+    /// Scenario: SubscriptionChange.subscribe_filter persists filter_prefix (RFC 0010 §7.2, spec line 179).
+    ///
+    /// WHEN agent sends SubscriptionChange with subscribe_filter=[{SCENE_TOPOLOGY, "scene.zone."}]
+    /// THEN runtime accepts the subscription (no denial) and stores the filter_prefix in
+    ///      session.subscription_filters so future event routing can apply the narrower filter.
+    ///
+    /// Additionally verifies that a subsequent plain `subscribe` for the same category
+    /// clears the stored filter (resetting to category-default prefix behavior).
+    #[tokio::test]
+    async fn test_subscription_change_with_filter_prefix() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "filter-agent".to_string(),
+                agent_display_name: "filter-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec!["read_scene_topology".to_string()],
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                ..Default::default()
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+
+        // Collect SessionEstablished and SceneSnapshot
+        for _ in 0..2 {
+            let _ = response_stream.next().await;
+        }
+
+        // Step 1: Send SubscriptionChange with subscribe_filter: add SCENE_TOPOLOGY with "scene.zone." filter
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
+                subscribe: Vec::new(),
+                unsubscribe: Vec::new(),
+                subscribe_filter: vec![
+                    crate::proto::session::SubscriptionEntry {
+                        category: "SCENE_TOPOLOGY".to_string(),
+                        filter_prefix: "scene.zone.".to_string(),
+                    },
+                ],
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SubscriptionChangeResult(result)) => {
+                // SCENE_TOPOLOGY must be in the active set (subscribe_filter is processed as an add)
+                assert!(
+                    result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY must be active after subscribe_filter"
+                );
+                // No denials (agent has read_scene_topology capability)
+                assert!(
+                    result.denied_subscriptions.is_empty(),
+                    "subscribe_filter with a valid capability must not produce denials"
+                );
+            }
+            other => panic!("Expected SubscriptionChangeResult, got: {other:?}"),
+        }
+
+        // Step 2: Reset to default by sending a plain `subscribe` for SCENE_TOPOLOGY.
+        // The stored filter must be cleared (empty filter_prefix resets to category default).
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
+                subscribe: vec!["SCENE_TOPOLOGY".to_string()],
+                unsubscribe: Vec::new(),
+                subscribe_filter: Vec::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg2 = response_stream.next().await.unwrap().unwrap();
+        match &msg2.payload {
+            Some(ServerPayload::SubscriptionChangeResult(result2)) => {
+                // SCENE_TOPOLOGY must still be active
+                assert!(
+                    result2.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY must remain active after plain subscribe"
+                );
+                // No denials
+                assert!(
+                    result2.denied_subscriptions.is_empty(),
+                    "plain subscribe for already-held category must not produce denials"
+                );
+            }
+            other => panic!("Expected SubscriptionChangeResult for reset, got: {other:?}"),
+        }
+
+        // Step 3: Also verify that subscribe_filter with empty filter_prefix explicitly resets the filter.
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
+                subscribe: Vec::new(),
+                unsubscribe: Vec::new(),
+                subscribe_filter: vec![
+                    crate::proto::session::SubscriptionEntry {
+                        category: "SCENE_TOPOLOGY".to_string(),
+                        filter_prefix: String::new(), // empty = reset to default
+                    },
+                ],
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg3 = response_stream.next().await.unwrap().unwrap();
+        match &msg3.payload {
+            Some(ServerPayload::SubscriptionChangeResult(result3)) => {
+                assert!(
+                    result3.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    "SCENE_TOPOLOGY must remain active after empty-prefix subscribe_filter"
+                );
+                assert!(
+                    result3.denied_subscriptions.is_empty(),
+                    "empty-prefix subscribe_filter for active category must not produce denials"
+                );
+            }
+            other => panic!("Expected SubscriptionChangeResult for empty-prefix reset, got: {other:?}"),
+        }
+
         drop(tx);
     }
 
@@ -4852,6 +5051,7 @@ mod tests {
             policy_capabilities: Vec::new(),
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,
@@ -5467,6 +5667,7 @@ mod tests {
             policy_capabilities: Vec::new(), // guest: no authorization
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,
@@ -5527,6 +5728,7 @@ mod tests {
             policy_capabilities: vec!["read_telemetry".to_string()], // only read_telemetry
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,
@@ -5594,6 +5796,7 @@ mod tests {
             policy_capabilities: Vec::new(),
             lease_ids: Vec::new(),
             subscriptions: Vec::new(),
+            subscription_filters: std::collections::HashMap::new(),
             server_sequence: 0,
             resume_token: Vec::new(),
             last_heartbeat_ms: 0,

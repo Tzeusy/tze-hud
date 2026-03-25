@@ -157,7 +157,10 @@ impl AgentSubscriptions {
 
     /// Apply a subscription change request.
     ///
-    /// `subscribe` — categories (or category + filter pairs) to add.
+    /// `subscribe` — `(category, filter_prefix)` pairs to add.  Pass
+    ///   `filter_prefix = None` to use the category's default prefix.
+    ///   A non-`None` `filter_prefix` narrows delivery to events whose type
+    ///   starts with that prefix (RFC 0010 §7.2, spec line 179).
     /// `unsubscribe` — categories to remove.
     /// `granted_capabilities` — capabilities held by this agent session.
     ///
@@ -165,7 +168,7 @@ impl AgentSubscriptions {
     /// (entries that were rejected).
     pub fn apply_change(
         &mut self,
-        subscribe: &[String],
+        subscribe: &[(String, Option<String>)],
         unsubscribe: &[String],
         granted_capabilities: &[String],
     ) -> SubscriptionChangeOutcome {
@@ -182,7 +185,7 @@ impl AgentSubscriptions {
         }
 
         // Process subscriptions
-        for cat in subscribe {
+        for (cat, filter_prefix) in subscribe {
             // Reject unknown categories
             if category_prefix(cat.as_str()).is_none() {
                 denied.push(cat.clone());
@@ -197,19 +200,41 @@ impl AgentSubscriptions {
                 continue;
             }
 
-            // Skip if already subscribed (mandatory categories are already in the set)
-            if self.entries.contains_key(cat.as_str()) {
-                // Already present — no change, no denial
-                continue;
+            // Validate filter_prefix: if provided, it must start with the
+            // category's default prefix (RFC 0010 §7.2). A filter that escapes
+            // the category boundary could route events outside the agent's
+            // granted capability scope.
+            if let Some(fp) = filter_prefix {
+                let default_prefix = category_prefix(cat.as_str()).unwrap_or("");
+                if !fp.starts_with(default_prefix) {
+                    denied.push(cat.clone());
+                    continue;
+                }
+                // If already subscribed, update the filter_prefix.
+                // This allows an agent to refine its filter without re-subscribing.
+                if let Some(existing) = self.entries.get_mut(cat.as_str()) {
+                    existing.filter_prefix = Some(fp.clone());
+                    continue;
+                }
+                // Enforce the 32-subscription limit
+                if self.entries.len() >= MAX_SUBSCRIPTIONS_PER_AGENT {
+                    denied.push(cat.clone());
+                    continue;
+                }
+                self.entries.insert(cat.clone(), Subscription::with_filter(cat.clone(), fp.clone()));
+            } else {
+                // If already subscribed, clear any stored filter (reset to default).
+                if let Some(existing) = self.entries.get_mut(cat.as_str()) {
+                    existing.filter_prefix = None;
+                    continue;
+                }
+                // Enforce the 32-subscription limit
+                if self.entries.len() >= MAX_SUBSCRIPTIONS_PER_AGENT {
+                    denied.push(cat.clone());
+                    continue;
+                }
+                self.entries.insert(cat.clone(), Subscription::new(cat.clone()));
             }
-
-            // Enforce the 32-subscription limit
-            if self.entries.len() >= MAX_SUBSCRIPTIONS_PER_AGENT {
-                denied.push(cat.clone());
-                continue;
-            }
-
-            self.entries.insert(cat.clone(), Subscription::new(cat.clone()));
         }
 
         SubscriptionChangeOutcome {
@@ -290,7 +315,7 @@ impl SubscriptionRegistry {
     pub fn apply_change(
         &mut self,
         namespace: &str,
-        subscribe: &[String],
+        subscribe: &[(String, Option<String>)],
         unsubscribe: &[String],
         granted_capabilities: &[String],
     ) -> SubscriptionChangeOutcome {
@@ -332,6 +357,16 @@ mod tests {
 
     fn caps(c: &[&str]) -> Vec<String> {
         c.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Build a plain subscribe list (no filter prefix) from string slices.
+    fn subscribe(cats: &[&str]) -> Vec<(String, Option<String>)> {
+        cats.iter().map(|s| (s.to_string(), None)).collect()
+    }
+
+    /// Build a single-entry subscribe list with an explicit filter prefix.
+    fn subscribe_with_filter(cat: &str, prefix: &str) -> Vec<(String, Option<String>)> {
+        vec![(cat.to_string(), Some(prefix.to_string()))]
     }
 
     // ── Category prefix mapping ───────────────────────────────────────────────
@@ -384,7 +419,7 @@ mod tests {
     fn test_cannot_unsubscribe_from_mandatory_categories() {
         let mut subs = AgentSubscriptions::new();
         let outcome = subs.apply_change(
-            &[],
+            &subscribe(&[]),
             &[
                 CATEGORY_DEGRADATION_NOTICES.to_string(),
                 CATEGORY_LEASE_CHANGES.to_string(),
@@ -405,7 +440,7 @@ mod tests {
     fn test_subscribe_and_unsubscribe() {
         let mut subs = AgentSubscriptions::new();
         let outcome = subs.apply_change(
-            &[CATEGORY_SCENE_TOPOLOGY.to_string()],
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
             &[],
             &caps(&[]),
         );
@@ -413,7 +448,7 @@ mod tests {
         assert!(outcome.active.contains(&CATEGORY_SCENE_TOPOLOGY.to_string()));
 
         let outcome2 = subs.apply_change(
-            &[],
+            &subscribe(&[]),
             &[CATEGORY_SCENE_TOPOLOGY.to_string()],
             &caps(&[]),
         );
@@ -428,7 +463,7 @@ mod tests {
         let mut subs = AgentSubscriptions::new();
         // Without capability: denied
         let outcome = subs.apply_change(
-            &[CATEGORY_INPUT_EVENTS.to_string()],
+            &subscribe(&[CATEGORY_INPUT_EVENTS]),
             &[],
             &caps(&[]),
         );
@@ -437,7 +472,7 @@ mod tests {
 
         // With capability: granted
         let outcome2 = subs.apply_change(
-            &[CATEGORY_INPUT_EVENTS.to_string()],
+            &subscribe(&[CATEGORY_INPUT_EVENTS]),
             &[],
             &caps(&["receive_input"]),
         );
@@ -463,7 +498,7 @@ mod tests {
 
         // Attempt to subscribe to one more — should be denied
         let outcome = subs.apply_change(
-            &[CATEGORY_SCENE_TOPOLOGY.to_string()],
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
             &[],
             &caps(&[]),
         );
@@ -482,7 +517,7 @@ mod tests {
 
         // 33rd should be denied
         let outcome = subs.apply_change(
-            &[CATEGORY_SCENE_TOPOLOGY.to_string()],
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
             &[],
             &caps(&[]),
         );
@@ -505,7 +540,7 @@ mod tests {
     fn test_subscribed_events_delivered() {
         let mut subs = AgentSubscriptions::new();
         subs.apply_change(
-            &[CATEGORY_SCENE_TOPOLOGY.to_string()],
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
             &[],
             &caps(&[]),
         );
@@ -551,16 +586,151 @@ mod tests {
         assert!(!subs.should_receive("scene.tab.active_changed"));
     }
 
+    // ── filter_prefix persisted via apply_change (spec line 179) ─────────────
+
+    #[test]
+    fn test_apply_change_persists_filter_prefix() {
+        // Agents MUST be able to subscribe to a category with a finer-grained
+        // filter_prefix via the change API, not just via direct struct construction.
+        let mut subs = AgentSubscriptions::new();
+        let outcome = subs.apply_change(
+            &subscribe_with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.zone."),
+            &[],
+            &caps(&[]),
+        );
+        assert!(outcome.denied.is_empty(), "subscription should be granted");
+        assert!(outcome.active.contains(&CATEGORY_SCENE_TOPOLOGY.to_string()));
+
+        // Filter must be persisted: only zone events should be delivered
+        assert!(subs.should_receive("scene.zone.occupancy_changed"),
+            "zone event must match scene.zone. filter");
+        assert!(!subs.should_receive("scene.tile.created"),
+            "tile event must NOT match scene.zone. filter");
+        assert!(!subs.should_receive("scene.tab.active_changed"),
+            "tab event must NOT match scene.zone. filter");
+    }
+
+    #[test]
+    fn test_apply_change_filter_prefix_update_in_place() {
+        // Subscribing to a category that is already active MUST update its filter.
+        let mut subs = AgentSubscriptions::new();
+        // First: subscribe without filter (all scene.* events)
+        subs.apply_change(
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
+            &[],
+            &caps(&[]),
+        );
+        assert!(subs.should_receive("scene.tile.created"),
+            "no filter: tile events expected");
+
+        // Second: re-subscribe with a narrower filter
+        subs.apply_change(
+            &subscribe_with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.zone."),
+            &[],
+            &caps(&[]),
+        );
+        assert!(!subs.should_receive("scene.tile.created"),
+            "after filter update: tile events must be excluded");
+        assert!(subs.should_receive("scene.zone.occupancy_changed"),
+            "after filter update: zone events must still be delivered");
+    }
+
+    #[test]
+    fn test_apply_change_no_filter_prefix_uses_default() {
+        // A subscription with no filter_prefix must use the category default.
+        let mut subs = AgentSubscriptions::new();
+        subs.apply_change(
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
+            &[],
+            &caps(&[]),
+        );
+        // With no filter, all scene.* events arrive
+        assert!(subs.should_receive("scene.tile.created"));
+        assert!(subs.should_receive("scene.tab.active_changed"));
+        assert!(subs.should_receive("scene.zone.occupancy_changed"));
+    }
+
+    #[test]
+    fn test_apply_change_filter_prefix_capability_denied() {
+        // filter_prefix on a category that requires capability must still be denied
+        // without the capability.
+        let mut subs = AgentSubscriptions::new();
+        let outcome = subs.apply_change(
+            &subscribe_with_filter(CATEGORY_INPUT_EVENTS, "input.pointer"),
+            &[],
+            &caps(&[]),
+        );
+        assert!(outcome.denied.contains(&CATEGORY_INPUT_EVENTS.to_string()),
+            "capability check must still apply when filter_prefix is set");
+    }
+
+    #[test]
+    fn test_registry_apply_change_persists_filter_prefix() {
+        // SubscriptionRegistry::apply_change must also thread filter_prefix through.
+        let mut registry = SubscriptionRegistry::new();
+        registry.register("agent_x");
+        registry.apply_change(
+            "agent_x",
+            &subscribe_with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.zone."),
+            &[],
+            &caps(&[]),
+        );
+        let agent_subs = registry.get("agent_x").unwrap();
+        // Only zone events should reach agent_x
+        assert!(agent_subs.should_receive("scene.zone.occupancy_changed"));
+        assert!(!agent_subs.should_receive("scene.tile.created"));
+    }
+
+    #[test]
+    fn test_filter_prefix_must_stay_within_category_default_prefix() {
+        // A filter_prefix that escapes the category's allowed prefix boundary must be denied.
+        // SCENE_TOPOLOGY has default prefix "scene."; "system." is outside that boundary.
+        let mut subs = AgentSubscriptions::new();
+        let outcome = subs.apply_change(
+            &subscribe_with_filter(CATEGORY_SCENE_TOPOLOGY, "system."),
+            &[],
+            &caps(&[]),
+        );
+        assert!(outcome.denied.contains(&CATEGORY_SCENE_TOPOLOGY.to_string()),
+            "filter_prefix outside category boundary must be denied");
+        // Category must not be subscribed
+        assert!(!outcome.active.contains(&CATEGORY_SCENE_TOPOLOGY.to_string()),
+            "subscription must not be active after denied filter_prefix");
+    }
+
+    #[test]
+    fn test_filter_prefix_reset_via_none_clears_stored_filter() {
+        // Sending a None filter_prefix for an already-subscribed category must reset
+        // the filter to the category default (i.e., clear any stored filter_prefix).
+        let mut subs = AgentSubscriptions::new();
+        // Subscribe with a narrow filter first
+        subs.apply_change(
+            &subscribe_with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.zone."),
+            &[],
+            &caps(&[]),
+        );
+        assert!(!subs.should_receive("scene.tile.created"),
+            "narrow filter: tile events must be excluded");
+
+        // Re-subscribe with no filter (None) — should reset to default
+        subs.apply_change(
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
+            &[],
+            &caps(&[]),
+        );
+        assert!(subs.should_receive("scene.tile.created"),
+            "after filter reset: tile events must be delivered");
+        assert!(subs.should_receive("scene.zone.occupancy_changed"),
+            "after filter reset: zone events must also be delivered");
+    }
+
     // ── Dual-routing deduplication ────────────────────────────────────────────
 
     #[test]
     fn test_zone_occupancy_dual_routing_returns_multiple_categories() {
         let mut subs = AgentSubscriptions::new();
         subs.apply_change(
-            &[
-                CATEGORY_SCENE_TOPOLOGY.to_string(),
-                CATEGORY_ZONE_EVENTS.to_string(),
-            ],
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY, CATEGORY_ZONE_EVENTS]),
             &[],
             &caps(&[]),
         );
@@ -576,10 +746,7 @@ mod tests {
     fn test_should_receive_deduplicates_to_single_delivery() {
         let mut subs = AgentSubscriptions::new();
         subs.apply_change(
-            &[
-                CATEGORY_SCENE_TOPOLOGY.to_string(),
-                CATEGORY_ZONE_EVENTS.to_string(),
-            ],
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY, CATEGORY_ZONE_EVENTS]),
             &[],
             &caps(&[]),
         );
@@ -615,7 +782,7 @@ mod tests {
 
         registry.apply_change(
             "agent_a",
-            &[CATEGORY_SCENE_TOPOLOGY.to_string()],
+            &subscribe(&[CATEGORY_SCENE_TOPOLOGY]),
             &[],
             &caps(&[]),
         );
@@ -637,7 +804,7 @@ mod tests {
     fn test_unknown_category_denied() {
         let mut subs = AgentSubscriptions::new();
         let outcome = subs.apply_change(
-            &["TOTALLY_UNKNOWN_CATEGORY".to_string()],
+            &subscribe(&["TOTALLY_UNKNOWN_CATEGORY"]),
             &[],
             &caps(&[]),
         );

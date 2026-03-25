@@ -466,9 +466,11 @@ mod tests {
     }
 
     fn subscribe(bus: &mut EventBus, namespace: &str, categories: &[&str]) {
+        let subscribe: Vec<(String, Option<String>)> =
+            categories.iter().map(|c| (c.to_string(), None)).collect();
         bus.subscriptions.apply_change(
             namespace,
-            &categories.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+            &subscribe,
             &[],
             &[],
         );

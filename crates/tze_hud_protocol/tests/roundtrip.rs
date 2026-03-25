@@ -45,7 +45,7 @@ use tze_hud_protocol::proto::session::{
     CapabilityRequest, CapabilityNotice,
     TimingHints, MutationBatch, MutationResult,
     LeaseRequest, LeaseRenew, LeaseRelease, LeaseResponse, LeaseStateChange,
-    SubscriptionChange, SubscriptionChangeResult,
+    SubscriptionChange, SubscriptionChangeResult, SubscriptionEntry,
     ZonePublish, ZonePublishResult,
     Heartbeat,
     TelemetryFrame, RuntimeTelemetryFrame,
@@ -968,10 +968,31 @@ fn roundtrip_subscription_change() {
     let orig = SubscriptionChange {
         subscribe: vec!["SCENE_TOPOLOGY".to_string()],
         unsubscribe: vec!["ZONE_EVENTS".to_string()],
+        subscribe_filter: Vec::new(),
     };
     let decoded = round_trip(&orig);
     assert_eq!(orig.subscribe, decoded.subscribe);
     assert_eq!(orig.unsubscribe, decoded.unsubscribe);
+    assert!(decoded.subscribe_filter.is_empty());
+}
+
+#[test]
+fn roundtrip_subscription_change_with_filter() {
+    // Verify that filter_prefix survives proto encode/decode (RFC 0010 §7.2).
+    let orig = SubscriptionChange {
+        subscribe: Vec::new(),
+        unsubscribe: Vec::new(),
+        subscribe_filter: vec![
+            SubscriptionEntry {
+                category: "SCENE_TOPOLOGY".to_string(),
+                filter_prefix: "scene.zone.".to_string(),
+            },
+        ],
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(decoded.subscribe_filter.len(), 1);
+    assert_eq!(decoded.subscribe_filter[0].category, "SCENE_TOPOLOGY");
+    assert_eq!(decoded.subscribe_filter[0].filter_prefix, "scene.zone.");
 }
 
 #[test]
