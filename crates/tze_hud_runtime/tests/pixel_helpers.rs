@@ -90,8 +90,11 @@ pub fn pixel_differs_from_bg(pixels: &[u8], width: u32, x: u32, y: u32, min_diff
     })
 }
 
-/// Assert that every pixel in the buffer that falls within `[x0..x1) × [y0..y1)`
-/// differs from the background by more than `min_diff` on at least one channel.
+/// Assert that at least one sampled pixel in `[x0..x1) × [y0..y1)` differs
+/// from the background by more than `min_diff` on at least one channel.
+///
+/// Samples every 10th pixel in both dimensions. Fails only when *all* sampled
+/// pixels match the background — i.e. no rendered content is detected at all.
 ///
 /// Used for scenes where we know tiles should cover a region but cannot
 /// predict exact colours (e.g. text rendering, alpha blending output).

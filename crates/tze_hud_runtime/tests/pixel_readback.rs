@@ -174,8 +174,8 @@ async fn test_color_01_empty_scene_all_background() {
 
 /// single_tile_solid: one tile with TextMarkdown background (0.08, 0.08, 0.15) linear.
 ///
-/// The tile occupies (100, 100, 800, 400) on an 800×600 surface.
-/// Display center (400, 300) is inside the tile.
+/// The tile occupies (x=100, y=100, w=800, h=400) on the 1920×1080 canvas,
+/// covering x=100..900, y=100..500.  Sample (400, 300) is inside the tile.
 /// Tile background: (0.08, 0.08, 0.15) linear → sRGB ≈ (75, 75, 106).
 /// Outside tile (10, 10) should be background clear ≈ [64, 64, 89, 255].
 ///
@@ -225,11 +225,11 @@ async fn test_color_02_single_tile_solid() {
 
 /// three_tiles_no_overlap: three non-overlapping tiles (text, hit-region, solid).
 ///
-/// Tile layout on 800×600:
-/// - Tile 1 (text): (10, 10, 900, 500) → clipped to (10, 10, 790, 500).
+/// Tile layout on 1920×1080:
+/// - Tile 1 (text): (x=10, y=10, w=900, h=500) → covers x=10..910, y=10..510.
 ///   Background (0.1, 0.1, 0.2) → sRGB ≈ (89, 89, 124).
-/// - Tile 2 (hit-region): transparent by default.
-/// - Tile 3 (solid): position varies but in lower portion of screen.
+/// - Tile 2 (hit-region): x=930..1830, y=10..510. Transparent by default.
+/// - Tile 3 (solid): y=600..680 (status bar full width).
 ///
 /// At (100, 100) we should be inside Tile 1 (text with background).
 /// At (750, 550) we may be outside all tiles (background).
@@ -446,7 +446,7 @@ async fn test_color_07_lease_expiry_tile_visible() {
 
 // ─── 8. mobile_degraded ──────────────────────────────────────────────────────
 
-/// mobile_degraded: single tile on 390×844 display, clipped to 800×600 viewport.
+/// mobile_degraded: single tile on 390×844 mobile display, rendered via the 1920×1080 runtime.
 ///
 /// Tile: (0, 0, 390, 422), background (0.05, 0.1, 0.15) → sRGB ≈ (64, 89, 106).
 /// Blue-grey bias.  Tile center at (195, 211).
@@ -488,9 +488,10 @@ async fn test_color_08_mobile_degraded() {
 
 // ─── 9. sync_group_media ─────────────────────────────────────────────────────
 
-/// sync_group_media: Tile A (0.2, 0.4, 0.7) at (20, 20, 880, 600).
+/// sync_group_media: Tile A (0.2, 0.4, 0.7) at (x=20, y=20, w=880, h=600).
 ///
-/// Tile B starts at x=920, outside the 800-wide display.
+/// Covers x=20..900, y=20..620 on the 1920×1080 canvas.
+/// Tile B starts at x=920 (adjacent, not overlapping).
 /// At (400, 300) we sample the centre of Tile A.
 /// (0.2, 0.4, 0.7) → sRGB ≈ (124, 174, 214). Blue channel dominant.
 ///
@@ -566,8 +567,8 @@ async fn test_color_10_input_highlight_background_tile() {
 /// coalesced_dashboard: 12 tiles in 4×3 grid.
 ///
 /// All tiles have TextMarkdown with teal-ish backgrounds.  The grid starts at
-/// pad=10 with tile_w≈187, tile_h≈186 for 800×600.
-/// First tile center ≈ (10 + 187/2, 10 + 186/2) = (103, 103).
+/// pad=10 on a 1920×1080 canvas: tile_w≈475, tile_h≈353.
+/// First tile center ≈ (10 + 475/2, 10 + 353/2) ≈ (248, 187).
 ///
 /// At least one tile interior should show non-background content.
 /// The coalesced_dashboard scene uses per-metric tile colours (varying
@@ -690,12 +691,13 @@ async fn test_color_14_overlay_passthrough_regions_near_background() {
 
 /// disconnect_reclaim_multiagent: three agents all ACTIVE.
 ///
-/// agent.one tile_a: (10, 10, 600, 500), red (0.8, 0.2, 0.2).
-/// agent.two tile: (660, 10, 580, 700), green (0.2, 0.7, 0.2).
-///   x+w=1240 > 800 so visible portion is 660..800.
+/// agent.one tile_a: (x=10, y=10, w=600, h=500) → covers x=10..610, y=10..510.
+/// Red (0.8, 0.2, 0.2).
+/// agent.two tile: (x=660, y=10, w=580, h=700) → covers x=660..1240, y=10..710.
+/// Green (0.2, 0.7, 0.2).  Entirely visible on 1920×1080 canvas.
 ///
 /// At (310, 260) inside agent.one tile_a: red dominant.
-/// At (730, 355) inside agent.two's visible strip: green dominant.
+/// At (730, 355) inside agent.two tile: green dominant.
 ///
 /// WHEN disconnect_reclaim_multiagent rendered
 /// THEN (310,260): red channel > blue channel + 30.
@@ -728,10 +730,11 @@ async fn test_color_15_disconnect_reclaim_multiagent_agents_visible() {
 
 // ─── 16. privacy_redaction_mode ──────────────────────────────────────────────
 
-/// privacy_redaction_mode: PUBLIC tile (0..960 x, green) + SENSITIVE tile (980+ x).
+/// privacy_redaction_mode: PUBLIC tile (x=0..960, green) + SENSITIVE tile (x=980+).
 ///
 /// Public tile background: (0.05, 0.2, 0.05) → sRGB ≈ (64, 124, 64). Green dominant.
-/// Sensitive tile starts at x=980 — outside 800-wide display.
+/// Sensitive tile starts at x=980 — well within the 1920-wide canvas, but the
+/// test only checks the public tile region at (400, 300).
 ///
 /// At (400, 300): inside public tile — green dominant.
 ///
@@ -796,16 +799,17 @@ async fn test_color_17_chatty_dashboard_touch_transparent_tiles() {
 
 /// zone_publish_subtitle: subtitle tile at bottom of display.
 ///
-/// Tile position on 800×600: x = 800×0.1 = 80, y = 600×0.88 = 528,
-/// w = 800×0.8 = 640, h = 600×0.08 = 48.  So tile covers y=528..576.
+/// Tile position on 1920×1080: x = 1920×0.1 = 192, y = 1080×0.88 = 950,
+/// w = 1920×0.8 = 1536, h = 1080×0.08 = 86.  So tile covers y=950..1037.
 /// Background: (0.0, 0.0, 0.0, 0.75) — semi-transparent black.
 ///
 /// Above tile at (400, 10): compositor clear background [64, 64, 89, 255].
-/// In subtitle at (400, 550): darker than background (semi-black blend).
+/// In subtitle at (960, 993): darker than background (semi-black blend).
+/// (960, 993) is the centre of the subtitle tile on a 1920×1080 canvas.
 ///
 /// WHEN zone_publish_subtitle rendered
 /// THEN (400,10): approximately background clear.
-/// THEN (400,550): at least one channel darker than corresponding BG_SRGB channel.
+/// THEN (960,993): at least one channel darker than corresponding BG_SRGB channel.
 #[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_18_zone_publish_subtitle_region() {
@@ -830,10 +834,12 @@ async fn test_color_18_zone_publish_subtitle_region() {
     .unwrap_or_else(|e| panic!("{e}"));
 
     // Subtitle zone tile (semi-transparent black, alpha=0.75) — darker than BG.
-    let sub_px = HeadlessSurface::pixel_at(&pixels, SCENE_W, 400, 550);
+    // Sample at (960, 993): centre of the subtitle tile on a 1920×1080 canvas.
+    // Tile covers x=192..1728, y=950..1037.
+    let sub_px = HeadlessSurface::pixel_at(&pixels, SCENE_W, 960, 993);
     assert!(
         sub_px[0] < BG_SRGB[0] || sub_px[1] < BG_SRGB[1] || sub_px[2] < BG_SRGB[2],
-        "zone_publish_subtitle: subtitle at (400,550) must be darker than background: \
+        "zone_publish_subtitle: subtitle at (960,993) must be darker than background: \
          pixel={sub_px:?} bg={BG_SRGB:?}"
     );
 }
