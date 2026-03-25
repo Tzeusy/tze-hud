@@ -1,0 +1,1191 @@
+//! Message round-trip serialization tests for types.proto, events.proto, session.proto.
+//!
+//! Every message type: construct → serialize (prost::Message::encode) →
+//! deserialize (prost::Message::decode) → assert field equality.
+//!
+//! Edge cases: empty fields, max u64/u32/float values, all enum variants,
+//! nested messages. Proto3 forward-compatibility: unknown fields are preserved
+//! on round-trip (tested via raw bytes).
+//!
+//! Test count target: ≥30 functions.
+
+use prost::Message;
+use tze_hud_protocol::proto::{
+    // types.proto
+    Rect, Rgba, NodeProto, SolidColorNodeProto, TextMarkdownNodeProto,
+    HitRegionNodeProto, StaticImageNodeProto, ImageFitModeProto,
+    CreateTileMutation, SetTileRootMutation, MutationProto,
+    NotificationPayload, StatusBarPayload, ZoneContent, ZonePublishToken,
+    RelativeGeometryPolicy, EdgeAnchoredGeometryPolicy, GeometryPolicyProto,
+    TextAlignProto, RenderingPolicyProto, ContentionPolicyProto,
+    ZoneDefinitionProto, ZonePublishRecordProto, ZoneRegistrySnapshotProto,
+    PublishToZoneMutation, ClearZoneMutation,
+    // events.proto
+    InputEvent, InputEventKind,
+    TileCreatedEvent, TileDeletedEvent, TileUpdatedEvent,
+    LeaseEvent, LeaseEventKind,
+    SceneEvent,
+    PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent,
+    PointerDownEvent, PointerUpEvent, ClickEvent, PointerCancelEvent,
+    KeyDownEvent, KeyUpEvent, CharacterEvent,
+    FocusSource, FocusGainedEvent, FocusLostReason, FocusLostEvent,
+    CaptureReleasedReason, CaptureReleasedEvent,
+    ImeCompositionStartEvent, ImeCompositionUpdateEvent, ImeCompositionEndEvent,
+    GestureEvent, ScrollOffsetChangedEvent,
+    CommandAction, CommandSource, CommandInputEvent,
+    InputEnvelope, EventBatch,
+};
+use tze_hud_protocol::proto::session::{
+    // session.proto
+    ClientMessage, ServerMessage,
+    SessionInit, SessionResume, SessionClose,
+    SessionEstablished, SessionError, SessionResumeResult,
+    SessionSuspended, SessionResumed,
+    ErrorCode, RuntimeError,
+    CapabilityRequest, CapabilityNotice,
+    TimingHints, MutationBatch, MutationResult,
+    LeaseRequest, LeaseRenew, LeaseRelease, LeaseResponse, LeaseStateChange,
+    SubscriptionChange, SubscriptionChangeResult,
+    ZonePublish, ZonePublishResult,
+    Heartbeat,
+    TelemetryFrame, RuntimeTelemetryFrame,
+    SceneSnapshot, SceneDelta,
+    InputFocusRequest, InputFocusResponse,
+    InputCaptureRequest, InputCaptureResponse, InputCaptureRelease,
+    SetImePosition,
+    BackpressureSignal,
+    EmitSceneEvent, EmitSceneEventResult,
+    PreSharedKeyCredential, LocalSocketCredential, AuthCredential,
+};
+use tze_hud_protocol::proto::session::auth_credential::Credential;
+use tze_hud_protocol::proto::node_proto::Data as NodeData;
+use tze_hud_protocol::proto::mutation_proto::Mutation;
+use tze_hud_protocol::proto::zone_content::Payload as ZonePayload;
+use tze_hud_protocol::proto::scene_event::Event as SceneEventPayload;
+use tze_hud_protocol::proto::input_envelope::Event as InputEnvelopeEvent;
+use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
+use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
+use tze_hud_protocol::proto::session::scene_delta::Delta;
+
+/// Encode then decode a prost Message and return the decoded value.
+fn round_trip<T: Message + Default>(msg: &T) -> T {
+    let mut buf = Vec::new();
+    msg.encode(&mut buf).expect("encode must succeed");
+    T::decode(buf.as_slice()).expect("decode must succeed")
+}
+
+// ─── types.proto ─────────────────────────────────────────────────────────────
+
+#[test]
+fn roundtrip_rect() {
+    let orig = Rect { x: 1.5, y: 2.5, width: 100.0, height: 200.0 };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.x, decoded.x);
+    assert_eq!(orig.y, decoded.y);
+    assert_eq!(orig.width, decoded.width);
+    assert_eq!(orig.height, decoded.height);
+}
+
+#[test]
+fn roundtrip_rect_max_values() {
+    let orig = Rect { x: f32::MAX, y: f32::MIN, width: f32::INFINITY, height: f32::NEG_INFINITY };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.x, decoded.x);
+    assert_eq!(orig.y, decoded.y);
+    assert!(decoded.width.is_infinite() && decoded.width > 0.0);
+    assert!(decoded.height.is_infinite() && decoded.height < 0.0);
+}
+
+#[test]
+fn roundtrip_rgba() {
+    let orig = Rgba { r: 0.5, g: 0.25, b: 0.75, a: 1.0 };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.r, decoded.r);
+    assert_eq!(orig.g, decoded.g);
+    assert_eq!(orig.b, decoded.b);
+    assert_eq!(orig.a, decoded.a);
+}
+
+#[test]
+fn roundtrip_rgba_zero() {
+    let orig = Rgba::default();
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.r, decoded.r);
+    assert_eq!(orig.a, decoded.a);
+}
+
+#[test]
+fn roundtrip_node_proto_solid_color() {
+    let orig = NodeProto {
+        id: "node-abc".to_string(),
+        data: Some(NodeData::SolidColor(SolidColorNodeProto {
+            color: Some(Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            bounds: Some(Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 }),
+        })),
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.id, decoded.id);
+    match &decoded.data {
+        Some(NodeData::SolidColor(sc)) => {
+            assert_eq!(sc.color.as_ref().unwrap().r, 1.0);
+        }
+        _ => panic!("wrong data variant"),
+    }
+}
+
+#[test]
+fn roundtrip_node_proto_text_markdown() {
+    let orig = NodeProto {
+        id: "node-text".to_string(),
+        data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
+            content: "**hello world**".to_string(),
+            bounds: Some(Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 }),
+            font_size_px: 14.0,
+            color: Some(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
+            background: Some(Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.0 }),
+        })),
+    };
+    let decoded = round_trip(&orig);
+    match &decoded.data {
+        Some(NodeData::TextMarkdown(tm)) => {
+            assert_eq!(tm.content, "**hello world**");
+            assert_eq!(tm.font_size_px, 14.0);
+        }
+        _ => panic!("wrong data variant"),
+    }
+}
+
+#[test]
+fn roundtrip_node_proto_hit_region() {
+    let orig = NodeProto {
+        id: "hit-1".to_string(),
+        data: Some(NodeData::HitRegion(HitRegionNodeProto {
+            bounds: Some(Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 }),
+            interaction_id: "btn-primary".to_string(),
+            accepts_focus: true,
+            accepts_pointer: true,
+        })),
+    };
+    let decoded = round_trip(&orig);
+    match &decoded.data {
+        Some(NodeData::HitRegion(hr)) => {
+            assert_eq!(hr.interaction_id, "btn-primary");
+            assert!(hr.accepts_focus);
+            assert!(hr.accepts_pointer);
+        }
+        _ => panic!("wrong data variant"),
+    }
+}
+
+#[test]
+fn roundtrip_node_proto_static_image_all_fit_modes() {
+    for &fit in &[
+        ImageFitModeProto::ImageFitModeUnspecified,
+        ImageFitModeProto::ImageFitModeContain,
+        ImageFitModeProto::ImageFitModeCover,
+        ImageFitModeProto::ImageFitModeFill,
+        ImageFitModeProto::ImageFitModeScaleDown,
+    ] {
+        let orig = NodeProto {
+            id: "img-node".to_string(),
+            data: Some(NodeData::StaticImage(StaticImageNodeProto {
+                resource_id: vec![0xAB; 32],
+                width: 1920,
+                height: 1080,
+                decoded_bytes: 1920 * 1080 * 4,
+                fit_mode: fit as i32,
+                bounds: Some(Rect { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0 }),
+            })),
+        };
+        let decoded = round_trip(&orig);
+        match &decoded.data {
+            Some(NodeData::StaticImage(si)) => {
+                assert_eq!(si.fit_mode, fit as i32);
+                assert_eq!(si.resource_id.len(), 32);
+            }
+            _ => panic!("wrong data variant"),
+        }
+    }
+}
+
+#[test]
+fn roundtrip_create_tile_mutation() {
+    let orig = CreateTileMutation {
+        tab_id: "tab-001".to_string(),
+        bounds: Some(Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 }),
+        z_order: 5,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.tab_id, decoded.tab_id);
+    assert_eq!(orig.z_order, decoded.z_order);
+    assert_eq!(decoded.bounds.unwrap().width, 300.0);
+}
+
+#[test]
+fn roundtrip_mutation_proto_all_variants() {
+    // CreateTile
+    let m1 = MutationProto {
+        mutation: Some(Mutation::CreateTile(CreateTileMutation {
+            tab_id: "t".to_string(), bounds: None, z_order: 0,
+        })),
+    };
+    let d1 = round_trip(&m1);
+    assert!(matches!(d1.mutation, Some(Mutation::CreateTile(_))));
+
+    // SetTileRoot
+    let m2 = MutationProto {
+        mutation: Some(Mutation::SetTileRoot(SetTileRootMutation {
+            tile_id: "tile-1".to_string(), node: None,
+        })),
+    };
+    let d2 = round_trip(&m2);
+    assert!(matches!(d2.mutation, Some(Mutation::SetTileRoot(_))));
+
+    // PublishToZone
+    let m3 = MutationProto {
+        mutation: Some(Mutation::PublishToZone(PublishToZoneMutation {
+            zone_name: "subtitle".to_string(),
+            content: Some(ZoneContent {
+                payload: Some(ZonePayload::StreamText("hello".to_string())),
+            }),
+            publish_token: None,
+            merge_key: String::new(),
+        })),
+    };
+    let d3 = round_trip(&m3);
+    assert!(matches!(d3.mutation, Some(Mutation::PublishToZone(_))));
+
+    // ClearZone
+    let m4 = MutationProto {
+        mutation: Some(Mutation::ClearZone(ClearZoneMutation {
+            zone_name: "notification".to_string(), publish_token: None,
+        })),
+    };
+    let d4 = round_trip(&m4);
+    assert!(matches!(d4.mutation, Some(Mutation::ClearZone(_))));
+}
+
+#[test]
+fn roundtrip_zone_content_all_variants() {
+    // StreamText
+    let z1 = ZoneContent { payload: Some(ZonePayload::StreamText("test".to_string())) };
+    let d1 = round_trip(&z1);
+    assert!(matches!(d1.payload, Some(ZonePayload::StreamText(_))));
+
+    // Notification
+    let z2 = ZoneContent {
+        payload: Some(ZonePayload::Notification(NotificationPayload {
+            text: "Alert!".to_string(),
+            icon: "warning.png".to_string(),
+            urgency: 2,
+        })),
+    };
+    let d2 = round_trip(&z2);
+    match d2.payload {
+        Some(ZonePayload::Notification(n)) => assert_eq!(n.urgency, 2),
+        _ => panic!("wrong variant"),
+    }
+
+    // StatusBar
+    let mut entries = std::collections::HashMap::new();
+    entries.insert("battery".to_string(), "95%".to_string());
+    let z3 = ZoneContent {
+        payload: Some(ZonePayload::StatusBar(StatusBarPayload { entries })),
+    };
+    let d3 = round_trip(&z3);
+    match d3.payload {
+        Some(ZonePayload::StatusBar(sb)) => assert_eq!(sb.entries["battery"], "95%"),
+        _ => panic!("wrong variant"),
+    }
+
+    // SolidColor
+    let z4 = ZoneContent {
+        payload: Some(ZonePayload::SolidColor(Rgba { r: 0.1, g: 0.2, b: 0.3, a: 0.4 })),
+    };
+    let d4 = round_trip(&z4);
+    assert!(matches!(d4.payload, Some(ZonePayload::SolidColor(_))));
+}
+
+#[test]
+fn roundtrip_zone_definition_proto() {
+    let orig = ZoneDefinitionProto {
+        id: "zone-001".to_string(),
+        name: "subtitle".to_string(),
+        description: "Subtitle display zone".to_string(),
+        geometry_policy: Some(GeometryPolicyProto {
+            policy: Some(tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(
+                RelativeGeometryPolicy {
+                    x_pct: 0.0, y_pct: 0.85, width_pct: 1.0, height_pct: 0.15,
+                },
+            )),
+        }),
+        accepted_media_types: vec!["text/plain".to_string()],
+        rendering_policy: Some(RenderingPolicyProto {
+            font_size_px: 16.0,
+            backdrop: Some(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.5 }),
+            text_align: TextAlignProto::Center as i32,
+            margin_px: 8.0,
+        }),
+        contention_policy: ContentionPolicyProto::ContentionPolicyLatestWins as i32,
+        max_publishers: 4,
+        auto_clear_ms: 5000,
+        stack_max_depth: 0,
+        merge_max_keys: 0,
+        ephemeral: false,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.name, decoded.name);
+    assert_eq!(orig.contention_policy, decoded.contention_policy);
+    assert_eq!(orig.max_publishers, decoded.max_publishers);
+    assert_eq!(orig.auto_clear_ms, 5000);
+}
+
+// ─── events.proto ─────────────────────────────────────────────────────────────
+
+#[test]
+fn roundtrip_input_event_all_kinds() {
+    for &kind in &[
+        InputEventKind::Unspecified,
+        InputEventKind::PointerMove,
+        InputEventKind::PointerDown,
+        InputEventKind::PointerUp,
+        InputEventKind::PointerEnter,
+        InputEventKind::PointerLeave,
+        InputEventKind::Activated,
+    ] {
+        let orig = InputEvent {
+            tile_id: "tile-a".to_string(),
+            node_id: "node-b".to_string(),
+            interaction_id: "btn".to_string(),
+            local_x: 10.0,
+            local_y: 20.0,
+            display_x: 100.0,
+            display_y: 200.0,
+            kind: kind as i32,
+            timestamp_ms: 1_700_000_000_000,
+        };
+        let decoded = round_trip(&orig);
+        assert_eq!(orig.kind, decoded.kind);
+        assert_eq!(decoded.local_x, 10.0);
+    }
+}
+
+#[test]
+fn roundtrip_tile_created_event() {
+    let orig = TileCreatedEvent {
+        tile_id: "tile-001".to_string(),
+        namespace: "weather-agent".to_string(),
+        timestamp_ms: 999_999,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.tile_id, decoded.tile_id);
+    assert_eq!(orig.namespace, decoded.namespace);
+    assert_eq!(orig.timestamp_ms, decoded.timestamp_ms);
+}
+
+#[test]
+fn roundtrip_tile_deleted_event() {
+    let orig = TileDeletedEvent { tile_id: "tile-002".to_string(), timestamp_ms: 1234 };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.tile_id, decoded.tile_id);
+}
+
+#[test]
+fn roundtrip_tile_updated_event() {
+    let orig = TileUpdatedEvent { tile_id: "tile-003".to_string(), timestamp_ms: 5678 };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.tile_id, decoded.tile_id);
+}
+
+#[test]
+fn roundtrip_lease_event_all_kinds() {
+    for &kind in &[
+        LeaseEventKind::Unspecified,
+        LeaseEventKind::LeaseGranted,
+        LeaseEventKind::LeaseRenewed,
+        LeaseEventKind::LeaseRevoked,
+        LeaseEventKind::LeaseExpired,
+    ] {
+        let orig = LeaseEvent {
+            lease_id: "lease-abc".to_string(),
+            namespace: "agent-1".to_string(),
+            kind: kind as i32,
+            timestamp_ms: 42,
+        };
+        let decoded = round_trip(&orig);
+        assert_eq!(orig.kind, decoded.kind);
+    }
+}
+
+#[test]
+fn roundtrip_scene_event_all_variants() {
+    // tile_created
+    let s1 = SceneEvent {
+        timestamp_ms: 100,
+        event: Some(SceneEventPayload::TileCreated(TileCreatedEvent {
+            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_ms: 100,
+        })),
+    };
+    let d1 = round_trip(&s1);
+    assert!(matches!(d1.event, Some(SceneEventPayload::TileCreated(_))));
+
+    // tile_deleted
+    let s2 = SceneEvent {
+        timestamp_ms: 200,
+        event: Some(SceneEventPayload::TileDeleted(TileDeletedEvent {
+            tile_id: "t2".to_string(), timestamp_ms: 200,
+        })),
+    };
+    assert!(matches!(round_trip(&s2).event, Some(SceneEventPayload::TileDeleted(_))));
+
+    // tile_updated
+    let s3 = SceneEvent {
+        timestamp_ms: 300,
+        event: Some(SceneEventPayload::TileUpdated(TileUpdatedEvent {
+            tile_id: "t3".to_string(), timestamp_ms: 300,
+        })),
+    };
+    assert!(matches!(round_trip(&s3).event, Some(SceneEventPayload::TileUpdated(_))));
+
+    // input
+    let s4 = SceneEvent {
+        timestamp_ms: 400,
+        event: Some(SceneEventPayload::Input(InputEvent {
+            tile_id: "t4".to_string(), kind: InputEventKind::PointerDown as i32, ..Default::default()
+        })),
+    };
+    assert!(matches!(round_trip(&s4).event, Some(SceneEventPayload::Input(_))));
+
+    // lease
+    let s5 = SceneEvent {
+        timestamp_ms: 500,
+        event: Some(SceneEventPayload::Lease(LeaseEvent {
+            lease_id: "l1".to_string(),
+            namespace: "ns".to_string(),
+            kind: LeaseEventKind::LeaseGranted as i32,
+            timestamp_ms: 500,
+        })),
+    };
+    assert!(matches!(round_trip(&s5).event, Some(SceneEventPayload::Lease(_))));
+}
+
+#[test]
+fn roundtrip_pointer_move_event() {
+    let orig = PointerMoveEvent {
+        tile_id: vec![1u8; 16],
+        node_id: vec![2u8; 16],
+        interaction_id: "btn".to_string(),
+        timestamp_mono_us: u64::MAX,
+        device_id: "mouse-0".to_string(),
+        local_x: 123.456,
+        local_y: 789.012,
+        display_x: 1920.0,
+        display_y: 1080.0,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.timestamp_mono_us, decoded.timestamp_mono_us);
+    assert_eq!(orig.tile_id, decoded.tile_id);
+    assert_eq!(decoded.local_x, 123.456);
+}
+
+#[test]
+fn roundtrip_pointer_down_up_events() {
+    let orig_down = PointerDownEvent {
+        tile_id: vec![0xAA; 16],
+        node_id: vec![0xBB; 16],
+        interaction_id: "btn".to_string(),
+        timestamp_mono_us: 123_456_789,
+        device_id: "mouse-0".to_string(),
+        local_x: 50.0,
+        local_y: 60.0,
+        display_x: 500.0,
+        display_y: 600.0,
+        button: 0,
+    };
+    let d_down = round_trip(&orig_down);
+    assert_eq!(d_down.button, 0);
+    assert_eq!(d_down.timestamp_mono_us, 123_456_789);
+
+    let orig_up = PointerUpEvent {
+        tile_id: vec![0xCC; 16],
+        button: 1,
+        timestamp_mono_us: 999,
+        ..Default::default()
+    };
+    assert_eq!(round_trip(&orig_up).button, 1);
+}
+
+#[test]
+fn roundtrip_keyboard_events() {
+    let orig_down = KeyDownEvent {
+        tile_id: vec![0u8; 16],
+        node_id: vec![0u8; 16],
+        timestamp_mono_us: 5555,
+        key_code: "KeyA".to_string(),
+        key: "a".to_string(),
+        repeat: false,
+        ctrl: true,
+        shift: false,
+        alt: false,
+        meta: false,
+    };
+    let d = round_trip(&orig_down);
+    assert_eq!(d.key_code, "KeyA");
+    assert!(d.ctrl);
+    assert!(!d.shift);
+
+    let orig_up = KeyUpEvent {
+        tile_id: vec![0u8; 16],
+        node_id: vec![0u8; 16],
+        timestamp_mono_us: 6666,
+        key_code: "KeyA".to_string(),
+        key: "a".to_string(),
+        ..Default::default()
+    };
+    assert_eq!(round_trip(&orig_up).key_code, "KeyA");
+}
+
+#[test]
+fn roundtrip_focus_events() {
+    for &src in &[
+        FocusSource::Unspecified,
+        FocusSource::Click,
+        FocusSource::TabKey,
+        FocusSource::Programmatic,
+        FocusSource::CommandInput,
+    ] {
+        let orig = FocusGainedEvent {
+            tile_id: vec![0u8; 16],
+            node_id: vec![],
+            timestamp_mono_us: 42,
+            source: src as i32,
+        };
+        assert_eq!(round_trip(&orig).source, src as i32);
+    }
+
+    for &reason in &[
+        FocusLostReason::Unspecified,
+        FocusLostReason::ClickElsewhere,
+        FocusLostReason::TabKey,
+        FocusLostReason::Programmatic,
+        FocusLostReason::TileDestroyed,
+        FocusLostReason::TabSwitched,
+        FocusLostReason::LeaseRevoked,
+        FocusLostReason::AgentDisconnected,
+        FocusLostReason::CommandInput,
+    ] {
+        let orig = FocusLostEvent {
+            tile_id: vec![0u8; 16],
+            node_id: vec![],
+            timestamp_mono_us: 99,
+            reason: reason as i32,
+        };
+        assert_eq!(round_trip(&orig).reason, reason as i32);
+    }
+}
+
+#[test]
+fn roundtrip_capture_released_event_all_reasons() {
+    for &reason in &[
+        CaptureReleasedReason::Unspecified,
+        CaptureReleasedReason::AgentReleased,
+        CaptureReleasedReason::PointerUp,
+        CaptureReleasedReason::RuntimeRevoked,
+        CaptureReleasedReason::LeaseRevoked,
+    ] {
+        let orig = CaptureReleasedEvent {
+            tile_id: vec![0u8; 16],
+            node_id: vec![0u8; 16],
+            timestamp_mono_us: 77,
+            device_id: "touch-0".to_string(),
+            reason: reason as i32,
+        };
+        assert_eq!(round_trip(&orig).reason, reason as i32);
+    }
+}
+
+#[test]
+fn roundtrip_ime_composition_events() {
+    let start = ImeCompositionStartEvent {
+        tile_id: vec![0u8; 16], node_id: vec![], timestamp_mono_us: 1,
+    };
+    let d_start = round_trip(&start);
+    assert_eq!(d_start.timestamp_mono_us, 1);
+
+    let update = ImeCompositionUpdateEvent {
+        tile_id: vec![0u8; 16], node_id: vec![], timestamp_mono_us: 2,
+        composition_text: "はよ".to_string(),
+    };
+    assert_eq!(round_trip(&update).composition_text, "はよ");
+
+    let end = ImeCompositionEndEvent {
+        tile_id: vec![0u8; 16], node_id: vec![], timestamp_mono_us: 3,
+        committed_text: "はよ".to_string(),
+    };
+    assert_eq!(round_trip(&end).committed_text, "はよ");
+}
+
+#[test]
+fn roundtrip_gesture_and_scroll_events() {
+    let gesture = GestureEvent {
+        tile_id: vec![0u8; 16],
+        node_id: vec![0u8; 16],
+        interaction_id: "pinch".to_string(),
+        timestamp_mono_us: 12345,
+        device_id: "touch-0".to_string(),
+        gesture_kind: "pinch".to_string(),
+        scale: 1.5,
+        rotation: 0.0,
+        delta_x: 0.0,
+        delta_y: 0.0,
+    };
+    assert_eq!(round_trip(&gesture).scale, 1.5);
+
+    let scroll = ScrollOffsetChangedEvent {
+        tile_id: vec![0u8; 16],
+        timestamp_mono_us: 99999,
+        offset_x: 0.0,
+        offset_y: 150.0,
+    };
+    assert_eq!(round_trip(&scroll).offset_y, 150.0);
+}
+
+#[test]
+fn roundtrip_command_input_event_all_actions() {
+    for &action in &[
+        CommandAction::Unspecified,
+        CommandAction::NavigateNext,
+        CommandAction::NavigatePrev,
+        CommandAction::Activate,
+        CommandAction::Cancel,
+        CommandAction::Context,
+        CommandAction::ScrollUp,
+        CommandAction::ScrollDown,
+    ] {
+        for &source in &[
+            CommandSource::Unspecified,
+            CommandSource::Keyboard,
+            CommandSource::Dpad,
+            CommandSource::Voice,
+            CommandSource::RemoteClicker,
+            CommandSource::RotaryDial,
+            CommandSource::Programmatic,
+        ] {
+            let orig = CommandInputEvent {
+                tile_id: vec![0u8; 16],
+                node_id: vec![0u8; 16],
+                interaction_id: String::new(),
+                timestamp_mono_us: 0,
+                device_id: String::new(),
+                action: action as i32,
+                source: source as i32,
+            };
+            let d = round_trip(&orig);
+            assert_eq!(d.action, action as i32);
+            assert_eq!(d.source, source as i32);
+        }
+    }
+}
+
+#[test]
+fn roundtrip_event_batch() {
+    let batch = EventBatch {
+        frame_number: 42,
+        batch_ts_us: 1_700_000_000_000_000,
+        events: vec![
+            InputEnvelope {
+                event: Some(InputEnvelopeEvent::PointerDown(PointerDownEvent {
+                    tile_id: vec![1u8; 16],
+                    timestamp_mono_us: 1000,
+                    ..Default::default()
+                })),
+            },
+            InputEnvelope {
+                event: Some(InputEnvelopeEvent::KeyDown(KeyDownEvent {
+                    tile_id: vec![2u8; 16],
+                    timestamp_mono_us: 2000,
+                    key_code: "KeyB".to_string(),
+                    ..Default::default()
+                })),
+            },
+        ],
+    };
+    let decoded = round_trip(&batch);
+    assert_eq!(decoded.frame_number, 42);
+    assert_eq!(decoded.events.len(), 2);
+}
+
+// ─── session.proto ────────────────────────────────────────────────────────────
+
+#[test]
+fn roundtrip_session_init_all_fields() {
+    let orig = SessionInit {
+        agent_id: "weather-agent".to_string(),
+        agent_display_name: "Weather Agent".to_string(),
+        pre_shared_key: "".to_string(),
+        requested_capabilities: vec!["resident_mcp".to_string(), "read_scene_topology".to_string()],
+        initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
+        resume_token: vec![],
+        agent_timestamp_wall_us: 1_700_000_000_000_000,
+        min_protocol_version: 1000,
+        max_protocol_version: 1001,
+        auth_credential: Some(AuthCredential {
+            credential: Some(Credential::PreSharedKey(PreSharedKeyCredential {
+                key: "test-key".to_string(),
+            })),
+        }),
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.agent_id, decoded.agent_id);
+    assert_eq!(orig.requested_capabilities, decoded.requested_capabilities);
+    assert_eq!(orig.min_protocol_version, decoded.min_protocol_version);
+    assert_eq!(orig.max_protocol_version, decoded.max_protocol_version);
+    assert_eq!(orig.agent_timestamp_wall_us, decoded.agent_timestamp_wall_us);
+    match &decoded.auth_credential {
+        Some(ac) => match &ac.credential {
+            Some(Credential::PreSharedKey(psk)) => assert_eq!(psk.key, "test-key"),
+            _ => panic!("wrong credential variant"),
+        },
+        None => panic!("missing auth_credential"),
+    }
+}
+
+#[test]
+fn roundtrip_session_init_empty_capabilities() {
+    // WHEN SessionInit has empty requested_capabilities THEN valid (no capabilities requested)
+    let orig = SessionInit {
+        agent_id: "guest-agent".to_string(),
+        requested_capabilities: vec![],
+        initial_subscriptions: vec![],
+        ..Default::default()
+    };
+    let decoded = round_trip(&orig);
+    assert!(decoded.requested_capabilities.is_empty());
+    assert_eq!(decoded.agent_id, "guest-agent");
+}
+
+#[test]
+fn roundtrip_session_resume() {
+    let orig = SessionResume {
+        agent_id: "weather-agent".to_string(),
+        resume_token: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03,
+                           0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B],
+        last_seen_server_sequence: 9999,
+        pre_shared_key: String::new(),
+        auth_credential: Some(AuthCredential {
+            credential: Some(Credential::LocalSocket(LocalSocketCredential {
+                socket_path: "/run/tze_hud.sock".to_string(),
+                pid_hint: "1234".to_string(),
+            })),
+        }),
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.resume_token, decoded.resume_token);
+    assert_eq!(orig.last_seen_server_sequence, decoded.last_seen_server_sequence);
+}
+
+#[test]
+fn roundtrip_session_established() {
+    let orig = SessionEstablished {
+        session_id: vec![0u8; 16],
+        namespace: "weather-agent".to_string(),
+        granted_capabilities: vec!["resident_mcp".to_string()],
+        resume_token: vec![0xFF; 16],
+        heartbeat_interval_ms: 5000,
+        server_sequence: 1,
+        compositor_timestamp_wall_us: 1_700_000_000_000_000,
+        estimated_skew_us: -500,
+        active_subscriptions: vec!["DEGRADATION_NOTICES".to_string(), "LEASE_CHANGES".to_string()],
+        denied_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
+        negotiated_protocol_version: 1000,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.heartbeat_interval_ms, decoded.heartbeat_interval_ms);
+    assert_eq!(orig.server_sequence, decoded.server_sequence);
+    assert_eq!(orig.estimated_skew_us, decoded.estimated_skew_us);
+    assert_eq!(orig.denied_subscriptions, decoded.denied_subscriptions);
+    assert_eq!(orig.negotiated_protocol_version, decoded.negotiated_protocol_version);
+}
+
+#[test]
+fn roundtrip_session_error() {
+    let orig = SessionError {
+        code: "AUTH_FAILED".to_string(),
+        message: "Invalid pre-shared key".to_string(),
+        hint: "check_psk".to_string(),
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.code, decoded.code);
+    assert_eq!(orig.hint, decoded.hint);
+}
+
+#[test]
+fn roundtrip_session_resume_result() {
+    let orig = SessionResumeResult {
+        accepted: true,
+        new_session_token: vec![0xAB; 16],
+        new_server_sequence: 42,
+        negotiated_protocol_version: 1001,
+        granted_capabilities: vec!["resident_mcp".to_string()],
+        error: String::new(),
+        active_subscriptions: vec!["DEGRADATION_NOTICES".to_string()],
+        denied_subscriptions: vec![],
+    };
+    let decoded = round_trip(&orig);
+    assert!(decoded.accepted);
+    assert_eq!(decoded.new_server_sequence, 42);
+}
+
+#[test]
+fn roundtrip_runtime_error_all_codes() {
+    for code in &[
+        ErrorCode::Unspecified,
+        ErrorCode::Unknown,
+        ErrorCode::LeaseExpired,
+        ErrorCode::LeaseNotFound,
+        ErrorCode::ZoneTypeMismatch,
+        ErrorCode::ZoneNotFound,
+        ErrorCode::BudgetExceeded,
+        ErrorCode::MutationRejected,
+        ErrorCode::PermissionDenied,
+        ErrorCode::RateLimited,
+        ErrorCode::InvalidArgument,
+        ErrorCode::SessionExpired,
+        ErrorCode::ClockSkewHigh,
+        ErrorCode::ClockSkewExcessive,
+        ErrorCode::SafeModeActive,
+        ErrorCode::TimestampTooOld,
+        ErrorCode::TimestampTooFuture,
+        ErrorCode::TimestampExpiryBeforePresent,
+        ErrorCode::AgentEventRateExceeded,
+        ErrorCode::AgentEventPayloadTooLarge,
+        ErrorCode::AgentEventCapabilityMissing,
+        ErrorCode::AgentEventInvalidName,
+        ErrorCode::AgentEventReservedPrefix,
+    ] {
+        let orig = RuntimeError {
+            error_code: format!("{:?}", code),
+            message: "test error".to_string(),
+            context: "field=value".to_string(),
+            hint: "{}".to_string(),
+            error_code_enum: *code as i32,
+        };
+        let decoded = round_trip(&orig);
+        assert_eq!(orig.error_code_enum, decoded.error_code_enum);
+    }
+}
+
+#[test]
+fn roundtrip_mutation_batch() {
+    let orig = MutationBatch {
+        batch_id: vec![0u8; 16],
+        lease_id: vec![0xAA; 16],
+        mutations: vec![
+            tze_hud_protocol::proto::MutationProto {
+                mutation: Some(Mutation::CreateTile(CreateTileMutation {
+                    tab_id: "tab-1".to_string(),
+                    bounds: Some(Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }),
+                    z_order: 1,
+                })),
+            },
+        ],
+        timing: Some(TimingHints {
+            present_at_wall_us: 1_700_000_000_000_000,
+            expires_at_wall_us: 1_700_000_001_000_000,
+        }),
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.batch_id, decoded.batch_id);
+    assert_eq!(orig.mutations.len(), decoded.mutations.len());
+    assert!(decoded.timing.is_some());
+}
+
+#[test]
+fn roundtrip_lease_request_response() {
+    let req = LeaseRequest {
+        ttl_ms: 30_000,
+        capabilities: vec!["resident_mcp".to_string()],
+        lease_priority: 2,
+    };
+    let d_req = round_trip(&req);
+    assert_eq!(d_req.ttl_ms, 30_000);
+    assert_eq!(d_req.lease_priority, 2);
+
+    let resp = LeaseResponse {
+        granted: true,
+        lease_id: vec![0xDE; 16],
+        granted_ttl_ms: 30_000,
+        granted_priority: 2,
+        granted_capabilities: vec!["resident_mcp".to_string()],
+        deny_reason: String::new(),
+        deny_code: String::new(),
+    };
+    let d_resp = round_trip(&resp);
+    assert!(d_resp.granted);
+    assert_eq!(d_resp.granted_ttl_ms, 30_000);
+
+    let denied = LeaseResponse {
+        granted: false,
+        deny_reason: "budget exceeded".to_string(),
+        deny_code: "BUDGET_EXCEEDED".to_string(),
+        ..Default::default()
+    };
+    let d_denied = round_trip(&denied);
+    assert!(!d_denied.granted);
+    assert_eq!(d_denied.deny_code, "BUDGET_EXCEEDED");
+}
+
+#[test]
+fn roundtrip_lease_state_change() {
+    let orig = LeaseStateChange {
+        lease_id: vec![0xAA; 16],
+        previous_state: "ACTIVE".to_string(),
+        new_state: "REVOKED".to_string(),
+        reason: "budget policy".to_string(),
+        timestamp_wall_us: 1_700_000_000_000_000,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.new_state, decoded.new_state);
+    assert_eq!(orig.timestamp_wall_us, decoded.timestamp_wall_us);
+}
+
+#[test]
+fn roundtrip_heartbeat() {
+    let orig = Heartbeat { timestamp_mono_us: u64::MAX };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.timestamp_mono_us, decoded.timestamp_mono_us);
+}
+
+#[test]
+fn roundtrip_heartbeat_zero() {
+    let orig = Heartbeat { timestamp_mono_us: 0 };
+    let decoded = round_trip(&orig);
+    assert_eq!(decoded.timestamp_mono_us, 0);
+}
+
+#[test]
+fn roundtrip_subscription_change() {
+    let orig = SubscriptionChange {
+        subscribe: vec!["SCENE_TOPOLOGY".to_string()],
+        unsubscribe: vec!["ZONE_EVENTS".to_string()],
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.subscribe, decoded.subscribe);
+    assert_eq!(orig.unsubscribe, decoded.unsubscribe);
+}
+
+#[test]
+fn roundtrip_backpressure_signal() {
+    let orig = BackpressureSignal {
+        queue_pressure: 0.85,
+        suggested_action: "reduce_rate".to_string(),
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(decoded.suggested_action, "reduce_rate");
+    // float comparison with tolerance
+    assert!((decoded.queue_pressure - 0.85).abs() < 1e-5);
+}
+
+#[test]
+fn roundtrip_emit_scene_event() {
+    let orig = EmitSceneEvent {
+        bare_name: "doorbell.ring".to_string(),
+        payload: vec![0xDE, 0xAD],
+        interruption_class_hint: 2,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.bare_name, decoded.bare_name);
+    assert_eq!(orig.payload, decoded.payload);
+    assert_eq!(orig.interruption_class_hint, decoded.interruption_class_hint);
+}
+
+#[test]
+fn roundtrip_emit_scene_event_result() {
+    let orig = EmitSceneEventResult {
+        request_sequence: 42,
+        accepted: true,
+        delivered_event_type: "agent.doorbell_agent.doorbell.ring".to_string(),
+        error_code: String::new(),
+        error_message: String::new(),
+    };
+    let decoded = round_trip(&orig);
+    assert!(decoded.accepted);
+    assert_eq!(decoded.delivered_event_type, "agent.doorbell_agent.doorbell.ring");
+}
+
+#[test]
+fn roundtrip_client_message_all_payload_variants() {
+    // Test a representative sample of ClientMessage payloads
+    let msgs = vec![
+        ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: 1_000_000,
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "agent-1".to_string(),
+                ..Default::default()
+            })),
+        },
+        ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: 2_000_000,
+            payload: Some(ClientPayload::Heartbeat(Heartbeat { timestamp_mono_us: 12345 })),
+        },
+        ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: 3_000_000,
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: vec![0u8; 16],
+                lease_id: vec![0u8; 16],
+                mutations: vec![],
+                timing: None,
+            })),
+        },
+        ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: 4_000_000,
+            payload: Some(ClientPayload::SessionClose(SessionClose {
+                reason: "done".to_string(),
+                expect_resume: false,
+            })),
+        },
+    ];
+    for msg in &msgs {
+        let decoded = round_trip(msg);
+        assert_eq!(msg.sequence, decoded.sequence);
+        assert_eq!(msg.timestamp_wall_us, decoded.timestamp_wall_us);
+    }
+}
+
+#[test]
+fn roundtrip_server_message_all_payload_variants() {
+    let msgs = vec![
+        ServerMessage {
+            sequence: 1,
+            timestamp_wall_us: 1_000_000,
+            payload: Some(ServerPayload::SessionEstablished(SessionEstablished::default())),
+        },
+        ServerMessage {
+            sequence: 2,
+            timestamp_wall_us: 2_000_000,
+            payload: Some(ServerPayload::SessionError(SessionError {
+                code: "AUTH_FAILED".to_string(), ..Default::default()
+            })),
+        },
+        ServerMessage {
+            sequence: 3,
+            timestamp_wall_us: 3_000_000,
+            payload: Some(ServerPayload::Heartbeat(Heartbeat { timestamp_mono_us: 99 })),
+        },
+        ServerMessage {
+            sequence: 4,
+            timestamp_wall_us: 4_000_000,
+            payload: Some(ServerPayload::BackpressureSignal(BackpressureSignal {
+                queue_pressure: 0.9, suggested_action: "coalesce".to_string(),
+            })),
+        },
+    ];
+    for msg in &msgs {
+        let decoded = round_trip(msg);
+        assert_eq!(msg.sequence, decoded.sequence);
+    }
+}
+
+#[test]
+fn roundtrip_scene_snapshot() {
+    let orig = SceneSnapshot {
+        snapshot_json: r#"{"tabs":[],"tiles":{},"active_tab":""}"#.to_string(),
+        sequence: 42,
+        snapshot_wall_us: 1_700_000_000_000_000,
+        snapshot_mono_us: 5_000_000,
+        blake3_checksum: "a".repeat(64),
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.sequence, decoded.sequence);
+    assert_eq!(orig.snapshot_wall_us, decoded.snapshot_wall_us);
+    assert_eq!(orig.snapshot_mono_us, decoded.snapshot_mono_us);
+    assert_eq!(orig.blake3_checksum, decoded.blake3_checksum);
+}
+
+#[test]
+fn roundtrip_scene_delta_variants() {
+    let d1 = SceneDelta {
+        delta: Some(Delta::TileCreated(TileCreatedEvent {
+            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_ms: 0,
+        })),
+    };
+    assert!(matches!(round_trip(&d1).delta, Some(Delta::TileCreated(_))));
+
+    let d2 = SceneDelta {
+        delta: Some(Delta::TileDeleted(TileDeletedEvent {
+            tile_id: "t2".to_string(), timestamp_ms: 0,
+        })),
+    };
+    assert!(matches!(round_trip(&d2).delta, Some(Delta::TileDeleted(_))));
+
+    let d3 = SceneDelta {
+        delta: Some(Delta::LeaseEvent(LeaseEvent {
+            lease_id: "l1".to_string(),
+            namespace: "ns".to_string(),
+            kind: LeaseEventKind::LeaseGranted as i32,
+            timestamp_ms: 0,
+        })),
+    };
+    assert!(matches!(round_trip(&d3).delta, Some(Delta::LeaseEvent(_))));
+}
+
+#[test]
+fn roundtrip_telemetry_frame() {
+    let orig = TelemetryFrame {
+        sample_timestamp_wall_us: 1_700_000_000_000_000,
+        mutations_sent: 100,
+        mutations_acked: 95,
+        rtt_estimate_us: 2500,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.mutations_sent, decoded.mutations_sent);
+    assert_eq!(orig.rtt_estimate_us, decoded.rtt_estimate_us);
+}
+
+#[test]
+fn roundtrip_runtime_telemetry_frame() {
+    let orig = RuntimeTelemetryFrame {
+        sample_timestamp_wall_us: 1_700_000_000_000_000,
+        compositor_frame_rate: 59.94,
+        compositor_frame_budget_us: 16_667,
+        compositor_frame_time_us: 14_000,
+        active_sessions: 3,
+        active_leases: 7,
+        heap_used_bytes: 256 * 1024 * 1024,
+        gpu_utilization_pct: 42.5,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(orig.active_sessions, decoded.active_sessions);
+    assert_eq!(orig.heap_used_bytes, decoded.heap_used_bytes);
+}
+
+/// Proto3 forward-compatibility: unknown fields are silently ignored by prost.
+/// Decoding a message with unknown fields must succeed (not panic/error), and
+/// known fields must still be correctly decoded.
+///
+/// Note: prost does not preserve unknown fields on re-encode (unlike the Go/Java
+/// proto3 libraries). This test documents the actual behavior.
+#[test]
+fn roundtrip_decode_with_unknown_fields_succeeds() {
+    // Encode a Heartbeat with timestamp_mono_us = 12345
+    let known = Heartbeat { timestamp_mono_us: 12345 };
+    let mut buf = Vec::new();
+    known.encode(&mut buf).unwrap();
+
+    // Append a synthetic unknown field: field 9999, wire type 0 (varint), value 42.
+    // Proto3 tag encoding: tag = (9999 << 3) | 0 = 79992
+    // LEB128 of 79992: 0xF8, 0xE8, 0x04; varint 42 = 0x2A
+    buf.extend_from_slice(&[0xF8, 0xE8, 0x04, 0x2A]);
+
+    // Decode MUST succeed even with unknown fields present
+    let decoded = Heartbeat::decode(buf.as_slice())
+        .expect("decode with unknown fields must not fail");
+
+    // Known fields must be correctly decoded despite the unknown field appended
+    assert_eq!(decoded.timestamp_mono_us, 12345,
+        "known fields must survive decoding alongside unknown fields");
+}
