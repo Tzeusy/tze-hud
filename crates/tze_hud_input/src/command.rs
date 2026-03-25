@@ -36,7 +36,7 @@
 //! - Lines 411–413: Pointer-Free Navigation
 
 use serde::{Deserialize, Serialize};
-use tze_hud_scene::{SceneId, NodeData};
+use tze_hud_scene::{MonoUs, SceneId, NodeData};
 use tze_hud_scene::graph::SceneGraph;
 use std::time::Instant;
 
@@ -96,7 +96,7 @@ pub struct RawCommandEvent {
     /// Hardware device identifier (e.g. HID device path / index).
     pub device_id: String,
     /// Monotonic timestamp in microseconds.
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
 }
 
 // ─── Agent-facing event ────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ pub struct CommandInputEvent {
     pub node_id: Option<SceneId>,
     /// Interaction ID of the focused `HitRegionNode`, or empty string.
     pub interaction_id: String,
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     pub device_id: String,
     pub action: CommandAction,
     pub source: CommandSource,
@@ -280,7 +280,7 @@ mod tests {
             action,
             source,
             device_id: "dpad-0".to_string(),
-            timestamp_mono_us: 10_000,
+            timestamp_mono_us: MonoUs(10_000),
         }
     }
 
@@ -523,7 +523,7 @@ mod tests {
             action: CommandAction::Cancel,
             source: CommandSource::RemoteClicker,
             device_id: "remote-42".to_string(),
-            timestamp_mono_us: 999_888,
+            timestamp_mono_us: MonoUs(999_888),
         };
 
         let dispatch = proc
@@ -531,7 +531,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(dispatch.event.device_id, "remote-42");
-        assert_eq!(dispatch.event.timestamp_mono_us, 999_888);
+        assert_eq!(dispatch.event.timestamp_mono_us, MonoUs(999_888));
     }
 
     // ── Latency budget ────────────────────────────────────────────────────────
