@@ -5,7 +5,8 @@ package tze_hud.protocol.v1;
 // ─── DEPRECATED LEGACY WIRE MESSAGES ─────────────────────────────────────────
 //
 // This file contains the pre-RFC 0004 wire messages that used string tile_id /
-// node_id / lease_id fields and wall-clock timestamps.
+// node_id / lease_id fields and legacy timestamp fields (wall-clock in most
+// messages, monotonic for InputEvent).
 //
 // These messages are DEPRECATED. All new code must use the RFC 0004 model in
 // events.proto (InputEnvelope, EventBatch) with binary 16-byte UUIDv7 IDs and
@@ -23,6 +24,7 @@ package tze_hud.protocol.v1;
 // InputEnvelope migration is complete; ID fields use old string convention;
 // timestamp has been updated to timestamp_mono_us (microseconds).
 message InputEvent {
+  option deprecated = true;
   string tile_id            = 1;
   string node_id            = 2;
   string interaction_id     = 3;
@@ -35,6 +37,7 @@ message InputEvent {
 }
 
 enum InputEventKind {
+  option deprecated = true;
   INPUT_EVENT_KIND_UNSPECIFIED = 0;
   POINTER_MOVE   = 1;
   POINTER_DOWN   = 2;
@@ -49,17 +52,20 @@ enum InputEventKind {
 // Typed scene lifecycle events (runtime → agent).
 // DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
 message TileCreatedEvent {
+  option deprecated = true;
   string tile_id          = 1;
   string namespace        = 2;  // owning agent namespace
   uint64 timestamp_wall_us = 3;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
 }
 
 message TileDeletedEvent {
+  option deprecated = true;
   string tile_id           = 1;
   uint64 timestamp_wall_us = 2;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
 }
 
 message TileUpdatedEvent {
+  option deprecated = true;
   string tile_id           = 1;
   uint64 timestamp_wall_us = 2;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
 }
@@ -69,6 +75,7 @@ message TileUpdatedEvent {
 // Lease lifecycle events dispatched to the owning agent.
 // DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
 message LeaseEvent {
+  option deprecated = true;
   string lease_id          = 1;
   string namespace         = 2;
   LeaseEventKind kind      = 3;
@@ -76,6 +83,7 @@ message LeaseEvent {
 }
 
 enum LeaseEventKind {
+  option deprecated = true;
   LEASE_EVENT_KIND_UNSPECIFIED = 0;
   LEASE_GRANTED  = 1;
   LEASE_RENEWED  = 2;
@@ -89,6 +97,7 @@ enum LeaseEventKind {
 // Each message carries exactly one event via the oneof.
 // DEPRECATED: Use EventBatch / InputEnvelope (RFC 0004) for new code.
 message SceneEvent {
+  option deprecated = true;
   uint64 timestamp_wall_us = 1;  // UTC wall clock µs (renamed from timestamp_ms; field number unchanged)
   oneof event {
     TileCreatedEvent tile_created = 10;

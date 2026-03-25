@@ -8,9 +8,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //   session.proto       — HudSession gRPC service (imports types.proto, events.proto,
     //                         and events_legacy.proto for SceneDelta)
     //
-    // All four files use package tze_hud.protocol.v1 (or its sub-package for session),
-    // so generated types live in the same Rust module.
-    // session.proto uses package tze_hud.protocol.v1.session.
+    // All four files use package tze_hud.protocol.v1 (with a sub-package for session),
+    // so generated types live under the same top-level Rust module tree.
+    // session.proto uses package tze_hud.protocol.v1.session, typically generating into a
+    // nested ...::protocol::v1::session Rust module.
     tonic_build::configure().compile_protos(
         &[
             "proto/types.proto",
