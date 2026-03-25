@@ -804,20 +804,6 @@ impl HudSessionImpl {
         }
     }
 
-    /// Build a `CapabilityPolicy` for the given agent at handshake time.
-    ///
-    /// Implements configuration/spec.md §Requirement: Agent Registration
-    /// (lines 136-147): registered agents get their configured capabilities;
-    /// unregistered agents get guest policy unless `fallback_unrestricted` is set.
-    #[allow(dead_code)]
-    fn capability_policy_for_agent(&self, agent_name: &str) -> CapabilityPolicy {
-        match self.agent_capabilities.get(agent_name) {
-            Some(caps) => CapabilityPolicy::new(caps.clone()),
-            None if self.fallback_unrestricted => CapabilityPolicy::unrestricted(),
-            None => CapabilityPolicy::guest(),
-        }
-    }
-
     /// Broadcast a `DegradationNotice` to all currently-active sessions.
     ///
     /// Updates `SharedState::degradation_level` so that newly-joining sessions
@@ -1467,13 +1453,15 @@ async fn handle_session_resume(
     }
 
     // Reconstruct policy_caps for the resumed session using the same config-driven
-    // lookup as new sessions.  Prior entry capabilities are restored from TokenStore
-    // (the agent retains the grants it had before disconnect); policy_caps governs
-    // mid-session capability escalation requests.
+    // lookup as new sessions.  `capabilities` (restored from TokenStore) holds the
+    // grants the agent actually held before disconnect.  `policy_capabilities` governs
+    // mid-session CapabilityRequest escalation and must reflect the agent's full
+    // *authorization* scope (not just the already-granted subset), so that
+    // post-resume escalation requests stay within the registered allow-list.
     let resume_policy_caps = match agent_capabilities.get(resume.agent_id.as_str()) {
-        Some(_caps) => prior_entry.capabilities.clone(), // registered: keep prior grants
+        Some(caps) => caps.clone(), // registered: full configured authorization scope
         None if fallback_unrestricted => vec!["*".to_string()],
-        None => prior_entry.capabilities.clone(), // guest: keep what was granted before
+        None => Vec::new(), // guest: no escalation scope
     };
     let session_open_at = now_wall_us();
     let mut session = StreamSession {

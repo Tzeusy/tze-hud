@@ -29,10 +29,10 @@
 //! ## Usage
 //!
 //! ```rust,ignore
-//! use tze_hud_runtime::RuntimeContext;
+//! use tze_hud_runtime::{RuntimeContext, FallbackPolicy};
 //! use tze_hud_scene::config::ResolvedConfig;
 //!
-//! let ctx = RuntimeContext::from_config(resolved_config);
+//! let ctx = RuntimeContext::from_config(resolved_config, FallbackPolicy::Guest);
 //! let policy = ctx.capability_policy_for("my-agent");
 //! ```
 

@@ -44,11 +44,11 @@ use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};
 use tze_hud_compositor::{Compositor, HeadlessSurface};
 use tze_hud_config::TzeHudConfig;
+use tze_hud_scene::config::ConfigLoader;
 use tze_hud_input::InputProcessor;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
-use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_telemetry::{TelemetryCollector, FrameTelemetry};
 use std::sync::Arc;
@@ -70,7 +70,9 @@ pub struct HeadlessConfig {
     ///
     /// When `Some(toml)`, the runtime parses and validates it, building a
     /// `RuntimeContext` that drives per-agent capability grants and profile
-    /// budgets.  When `None`, a headless-profile `RuntimeContext` is used with
+    /// budgets.  If parsing or validation fails, falls back to headless-default
+    /// with `fallback_unrestricted = false` (guest policy / fail-safe).
+    /// When `None`, a headless-profile `RuntimeContext` is used with
     /// `fallback_unrestricted = true` (backwards-compatible dev mode).
     pub config_toml: Option<String>,
 }
@@ -93,8 +95,12 @@ impl HeadlessConfig {
     /// If `config_toml` is `None`, returns a headless-default context with
     /// `fallback_unrestricted = true` (all agents allowed, dev-mode behaviour).
     ///
-    /// If `config_toml` is `Some(toml)` but parsing or validation fails, logs
-    /// warnings and falls back to the headless default (non-fatal per spec).
+    /// If `config_toml` is `Some(toml)` but parsing, validation, or freezing
+    /// fails, logs warnings and falls back to the headless default with
+    /// `fallback_unrestricted = false` (guest policy / fail-safe). A caller
+    /// that supplied a config string intended to run with restricted capabilities;
+    /// silently upgrading to unrestricted on parse failure would be a security
+    /// regression.
     pub fn build_runtime_context(&self) -> (RuntimeContext, bool) {
         match &self.config_toml {
             None => (RuntimeContext::headless_default(), true),
@@ -105,9 +111,9 @@ impl HeadlessConfig {
                             parse_error = %e.message,
                             line = e.line,
                             column = e.column,
-                            "HeadlessConfig: TOML parse error; using headless-default RuntimeContext"
+                            "HeadlessConfig: TOML parse error; using headless-default RuntimeContext (guest fallback)"
                         );
-                        (RuntimeContext::headless_default(), true)
+                        (RuntimeContext::headless_default(), false)
                     }
                     Ok(mut loader) => {
                         loader.normalize();
@@ -115,9 +121,9 @@ impl HeadlessConfig {
                         if !errors.is_empty() {
                             tracing::warn!(
                                 error_count = errors.len(),
-                                "HeadlessConfig: config validation errors; using headless-default RuntimeContext"
+                                "HeadlessConfig: config validation errors; using headless-default RuntimeContext (guest fallback)"
                             );
-                            return (RuntimeContext::headless_default(), true);
+                            return (RuntimeContext::headless_default(), false);
                         }
                         match loader.freeze() {
                             Ok(resolved) => {
@@ -132,9 +138,9 @@ impl HeadlessConfig {
                             Err(errors) => {
                                 tracing::warn!(
                                     error_count = errors.len(),
-                                    "HeadlessConfig: config freeze errors; using headless-default RuntimeContext"
+                                    "HeadlessConfig: config freeze errors; using headless-default RuntimeContext (guest fallback)"
                                 );
-                                (RuntimeContext::headless_default(), true)
+                                (RuntimeContext::headless_default(), false)
                             }
                         }
                     }
@@ -175,8 +181,10 @@ impl HeadlessRuntime {
     ///
     /// If `config.config_toml` is provided, the runtime builds an immutable
     /// `RuntimeContext` from the loaded config (profile budgets, per-agent
-    /// capability grants). If absent or invalid, falls back to headless-default
-    /// context with `fallback_unrestricted = true` (dev mode).
+    /// capability grants). If config is absent (`None`), falls back to
+    /// headless-default with `fallback_unrestricted = true` (dev mode). If
+    /// config is present but fails to parse/validate, falls back to
+    /// headless-default with `fallback_unrestricted = false` (guest policy).
     pub async fn new(config: HeadlessConfig) -> Result<Self, Box<dyn std::error::Error>> {
         // Build RuntimeContext at startup from loaded config (or default).
         let (runtime_ctx, fallback_unrestricted) = config.build_runtime_context();
@@ -534,9 +542,13 @@ capabilities = ["read_telemetry", "read_scene_topology"]
         );
     }
 
-    /// Verify that a malformed TOML gracefully falls back to dev-mode defaults.
+    /// Verify that a malformed TOML falls back to the guest (fail-safe) policy, NOT dev mode.
+    ///
+    /// When a config string is provided but cannot be parsed, the caller intended
+    /// to run with restricted capabilities. Silently upgrading to unrestricted on
+    /// parse failure would be a security regression.
     #[test]
-    fn test_build_runtime_context_malformed_toml_falls_back() {
+    fn test_build_runtime_context_malformed_toml_falls_back_to_guest() {
         let config = HeadlessConfig {
             width: 64,
             height: 64,
@@ -546,6 +558,6 @@ capabilities = ["read_telemetry", "read_scene_topology"]
         };
         let (ctx, fallback) = config.build_runtime_context();
         assert_eq!(ctx.profile.name, "headless");
-        assert!(fallback, "malformed TOML should fall back to dev mode");
+        assert!(!fallback, "malformed TOML should fall back to guest policy (fallback_unrestricted = false), not dev mode");
     }
 }
