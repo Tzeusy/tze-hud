@@ -55,7 +55,7 @@ pub mod zones;
 #[cfg(test)]
 mod tests;
 
-pub use agents::{AuthEnvWarning, check_agent_auth_env_vars, dynamic_agents_allowed, validate_agents};
+pub use agents::{AuthEnvWarning, check_agent_auth_env_vars, check_agent_auth_env_vars_with_lookup, dynamic_agents_allowed, validate_agents};
 pub use loader::TzeHudConfig;
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{

@@ -103,23 +103,35 @@ pub fn validate_agents(
     }
 }
 
-/// Check agent authentication PSK env var indirection.
+/// Check agent authentication PSK env var indirection with injectable env lookup.
 ///
-/// For each registered agent that sets `auth_psk_env`, check whether the
-/// referenced environment variable is currently set. Returns a list of
-/// warning messages for unset env vars (the caller should log them as warnings).
+/// For each registered agent that sets `auth_psk_env`, checks whether the
+/// referenced environment variable is set using the provided env lookup function.
+/// Returns a list of warning messages for unset env vars (the caller should log them as warnings).
 ///
 /// Per spec: if env var is unset → warning logged, agent cannot authenticate.
 /// This does NOT produce a `ConfigError` — it is a runtime warning, not a
 /// startup-blocking error.
-pub fn check_agent_auth_env_vars(agents: &RawAgents) -> Vec<AuthEnvWarning> {
+///
+/// # Arguments
+///
+/// * `agents` - The agents configuration to check
+/// * `env_lookup` - A closure that takes an env var name and returns `Option<String>`;
+///   use `std::env::var` for production, or a mock for tests.
+pub fn check_agent_auth_env_vars_with_lookup<F>(
+    agents: &RawAgents,
+    env_lookup: F,
+) -> Vec<AuthEnvWarning>
+where
+    F: Fn(&str) -> Option<String>,
+{
     let mut warnings = Vec::new();
 
     if let Some(registered) = &agents.registered {
         for (agent_name, agent) in registered {
             if let Some(env_var_name) = &agent.auth_psk_env {
-                match std::env::var(env_var_name) {
-                    Ok(val) if !val.is_empty() => {
+                match env_lookup(env_var_name) {
+                    Some(val) if !val.is_empty() => {
                         // Env var is set and non-empty — agent can authenticate.
                     }
                     _ => {
@@ -135,6 +147,24 @@ pub fn check_agent_auth_env_vars(agents: &RawAgents) -> Vec<AuthEnvWarning> {
     }
 
     warnings
+}
+
+/// Check agent authentication PSK env var indirection.
+///
+/// For each registered agent that sets `auth_psk_env`, check whether the
+/// referenced environment variable is currently set. Returns a list of
+/// warning messages for unset env vars (the caller should log them as warnings).
+///
+/// Per spec: if env var is unset → warning logged, agent cannot authenticate.
+/// This does NOT produce a `ConfigError` — it is a runtime warning, not a
+/// startup-blocking error.
+///
+/// This is a convenience wrapper around `check_agent_auth_env_vars_with_lookup`
+/// that uses `std::env::var` for the environment lookup.
+pub fn check_agent_auth_env_vars(agents: &RawAgents) -> Vec<AuthEnvWarning> {
+    check_agent_auth_env_vars_with_lookup(agents, |var_name| {
+        std::env::var(var_name).ok()
+    })
 }
 
 /// A warning about an unset auth PSK env var.
@@ -326,13 +356,12 @@ mod tests {
     fn test_auth_psk_env_set_no_warning() {
         // Spec scenario: agent sets auth_psk_env = "TEST_AGENT_KEY_SET" and env var is set
         // → agent can authenticate (no warning).
-        // SAFETY: test-only mutation; no other threads read this env var in tests.
-        unsafe { std::env::set_var("TEST_AGENT_KEY_SET_MOP4", "mysecret") };
+        // Use mock env lookup to avoid unsafe env mutation.
         let mut registered = HashMap::new();
         registered.insert(
             "agent_a".to_string(),
             RawRegisteredAgent {
-                auth_psk_env: Some("TEST_AGENT_KEY_SET_MOP4".into()),
+                auth_psk_env: Some("TEST_AGENT_KEY_SET".into()),
                 ..Default::default()
             },
         );
@@ -340,9 +369,14 @@ mod tests {
             registered: Some(registered),
             ..Default::default()
         };
-        let warnings = check_agent_auth_env_vars(&agents);
-        // SAFETY: test-only cleanup.
-        unsafe { std::env::remove_var("TEST_AGENT_KEY_SET_MOP4") };
+        let mock_lookup = |var_name: &str| -> Option<String> {
+            if var_name == "TEST_AGENT_KEY_SET" {
+                Some("mysecret".to_string())
+            } else {
+                None
+            }
+        };
+        let warnings = check_agent_auth_env_vars_with_lookup(&agents, mock_lookup);
         assert!(
             warnings.is_empty(),
             "set env var should produce no auth warnings, got: {:?}", warnings
@@ -353,9 +387,7 @@ mod tests {
     fn test_auth_psk_env_unset_produces_warning() {
         // Spec scenario: agent sets auth_psk_env = "AGENT_KEY" and env var AGENT_KEY is not set
         // → warning logged, agent cannot authenticate.
-        let env_var = "TEST_AGENT_KEY_UNSET_MOP4_XYZ123";
-        // SAFETY: test-only; ensure the var is unset before testing.
-        unsafe { std::env::remove_var(env_var) };
+        let env_var = "TEST_AGENT_KEY_UNSET";
         let mut registered = HashMap::new();
         registered.insert(
             "agent_b".to_string(),
@@ -368,7 +400,9 @@ mod tests {
             registered: Some(registered),
             ..Default::default()
         };
-        let warnings = check_agent_auth_env_vars(&agents);
+        // Mock env lookup that always returns None (unset).
+        let mock_lookup = |_var_name: &str| -> Option<String> { None };
+        let warnings = check_agent_auth_env_vars_with_lookup(&agents, mock_lookup);
         assert!(
             !warnings.is_empty(),
             "unset env var should produce auth warning"

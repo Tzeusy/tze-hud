@@ -1269,13 +1269,11 @@ fn spec_no_dynamic_policy_dynamic_agents_disabled() {
 /// WHEN agent sets auth_psk_env and env var is unset THEN warning logged.
 #[test]
 fn spec_auth_psk_unset_env_produces_warning() {
-    use crate::agents::check_agent_auth_env_vars;
+    use crate::agents::check_agent_auth_env_vars_with_lookup;
     use crate::raw::{RawAgents, RawRegisteredAgent};
     use std::collections::HashMap;
 
     let env_var = "SPEC_TEST_AGENT_KEY_UNSET_MOP4_ABC999";
-    // SAFETY: test-only; ensure not set.
-    unsafe { std::env::remove_var(env_var) };
 
     let mut registered = HashMap::new();
     registered.insert(
@@ -1289,7 +1287,9 @@ fn spec_auth_psk_unset_env_produces_warning() {
         registered: Some(registered),
         ..Default::default()
     };
-    let warnings = check_agent_auth_env_vars(&agents);
+    // Use mock env lookup to avoid unsafe env mutation.
+    let mock_lookup = |_var_name: &str| -> Option<String> { None };
+    let warnings = check_agent_auth_env_vars_with_lookup(&agents, mock_lookup);
     assert!(
         !warnings.is_empty(),
         "unset auth_psk_env should produce a warning"
