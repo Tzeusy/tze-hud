@@ -62,7 +62,9 @@ pub struct RegionSsim {
 pub struct SsimResult {
     /// Overall mean SSIM across the image.
     pub mean: f64,
-    /// Per-window SSIM scores. Empty when the image is smaller than one window.
+    /// Per-window SSIM scores. For images at least one window in size, this
+    /// contains the SSIM score for each window. For images smaller than one
+    /// window, this contains a single score computed over the full image.
     pub windows: Vec<f64>,
     /// Per-region breakdown. Useful for structured failure output.
     pub regions: Vec<RegionSsim>,
@@ -80,10 +82,10 @@ impl SsimResult {
     }
 }
 
-/// Compute per-pixel SSIM map between two RGBA8 images (same size).
+/// Compute SSIM between two RGBA8 images (same size).
 ///
 /// Input: raw RGBA8 bytes, row-major, no padding.
-/// Output: [`SsimResult`] with global mean and per-window breakdown.
+/// Output: [`SsimResult`] with global mean, per-window scores, and per-region breakdown.
 ///
 /// Both buffers must have `width * height * 4` bytes.
 ///
@@ -165,24 +167,34 @@ pub fn compute_ssim(
     };
 
     // Build per-region SSIM objects.
+    // Use proportional start/end boundaries so the last column/row extends to
+    // the full image edge, covering any pixels lost to integer truncation.
     let mut regions = Vec::with_capacity(region_cols * region_rows);
     for ry in 0..region_rows {
         for rx in 0..region_cols {
             let cell_scores = &region_scores[ry * region_cols + rx];
+            // A cell with no SSIM windows sampled has no measured score.
+            // Use NaN rather than defaulting to 1.0, which would misrepresent
+            // unsampled cells (e.g. on very small images) as "perfect".
             let cell_mean = if cell_scores.is_empty() {
-                1.0
+                f64::NAN
             } else {
                 cell_scores.iter().sum::<f64>() / cell_scores.len() as f64
             };
-            let rx_px = (rx * region_w / region_cols) as u32;
-            let ry_px = (ry * region_h / region_rows) as u32;
-            let rw_px = (region_w / region_cols) as u32;
-            let rh_px = (region_h / region_rows) as u32;
+            // Proportional start/end ensures the last cell reaches the image edge
+            // when w/h are not divisible by region_cols/region_rows.
+            let x_start = (rx * region_w / region_cols) as u32;
+            let x_end = ((rx + 1) * region_w / region_cols) as u32;
+            let y_start = (ry * region_h / region_rows) as u32;
+            let y_end = ((ry + 1) * region_h / region_rows) as u32;
+            // Clamp last cell to image boundary.
+            let x_end = if rx == region_cols - 1 { width } else { x_end };
+            let y_end = if ry == region_rows - 1 { height } else { y_end };
             regions.push(RegionSsim {
-                x: rx_px,
-                y: ry_px,
-                width: rw_px.max(1),
-                height: rh_px.max(1),
+                x: x_start,
+                y: y_start,
+                width: (x_end - x_start).max(1),
+                height: (y_end - y_start).max(1),
                 score: cell_mean,
             });
         }

@@ -352,13 +352,17 @@ async fn layer2_validator_regression_returns_structured_error() {
         h,
     );
 
+    // compare() returns Ok(outcome) with passed=false on regression so callers
+    // retain the heatmap/record for diagnostic artifact generation.
     match err {
-        Err(ValidationError::SsimRegression { scene, actual, threshold, delta }) => {
-            assert_eq!(scene, "regression_scene");
-            assert!(actual < threshold, "actual SSIM must be below threshold");
-            assert!(delta < 0.0, "delta must be negative when failing");
+        Ok(outcome) => {
+            assert!(!outcome.passed, "black vs white must fail SSIM regression");
+            assert_eq!(outcome.record.scene_name, "regression_scene");
+            assert!(outcome.record.actual_ssim < outcome.record.threshold,
+                "actual SSIM must be below threshold");
+            assert!(outcome.record.delta < 0.0, "delta must be negative when failing");
         }
-        other => panic!("expected SsimRegression, got {:?}", other),
+        Err(e) => panic!("expected Ok(failed outcome), got Err: {:?}", e),
     }
 
     let _ = fs::remove_dir_all(&dir);

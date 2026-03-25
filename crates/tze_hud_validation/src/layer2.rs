@@ -107,11 +107,15 @@ impl Layer2Validator {
     /// # Algorithm
     /// 1. Load golden reference (fail if missing).
     /// 2. Check dimension parity.
-    /// 3. pHash pre-screen — if identical, skip SSIM (fast path).
-    /// 4. Compute SSIM.
-    /// 5. Generate diff heatmap.
-    /// 6. Build structured failure record.
-    /// 7. Return `Err(ValidationError::SsimRegression)` if below threshold.
+    /// 3. Validate rendered buffer length (returns error instead of panicking).
+    /// 4. pHash pre-screen — if identical, skip SSIM (fast path).
+    /// 5. Compute SSIM.
+    /// 6. Generate diff heatmap.
+    /// 7. Build structured failure record.
+    /// 8. Return `Ok(ComparisonOutcome { passed: false, .. })` on regression so
+    ///    callers retain the heatmap pixels and failure record for diagnostics.
+    ///    Returns `Err` only for I/O failures, missing golden, or dimension/buffer
+    ///    mismatch.
     pub fn compare(
         &self,
         scene_name: &str,
@@ -135,7 +139,21 @@ impl Layer2Validator {
             });
         }
 
-        // Step 3: pHash pre-screen.
+        // Step 3: Validate rendered buffer length before any downstream calls
+        // that would panic on size mismatch (compute_ssim, generate_heatmap).
+        let expected_len = (width as usize)
+            .saturating_mul(height as usize)
+            .saturating_mul(4);
+        if rendered.len() != expected_len {
+            return Err(ValidationError::BufferSizeMismatch {
+                actual_len: rendered.len(),
+                expected_len,
+                width,
+                height,
+            });
+        }
+
+        // Step 4: pHash pre-screen.
         let ps = pre_screen(rendered, &golden.pixels, width, height);
         let threshold = test_type.threshold();
 
@@ -164,13 +182,13 @@ impl Layer2Validator {
             });
         }
 
-        // Step 4: SSIM computation.
+        // Step 5: SSIM computation.
         let ssim = compute_ssim(rendered, &golden.pixels, width, height);
 
-        // Step 5: Diff heatmap.
+        // Step 6: Diff heatmap.
         let heatmap = generate_heatmap(rendered, &golden.pixels, width, height);
 
-        // Step 6: Structured failure record.
+        // Step 7: Structured failure record.
         let record = SsimFailureRecord::from_ssim_result(
             scene_name,
             backend,
@@ -179,18 +197,14 @@ impl Layer2Validator {
             &ssim,
         );
 
-        // Step 7: Return error if failing.
-        if !record.passed {
-            return Err(ValidationError::SsimRegression {
-                scene: scene_name.to_string(),
-                actual: ssim.mean,
-                threshold,
-                delta: ssim.mean - threshold,
-            });
-        }
-
+        // Step 8: Return structured outcome for both pass and fail.
+        // Even on regression, return Ok(ComparisonOutcome { passed: false }) so
+        // callers retain access to the heatmap pixels, per-region scores, and
+        // JSON failure record for diagnostic artifact generation.
+        // Callers that want to propagate an error can check outcome.passed and
+        // map it to ValidationError::SsimRegression themselves.
         Ok(ComparisonOutcome {
-            passed: true,
+            passed: record.passed,
             record,
             heatmap_pixels: heatmap,
             golden_path,
@@ -278,14 +292,19 @@ mod tests {
     }
 
     /// Completely different images fail the layout threshold.
+    /// compare() returns Ok(outcome) with passed=false so callers can access
+    /// the heatmap and failure record for diagnostic artifact generation.
     #[test]
     fn different_images_fail_layout() {
         let (dir, v) = temp_validator_named("different");
         let golden = solid_rgba(64, 64, 0, 0, 0);
         let rendered = solid_rgba(64, 64, 255, 255, 255);
         v.update_golden("diff_scene", "software", &golden, 64, 64).unwrap();
-        let result = v.compare("diff_scene", "software", TestType::Layout, &rendered, 64, 64);
-        assert!(matches!(result, Err(ValidationError::SsimRegression { .. })));
+        let outcome = v.compare("diff_scene", "software", TestType::Layout, &rendered, 64, 64)
+            .expect("compare should return Ok even on regression");
+        assert!(!outcome.passed, "black vs white must fail layout threshold");
+        assert!(!outcome.heatmap_pixels.is_empty(), "failure outcome must include heatmap pixels");
+        assert!(!outcome.record.regions.is_empty(), "failure outcome must include per-region scores");
         let _ = fs::remove_dir_all(&dir);
     }
 

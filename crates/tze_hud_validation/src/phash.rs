@@ -70,9 +70,12 @@ pub fn compute_phash(rgba: &[u8], width: u32, height: u32) -> PHash {
     // The DC coefficient (index 0) is excluded (it carries mean brightness, not structure).
     let mean: f64 = dct[1..].iter().sum::<f64>() / 63.0;
 
-    // Step 4: Build hash bits.
+    // Step 4: Build hash bits from AC coefficients only (indices 1..64).
+    // Index 0 is the DC coefficient (mean brightness) and is excluded both from
+    // the mean computation above and from the hash bits, so the hash captures
+    // only structural/frequency content, not absolute brightness.
     let mut hash = 0u64;
-    for (i, &v) in dct.iter().enumerate().take(64) {
+    for (i, &v) in dct[1..].iter().enumerate() {
         if v > mean {
             hash |= 1u64 << i;
         }
@@ -221,10 +224,10 @@ mod tests {
         let white = solid_rgba(64, 64, 255, 255, 255);
         let result = pre_screen(&black, &white, 64, 64);
         // Black vs white is a large structural difference.
-        matches!(
+        assert!(matches!(
             result,
             PreScreenResult::LikelyRegression { .. } | PreScreenResult::ProceedToSsim
-        );
+        ));
     }
 
     /// PHash of identical images is always equal.

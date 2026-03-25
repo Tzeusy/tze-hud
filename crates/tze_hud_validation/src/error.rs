@@ -34,6 +34,21 @@ pub enum ValidationError {
         golden_h: u32,
     },
 
+    /// The rendered buffer length does not match `width * height * 4`.
+    ///
+    /// Returned by `Layer2Validator::compare` when the caller passes a buffer
+    /// of the wrong size, preventing a downstream panic in `compute_ssim`.
+    #[error(
+        "rendered buffer size mismatch: got {actual_len} bytes, \
+         expected {width}×{height}×4 = {expected_len} bytes"
+    )]
+    BufferSizeMismatch {
+        actual_len: usize,
+        expected_len: usize,
+        width: u32,
+        height: u32,
+    },
+
     /// SSIM fell below the required threshold.
     ///
     /// This is the primary validation failure mode.
