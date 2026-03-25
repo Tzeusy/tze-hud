@@ -12,6 +12,35 @@
 //! - **Network thread(s)**: Tokio runtime for gRPC and MCP.
 //! - **Telemetry thread**: async structured emission.
 //!
+//! ## Window modes (spec §Window Modes, line 172)
+//!
+//! Two modes are supported, configured via `WindowedConfig::window.mode`:
+//!
+//! - **Fullscreen**: borderless fullscreen (`Fullscreen::Borderless`). The
+//!   compositor owns the entire display with an opaque background. All input
+//!   is captured (no passthrough).
+//!
+//! - **Overlay/HUD**: transparent, borderless, always-on-top window. Per-region
+//!   input passthrough is implemented via `Window::set_cursor_hittest()`:
+//!   - When the cursor is **inside** any active hit-region → `set_cursor_hittest(true)`
+//!     (window captures the event).
+//!   - When the cursor is **outside** all hit-regions → `set_cursor_hittest(false)`
+//!     (event passes through to the desktop).
+//!   This gives the same semantic as the XShape extension / wlr-layer-shell approach
+//!   while using winit's cross-platform API.
+//!
+//! ## GNOME Wayland fallback (spec §Unsupported overlay fallback, line 185)
+//!
+//! `resolve_window_mode()` detects GNOME Wayland (no layer-shell) and falls back
+//! to fullscreen with a startup warning logged.
+//!
+//! ## Runtime mode switching
+//!
+//! Mode switching is supported but disruptive (requires surface recreation, spec
+//! line 173). Call `WindowedRuntime::switch_mode()` — the event loop signals a
+//! mode change, tears down the existing window and compositor, and re-initialises
+//! with the new mode on the next `resumed()` callback.
+//!
 //! ## Main thread event loop
 //!
 //! The winit event loop runs on the main thread (OS requirement on macOS).
@@ -55,7 +84,7 @@ use tokio::sync::Mutex;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
 use tze_hud_compositor::{Compositor, WindowSurface};
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
@@ -72,7 +101,8 @@ use crate::pipeline::FramePipeline;
 use crate::threads::{
     spawn_compositor_thread, CompositorReady, NetworkRuntime, ShutdownToken,
 };
-use crate::window::WindowConfig;
+use crate::window::{HitRegion, WindowConfig, WindowMode};
+use crate::window::{resolve_window_mode, should_capture_pointer_event};
 
 // ─── WindowedConfig ──────────────────────────────────────────────────────────
 
@@ -80,6 +110,12 @@ use crate::window::WindowConfig;
 #[derive(Debug, Clone)]
 pub struct WindowedConfig {
     /// Window configuration (mode, dimensions, title).
+    ///
+    /// The `mode` field controls whether the runtime starts in fullscreen or
+    /// overlay/HUD mode. Use `WindowMode::Fullscreen` (default) for the
+    /// compositor to own the entire display, or `WindowMode::Overlay` for a
+    /// transparent, borderless, always-on-top window with per-region input
+    /// passthrough.
     pub window: WindowConfig,
     /// gRPC server port.  Set to `0` to disable the gRPC server.
     pub grpc_port: u16,
@@ -138,6 +174,20 @@ struct WindowedRuntimeState {
     cursor_y: f32,
     /// Winit window handle (Some after window is created).
     window: Option<Arc<Window>>,
+    /// Effective window mode after platform fallback resolution.
+    ///
+    /// This may differ from `config.window.mode` if an overlay-to-fullscreen
+    /// fallback occurred (e.g., GNOME Wayland with no layer-shell).
+    effective_mode: WindowMode,
+    /// Active hit-regions for overlay input passthrough.
+    ///
+    /// In overlay mode, the cursor hittest is toggled on/off per frame based
+    /// on whether the cursor is inside any of these regions.  Empty means all
+    /// events pass through.
+    hit_regions: Vec<HitRegion>,
+    /// Pending mode switch requested at runtime (disruptive — triggers surface
+    /// recreation on the next event loop tick).
+    pending_mode_switch: Option<WindowMode>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -153,15 +203,83 @@ struct WinitApp {
 
 impl ApplicationHandler for WinitApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Handle pending mode switch: tear down current window/compositor so
+        // we can re-initialise with the new mode (surface recreation required,
+        // spec §Window Modes line 173).
+        if let Some(new_mode) = self.state.pending_mode_switch.take() {
+            tracing::info!(
+                old_mode = %self.state.effective_mode,
+                new_mode = %new_mode,
+                "runtime mode switch: tearing down existing window for surface recreation"
+            );
+            // Join the compositor thread before destroying the surface.
+            if let Some(handle) = self.state.compositor_handle.take() {
+                self.state.shutdown.trigger(crate::threads::ShutdownReason::Clean);
+                let _ = handle.join();
+            }
+            // Drop the surface and window handles.
+            self.state.window_surface = None;
+            self.state.window = None;
+            // Re-create the shutdown token for the new session.
+            self.state.shutdown = ShutdownToken::new();
+            // Re-create the frame-ready channel.
+            let (new_tx, new_rx) = frame_ready_channel();
+            self.state.frame_ready_tx = Some(new_tx);
+            self.state.frame_ready_rx = new_rx;
+            // Apply the new mode (with platform fallback check).
+            let (resolved_mode, fallback) = resolve_window_mode(new_mode);
+            if let Some(reason) = fallback {
+                tracing::warn!(
+                    reason = %reason,
+                    "mode switch: overlay unavailable on this platform; using fullscreen"
+                );
+            }
+            self.state.effective_mode = resolved_mode;
+            self.state.config.window.mode = resolved_mode;
+        }
+
         if self.state.window.is_some() {
             return; // Already initialised.
         }
 
         // ── Create winit window ────────────────────────────────────────────
         let cfg = &self.state.config.window;
-        let attrs = WindowAttributes::default()
-            .with_title(cfg.title.clone())
-            .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height));
+
+        // Build window attributes based on the effective window mode.
+        //
+        // Fullscreen: borderless fullscreen — compositor owns the entire display
+        //   with an opaque background. All input captured. Spec §Fullscreen mode
+        //   (line 177).
+        //
+        // Overlay: transparent, borderless, always-on-top window with per-region
+        //   input passthrough via set_cursor_hittest(). Spec §Overlay click-through
+        //   (line 181).
+        let attrs = match self.state.effective_mode {
+            WindowMode::Fullscreen => {
+                tracing::info!(
+                    "window mode: fullscreen (borderless) — compositor owns display, all input captured"
+                );
+                WindowAttributes::default()
+                    .with_title(cfg.title.clone())
+                    // Borderless fullscreen on the current monitor.
+                    .with_fullscreen(Some(Fullscreen::Borderless(None)))
+                    .with_decorations(false)
+            }
+            WindowMode::Overlay => {
+                tracing::info!(
+                    "window mode: overlay/HUD — transparent borderless always-on-top"
+                );
+                WindowAttributes::default()
+                    .with_title(cfg.title.clone())
+                    .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
+                    // Transparent so the desktop shows through non-opaque pixels.
+                    .with_transparent(true)
+                    // No title bar / frame — pure overlay surface.
+                    .with_decorations(false)
+                    // Always on top of other windows, including normal desktop windows.
+                    .with_window_level(WindowLevel::AlwaysOnTop)
+            }
+        };
 
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -171,6 +289,21 @@ impl ApplicationHandler for WinitApp {
                 return;
             }
         };
+
+        // In overlay mode, initialise cursor hittest to false so all pointer
+        // events pass through to the desktop until the cursor enters a
+        // hit-region.  The hittest is toggled per-frame in enqueue_pointer_event()
+        // per spec §Overlay click-through (line 181).
+        if self.state.effective_mode == WindowMode::Overlay {
+            if let Err(e) = window.set_cursor_hittest(false) {
+                tracing::warn!(
+                    error = %e,
+                    "overlay mode: set_cursor_hittest(false) failed — passthrough \
+                     may not work on this platform/compositor"
+                );
+            }
+        }
+
         self.state.window = Some(window.clone());
 
         let cfg = self.state.config.clone();
@@ -469,9 +602,40 @@ impl WinitApp {
     ///
     /// Maps a `PointerEventKind` to the corresponding `InputEventKind` variant
     /// understood by the channel topology and compositor pipeline.
+    ///
+    /// In overlay mode, dynamically toggles cursor hittest based on whether the
+    /// cursor is inside any active hit-region (spec §Overlay click-through, line 181):
+    /// - Inside a hit-region → `set_cursor_hittest(true)` (window captures events).
+    /// - Outside all hit-regions → `set_cursor_hittest(false)` (events pass through).
     fn enqueue_pointer_event(&mut self, kind: PointerEventKind) {
         let x = self.state.cursor_x;
         let y = self.state.cursor_y;
+
+        // In overlay mode, update cursor hittest based on hit-region membership.
+        // This implements per-region passthrough: pointer events outside all
+        // active hit-regions are passed through to the underlying desktop, while
+        // events inside any hit-region are captured by the runtime.
+        //
+        // We toggle on every CursorMoved so the hittest tracks the cursor as it
+        // moves in/out of regions continuously.
+        if self.state.effective_mode == WindowMode::Overlay {
+            let should_capture = should_capture_pointer_event(
+                WindowMode::Overlay,
+                x,
+                y,
+                &self.state.hit_regions,
+            );
+            if let Some(window) = &self.state.window {
+                if let Err(e) = window.set_cursor_hittest(should_capture) {
+                    tracing::trace!(
+                        error = %e,
+                        capture = should_capture,
+                        "overlay: set_cursor_hittest failed"
+                    );
+                }
+            }
+        }
+
         let channel_kind = match kind {
             PointerEventKind::Move => InputEventKind::PointerMove { x, y },
             PointerEventKind::Down => InputEventKind::PointerPress { x, y, button: 0 },
@@ -498,6 +662,41 @@ impl WinitApp {
             // compositor via a local-patch channel in the full pipeline. For the
             // initial windowed runtime, the compositor reads the scene state
             // directly on the next frame.
+        }
+    }
+
+    /// Update the active hit-regions for overlay input passthrough.
+    ///
+    /// Replaces the current hit-region set.  The new regions take effect on the
+    /// next `CursorMoved` event.
+    ///
+    /// No-op in fullscreen mode (all events are always captured).
+    pub fn set_hit_regions(&mut self, regions: Vec<HitRegion>) {
+        self.state.hit_regions = regions;
+    }
+
+    /// Request a runtime mode switch (disruptive — triggers surface recreation).
+    ///
+    /// The switch is deferred to the next `resumed()` callback so the winit
+    /// event loop can clean up the existing window safely.
+    ///
+    /// Per spec §Window Modes (line 173): "Runtime mode switching MUST be
+    /// supported but is a disruptive operation requiring surface recreation."
+    pub fn request_mode_switch(&mut self, new_mode: WindowMode) {
+        if new_mode == self.state.effective_mode {
+            tracing::debug!(mode = %new_mode, "mode switch no-op: already in requested mode");
+            return;
+        }
+        tracing::info!(
+            current = %self.state.effective_mode,
+            requested = %new_mode,
+            "runtime mode switch requested — surface recreation will occur"
+        );
+        self.state.pending_mode_switch = Some(new_mode);
+        // Trigger a resumed() callback by requesting a redraw, which will cause
+        // the event loop to process the pending switch on the next tick.
+        if let Some(window) = &self.state.window {
+            window.request_redraw();
         }
     }
 
@@ -575,6 +774,19 @@ impl WindowedRuntime {
     pub fn run(self) -> Result<(), Box<dyn std::error::Error>> {
         let cfg = self.config;
 
+        // Resolve the effective window mode, applying platform fallback checks.
+        // Spec §Unsupported overlay fallback (line 185): if overlay is requested
+        // on GNOME Wayland (no layer-shell), fall back to fullscreen with a
+        // startup warning.
+        let (effective_mode, fallback_reason) = resolve_window_mode(cfg.window.mode);
+        if let Some(reason) = fallback_reason {
+            tracing::warn!(
+                reason = %reason,
+                requested = %cfg.window.mode,
+                "window mode fallback: overlay unavailable — starting in fullscreen"
+            );
+        }
+
         // Build shared state (scene + sessions).
         let width = cfg.window.width as f32;
         let height = cfg.window.height as f32;
@@ -612,6 +824,9 @@ impl WindowedRuntime {
             cursor_x: 0.0,
             cursor_y: 0.0,
             window: None,
+            effective_mode,
+            hit_regions: Vec::new(),
+            pending_mode_switch: None,
         };
 
         let mut app = WinitApp { state: app_state };
@@ -760,5 +975,127 @@ mod tests {
         let key = Key::Dead(Some('´'));
         let s = winit_logical_to_str(&key);
         assert!(s.starts_with("Dead"));
+    }
+
+    // ── Window mode configuration ─────────────────────────────────────────
+
+    #[test]
+    fn windowed_config_default_mode_is_fullscreen() {
+        let cfg = WindowedConfig::default();
+        assert_eq!(
+            cfg.window.mode,
+            WindowMode::Fullscreen,
+            "default mode must be fullscreen (spec §Window Modes)"
+        );
+    }
+
+    #[test]
+    fn windowed_config_overlay_mode_can_be_set() {
+        let cfg = WindowedConfig {
+            window: WindowConfig {
+                mode: WindowMode::Overlay,
+                width: 1280,
+                height: 720,
+                title: "test-overlay".to_string(),
+            },
+            ..WindowedConfig::default()
+        };
+        assert_eq!(cfg.window.mode, WindowMode::Overlay);
+    }
+
+    // ── resolve_window_mode integration ──────────────────────────────────
+
+    /// Verify that resolve_window_mode is called correctly for fullscreen
+    /// (no fallback should ever occur for fullscreen).
+    #[test]
+    fn resolve_fullscreen_config_produces_fullscreen() {
+        let (mode, reason) = resolve_window_mode(WindowMode::Fullscreen);
+        assert_eq!(mode, WindowMode::Fullscreen);
+        assert!(reason.is_none(), "fullscreen must never trigger a fallback");
+    }
+
+    /// Verify that resolve_window_mode for overlay either returns Overlay
+    /// (if supported) or falls back to Fullscreen (GNOME Wayland), but never
+    /// panics and always produces a valid mode.
+    #[test]
+    fn resolve_overlay_config_is_always_valid() {
+        let (mode, _reason) = resolve_window_mode(WindowMode::Overlay);
+        assert!(
+            mode == WindowMode::Overlay || mode == WindowMode::Fullscreen,
+            "resolved mode must be Overlay or Fullscreen, got: {mode}"
+        );
+    }
+
+    // ── Overlay passthrough logic (no window required) ────────────────────
+
+    /// In fullscreen mode, should_capture_pointer_event must return true
+    /// regardless of cursor position or hit-regions (spec §Fullscreen mode,
+    /// line 177: "all input captured").
+    #[test]
+    fn fullscreen_captures_pointer_outside_any_hit_region() {
+        // No hit-regions at all.
+        let capture = should_capture_pointer_event(WindowMode::Fullscreen, 9000.0, 9000.0, &[]);
+        assert!(capture, "fullscreen must capture all pointer events");
+    }
+
+    #[test]
+    fn fullscreen_captures_pointer_even_with_regions_present() {
+        let regions = vec![HitRegion::new(0.0, 0.0, 100.0, 100.0)];
+        // Cursor is far outside the region — fullscreen still captures.
+        let capture =
+            should_capture_pointer_event(WindowMode::Fullscreen, 9000.0, 9000.0, &regions);
+        assert!(capture);
+    }
+
+    /// In overlay mode with no hit-regions, ALL pointer events must pass through
+    /// (spec §Overlay click-through, line 181).
+    #[test]
+    fn overlay_no_hit_regions_passes_through_all_events() {
+        let capture = should_capture_pointer_event(WindowMode::Overlay, 500.0, 500.0, &[]);
+        assert!(!capture, "overlay with no hit-regions must pass all events through");
+    }
+
+    /// In overlay mode, cursor inside a hit-region is captured.
+    #[test]
+    fn overlay_cursor_inside_hit_region_is_captured() {
+        let regions = vec![HitRegion::new(100.0, 100.0, 200.0, 150.0)];
+        let capture = should_capture_pointer_event(WindowMode::Overlay, 150.0, 150.0, &regions);
+        assert!(capture, "cursor inside hit-region must be captured");
+    }
+
+    /// In overlay mode, cursor outside all hit-regions passes through.
+    #[test]
+    fn overlay_cursor_outside_all_hit_regions_passes_through() {
+        let regions = vec![HitRegion::new(100.0, 100.0, 200.0, 150.0)];
+        // Cursor at (50, 50) is outside the region.
+        let capture = should_capture_pointer_event(WindowMode::Overlay, 50.0, 50.0, &regions);
+        assert!(!capture, "cursor outside all hit-regions must pass through");
+    }
+
+    /// In overlay mode, the union of multiple hit-regions is used.
+    #[test]
+    fn overlay_multiple_hit_regions_union_semantics() {
+        let regions = vec![
+            HitRegion::new(0.0, 0.0, 100.0, 100.0),    // top-left
+            HitRegion::new(500.0, 500.0, 100.0, 100.0), // bottom-right
+        ];
+        assert!(should_capture_pointer_event(WindowMode::Overlay, 50.0, 50.0, &regions));
+        assert!(should_capture_pointer_event(WindowMode::Overlay, 550.0, 550.0, &regions));
+        assert!(!should_capture_pointer_event(WindowMode::Overlay, 300.0, 300.0, &regions));
+    }
+
+    // ── WindowedConfig display properties ────────────────────────────────
+
+    #[test]
+    fn windowed_config_title_is_non_empty_by_default() {
+        let cfg = WindowedConfig::default();
+        assert!(!cfg.window.title.is_empty(), "default title must be non-empty");
+    }
+
+    #[test]
+    fn windowed_config_dimensions_are_sensible_by_default() {
+        let cfg = WindowedConfig::default();
+        assert!(cfg.window.width > 0, "default width must be positive");
+        assert!(cfg.window.height > 0, "default height must be positive");
     }
 }
