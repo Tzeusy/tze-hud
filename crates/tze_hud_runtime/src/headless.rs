@@ -450,6 +450,7 @@ mod tests {
             height: 64,
             grpc_port: 0,
             psk: "test".to_string(),
+            config_toml: None,
         };
         let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
         runtime.render_frame().await;
