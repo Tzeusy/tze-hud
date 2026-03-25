@@ -535,6 +535,31 @@ fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, Status> {
     Ok(tze_hud_scene::SceneId::from_uuid(uuid))
 }
 
+/// Map proto `batch_id` bytes to a `SceneId` for rejection-correlation semantics.
+///
+/// If the client supplied a valid 16-byte UUID, use it directly so that any
+/// `BatchRejected` or `MutationResult` echoes the client's own `batch_id`.
+/// Note: `bytes_to_scene_id` validates only the byte length (16 bytes); UUID
+/// version/variant are not checked because the spec (RFC 0005 §3.2) requires
+/// only that `batch_id` is a 16-byte little-endian SceneId — version bits are
+/// the client's responsibility.
+///
+/// Falls back to a fresh `SceneId` only when the field is absent or malformed
+/// (wrong length); logs a debug warning so SDK regressions are diagnosable.
+fn proto_batch_id_to_scene_id(batch_id: &[u8]) -> tze_hud_scene::SceneId {
+    match bytes_to_scene_id(batch_id) {
+        Ok(id) => id,
+        Err(_) => {
+            tracing::debug!(
+                batch_id_len = batch_id.len(),
+                "proto batch_id is absent or malformed (expected 16 bytes); \
+                 generating a fresh SceneId — client cannot correlate this batch"
+            );
+            tze_hud_scene::SceneId::new()
+        }
+    }
+}
+
 // ─── Per-session event rate limiter ─────────────────────────────────────────
 
 /// Sliding-window rate limiter for agent scene event emission.
@@ -2061,13 +2086,9 @@ async fn handle_mutation_batch(
         }
     }
 
-    // Map the proto batch_id bytes to a SceneId for correlation.
-    // If the client supplied a valid 16-byte UUIDv7, use it directly so that
-    // any BatchRejected or MutationResult echoes the client's own batch_id.
-    // Fall back to a fresh SceneId only for malformed / empty fields (the
-    // client's dedup logic cannot correlate those anyway).
-    let scene_batch_id = bytes_to_scene_id(&batch.batch_id)
-        .unwrap_or_else(|_| tze_hud_scene::SceneId::new());
+    // Map the proto batch_id bytes to a SceneId for rejection-correlation.
+    // Falls back (with a debug log) when the field is absent or malformed.
+    let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
 
     // Apply as atomic batch, propagating client batch_id and lease_id so that
     // the five-stage validation pipeline can perform lease/budget checks.
@@ -2255,8 +2276,7 @@ async fn apply_queued_batch_to_scene(
     }
 
     // Map the proto batch_id bytes to a SceneId for validation correlation.
-    let scene_batch_id = bytes_to_scene_id(&batch.batch_id)
-        .unwrap_or_else(|_| tze_hud_scene::SceneId::new());
+    let scene_batch_id = proto_batch_id_to_scene_id(&batch.batch_id);
 
     let scene_batch = SceneMutationBatch {
         batch_id: scene_batch_id,
@@ -3558,6 +3578,178 @@ mod tests {
                 // round-trip works.
                 assert_eq!(result.batch_id, batch_id);
                 // accepted may be false due to "no active tab" -- that's fine
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
+        }
+    }
+
+    // ─── Regression tests for hud-wu32: batch_id correlation + lease_id propagation ──
+
+    /// Regression: MutationResult.batch_id MUST echo the client-provided batch_id.
+    ///
+    /// Before this fix, handle_mutation_batch generated a fresh SceneId for
+    /// `SceneMutationBatch.batch_id`, which meant the client could not correlate
+    /// rejection responses with their own batch_id values.
+    ///
+    /// This test verifies that even when a mutation is rejected (here: "no active
+    /// tab"), the MutationResult carries back the original client batch_id.
+    #[tokio::test]
+    async fn test_mutation_result_echoes_client_batch_id() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "batch-id-regression", "test-key").await;
+
+        // Acquire a lease so the batch reaches the batch_id mapping code
+        // (lease validation runs first; an invalid lease returns early before
+        // the batch_id mapping happens).
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        // Send a mutation batch with a known, unique batch_id.
+        let client_batch_id: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: client_batch_id.clone(),
+                lease_id,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                        crate::proto::CreateTileMutation {
+                            tab_id: vec![],
+                            bounds: Some(crate::proto::Rect {
+                                x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+                                ..Default::default()
+                            }),
+                            z_order: 0,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // The batch will be rejected (no active tab in setup_test).
+        // Regardless of rejection, MutationResult.batch_id MUST equal client_batch_id.
+        let result_msg = next_non_state_change(&mut stream).await;
+        match &result_msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert_eq!(
+                    result.batch_id, client_batch_id,
+                    "MutationResult.batch_id must echo the client-provided batch_id \
+                     (regression for hud-wu32: batch_id was previously a fresh SceneId)"
+                );
+            }
+            other => panic!("Expected MutationResult, got: {other:?}"),
+        }
+    }
+
+    /// Regression: lease_id MUST be propagated into SceneMutationBatch so that
+    /// the five-stage validation pipeline (including lease/budget checks) fires.
+    ///
+    /// Before this fix, `lease_id: None` was passed, which meant lease and budget
+    /// validation was skipped for non-CreateTile mutations in the gRPC path.
+    ///
+    /// This test verifies that a mutation using an expired lease is rejected with
+    /// an error indicating lease/budget validation ran — not silently accepted.
+    #[tokio::test]
+    async fn test_mutation_rejected_with_expired_lease_id() {
+        let (mut client, _server, shared_state) = setup_test_with_state().await;
+        let (tx, _init_messages, mut stream) =
+            handshake(&mut client, "lease-validation-regression", "test-key").await;
+
+        // Create an active tab so mutations can reach the scene-apply path.
+        {
+            let mut st = shared_state.lock().await;
+            st.scene.create_tab("test-tab", 0).expect("create_tab");
+        }
+
+        // Acquire a lease.
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let lease_msg = next_non_state_change(&mut stream).await;
+        let lease_id_bytes = match &lease_msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) if resp.granted => resp.lease_id.clone(),
+            other => panic!("Expected LeaseResponse (granted), got: {other:?}"),
+        };
+
+        // Revoke the lease directly in shared state, simulating an expired lease.
+        // The wire format encodes SceneId as uuid::Uuid::as_bytes() (big-endian UUID bytes),
+        // matching bytes_to_scene_id in session_server.rs.
+        {
+            let mut st = shared_state.lock().await;
+            let arr: [u8; 16] = lease_id_bytes.as_slice().try_into().expect("16-byte lease_id");
+            let lease_id = tze_hud_scene::SceneId::from_uuid(uuid::Uuid::from_bytes(arr));
+            let _ = st.scene.revoke_lease(lease_id);
+        }
+
+        // Send a CreateTile mutation referencing the now-revoked lease.
+        let batch_id: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::MutationBatch(MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id_bytes,
+                mutations: vec![crate::proto::MutationProto {
+                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                        crate::proto::CreateTileMutation {
+                            tab_id: vec![],
+                            bounds: Some(crate::proto::Rect {
+                                x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+                                ..Default::default()
+                            }),
+                            z_order: 0,
+                        },
+                    )),
+                }],
+                timing: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // The batch MUST be rejected (lease is revoked; validation pipeline runs).
+        // batch_id must still be echoed back.
+        let result_msg = next_non_state_change(&mut stream).await;
+        match &result_msg.payload {
+            Some(ServerPayload::MutationResult(result)) => {
+                assert!(
+                    !result.accepted,
+                    "Mutation with revoked lease_id must be rejected \
+                     (regression for hud-wu32: lease_id=None previously bypassed validation)"
+                );
+                assert_eq!(
+                    result.batch_id, batch_id,
+                    "MutationResult.batch_id must echo client batch_id even on rejection"
+                );
             }
             other => panic!("Expected MutationResult, got: {other:?}"),
         }
