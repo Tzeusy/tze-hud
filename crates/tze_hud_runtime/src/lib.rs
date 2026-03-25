@@ -31,6 +31,18 @@
 //! Inter-thread communication uses bounded channels only (spec §Channel Topology,
 //! line 272). See [`channels`] for the complete channel inventory.
 //!
+//! ## Feature flags
+//!
+//! | Feature | Purpose |
+//! |---------|---------|
+//! | `headless` | Enable headless GPU surface (required for CI and tests) |
+//! | `dev-mode` | Allow `HeadlessConfig { config_toml: None }` — grants unrestricted capabilities to all agents. **MUST NOT be enabled in production binaries.** Safe for integration tests, examples, and local development. |
+//!
+//! In unit tests (compiled with `cfg(test)`), the `dev-mode` bypass is also
+//! available without the feature flag, because unit tests run inside the
+//! library and `cfg(test)` is set by the compiler. Integration test binaries
+//! (in `tests/` directories) require `features = ["dev-mode"]` explicitly.
+//!
 //! ## Bead 3: Interruption classification and quiet hours
 //!
 //! - [`attention_budget`] — per-agent and per-zone rolling interruption budgets,

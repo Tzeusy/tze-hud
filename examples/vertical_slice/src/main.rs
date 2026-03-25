@@ -42,8 +42,11 @@
 //! - `configuration/spec.md` §Requirement: Capability Vocabulary (lines 149-164)
 //! - `validation-framework/spec.md`: "Tests SHALL read like usage examples" (line 398)
 //!
-//! Run headless:  cargo run -p vertical_slice -- --headless
-//! Run windowed:  cargo run -p vertical_slice
+//! Run headless (dev mode — unrestricted caps):
+//!   cargo run -p vertical_slice --features dev-mode -- --headless
+//!
+//! Run windowed:
+//!   cargo run -p vertical_slice
 
 #[allow(deprecated)]
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
@@ -118,13 +121,19 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
 
     // ─── Initialize runtime ────────────────────────────────────────────────
     //
-    // `config_toml: None` runs in dev mode: all capabilities are granted
-    // to any agent (fallback_unrestricted = true). This is the right choice
-    // for the headless reference demo.
+    // `config_toml: None` activates dev mode: all capabilities are granted to
+    // any agent (fallback_unrestricted = true).  This path requires the
+    // `dev-mode` feature to be enabled at compile time; production builds
+    // without this feature will return an error from `HeadlessRuntime::new`.
     //
-    // For a registered-agent flow (production), set config_toml to a TOML
-    // string that lists the agent in `[agents.registered]` with its allowed
-    // capability set. Example:
+    // Run with: cargo run -p vertical_slice --features dev-mode -- --headless
+    //
+    // For a registered-agent flow (production), supply a TOML config string
+    // via `HeadlessConfig { config_toml: Some(config_toml.to_string()), .. }`.
+    // The agent must appear in `[agents.registered]` with its allowed
+    // capability set; unlisted agents receive guest policy (no capabilities).
+    //
+    // Example production config:
     //
     //   let config_toml = r#"
     //   [runtime]
@@ -143,15 +152,12 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     //   ]
     //   "#;
     //   HeadlessConfig { config_toml: Some(config_toml.to_string()), .. }
-    //
-    // With a registered-agent config, an unregistered agent receives guest
-    // policy (no capabilities) instead of the unrestricted dev grant.
     let config = HeadlessConfig {
         width: 800,
         height: 600,
         grpc_port: 50051,
         psk: "vertical-slice-key".to_string(),
-        config_toml: None, // dev mode — all capabilities granted
+        config_toml: None, // dev-mode: requires --features dev-mode at build time
     };
 
     let mut runtime = HeadlessRuntime::new(config).await?;

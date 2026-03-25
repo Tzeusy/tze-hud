@@ -10,11 +10,19 @@ path = "src/main.rs"
 
 [features]
 headless = ["tze_hud_runtime/headless"]
+## Enable dev-mode to allow `config_toml: None` (unrestricted capability grants).
+## Required for the headless demo path which uses `config_toml: None`.
+## MUST NOT be used in production deployments.
+dev-mode = ["tze_hud_runtime/dev-mode"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
 tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
-tze_hud_runtime = { path = "../../crates/tze_hud_runtime" }
+# dev-mode is enabled unconditionally for this example: it uses config_toml: None
+# in both the binary and its integration tests (tests/budget_assertions.rs).
+# This is correct — the vertical_slice example is a development reference, not
+# a production binary.
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
 tze_hud_input = { path = "../../crates/tze_hud_input" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }

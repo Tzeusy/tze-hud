@@ -30,13 +30,17 @@ path = "soak.rs"
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`
 # feature is re-exported here for downstream tooling that may set it.
+#
+# dev-mode is required because multi_agent.rs uses config_toml: None.
+# Integration tests are separate binaries; cfg(test) is set in them but NOT
+# in the library they link, so dev-mode must be enabled explicitly here.
 [features]
 headless = ["tze_hud_compositor/headless"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
 tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
-tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["headless"] }
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["headless", "dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
 tokio = { workspace = true }
