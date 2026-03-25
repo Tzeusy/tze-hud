@@ -193,7 +193,10 @@ pub trait LeaseStateMachine<C: Clock> {
     fn release(&mut self) -> Result<(), TransitionError>;
 
     /// REQUESTED → DENIED (capability or budget check failed).
-    fn deny(&mut self) -> Result<(), TransitionError>;
+    ///
+    /// The `reason` is recorded in the emitted `LeaseAuditEvent` and surfaced
+    /// in the `LeaseResponse.deny_reason` wire field.
+    fn deny(&mut self, reason: DenyReason) -> Result<(), TransitionError>;
 
     // ── Queries ───────────────────────────────────────────────────────────────
 
@@ -221,6 +224,18 @@ pub trait LeaseStateMachine<C: Clock> {
     /// The implementation should update `budget_tier` accordingly.
     /// At ≥ 80% → Warning; warning unresolved ≥ 5s → Throttle; throttle ≥ 30s → Revocation.
     fn update_budget_usage(&mut self, usage_fraction: f64) -> Result<(), TransitionError>;
+
+    // ── Audit event channel ───────────────────────────────────────────────────
+
+    /// Drain and return all buffered audit events since the last call.
+    ///
+    /// Spec requirement: "Each transition produces an auditable event."
+    /// Events are queued internally on each successful state transition and
+    /// delivered here for routing to `lease_changes` subscribers.
+    ///
+    /// Calling this method clears the internal buffer.  Callers should drain
+    /// after every transition to prevent unbounded growth.
+    fn drain_events(&mut self) -> Vec<LeaseAuditEvent>;
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -261,7 +276,7 @@ pub mod tests {
     pub fn test_denied_is_terminal<S: LeaseStateMachine<TestClock>>() {
         let clock = TestClock::new(0);
         let mut lease = S::new_requested(60_000, RenewalPolicy::Manual, clock);
-        lease.deny().expect("deny from REQUESTED should succeed");
+        lease.deny(DenyReason::CapabilitiesExceeded).expect("deny from REQUESTED should succeed");
         assert_eq!(lease.state(), LeaseState::Denied);
         assert!(lease.is_terminal());
     }
@@ -678,5 +693,263 @@ pub mod tests {
         lease.suspend().unwrap();
         lease.revoke(RevokeReason::SuspensionTimeout).expect("revoke suspended");
         assert_eq!(lease.state(), LeaseState::Revoked);
+    }
+
+    // ─── Audit event emission tests ───────────────────────────────────────────
+
+    /// WHEN activate() succeeds THEN a Granted event is emitted and drained.
+    #[test]
+    fn impl_audit_event_granted_on_activate() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(1_000);
+        let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
+        lease.activate().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1, "exactly one event expected");
+        match &events[0].kind {
+            LeaseEventKind::Granted { identity, expires_at_wall_us } => {
+                assert_eq!(identity.ttl_ms, 60_000);
+                assert!(expires_at_wall_us.is_some(), "finite TTL should produce expires_at");
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
+        // Draining again must return empty — events are consumed.
+        assert!(lease.drain_events().is_empty(), "second drain must be empty");
+    }
+
+    /// WHEN activate() succeeds with ttl_ms=0 THEN Granted event has no expiry.
+    #[test]
+    fn impl_audit_event_granted_indefinite_has_no_expiry() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(0);
+        let mut lease = Impl::new_requested(0, RenewalPolicy::Manual, clock);
+        lease.activate().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            LeaseEventKind::Granted { expires_at_wall_us, .. } => {
+                assert!(expires_at_wall_us.is_none(), "indefinite lease must not have expires_at");
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
+    }
+
+    /// WHEN deny() is called THEN a Denied event is emitted with the correct reason.
+    #[test]
+    fn impl_audit_event_denied_on_deny() {
+        use crate::lease::types::{DenyReason, LeaseEventKind};
+        let clock = TestClock::new(0);
+        let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
+        lease.deny(DenyReason::MaxRuntimeLeasesExceeded).unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            LeaseEventKind::Denied { reason } => {
+                assert_eq!(*reason, DenyReason::MaxRuntimeLeasesExceeded);
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    /// WHEN suspend() succeeds THEN a Suspended event is emitted with the correct fields.
+    #[test]
+    fn impl_audit_event_suspended_on_suspend() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(5_000);
+        let mut lease: Impl = make_active(clock.clone());
+        // Drain the Granted event from activate.
+        let _ = lease.drain_events();
+        clock.advance(2_000);
+        lease.suspend().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            LeaseEventKind::Suspended { ttl_remaining_ms, .. } => {
+                // ttl started at 60_000, 2_000ms elapsed → ~58_000 remaining
+                assert!(*ttl_remaining_ms > 57_000 && *ttl_remaining_ms <= 60_000,
+                    "ttl_remaining_ms={ttl_remaining_ms}");
+            }
+            other => panic!("expected Suspended, got {other:?}"),
+        }
+    }
+
+    /// WHEN resume() succeeds THEN a Resumed event is emitted with suspension_duration_us.
+    #[test]
+    fn impl_audit_event_resumed_on_resume() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock.clone());
+        let _ = lease.drain_events();
+        lease.suspend().unwrap();
+        let _ = lease.drain_events();
+        clock.advance(5_000); // 5s suspension
+        lease.resume().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            LeaseEventKind::Resumed { suspension_duration_us, .. } => {
+                // 5_000ms → 5_000_000us
+                assert!(
+                    *suspension_duration_us >= 4_900_000 && *suspension_duration_us <= 5_100_000,
+                    "suspension_duration_us={suspension_duration_us}"
+                );
+            }
+            other => panic!("expected Resumed, got {other:?}"),
+        }
+    }
+
+    /// WHEN orphan() succeeds THEN an Orphaned event is emitted with grace expiry.
+    #[test]
+    fn impl_audit_event_orphaned_on_orphan() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(10_000);
+        let mut lease: Impl = make_active(clock.clone());
+        let _ = lease.drain_events();
+        lease.orphan().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            LeaseEventKind::Orphaned { grace_expires_at_wall_us } => {
+                // now=10_000ms, grace=30_000ms → expires at 40_000ms → 40_000_000us
+                assert_eq!(*grace_expires_at_wall_us, 40_000_000,
+                    "grace_expires_at_wall_us should be (now + grace) * 1000");
+            }
+            other => panic!("expected Orphaned, got {other:?}"),
+        }
+    }
+
+    /// WHEN reconnect() succeeds THEN a Reconnected event is emitted.
+    #[test]
+    fn impl_audit_event_reconnected_on_reconnect() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock.clone());
+        let _ = lease.drain_events();
+        lease.orphan().unwrap();
+        let _ = lease.drain_events();
+        clock.advance(1_000);
+        lease.reconnect().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events[0].kind, LeaseEventKind::Reconnected),
+            "expected Reconnected, got {:?}", events[0].kind
+        );
+    }
+
+    /// WHEN expire() succeeds THEN an Expired event is emitted.
+    #[test]
+    fn impl_audit_event_expired_on_expire() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock);
+        let _ = lease.drain_events();
+        lease.expire().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events[0].kind, LeaseEventKind::Expired),
+            "expected Expired, got {:?}", events[0].kind
+        );
+    }
+
+    /// WHEN revoke() succeeds THEN a Revoked event is emitted with the reason.
+    #[test]
+    fn impl_audit_event_revoked_on_revoke() {
+        use crate::lease::types::{LeaseEventKind, RevokeReason as AuditRevokeReason};
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock);
+        let _ = lease.drain_events();
+        lease.revoke(RevokeReason::ViewerDismissed).unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        match &events[0].kind {
+            LeaseEventKind::Revoked { reason } => {
+                assert_eq!(*reason, AuditRevokeReason::ViewerDismissed);
+            }
+            other => panic!("expected Revoked, got {other:?}"),
+        }
+    }
+
+    /// WHEN release() succeeds THEN a Released event is emitted.
+    #[test]
+    fn impl_audit_event_released_on_release() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock);
+        let _ = lease.drain_events();
+        lease.release().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events[0].kind, LeaseEventKind::Released),
+            "expected Released, got {:?}", events[0].kind
+        );
+    }
+
+    /// WHEN a transition fails THEN no audit event is emitted.
+    #[test]
+    fn impl_audit_no_event_on_failed_transition() {
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock);
+        let _ = lease.drain_events();
+        // Attempt invalid suspend from Active while already Active — try invalid
+        // transition: double-suspend should fail.
+        lease.suspend().unwrap();
+        let _ = lease.drain_events();
+        // Now try suspend again from SUSPENDED — should fail, no event.
+        let result = lease.suspend();
+        assert!(result.is_err());
+        assert!(
+            lease.drain_events().is_empty(),
+            "failed transition must not emit an event"
+        );
+    }
+
+    /// WHEN set_lease_id() is called before activate() THEN the Granted event carries the id.
+    #[test]
+    fn impl_audit_event_carries_assigned_lease_id() {
+        use crate::types::SceneId;
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(0);
+        let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
+        let id = SceneId::new();
+        lease.set_lease_id(id);
+        lease.activate().unwrap();
+        let events = lease.drain_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].lease_id, id, "event must carry the assigned lease id");
+        match &events[0].kind {
+            LeaseEventKind::Granted { identity, .. } => {
+                assert_eq!(identity.lease_id, id);
+            }
+            other => panic!("expected Granted, got {other:?}"),
+        }
+    }
+
+    /// WHEN events are drained mid-sequence THEN each drain returns only new events.
+    #[test]
+    fn impl_audit_drain_is_incremental() {
+        use crate::lease::types::LeaseEventKind;
+        let clock = TestClock::new(0);
+        let mut lease: Impl = make_active(clock.clone());
+
+        // After activate: 1 event (Granted).
+        let ev1 = lease.drain_events();
+        assert_eq!(ev1.len(), 1);
+        assert!(matches!(ev1[0].kind, LeaseEventKind::Granted { .. }));
+
+        // After suspend: 1 event (Suspended).
+        lease.suspend().unwrap();
+        let ev2 = lease.drain_events();
+        assert_eq!(ev2.len(), 1, "only the Suspended event since last drain");
+        assert!(matches!(ev2[0].kind, LeaseEventKind::Suspended { .. }));
+
+        // After resume: 1 event (Resumed).
+        clock.advance(1_000);
+        lease.resume().unwrap();
+        let ev3 = lease.drain_events();
+        assert_eq!(ev3.len(), 1, "only the Resumed event since last drain");
+        assert!(matches!(ev3[0].kind, LeaseEventKind::Resumed { .. }));
     }
 }

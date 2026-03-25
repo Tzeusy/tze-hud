@@ -3,8 +3,17 @@
 //! `LeaseImpl<C>` holds per-lease state and implements every transition and
 //! query defined in the trait contract.  Clock injection via `C: Clock`
 //! enables deterministic testing.
+//!
+//! ## Audit events
+//!
+//! Every successful state transition appends a [`LeaseAuditEvent`] to an
+//! internal buffer.  Callers drain that buffer via [`LeaseStateMachine::drain_events`]
+//! and route the events to `lease_changes` subscribers.  Failed transitions
+//! (those returning `Err`) produce **no** event.
 
 use crate::clock::Clock;
+use crate::types::SceneId;
+use super::types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
 use super::{BudgetTier, LeaseState, RenewalPolicy, RevokeReason, TransitionError, LeaseStateMachine};
 
 // ─── Budget tier time thresholds ─────────────────────────────────────────────
@@ -26,6 +35,11 @@ pub struct LeaseImpl<C: Clock> {
     clock: C,
     state: LeaseState,
     renewal_policy: RenewalPolicy,
+
+    /// Lease identifier.  Nil until the caller assigns an identity via
+    /// [`set_lease_id`][LeaseImpl::set_lease_id].  Events carry whatever value
+    /// is stored here at transition time.
+    lease_id: LeaseId,
 
     /// When the lease was activated (ms since epoch).  Used for TTL accounting.
     activated_at_ms: u64,
@@ -51,12 +65,25 @@ pub struct LeaseImpl<C: Clock> {
     warning_started_ms: Option<u64>,
     /// Timestamp when budget entered Throttle tier (ms).
     throttle_started_ms: Option<u64>,
+
+    // ── Audit event buffer ──────────────────────────────────────────────────
+
+    /// Pending audit events produced by successful transitions.
+    ///
+    /// Drained by callers via `drain_events()`.  Never grows unboundedly because
+    /// the caller is expected to drain after each transition.
+    pending_events: Vec<LeaseAuditEvent>,
 }
 
 impl<C: Clock> LeaseImpl<C> {
     /// Current wall-clock time from the injected clock.
     fn now_ms(&self) -> u64 {
         self.clock.now_millis()
+    }
+
+    /// Current wall-clock time in microseconds from the injected clock.
+    fn now_us(&self) -> u64 {
+        self.clock.now_us()
     }
 
     /// Returns the renewal policy for this lease.
@@ -67,6 +94,19 @@ impl<C: Clock> LeaseImpl<C> {
         self.renewal_policy
     }
 
+    /// Assign a `LeaseId` to this state machine.
+    ///
+    /// Must be called before `activate()` so that the emitted `Granted` event
+    /// carries the correct identity.  The lease ID is assigned by the runtime
+    /// at grant time (UUIDv7, time-ordered).
+    pub fn set_lease_id(&mut self, id: LeaseId) {
+        self.lease_id = id;
+    }
+
+    /// Returns the current lease id.
+    pub fn lease_id(&self) -> LeaseId {
+        self.lease_id
+    }
 
     /// Effective remaining TTL accounting for all suspension pauses.
     ///
@@ -112,6 +152,27 @@ impl<C: Clock> LeaseImpl<C> {
             }
         }
     }
+
+    /// Push an audit event with the current lease_id and clock timestamp.
+    fn push_event(&mut self, kind: LeaseEventKind) {
+        self.pending_events.push(LeaseAuditEvent {
+            lease_id: self.lease_id,
+            event_at_wall_us: self.now_us(),
+            kind,
+        });
+    }
+
+    /// Compute optional `expires_at_wall_us` given a TTL and activation time.
+    ///
+    /// Returns `None` for indefinite leases (`ttl_ms == 0`).
+    fn compute_expires_at_wall_us(&self, activated_at_ms: u64) -> Option<u64> {
+        if self.ttl_ms == 0 {
+            None
+        } else {
+            // expires_at = activated_at + ttl, in microseconds
+            Some((activated_at_ms + self.ttl_ms) * 1_000)
+        }
+    }
 }
 
 impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
@@ -120,6 +181,7 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
             clock,
             state: LeaseState::Requested,
             renewal_policy: policy,
+            lease_id: SceneId::null(),
             activated_at_ms: 0,
             ttl_ms,
             total_suspension_ms: 0,
@@ -130,6 +192,7 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
             budget_tier: BudgetTier::Normal,
             warning_started_ms: None,
             throttle_started_ms: None,
+            pending_events: Vec::new(),
         }
     }
 
@@ -142,8 +205,34 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
                 to: LeaseState::Active,
             });
         }
-        self.activated_at_ms = self.now_ms();
+        let now_ms = self.now_ms();
+        let now_us = self.now_us();
+        self.activated_at_ms = now_ms;
         self.state = LeaseState::Active;
+
+        // Build a minimal LeaseIdentity from locally available fields.
+        // Callers that need fully-populated identity fields (namespace, session_id,
+        // capability_scope, resource_budget) should set those on a higher-level
+        // wrapper and not rely on this auto-built identity for wire protocol.
+        let expires_at = self.compute_expires_at_wall_us(now_ms);
+        // Convert lease-module RenewalPolicy to types::RenewalPolicy for LeaseIdentity.
+        let identity_renewal_policy = match self.renewal_policy {
+            RenewalPolicy::Manual => crate::types::RenewalPolicy::Manual,
+            RenewalPolicy::AutoRenew => crate::types::RenewalPolicy::AutoRenew,
+            RenewalPolicy::OneShot => crate::types::RenewalPolicy::OneShot,
+        };
+        let identity = LeaseIdentity {
+            lease_id: self.lease_id,
+            namespace: String::new(),
+            session_id: SceneId::null(),
+            granted_at_wall_us: now_us,
+            ttl_ms: self.ttl_ms,
+            renewal_policy: identity_renewal_policy,
+            capability_scope: Vec::new(),
+            resource_budget: crate::types::ResourceBudget::default(),
+            lease_priority: 2, // normal
+        };
+        self.push_event(LeaseEventKind::Granted { identity, expires_at_wall_us: expires_at });
         Ok(())
     }
 
@@ -158,10 +247,16 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
             });
         }
         let now_ms = self.now_ms();
+        let now_us = self.now_us();
         let remaining = self.effective_remaining_ms_at(now_ms);
         self.suspended_at_ms = Some(now_ms);
         self.ttl_remaining_at_suspend_ms = Some(remaining);
         self.state = LeaseState::Suspended;
+
+        self.push_event(LeaseEventKind::Suspended {
+            suspended_at_wall_us: now_us,
+            ttl_remaining_ms: remaining,
+        });
         Ok(())
     }
 
@@ -176,6 +271,12 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
             });
         }
         let now_ms = self.now_ms();
+
+        // Compute suspension duration before mutating state.
+        let suspension_duration_us = self.suspended_at_ms
+            .map(|at| now_ms.saturating_sub(at) * 1_000)
+            .unwrap_or(0);
+
         // Accumulate suspension duration
         if let Some(susp_at) = self.suspended_at_ms {
             self.total_suspension_ms += now_ms.saturating_sub(susp_at);
@@ -202,6 +303,13 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         self.suspended_at_ms = None;
         self.ttl_remaining_at_suspend_ms = None;
         self.state = LeaseState::Active;
+
+        // Compute new expires_at after TTL adjustment.
+        let adjusted_expires_at_wall_us = self.compute_expires_at_wall_us(self.activated_at_ms);
+        self.push_event(LeaseEventKind::Resumed {
+            adjusted_expires_at_wall_us,
+            suspension_duration_us,
+        });
         Ok(())
     }
 
@@ -215,8 +323,12 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
                 to: LeaseState::Orphaned,
             });
         }
-        self.orphaned_at_ms = Some(self.now_ms());
+        let now_ms = self.now_ms();
+        self.orphaned_at_ms = Some(now_ms);
         self.state = LeaseState::Orphaned;
+
+        let grace_expires_at_wall_us = (now_ms + self.grace_period_ms) * 1_000;
+        self.push_event(LeaseEventKind::Orphaned { grace_expires_at_wall_us });
         Ok(())
     }
 
@@ -242,6 +354,8 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         }
         self.orphaned_at_ms = None;
         self.state = LeaseState::Active;
+
+        self.push_event(LeaseEventKind::Reconnected);
         Ok(())
     }
 
@@ -252,6 +366,7 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         match self.state {
             LeaseState::Active | LeaseState::Orphaned => {
                 self.state = LeaseState::Expired;
+                self.push_event(LeaseEventKind::Expired);
                 Ok(())
             }
             _ => Err(TransitionError::InvalidTransition {
@@ -261,7 +376,7 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         }
     }
 
-    fn revoke(&mut self, _reason: RevokeReason) -> Result<(), TransitionError> {
+    fn revoke(&mut self, reason: RevokeReason) -> Result<(), TransitionError> {
         if self.state.is_terminal() {
             return Err(TransitionError::TerminalState);
         }
@@ -269,6 +384,15 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         match self.state {
             LeaseState::Active | LeaseState::Suspended | LeaseState::Orphaned => {
                 self.state = LeaseState::Revoked;
+                // Map internal RevokeReason to the audit types RevokeReason.
+                let audit_reason = match reason {
+                    RevokeReason::ViewerDismissed => AuditRevokeReason::ViewerDismissed,
+                    RevokeReason::BudgetPolicy => AuditRevokeReason::BudgetPolicy,
+                    RevokeReason::SuspensionTimeout => AuditRevokeReason::SuspensionTimeout,
+                    RevokeReason::CapabilityRevoked => AuditRevokeReason::CapabilityRevoked,
+                    RevokeReason::Other => AuditRevokeReason::Other,
+                };
+                self.push_event(LeaseEventKind::Revoked { reason: audit_reason });
                 Ok(())
             }
             _ => Err(TransitionError::InvalidTransition {
@@ -289,10 +413,11 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
             });
         }
         self.state = LeaseState::Released;
+        self.push_event(LeaseEventKind::Released);
         Ok(())
     }
 
-    fn deny(&mut self) -> Result<(), TransitionError> {
+    fn deny(&mut self, reason: DenyReason) -> Result<(), TransitionError> {
         if self.state != LeaseState::Requested {
             return Err(TransitionError::InvalidTransition {
                 from: self.state,
@@ -300,6 +425,7 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
             });
         }
         self.state = LeaseState::Denied;
+        self.push_event(LeaseEventKind::Denied { reason });
         Ok(())
     }
 
@@ -391,5 +517,11 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         }
 
         Ok(())
+    }
+
+    // ── Audit event channel ───────────────────────────────────────────────────
+
+    fn drain_events(&mut self) -> Vec<LeaseAuditEvent> {
+        std::mem::take(&mut self.pending_events)
     }
 }
