@@ -10,7 +10,7 @@
 //! - Multiple events for the same agent in a single frame → one `EventBatch`.
 //! - Events within a batch are sorted by `timestamp_mono_us` ascending.
 //! - `EventBatch.frame_number` = compositor frame counter.
-//! - `EventBatch.batch_ts_us` = wall-clock UTC µs at batch assembly time.
+//! - `EventBatch.batch_ts_wall_us` = wall-clock UTC µs at batch assembly time.
 //! - Events are coalesced (via `FrameCoalescer`) before sorting.
 //!
 //! ## Latency
