@@ -2061,13 +2061,22 @@ async fn handle_mutation_batch(
         }
     }
 
-    // Apply as atomic batch
+    // Map the proto batch_id bytes to a SceneId for correlation.
+    // If the client supplied a valid 16-byte UUIDv7, use it directly so that
+    // any BatchRejected or MutationResult echoes the client's own batch_id.
+    // Fall back to a fresh SceneId only for malformed / empty fields (the
+    // client's dedup logic cannot correlate those anyway).
+    let scene_batch_id = bytes_to_scene_id(&batch.batch_id)
+        .unwrap_or_else(|_| tze_hud_scene::SceneId::new());
+
+    // Apply as atomic batch, propagating client batch_id and lease_id so that
+    // the five-stage validation pipeline can perform lease/budget checks.
     let scene_batch = SceneMutationBatch {
-        batch_id: tze_hud_scene::SceneId::new(),
+        batch_id: scene_batch_id,
         agent_namespace: session.namespace.clone(),
         mutations: scene_mutations,
         timing_hints: None,
-        lease_id: None,
+        lease_id: Some(lease_id),
     };
 
     let result = st.scene.apply_batch(&scene_batch);
@@ -2245,12 +2254,18 @@ async fn apply_queued_batch_to_scene(
         }
     }
 
+    // Map the proto batch_id bytes to a SceneId for validation correlation.
+    let scene_batch_id = bytes_to_scene_id(&batch.batch_id)
+        .unwrap_or_else(|_| tze_hud_scene::SceneId::new());
+
     let scene_batch = SceneMutationBatch {
-        batch_id: tze_hud_scene::SceneId::new(),
+        batch_id: scene_batch_id,
         agent_namespace: session.namespace.clone(),
         mutations: scene_mutations,
         timing_hints: None,
-        lease_id: None,
+        // Propagate the lease_id so that lease/budget validation runs for
+        // queued batches just as it does for live batches.
+        lease_id: Some(lease_id),
     };
 
     // Apply to scene; result is intentionally discarded — response already sent.
@@ -2933,13 +2948,17 @@ async fn handle_zone_publish(
                 content_classification: None,
             };
 
-            // Apply as a single-mutation batch
+            // Apply as a single-mutation batch.
+            // Use the session's first active lease for budget validation; if the
+            // session holds no lease yet, lease_id is None and budget checks are
+            // skipped (ZonePublish does not require a lease per RFC 0005 §8.6).
+            let zone_publish_lease_id = session.lease_ids.first().copied();
             let batch = tze_hud_scene::mutation::MutationBatch {
                 batch_id: tze_hud_scene::SceneId::new(),
                 agent_namespace: session.namespace.clone(),
                 mutations: vec![mutation],
                 timing_hints: None,
-                lease_id: None,
+                lease_id: zone_publish_lease_id,
             };
             let result = st.scene.apply_batch(&batch);
             if result.applied {
