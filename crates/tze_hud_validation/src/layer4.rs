@@ -334,8 +334,15 @@ impl ArtifactBuilder {
     /// Create a new builder and initialise the run directory on disk.
     ///
     /// `output_root` — parent directory for all runs (e.g. `"test_results"`).
+    ///   When provided, this *overrides* `opts.output_root`.
     /// `branch`      — git branch name embedded in the run directory name.
+    ///   When provided, this *overrides* `opts.branch`.
     /// `opts`        — additional options (spec IDs, etc.).
+    ///
+    /// Note: `output_root` and `branch` parameters take precedence over the
+    /// same-named fields on `ArtifactOptions` to keep the call-site
+    /// unambiguous.  Callers that construct `ArtifactOptions` with those
+    /// fields set should pass them here consistently.
     pub fn new(
         output_root: impl AsRef<Path>,
         branch: impl Into<String>,
@@ -374,8 +381,12 @@ impl ArtifactBuilder {
     /// Creates the `scenes/{name}/` subdirectory and writes all image and JSON
     /// files from `input`.  Returns a manifest entry for inclusion in
     /// `manifest.json`.
+    ///
+    /// The scene name is sanitised before use as a filesystem component to
+    /// guard against path-traversal attacks (e.g. names containing `../`).
     pub fn add_scene(&mut self, input: SceneArtifactInput) -> Result<(), String> {
-        let scene_dir = self.run_dir.join("scenes").join(&input.description.name);
+        let safe_name = sanitise_artifact_name(&input.description.name);
+        let scene_dir = self.run_dir.join("scenes").join(&safe_name);
         std::fs::create_dir_all(&scene_dir)
             .map_err(|e| format!("create scene dir: {e}"))?;
 
@@ -384,13 +395,13 @@ impl ArtifactBuilder {
             golden_png: None,
             diff_png: None,
             telemetry_json: None,
-            explanation_md: format!("scenes/{}/explanation.md", input.description.name),
+            explanation_md: format!("scenes/{safe_name}/explanation.md"),
         };
 
         // Write rendered.png
         if let Some(ref pixels) = input.rendered_pixels {
             let png = encode_rgba8_png(pixels, input.width, input.height)?;
-            let rel = format!("scenes/{}/rendered.png", input.description.name);
+            let rel = format!("scenes/{safe_name}/rendered.png");
             self.pending_files.push((PathBuf::from(&rel), png));
             paths.rendered_png = Some(rel);
         }
@@ -398,7 +409,7 @@ impl ArtifactBuilder {
         // Write golden.png
         if let Some(ref pixels) = input.golden_pixels {
             let png = encode_rgba8_png(pixels, input.width, input.height)?;
-            let rel = format!("scenes/{}/golden.png", input.description.name);
+            let rel = format!("scenes/{safe_name}/golden.png");
             self.pending_files.push((PathBuf::from(&rel), png));
             paths.golden_png = Some(rel);
         }
@@ -406,14 +417,14 @@ impl ArtifactBuilder {
         // Write diff.png
         if let Some(ref pixels) = input.diff_pixels {
             let png = encode_rgba8_png(pixels, input.width, input.height)?;
-            let rel = format!("scenes/{}/diff.png", input.description.name);
+            let rel = format!("scenes/{safe_name}/diff.png");
             self.pending_files.push((PathBuf::from(&rel), png));
             paths.diff_png = Some(rel);
         }
 
         // Write telemetry.json
         if let Some(ref json_bytes) = input.telemetry_json {
-            let rel = format!("scenes/{}/telemetry.json", input.description.name);
+            let rel = format!("scenes/{safe_name}/telemetry.json");
             self.pending_files.push((PathBuf::from(&rel), json_bytes.clone()));
             paths.telemetry_json = Some(rel);
         }
@@ -425,7 +436,7 @@ impl ArtifactBuilder {
             &input.metrics,
             input.changes_since_golden.as_deref(),
         );
-        let expl_rel = format!("scenes/{}/explanation.md", input.description.name);
+        let expl_rel = format!("scenes/{safe_name}/explanation.md");
         self.pending_files
             .push((PathBuf::from(&expl_rel), explanation.into_bytes()));
 
@@ -441,15 +452,19 @@ impl ArtifactBuilder {
     }
 
     /// Add a benchmark artifact.
+    ///
+    /// The benchmark name is sanitised before use as a filesystem component to
+    /// guard against path-traversal attacks.
     pub fn add_benchmark(&mut self, input: BenchmarkArtifactInput) -> Result<(), String> {
-        let bench_dir = self.run_dir.join("benchmarks").join(&input.name);
+        let safe_name = sanitise_artifact_name(&input.name);
+        let bench_dir = self.run_dir.join("benchmarks").join(&safe_name);
         std::fs::create_dir_all(&bench_dir)
             .map_err(|e| format!("create benchmark dir: {e}"))?;
 
-        let tel_rel = format!("benchmarks/{}/telemetry.json", input.name);
+        let tel_rel = format!("benchmarks/{safe_name}/telemetry.json");
         self.pending_files.push((PathBuf::from(&tel_rel), input.session_telemetry_json));
 
-        let hist_rel = format!("benchmarks/{}/histogram.json", input.name);
+        let hist_rel = format!("benchmarks/{safe_name}/histogram.json");
         self.pending_files.push((PathBuf::from(&hist_rel), input.histogram_json));
 
         let mut paths = BenchmarkArtifactPaths {
@@ -460,13 +475,13 @@ impl ArtifactBuilder {
         };
 
         if let Some(cal) = input.calibration_json {
-            let rel = format!("benchmarks/{}/calibration.json", input.name);
+            let rel = format!("benchmarks/{safe_name}/calibration.json");
             self.pending_files.push((PathBuf::from(&rel), cal));
             paths.calibration_json = Some(rel);
         }
 
         if let Some(hw) = input.hardware_info_json {
-            let rel = format!("benchmarks/{}/hardware_info.json", input.name);
+            let rel = format!("benchmarks/{safe_name}/hardware_info.json");
             self.pending_files.push((PathBuf::from(&rel), hw));
             paths.hardware_info_json = Some(rel);
         }
@@ -538,19 +553,27 @@ impl ArtifactBuilder {
             .iter()
             .filter(|s| s.status == SceneStatus::Fail)
             .map(|s| {
-                let ssim = s.metrics.ssim_score.map(|score| {
+                // Only emit an SSIM diagnostic when the score is actually below the
+                // threshold.  A scene can fail for performance reasons while having a
+                // perfectly healthy SSIM score; emitting a diagnostic in that case
+                // would be misleading and produce a negative `regression_pct`.
+                let ssim = s.metrics.ssim_score.and_then(|score| {
                     let threshold = 0.995_f64; // layout threshold
-                    let regression_pct = (threshold - score) / threshold * 100.0;
-                    SsimDiagnostic {
-                        metric_name: "ssim_score".to_string(),
-                        actual_value: score,
-                        budget_value: threshold,
-                        regression_pct,
-                        description: format!(
-                            "SSIM {score:.6} is {regression_pct:.2}% below the \
-                             layout threshold {threshold:.3}. Check diff.png for \
-                             the spatial pattern of the regression."
-                        ),
+                    if score < threshold {
+                        let regression_pct = (threshold - score) / threshold * 100.0;
+                        Some(SsimDiagnostic {
+                            metric_name: "ssim_score".to_string(),
+                            actual_value: score,
+                            budget_value: threshold,
+                            regression_pct,
+                            description: format!(
+                                "SSIM {score:.6} is {regression_pct:.2}% below the \
+                                 layout threshold {threshold:.3}. Check diff.png for \
+                                 the spatial pattern of the regression."
+                            ),
+                        })
+                    } else {
+                        None
                     }
                 });
 
@@ -731,7 +754,7 @@ pub fn generate_index_html(manifest: &ArtifactManifest) -> String {
     html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
     html.push_str(&format!(
         "<title>tze_hud validation — {} ({})</title>\n",
-        manifest.branch, manifest.timestamp
+        html_escape(&manifest.branch), html_escape(&manifest.timestamp)
     ));
     html.push_str("<style>\n");
     html.push_str(INDEX_HTML_CSS);
@@ -741,11 +764,11 @@ pub fn generate_index_html(manifest: &ArtifactManifest) -> String {
     html.push_str("<div class=\"header\">\n");
     html.push_str(&format!(
         "<h1>tze_hud Validation Run: <code>{}</code></h1>\n",
-        manifest.run_id
+        html_escape(&manifest.run_id)
     ));
     html.push_str(&format!(
         "<p>Branch: <strong>{}</strong> &nbsp;|&nbsp; Timestamp: <strong>{}</strong></p>\n",
-        manifest.branch, manifest.timestamp
+        html_escape(&manifest.branch), html_escape(&manifest.timestamp)
     ));
     html.push_str("</div>\n");
 
@@ -807,17 +830,22 @@ pub fn generate_index_html(manifest: &ArtifactManifest) -> String {
                  <p><a href=\"{}\">telemetry.json</a> | \
                  <a href=\"{}\">histogram.json</a></p>\
                  </div>\n",
-                bench.name, bench.paths.telemetry_json, bench.paths.histogram_json
+                html_escape(&bench.name),
+                html_escape(&bench.paths.telemetry_json),
+                html_escape(&bench.paths.histogram_json),
             ));
         }
         html.push_str("</div>\n");
     }
 
-    // Embedded LLM-readable JSON summary
+    // Embedded LLM-readable JSON summary.
+    // Escape `</` → `<\/` so a branch/field value containing `</script>`
+    // cannot prematurely terminate the script block.
     let llm_json = serde_json::to_string_pretty(manifest).unwrap_or_default();
+    let safe_json = escape_json_for_script(&llm_json);
     html.push_str("\n<!-- LLM-readable artifact summary (machine-parseable) -->\n");
     html.push_str("<script type=\"application/json\" id=\"artifact-manifest\">\n");
-    html.push_str(&llm_json);
+    html.push_str(&safe_json);
     html.push_str("\n</script>\n");
 
     // JavaScript for filtering
@@ -856,43 +884,50 @@ fn render_scene_card(scene: &SceneManifestEntry) -> String {
         .map(|s| format!("SSIM: {s:.4}"))
         .unwrap_or_else(|| "SSIM: n/a".to_string());
 
+    // status_class and status_label come from controlled enum values — safe to
+    // interpolate directly.  All caller-supplied string fields are HTML-escaped.
+    let name_escaped = html_escape(&scene.name);
+    let rendered_src_escaped = html_escape(rendered_src);
+    let golden_src_escaped = html_escape(golden_src);
+    let diff_src_escaped = html_escape(diff_src);
+    let ssim_text_escaped = html_escape(&ssim_text);
+    let explanation_md_escaped = html_escape(&scene.paths.explanation_md);
+    let telemetry_link = scene
+        .paths
+        .telemetry_json
+        .as_deref()
+        .map(|p| format!(r#" | <a href="{}">telemetry.json</a>"#, html_escape(p)))
+        .unwrap_or_default();
+
     format!(
         r#"<div class="scene-card {status_class}" data-status="{status_class}">
   <div class="card-header">
-    <span class="scene-name">{name}</span>
+    <span class="scene-name">{name_escaped}</span>
     <span class="badge {status_class}">{status_label}</span>
   </div>
   <div class="image-trio">
     <figure>
-      <img src="{rendered_src}" alt="Rendered" loading="lazy" title="Rendered">
+      <img src="{rendered_src_escaped}" alt="Rendered" loading="lazy" title="Rendered">
       <figcaption>Rendered</figcaption>
     </figure>
     <figure>
-      <img src="{golden_src}" alt="Golden" loading="lazy" title="Golden">
+      <img src="{golden_src_escaped}" alt="Golden" loading="lazy" title="Golden">
       <figcaption>Golden</figcaption>
     </figure>
     <figure>
-      <img src="{diff_src}" alt="Diff" loading="lazy" title="Diff (red=large, blue=none)">
+      <img src="{diff_src_escaped}" alt="Diff" loading="lazy" title="Diff (red=large, blue=none)">
       <figcaption>Diff</figcaption>
     </figure>
   </div>
   <div class="metrics">
-    <span>{ssim_text}</span>
+    <span>{ssim_text_escaped}</span>
   </div>
   <div class="card-links">
-    <a href="{explanation_md}">explanation.md</a>
+    <a href="{explanation_md_escaped}">explanation.md</a>
     {telemetry_link}
   </div>
 </div>
 "#,
-        name = scene.name,
-        explanation_md = scene.paths.explanation_md,
-        telemetry_link = scene
-            .paths
-            .telemetry_json
-            .as_deref()
-            .map(|p| format!(r#" | <a href="{p}">telemetry.json</a>"#))
-            .unwrap_or_default(),
     )
 }
 
@@ -900,14 +935,17 @@ fn render_scene_card(scene: &SceneManifestEntry) -> String {
 fn render_diagnostic(diag: &SceneDiagnostic) -> String {
     let mut html = format!(
         "<div class=\"diag-card\">\n<h3><span class=\"badge fail\">FAIL</span> {}</h3>\n",
-        diag.scene_name
+        html_escape(&diag.scene_name)
     );
 
     if let Some(ref ssim) = diag.ssim {
         html.push_str(&format!(
             "<p><strong>SSIM:</strong> actual={:.6} budget={:.6} regression={:.2}%</p>\n\
              <p>{}</p>\n",
-            ssim.actual_value, ssim.budget_value, ssim.regression_pct, ssim.description
+            ssim.actual_value,
+            ssim.budget_value,
+            ssim.regression_pct,
+            html_escape(&ssim.description),
         ));
     }
     if let Some(ref perf) = diag.performance {
@@ -917,7 +955,7 @@ fn render_diagnostic(diag: &SceneDiagnostic) -> String {
             perf.actual_value_us,
             perf.budget_value_us,
             perf.regression_pct,
-            perf.description
+            html_escape(&perf.description),
         ));
     }
     html.push_str("</div>\n");
@@ -1092,6 +1130,56 @@ fn sanitise_branch_name(branch: &str) -> String {
             _ => '-',
         })
         .collect()
+}
+
+/// Sanitise a scene or benchmark name for safe use as a filesystem component.
+///
+/// Only allows alphanumeric characters, hyphens, underscores, and dots.
+/// All other characters (including path separators) are replaced with `_`.
+/// A leading `.` is prefixed with `_` to avoid hidden-directory names.
+///
+/// This guards against path-traversal attacks when caller-supplied names are
+/// joined into the run directory (e.g. `scenes/../../etc/passwd`).
+fn sanitise_artifact_name(name: &str) -> String {
+    let sanitised: String = name
+        .chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c,
+            _ => '_',
+        })
+        .collect();
+    // Prevent hidden-directory names and upward traversal residuals.
+    if sanitised.starts_with('.') {
+        format!("_{sanitised}")
+    } else {
+        sanitised
+    }
+}
+
+/// Escape a string for safe inline insertion into HTML text or attribute values.
+///
+/// Replaces `&`, `<`, `>`, `"`, and `'` with their HTML entities.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Escape a JSON string for safe embedding inside a `<script>` tag.
+///
+/// `</script>` inside a JSON blob would prematurely terminate the script block.
+/// Replacing `</` with `<\/` is the standard defence and is valid JSON.
+fn escape_json_for_script(json: &str) -> String {
+    json.replace("</", "<\\/")
 }
 
 /// Encode an RGBA8 pixel buffer as a PNG byte vector.
@@ -1523,5 +1611,132 @@ mod tests {
     fn test_guidance_fallback_for_unknown_scene() {
         let guidance = scene_visual_guidance("unknown_scene_xyz");
         assert!(guidance.contains("rendered.png"), "fallback must mention rendered.png");
+    }
+
+    // ── sanitise_artifact_name ────────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitise_artifact_name_safe_chars_unchanged() {
+        assert_eq!(sanitise_artifact_name("single_tile_solid"), "single_tile_solid");
+        assert_eq!(sanitise_artifact_name("bench-max.tiles"), "bench-max.tiles");
+    }
+
+    #[test]
+    fn test_sanitise_artifact_name_strips_path_traversal() {
+        // A name containing `../` must not escape the target directory.
+        // The `/` and `\` path separators are replaced with `_`; dots are
+        // allowed (legitimate in artifact names like "bench.v2").
+        let safe = sanitise_artifact_name("../../etc/passwd");
+        assert!(!safe.contains('/'), "sanitised name must not contain /");
+        assert!(!safe.contains('\\'), "sanitised name must not contain \\");
+        // The remaining string must not be joinable out of the target dir.
+        // Since `/` is gone, `Path::join` cannot escape upward.
+        let joined = std::path::Path::new("/base").join(&safe);
+        assert!(joined.starts_with("/base"),
+            "joined path must stay under /base, got {}", joined.display());
+    }
+
+    #[test]
+    fn test_sanitise_artifact_name_leading_dot_prefixed() {
+        let safe = sanitise_artifact_name(".hidden");
+        assert!(safe.starts_with('_'), "leading '.' must be prefixed with '_'");
+    }
+
+    #[test]
+    fn test_sanitise_artifact_name_spaces_and_specials() {
+        let safe = sanitise_artifact_name("my scene <name>");
+        assert!(!safe.contains(' '), "spaces replaced");
+        assert!(!safe.contains('<'), "angle brackets replaced");
+        assert!(!safe.contains('>'), "angle brackets replaced");
+    }
+
+    // ── html_escape ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_html_escape_passthrough_safe_string() {
+        assert_eq!(html_escape("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_html_escape_entities() {
+        assert_eq!(html_escape("<script>alert('xss')&\"</script>"),
+                   "&lt;script&gt;alert(&#39;xss&#39;)&amp;&quot;&lt;/script&gt;");
+    }
+
+    #[test]
+    fn test_html_escape_branch_name_with_angle_brackets() {
+        // Branch names cannot normally contain `<` but a crafted input must be
+        // safe when interpolated into HTML.
+        let escaped = html_escape("<evil-branch>");
+        assert!(!escaped.contains('<'), "must not contain raw <");
+        assert!(!escaped.contains('>'), "must not contain raw >");
+    }
+
+    // ── escape_json_for_script ────────────────────────────────────────────────
+
+    #[test]
+    fn test_escape_json_for_script_terminates_safely() {
+        let json = r#"{"branch": "feat</script><script>alert(1)"}"#;
+        let escaped = escape_json_for_script(json);
+        assert!(!escaped.contains("</script>"), "must not contain raw </script>");
+        // The replacement is valid JSON (backslash-escaped forward slash).
+        assert!(escaped.contains("<\\/script>"), "should use <\\/ escape");
+    }
+
+    #[test]
+    fn test_escape_json_for_script_normal_json_unchanged() {
+        let json = r#"{"key": "value", "n": 42}"#;
+        assert_eq!(escape_json_for_script(json), json);
+    }
+
+    // ── SSIM diagnostic threshold gate ────────────────────────────────────────
+
+    #[test]
+    fn test_ssim_diagnostic_not_emitted_when_score_above_threshold() {
+        let tmp = std::env::temp_dir().join(format!(
+            "tze_hud_layer4_ssim_gate_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+
+        let opts = ArtifactOptions {
+            output_root: tmp.clone(),
+            branch: "test".to_string(),
+            spec_ids: vec![],
+        };
+        let mut builder = ArtifactBuilder::new(&tmp, "test", opts).unwrap();
+
+        // Scene fails for performance, but SSIM is fine (above threshold).
+        builder
+            .add_scene(SceneArtifactInput {
+                description: test_scene_desc("perf_only_fail"),
+                status: SceneStatus::Fail,
+                metrics: SceneMetrics {
+                    ssim_score: Some(0.999), // above 0.995 threshold — no SSIM regression
+                    frames_rendered: Some(60),
+                    frame_time_p99_us: Some(20_000), // over budget
+                    lease_violations: 0,
+                    budget_overruns: 0,
+                },
+                rendered_pixels: None,
+                width: 1,
+                height: 1,
+                golden_pixels: None,
+                diff_pixels: None,
+                telemetry_json: None,
+                changes_since_golden: None,
+            })
+            .unwrap();
+
+        let manifest = builder.finalise().unwrap();
+
+        assert_eq!(manifest.diagnostics.len(), 1);
+        let diag = &manifest.diagnostics[0];
+        assert!(diag.ssim.is_none(),
+            "SSIM diagnostic must NOT be emitted when score is above threshold");
+        assert!(diag.performance.is_some(),
+            "performance diagnostic must still be present");
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

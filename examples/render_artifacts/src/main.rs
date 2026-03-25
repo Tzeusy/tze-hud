@@ -74,24 +74,40 @@ fn parse_args() -> Args {
                 i += 1;
                 if i < args.len() {
                     output = PathBuf::from(&args[i]);
+                } else {
+                    eprintln!("error: --output requires a value");
+                    print_usage();
+                    std::process::exit(1);
                 }
             }
             "--branch" | "-b" => {
                 i += 1;
                 if i < args.len() {
                     branch = args[i].clone();
+                } else {
+                    eprintln!("error: --branch requires a value");
+                    print_usage();
+                    std::process::exit(1);
                 }
             }
             "--telemetry-dir" => {
                 i += 1;
                 if i < args.len() {
                     telemetry_dir = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("error: --telemetry-dir requires a value");
+                    print_usage();
+                    std::process::exit(1);
                 }
             }
             "--benchmark-json" => {
                 i += 1;
                 if i < args.len() {
                     benchmark_json = Some(PathBuf::from(&args[i]));
+                } else {
+                    eprintln!("error: --benchmark-json requires a value");
+                    print_usage();
+                    std::process::exit(1);
                 }
             }
             "--print-summary" => {
@@ -386,9 +402,10 @@ mod tests {
         let builder = ArtifactBuilder::new(&tmp, "test", opts).unwrap();
         let manifest = builder.finalise().unwrap();
 
-        assert!(tmp.join(manifest.run_id.as_str()).join("manifest.json").exists()
-            || tmp.join(&manifest.run_id).join("manifest.json").exists()
-            || tmp.read_dir().unwrap().count() > 0);
+        // Verify the exact expected output files are present in the run directory.
+        let run_dir = tmp.join(&manifest.run_id);
+        assert!(run_dir.join("manifest.json").exists(), "manifest.json must exist in run dir");
+        assert!(run_dir.join("index.html").exists(), "index.html must exist in run dir");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
