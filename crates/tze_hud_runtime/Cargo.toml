@@ -27,6 +27,9 @@ arc-swap = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_Threading"] }
+
 [dev-dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
 tze_hud_compositor = { path = "../tze_hud_compositor" }
