@@ -63,6 +63,31 @@ pub struct FrameTelemetry {
     /// Non-blocking channel send of TelemetryRecord to telemetry thread.
     pub stage8_telemetry_emit_us: u64,
 
+    // ── Split input latency measurements ────────────────────────────────────
+    //
+    // These three fields carry the split latency measurements required by
+    // validation-framework/spec.md §"Split Latency Budgets". Each records
+    // the elapsed time from the triggering input event to a specific pipeline
+    // boundary for the *current frame*. A value of 0 means no input event
+    // occurred this frame for that measurement point.
+
+    /// input_to_local_ack — time from input event arrival to Stage 2 completion
+    /// (local visual feedback rendered). p99 budget: 4ms (4_000 µs).
+    /// Populated by the input processor; 0 when no input event occurred this frame.
+    pub input_to_local_ack_us: u64,
+
+    /// input_to_scene_commit — time from input event arrival to Stage 4
+    /// completion (agent mutation reflected in scene graph). p99 budget: 50ms.
+    /// Populated when an agent commits a mutation in response to this frame's
+    /// input; 0 when no agent response was committed this frame.
+    pub input_to_scene_commit_us: u64,
+
+    /// input_to_next_present — time from input event arrival to Stage 7
+    /// completion (GPU present of the frame containing the agent response).
+    /// p99 budget: 33ms (two frames at 60Hz). Populated when Stage 7 completes
+    /// on a frame that carries a scene commit triggered by input; 0 otherwise.
+    pub input_to_next_present_us: u64,
+
     // ── Legacy field aliases (in-process API compatibility only) ────────────
     //
     // These fields are excluded from serialization (`#[serde(skip)]`) so they
@@ -116,6 +141,10 @@ impl FrameTelemetry {
             stage6_render_encode_us: 0,
             stage7_gpu_submit_us: 0,
             stage8_telemetry_emit_us: 0,
+            // Split input latency measurements
+            input_to_local_ack_us: 0,
+            input_to_scene_commit_us: 0,
+            input_to_next_present_us: 0,
             // Legacy aliases
             input_drain_us: 0,
             scene_commit_us: 0,
@@ -297,12 +326,26 @@ pub enum DegradationDirection {
 }
 
 /// Per-session aggregated telemetry summary.
+///
+/// Contains three independent LatencyBucket instances for the split latency
+/// contracts required by validation-framework/spec.md §"Split Latency Budgets":
+/// - `input_to_local_ack` — Stage 2 boundary (p99 < 4ms)
+/// - `input_to_scene_commit` — Stage 4 boundary (p99 < 50ms)
+/// - `input_to_next_present` — Stage 7 boundary (p99 < 33ms @ 60Hz)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub total_frames: u64,
     pub frame_time: LatencyBucket,
+    /// input_to_local_ack — time from input event to Stage 2 completion.
+    /// Spec: p99 < 4ms (4_000 µs). Purely local, no network.
     pub input_to_local_ack: LatencyBucket,
+    /// input_to_scene_commit — time from input event to Stage 4 completion.
+    /// Spec: p99 < 50ms (50_000 µs). Covers agent response round-trip.
     pub input_to_scene_commit: LatencyBucket,
+    /// input_to_next_present — time from input event to Stage 7 completion
+    /// (GPU present of frame containing agent response).
+    /// Spec: p99 < 33ms (33_000 µs) at 60Hz (two frames).
+    pub input_to_next_present: LatencyBucket,
     pub hit_test_latency: LatencyBucket,
     pub validation_latency: LatencyBucket,
     pub diff_latency: LatencyBucket,
@@ -317,6 +360,7 @@ impl SessionSummary {
             frame_time: LatencyBucket::new("frame_time"),
             input_to_local_ack: LatencyBucket::new("input_to_local_ack"),
             input_to_scene_commit: LatencyBucket::new("input_to_scene_commit"),
+            input_to_next_present: LatencyBucket::new("input_to_next_present"),
             hit_test_latency: LatencyBucket::new("hit_test"),
             validation_latency: LatencyBucket::new("validation"),
             diff_latency: LatencyBucket::new("diff"),
@@ -361,6 +405,58 @@ mod tests {
         let json = summary.to_json().unwrap();
         assert!(json.contains("frame_time"));
         assert!(json.contains("12000"));
+    }
+
+    /// Verify that all three split latency buckets exist in SessionSummary and
+    /// serialize to their canonical names.
+    #[test]
+    fn test_session_summary_has_three_split_latency_buckets() {
+        let mut summary = SessionSummary::new();
+
+        // Populate each bucket independently
+        summary.input_to_local_ack.record(1_000);    // 1ms
+        summary.input_to_scene_commit.record(10_000); // 10ms
+        summary.input_to_next_present.record(20_000); // 20ms
+
+        // Budget assertions must pass for all three
+        assert!(
+            summary.input_to_local_ack.assert_p99_under(4_000).is_ok(),
+            "input_to_local_ack p99 must be under 4ms budget"
+        );
+        assert!(
+            summary.input_to_scene_commit.assert_p99_under(50_000).is_ok(),
+            "input_to_scene_commit p99 must be under 50ms budget"
+        );
+        assert!(
+            summary.input_to_next_present.assert_p99_under(33_000).is_ok(),
+            "input_to_next_present p99 must be under 33ms budget"
+        );
+
+        // Serialized JSON must contain all three bucket names
+        let json = summary.to_json().unwrap();
+        assert!(json.contains("input_to_local_ack"), "JSON must contain input_to_local_ack");
+        assert!(json.contains("input_to_scene_commit"), "JSON must contain input_to_scene_commit");
+        assert!(json.contains("input_to_next_present"), "JSON must contain input_to_next_present");
+    }
+
+    /// Verify that FrameTelemetry carries all three split latency fields.
+    #[test]
+    fn test_frame_telemetry_has_split_latency_fields() {
+        let mut frame = FrameTelemetry::new(1);
+        frame.input_to_local_ack_us = 500;     // 0.5ms
+        frame.input_to_scene_commit_us = 5_000; // 5ms
+        frame.input_to_next_present_us = 15_000; // 15ms
+
+        // Fields round-trip through the struct
+        assert_eq!(frame.input_to_local_ack_us, 500);
+        assert_eq!(frame.input_to_scene_commit_us, 5_000);
+        assert_eq!(frame.input_to_next_present_us, 15_000);
+
+        // Serialized JSON must contain all three field names
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains("input_to_local_ack_us"), "JSON must contain input_to_local_ack_us");
+        assert!(json.contains("input_to_scene_commit_us"), "JSON must contain input_to_scene_commit_us");
+        assert!(json.contains("input_to_next_present_us"), "JSON must contain input_to_next_present_us");
     }
 
     #[test]

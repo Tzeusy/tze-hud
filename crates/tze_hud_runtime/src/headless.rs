@@ -168,6 +168,10 @@ impl HeadlessRuntime {
         let new_snap = HitTestSnapshot::from_scene(scene);
         self.pipeline.hit_test_snapshot.store(Arc::new(new_snap));
         let stage4_us = s4_start.elapsed().as_micros() as u64;
+        // input_to_scene_commit: time from frame start (proxy for input event
+        // arrival) to end of Stage 4. Captures stages 1–4 combined.
+        let input_to_scene_commit_us =
+            stage1_us + stage2_us + stage3_us + stage4_us;
 
         // Stage 5: Layout Resolve
         let s5_start = Instant::now();
@@ -182,6 +186,10 @@ impl HeadlessRuntime {
 
         // Total frame time: stage 1 start → stage 7 end
         let frame_time_us = frame_start.elapsed().as_micros() as u64;
+        // input_to_next_present: time from frame start (proxy for input event
+        // arrival) to Stage 7 completion (GPU present). Equals total frame time
+        // since the frame pipeline starts at the input drain boundary.
+        let input_to_next_present_us = frame_time_us;
 
         // Build the per-stage telemetry record (outside the Stage 8 timed region)
         let mut telemetry = FrameTelemetry::new(compositor_telemetry.frame_number);
@@ -193,6 +201,19 @@ impl HeadlessRuntime {
         telemetry.stage6_render_encode_us = stage6_us;
         telemetry.stage7_gpu_submit_us = stage7_us;
         telemetry.frame_time_us = frame_time_us;
+        // ── Split input latency fields ─────────────────────────────────────
+        // input_to_local_ack_us is populated externally by the input processor
+        // (via input_processor.process() → InputProcessResult::local_ack_us) and
+        // recorded into the summary by callers. The FrameTelemetry field is left
+        // at 0 here because headless render_frame() has no input event to ack.
+        //
+        // input_to_scene_commit_us and input_to_next_present_us are pipeline-
+        // derived: they measure the pipeline wall time from frame start to
+        // Stage 4 and Stage 7 boundaries respectively, which in the windowed
+        // runtime corresponds to the input event arrival boundary.
+        telemetry.input_to_local_ack_us = 0; // populated by input_processor callers
+        telemetry.input_to_scene_commit_us = input_to_scene_commit_us;
+        telemetry.input_to_next_present_us = input_to_next_present_us;
         telemetry.tile_count = tiles_visible;
         telemetry.node_count = compositor_telemetry.node_count;
         telemetry.active_leases = compositor_telemetry.active_leases;
