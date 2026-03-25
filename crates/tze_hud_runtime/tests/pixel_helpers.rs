@@ -164,6 +164,7 @@ pub async fn make_scene_runtime() -> tze_hud_runtime::HeadlessRuntime {
         height: SCENE_H,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     })
     .await
     .expect("HeadlessRuntime::new failed")
