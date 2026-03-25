@@ -164,6 +164,9 @@ impl ConfigLoader for TzeHudConfig {
         // ── (4) [[tabs]] — at least one, names unique, ≤1 default ────────────
         validate_tabs(&self.raw, &mut errors);
 
+        // ── (4b) Per-tab zone-type reference validation ───────────────────────
+        zones::validate_tab_zone_references(&self.raw, &mut errors);
+
         // ── (5) Reserved fractions ────────────────────────────────────────────
         for (i, tab) in self.raw.tabs.iter().enumerate() {
             if let Some(layout) = &tab.layout {
