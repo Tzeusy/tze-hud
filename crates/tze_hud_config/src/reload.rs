@@ -75,7 +75,10 @@ pub fn section_classification(section_path: &str) -> FieldClassification {
 ///
 /// Produced by `reload_config` when the new TOML is valid.
 /// The caller is responsible for atomically applying this to the running state.
-#[derive(Clone, Debug)]
+///
+/// The `Default` implementation produces an all-`None` config (no policy overrides),
+/// suitable as the initial state before the first SIGHUP or `ReloadConfig` call.
+#[derive(Clone, Debug, Default)]
 pub struct HotReloadableConfig {
     /// Updated `[privacy]` section (or defaults if absent from new TOML).
     pub privacy: RawPrivacy,
