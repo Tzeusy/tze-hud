@@ -752,3 +752,253 @@ mod proptest_batch_atomicity {
         }
     }
 }
+
+// ─── Stage 1 lease validation gaps (hud-ugwr) ────────────────────────────────
+
+/// WHEN batch.lease_id references a nonexistent lease
+/// THEN Stage 1 MUST reject with LeaseNotFound BEFORE Stage 2 budget checks.
+///
+/// This covers the gap where batch.lease_id was added to lease_ids but not
+/// validated for existence — a nonexistent lease silently passed Stage 2.
+#[test]
+fn stage1_batch_lease_id_nonexistent_is_rejected() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+
+    // A lease_id that was never issued — not in the scene at all.
+    let nonexistent_lease_id = SceneId::new();
+
+    let batch = MutationBatch {
+        batch_id: SceneId::new(),
+        agent_namespace: "agent".into(),
+        mutations: vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: "agent".into(),
+            lease_id: nonexistent_lease_id,
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            z_order: 1,
+        }],
+        timing_hints: None,
+        lease_id: Some(nonexistent_lease_id),
+    };
+
+    let result = scene.apply_batch(&batch);
+
+    assert!(!result.applied, "batch must be rejected");
+    let code = result.rejection.unwrap().primary_code().unwrap();
+    assert_eq!(
+        code,
+        ValidationErrorCode::LeaseNotFound,
+        "expected LeaseNotFound at Stage 1, got {code:?}"
+    );
+    assert_eq!(scene.tile_count(), 0, "no tiles must be created");
+}
+
+/// WHEN batch.lease_id references a lease in Expired state (not Active)
+/// THEN Stage 1 MUST reject with LeaseExpired BEFORE Stage 2 budget checks.
+///
+/// Previously batch.lease_id was only collected into lease_ids for budget
+/// accounting; its state was never explicitly checked at Stage 1.
+#[test]
+fn stage1_batch_lease_id_expired_is_rejected_before_budget() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 1, vec![Capability::CreateTile]);
+
+    // Force into Expired state and also shrink budget to 0 — Stage 1 must fire first.
+    scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
+    scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 0;
+
+    let batch = MutationBatch {
+        batch_id: SceneId::new(),
+        agent_namespace: "agent".into(),
+        mutations: vec![],
+        timing_hints: None,
+        // batch.lease_id only — no per-mutation lease_id to trigger the old path.
+        lease_id: Some(lease_id),
+    };
+
+    let result = scene.apply_batch(&batch);
+
+    assert!(!result.applied, "batch with expired batch.lease_id must be rejected");
+    let code = result.rejection.unwrap().primary_code().unwrap();
+    assert!(
+        matches!(
+            code,
+            ValidationErrorCode::LeaseExpired | ValidationErrorCode::LeaseInvalidState
+        ),
+        "expected Stage 1 (lease) error, got {code:?}"
+    );
+}
+
+/// WHEN a DeleteTile mutation targets a tile whose lease is expired
+/// THEN Stage 1 MUST reject with LeaseExpired BEFORE later stages.
+///
+/// Covers the gap where non-CreateTile mutations skipped Stage 1 entirely.
+#[test]
+fn stage1_delete_tile_with_expired_lease_rejected() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+
+    // Create a tile on an active lease.
+    let tile_id = scene
+        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .unwrap();
+
+    // Now expire the lease — mutation against this tile must fail Stage 1.
+    scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
+
+    let batch = make_batch("agent", vec![SceneMutation::DeleteTile { tile_id }]);
+    let result = scene.apply_batch(&batch);
+
+    assert!(!result.applied, "DeleteTile with expired lease must be rejected");
+    let code = result.rejection.unwrap().primary_code().unwrap();
+    assert!(
+        matches!(
+            code,
+            ValidationErrorCode::LeaseExpired | ValidationErrorCode::LeaseInvalidState
+        ),
+        "expected Stage 1 lease error for DeleteTile, got {code:?}"
+    );
+    // Tile must still exist (batch was atomic — nothing applied).
+    assert_eq!(scene.tile_count(), 1, "tile must survive due to rejection");
+}
+
+/// WHEN an UpdateTileBounds mutation targets a tile whose lease is expired
+/// THEN Stage 1 MUST reject with LeaseExpired BEFORE bounds or type checks.
+#[test]
+fn stage1_update_tile_bounds_with_expired_lease_rejected() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+
+    let tile_id = scene
+        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .unwrap();
+
+    scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
+
+    let batch = make_batch("agent", vec![SceneMutation::UpdateTileBounds {
+        tile_id,
+        bounds: Rect::new(10.0, 10.0, 200.0, 200.0),
+    }]);
+    let result = scene.apply_batch(&batch);
+
+    assert!(!result.applied, "UpdateTileBounds with expired lease must be rejected");
+    let code = result.rejection.unwrap().primary_code().unwrap();
+    assert!(
+        matches!(
+            code,
+            ValidationErrorCode::LeaseExpired | ValidationErrorCode::LeaseInvalidState
+        ),
+        "expected Stage 1 lease error for UpdateTileBounds, got {code:?}"
+    );
+}
+
+/// WHEN a SetTileRoot mutation targets a tile whose lease is expired
+/// THEN Stage 1 MUST reject with LeaseExpired BEFORE applying the node.
+#[test]
+fn stage1_set_tile_root_with_expired_lease_rejected() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+
+    let tile_id = scene
+        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .unwrap();
+
+    scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
+
+    let node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::WHITE,
+            bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
+        }),
+    };
+
+    let batch = make_batch("agent", vec![SceneMutation::SetTileRoot { tile_id, node }]);
+    let result = scene.apply_batch(&batch);
+
+    assert!(!result.applied, "SetTileRoot with expired lease must be rejected");
+    let code = result.rejection.unwrap().primary_code().unwrap();
+    assert!(
+        matches!(
+            code,
+            ValidationErrorCode::LeaseExpired | ValidationErrorCode::LeaseInvalidState
+        ),
+        "expected Stage 1 lease error for SetTileRoot, got {code:?}"
+    );
+}
+
+/// WHEN an AddNode mutation targets a tile whose lease is expired
+/// THEN Stage 1 MUST reject with LeaseExpired BEFORE the node is added.
+#[test]
+fn stage1_add_node_with_expired_lease_rejected() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+
+    let tile_id = scene
+        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .unwrap();
+
+    scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
+
+    let node = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::SolidColor(SolidColorNode {
+            color: Rgba::WHITE,
+            bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
+        }),
+    };
+
+    let batch = make_batch("agent", vec![SceneMutation::AddNode {
+        tile_id,
+        parent_id: None,
+        node,
+    }]);
+    let result = scene.apply_batch(&batch);
+
+    assert!(!result.applied, "AddNode with expired lease must be rejected");
+    let code = result.rejection.unwrap().primary_code().unwrap();
+    assert!(
+        matches!(
+            code,
+            ValidationErrorCode::LeaseExpired | ValidationErrorCode::LeaseInvalidState
+        ),
+        "expected Stage 1 lease error for AddNode, got {code:?}"
+    );
+}
+
+/// WHEN batch.lease_id references a nonexistent lease AND the batch has no
+/// per-mutation mutations (empty batch), Stage 1 must still reject before
+/// reaching Stage 2 budget checks.
+#[test]
+fn stage1_empty_batch_with_nonexistent_batch_lease_id_rejected() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let _tab_id = scene.create_tab("Main", 0).unwrap();
+
+    let nonexistent = SceneId::new();
+
+    let batch = MutationBatch {
+        batch_id: SceneId::new(),
+        agent_namespace: "agent".into(),
+        mutations: vec![],
+        timing_hints: None,
+        lease_id: Some(nonexistent),
+    };
+
+    let result = scene.apply_batch(&batch);
+
+    assert!(!result.applied, "batch with nonexistent batch.lease_id must be rejected");
+    let code = result.rejection.unwrap().primary_code().unwrap();
+    assert_eq!(
+        code,
+        ValidationErrorCode::LeaseNotFound,
+        "expected LeaseNotFound, got {code:?}"
+    );
+}
