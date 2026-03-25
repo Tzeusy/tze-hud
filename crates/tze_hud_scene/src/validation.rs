@@ -4,7 +4,7 @@
 //!
 //! [`BatchRejected`] is the structured rejection response for a [`crate::mutation::MutationBatch`].
 //! It carries a [`BatchValidationError`] for each failing mutation, containing:
-//! - `mutation_index` (0-based)
+//! - `mutation_index` (0-based; `None` for batch-level errors)
 //! - `mutation_type` (human-readable name)
 //! - [`ValidationErrorCode`] (stable across minor versions)
 //! - `message` (human-readable)
@@ -281,7 +281,10 @@ impl ValidationErrorCode {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BatchValidationError {
     /// 0-based index of the failing mutation within the batch.
-    pub mutation_index: usize,
+    ///
+    /// `None` for batch-level errors (e.g. `BatchSizeExceeded`) that are not
+    /// attributable to a specific mutation.
+    pub mutation_index: Option<usize>,
 
     /// Human-readable mutation type name (e.g. `"CreateTile"`).
     pub mutation_type: String,
@@ -306,8 +309,12 @@ pub struct BatchValidationError {
 
 impl BatchValidationError {
     /// Build a [`BatchValidationError`] from a raw [`ValidationError`].
+    ///
+    /// Pass `mutation_index = Some(idx)` for per-mutation errors, or `None` for
+    /// batch-level errors (e.g. `BatchSizeExceeded`) that are not attributable to
+    /// a specific mutation.
     pub fn from_validation_error(
-        mutation_index: usize,
+        mutation_index: Option<usize>,
         mutation_type: impl Into<String>,
         error: &ValidationError,
     ) -> Self {
@@ -476,12 +483,14 @@ pub struct BatchRejected {
     /// Structured validation errors. At least one is always present.
     ///
     /// Errors are ordered by `mutation_index`. For batch-level rejections
-    /// (e.g. `BatchSizeExceeded`), `mutation_index` is `usize::MAX`.
+    /// (e.g. `BatchSizeExceeded`), `mutation_index` is `None`.
     pub errors: Vec<BatchValidationError>,
 }
 
 impl BatchRejected {
-    /// Create a single-error batch rejection.
+    /// Create a single-error batch rejection for a specific mutation.
+    ///
+    /// `mutation_index` is the 0-based index of the failing mutation.
     pub fn single(
         batch_id: SceneId,
         mutation_index: usize,
@@ -491,7 +500,7 @@ impl BatchRejected {
         Self {
             batch_id,
             errors: vec![BatchValidationError::from_validation_error(
-                mutation_index,
+                Some(mutation_index),
                 mutation_type,
                 error,
             )],
@@ -500,9 +509,17 @@ impl BatchRejected {
 
     /// Create a batch-level rejection (e.g. `BatchSizeExceeded`).
     ///
-    /// Uses `mutation_index = usize::MAX` to signal a batch-level error.
+    /// Sets `mutation_index = None` to signal that the error is not attributable
+    /// to any specific mutation within the batch.
     pub fn batch_level(batch_id: SceneId, mutation_type: impl Into<String>, error: &ValidationError) -> Self {
-        Self::single(batch_id, usize::MAX, mutation_type, error)
+        Self {
+            batch_id,
+            errors: vec![BatchValidationError::from_validation_error(
+                None,
+                mutation_type,
+                error,
+            )],
+        }
     }
 
     /// Return the primary (first) error code.
