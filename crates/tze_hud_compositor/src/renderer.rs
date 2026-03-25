@@ -22,7 +22,7 @@
 //! This separation is the architectural foundation for future render-skip redaction
 //! (capture-safe architecture): the content and chrome passes are structurally independent.
 
-use crate::pipeline::{rect_vertices, ChromeDrawCmd, RectVertex, RECT_SHADER};
+use crate::pipeline::{rect_vertices, ChromeDrawCmd, RectVertex};
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
@@ -221,26 +221,37 @@ impl Compositor {
 
     /// Create a render pipeline targeting a specific texture format.
     ///
-    /// Called by `new_windowed` so the pipeline matches the swapchain format.
-    fn create_pipeline_with_format(
+    /// This is the canonical pipeline constructor. Both `create_pipeline`
+    /// (headless, fixed format) and `create_pipeline_with_format` (windowed,
+    /// dynamic swapchain format) delegate here to avoid duplicating the
+    /// pipeline descriptor.
+    ///
+    /// `label_prefix` is prepended to debug labels so GPU profilers can
+    /// distinguish headless vs windowed pipelines.
+    fn create_pipeline_inner(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
+        label_prefix: &str,
     ) -> wgpu::RenderPipeline {
         use crate::pipeline::{RectVertex, RECT_SHADER};
 
+        let shader_label = format!("{label_prefix}rect_shader");
+        let layout_label = format!("{label_prefix}rect_pipeline_layout");
+        let pipeline_label = format!("{label_prefix}rect_pipeline");
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("rect_shader_windowed"),
+            label: Some(&shader_label),
             source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("rect_pipeline_layout_windowed"),
+            label: Some(&layout_label),
             bind_group_layouts: &[],
             push_constant_ranges: &[],
         });
 
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rect_pipeline_windowed"),
+            label: Some(&pipeline_label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -274,51 +285,20 @@ impl Compositor {
         })
     }
 
+    /// Create a render pipeline targeting a dynamic swapchain format.
+    ///
+    /// Called by `new_windowed` so the pipeline matches the negotiated
+    /// surface format (which varies by platform/driver).
+    fn create_pipeline_with_format(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        Self::create_pipeline_inner(device, format, "windowed_")
+    }
+
+    /// Create a render pipeline for headless mode (`Rgba8UnormSrgb`).
     fn create_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("rect_shader"),
-            source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("rect_pipeline_layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rect_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[RectVertex::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        })
+        Self::create_pipeline_inner(device, wgpu::TextureFormat::Rgba8UnormSrgb, "")
     }
 
     /// Render one frame of the scene to the surface.

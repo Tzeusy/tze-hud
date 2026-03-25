@@ -252,6 +252,36 @@ impl ApplicationHandler for WinitApp {
 
                     let frame_start = Instant::now();
 
+                    // ── Resize check ───────────────────────────────────────
+                    // The main thread writes pending_resize_width/height on
+                    // WindowEvent::Resized. We detect and apply it here because
+                    // the compositor thread owns the wgpu::Device required by
+                    // surface.reconfigure().
+                    //
+                    // Read width last (it was written last by the main thread)
+                    // to avoid a torn read: if the main thread is mid-write we
+                    // will see the old width and skip this cycle; the resize
+                    // will be applied on the next frame instead.
+                    let pending_w = surface_for_compositor
+                        .pending_resize_width
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    let pending_h = surface_for_compositor
+                        .pending_resize_height
+                        .load(std::sync::atomic::Ordering::Acquire);
+                    if pending_w > 0 && pending_h > 0 {
+                        surface_for_compositor.reconfigure(pending_w, pending_h, &compositor.device);
+                        // Reset pending resize (store 0 to signal "handled").
+                        surface_for_compositor
+                            .pending_resize_width
+                            .store(0, std::sync::atomic::Ordering::Release);
+                        surface_for_compositor
+                            .pending_resize_height
+                            .store(0, std::sync::atomic::Ordering::Release);
+                        // Update compositor's cached dimensions.
+                        compositor.width = pending_w;
+                        compositor.height = pending_h;
+                    }
+
                     // ── Stage 3: Mutation Intake ───────────────────────────
                     // (placeholder — real mutations come via gRPC session)
 
@@ -353,35 +383,28 @@ impl ApplicationHandler for WinitApp {
             // ── Resize ─────────────────────────────────────────────────────
             WindowEvent::Resized(physical_size) => {
                 if let Some(surface) = &self.state.window_surface {
-                    // Main thread calls reconfigure — safe per spec line 46.
-                    // The compositor uses the stored compositor device to
-                    // reconfigure; however the device is on the compositor
-                    // thread. We use an Arc<WindowSurface> with interior
-                    // mutability to handle this.
-                    //
-                    // NOTE: In a production system, the main thread would send
-                    // a resize event to the compositor thread via a channel,
-                    // and the compositor thread would call reconfigure() after
-                    // finishing the current frame. For now, we call it directly
-                    // from the main thread using the shared surface Arc.
-                    //
-                    // Since the wgpu Device is owned by the compositor thread,
-                    // and reconfigure requires Device access, we log a resize
-                    // signal and the compositor thread will pick it up.
                     tracing::info!(
                         width = physical_size.width,
                         height = physical_size.height,
-                        "main thread: window resized"
+                        "main thread: window resized — signalling compositor for reconfiguration"
                     );
-                    // Update atomic dimensions in the surface so size() calls
-                    // reflect the new size. The actual surface reconfiguration
-                    // happens in the compositor thread via the resize signal.
-                    surface.width.store(
-                        physical_size.width,
+                    // Signal the compositor thread to reconfigure the surface.
+                    // The compositor thread owns the wgpu::Device and is the
+                    // only thread that can safely call surface.configure().
+                    //
+                    // We write the new dimensions atomically. The compositor
+                    // thread reads `pending_resize_width/height` at the start of
+                    // each frame cycle, calls `surface.reconfigure()` when
+                    // non-zero, and resets both fields to 0.
+                    //
+                    // Write height first so the compositor never sees a
+                    // partially-updated pair (width updated, height stale).
+                    surface.pending_resize_height.store(
+                        physical_size.height,
                         std::sync::atomic::Ordering::Release,
                     );
-                    surface.height.store(
-                        physical_size.height,
+                    surface.pending_resize_width.store(
+                        physical_size.width,
                         std::sync::atomic::Ordering::Release,
                     );
                 }
@@ -486,46 +509,33 @@ impl WinitApp {
     /// signal the main thread via FrameReadySignal, and only the main thread
     /// SHALL call surface.present()."
     ///
-    /// On `WindowSurface`, the swapchain `present()` is called by dropping the
-    /// `SurfaceTexture` guard held inside `CompositorFrame._guard`. However, the
-    /// guard is in the compositor thread's `CompositorFrame`. To satisfy macOS
-    /// constraints the compositor thread must NOT call `.present()` — we do it
-    /// here by calling `surface.surface.get_current_texture()` and immediately
-    /// calling `.present()` on the returned texture.
-    ///
-    /// Note: this is a simplified present path. The production path would have
-    /// the compositor thread hand off the `SurfaceTexture` via a channel, and
-    /// the main thread calls `.present()` on it. For now, the compositor thread
-    /// calls `render_frame()` (which calls `acquire_frame()` and GPU submit),
-    /// but does NOT call `.present()` on the surface texture — that is deferred
-    /// to the main thread here.
+    /// The compositor thread stores the rendered `SurfaceTexture` in
+    /// `WindowSurface::pending_texture` during `acquire_frame()`. This method
+    /// retrieves that exact texture via `take_pending_texture()` and calls
+    /// `SurfaceTexture::present()` on it — satisfying the macOS/Metal requirement
+    /// that `present()` runs on the main thread, and ensuring we present the
+    /// texture the compositor actually rendered into.
     fn maybe_present_frame(&mut self) {
         if self.state.frame_ready_rx.has_changed().unwrap_or(false) {
             // Acknowledge the signal.
             let _ = self.state.frame_ready_rx.borrow_and_update();
-            // On windowed surfaces the SurfaceTexture is presented by the
-            // wgpu internal swapchain on next acquire if not explicitly
-            // presented. Calling get_current_texture() + present() here
-            // ensures correct macOS/Metal behavior.
-            //
-            // Note: we do not call get_current_texture() here because the
-            // compositor thread already acquired the texture and submitted GPU
-            // commands against it via `CompositorSurface::acquire_frame()`.
-            // The compositor thread does NOT call `SurfaceTexture::present()`
-            // (the WindowSurface::present() is a no-op); the main thread needs
-            // to present. Since we can't transfer the SurfaceTexture across
-            // threads without unsafe Send impl, we call get_current_texture()
-            // again here to get the same (or next) texture and present it.
-            //
-            // This is safe because the compositor has already flushed all GPU
-            // work (device.poll(Wait)) before signalling FrameReady.
+
             if let Some(surface) = &self.state.window_surface {
-                match surface.surface.get_current_texture() {
-                    Ok(texture) => {
+                // Take the SurfaceTexture that the compositor stored in
+                // acquire_frame(). This is the exact texture rendered into —
+                // NOT a second acquire from the swapchain.
+                match surface.take_pending_texture() {
+                    Some(texture) => {
                         texture.present();
                     }
-                    Err(e) => {
-                        tracing::warn!("main thread: get_current_texture failed: {e}");
+                    None => {
+                        // FrameReady signal fired but no texture is pending —
+                        // this can happen if acquire_frame() failed on the
+                        // compositor thread (error already logged there).
+                        tracing::debug!(
+                            "main thread: FrameReady received but no pending texture; \
+                             compositor likely skipped frame due to surface error"
+                        );
                     }
                 }
             }
@@ -611,6 +621,24 @@ impl WindowedRuntime {
         let event_loop = EventLoop::new()?;
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(&mut app)?;
+
+        // Cleanly join the compositor thread after the event loop exits.
+        //
+        // Without this, the compositor thread is detached (JoinHandle drop ≠
+        // join) and may still be running GPU work during process teardown,
+        // leading to device-lost errors or use-after-free in wgpu internals.
+        //
+        // The shutdown token was already triggered via CloseRequested
+        // (WindowEvent::CloseRequested calls shutdown.trigger()), so the
+        // compositor frame loop should exit promptly.
+        if let Some(handle) = app.state.compositor_handle.take() {
+            tracing::info!("waiting for compositor thread to exit...");
+            if let Err(e) = handle.join() {
+                tracing::error!("compositor thread panicked: {e:?}");
+            } else {
+                tracing::info!("compositor thread exited cleanly");
+            }
+        }
 
         Ok(())
     }

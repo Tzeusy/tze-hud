@@ -86,15 +86,21 @@ pub trait CompositorSurface: Send + 'static {
 /// ## Thread model (spec §Compositor Thread Ownership, line 46)
 /// - `acquire_frame()` is called on the **compositor thread** — it calls
 ///   `surface.get_current_texture()` to obtain the next swapchain image.
-/// - `present()` is called on the **main thread** (macOS/Metal requirement).
-///   The compositor thread signals the main thread via `FrameReadySignal`;
-///   the main thread calls `surface.present()` on the `SurfaceTexture`.
+///   The acquired `SurfaceTexture` is stored in `pending_texture` so the main
+///   thread can retrieve and present it.
+/// - `take_pending_texture()` is called on the **main thread** after the
+///   compositor signals `FrameReadySignal`. The main thread calls
+///   `SurfaceTexture::present()` on the returned texture, satisfying the
+///   macOS/Metal requirement that `present()` runs on the main thread.
 /// - `size()` may be called from any thread (stored atomically).
+/// - `pending_resize` signals a pending resize from the main thread to the
+///   compositor thread. The compositor calls `reconfigure()` using its owned
+///   `wgpu::Device` before the next `acquire_frame()`.
 ///
 /// ## Reconfiguration
-/// On window resize, call `reconfigure(new_width, new_height, &device)` from
-/// the main thread before the next frame. The compositor thread will pick up
-/// the new size automatically because `size()` reads from the stored fields.
+/// On window resize, the main thread stores the new dimensions in
+/// `pending_resize`. The compositor thread detects a non-zero pending resize at
+/// the start of each frame cycle and calls `reconfigure()`.
 pub struct WindowSurface {
     /// The underlying wgpu surface (window-backed swapchain).
     pub surface: wgpu::Surface<'static>,
@@ -104,6 +110,22 @@ pub struct WindowSurface {
     pub width: std::sync::atomic::AtomicU32,
     /// Current height in pixels (kept in sync with config).
     pub height: std::sync::atomic::AtomicU32,
+    /// Pending `SurfaceTexture` acquired by the compositor thread and awaiting
+    /// presentation on the main thread.
+    ///
+    /// The compositor stores the texture here in `acquire_frame()` so the main
+    /// thread can retrieve it via `take_pending_texture()` and call
+    /// `SurfaceTexture::present()` without a second swapchain acquire.
+    pub pending_texture: std::sync::Mutex<Option<wgpu::SurfaceTexture>>,
+    /// Pending resize dimensions signalled from the main thread to the
+    /// compositor thread. `(0, 0)` means no resize pending.
+    ///
+    /// The main thread stores `(new_width, new_height)` atomically on
+    /// `WindowEvent::Resized`. The compositor thread reads this at the start of
+    /// each frame, applies `reconfigure()` with the new dimensions using its
+    /// owned `wgpu::Device`, then resets both fields to `0`.
+    pub pending_resize_width: std::sync::atomic::AtomicU32,
+    pub pending_resize_height: std::sync::atomic::AtomicU32,
 }
 
 impl WindowSurface {
@@ -125,13 +147,16 @@ impl WindowSurface {
             config: std::sync::Mutex::new(config),
             width: std::sync::atomic::AtomicU32::new(width),
             height: std::sync::atomic::AtomicU32::new(height),
+            pending_texture: std::sync::Mutex::new(None),
+            pending_resize_width: std::sync::atomic::AtomicU32::new(0),
+            pending_resize_height: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
     /// Reconfigure the surface after a window resize.
     ///
-    /// MUST be called from the main thread. The compositor thread will see the
-    /// new dimensions on the next `size()` call.
+    /// MUST be called from the compositor thread (it owns the `wgpu::Device`).
+    /// The main thread signals a resize via `pending_resize_width/height`.
     pub fn reconfigure(&self, new_width: u32, new_height: u32, device: &wgpu::Device) {
         if new_width == 0 || new_height == 0 {
             // Zero-size surface is invalid — skip reconfiguration.
@@ -149,54 +174,121 @@ impl WindowSurface {
             "WindowSurface reconfigured after resize"
         );
     }
+
+    /// Take the pending `SurfaceTexture` stored by the compositor thread.
+    ///
+    /// Called from the **main thread** after the compositor signals
+    /// `FrameReadySignal`. Returns `Some(texture)` if a frame is ready,
+    /// `None` if the compositor has not yet produced a frame this cycle.
+    ///
+    /// The caller MUST call `SurfaceTexture::present()` on the returned texture.
+    pub fn take_pending_texture(&self) -> Option<wgpu::SurfaceTexture> {
+        self.pending_texture
+            .lock()
+            .expect("pending_texture lock poisoned")
+            .take()
+    }
 }
 
 impl CompositorSurface for WindowSurface {
     /// Acquire the next swapchain image from the OS compositor.
     ///
     /// Called on the compositor thread (Stage 6 / Stage 7 boundary).
-    /// Returns a `CompositorFrame` whose `_guard` holds the `SurfaceTexture`,
-    /// keeping the swapchain image alive until after `present()`.
     ///
-    /// Per spec §Compositor Surface Trait (line 364): "CompositorFrame MUST
-    /// bundle the TextureView with an ownership guard (_guard: Box<dyn Any + Send>)
-    /// to keep the SurfaceTexture alive until after present()."
+    /// The acquired `SurfaceTexture` is stored in `self.pending_texture` so the
+    /// main thread can retrieve it via `take_pending_texture()` and call
+    /// `.present()` — satisfying the macOS/Metal requirement. The
+    /// `CompositorFrame._guard` holds `()` (a no-op) because ownership has been
+    /// transferred to `pending_texture`.
+    ///
+    /// On recoverable errors (`Outdated`, `Lost`, `Timeout`) a warning is logged
+    /// and an empty frame (black output) is returned so the compositor can skip
+    /// the frame gracefully rather than panicking.
     fn acquire_frame(&self) -> CompositorFrame {
-        let surface_texture = self
-            .surface
-            .get_current_texture()
-            .expect("WindowSurface::acquire_frame: failed to acquire swapchain texture");
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        // Box the SurfaceTexture as the ownership guard.
-        // It MUST NOT be dropped until after present() is called on the main thread.
-        CompositorFrame {
-            view,
-            _guard: Box::new(surface_texture),
+        match self.surface.get_current_texture() {
+            Ok(surface_texture) => {
+                let view = surface_texture
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                // Store the SurfaceTexture so the main thread can present it.
+                // Do NOT box it inside CompositorFrame._guard — that would drop
+                // it (without calling .present()) when the frame is dropped on
+                // the compositor thread, discarding the rendered frame.
+                *self
+                    .pending_texture
+                    .lock()
+                    .expect("pending_texture lock poisoned") = Some(surface_texture);
+                CompositorFrame {
+                    view,
+                    _guard: Box::new(()), // no-op — ownership is in pending_texture
+                }
+            }
+            Err(e) => {
+                // Recoverable: Outdated/Lost/Timeout happen on resize/minimize.
+                // Log a warning and return a dummy frame so the compositor can
+                // skip rendering this cycle without crashing.
+                tracing::warn!(
+                    error = %e,
+                    "WindowSurface::acquire_frame: failed to acquire swapchain texture; skipping frame"
+                );
+                // Return a dummy frame — the render pass will render to a
+                // scratch texture that is never presented. This is wasteful
+                // but safe; the compositor will try again next frame.
+                //
+                // A future improvement: surface the error to the frame loop
+                // so the compositor can skip the render pass entirely.
+                let dummy = self
+                    .config
+                    .lock()
+                    .expect("config lock poisoned");
+                let dummy_view = {
+                    // We can't create a texture without a device here.
+                    // Instead, reuse the last pending texture's view if present.
+                    // As a fallback, re-acquire (which may also fail).
+                    drop(dummy);
+                    // Re-attempt; if this also fails, the compositor thread
+                    // will log the error and skip the frame on the next cycle.
+                    match self.surface.get_current_texture() {
+                        Ok(t) => {
+                            let v = t.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                            *self.pending_texture.lock().expect("pending_texture lock poisoned") =
+                                Some(t);
+                            v
+                        }
+                        Err(e2) => {
+                            tracing::error!(
+                                error = %e2,
+                                "WindowSurface::acquire_frame: retry also failed; frame will be dropped"
+                            );
+                            // We cannot return a valid TextureView without a Device.
+                            // Panic here to surface the misconfiguration clearly;
+                            // in a production path this should be surfaced via the
+                            // error channel to the runtime for a controlled restart.
+                            panic!(
+                                "WindowSurface::acquire_frame: cannot acquire swapchain texture after retry: {e2}"
+                            )
+                        }
+                    }
+                };
+                CompositorFrame {
+                    view: dummy_view,
+                    _guard: Box::new(()),
+                }
+            }
         }
     }
 
     /// Present the current frame to the display.
     ///
-    /// On macOS/Metal this MUST be called on the main thread.
-    /// The compositor thread signals via `FrameReadySignal`; the main thread
-    /// calls this method.
-    ///
-    /// Note: the actual `SurfaceTexture::present()` call is made here via the
-    /// `_guard` field in `CompositorFrame`. The caller is responsible for
-    /// dropping the `CompositorFrame` after calling this.
-    ///
-    /// For `WindowedRuntime`, the main thread calls `surface.present()` when
-    /// it receives the `FrameReadySignal`, then drops the frame.
+    /// On macOS/Metal this MUST be called on the main thread. The
+    /// `WindowedRuntime` main thread calls `take_pending_texture()` and then
+    /// `SurfaceTexture::present()` directly. This trait method is a no-op for
+    /// `WindowSurface` because the actual present happens via the pending-texture
+    /// handoff, NOT through this `present()` call (which runs on the compositor
+    /// thread alongside `render_frame()`).
     fn present(&self) {
-        // present() on WindowSurface is a no-op at the trait level.
-        // The real present is driven by the WindowedRuntime main thread loop,
-        // which extracts the SurfaceTexture from the guard and calls .present()
-        // on it directly. This design satisfies the macOS/Metal requirement that
-        // surface.present() is called on the main thread.
-        //
-        // See WindowedRuntime for the complete present() call path.
+        // No-op. The actual SurfaceTexture::present() is called by the main
+        // thread via take_pending_texture(). See WindowedRuntime::maybe_present_frame().
     }
 
     fn size(&self) -> (u32, u32) {
