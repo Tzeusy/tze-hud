@@ -29,7 +29,7 @@ use crate::types::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
 // ─── Budget constants ────────────────────────────────────────────────────────
@@ -67,15 +67,42 @@ pub mod budgets {
 // ─── Calibration result ─────────────────────────────────────────────────────
 
 /// Result of running the reference calibration workload.
+///
+/// All three calibration dimensions are tracked per the validation-framework spec
+/// (lines 137-157): CPU scene-graph, GPU fill/composition, and texture upload.
+///
+/// GPU-derived fields (`gpu_fill_factor`, `texture_upload_factor`) are `Option<f64>`
+/// because the scene crate has no GPU dependency.  Callers with access to a GPU
+/// context (e.g., headless runtime tests) should populate these fields after running
+/// the GPU calibration workloads and then store the result in the `CALIBRATION`
+/// static via [`set_gpu_factors`].
+///
+/// Per spec line 156: when `gpu_fill_factor` or `texture_upload_factor` is `None`,
+/// performance tests that depend on those dimensions MUST treat their result as
+/// "uncalibrated" and emit a warning rather than a hard pass/fail.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalibrationResult {
-    /// How many times slower this machine is than the reference.
+    /// How many times slower this machine is than the reference for CPU scene-graph work.
     /// 1.0 = reference hardware, 2.0 = half speed, 0.5 = double speed.
     pub speed_factor: f64,
     /// Scene-graph operations per second achieved during calibration.
     pub scene_ops_per_sec: f64,
     /// SHA-256 throughput in MB/s (synthetic CPU load dimension).
     pub hash_throughput_mbps: f64,
+    /// GPU fill/composition factor: ratio of reference GPU throughput to actual.
+    ///
+    /// 1.0 = reference GPU, >1.0 = slower (e.g., llvmpipe in CI ≈ 8–12×).
+    /// `None` means GPU calibration has not been run.
+    /// Populate via [`set_gpu_factors`] after running GPU calibration workloads.
+    #[serde(default)]
+    pub gpu_fill_factor: Option<f64>,
+    /// Texture upload factor: ratio of reference upload throughput to actual.
+    ///
+    /// 1.0 = reference hardware, >1.0 = slower.
+    /// `None` means texture upload calibration has not been run.
+    /// Populate via [`set_gpu_factors`] after running GPU calibration workloads.
+    #[serde(default)]
+    pub texture_upload_factor: Option<f64>,
     /// Unix timestamp (seconds) when calibration was performed.
     pub timestamp: u64,
     /// Duration of the calibration run in microseconds.
@@ -152,6 +179,9 @@ pub fn calibrate() -> CalibrationResult {
         speed_factor,
         scene_ops_per_sec: scene_ops,
         hash_throughput_mbps: hash_mbps,
+        // GPU fields are None until populated by a GPU-context caller via set_gpu_factors().
+        gpu_fill_factor: None,
+        texture_upload_factor: None,
         timestamp: now_secs,
         calibration_duration_us,
     }
@@ -350,7 +380,7 @@ fn run_hash_workload() -> f64 {
 
 // ─── Budget scaling ─────────────────────────────────────────────────────────
 
-/// Scale a reference budget by the calibration speed factor.
+/// Scale a reference budget by the calibration speed factor (CPU dimension).
 ///
 /// On a machine twice as slow as the reference (speed_factor = 2.0),
 /// a 100μs budget becomes 200μs. On a machine twice as fast
@@ -361,10 +391,52 @@ pub fn scaled_budget(base_budget_us: u64, calibration: &CalibrationResult) -> u6
     (scaled as u64).max(1)
 }
 
+/// Scale a reference budget by the GPU fill factor.
+///
+/// Returns `None` if `gpu_fill_factor` is not populated (uncalibrated), which
+/// callers must treat as "uncalibrated" per the validation-framework spec —
+/// they should emit a warning rather than a hard pass/fail assertion.
+///
+/// Also returns `None` if the factor is not finite or not positive (e.g., `NaN`,
+/// `Inf`, or a negative deserialized value), preventing degenerate budget values.
+///
+/// Returns `Some(scaled_us)` when the GPU factor is known and valid.
+pub fn gpu_scaled_budget(base_budget_us: u64, calibration: &CalibrationResult) -> Option<u64> {
+    let factor = calibration.gpu_fill_factor?;
+    if !factor.is_finite() || factor <= 0.0 {
+        return None;
+    }
+    let scaled = base_budget_us as f64 * factor;
+    Some((scaled as u64).max(1))
+}
+
+/// Scale a reference budget by the texture upload factor.
+///
+/// Returns `None` when `texture_upload_factor` is not populated (uncalibrated),
+/// or when the factor is not finite or not positive.
+pub fn texture_upload_scaled_budget(
+    base_budget_us: u64,
+    calibration: &CalibrationResult,
+) -> Option<u64> {
+    let factor = calibration.texture_upload_factor?;
+    if !factor.is_finite() || factor <= 0.0 {
+        return None;
+    }
+    let scaled = base_budget_us as f64 * factor;
+    Some((scaled as u64).max(1))
+}
+
 // ─── Test helper ────────────────────────────────────────────────────────────
 
 /// Global calibration result, lazily initialized on first use.
 static CALIBRATION: OnceLock<CalibrationResult> = OnceLock::new();
+
+/// GPU calibration factors, separately mutable because GPU context is not
+/// available during the initial `calibrate()` call (scene crate has no GPU dep).
+///
+/// Callers with GPU access (e.g., headless runtime tests) call [`set_gpu_factors`]
+/// after running GPU calibration workloads.  Until set, both factors are `None`.
+static GPU_FACTORS: RwLock<(Option<f64>, Option<f64>)> = RwLock::new((None, None));
 
 /// Get a calibrated budget for use in test assertions.
 ///
@@ -397,6 +469,44 @@ pub fn test_budget(base_us: u64) -> u64 {
 /// Get the current calibration result (runs calibration if needed).
 pub fn current_calibration() -> &'static CalibrationResult {
     CALIBRATION.get_or_init(|| load_or_calibrate())
+}
+
+/// Get the current calibration result with GPU factors merged in.
+///
+/// Returns a clone of the static calibration result with `gpu_fill_factor` and
+/// `texture_upload_factor` populated from the separately-stored GPU factors
+/// (set via [`set_gpu_factors`]).  If GPU factors have not been set, both
+/// fields remain `None` in the returned struct, which downstream callers
+/// should treat as "uncalibrated" per the validation-framework spec.
+pub fn current_calibration_with_gpu() -> CalibrationResult {
+    let base = current_calibration().clone();
+    let (gpu_fill, tex_upload) = GPU_FACTORS.read().unwrap_or_else(|e| e.into_inner()).clone();
+    CalibrationResult {
+        gpu_fill_factor: gpu_fill,
+        texture_upload_factor: tex_upload,
+        ..base
+    }
+}
+
+/// Register GPU calibration factors measured by a GPU-context caller.
+///
+/// Call this once at the start of GPU-accelerated test suites, before any
+/// budget assertions that use `gpu_fill_factor` or `texture_upload_factor`.
+/// Calling it multiple times overwrites the previous values.
+///
+/// # Arguments
+///
+/// * `gpu_fill` — ratio of reference GPU fill throughput to actual;
+///   1.0 = reference hardware, >1.0 = slower.
+/// * `texture_upload` — ratio of reference texture upload throughput to actual;
+///   1.0 = reference hardware, >1.0 = slower.
+///
+/// Both values are clamped to `[0.1, 200.0]` to prevent degenerate budgets.
+pub fn set_gpu_factors(gpu_fill: f64, texture_upload: f64) {
+    let gpu_fill = gpu_fill.clamp(0.1, 200.0);
+    let texture_upload = texture_upload.clamp(0.1, 200.0);
+    let mut guard = GPU_FACTORS.write().unwrap_or_else(|e| e.into_inner());
+    *guard = (Some(gpu_fill), Some(texture_upload));
 }
 
 // ─── Cache management ───────────────────────────────────────────────────────
@@ -531,6 +641,8 @@ mod tests {
             speed_factor: 2.0,
             scene_ops_per_sec: 100_000.0,
             hash_throughput_mbps: 400.0,
+            gpu_fill_factor: None,
+            texture_upload_factor: None,
             timestamp: 0,
             calibration_duration_us: 0,
         };
@@ -545,12 +657,59 @@ mod tests {
             speed_factor: 0.5,
             scene_ops_per_sec: 1_000_000.0,
             hash_throughput_mbps: 1600.0,
+            gpu_fill_factor: None,
+            texture_upload_factor: None,
             timestamp: 0,
             calibration_duration_us: 0,
         };
 
         // Even very small base budgets floor at 1μs
         assert!(scaled_budget(1, &fast) >= 1);
+    }
+
+    #[test]
+    fn test_gpu_scaled_budget_returns_none_when_uncalibrated() {
+        let uncalibrated = CalibrationResult {
+            speed_factor: 1.0,
+            scene_ops_per_sec: 550_000.0,
+            hash_throughput_mbps: 800.0,
+            gpu_fill_factor: None,
+            texture_upload_factor: None,
+            timestamp: 0,
+            calibration_duration_us: 0,
+        };
+        assert!(gpu_scaled_budget(16_600, &uncalibrated).is_none());
+        assert!(texture_upload_scaled_budget(1_000, &uncalibrated).is_none());
+    }
+
+    #[test]
+    fn test_gpu_scaled_budget_scales_when_calibrated() {
+        let calibrated = CalibrationResult {
+            speed_factor: 1.0,
+            scene_ops_per_sec: 550_000.0,
+            hash_throughput_mbps: 800.0,
+            gpu_fill_factor: Some(10.0),     // 10× slower GPU (like llvmpipe)
+            texture_upload_factor: Some(5.0), // 5× slower upload
+            timestamp: 0,
+            calibration_duration_us: 0,
+        };
+        // Frame budget 16.6ms × 10 = 166ms
+        assert_eq!(gpu_scaled_budget(16_600, &calibrated), Some(166_000));
+        // Texture upload budget 1ms × 5 = 5ms
+        assert_eq!(texture_upload_scaled_budget(1_000, &calibrated), Some(5_000));
+    }
+
+    #[test]
+    fn test_set_gpu_factors_roundtrips_via_current_calibration_with_gpu() {
+        // Reset to None by setting to known values
+        set_gpu_factors(8.0, 4.0);
+        let cal = current_calibration_with_gpu();
+        assert!(cal.gpu_fill_factor.is_some());
+        assert!(cal.texture_upload_factor.is_some());
+        let fill = cal.gpu_fill_factor.unwrap();
+        let upload = cal.texture_upload_factor.unwrap();
+        assert!((fill - 8.0).abs() < f64::EPSILON, "gpu_fill_factor mismatch: {fill}");
+        assert!((upload - 4.0).abs() < f64::EPSILON, "texture_upload_factor mismatch: {upload}");
     }
 
     #[test]
@@ -595,6 +754,8 @@ mod tests {
             speed_factor: 1.5,
             scene_ops_per_sec: 300_000.0,
             hash_throughput_mbps: 500.0,
+            gpu_fill_factor: Some(9.5),
+            texture_upload_factor: Some(3.2),
             timestamp: 1_700_000_000,
             calibration_duration_us: 250_000,
         };
@@ -605,5 +766,27 @@ mod tests {
 
         assert!((deserialized.speed_factor - 1.5).abs() < f64::EPSILON);
         assert_eq!(deserialized.timestamp, 1_700_000_000);
+        assert!(deserialized.gpu_fill_factor.is_some());
+        assert!((deserialized.gpu_fill_factor.unwrap() - 9.5).abs() < f64::EPSILON);
+        assert!(deserialized.texture_upload_factor.is_some());
+        assert!((deserialized.texture_upload_factor.unwrap() - 3.2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_cache_serialization_backward_compat_no_gpu_fields() {
+        // Old calibration JSON without gpu_fill_factor or texture_upload_factor
+        // should still deserialize correctly (fields default to None).
+        let old_json = r#"{
+            "speed_factor": 2.0,
+            "scene_ops_per_sec": 200000.0,
+            "hash_throughput_mbps": 400.0,
+            "timestamp": 1700000000,
+            "calibration_duration_us": 300000
+        }"#;
+        let result: CalibrationResult =
+            serde_json::from_str(old_json).expect("deserialize old JSON");
+        assert_eq!(result.gpu_fill_factor, None);
+        assert_eq!(result.texture_upload_factor, None);
+        assert!((result.speed_factor - 2.0).abs() < f64::EPSILON);
     }
 }

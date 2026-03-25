@@ -14,6 +14,7 @@ pub use record::{
     FrameTelemetry, SessionSummary, LatencyBucket,
     BudgetTier, BudgetViolationKind, BudgetViolationEvent, FrameTimeShedEvent,
     DegradationEvent, DegradationDirection,
+    CalibrationStatus,
 };
 pub use collector::{FrameRecorder, TelemetryCollector};
 pub use resource_monitor::{
