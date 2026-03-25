@@ -13,7 +13,6 @@ headless = ["tze_hud_runtime/headless"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
-tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
 tokio = { workspace = true }

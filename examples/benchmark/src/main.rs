@@ -463,9 +463,14 @@ mod headless_impl {
                                 bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
                             }),
                         };
-                        let _ = scene.set_tile_root(tile_id, node);
+                        // Count create unconditionally (it succeeded); count
+                        // set_root only if it also succeeds, to avoid inflating
+                        // throughput when the scene mutation fails.
+                        total_ops += 1; // create
+                        if scene.set_tile_root(tile_id, node).is_ok() {
+                            total_ops += 1; // set_root
+                        }
                         tile_ids.push(tile_id);
-                        total_ops += 2; // create + set_root
                     }
                 }
             }
@@ -643,6 +648,14 @@ mod headless_impl {
                     tile_ids.push(tile_id);
                 }
             }
+        }
+
+        if tile_ids.is_empty() {
+            warn!("run_high_mutation: no tiles were created; cannot run mutation scenario");
+            return ScenarioResult {
+                name: "high_mutation".to_string(),
+                summary: SessionSummary::new(),
+            };
         }
 
         // Warmup

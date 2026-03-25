@@ -215,33 +215,36 @@ impl BudgetAssertion {
 
     /// Check a `LatencyBucket` against this budget with the given hardware factors.
     ///
-    /// - If the required dimension is not calibrated → `Uncalibrated`.
     /// - If the bucket has no samples → `NoSamples`.
+    /// - If the required dimension is not calibrated → `Uncalibrated`.
     /// - If p99 ≤ effective_budget → `Pass`.
     /// - If p99 > effective_budget → `Fail`.
     pub fn check(&self, bucket: &LatencyBucket, factors: &HardwareFactors) -> AssertionOutcome {
+        // Check for samples first; a missing dimension on an empty bucket is
+        // meaningless — report the data absence, not the calibration state.
+        let p99 = match bucket.p99() {
+            Some(v) => v,
+            None => return AssertionOutcome::NoSamples { metric: self.metric.clone() },
+        };
+
         let factor = match self.dimension.factor_from(factors) {
             Some(f) => f,
             None => {
-                // Get raw p99 if available for the uncalibrated report.
-                let raw_value = bucket.p99().unwrap_or(0);
                 return AssertionOutcome::Uncalibrated {
                     metric: self.metric.clone(),
                     reason: format!(
                         "{:?} factor not available",
                         self.dimension
                     ),
-                    raw_value,
+                    raw_value: p99,
                 };
             }
         };
 
-        let p99 = match bucket.p99() {
-            Some(v) => v,
-            None => return AssertionOutcome::NoSamples { metric: self.metric.clone() },
-        };
-
-        let effective_budget = ((self.base_budget_us as f64 * factor) as u64).max(1);
+        // Use ceil to avoid truncation making the enforced budget stricter than intended.
+        let effective_budget = (self.base_budget_us as f64 * factor)
+            .ceil()
+            .max(1.0) as u64;
 
         if p99 <= effective_budget {
             AssertionOutcome::Pass {
@@ -304,7 +307,13 @@ pub struct ValidationReport {
     pub fail_count: usize,
     /// Number of uncalibrated / no-samples outcomes.
     pub uncalibrated_count: usize,
-    /// Overall verdict: "pass", "fail", or "uncalibrated".
+    /// Overall verdict string. One of:
+    /// - `"pass"`: all assertions produced a definitive pass, no failures.
+    /// - `"fail"`: at least one assertion definitively failed.
+    /// - `"uncalibrated"`: no assertions produced a definitive pass or fail
+    ///   (all were uncalibrated or had no samples).
+    /// - `"partial"`: some assertions passed while others were uncalibrated
+    ///   or had no samples.
     pub verdict: String,
 }
 
@@ -318,6 +327,7 @@ impl ValidationReport {
     /// - `input_to_next_present` p99 < 33ms (GPU dimension)
     /// - `lease_violations` == 0
     /// - `budget_overruns` == 0
+    /// - `sync_drift_violations` == 0
     pub fn run(summary: &SessionSummary, factors: &HardwareFactors) -> Self {
         let assertions_to_run = vec![
             BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu),
@@ -348,6 +358,10 @@ impl ValidationReport {
         outcomes.push(BudgetAssertion::check_zero(
             "budget_overruns",
             summary.budget_overruns,
+        ));
+        outcomes.push(BudgetAssertion::check_zero(
+            "sync_drift_violations",
+            summary.sync_drift_violations,
         ));
 
         let pass_count = outcomes.iter().filter(|o| o.is_pass()).count();

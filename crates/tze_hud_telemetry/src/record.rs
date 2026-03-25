@@ -334,13 +334,16 @@ pub enum DegradationDirection {
 /// - Peak tracking: peak_frame_time_us, peak_tile_count
 /// - Violation counters: lease_violations, budget_overruns, sync_drift_violations
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct SessionSummary {
     /// Total frames rendered in this session.
     pub total_frames: u64,
     /// Total session duration in microseconds (set externally when session ends).
+    #[serde(default)]
     pub elapsed_us: u64,
     /// Average FPS over the session (computed from total_frames / elapsed_us).
     /// Zero if elapsed_us == 0.
+    #[serde(default)]
     pub fps: f64,
     /// Per-frame total time (Stage 1 start → Stage 7 end), microseconds.
     pub frame_time: LatencyBucket,
@@ -368,14 +371,19 @@ pub struct SessionSummary {
     /// Agent connect latency.
     pub agent_connect_latency: LatencyBucket,
     /// Peak single-frame time observed (microseconds).
+    #[serde(default)]
     pub peak_frame_time_us: u64,
     /// Peak tile count seen in any single frame.
+    #[serde(default)]
     pub peak_tile_count: u32,
     /// Number of lease violations observed (zero is the pass threshold).
+    #[serde(default)]
     pub lease_violations: u64,
     /// Number of budget overruns observed (zero is the pass threshold).
+    #[serde(default)]
     pub budget_overruns: u64,
     /// Number of sync drift violations (drift > 500µs).
+    #[serde(default)]
     pub sync_drift_violations: u64,
 }
 
