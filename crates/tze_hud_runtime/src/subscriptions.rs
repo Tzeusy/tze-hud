@@ -73,17 +73,23 @@ pub fn required_capability(category: &str) -> Option<&'static str> {
 // ─── Subscription entry ───────────────────────────────────────────────────────
 
 /// A single active subscription for an agent.
+///
+/// Fields are private to enforce the invariant that `filter_prefix`, when
+/// present, must start with the category's default prefix (RFC 0010 §7.2).
+/// Construct via [`Subscription::new`] or [`Subscription::with_filter`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subscription {
     /// The subscription category (e.g., "SCENE_TOPOLOGY").
-    pub category: String,
+    category: String,
     /// Optional finer-grained event type prefix filter within the category
     /// (e.g., "scene.zone." to receive only zone events within SCENE_TOPOLOGY).
     /// If `None`, the category's default prefix applies.
-    pub filter_prefix: Option<String>,
+    filter_prefix: Option<String>,
 }
 
 impl Subscription {
+    /// Create a subscription for `category` with no finer-grained filter.
+    /// The category's default prefix applies to event routing.
     pub fn new(category: impl Into<String>) -> Self {
         Self {
             category: category.into(),
@@ -91,11 +97,64 @@ impl Subscription {
         }
     }
 
+    /// Create a subscription with an explicit `filter_prefix`, narrowing delivery
+    /// to events whose type starts with that prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `filter` does not start with the category's default prefix
+    /// (i.e., the filter would escape the category's event namespace).
+    /// For an unknown category, the filter is accepted as-is (no prefix to check).
+    ///
+    /// Use this constructor when the caller has already validated that the filter
+    /// is within bounds, or in tests with known-good inputs.
     pub fn with_filter(category: impl Into<String>, filter: impl Into<String>) -> Self {
-        Self {
-            category: category.into(),
-            filter_prefix: Some(filter.into()),
+        let category = category.into();
+        let filter = filter.into();
+        if let Some(default_prefix) = category_prefix(&category) {
+            assert!(
+                filter.starts_with(default_prefix),
+                "filter_prefix {:?} does not start with category {:?} default prefix {:?}",
+                filter,
+                category,
+                default_prefix,
+            );
         }
+        Self {
+            category,
+            filter_prefix: Some(filter),
+        }
+    }
+
+    /// Returns the subscription category name (e.g., `"SCENE_TOPOLOGY"`).
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+
+    /// Returns the finer-grained filter prefix, if one is active.
+    ///
+    /// When `None`, the category's default prefix governs event routing.
+    pub fn filter_prefix(&self) -> Option<&str> {
+        self.filter_prefix.as_deref()
+    }
+
+    /// Set or clear the filter prefix.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `filter` is `Some` and does not start with the category's
+    /// default prefix (same invariant as [`Subscription::with_filter`]).
+    pub(crate) fn set_filter_prefix(&mut self, filter: Option<String>) {
+        if let (Some(fp), Some(default_prefix)) = (&filter, category_prefix(&self.category)) {
+            assert!(
+                fp.starts_with(default_prefix),
+                "filter_prefix {:?} does not start with category {:?} default prefix {:?}",
+                fp,
+                self.category,
+                default_prefix,
+            );
+        }
+        self.filter_prefix = filter;
     }
 
     /// Returns true if this subscription matches the given event type.
@@ -213,7 +272,7 @@ impl AgentSubscriptions {
                 // If already subscribed, update the filter_prefix.
                 // This allows an agent to refine its filter without re-subscribing.
                 if let Some(existing) = self.entries.get_mut(cat.as_str()) {
-                    existing.filter_prefix = Some(fp.clone());
+                    existing.set_filter_prefix(Some(fp.clone()));
                     continue;
                 }
                 // Enforce the 32-subscription limit
@@ -225,7 +284,7 @@ impl AgentSubscriptions {
             } else {
                 // If already subscribed, clear any stored filter (reset to default).
                 if let Some(existing) = self.entries.get_mut(cat.as_str()) {
-                    existing.filter_prefix = None;
+                    existing.set_filter_prefix(None);
                     continue;
                 }
                 // Enforce the 32-subscription limit
@@ -268,7 +327,7 @@ impl AgentSubscriptions {
         self.entries
             .values()
             .filter(|s| s.matches_event_type(event_type))
-            .map(|s| s.category.clone())
+            .map(|s| s.category().to_string())
             .collect()
     }
 
@@ -809,5 +868,60 @@ mod tests {
             &caps(&[]),
         );
         assert!(outcome.denied.contains(&"TOTALLY_UNKNOWN_CATEGORY".to_string()));
+    }
+
+    // ── Subscription accessor methods ─────────────────────────────────────────
+
+    #[test]
+    fn test_subscription_accessors_no_filter() {
+        let sub = Subscription::new(CATEGORY_SCENE_TOPOLOGY);
+        assert_eq!(sub.category(), CATEGORY_SCENE_TOPOLOGY);
+        assert_eq!(sub.filter_prefix(), None);
+    }
+
+    #[test]
+    fn test_subscription_accessors_with_filter() {
+        let sub = Subscription::with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.zone.");
+        assert_eq!(sub.category(), CATEGORY_SCENE_TOPOLOGY);
+        assert_eq!(sub.filter_prefix(), Some("scene.zone."));
+    }
+
+    // ── with_filter invariant enforcement ────────────────────────────────────
+
+    #[test]
+    #[should_panic(expected = "does not start with category")]
+    fn test_with_filter_panics_on_out_of_bounds_prefix() {
+        // "system." does not start with the SCENE_TOPOLOGY default prefix "scene."
+        let _ = Subscription::with_filter(CATEGORY_SCENE_TOPOLOGY, "system.");
+    }
+
+    #[test]
+    #[should_panic(expected = "does not start with category")]
+    fn test_with_filter_panics_on_completely_unrelated_prefix() {
+        // "input." is entirely outside "agent." namespace
+        let _ = Subscription::with_filter(CATEGORY_AGENT_EVENTS, "input.");
+    }
+
+    #[test]
+    fn test_with_filter_accepts_valid_narrowing_prefix() {
+        // "scene.zone." starts with "scene." (SCENE_TOPOLOGY default) — valid
+        let sub = Subscription::with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.zone.");
+        assert_eq!(sub.filter_prefix(), Some("scene.zone."));
+    }
+
+    #[test]
+    fn test_with_filter_accepts_exact_category_prefix() {
+        // Using the exact category prefix as filter is valid (no narrowing, but allowed)
+        let sub = Subscription::with_filter(CATEGORY_SCENE_TOPOLOGY, "scene.");
+        assert_eq!(sub.filter_prefix(), Some("scene."));
+    }
+
+    #[test]
+    fn test_with_filter_unknown_category_allows_any_prefix() {
+        // Unknown categories have no enforced prefix (no category_prefix entry)
+        // so any filter is accepted without panic.
+        let sub = Subscription::with_filter("UNKNOWN_CAT", "anything.");
+        assert_eq!(sub.category(), "UNKNOWN_CAT");
+        assert_eq!(sub.filter_prefix(), Some("anything."));
     }
 }
