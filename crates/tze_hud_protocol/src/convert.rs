@@ -329,7 +329,7 @@ pub fn zone_publish_record_to_proto(r: &ZonePublishRecord) -> proto::ZonePublish
         zone_name: r.zone_name.clone(),
         publisher_namespace: r.publisher_namespace.clone(),
         content: Some(scene_zone_content_to_proto(&r.content)),
-        published_at_ms: r.published_at_ms,
+        published_at_wall_us: r.published_at_wall_us,
         merge_key: r.merge_key.clone().unwrap_or_default(),
     }
 }

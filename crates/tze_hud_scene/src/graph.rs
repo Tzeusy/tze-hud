@@ -2080,12 +2080,12 @@ impl SceneGraph {
             });
         }
 
-        let now_ms = self.clock.now_millis();
+        let now_us = self.clock.now_us();
         let record = ZonePublishRecord {
             zone_name: zone_name.to_string(),
             publisher_namespace: publisher_namespace.to_string(),
             content,
-            published_at_ms: now_ms,
+            published_at_wall_us: now_us,
             merge_key: merge_key.clone(),
             expires_at_wall_us,
             content_classification,
@@ -2457,7 +2457,7 @@ impl SceneGraph {
 
         // Active publications: BTreeMap keyed by zone name; each Vec is already
         // ordered by insertion (policy-enforced). Sort each Vec with a total order
-        // to guarantee determinism: published_at_ms → publisher_namespace → merge_key.
+        // to guarantee determinism: published_at_wall_us → publisher_namespace → merge_key.
         // The merge_key tie-breaker ensures records that share a timestamp and namespace
         // (e.g., MergeByKey records) are still ordered deterministically.
         let active_publications: std::collections::BTreeMap<String, Vec<ZonePublishRecord>> = self
@@ -2467,8 +2467,8 @@ impl SceneGraph {
             .map(|(zone_name, records)| {
                 let mut sorted = records.clone();
                 sorted.sort_by(|a, b| {
-                    a.published_at_ms
-                        .cmp(&b.published_at_ms)
+                    a.published_at_wall_us
+                        .cmp(&b.published_at_wall_us)
                         .then_with(|| a.publisher_namespace.cmp(&b.publisher_namespace))
                         .then_with(|| a.merge_key.cmp(&b.merge_key))
                 });

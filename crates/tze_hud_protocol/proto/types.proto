@@ -217,7 +217,7 @@ message ZonePublishRecordProto {
   string      zone_name           = 1;
   string      publisher_namespace = 2;
   ZoneContent content             = 3;
-  uint64      published_at_ms     = 4;
+  uint64      published_at_wall_us = 4;  // UTC wall clock timestamp in microseconds
   string      merge_key           = 5;  // Empty if not MergeByKey
 }
 

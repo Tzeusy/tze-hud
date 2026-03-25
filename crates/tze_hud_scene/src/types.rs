@@ -1482,7 +1482,8 @@ pub struct ZonePublishRecord {
     pub zone_name: String,
     pub publisher_namespace: String,
     pub content: ZoneContent,
-    pub published_at_ms: u64,
+    /// UTC wall-clock timestamp in microseconds (per timing-model/spec.md Clock Domain Naming Convention).
+    pub published_at_wall_us: u64,
     /// For MergeByKey contention: the key under which this record is stored.
     pub merge_key: Option<String>,
     /// Optional wall-clock expiry timestamp (microseconds since epoch).

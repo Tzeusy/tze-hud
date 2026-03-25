@@ -1581,7 +1581,7 @@ pub fn check_sync_group_commit_policy_valid(graph: &SceneGraph) -> Vec<Invariant
         .collect()
 }
 
-/// Zone publish records: if `expires_at_wall_us` is set, it must be > `published_at_ms * 1000`.
+/// Zone publish records: if `expires_at_wall_us` is set, it must be > `published_at_wall_us`.
 ///
 /// Spec: timing-model/spec.md lines 107-122.
 pub fn check_zone_publish_record_expires_at_valid(graph: &SceneGraph) -> Vec<InvariantViolation> {
@@ -1589,13 +1589,12 @@ pub fn check_zone_publish_record_expires_at_valid(graph: &SceneGraph) -> Vec<Inv
     for pubs in graph.zone_registry.active_publishes.values() {
         for record in pubs {
             if let Some(expires_at_us) = record.expires_at_wall_us {
-                let published_at_us = record.published_at_ms * 1_000;
-                if expires_at_us <= published_at_us {
+                if expires_at_us <= record.published_at_wall_us {
                     violations.push(InvariantViolation::new(
                         "zone_publish_record_expires_at_before_published_at",
                         format!(
-                            "zone '{}' publish by '{}' has expires_at_wall_us={} ≤ published_at_ms*1000={}",
-                            record.zone_name, record.publisher_namespace, expires_at_us, published_at_us
+                            "zone '{}' publish by '{}' has expires_at_wall_us={} ≤ published_at_wall_us={}",
+                            record.zone_name, record.publisher_namespace, expires_at_us, record.published_at_wall_us
                         ),
                     ));
                 }
@@ -2047,7 +2046,7 @@ mod tests {
                 zone_name: "nonexistent_zone".to_string(),
                 publisher_namespace: "agent".to_string(),
                 content: ZoneContent::StreamText("hello".to_string()),
-                published_at_ms: 1_000_000,
+                published_at_wall_us: 1_000_000_000,
                 merge_key: None,
                 expires_at_wall_us: None,
                 content_classification: None,
@@ -2097,7 +2096,7 @@ mod tests {
                     zone_name: zone_name.clone(),
                     publisher_namespace: "a1".into(),
                     content: ZoneContent::StreamText("hello".into()),
-                    published_at_ms: 1_000,
+                    published_at_wall_us: 1_000_000,  // microseconds
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
@@ -2106,7 +2105,7 @@ mod tests {
                     zone_name: zone_name.clone(),
                     publisher_namespace: "a2".into(),
                     content: ZoneContent::StreamText("world".into()),
-                    published_at_ms: 2_000,
+                    published_at_wall_us: 2_000_000,  // microseconds
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
@@ -2223,7 +2222,7 @@ mod tests {
 
     // ── Zone timing checks ─────────────────────────────────────────────────
 
-    /// WHEN zone publish record has expires_at_wall_us <= published_at_ms*1000 THEN check fires.
+    /// WHEN zone publish record has expires_at_wall_us <= published_at_wall_us THEN check fires.
     #[test]
     fn zone_publish_record_expires_before_published_detected() {
         let mut graph = make_graph();
@@ -2260,9 +2259,9 @@ mod tests {
                 zone_name: zone_name.clone(),
                 publisher_namespace: "agent".into(),
                 content: ZoneContent::StreamText("hello".into()),
-                published_at_ms: 10_000, // 10,000 ms = 10_000_000 µs
+                published_at_wall_us: 10_000_000,  // microseconds
                 merge_key: None,
-                expires_at_wall_us: Some(5_000_000), // earlier than published_at
+                expires_at_wall_us: Some(5_000_000), // earlier than published_at_wall_us
                 content_classification: None,
             }],
         );
