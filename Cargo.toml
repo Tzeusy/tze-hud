@@ -12,6 +12,7 @@ members = [
     "crates/tze_hud_policy",
     "crates/tze_hud_config",
     "crates/tze_hud_resource",
+    "crates/tze_hud_validation",
     "examples/vertical_slice",
     "tests/integration",
 ]
