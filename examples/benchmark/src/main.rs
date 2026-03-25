@@ -239,12 +239,29 @@ mod headless_impl {
             match args[i].as_str() {
                 "--emit" => {
                     i += 1;
-                    emit = args.get(i).map(PathBuf::from);
+                    if let Some(path_str) = args.get(i) {
+                        emit = Some(PathBuf::from(path_str));
+                    } else {
+                        eprintln!("Error: --emit requires a path argument");
+                        eprintln!("Usage: --emit <path>");
+                        std::process::exit(1);
+                    }
                 }
                 "--frames" => {
                     i += 1;
-                    if let Some(n) = args.get(i).and_then(|s| s.parse().ok()) {
-                        frames = n;
+                    if let Some(n_str) = args.get(i) {
+                        match n_str.parse::<u64>() {
+                            Ok(n) => frames = n,
+                            Err(_) => {
+                                eprintln!("Error: --frames requires a positive integer, got '{}'", n_str);
+                                eprintln!("Usage: --frames <number>");
+                                std::process::exit(1);
+                            }
+                        }
+                    } else {
+                        eprintln!("Error: --frames requires a numeric argument");
+                        eprintln!("Usage: --frames <number>");
+                        std::process::exit(1);
                     }
                 }
                 "--cpu-only" => {
