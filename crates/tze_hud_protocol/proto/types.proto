@@ -36,7 +36,7 @@ message Rgba {
 // ─── Node Types ───────────────────────────────────────────────────────────────
 
 message NodeProto {
-  bytes id = 1;  // 16-byte UUIDv7 SceneId (little-endian); all-zero = absent/null
+  bytes id = 1;  // 16-byte UUIDv7 SceneId (little-endian); empty (0 bytes) = unset, server assigns; 16 zero bytes = explicit null sentinel
   oneof data {
     SolidColorNodeProto solid_color = 10;
     TextMarkdownNodeProto text_markdown = 11;

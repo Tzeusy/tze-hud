@@ -9,7 +9,8 @@ import "types.proto";
 // Pointer input event dispatched to the agent that owns the hit tile.
 // DEPRECATED: Use InputEnvelope (RFC 0004) for new code.
 // Legacy wire format retained for backwards-compatibility until the
-// InputEnvelope migration is complete; all fields use old string/ms conventions.
+// InputEnvelope migration is complete; ID fields use old string convention;
+// timestamp has been updated to timestamp_mono_us (microseconds).
 message InputEvent {
   string tile_id            = 1;
   string node_id            = 2;

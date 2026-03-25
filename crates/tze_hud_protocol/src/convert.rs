@@ -47,7 +47,13 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
         SceneId::new()
     } else {
         // Decode 16-byte little-endian UUIDv7 SceneId from bytes field.
-        SceneId::from_bytes_le(&n.id).unwrap_or_else(SceneId::new)
+        // Treat the null sentinel (16 zero bytes) and invalid lengths as absent
+        // to avoid introducing a null ID into the live node map.
+        match SceneId::from_bytes_le(&n.id) {
+            Some(decoded) if decoded == SceneId::null() => SceneId::new(),
+            Some(decoded) => decoded,
+            None => SceneId::new(),
+        }
     };
 
     let data = match &n.data {
