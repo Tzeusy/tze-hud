@@ -282,6 +282,128 @@ impl CapabilityPolicy {
     }
 }
 
+// ─── Canonical capability vocabulary (configuration/spec.md §Capability Vocabulary) ──
+
+/// Error produced when an unrecognized capability name is encountered.
+///
+/// Conforms to configuration/spec.md Requirement: Structured Validation Error Collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownCapabilityError {
+    /// The unrecognized capability name.
+    pub unknown: String,
+    /// A hint naming the closest canonical replacement, if any.
+    pub hint: String,
+}
+
+/// Static list of fixed (non-parameterized) canonical v1 capability names.
+///
+/// Source: configuration/spec.md Requirement: Capability Vocabulary (lines 149-164),
+/// RFC 0006 §6.3 (canonical authority), RFC 0005 Round 14 (wire-format amendments).
+pub const CANONICAL_FIXED_CAPS: &[&str] = &[
+    "create_tiles",
+    "modify_own_tiles",
+    "manage_tabs",
+    "manage_sync_groups",
+    "upload_resource",
+    "read_scene_topology",
+    "subscribe_scene_events",
+    "overlay_privileges",
+    "access_input_events",
+    "high_priority_z_order",
+    "exceed_default_budgets",
+    "read_telemetry",
+    "resident_mcp",
+    "lease:priority:1",
+    // publish_zone:* is a parameterized form but * is a valid literal suffix.
+    "publish_zone:*",
+];
+
+/// Validate that every capability in `requested` is a canonical v1 name.
+///
+/// Returns `Ok(())` if all names are canonical, or `Err(Vec<UnknownCapabilityError>)`
+/// listing each unrecognized name with a hint for the canonical replacement.
+///
+/// Recognized forms:
+/// - Fixed names in `CANONICAL_FIXED_CAPS`
+/// - `publish_zone:<zone_name>` (non-empty zone name)
+/// - `emit_scene_event:<event_name>` (non-empty event name)
+///
+/// Rejected forms include: pre-Round-14 names (`read_scene`, `receive_input`,
+/// `zone_publish`), legacy names (`create_tile`, `update_tile`, `delete_tile`,
+/// `create_node`, `update_node`, `delete_node`), camelCase, kebab-case, etc.
+pub fn validate_canonical_capabilities(
+    requested: &[String],
+) -> Result<(), Vec<UnknownCapabilityError>> {
+    let mut errors = Vec::new();
+    for cap in requested {
+        if !is_canonical_capability(cap) {
+            errors.push(UnknownCapabilityError {
+                unknown: cap.clone(),
+                hint: canonical_hint(cap),
+            });
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+/// Returns `true` if `cap` is a canonical v1 capability name.
+fn is_canonical_capability(cap: &str) -> bool {
+    // Fixed names.
+    if CANONICAL_FIXED_CAPS.contains(&cap) {
+        return true;
+    }
+    // Parameterized: publish_zone:<non-empty>
+    if let Some(rest) = cap.strip_prefix("publish_zone:") {
+        return !rest.is_empty();
+    }
+    // Parameterized: emit_scene_event:<non-empty>
+    if let Some(rest) = cap.strip_prefix("emit_scene_event:") {
+        return !rest.is_empty();
+    }
+    // lease:priority:<N> (any positive digit string)
+    if let Some(rest) = cap.strip_prefix("lease:priority:") {
+        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
+/// Return a hint string for a non-canonical capability name, pointing to
+/// the canonical replacement where known.
+///
+/// The hint JSON format matches the spec example:
+/// `{"unknown": "createTiles", "hint": "did you mean create_tiles?"}`
+fn canonical_hint(cap: &str) -> String {
+    // Pre-Round-14 names revised by RFC 0005 Round 14 (policy-arbitration/spec.md §281-292).
+    if cap == "receive_input" {
+        return r#"did you mean "access_input_events"? (pre-Round-14 name superseded by RFC 0005 Round 14)"#.to_string();
+    }
+    if cap == "read_scene" {
+        return r#"did you mean "read_scene_topology"? (pre-Round-14 name superseded by RFC 0005 Round 14)"#.to_string();
+    }
+    if cap.starts_with("zone_publish:") {
+        let zone = cap.strip_prefix("zone_publish:").unwrap_or("*");
+        return format!(
+            r#"did you mean "publish_zone:{zone}"? (pre-Round-14 name superseded by RFC 0005 Round 14)"#
+        );
+    }
+    // Legacy single-object names (create_tile → create_tiles, etc.).
+    if cap == "create_tile" {
+        return r#"did you mean "create_tiles"? (legacy name; use plural canonical form)"#.to_string();
+    }
+    if cap == "update_tile" || cap == "delete_tile" {
+        return r#"did you mean "modify_own_tiles"? (legacy name; use canonical form)"#.to_string();
+    }
+    if cap == "create_node" || cap == "update_node" || cap == "delete_node" {
+        return r#"did you mean "modify_own_tiles"? (legacy node-level name; use canonical tile-level form)"#.to_string();
+    }
+    // Generic fallback.
+    "unknown capability; see configuration/spec.md §Capability Vocabulary for the canonical v1 list".to_string()
+}
+
 // ─── Subscription filtering ───────────────────────────────────────────────────
 
 /// Filter an agent's requested initial subscriptions against their granted capabilities.
@@ -614,5 +736,123 @@ mod tests {
         assert!(active.contains(&"SCENE_TOPOLOGY".to_string()));
         assert!(active.contains(&"DEGRADATION_NOTICES".to_string()));
         assert!(denied.contains(&"INPUT_EVENTS".to_string()));
+    }
+
+    // ── Canonical capability validation tests ──────────────────────────────────
+
+    /// Scenario: Valid capability grants accepted
+    /// (configuration/spec.md Requirement: Capability Vocabulary, line 154-156)
+    #[test]
+    fn test_canonical_caps_all_valid() {
+        let caps = vec![
+            "create_tiles".to_string(),
+            "modify_own_tiles".to_string(),
+            "manage_tabs".to_string(),
+            "manage_sync_groups".to_string(),
+            "upload_resource".to_string(),
+            "read_scene_topology".to_string(),
+            "subscribe_scene_events".to_string(),
+            "overlay_privileges".to_string(),
+            "access_input_events".to_string(),
+            "high_priority_z_order".to_string(),
+            "exceed_default_budgets".to_string(),
+            "read_telemetry".to_string(),
+            "resident_mcp".to_string(),
+            "publish_zone:subtitle".to_string(),
+            "publish_zone:*".to_string(),
+            "emit_scene_event:doorbell.ring".to_string(),
+            "lease:priority:1".to_string(),
+        ];
+        assert!(validate_canonical_capabilities(&caps).is_ok());
+    }
+
+    /// Scenario: Non-canonical capability name rejected
+    /// (configuration/spec.md Requirement: Capability Vocabulary, line 162-164)
+    #[test]
+    fn test_legacy_create_tile_rejected() {
+        let caps = vec!["create_tile".to_string()];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!(err[0].unknown, "create_tile");
+        assert!(err[0].hint.contains("create_tiles"));
+    }
+
+    /// Scenario: Pre-Round-14 name receive_input rejected with hint
+    /// (policy-arbitration/spec.md §281-292)
+    #[test]
+    fn test_pre_round14_receive_input_rejected() {
+        let caps = vec!["receive_input".to_string()];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!(err[0].unknown, "receive_input");
+        assert!(err[0].hint.contains("access_input_events"));
+    }
+
+    /// Scenario: Pre-Round-14 name read_scene rejected with hint
+    #[test]
+    fn test_pre_round14_read_scene_rejected() {
+        let caps = vec!["read_scene".to_string()];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert_eq!(err[0].unknown, "read_scene");
+        assert!(err[0].hint.contains("read_scene_topology"));
+    }
+
+    /// Scenario: Pre-Round-14 name zone_publish rejected with hint
+    #[test]
+    fn test_pre_round14_zone_publish_rejected() {
+        let caps = vec!["zone_publish:subtitle".to_string()];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert_eq!(err[0].unknown, "zone_publish:subtitle");
+        assert!(err[0].hint.contains("publish_zone:subtitle"));
+    }
+
+    /// Multiple legacy names in one request → all reported.
+    #[test]
+    fn test_multiple_unknown_caps_reported() {
+        let caps = vec![
+            "create_tile".to_string(),
+            "receive_input".to_string(),
+            "read_scene_topology".to_string(), // valid — should not appear in errors
+        ];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert_eq!(err.len(), 2);
+        let unknown: Vec<&str> = err.iter().map(|e| e.unknown.as_str()).collect();
+        assert!(unknown.contains(&"create_tile"));
+        assert!(unknown.contains(&"receive_input"));
+    }
+
+    /// Empty capability list is valid.
+    #[test]
+    fn test_empty_capabilities_valid() {
+        assert!(validate_canonical_capabilities(&[]).is_ok());
+    }
+
+    /// publish_zone with empty zone name is invalid.
+    #[test]
+    fn test_publish_zone_empty_suffix_invalid() {
+        let caps = vec!["publish_zone:".to_string()];
+        assert!(validate_canonical_capabilities(&caps).is_err());
+    }
+
+    /// emit_scene_event with non-empty name is valid.
+    #[test]
+    fn test_emit_scene_event_valid() {
+        let caps = vec!["emit_scene_event:my.event".to_string()];
+        assert!(validate_canonical_capabilities(&caps).is_ok());
+    }
+
+    /// camelCase variant is rejected.
+    #[test]
+    fn test_camel_case_rejected() {
+        let caps = vec!["createTiles".to_string()];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert!(!err[0].hint.is_empty());
+    }
+
+    /// kebab-case variant is rejected.
+    #[test]
+    fn test_kebab_case_rejected() {
+        let caps = vec!["create-tiles".to_string()];
+        assert!(validate_canonical_capabilities(&caps).is_err());
     }
 }

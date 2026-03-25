@@ -23,8 +23,8 @@
 //! - Resuming → Closed (expired/invalid token)
 
 use crate::auth::{
-    authenticate_session_init, negotiate_version, CapabilityPolicy,
-    AuthResult,
+    authenticate_session_init, negotiate_version, validate_canonical_capabilities,
+    CapabilityPolicy, AuthResult,
 };
 use std::collections::HashMap;
 use crate::convert;
@@ -1262,7 +1262,36 @@ async fn handle_session_init(
         }
     }
 
-    // ── Step 3: Capability negotiation (RFC 0005 §5.3) ───────────────────────
+    // ── Step 3: Capability vocabulary validation (configuration/spec.md §Capability Vocabulary) ──
+    // All requested capability names MUST be from the canonical v1 vocabulary.
+    // Legacy names (create_tile, receive_input, read_scene, zone_publish) and any
+    // other non-canonical name MUST be rejected with CONFIG_UNKNOWN_CAPABILITY and a hint.
+    if let Err(unknown_caps) = validate_canonical_capabilities(&init.requested_capabilities) {
+        // Collect all errors before reporting (spec requires collecting all, not fail-fast).
+        let hints: Vec<serde_json::Value> = unknown_caps
+            .iter()
+            .map(|e| serde_json::json!({"unknown": e.unknown, "hint": e.hint}))
+            .collect();
+        let hint_json = serde_json::to_string(&hints)
+            .unwrap_or_else(|_| "see configuration/spec.md §Capability Vocabulary".to_string());
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: 1,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::SessionError(SessionError {
+                    code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
+                    message: format!(
+                        "{} unrecognized capability name(s); canonical v1 names are required",
+                        unknown_caps.len()
+                    ),
+                    hint: hint_json,
+                })),
+            }))
+            .await;
+        return None;
+    }
+
+    // ── Step 4: Capability negotiation (RFC 0005 §5.3) ───────────────────────
     // Capabilities are gated against the agent's authorization policy.
     //
     // Per configuration/spec.md §Requirement: Agent Registration (lines 136-147):
@@ -1276,7 +1305,7 @@ async fn handle_session_init(
     let (granted_capabilities, _denied_caps) =
         policy.partition_capabilities(&init.requested_capabilities);
 
-    // ── Step 4: Subscription filtering (RFC 0005 §7.1) ──────────────────────
+    // ── Step 5: Subscription filtering (RFC 0005 §7.1) ──────────────────────
     // Initial subscriptions are filtered against the agent's explicitly granted
     // capabilities. Agents must include the required capability in their
     // `requested_capabilities` to subscribe to capability-gated categories
@@ -2228,6 +2257,41 @@ async fn apply_queued_batch_to_scene(
     let _ = st.scene.apply_batch(&scene_batch);
 }
 
+/// Map a canonical v1 capability wire name to the `Capability` enum variant.
+///
+/// Only canonical names (post-validation) reach this function.
+/// Returns `None` for names that have no corresponding enum variant at this
+/// layer (e.g., informational capabilities not enforced by the scene graph).
+fn canonical_name_to_capability(name: &str) -> Option<Capability> {
+    match name {
+        "create_tiles"            => Some(Capability::CreateTiles),
+        "modify_own_tiles"        => Some(Capability::ModifyOwnTiles),
+        "manage_tabs"             => Some(Capability::ManageTabs),
+        "manage_sync_groups"      => Some(Capability::ManageSyncGroups),
+        "upload_resource"         => Some(Capability::UploadResource),
+        "read_scene_topology"     => Some(Capability::ReadSceneTopology),
+        "subscribe_scene_events"  => Some(Capability::SubscribeSceneEvents),
+        "overlay_privileges"      => Some(Capability::OverlayPrivileges),
+        "access_input_events"     => Some(Capability::AccessInputEvents),
+        "high_priority_z_order"   => Some(Capability::HighPriorityZOrder),
+        "exceed_default_budgets"  => Some(Capability::ExceedDefaultBudgets),
+        "read_telemetry"          => Some(Capability::ReadTelemetry),
+        "resident_mcp"            => Some(Capability::ResidentMcp),
+        "lease:priority:1"        => Some(Capability::LeasePriority1),
+        _ if name.starts_with("publish_zone:") => {
+            let zone = name.strip_prefix("publish_zone:").unwrap_or("*");
+            Some(Capability::PublishZone(zone.to_string()))
+        }
+        _ if name.starts_with("emit_scene_event:") => {
+            let event = name.strip_prefix("emit_scene_event:").unwrap_or("");
+            Some(Capability::EmitSceneEvent(event.to_string()))
+        }
+        // Higher-priority lease variants beyond priority 1 are not yet represented
+        // in the enum; skip them without error (forward compat).
+        _ => None,
+    }
+}
+
 async fn handle_lease_request(
     state: &Arc<Mutex<SharedState>>,
     session: &mut StreamSession,
@@ -2261,32 +2325,60 @@ async fn handle_lease_request(
 
     let mut st = state.lock().await;
 
-    // Parse capabilities — filter_map discards unknown strings.
-    // Track the normalized (valid) capability names alongside the enum values
-    // so that `granted_capabilities` in the response reflects what was actually
-    // granted, not the raw request strings (which may include unknowns).
-    let known_cap_names = [
-        "create_tile", "update_tile", "delete_tile",
-        "create_node", "update_node", "delete_node", "receive_input",
-    ];
-    let granted_capabilities: Vec<String> = req
-        .capabilities
-        .iter()
-        .filter(|c| known_cap_names.contains(&c.as_str()))
-        .cloned()
-        .collect();
+    // Validate requested capabilities against the canonical v1 vocabulary.
+    // Non-canonical names (including legacy names like create_tile, receive_input)
+    // must be rejected with CONFIG_UNKNOWN_CAPABILITY and a hint.
+    if let Err(unknown_caps) = validate_canonical_capabilities(&req.capabilities) {
+        let hints: Vec<serde_json::Value> = unknown_caps
+            .iter()
+            .map(|e| serde_json::json!({"unknown": e.unknown, "hint": e.hint}))
+            .collect();
+        let hint_json = serde_json::to_string(&hints)
+            .unwrap_or_else(|_| "see configuration/spec.md §Capability Vocabulary".to_string());
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
+                    granted: false,
+                    deny_code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
+                    deny_reason: format!(
+                        "{} unrecognized capability name(s)",
+                        unknown_caps.len()
+                    ),
+                    // hint is embedded in deny_reason JSON above; also in deny_code context
+                    ..Default::default()
+                })),
+            }))
+            .await;
+        // Log the structured hint separately via a RuntimeError advisory.
+        let hint_seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: hint_seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                    error_code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
+                    message: format!(
+                        "LeaseRequest contains {} unrecognized capability name(s)",
+                        unknown_caps.len()
+                    ),
+                    hint: hint_json,
+                    ..Default::default()
+                })),
+            }))
+            .await;
+        return;
+    }
+
+    // Map canonical wire names to Capability enum values.
+    // Only canonical v1 names are accepted here; validation above ensures no
+    // legacy names reach this mapping.
+    let granted_capabilities: Vec<String> = req.capabilities.clone();
     let capabilities: Vec<Capability> = granted_capabilities
         .iter()
-        .filter_map(|c| match c.as_str() {
-            "create_tile" => Some(Capability::CreateTile),
-            "update_tile" => Some(Capability::UpdateTile),
-            "delete_tile" => Some(Capability::DeleteTile),
-            "create_node" => Some(Capability::CreateNode),
-            "update_node" => Some(Capability::UpdateNode),
-            "delete_node" => Some(Capability::DeleteNode),
-            "receive_input" => Some(Capability::ReceiveInput),
-            _ => None,
-        })
+        .filter_map(|c| canonical_name_to_capability(c))
         .collect();
 
     let ttl = if req.ttl_ms > 0 { req.ttl_ms } else { 60_000 };
@@ -3218,7 +3310,8 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
-        // Send SessionInit with read_scene_topology so SCENE_TOPOLOGY subscription is granted
+        // Send SessionInit with canonical capability names (create_tiles, access_input_events)
+        // and read_scene_topology so SCENE_TOPOLOGY subscription is granted.
         tx.send(ClientMessage {
             sequence: 1,
             timestamp_wall_us: now_wall_us(),
@@ -3227,8 +3320,8 @@ mod tests {
                 agent_display_name: agent_id.to_string(),
                 pre_shared_key: psk.to_string(),
                 requested_capabilities: vec![
-                    "create_tile".to_string(),
-                    "receive_input".to_string(),
+                    "create_tiles".to_string(),
+                    "access_input_events".to_string(),
                     "read_scene_topology".to_string(),
                 ],
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
@@ -3268,8 +3361,8 @@ mod tests {
             Some(ServerPayload::SessionEstablished(established)) => {
                 assert!(!established.session_id.is_empty());
                 assert_eq!(established.namespace, "test-agent");
-                assert!(established.granted_capabilities.contains(&"create_tile".to_string()));
-                assert!(established.granted_capabilities.contains(&"receive_input".to_string()));
+                assert!(established.granted_capabilities.contains(&"create_tiles".to_string()));
+                assert!(established.granted_capabilities.contains(&"access_input_events".to_string()));
                 assert!(established.granted_capabilities.contains(&"read_scene_topology".to_string()));
                 assert!(!established.resume_token.is_empty());
                 assert_eq!(established.heartbeat_interval_ms, DEFAULT_HEARTBEAT_INTERVAL_MS);
@@ -3360,7 +3453,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 60_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -3442,7 +3535,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string(), "receive_input".to_string()],
+                capabilities: vec!["create_tiles".to_string(), "access_input_events".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -3456,7 +3549,7 @@ mod tests {
                 assert!(!resp.lease_id.is_empty());
                 assert_eq!(resp.lease_id.len(), 16);
                 assert_eq!(resp.granted_ttl_ms, 30_000);
-                assert!(resp.granted_capabilities.contains(&"create_tile".to_string()));
+                assert!(resp.granted_capabilities.contains(&"create_tiles".to_string()));
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
         }
@@ -3892,7 +3985,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -4011,7 +4104,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -4119,7 +4212,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -4845,6 +4938,146 @@ mod tests {
         }
     }
 
+    /// Scenario: Non-canonical capability name rejected with CONFIG_UNKNOWN_CAPABILITY
+    /// (configuration/spec.md Requirement: Capability Vocabulary, line 162-164)
+    /// WHEN agent sends SessionInit with a legacy/non-canonical capability name,
+    /// THEN runtime responds with SessionError(CONFIG_UNKNOWN_CAPABILITY) and a hint.
+    #[tokio::test]
+    async fn test_legacy_capability_rejected_with_hint() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "legacy-agent".to_string(),
+                agent_display_name: "legacy-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                // Legacy names — must be rejected
+                requested_capabilities: vec![
+                    "create_tile".to_string(),   // legacy: should be create_tiles
+                    "receive_input".to_string(),  // legacy: should be access_input_events
+                ],
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        use tokio_stream::StreamExt;
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(
+                    err.code, "CONFIG_UNKNOWN_CAPABILITY",
+                    "Expected CONFIG_UNKNOWN_CAPABILITY, got: {:?}", err.code
+                );
+                // Hint should contain JSON with canonical replacements
+                assert!(
+                    !err.hint.is_empty(),
+                    "Hint must be non-empty and point to canonical replacements"
+                );
+                // Both legacy names must be reported (spec: collect all, not fail-fast)
+                assert!(
+                    err.hint.contains("create_tiles") || err.hint.contains("create_tile"),
+                    "Hint must reference create_tiles: {:?}", err.hint
+                );
+                assert!(
+                    err.hint.contains("access_input_events"),
+                    "Hint must reference access_input_events: {:?}", err.hint
+                );
+            }
+            other => panic!("Expected SessionError(CONFIG_UNKNOWN_CAPABILITY), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: Pre-Round-14 name read_scene rejected with hint
+    /// (policy-arbitration/spec.md §Requirement: Capability Registry Canonical Names, lines 281-292)
+    #[tokio::test]
+    async fn test_pre_round14_capability_name_rejected() {
+        let (mut client, _server) = setup_test().await;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "old-vocab-agent".to_string(),
+                agent_display_name: "old-vocab-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec![
+                    "read_scene".to_string(),          // pre-Round-14: should be read_scene_topology
+                    "zone_publish:subtitle".to_string(), // pre-Round-14: should be publish_zone:subtitle
+                ],
+                initial_subscriptions: Vec::new(),
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: 0,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+        use tokio_stream::StreamExt;
+        let msg = response_stream.next().await.unwrap().unwrap();
+        match &msg.payload {
+            Some(ServerPayload::SessionError(err)) => {
+                assert_eq!(err.code, "CONFIG_UNKNOWN_CAPABILITY");
+                assert!(err.hint.contains("read_scene_topology"), "Hint must reference read_scene_topology");
+                assert!(err.hint.contains("publish_zone:subtitle"), "Hint must reference publish_zone:subtitle");
+            }
+            other => panic!("Expected SessionError(CONFIG_UNKNOWN_CAPABILITY), got: {other:?}"),
+        }
+    }
+
+    /// Scenario: LeaseRequest with non-canonical capability rejected
+    /// (configuration/spec.md Requirement: Capability Vocabulary)
+    #[tokio::test]
+    async fn test_lease_request_with_legacy_capability_rejected() {
+        let (mut client, _server) = setup_test().await;
+        let (tx, _messages, mut response_stream) = handshake(&mut client, "cap-test-agent", "test-key").await;
+
+        // Request a lease with a legacy (non-canonical) capability name
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tile".to_string()], // legacy: should be create_tiles
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Expect a LeaseResponse with granted=false and CONFIG_UNKNOWN_CAPABILITY
+        let msg = next_non_state_change(&mut response_stream).await;
+        match &msg.payload {
+            Some(ServerPayload::LeaseResponse(resp)) => {
+                assert!(!resp.granted, "Lease must be denied for non-canonical capability");
+                assert_eq!(
+                    resp.deny_code, "CONFIG_UNKNOWN_CAPABILITY",
+                    "deny_code must be CONFIG_UNKNOWN_CAPABILITY, got: {:?}", resp.deny_code
+                );
+            }
+            other => panic!("Expected LeaseResponse(denied), got: {other:?}"),
+        }
+    }
+
     /// Scenario: PSK agent with access_input_events capability successfully subscribes to
     /// INPUT_EVENTS (RFC 0005 §7.1).
     /// WHEN a PSK-authenticated agent requests INPUT_EVENTS subscription AND includes
@@ -5446,9 +5679,9 @@ mod tests {
                 agent_id: "sub-resume-agent".to_string(),
                 agent_display_name: "sub-resume-agent".to_string(),
                 pre_shared_key: "test-key".to_string(),
-                // Include required capabilities for both subscriptions
+                // Include required capabilities for both subscriptions (canonical names)
                 requested_capabilities: vec![
-                    "create_tile".to_string(),
+                    "create_tiles".to_string(),
                     "read_scene_topology".to_string(),
                     "access_input_events".to_string(),
                 ],
@@ -5499,8 +5732,8 @@ mod tests {
                 assert!(result.accepted);
                 // Capabilities must be restored.
                 assert!(
-                    result.granted_capabilities.contains(&"create_tile".to_string()),
-                    "create_tile capability must be restored on resume"
+                    result.granted_capabilities.contains(&"create_tiles".to_string()),
+                    "create_tiles capability must be restored on resume"
                 );
                 // Subscriptions must be restored.
                 assert!(
@@ -5616,7 +5849,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 60_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -5782,7 +6015,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 60_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -5842,7 +6075,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 60_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -6278,7 +6511,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -6293,7 +6526,7 @@ mod tests {
                 assert_eq!(resp.lease_id.len(), 16, "lease_id must be 16-byte UUIDv7");
                 assert_eq!(resp.granted_ttl_ms, 30_000);
                 assert_eq!(resp.granted_priority, 2);
-                assert!(resp.granted_capabilities.contains(&"create_tile".to_string()));
+                assert!(resp.granted_capabilities.contains(&"create_tiles".to_string()));
                 resp.lease_id.clone()
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
@@ -6437,7 +6670,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 60_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -6568,7 +6801,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 30_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         };
@@ -6645,7 +6878,7 @@ mod tests {
                 timestamp_wall_us: now_wall_us(),
                 payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                     ttl_ms: 30_000,
-                    capabilities: vec!["create_tile".to_string()],
+                    capabilities: vec!["create_tiles".to_string()],
                     lease_priority: 2,
                 })),
             })
@@ -6693,7 +6926,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 100, // very short TTL for expiry testing
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
@@ -6808,7 +7041,7 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 60_000,
-                capabilities: vec!["create_tile".to_string()],
+                capabilities: vec!["create_tiles".to_string()],
                 lease_priority: 2,
             })),
         })
