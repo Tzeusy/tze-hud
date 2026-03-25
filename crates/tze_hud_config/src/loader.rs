@@ -26,7 +26,9 @@
 //! Validation items delegated to other beads:
 //! - Capability vocabulary (rig-9yfh): `CONFIG_UNKNOWN_CAPABILITY`, reserved event
 //!   prefix in capability grants.
-//! - Privacy / zone / agent registration (rig-mop4).
+//! - Privacy / zone registry / agent registration (rig-mop4).
+//!   Note: per-tab zone-type reference validation (`validate_tab_zone_references`)
+//!   is invoked here at step (4b), but the implementation lives in the `zones` module.
 
 use std::collections::HashMap;
 
