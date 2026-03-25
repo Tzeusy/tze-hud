@@ -12,11 +12,12 @@
 //!
 //! ## Strategy
 //!
-//! 1. **Oracle fuzzer** — maintain an independent counter of "expected" resources
-//!    alongside the scene graph.  After every mutation (accepted or rejected), verify
-//!    that the graph's tile/node counts match the oracle.
+//! 1. **Oracle state tracker** — maintain an independent set of live IDs (tabs, tiles,
+//!    nodes, leases, sync groups) alongside the scene graph.  The oracle is used for
+//!    realistic ID selection so operations have valid targets; structural consistency is
+//!    verified by `assert_layer0_invariants`, not by count comparisons.
 //!
-//! 2. **Invariant harness** — call `assert_layer0_invariants` after every batch.
+//! 2. **Invariant harness** — call `assert_layer0_invariants` after every operation.
 //!    Any invariant violation surfaces as a proptest failure with a minimal reproducer.
 //!
 //! 3. **Leak detector** — after deleting all tiles the scene must hold no orphan nodes
@@ -658,12 +659,16 @@ proptest! {
 
 // ─── High-volume deterministic test ──────────────────────────────────────────
 
-/// Apply 100,000 sequential create/update/delete mutation batches (all valid)
-/// and verify no crash, no inconsistent state, and final graph is empty after cleanup.
+/// Apply 100,000 sequential create/update/delete tile mutations (all valid) using
+/// direct `create_tile` / `update_tile_*` / `delete_tile` calls in a deterministic
+/// 4-phase loop, and verify no crash, no inconsistent state, and final graph is empty
+/// after cleanup.
 ///
-/// This is the "100,000 random mutation sequences" acceptance gate from hud-3ksv.
+/// This is the high-volume stability gate from hud-3ksv (100,000 operations without
+/// crash or inconsistent state). The proptest suite above provides random/combinatorial
+/// coverage; this test provides sustained-load coverage.
 #[test]
-fn test_100k_valid_mutation_batches() {
+fn test_100k_deterministic_tile_mutations() {
     let mut graph = SceneGraph::new(1920.0, 1080.0);
     let tab = graph.create_tab("Main", 0).unwrap();
     let lease = graph.grant_lease("load.agent", 300_000, vec![
