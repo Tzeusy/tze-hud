@@ -14,10 +14,10 @@
 //!
 //! ## Design
 //!
-//! [`TraceRecorder`] is a lightweight, opt-in recorder. When disabled (the
-//! default), all `record_*` calls are no-ops and compile down to nothing
-//! significant. When enabled, each call appends a [`TraceEvent`] to an in-memory
-//! buffer.
+//! [`TraceRecorder`] is a lightweight, opt-in recorder. It only records when
+//! the caller explicitly creates one via [`TraceRecorder::start`] and passes
+//! it through the pipeline; otherwise no trace data is captured. When active,
+//! each `record_*` call appends a [`TraceEvent`] to an in-memory buffer.
 //!
 //! The caller is responsible for:
 //! 1. Creating a [`TraceRecorder`] via [`TraceRecorder::start`].
@@ -111,10 +111,14 @@ impl TraceRecorder {
         let initial_json = serde_json::to_string(initial_scene)
             .expect("TraceRecorder::start: failed to serialize initial scene");
 
+        // Bias by | 1 so that 0 (the "not set" sentinel, spec lines 68-70)
+        // is never emitted into the trace header even if the system clock
+        // pre-dates the Unix epoch.
         let started_at_wall_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_micros() as u64;
+            .as_micros() as u64
+            | 1;
 
         let header = TraceHeader {
             trace_id: SceneId::new(),
@@ -240,11 +244,16 @@ impl TraceRecorder {
     }
 
     fn now(&self) -> TraceTimestamp {
+        // Bias both timestamps by | 1 / + 1 so that 0 (the "not set" sentinel,
+        // spec lines 68-70) is never emitted into trace events.  Mirrors the
+        // bias applied in `SystemClock::now_us` and `SystemClock::monotonic_us`
+        // (crates/tze_hud_scene/src/clock.rs).
         let wall_us = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_micros() as u64;
-        let mono_us = self.inner.mono_origin.elapsed().as_micros() as u64;
+            .as_micros() as u64
+            | 1;
+        let mono_us = self.inner.mono_origin.elapsed().as_micros() as u64 + 1;
         TraceTimestamp { wall_us, mono_us }
     }
 }
