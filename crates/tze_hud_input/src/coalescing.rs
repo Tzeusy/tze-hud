@@ -244,7 +244,7 @@ impl FrameCoalescer {
 mod tests {
     use super::*;
     use crate::envelope::*;
-    use tze_hud_scene::SceneId;
+    use tze_hud_scene::{MonoUs, SceneId};
 
     fn null_id() -> SceneId {
         SceneId::null()
@@ -255,7 +255,7 @@ mod tests {
             tile_id: null_id(),
             node_id,
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
             local_x: x,
             local_y: y,
@@ -267,7 +267,7 @@ mod tests {
     fn make_scroll(tile_id: SceneId, ts: u64, ox: f32, oy: f32) -> InputEnvelope {
         InputEnvelope::ScrollOffsetChanged(ScrollOffsetChangedData {
             tile_id,
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             offset_x: ox,
             offset_y: oy,
         })
@@ -278,7 +278,7 @@ mod tests {
             tile_id,
             node_id,
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
@@ -290,7 +290,7 @@ mod tests {
             tile_id,
             node_id,
             interaction_id: String::new(),
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
             device_id: String::new(),
         })
     }
@@ -306,7 +306,7 @@ mod tests {
             tile_id: null_id(),
             node_id,
             interaction_id: String::new(),
-            timestamp_mono_us: 200,
+            timestamp_mono_us: MonoUs(200),
             device_id: String::new(),
             local_x: 50.0,
             local_y: 60.0,
@@ -317,7 +317,7 @@ mod tests {
         assert_eq!(result, CoalesceResult::Merged);
         assert_eq!(queue.len(), 1);
         if let InputEnvelope::PointerMove(d) = &queue[0] {
-            assert_eq!(d.timestamp_mono_us, 200);
+            assert_eq!(d.timestamp_mono_us, MonoUs(200));
             assert!((d.local_x - 50.0).abs() < 0.001);
         } else {
             panic!("expected PointerMove");
@@ -334,7 +334,7 @@ mod tests {
             tile_id: null_id(),
             node_id: node_b,
             interaction_id: String::new(),
-            timestamp_mono_us: 200,
+            timestamp_mono_us: MonoUs(200),
             device_id: String::new(),
             local_x: 5.0,
             local_y: 5.0,
@@ -353,7 +353,7 @@ mod tests {
 
         let incoming = ScrollOffsetChangedData {
             tile_id: tile,
-            timestamp_mono_us: 200,
+            timestamp_mono_us: MonoUs(200),
             offset_x: 0.0,
             offset_y: 250.0,
         };
@@ -376,7 +376,7 @@ mod tests {
             tile_id: tile,
             node_id: node,
             interaction_id: String::new(),
-            timestamp_mono_us: 200,
+            timestamp_mono_us: MonoUs(200),
             device_id: String::new(),
         };
         let result = EventCoalescer::coalesce_leave(&mut queue, leave);
@@ -395,7 +395,7 @@ mod tests {
             tile_id: tile,
             node_id: node,
             interaction_id: String::new(),
-            timestamp_mono_us: 200,
+            timestamp_mono_us: MonoUs(200),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
@@ -475,7 +475,7 @@ mod tests {
             tile_id: null_id(),
             node_id: node,
             interaction_id: String::new(),
-            timestamp_mono_us: 100,
+            timestamp_mono_us: MonoUs(100),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
@@ -487,7 +487,7 @@ mod tests {
             tile_id: null_id(),
             node_id: node,
             interaction_id: String::new(),
-            timestamp_mono_us: 200,
+            timestamp_mono_us: MonoUs(200),
             device_id: String::new(),
             local_x: 0.0,
             local_y: 0.0,
