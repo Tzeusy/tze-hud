@@ -2397,13 +2397,15 @@ async fn handle_lease_request(
 
     // Enforce priority rules per lease-governance spec §Priority Assignment.
     let granted_priority = effective_priority(req.lease_priority, &session.capabilities);
-    // NOTE: `SceneGraph::grant_lease` does not currently persist `granted_priority` in
-    // the lease record (the scene-graph API predates the priority system).  The
-    // `granted_priority` value is returned to the agent in `LeaseResponse` and
-    // honored at the session layer, but arbitration based on stored priority is a
-    // follow-up task (see Epic 4 / lease-governance bead).
 
-    let lease_id = st.scene.grant_lease(&session.namespace, ttl, capabilities);
+    // Persist the effective priority in the scene graph lease record so that the
+    // degradation ladder and arbitration engine can sort tiles by
+    // (lease_priority ASC, z_order DESC) without consulting the session layer.
+    // Spec §Requirement: Priority Sort Semantics (lease-governance/spec.md lines 62-69).
+    // `effective_priority` returns u32 (wire type); priority values are 0-4 so the
+    // conversion to u8 is always lossless.
+    let priority_u8 = granted_priority as u8;
+    let lease_id = st.scene.grant_lease_with_priority(&session.namespace, ttl, priority_u8, capabilities);
     session.lease_ids.push(lease_id);
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
@@ -2532,14 +2534,21 @@ async fn handle_lease_renew(
         Ok(()) => {
             // Spec: "runtime SHALL respond with LeaseResponse" for lease operations.
             // For renewal success, return LeaseResponse(granted=true) with the updated TTL.
-            // Note: granted_priority and granted_capabilities reflect the renewal response
-            // (not the original grant; the scene-graph does not expose them on renew).
-            // Priority and capability assignment belong to the original acquisition path.
+            // Read the stored priority from the scene graph so the renewal response reflects
+            // the persisted value (lease-governance spec §Requirement: Priority Assignment,
+            // lines 49-60: renewal preserves the priority set at grant time).
+            let stored_priority = st
+                .scene
+                .leases
+                .get(&lease_id)
+                .map(|l| l.priority as u32)
+                .unwrap_or(2);
             let seq = session.next_server_seq();
             let lease_response = LeaseResponse {
                 granted: true,
                 lease_id: lease_id_bytes.clone(),
                 granted_ttl_ms: ttl,
+                granted_priority: stored_priority,
                 ..Default::default()
             };
             // Cache exactly what we send, so retransmit replays the same response.
