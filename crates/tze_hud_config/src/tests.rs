@@ -1520,3 +1520,38 @@ name = "Main"
         "non-overridden fields use base values"
     );
 }
+
+/// WHEN custom profile lowers max_agent_update_hz to 30 and agent sets max_update_hz=45
+/// THEN CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE (agent exceeds the tightened custom ceiling).
+///
+/// Regression test: profile_ceiling_for_validation must apply custom overrides, not just
+/// use the base profile ceiling.
+#[test]
+fn spec_agent_max_update_hz_exceeds_custom_tightened_ceiling_rejected() {
+    let toml = r#"
+[runtime]
+profile = "custom"
+
+[display_profile]
+extends = "full-display"
+max_agent_update_hz = 30
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.fast_agent]
+max_update_hz = 45
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let budget_error = errors.iter().find(|e| {
+        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
+            && e.field_path.contains("max_update_hz")
+    });
+    assert!(
+        budget_error.is_some(),
+        "max_update_hz=45 exceeding custom ceiling of 30 should produce \
+         CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE, got: {:?}",
+        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+    );
+}

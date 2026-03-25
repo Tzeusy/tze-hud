@@ -162,17 +162,29 @@ pub(crate) fn profile_ceiling_for_validation(raw: &RawConfig) -> Option<DisplayP
             }
         }
         "custom" => {
-            // Derive base from extends (same logic as resolve_custom_profile, but
-            // without applying overrides, since we only need the ceiling).
-            // The ceiling for a custom profile IS the base profile's values
-            // (custom profiles cannot escalate above the base).
-            let base = raw
-                .display_profile
-                .as_ref()
-                .and_then(|dp| dp.extends.as_deref())
+            // Apply the same override logic as resolve_custom_profile so that
+            // agents are validated against the actual resolved ceiling, not the
+            // base ceiling.  Custom profiles can only LOWER budgets (escalation
+            // is already rejected by validate_budget_escalation), so the resolved
+            // values are always ≤ base.  Using only the base would silently accept
+            // agents that exceed a tightened custom ceiling.
+            let dp = raw.display_profile.as_ref();
+            let base = dp
+                .and_then(|d| d.extends.as_deref())
                 .and_then(base_profile_for)
                 .unwrap_or_else(DisplayProfile::full_display);
-            Some(base)
+            let ceiling = DisplayProfile {
+                name: "custom".into(),
+                max_tiles: dp.and_then(|d| d.max_tiles).unwrap_or(base.max_tiles),
+                max_texture_mb: dp.and_then(|d| d.max_texture_mb).unwrap_or(base.max_texture_mb),
+                max_agents: dp.and_then(|d| d.max_agents).unwrap_or(base.max_agents),
+                max_agent_update_hz: dp.and_then(|d| d.max_agent_update_hz).unwrap_or(base.max_agent_update_hz),
+                target_fps: dp.and_then(|d| d.target_fps).unwrap_or(base.target_fps),
+                min_fps: dp.and_then(|d| d.min_fps).unwrap_or(base.min_fps),
+                allow_background_zones: dp.and_then(|d| d.allow_background_zones).unwrap_or(base.allow_background_zones),
+                allow_chrome_zones: dp.and_then(|d| d.allow_chrome_zones).unwrap_or(base.allow_chrome_zones),
+            };
+            Some(ceiling)
         }
         _ => None, // Unknown/mobile — other checks will report errors.
     }
