@@ -45,7 +45,7 @@
 //! // In the SIGHUP or ReloadConfig handler:
 //! let hot = tze_hud_config::reload_config(&new_toml)?;
 //! ctx.reload_hot_config(hot);
-//! // All subsystems reading ctx.hot().load() will see the new values
+//! // All subsystems reading ctx.hot_config() will see the new values
 //! // immediately on their next access.
 //! ```
 //!
@@ -227,18 +227,19 @@ impl RuntimeContext {
         self.hot.store(Arc::new(new_hot));
     }
 
-    /// Return a loaded snapshot of the hot-reloadable configuration.
+    /// Return a snapshot of the hot-reloadable configuration.
     ///
-    /// The returned `Guard` keeps the current `HotReloadableConfig` alive for the
-    /// duration of the borrow. Use this to access privacy, degradation, chrome, and
-    /// dynamic policy settings in a lock-free manner.
+    /// The returned `Arc` keeps the current `HotReloadableConfig` alive for as long
+    /// as there are strong references to it. Use this to access privacy,
+    /// degradation, chrome, and dynamic policy settings without exposing the
+    /// internal hot-reload mechanism.
     ///
     /// ```rust,ignore
     /// let hot = ctx.hot_config();
     /// let privacy = &hot.privacy;
     /// ```
-    pub fn hot_config(&self) -> arc_swap::Guard<Arc<HotReloadableConfig>> {
-        self.hot.load()
+    pub fn hot_config(&self) -> Arc<HotReloadableConfig> {
+        self.hot.load_full()
     }
 
     // ── Capability policy lookup ──────────────────────────────────────────────
