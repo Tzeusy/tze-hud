@@ -3053,6 +3053,7 @@ dependencies = [
 name = "tze_hud_protocol"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "prost",
  "serde",
  "serde_json",
