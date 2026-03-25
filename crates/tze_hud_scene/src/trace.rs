@@ -304,7 +304,8 @@ impl ReplayResult {
 mod tests {
     use super::*;
     use crate::graph::SceneGraph;
-    use crate::mutation::{MutationBatch, TimingHints};
+    use crate::mutation::{BatchTimingHints, MutationBatch};
+    use crate::timing::domains::WallUs;
 
     fn make_timestamp(mono_us: u64) -> TraceTimestamp {
         TraceTimestamp {
@@ -330,8 +331,8 @@ mod tests {
             batch_id: SceneId::new(),
             agent_namespace: "test-agent".into(),
             mutations: vec![],
-            timing_hints: Some(TimingHints {
-                present_at_wall_us: Some(1_735_689_600_001_000),
+            timing_hints: Some(BatchTimingHints {
+                present_at_wall_us: Some(WallUs(1_735_689_600_001_000)),
                 expires_at_wall_us: None,
             }),
             lease_id: None,
