@@ -2207,9 +2207,6 @@ impl SceneGraph {
                 });
             }
             Some(state) => {
-                // Convert types::LeaseState to lease::LeaseState for the check.
-                // The check function uses the lease mod's LeaseState, which
-                // mirrors the types.rs version.
                 let result = match state {
                     LeaseState::Active => ZonePublishResult::Accepted,
                     LeaseState::Orphaned | LeaseState::Disconnected => {
