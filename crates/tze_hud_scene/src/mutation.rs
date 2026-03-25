@@ -31,6 +31,7 @@
 
 use crate::types::*;
 use crate::graph::SceneGraph;
+use crate::timing::domains::WallUs;
 use crate::validation::{BatchRejected, ValidationError};
 #[cfg(test)]
 use crate::validation::ValidationErrorCode;
@@ -46,26 +47,30 @@ pub const MAX_BATCH_SIZE: usize = 1_000;
 /// - `agent_namespace` is filled by the runtime from the authenticated session;
 ///   client-supplied values MUST be ignored by the gRPC layer.
 /// - `mutations` are applied in order, atomically (all-or-nothing).
-/// - Optional `timing_hints` carry `present_at_wall_us` and `expires_at_wall_us`.
+/// - Optional `timing_hints` carry `present_at_wall_us` and `expires_at_wall_us` (as [`WallUs`]).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MutationBatch {
     pub batch_id: SceneId,
     pub agent_namespace: String,
     pub mutations: Vec<SceneMutation>,
     /// Optional timing hints from the agent.
-    pub timing_hints: Option<TimingHints>,
+    pub timing_hints: Option<BatchTimingHints>,
     /// Lease ID for this batch. Required for lease/budget validation.
     /// If absent, lease validation is skipped (use with care in tests only).
     pub lease_id: Option<SceneId>,
 }
 
-/// Optional timing hints from the agent (RFC 0005).
+/// Optional timing hints attached to a [`MutationBatch`] (RFC 0005).
+///
+/// Named `BatchTimingHints` to distinguish it from [`crate::timing::TimingHints`],
+/// which is the per-node/per-payload scheduling struct used by the compositor.
+/// Fields use the [`WallUs`] newtype for clock-domain safety.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TimingHints {
-    /// Wall-clock time (microseconds since epoch) at which the batch should be presented.
-    pub present_at_wall_us: Option<u64>,
-    /// Wall-clock time (microseconds since epoch) at which the batch expires.
-    pub expires_at_wall_us: Option<u64>,
+pub struct BatchTimingHints {
+    /// Wall-clock time at which the batch should be presented.
+    pub present_at_wall_us: Option<WallUs>,
+    /// Wall-clock time at which the batch expires.
+    pub expires_at_wall_us: Option<WallUs>,
 }
 
 /// Individual scene mutations (v1 set per RFC 0001 §3.1).

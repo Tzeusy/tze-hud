@@ -321,7 +321,8 @@ pub fn build_regression_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tze_hud_scene::mutation::{MutationBatch, SceneMutation, TimingHints};
+    use tze_hud_scene::mutation::{BatchTimingHints, MutationBatch, SceneMutation};
+    use tze_hud_scene::timing::domains::WallUs;
     use tze_hud_scene::replay::{TraceReplayer, assert_trace_is_deterministic};
     use tze_hud_scene::trace::TraceEventKind;
 
@@ -570,8 +571,8 @@ mod tests {
                 name: "Home".into(),
                 display_order: 0,
             }],
-            timing_hints: Some(TimingHints {
-                present_at_wall_us: Some(1_000_000),
+            timing_hints: Some(BatchTimingHints {
+                present_at_wall_us: Some(WallUs(1_000_000)),
                 expires_at_wall_us: None,
             }),
             lease_id: None,
