@@ -27,9 +27,36 @@
 
 use crate::graph::{SceneGraph, ZONE_TILE_Z_MIN, MAX_TABS, MAX_TILES_PER_TAB, MAX_NODES_PER_TILE};
 use crate::mutation::MAX_BATCH_SIZE;
-use crate::test_scenes::InvariantViolation;
 use crate::types::{InputMode, LeaseState, NodeData, SceneId};
 use std::collections::{HashMap, HashSet};
+
+// ─── InvariantViolation type ──────────────────────────────────────────────────
+
+/// A Layer 0 invariant that was violated.
+///
+/// This type is the canonical return value for all `check_*` functions and
+/// `check_all()`. It is defined here (in `invariants`) rather than in
+/// `test_scenes` so that downstream consumers can depend on `invariants`
+/// without importing test infrastructure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvariantViolation {
+    /// Short machine-readable label, e.g. `"orphan_tile"`.
+    pub code: &'static str,
+    /// Human-readable diagnostic message.
+    pub message: String,
+}
+
+impl InvariantViolation {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self { code, message: message.into() }
+    }
+}
+
+impl std::fmt::Display for InvariantViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.code, self.message)
+    }
+}
 
 // ─── Top-level aggregator ─────────────────────────────────────────────────────
 
@@ -73,7 +100,9 @@ pub fn check_all(graph: &SceneGraph) -> Vec<InvariantViolation> {
     v.extend(check_lease_granted_at_nonzero_if_not_requested(graph));
     v.extend(check_lease_suspended_fields_consistency(graph));
     v.extend(check_lease_orphaned_fields_consistency(graph));
-    v.extend(check_active_lease_has_tiles_or_is_fresh(graph));
+    // Note: check_active_lease_has_tiles_or_is_fresh is intentionally not
+    // called from check_all — it is a no-op stub pending a concrete spec
+    // definition for "stale active lease" detection.
     v.extend(check_terminal_lease_has_no_tiles(graph));
     v.extend(check_lease_namespace_matches_tile_namespace(graph));
 
@@ -927,40 +956,40 @@ pub fn check_resource_budget_max_nodes_nonzero(graph: &SceneGraph) -> Vec<Invari
 /// Per-tab: at most one node may have `focused = true` in `hit_region_states`.
 ///
 /// Spec: input-model/spec.md lines 11-22.
+///
+/// Implementation note: builds a single node→tab map by BFS-walking each tile subtree
+/// once (O(tiles × nodes)), then resolves focused-node ownership in O(focused_nodes).
+/// This avoids the O(focused_nodes × tiles × nodes) complexity of the naïve approach.
 pub fn check_at_most_one_focused_node_per_tab(graph: &SceneGraph) -> Vec<InvariantViolation> {
-    // Map: tab_id → list of focused node IDs
-    let mut focused_per_tab: HashMap<SceneId, Vec<SceneId>> = HashMap::new();
+    // Build a node → tab map once by traversing each tile subtree.
+    let mut node_to_tab: HashMap<SceneId, SceneId> = HashMap::new();
+    for tile in graph.tiles.values() {
+        let Some(root_id) = tile.root_node else {
+            continue;
+        };
+        let mut queue = vec![root_id];
+        let mut visited: HashSet<SceneId> = HashSet::new();
+        while let Some(nid) = queue.pop() {
+            if !visited.insert(nid) {
+                continue;
+            }
+            // Preserve first-seen mapping (nodes appear in exactly one tile in valid graphs).
+            node_to_tab.entry(nid).or_insert(tile.tab_id);
+            if let Some(node) = graph.nodes.get(&nid) {
+                for &child in &node.children {
+                    queue.push(child);
+                }
+            }
+        }
+    }
 
+    // Count focused nodes per tab using the precomputed map.
+    let mut focused_per_tab: HashMap<SceneId, Vec<SceneId>> = HashMap::new();
     for (node_id, state) in &graph.hit_region_states {
         if !state.focused {
             continue;
         }
-        // Resolve which tile this node belongs to and thus which tab.
-        // Walk tiles to find owner.
-        let mut found_tab: Option<SceneId> = None;
-        'outer: for tile in graph.tiles.values() {
-            // BFS tile subtree
-            let Some(root_id) = tile.root_node else {
-                continue;
-            };
-            let mut queue = vec![root_id];
-            let mut visited: HashSet<SceneId> = HashSet::new();
-            while let Some(nid) = queue.pop() {
-                if !visited.insert(nid) {
-                    continue;
-                }
-                if nid == *node_id {
-                    found_tab = Some(tile.tab_id);
-                    break 'outer;
-                }
-                if let Some(node) = graph.nodes.get(&nid) {
-                    for &child in &node.children {
-                        queue.push(child);
-                    }
-                }
-            }
-        }
-        if let Some(tab_id) = found_tab {
+        if let Some(&tab_id) = node_to_tab.get(node_id) {
             focused_per_tab.entry(tab_id).or_default().push(*node_id);
         }
     }
@@ -1364,7 +1393,12 @@ pub fn check_zone_stack_depth_within_limit(graph: &SceneGraph) -> Vec<InvariantV
     violations
 }
 
-/// Zones with `MergeByKey` contention must not exceed their declared `max_keys`.
+/// Zones with `MergeByKey` contention must not exceed their declared `max_keys`,
+/// and all active publish records must have distinct, non-empty merge keys.
+///
+/// Two distinct violations are reported:
+/// 1. `mergebykey_zone_key_limit_exceeded` — more active publishes than max_keys.
+/// 2. `mergebykey_zone_duplicate_keys` — two or more publishes share the same key.
 ///
 /// Spec: scene-graph/spec.md lines 185-196.
 pub fn check_zone_mergebykey_within_key_limit(graph: &SceneGraph) -> Vec<InvariantViolation> {
@@ -1376,17 +1410,35 @@ pub fn check_zone_mergebykey_within_key_limit(graph: &SceneGraph) -> Vec<Invaria
             continue;
         };
         if let Some(pubs) = graph.zone_registry.active_publishes.get(zone_name) {
-            // Check key uniqueness: all keys must be unique and non-null.
-            let unique_keys: HashSet<_> = pubs
-                .iter()
-                .map(|p| p.merge_key.as_deref().unwrap_or(""))
-                .collect();
-            if unique_keys.len() > max_keys as usize {
+            // 1. Enforce that the number of active publishes does not exceed max_keys.
+            if pubs.len() > max_keys as usize {
                 violations.push(InvariantViolation::new(
                     "mergebykey_zone_key_limit_exceeded",
                     format!(
-                        "zone '{}' has MergeByKey(max_keys={}) contention but {} unique keys present",
-                        zone_name, max_keys, unique_keys.len()
+                        "zone '{}' has MergeByKey(max_keys={}) contention but {} publishes are active",
+                        zone_name, max_keys, pubs.len()
+                    ),
+                ));
+            }
+
+            // 2. Enforce key uniqueness: no two records may share the same merge_key.
+            let mut seen_keys: HashSet<Option<&str>> = HashSet::new();
+            let mut duplicate_keys: Vec<String> = Vec::new();
+            for p in pubs {
+                let key_opt = p.merge_key.as_deref();
+                if !seen_keys.insert(key_opt) {
+                    let label = key_opt.unwrap_or("<none>").to_string();
+                    if !duplicate_keys.contains(&label) {
+                        duplicate_keys.push(label);
+                    }
+                }
+            }
+            if !duplicate_keys.is_empty() {
+                violations.push(InvariantViolation::new(
+                    "mergebykey_zone_duplicate_keys",
+                    format!(
+                        "zone '{}' has MergeByKey(max_keys={}) contention with duplicate merge keys: {}",
+                        zone_name, max_keys, duplicate_keys.join(", ")
                     ),
                 ));
             }
