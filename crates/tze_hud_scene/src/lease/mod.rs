@@ -18,6 +18,9 @@ pub mod enforcement;
 
 pub use types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
 pub use state_machine::LeaseImpl;
+// LeaseState is defined in crate::types and re-exported here so that the
+// lease module and all its sub-modules share one canonical definition.
+pub use crate::types::LeaseState;
 pub use ttl::{TtlState, TtlCheck, AutoRenewalArm, DisarmReason, AUTO_RENEW_THRESHOLD};
 pub use suspension::{
     SuspensionManager, SuspendedEntry, SafeModeResult, SafeModeResumeResult,
@@ -49,31 +52,6 @@ pub use budget::{
 pub use enforcement::{CriticalBypassTrigger, EnforcementAction, EnforcementLadder};
 
 use crate::clock::Clock;
-
-// ─── Lease States ────────────────────────────────────────────────────────────
-
-/// All possible states a lease can be in.
-///
-/// From spec: REQUESTED, ACTIVE, SUSPENDED, ORPHANED, REVOKED, EXPIRED, DENIED, RELEASED.
-/// DENIED, REVOKED, EXPIRED, and RELEASED are terminal states.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LeaseState {
-    Requested,
-    Active,
-    Suspended,
-    Orphaned,
-    Revoked,
-    Expired,
-    Denied,
-    Released,
-}
-
-impl LeaseState {
-    /// Returns `true` if this is a terminal state (no further transitions allowed).
-    pub fn is_terminal(self) -> bool {
-        matches!(self, LeaseState::Denied | LeaseState::Revoked | LeaseState::Expired | LeaseState::Released)
-    }
-}
 
 // ─── Renewal Policy ──────────────────────────────────────────────────────────
 
