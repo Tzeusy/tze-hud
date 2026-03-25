@@ -21,7 +21,7 @@
 //! bypassing the gesture recognizer pipeline.
 
 use std::time::Instant;
-use tze_hud_scene::{NodeData, SceneGraph, SceneId};
+use tze_hud_scene::{MonoUs, NodeData, SceneGraph, SceneId};
 
 use crate::events::{EventBatch, HitTestResult, InputEnvelope, RouteTarget, SceneLocalPatch};
 use crate::hit_test::hit_test;
@@ -61,7 +61,7 @@ pub struct DispatchProcessor {
     /// Currently pressed (tile_id, node_id, button).
     current_press: Option<(SceneId, SceneId, PointerButton)>,
     /// Last click timestamp for double-click detection.
-    last_click_ts: Option<u64>,
+    last_click_ts: Option<MonoUs>,
     /// Last click position for double-click proximity check.
     last_click_pos: Option<(f32, f32)>,
     /// Frame number (set by caller each frame).
@@ -431,11 +431,11 @@ impl DispatchProcessor {
     }
 
     /// Check whether the current Up event qualifies as a DoubleClick.
-    fn check_double_click(&self, ts: u64, x: f32, y: f32) -> bool {
+    fn check_double_click(&self, ts: MonoUs, x: f32, y: f32) -> bool {
         if let (Some(last_ts), Some((last_x, last_y))) =
             (self.last_click_ts, self.last_click_pos)
         {
-            let dt = ts.saturating_sub(last_ts);
+            let dt = ts.0.saturating_sub(last_ts.0);
             let dx = x - last_x;
             let dy = y - last_y;
             let dist = (dx * dx + dy * dy).sqrt();
@@ -574,7 +574,7 @@ mod tests {
                 _ => None,
             },
             device_id: 1,
-            timestamp_mono_us: 1000,
+            timestamp_mono_us: MonoUs(1000),
             modifiers: Modifiers::NONE,
         }
     }
@@ -595,7 +595,7 @@ mod tests {
                 kind: RawPointerEventKind::Down,
                 button: Some(PointerButton::Primary),
                 device_id: 42,
-                timestamp_mono_us: 1_234_567,
+                timestamp_mono_us: MonoUs(1_234_567),
                 modifiers: Modifiers { shift: true, ..Modifiers::NONE },
             },
             &mut scene,
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(down.fields.display_x, 200.0, "display_x must match raw event");
         assert_eq!(down.fields.display_y, 180.0, "display_y must match raw event");
         assert!(down.fields.modifiers.shift, "modifier shift must be forwarded");
-        assert_eq!(down.fields.timestamp_mono_us, 1_234_567, "timestamp_mono_us must match");
+        assert_eq!(down.fields.timestamp_mono_us, MonoUs(1_234_567), "timestamp_mono_us must match");
     }
 
     // ── Event routing to lease owner (spec line 321) ──────────────────────────
@@ -707,7 +707,7 @@ mod tests {
                 kind: RawPointerEventKind::RightClick,
                 button: Some(PointerButton::Secondary),
                 device_id: 1,
-                timestamp_mono_us: 1000,
+                timestamp_mono_us: MonoUs(1000),
                 modifiers: Modifiers::NONE,
             },
             &mut scene,
@@ -742,7 +742,7 @@ mod tests {
                 kind: RawPointerEventKind::Down,
                 button: Some(PointerButton::Primary),
                 device_id: 1,
-                timestamp_mono_us: 1000,
+                timestamp_mono_us: MonoUs(1000),
                 modifiers: Modifiers::NONE,
             },
             &mut scene,
@@ -754,7 +754,7 @@ mod tests {
                 kind: RawPointerEventKind::Up,
                 button: Some(PointerButton::Primary),
                 device_id: 1,
-                timestamp_mono_us: 1000,
+                timestamp_mono_us: MonoUs(1000),
                 modifiers: Modifiers::NONE,
             },
             &mut scene,
@@ -768,7 +768,7 @@ mod tests {
                 kind: RawPointerEventKind::Down,
                 button: Some(PointerButton::Primary),
                 device_id: 1,
-                timestamp_mono_us: 250_000,
+                timestamp_mono_us: MonoUs(250_000),
                 modifiers: Modifiers::NONE,
             },
             &mut scene,
@@ -780,7 +780,7 @@ mod tests {
                 kind: RawPointerEventKind::Up,
                 button: Some(PointerButton::Primary),
                 device_id: 1,
-                timestamp_mono_us: 250_000,
+                timestamp_mono_us: MonoUs(250_000),
                 modifiers: Modifiers::NONE,
             },
             &mut scene,
@@ -857,7 +857,7 @@ mod tests {
             display_x: 0.0,
             display_y: 0.0,
             modifiers: Modifiers::NONE,
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
         };
 
         let events = vec![

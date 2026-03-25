@@ -8,7 +8,7 @@
 //!   (spec §Requirement: Protobuf Schema for Input Events, lines 367-369)
 
 use serde::{Deserialize, Serialize};
-use tze_hud_scene::SceneId;
+use tze_hud_scene::{MonoUs, SceneId};
 
 use crate::pointer::{
     ClickEvent, ContextMenuEvent, DoubleClickEvent, PointerCancelEvent, PointerDownEvent,
@@ -283,7 +283,7 @@ pub enum InputEnvelope {
 
 impl InputEnvelope {
     /// Extract the timestamp_mono_us from whatever event variant is wrapped.
-    pub fn timestamp_mono_us(&self) -> u64 {
+    pub fn timestamp_mono_us(&self) -> MonoUs {
         match self {
             InputEnvelope::PointerDown(e) => e.fields.timestamp_mono_us,
             InputEnvelope::PointerUp(e) => e.fields.timestamp_mono_us,
@@ -365,7 +365,7 @@ mod tests {
             display_x: 0.0,
             display_y: 0.0,
             modifiers: Modifiers::NONE,
-            timestamp_mono_us: ts,
+            timestamp_mono_us: MonoUs(ts),
         }
     }
 
@@ -412,8 +412,8 @@ mod tests {
             button: crate::pointer::PointerButton::Primary,
         }));
 
-        let timestamps: Vec<u64> = batch.events.iter().map(|e| e.timestamp_mono_us()).collect();
-        assert_eq!(timestamps, vec![100, 200, 300], "events must be ordered by timestamp");
+        let timestamps: Vec<MonoUs> = batch.events.iter().map(|e| e.timestamp_mono_us()).collect();
+        assert_eq!(timestamps, vec![MonoUs(100), MonoUs(200), MonoUs(300)], "events must be ordered by timestamp");
     }
 
     #[test]

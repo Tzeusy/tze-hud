@@ -12,7 +12,7 @@
 //! - `timestamp_mono_us`: OS hardware event timestamp in the monotonic domain
 
 use serde::{Deserialize, Serialize};
-use tze_hud_scene::SceneId;
+use tze_hud_scene::{MonoUs, SceneId};
 
 // ─── Modifier keys ────────────────────────────────────────────────────────────
 
@@ -77,7 +77,7 @@ pub struct PointerFields {
     /// Modifier keys held at the time of the event.
     pub modifiers: Modifiers,
     /// OS hardware event timestamp, monotonic domain, microseconds.
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
 }
 
 // ─── Per-event types ─────────────────────────────────────────────────────────
@@ -188,7 +188,7 @@ pub struct RawPointerEvent {
     pub device_id: u64,
     /// OS hardware event timestamp in the monotonic domain (microseconds).
     /// Attached by Stage 1 Input Drain.
-    pub timestamp_mono_us: u64,
+    pub timestamp_mono_us: MonoUs,
     /// Modifier keys held at the time.
     pub modifiers: Modifiers,
 }
@@ -228,7 +228,7 @@ mod tests {
             display_x: 110.0,
             display_y: 120.0,
             modifiers: Modifiers { shift: true, ctrl: false, alt: false, meta: false },
-            timestamp_mono_us: 1_234_567,
+            timestamp_mono_us: MonoUs(1_234_567),
         };
         let json = serde_json::to_string(&f).unwrap();
         let decoded: PointerFields = serde_json::from_str(&json).unwrap();
@@ -250,7 +250,7 @@ mod tests {
                 display_x: 105.0,
                 display_y: 105.0,
                 modifiers: Modifiers::NONE,
-                timestamp_mono_us: 999,
+                timestamp_mono_us: MonoUs(999),
             },
         };
         assert_eq!(evt.fields.tile_id, tile_id);
