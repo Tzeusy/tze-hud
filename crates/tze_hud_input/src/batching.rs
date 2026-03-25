@@ -139,7 +139,8 @@ impl Default for EventBatchAssembler {
 fn wall_clock_us() -> WallUs {
     let us = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_micros()).ok())
         .unwrap_or(1);
     WallUs(if us == 0 { 1 } else { us })
 }
