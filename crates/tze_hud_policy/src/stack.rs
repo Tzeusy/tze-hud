@@ -21,9 +21,10 @@
 //! | 5     | Resource       | Suppress/Transform   |
 //! | 6     | Content        | Suppress             |
 
+use crate::attention::{AttentionDecision, evaluate_attention as eval_attention_pure};
 use crate::types::{
     ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome,
-    AttentionContext, BlockReason, ContentContext, InterruptionClass, MutationKind, OverrideState,
+    AttentionContext, BlockReason, ContentContext, MutationKind, OverrideState,
     PolicyContext, PrivacyContext, QueueReason, RedactionReason, ResourceContext,
     SecurityContext, VisibilityClassification,
 };
@@ -297,89 +298,48 @@ impl ArbitrationStack {
 
     /// Level 4: Attention gate.
     ///
-    /// Returns `Some(Queue(...))` if the mutation should be deferred.
-    /// CRITICAL interruptions bypass both quiet hours and budget.
+    /// Delegates to `attention::evaluate_attention` — the canonical, spec-correct
+    /// pure evaluator — and converts its `AttentionDecision` into an
+    /// `Option<ArbitrationOutcome>`:
+    ///
+    /// | `AttentionDecision`     | `ArbitrationOutcome`                        |
+    /// |-------------------------|---------------------------------------------|
+    /// | `Pass`                  | `None` (mutation proceeds)                  |
+    /// | `QueueQuietHours`       | `Some(Queue { QueueReason::QuietHours })` |
+    /// | `Discard`               | `Some(Shed { degradation_level: 0 })` — LOW during quiet hours, silently dropped |
+    /// | `Coalesce`              | `Some(Queue { QueueReason::AttentionBudgetExhausted })` |
+    ///
+    /// `Discard` maps to `Shed` because `ArbitrationOutcome` has no `Discard`
+    /// variant; `Shed` is the closest semantic match — silently dropped, no error
+    /// to the agent (spec lines 152-154, scene-events/spec.md line 70).
     fn evaluate_level4_attention(
         &self,
         ctx: &AttentionContext,
         _mutation_ref: SceneId,
     ) -> Option<ArbitrationOutcome> {
-        // CRITICAL bypasses everything.
-        if ctx.interruption_class == InterruptionClass::Critical {
-            return None;
-        }
-
-        // SILENT has zero budget cost and always passes.
-        if ctx.interruption_class == InterruptionClass::Silent {
-            return None;
-        }
-
-        // LOW is discarded during quiet hours (not queued; too stale to be useful).
-        // Handled by the caller as a Reject? Per spec §11.5, LOW is "discarded during quiet hours".
-        // The spec says Queue for NORMAL, Discard for LOW. LOW discard = Suppress outcome.
-        // However, spec §3.4 says only "Queue(QuietHours)" as outcomes, not Reject.
-        // Reading spec scene-events/spec.md line 70: "LOW SHALL be discarded".
-        // We use Reject here conceptually — but spec says "not queued". We don't have a Discard
-        // outcome variant; treat it as Shed (no error) since it's not a security/policy violation.
-        // Actually, for policy-arbitration purposes, LOW during quiet hours is a Queue-like behavior
-        // that the spec says to discard. We return Queue to indicate deferral, but the layer above
-        // this (the evaluation pipeline, bead #2/#3) will handle the discard semantics.
-        // For this stack, we Queue it; the caller distinguishes LOW+quiet_hours as Discard.
-        if ctx.quiet_hours_active {
-            match ctx.interruption_class {
-                InterruptionClass::Critical => unreachable!("handled above"),
-                InterruptionClass::Silent => unreachable!("handled above"),
-                InterruptionClass::Low => {
-                    // LOW is discarded during quiet hours. Signal as Shed (no error, zone-state applies).
-                    return Some(ArbitrationOutcome::Shed { degradation_level: 0 });
-                }
-                InterruptionClass::Normal => {
-                    // NORMAL is queued until quiet hours end.
-                    return Some(ArbitrationOutcome::Queue {
-                        queue_reason: QueueReason::QuietHours {
-                            window_end_us: ctx.quiet_hours_end_us,
-                        },
-                        earliest_present_us: ctx.quiet_hours_end_us,
-                        redacted: false, // will be overwritten by compose logic above
-                    });
-                }
-                InterruptionClass::High => {
-                    // Queue HIGH if the mutation's interruption class is less urgent than the
-                    // zone's pass-through threshold (spec §4.2).
-                    // InterruptionClass ordering: Critical(0) < High(1) < Normal(2) < Low(3).
-                    // "Less urgent" means numerically greater. So if interruption_class > pass_through_class,
-                    // the mutation does not meet the threshold and must be queued.
-                    if ctx.interruption_class > ctx.pass_through_class {
-                        return Some(ArbitrationOutcome::Queue {
-                            queue_reason: QueueReason::QuietHours {
-                                window_end_us: ctx.quiet_hours_end_us,
-                            },
-                            earliest_present_us: ctx.quiet_hours_end_us,
-                            redacted: false,
-                        });
-                    }
-                    // Otherwise HIGH meets the threshold and passes quiet hours.
-                }
+        match eval_attention_pure(ctx) {
+            AttentionDecision::Pass => None,
+            AttentionDecision::Discard => {
+                // LOW during quiet hours — silently dropped, no error to agent.
+                // ArbitrationOutcome has no Discard variant; Shed is the correct mapping
+                // (no structured error emitted, zone-state effects do not apply).
+                Some(ArbitrationOutcome::Shed { degradation_level: 0 })
+            }
+            AttentionDecision::QueueQuietHours { window_end_us } => {
+                Some(ArbitrationOutcome::Queue {
+                    queue_reason: QueueReason::QuietHours { window_end_us },
+                    earliest_present_us: window_end_us,
+                    redacted: false, // overwritten by Level 2 compose logic in caller
+                })
+            }
+            AttentionDecision::Coalesce { per_agent, per_zone, budget_refill_us } => {
+                Some(ArbitrationOutcome::Queue {
+                    queue_reason: QueueReason::AttentionBudgetExhausted { per_agent, per_zone },
+                    earliest_present_us: budget_refill_us,
+                    redacted: false,
+                })
             }
         }
-
-        // Attention budget check (CRITICAL is already exempt above).
-        let agent_exhausted = ctx.agent_budget_exhausted();
-        let zone_exhausted = ctx.zone_budget_exhausted();
-        if agent_exhausted || zone_exhausted {
-            // When budget is exhausted, mutations are coalesced (latest-wins).
-            // At the stack level, this is represented as Queue(AttentionBudgetExhausted).
-            return Some(ArbitrationOutcome::Queue {
-                queue_reason: QueueReason::AttentionBudgetExhausted {
-                    per_agent: agent_exhausted,
-                    per_zone: zone_exhausted,
-                },
-                earliest_present_us: ctx.budget_refill_us,
-                redacted: false,
-            });
-        }
-
-        None
     }
 
     /// Level 5: Resource gate.
