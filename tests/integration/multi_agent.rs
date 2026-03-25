@@ -185,6 +185,9 @@ async fn connect_agent(
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1000,
+                auth_credential: None,
             },
         )),
     })
@@ -288,6 +291,7 @@ async fn create_tile_via_grpc(
                             ),
                         ),
                     }],
+                    timing: None,
                 },
             )),
         })
