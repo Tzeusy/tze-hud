@@ -41,6 +41,7 @@
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_protocol::proto as proto;
+use tze_hud_protocol::auth::{RUNTIME_MIN_VERSION, RUNTIME_MAX_VERSION};
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::types::*;
@@ -185,8 +186,8 @@ async fn connect_agent(
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_us,
-                min_protocol_version: 1000,
-                max_protocol_version: 1000,
+                min_protocol_version: RUNTIME_MIN_VERSION,
+                max_protocol_version: RUNTIME_MAX_VERSION,
                 auth_credential: None,
             },
         )),
