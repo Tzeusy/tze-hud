@@ -321,9 +321,45 @@ impl SceneGraph {
         lease_ids.sort();
         lease_ids.dedup();
 
-        // Check each referenced lease: must exist and be Active.
+        // Validate batch.lease_id (and any other batch-level lease IDs collected
+        // above) for existence and Active state. This is a batch-level check: a
+        // nonexistent or inactive batch.lease_id must be rejected before Stage 2
+        // budget checks even if no individual mutation embeds that lease_id
+        // (e.g., when the batch contains only tile-targeting mutations).
+        //
+        // Only leases that came from batch.lease_id are validated here; leases
+        // embedded in individual CreateTile mutations are validated in the
+        // per-mutation loop below (with per-mutation attribution).
+        if let Some(lid) = batch.lease_id {
+            if let Some(lease) = self.leases.get(&lid) {
+                if !lease.is_mutations_allowed() {
+                    let err = if lease.is_expired(self.now_millis()) {
+                        ValidationError::LeaseExpired { id: lid }
+                    } else {
+                        ValidationError::InvalidField {
+                            field: "lease_state".into(),
+                            reason: format!(
+                                "lease {} is in {:?} state; mutations require Active state",
+                                lid, lease.state,
+                            ),
+                        }
+                    };
+                    let rejection = BatchRejected::batch_level(batch.batch_id, "batch", &err);
+                    return MutationResult::rejected_with_error(batch.batch_id, rejection, err);
+                }
+            } else {
+                let err = ValidationError::LeaseNotFound { id: lid };
+                let rejection = BatchRejected::batch_level(batch.batch_id, "batch", &err);
+                return MutationResult::rejected_with_error(batch.batch_id, rejection, err);
+            }
+        }
+
+        // Check each mutation's lease: must exist and be Active.
+        // lease_id_for_mutation now also derives lease from tile for
+        // tile-targeting mutations (UpdateTileBounds, DeleteTile, SetTileRoot,
+        // AddNode, and related variants) via graph lookup.
         for (idx, mutation) in batch.mutations.iter().enumerate() {
-            let maybe_lease_id = Self::lease_id_for_mutation(mutation);
+            let maybe_lease_id = Self::lease_id_for_mutation(mutation, &self.tiles);
             if let Some(lease_id) = maybe_lease_id {
                 if let Some(lease) = self.leases.get(&lease_id) {
                     if !lease.is_mutations_allowed() {
@@ -352,6 +388,10 @@ impl SceneGraph {
                         );
                     }
                 } else {
+                    // Only report LeaseNotFound for mutations that embed their own
+                    // lease_id (CreateTile). For tile-targeting mutations whose lease
+                    // was derived from the tile, the tile not having a valid lease is
+                    // a transient state that should be reported as LeaseNotFound.
                     let err = ValidationError::LeaseNotFound { id: lease_id };
                     let rejection = BatchRejected::single(
                         batch.batch_id,
@@ -433,10 +473,37 @@ impl SceneGraph {
         }
     }
 
-    /// Extract the lease_id directly embedded in a mutation, if applicable.
-    fn lease_id_for_mutation(mutation: &SceneMutation) -> Option<SceneId> {
+    /// Extract the lease_id for a mutation, if applicable.
+    ///
+    /// For `CreateTile` the lease_id is embedded in the mutation directly.
+    /// For tile-targeting mutations (`UpdateTileBounds`, `UpdateTileZOrder`,
+    /// `UpdateTileOpacity`, `UpdateTileInputMode`, `UpdateTileSyncGroup`,
+    /// `UpdateTileExpiry`, `DeleteTile`, `SetTileRoot`, `AddNode`,
+    /// `JoinSyncGroup`, `LeaveSyncGroup`) the lease is derived from the
+    /// tile in the graph. This enables Stage 1 to catch expired/revoked
+    /// leases for all mutation types, not just `CreateTile`.
+    fn lease_id_for_mutation(
+        mutation: &SceneMutation,
+        tiles: &std::collections::HashMap<SceneId, Tile>,
+    ) -> Option<SceneId> {
         match mutation {
             SceneMutation::CreateTile { lease_id, .. } => Some(*lease_id),
+            // Tile-targeting mutations: derive lease from the tile's recorded lease_id.
+            SceneMutation::UpdateTileBounds { tile_id, .. }
+            | SceneMutation::UpdateTileZOrder { tile_id, .. }
+            | SceneMutation::UpdateTileOpacity { tile_id, .. }
+            | SceneMutation::UpdateTileInputMode { tile_id, .. }
+            | SceneMutation::UpdateTileSyncGroup { tile_id, .. }
+            | SceneMutation::UpdateTileExpiry { tile_id, .. }
+            | SceneMutation::DeleteTile { tile_id }
+            | SceneMutation::SetTileRoot { tile_id, .. }
+            | SceneMutation::AddNode { tile_id, .. }
+            | SceneMutation::JoinSyncGroup { tile_id, .. }
+            | SceneMutation::LeaveSyncGroup { tile_id } => {
+                tiles.get(tile_id).map(|t| t.lease_id)
+            }
+            // Tab mutations, zone mutations, sync group mutations other than
+            // tile-targeting ones: no per-mutation lease check at Stage 1.
             _ => None,
         }
     }
