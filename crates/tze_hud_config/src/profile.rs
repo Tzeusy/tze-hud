@@ -41,6 +41,7 @@ fn mobile_budget() -> DisplayProfile {
         max_tiles: 128,
         max_texture_mb: 256,
         max_agents: 4,
+        max_agent_update_hz: 30,
         target_fps: 60,
         min_fps: 15,
         allow_background_zones: false,
@@ -132,6 +133,51 @@ fn base_profile_for(name: &str) -> Option<DisplayProfile> {
     }
 }
 
+// ─── Profile ceiling for agent validation ────────────────────────────────────
+
+/// Returns the effective `DisplayProfile` to use as the ceiling for agent budget
+/// validation during `validate()`, before full resolution.
+///
+/// Returns `None` when the profile is unresolvable (unknown profile name, "auto"
+/// in an ambiguous environment, etc.) — in that case the agent budget check is
+/// skipped; other validation passes will already have produced errors for the
+/// bad profile.
+pub(crate) fn profile_ceiling_for_validation(raw: &RawConfig) -> Option<DisplayProfile> {
+    let profile_str = raw
+        .runtime
+        .as_ref()
+        .and_then(|r| r.profile.as_deref())
+        .unwrap_or("full-display");
+
+    match profile_str {
+        "full-display" => Some(DisplayProfile::full_display()),
+        "headless" => Some(DisplayProfile::headless()),
+        "auto" => {
+            // Use synthetic GPU params (same as freeze()). If env is ambiguous
+            // auto-detection will fail but that's caught elsewhere; skip agent check.
+            match auto_detect_profile(8192, 60) {
+                AutoDetectResult::Headless(_) => Some(DisplayProfile::headless()),
+                AutoDetectResult::FullDisplay => Some(DisplayProfile::full_display()),
+                AutoDetectResult::Ambiguous => None,
+            }
+        }
+        "custom" => {
+            // Derive base from extends (same logic as resolve_custom_profile, but
+            // without applying overrides, since we only need the ceiling).
+            // The ceiling for a custom profile IS the base profile's values
+            // (custom profiles cannot escalate above the base).
+            let base = raw
+                .display_profile
+                .as_ref()
+                .and_then(|dp| dp.extends.as_deref())
+                .and_then(base_profile_for)
+                .unwrap_or_else(DisplayProfile::full_display);
+            Some(base)
+        }
+        _ => None, // Unknown/mobile — other checks will report errors.
+    }
+}
+
 // ─── Profile validation ───────────────────────────────────────────────────────
 
 /// Validate the `[display_profile]` extends section and profile selection.
@@ -217,6 +263,7 @@ fn validate_budget_escalation(
         ("display_profile.max_tiles", dp.max_tiles, base.max_tiles),
         ("display_profile.max_texture_mb", dp.max_texture_mb, base.max_texture_mb),
         ("display_profile.max_agents", dp.max_agents, base.max_agents),
+        ("display_profile.max_agent_update_hz", dp.max_agent_update_hz, base.max_agent_update_hz),
     ];
 
     for (field, override_val, base_val) in numeric_checks {
@@ -235,14 +282,9 @@ fn validate_budget_escalation(
             }
     }
 
-    // max_media_streams and max_agent_update_hz — no corresponding field in DisplayProfile yet,
-    // but the spec requires them to be bounded. We track them if the raw section provides values.
-    // These are currently unconstrained in DisplayProfile, but the validation is specified.
-    // We add the fields here so they are rejected if present and the base doesn't define a ceiling.
-    // Per spec §Profile Budget Escalation Prevention, these fields MUST NOT exceed base values.
-    // For the full-display and mobile profiles, since no explicit max_media_streams or
-    // max_agent_update_hz is set in DisplayProfile, escalation cannot be verified structurally.
-    // We therefore skip those checks until DisplayProfile adds those fields (tracked separately).
+    // max_media_streams — no corresponding field in DisplayProfile yet.
+    // Per spec §Profile Budget Escalation Prevention, this field MUST NOT exceed base values.
+    // We skip this check until DisplayProfile adds max_media_streams (tracked separately).
 
     // Boolean capability fields.
     if let Some(allow_bg) = dp.allow_background_zones
@@ -372,6 +414,7 @@ fn resolve_custom_profile(raw: &RawConfig) -> Result<DisplayProfile, Vec<ConfigE
         max_tiles: dp.max_tiles.unwrap_or(base.max_tiles),
         max_texture_mb: dp.max_texture_mb.unwrap_or(base.max_texture_mb),
         max_agents: dp.max_agents.unwrap_or(base.max_agents),
+        max_agent_update_hz: dp.max_agent_update_hz.unwrap_or(base.max_agent_update_hz),
         target_fps: dp.target_fps.unwrap_or(base.target_fps),
         min_fps: dp.min_fps.unwrap_or(base.min_fps),
         allow_background_zones: dp.allow_background_zones.unwrap_or(base.allow_background_zones),

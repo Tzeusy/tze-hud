@@ -271,6 +271,9 @@ impl ConfigLoader for TzeHudConfig {
                 }
             }
 
+        // ── (10) Per-agent budget ceiling validation ───────────────────────────
+        validate_agents(&self.raw, &mut errors);
+
         errors
     }
 
@@ -590,6 +593,81 @@ fn validate_degradation_order(deg: &RawDegradation, errors: &mut Vec<ConfigError
     ];
 
     check_monotone_non_decreasing(gpu_thresholds, errors);
+}
+
+/// Validate per-agent resource budget overrides against the active profile ceiling.
+///
+/// From spec §Requirement: Agent Registration with Per-Agent Budget Overrides:
+/// - `max_tiles` MUST NOT exceed `profile.max_tiles`.
+/// - `max_texture_mb` MUST NOT exceed `profile.max_texture_mb`.
+/// - `max_update_hz` MUST NOT exceed `profile.max_agent_update_hz`.
+/// Violations produce `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE`.
+fn validate_agents(raw: &RawConfig, errors: &mut Vec<ConfigError>) {
+    let ceiling = match profile::profile_ceiling_for_validation(raw) {
+        Some(p) => p,
+        None => return, // Unresolvable profile — other checks will report the error.
+    };
+
+    let agents = match raw.agents.as_ref().and_then(|a| a.registered.as_ref()) {
+        Some(registered) => registered,
+        None => return,
+    };
+
+    for (agent_name, agent) in agents {
+        // max_tiles ceiling.
+        if let Some(agent_max_tiles) = agent.max_tiles {
+            if agent_max_tiles > ceiling.max_tiles {
+                errors.push(ConfigError {
+                    code: ConfigErrorCode::AgentBudgetExceedsProfile,
+                    field_path: format!("agents.registered.{agent_name}.max_tiles"),
+                    expected: format!("<= {} (active profile ceiling)", ceiling.max_tiles),
+                    got: format!("{agent_max_tiles}"),
+                    hint: format!(
+                        "agent {agent_name:?} max_tiles={agent_max_tiles} exceeds \
+                         the active profile ceiling of {}; reduce max_tiles or \
+                         use a profile with a higher ceiling",
+                        ceiling.max_tiles
+                    ),
+                });
+            }
+        }
+
+        // max_texture_mb ceiling.
+        if let Some(agent_max_texture_mb) = agent.max_texture_mb {
+            if agent_max_texture_mb > ceiling.max_texture_mb {
+                errors.push(ConfigError {
+                    code: ConfigErrorCode::AgentBudgetExceedsProfile,
+                    field_path: format!("agents.registered.{agent_name}.max_texture_mb"),
+                    expected: format!("<= {} (active profile ceiling)", ceiling.max_texture_mb),
+                    got: format!("{agent_max_texture_mb}"),
+                    hint: format!(
+                        "agent {agent_name:?} max_texture_mb={agent_max_texture_mb} exceeds \
+                         the active profile ceiling of {}; reduce max_texture_mb or \
+                         use a profile with a higher ceiling",
+                        ceiling.max_texture_mb
+                    ),
+                });
+            }
+        }
+
+        // max_update_hz ceiling (checked against profile.max_agent_update_hz).
+        if let Some(agent_max_update_hz) = agent.max_update_hz {
+            if agent_max_update_hz > ceiling.max_agent_update_hz {
+                errors.push(ConfigError {
+                    code: ConfigErrorCode::AgentBudgetExceedsProfile,
+                    field_path: format!("agents.registered.{agent_name}.max_update_hz"),
+                    expected: format!("<= {} (active profile max_agent_update_hz ceiling)", ceiling.max_agent_update_hz),
+                    got: format!("{agent_max_update_hz}"),
+                    hint: format!(
+                        "agent {agent_name:?} max_update_hz={agent_max_update_hz} exceeds \
+                         the active profile max_agent_update_hz ceiling of {}; \
+                         reduce max_update_hz or use a profile with a higher ceiling",
+                        ceiling.max_agent_update_hz
+                    ),
+                });
+            }
+        }
+    }
 }
 
 /// Check that each pair of adjacent non-None thresholds is non-decreasing.

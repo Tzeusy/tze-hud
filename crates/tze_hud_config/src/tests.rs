@@ -1349,3 +1349,174 @@ default_classification = "top_secret"
         "should return validation error from reload, got: {:?}", errors
     );
 }
+
+// ── Spec §Agent Registration — max_update_hz ceiling (hud-7sku) ───────────────
+
+/// WHEN agent max_update_hz is within profile ceiling THEN configuration accepted.
+#[test]
+fn spec_agent_max_update_hz_within_ceiling_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+max_update_hz = 30
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let has_budget_error = errors.iter().any(|e| {
+        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
+    });
+    assert!(
+        !has_budget_error,
+        "max_update_hz=30 within full-display ceiling of 60 should be accepted, got: {:?}",
+        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+    );
+}
+
+/// WHEN agent max_update_hz exceeds profile ceiling THEN CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE.
+#[test]
+fn spec_agent_max_update_hz_exceeds_ceiling_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+max_update_hz = 120
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let budget_error = errors.iter().find(|e| {
+        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
+            && e.field_path.contains("max_update_hz")
+    });
+    assert!(
+        budget_error.is_some(),
+        "max_update_hz=120 exceeding full-display ceiling of 60 should produce \
+         CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE, got: {:?}",
+        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+    );
+    let err = budget_error.unwrap();
+    assert!(
+        err.field_path.contains("agent_a"),
+        "error field_path should identify the agent name, got: {:?}", err.field_path
+    );
+    assert!(
+        err.field_path.contains("max_update_hz"),
+        "error field_path should identify the field, got: {:?}", err.field_path
+    );
+}
+
+/// WHEN agent max_update_hz equals profile ceiling THEN accepted (equality is within ceiling).
+#[test]
+fn spec_agent_max_update_hz_equal_to_ceiling_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+max_update_hz = 60
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let has_budget_error = errors.iter().any(|e| {
+        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
+    });
+    assert!(
+        !has_budget_error,
+        "max_update_hz=60 equal to full-display ceiling of 60 should be accepted, got: {:?}",
+        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+    );
+}
+
+/// WHEN agent max_update_hz exceeds headless profile ceiling THEN rejected.
+#[test]
+fn spec_agent_max_update_hz_exceeds_headless_ceiling_rejected() {
+    // headless has max_agent_update_hz = 60; same as full-display in our defaults.
+    // Use a custom profile with lower ceiling to test headless-derived scenario.
+    let toml = r#"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.ci_agent]
+max_update_hz = 120
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let has_budget_error = errors.iter().any(|e| {
+        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
+            && e.field_path.contains("max_update_hz")
+    });
+    assert!(
+        has_budget_error,
+        "max_update_hz=120 exceeding headless ceiling of 60 should produce \
+         CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE"
+    );
+}
+
+/// WHEN custom profile sets max_agent_update_hz above base THEN CONFIG_PROFILE_BUDGET_ESCALATION.
+#[test]
+fn spec_profile_budget_escalation_max_agent_update_hz_rejected() {
+    let toml = r#"
+[runtime]
+profile = "custom"
+
+[display_profile]
+extends = "full-display"
+max_agent_update_hz = 120
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let has_escalation = errors.iter().any(|e| {
+        matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)
+            && e.field_path.contains("max_agent_update_hz")
+    });
+    assert!(
+        has_escalation,
+        "max_agent_update_hz=120 exceeding full-display base of 60 should produce \
+         CONFIG_PROFILE_BUDGET_ESCALATION, got: {:?}",
+        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+    );
+}
+
+/// WHEN custom profile overrides max_agent_update_hz within ceiling THEN accepted and resolved.
+#[test]
+fn spec_custom_profile_max_agent_update_hz_override_applied() {
+    let toml = r#"
+[runtime]
+profile = "custom"
+
+[display_profile]
+extends = "full-display"
+max_agent_update_hz = 30
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let resolved = loader.freeze().expect("freeze should succeed");
+    assert_eq!(
+        resolved.profile.max_agent_update_hz, 30,
+        "overridden max_agent_update_hz should be 30"
+    );
+    assert_eq!(
+        resolved.profile.max_tiles,
+        tze_hud_scene::config::DisplayProfile::full_display().max_tiles,
+        "non-overridden fields use base values"
+    );
+}
