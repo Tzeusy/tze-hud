@@ -114,15 +114,12 @@ pub fn has_reserved_event_prefix(cap: &str) -> bool {
 fn closest_canonical(name: &str) -> Option<&'static str> {
     const MAX_EDIT_DISTANCE: usize = 5;
 
-    // Build the flat-name candidates: exclude `publish_zone:*` from suggestions.
-    let candidates: Vec<&str> = CANONICAL_CAPABILITIES
-        .iter()
-        .copied()
-        .filter(|c| !c.contains(':'))
-        .collect();
-
-    let mut best: Option<(&str, usize)> = None;
-    for candidate in &candidates {
+    // Iterate flat-name candidates directly: exclude parameterized entries (containing ':').
+    let mut best: Option<(&'static str, usize)> = None;
+    for &candidate in CANONICAL_CAPABILITIES.iter() {
+        if candidate.contains(':') {
+            continue;
+        }
         let d = edit_distance(name, candidate);
         match best {
             None => best = Some((candidate, d)),
@@ -193,7 +190,9 @@ mod tests {
 
     // ── Vocabulary completeness ───────────────────────────────────────────────
 
-    /// All 17 v1 canonical capabilities must be recognized.
+    /// All 17 v1 canonical capability forms must be recognized.
+    /// The spec lists 17 forms; parameterized forms (publish_zone, emit_scene_event, lease:priority)
+    /// are tested with concrete examples, so the array below contains 18 entries.
     #[test]
     fn all_canonical_capabilities_recognized() {
         let caps = [
