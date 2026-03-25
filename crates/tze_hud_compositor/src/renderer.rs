@@ -22,7 +22,7 @@
 //! This separation is the architectural foundation for future render-skip redaction
 //! (capture-safe architecture): the content and chrome passes are structurally independent.
 
-use crate::pipeline::{rect_vertices, ChromeDrawCmd, RectVertex, RECT_SHADER};
+use crate::pipeline::{rect_vertices, ChromeDrawCmd, RectVertex};
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
@@ -91,20 +91,167 @@ impl Compositor {
         })
     }
 
-    fn create_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
+    /// Create a windowed compositor backed by a real `winit::window::Window`.
+    ///
+    /// This is the factory method for production windowed rendering. It:
+    /// 1. Uses `select_gpu_adapter` with platform-mandated backends (Vulkan/D3D12/Metal).
+    /// 2. Creates a `wgpu::Surface` from the window via `instance.create_surface`.
+    /// 3. Negotiates the surface format (sRGB preferred).
+    /// 4. Configures the surface with the window's physical dimensions.
+    /// 5. Creates the `wgpu::Device` and `wgpu::Queue`.
+    ///
+    /// Returns the `(Compositor, WindowSurface)` pair. The `WindowSurface` must
+    /// be kept alive for the duration of the runtime.
+    ///
+    /// Per spec §Compositor Thread Ownership (line 46): the returned `Compositor`
+    /// (and thus `Device` + `Queue`) MUST be transferred to the compositor thread
+    /// immediately after creation. The `WindowSurface` is owned by the main thread.
+    ///
+    /// Per spec §Platform GPU Backends (line 189): this path uses the platform-
+    /// mandated backends — unlike `new_headless` which uses `Backends::all()`.
+    pub async fn new_windowed(
+        window: std::sync::Arc<winit::window::Window>,
+        width: u32,
+        height: u32,
+    ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
+        use crate::surface::WindowSurface;
+
+        // ── Step 1: Create instance with platform-mandated backends ──────────
+        // We need the surface before adapter selection so we can pass it as
+        // `compatible_surface`. Create a temporary instance first, create the
+        // surface, then select the adapter with that surface constraint.
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: crate::adapter::platform_backends().flags,
+            ..Default::default()
+        });
+
+        // ── Step 2: Create wgpu::Surface from the winit window ───────────────
+        // SAFETY: `window` is wrapped in Arc — it outlives the surface because
+        // we pass 'static lifetime via Arc<Window>.
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|e| CompositorError::DeviceCreation(format!("create_surface: {e}")))?;
+
+        // ── Step 3: Select adapter compatible with the surface ────────────────
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or(CompositorError::NoAdapter)?;
+
+        let adapter_info = adapter.get_info();
+        tracing::info!(
+            backend = ?adapter_info.backend,
+            device_name = %adapter_info.name,
+            vendor = adapter_info.vendor,
+            "windowed: GPU adapter selected"
+        );
+
+        // ── Step 4: Request device ────────────────────────────────────────────
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("tze_hud_compositor_windowed"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|e| CompositorError::DeviceCreation(e.to_string()))?;
+
+        // ── Step 5: Configure the surface ────────────────────────────────────
+        let surface_caps = surface.get_capabilities(&adapter);
+        // Prefer sRGB surface format; fall back to the first available format.
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(surface_caps.formats[0]);
+
+        let present_mode = if surface_caps
+            .present_modes
+            .contains(&wgpu::PresentMode::Fifo)
+        {
+            wgpu::PresentMode::Fifo // vsync — latency-stable
+        } else {
+            surface_caps.present_modes[0]
+        };
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width,
+            height,
+            present_mode,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &config);
+        tracing::info!(
+            format = ?surface_format,
+            present_mode = ?present_mode,
+            width,
+            height,
+            "windowed: surface configured"
+        );
+
+        // ── Step 6: Create render pipeline (format-aware) ─────────────────────
+        // The windowed pipeline must use the surface format, not Rgba8UnormSrgb.
+        let pipeline = Self::create_pipeline_with_format(&device, surface_format);
+
+        let compositor = Self {
+            device,
+            queue,
+            pipeline,
+            width,
+            height,
+            frame_number: 0,
+        };
+
+        let window_surface = WindowSurface::new(surface, config);
+        Ok((compositor, window_surface))
+    }
+
+    /// Create a render pipeline targeting a specific texture format.
+    ///
+    /// This is the canonical pipeline constructor. Both `create_pipeline`
+    /// (headless, fixed format) and `create_pipeline_with_format` (windowed,
+    /// dynamic swapchain format) delegate here to avoid duplicating the
+    /// pipeline descriptor.
+    ///
+    /// `label_prefix` is prepended to debug labels so GPU profilers can
+    /// distinguish headless vs windowed pipelines.
+    fn create_pipeline_inner(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        label_prefix: &str,
+    ) -> wgpu::RenderPipeline {
+        use crate::pipeline::{RectVertex, RECT_SHADER};
+
+        let shader_label = format!("{label_prefix}rect_shader");
+        let layout_label = format!("{label_prefix}rect_pipeline_layout");
+        let pipeline_label = format!("{label_prefix}rect_pipeline");
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("rect_shader"),
+            label: Some(&shader_label),
             source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("rect_pipeline_layout"),
+            label: Some(&layout_label),
             bind_group_layouts: &[],
             push_constant_ranges: &[],
         });
 
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("rect_pipeline"),
+            label: Some(&pipeline_label),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -116,7 +263,7 @@ impl Compositor {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -136,6 +283,22 @@ impl Compositor {
             multiview: None,
             cache: None,
         })
+    }
+
+    /// Create a render pipeline targeting a dynamic swapchain format.
+    ///
+    /// Called by `new_windowed` so the pipeline matches the negotiated
+    /// surface format (which varies by platform/driver).
+    fn create_pipeline_with_format(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        Self::create_pipeline_inner(device, format, "windowed_")
+    }
+
+    /// Create a render pipeline for headless mode (`Rgba8UnormSrgb`).
+    fn create_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
+        Self::create_pipeline_inner(device, wgpu::TextureFormat::Rgba8UnormSrgb, "")
     }
 
     /// Render one frame of the scene to the surface.
