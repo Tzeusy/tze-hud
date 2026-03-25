@@ -44,6 +44,7 @@ pub mod channels;
 pub mod degradation;
 pub mod headless;
 pub mod windowed;
+pub mod runtime_context;
 pub mod subscriptions;
 pub mod event_bus;
 pub mod quiet_hours;
@@ -95,6 +96,7 @@ pub use degradation::{
 };
 pub use headless::HeadlessRuntime;
 pub use windowed::{WindowedRuntime, WindowedConfig};
+pub use runtime_context::{FallbackPolicy, RuntimeContext, SharedRuntimeContext};
 pub use subscriptions::{
     AgentSubscriptions, Subscription, SubscriptionChangeOutcome, SubscriptionRegistry,
     CATEGORY_AGENT_EVENTS, CATEGORY_ATTENTION_EVENTS, CATEGORY_DEGRADATION_NOTICES,

@@ -89,6 +89,7 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
         height: 600,
         grpc_port: 50051,
         psk: "vertical-slice-key".to_string(),
+        config_toml: None,
     };
 
     let mut runtime = HeadlessRuntime::new(config).await?;
@@ -819,6 +820,7 @@ mod tests {
             height: 240,
             grpc_port: 50061,
             psk: "test-key".to_string(),
+            config_toml: None,
         };
         let runtime = HeadlessRuntime::new(config).await.unwrap();
         let _server = runtime.start_grpc_server().await.unwrap();

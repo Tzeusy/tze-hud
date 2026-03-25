@@ -26,6 +26,7 @@ use crate::auth::{
     authenticate_session_init, negotiate_version, CapabilityPolicy,
     AuthResult,
 };
+use std::collections::HashMap;
 use crate::convert;
 use crate::dedup::{CachedResult, DedupWindow};
 use crate::lease::{
@@ -713,9 +714,28 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 32;
 /// messages to all active sessions unconditionally (RFC 0005 §3.4, §7.1).
 /// Each session handler task subscribes to this channel and forwards any
 /// received notices to the agent stream at Transactional traffic class.
+///
+/// `agent_capabilities` drives per-agent capability gating at handshake time
+/// (configuration/spec.md §Requirement: Agent Registration, lines 136-147).
+/// Agents whose `agent_id` matches a key in this map receive only the listed
+/// capabilities; unlisted agents are treated as guests (no capabilities).
 pub struct HudSessionImpl {
     pub state: Arc<Mutex<SharedState>>,
     psk: String,
+    /// Per-agent capability grants from `[agents.registered]` config.
+    ///
+    /// Keyed by agent name (the `agent_id` sent in `SessionInit`).
+    /// Used to build `CapabilityPolicy` at handshake: registered agents get
+    /// their listed capabilities; unregistered agents get guest (empty) policy.
+    ///
+    /// For dev/test scenarios where no config is loaded, pass an empty map
+    /// and set `fallback_unrestricted = true` to restore the legacy behaviour.
+    agent_capabilities: Arc<HashMap<String, Vec<String>>>,
+    /// When true and an agent is not found in `agent_capabilities`, grant
+    /// unrestricted capabilities (backwards-compatible dev mode).
+    ///
+    /// Production deployments MUST set this to `false`.
+    fallback_unrestricted: bool,
     /// Broadcast sender for transactional server-push notices (DegradationNotice).
     /// Cloned into each session handler task.
     pub degradation_tx: tokio::sync::broadcast::Sender<DegradationNotice>,
@@ -723,6 +743,9 @@ pub struct HudSessionImpl {
 
 impl HudSessionImpl {
     /// Create a new session service with the given scene graph and PSK.
+    ///
+    /// Uses an empty capability registry with `fallback_unrestricted = true`
+    /// for backwards compatibility. Prefer `new_with_config` for production.
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
@@ -735,16 +758,48 @@ impl HudSessionImpl {
                 degradation_level: crate::session::RuntimeDegradationLevel::Normal,
             })),
             psk: psk.to_string(),
+            agent_capabilities: Arc::new(HashMap::new()),
+            fallback_unrestricted: true,
             degradation_tx,
         }
     }
 
     /// Create from existing shared state.
+    ///
+    /// Uses an empty capability registry with `fallback_unrestricted = true`
+    /// for backwards compatibility. Prefer `from_shared_state_with_config` for production.
     pub fn from_shared_state(state: Arc<Mutex<SharedState>>, psk: &str) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
+            agent_capabilities: Arc::new(HashMap::new()),
+            fallback_unrestricted: true,
+            degradation_tx,
+        }
+    }
+
+    /// Create from existing shared state with a config-driven capability registry.
+    ///
+    /// `agent_capabilities` is populated from `ResolvedConfig::agent_capabilities`
+    /// (i.e. the `[agents.registered]` TOML section).
+    ///
+    /// `fallback_unrestricted` controls what happens when an agent is NOT found in
+    /// the registry:
+    /// - `false` (production): unlisted agents receive guest policy (no capabilities).
+    /// - `true` (dev/test): unlisted agents receive unrestricted policy.
+    pub fn from_shared_state_with_config(
+        state: Arc<Mutex<SharedState>>,
+        psk: &str,
+        agent_capabilities: HashMap<String, Vec<String>>,
+        fallback_unrestricted: bool,
+    ) -> Self {
+        let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        Self {
+            state,
+            psk: psk.to_string(),
+            agent_capabilities: Arc::new(agent_capabilities),
+            fallback_unrestricted,
             degradation_tx,
         }
     }
@@ -797,6 +852,9 @@ impl HudSession for HudSessionImpl {
         let mut inbound = request.into_inner();
         let state = self.state.clone();
         let psk = self.psk.clone();
+        // Clone the capability registry for use inside the session task.
+        let agent_capabilities = self.agent_capabilities.clone();
+        let fallback_unrestricted = self.fallback_unrestricted;
         // Subscribe to the degradation broadcast channel before spawning the task.
         // Subscribing here (rather than inside the task) ensures we don't miss notices
         // that arrive between task spawn and channel subscription.
@@ -864,10 +922,10 @@ impl HudSession for HudSessionImpl {
             // Process handshake
             let mut session = match first_msg.payload {
                 Some(ClientPayload::SessionInit(init)) => {
-                    handle_session_init(&state, &psk, &tx, &init).await
+                    handle_session_init(&state, &psk, &tx, &init, &agent_capabilities, fallback_unrestricted).await
                 }
                 Some(ClientPayload::SessionResume(resume)) => {
-                    handle_session_resume(&state, &psk, &tx, &resume).await
+                    handle_session_resume(&state, &psk, &tx, &resume, &agent_capabilities, fallback_unrestricted).await
                 }
                 _ => {
                     let _ = tx
@@ -1132,6 +1190,8 @@ async fn handle_session_init(
     psk: &str,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     init: &SessionInit,
+    agent_capabilities: &HashMap<String, Vec<String>>,
+    fallback_unrestricted: bool,
 ) -> Option<StreamSession> {
     // ── Step 1: Version negotiation (RFC 0005 §4.1) ──────────────────────────
     // Do this before authentication so agents can learn about version
@@ -1204,8 +1264,15 @@ async fn handle_session_init(
 
     // ── Step 3: Capability negotiation (RFC 0005 §5.3) ───────────────────────
     // Capabilities are gated against the agent's authorization policy.
-    // For PSK-authenticated agents in v1, the policy is unrestricted.
-    let policy = CapabilityPolicy::for_psk_agent();
+    //
+    // Per configuration/spec.md §Requirement: Agent Registration (lines 136-147):
+    // registered agents get their configured capability set; unregistered agents
+    // get guest policy (no capabilities) unless fallback_unrestricted is set.
+    let policy = match agent_capabilities.get(init.agent_id.as_str()) {
+        Some(caps) => CapabilityPolicy::new(caps.clone()),
+        None if fallback_unrestricted => CapabilityPolicy::unrestricted(),
+        None => CapabilityPolicy::guest(),
+    };
     let (granted_capabilities, _denied_caps) =
         policy.partition_capabilities(&init.requested_capabilities);
 
@@ -1315,6 +1382,8 @@ async fn handle_session_resume(
     psk: &str,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     resume: &SessionResume,
+    agent_capabilities: &HashMap<String, Vec<String>>,
+    fallback_unrestricted: bool,
 ) -> Option<StreamSession> {
     // Re-authentication is required on resume (RFC 0005 §6.2).
     let auth_result = authenticate_session_init(
@@ -1383,8 +1452,17 @@ async fn handle_session_resume(
         );
     }
 
-    // Resume session with PSK-unrestricted policy (same as new session).
-    let resume_policy_caps = vec!["*".to_string()];
+    // Reconstruct policy_caps for the resumed session using the same config-driven
+    // lookup as new sessions.  `capabilities` (restored from TokenStore) holds the
+    // grants the agent actually held before disconnect.  `policy_capabilities` governs
+    // mid-session CapabilityRequest escalation and must reflect the agent's full
+    // *authorization* scope (not just the already-granted subset), so that
+    // post-resume escalation requests stay within the registered allow-list.
+    let resume_policy_caps = match agent_capabilities.get(resume.agent_id.as_str()) {
+        Some(caps) => caps.clone(), // registered: full configured authorization scope
+        None if fallback_unrestricted => vec!["*".to_string()],
+        None => Vec::new(), // guest: no escalation scope
+    };
     let session_open_at = now_wall_us();
     let mut session = StreamSession {
         session_id: session_id.clone(),

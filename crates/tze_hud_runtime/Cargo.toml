@@ -13,6 +13,7 @@ tze_hud_compositor = { path = "../tze_hud_compositor" }
 tze_hud_protocol = { path = "../tze_hud_protocol" }
 tze_hud_input = { path = "../tze_hud_input" }
 tze_hud_telemetry = { path = "../tze_hud_telemetry" }
+tze_hud_config = { path = "../tze_hud_config" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 wgpu = { workspace = true }

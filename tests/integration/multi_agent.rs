@@ -418,6 +418,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
         height: DISPLAY_H,
         grpc_port: GRPC_PORT,
         psk: TEST_PSK.to_string(),
+        config_toml: None,
     };
 
     let mut runtime = HeadlessRuntime::new(config).await?;

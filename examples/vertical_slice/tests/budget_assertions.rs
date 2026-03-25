@@ -61,6 +61,7 @@ async fn test_frame_time_p99_within_budget() {
         height: 600,
         grpc_port: 0, // no gRPC needed for this test
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -110,6 +111,7 @@ async fn test_input_to_local_ack_p99_within_budget() {
         height: 600,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -317,6 +319,7 @@ async fn test_hit_test_p99_within_budget() {
         height: 600,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -512,6 +515,7 @@ async fn test_layer1_pixel_readback_background() {
         height: 600,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -551,6 +555,7 @@ async fn test_layer1_pixel_readback_tile_color() {
         height: 600,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -626,6 +631,7 @@ async fn test_layer1_pixel_readback_z_order() {
         height: 600,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -730,6 +736,7 @@ async fn make_scene_runtime() -> tze_hud_runtime::HeadlessRuntime {
         height: SCENE_H,
         grpc_port: 0,
         psk: "test".to_string(),
+        config_toml: None,
     })
     .await
     .expect("HeadlessRuntime::new failed")
