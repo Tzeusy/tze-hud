@@ -895,6 +895,113 @@ name = "T"
     assert_eq!(resolved.profile.max_texture_mb, 2048, "non-overridden fields use base values");
 }
 
+// ── Spec §Zone Registry — per-tab zone-type reference validation ──────────────
+
+/// WHEN tab references a built-in zone type THEN no error.
+#[test]
+fn spec_builtin_zone_type_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+zones = ["subtitle", "notification", "status_bar", "pip", "ambient_background", "alert_banner"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let zone_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType))
+        .collect();
+    assert!(
+        zone_errors.is_empty(),
+        "all built-in zone types should be accepted, got errors: {:?}",
+        zone_errors
+    );
+}
+
+/// WHEN tab references a custom zone type defined in [zones] THEN no error.
+#[test]
+fn spec_custom_zone_type_defined_in_zones_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+zones = ["news_ticker"]
+
+[zones.news_ticker]
+policy = "latest_wins"
+layer = "content"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let zone_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType))
+        .collect();
+    assert!(
+        zone_errors.is_empty(),
+        "custom zone type defined in [zones] should be accepted, got errors: {:?}",
+        zone_errors
+    );
+}
+
+/// WHEN tab references a zone type not in [zones] and not built-in THEN CONFIG_UNKNOWN_ZONE_TYPE.
+#[test]
+fn spec_unknown_zone_type_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+zones = ["news_ticker"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
+        "unknown zone type should produce CONFIG_UNKNOWN_ZONE_TYPE, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+    // Error should reference the offending zone name.
+    let zone_error = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType))
+        .unwrap();
+    assert!(
+        zone_error.got.contains("news_ticker"),
+        "error should identify the unknown zone type, got: {:?}",
+        zone_error.got
+    );
+}
+
+/// WHEN tab has no zones field THEN no zone validation errors.
+#[test]
+fn spec_tab_without_zones_field_no_error() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let zone_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType))
+        .collect();
+    assert!(
+        zone_errors.is_empty(),
+        "tab with no zones field should produce no zone errors, got: {:?}",
+        zone_errors
+    );
+}
+
 // ── Spec §Privacy Configuration Defaults (rig-mop4) ──────────────────────────
 
 /// WHEN default_classification = "top_secret" THEN CONFIG_UNKNOWN_CLASSIFICATION.

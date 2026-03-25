@@ -103,6 +103,14 @@ pub struct RawTab {
 
     /// Layout fractions.
     pub layout: Option<RawTabLayout>,
+
+    /// Zone types active on this tab.
+    ///
+    /// Each entry must be either a built-in zone type (see
+    /// `zones::BUILTIN_ZONE_TYPES`) or a custom type defined in the
+    /// `[zones]` section.  An unknown name produces `CONFIG_UNKNOWN_ZONE_TYPE`.
+    #[serde(default)]
+    pub zones: Vec<String>,
 }
 
 /// Layout fractions within a tab.
