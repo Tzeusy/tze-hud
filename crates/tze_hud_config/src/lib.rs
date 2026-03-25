@@ -34,6 +34,7 @@
 //! - Privacy, zone registry, agent registration (rig-mop4)
 //! - Hot-reload (rig-mop4)
 
+pub mod capability;
 pub mod loader;
 pub mod profile;
 pub mod raw;

@@ -633,6 +633,217 @@ capabilities = ["emit_scene_event:system.shutdown"]
     assert!(has_reserved, "emit_scene_event:system.* should produce CONFIG_RESERVED_EVENT_PREFIX");
 }
 
+/// WHEN canonical capabilities ["create_tiles", "publish_zone:subtitle", "emit_scene_event:doorbell.ring"]
+/// THEN accepted (spec scenario lines 155-156).
+#[test]
+fn spec_valid_canonical_capability_list_accepted() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+capabilities = ["create_tiles", "publish_zone:subtitle", "emit_scene_event:doorbell.ring"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let cap_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.code,
+                ConfigErrorCode::UnknownCapability | ConfigErrorCode::ReservedEventPrefix
+            )
+        })
+        .collect();
+    assert!(
+        cap_errors.is_empty(),
+        "canonical capability list should produce no errors, got: {:?}",
+        cap_errors
+    );
+}
+
+/// WHEN createTiles (camelCase) used THEN error hint mentions create_tiles.
+#[test]
+fn spec_unknown_capability_hint_mentions_canonical_match() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+capabilities = ["createTiles"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let cap_error = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::UnknownCapability))
+        .expect("should have UNKNOWN_CAPABILITY error");
+    assert!(
+        cap_error.hint.contains("create_tiles"),
+        "hint should suggest create_tiles, got: {:?}",
+        cap_error.hint
+    );
+}
+
+/// WHEN emit_scene_event:scene.render used THEN CONFIG_RESERVED_EVENT_PREFIX.
+#[test]
+fn spec_scene_prefix_in_capability_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+capabilities = ["emit_scene_event:scene.render"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ReservedEventPrefix)),
+        "emit_scene_event:scene.* should produce CONFIG_RESERVED_EVENT_PREFIX"
+    );
+}
+
+/// WHEN legacy name read_scene used THEN CONFIG_UNKNOWN_CAPABILITY with hint for read_scene_topology.
+#[test]
+fn spec_legacy_read_scene_rejected_with_hint() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+capabilities = ["read_scene"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let cap_error = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::UnknownCapability))
+        .expect("should have UNKNOWN_CAPABILITY error for legacy read_scene");
+    assert!(
+        cap_error.hint.contains("read_scene_topology"),
+        "hint should point to canonical replacement, got: {:?}",
+        cap_error.hint
+    );
+}
+
+/// WHEN legacy name receive_input used THEN CONFIG_UNKNOWN_CAPABILITY with hint for access_input_events.
+#[test]
+fn spec_legacy_receive_input_rejected_with_hint() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+capabilities = ["receive_input"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let cap_error = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::UnknownCapability))
+        .expect("should have UNKNOWN_CAPABILITY error for legacy receive_input");
+    assert!(
+        cap_error.hint.contains("access_input_events"),
+        "hint should point to canonical replacement, got: {:?}",
+        cap_error.hint
+    );
+}
+
+/// WHEN legacy name zone_publish used THEN CONFIG_UNKNOWN_CAPABILITY with hint for publish_zone.
+#[test]
+fn spec_legacy_zone_publish_rejected_with_hint() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+capabilities = ["zone_publish"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let cap_error = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::UnknownCapability))
+        .expect("should have UNKNOWN_CAPABILITY error for legacy zone_publish");
+    assert!(
+        cap_error.hint.contains("publish_zone"),
+        "hint should point to canonical replacement, got: {:?}",
+        cap_error.hint
+    );
+}
+
+/// WHEN all 13 flat canonical capabilities in agent config THEN no errors.
+#[test]
+fn spec_all_flat_canonical_capabilities_accepted() {
+    let caps = [
+        "create_tiles",
+        "modify_own_tiles",
+        "manage_tabs",
+        "manage_sync_groups",
+        "upload_resource",
+        "read_scene_topology",
+        "subscribe_scene_events",
+        "overlay_privileges",
+        "access_input_events",
+        "high_priority_z_order",
+        "exceed_default_budgets",
+        "read_telemetry",
+        "resident_mcp",
+    ];
+    let cap_list = caps
+        .iter()
+        .map(|c| format!("{:?}", c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml = format!(
+        r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.agent_a]
+capabilities = [{}]
+"#,
+        cap_list
+    );
+    let loader = parse_ok(&toml);
+    let errors = loader.validate();
+    let cap_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.code,
+                ConfigErrorCode::UnknownCapability | ConfigErrorCode::ReservedEventPrefix
+            )
+        })
+        .collect();
+    assert!(
+        cap_errors.is_empty(),
+        "all flat canonical capabilities should be accepted, got errors: {:?}",
+        cap_errors
+    );
+}
+
 // ── freeze / ResolvedConfig ───────────────────────────────────────────────────
 
 /// WHEN minimal config frozen THEN tab_names contains the tab.
