@@ -2335,6 +2335,20 @@ async fn handle_lease_request(
             .collect();
         let hint_json = serde_json::to_string(&hints)
             .unwrap_or_else(|_| "see configuration/spec.md §Capability Vocabulary".to_string());
+        let deny_reason = format!("{} unrecognized capability name(s)", unknown_caps.len());
+        // Cache the denial so retransmits replay a stable response without
+        // duplicating the RuntimeError advisory (RFC 0005 §5.3 dedup contract).
+        if client_sequence > 0 {
+            session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
+                granted: false,
+                lease_id: Vec::new(),
+                granted_ttl_ms: 0,
+                granted_priority: 0,
+                granted_capabilities: Vec::new(),
+                deny_reason: deny_reason.clone(),
+                deny_code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
+            });
+        }
         let seq = session.next_server_seq();
         let _ = tx
             .send(Ok(ServerMessage {
@@ -2343,16 +2357,14 @@ async fn handle_lease_request(
                 payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
                     granted: false,
                     deny_code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
-                    deny_reason: format!(
-                        "{} unrecognized capability name(s)",
-                        unknown_caps.len()
-                    ),
-                    // hint is embedded in deny_reason JSON above; also in deny_code context
+                    deny_reason,
                     ..Default::default()
                 })),
             }))
             .await;
-        // Log the structured hint separately via a RuntimeError advisory.
+        // Send structured hints as a RuntimeError advisory.
+        // LeaseResponse has no hint field; the advisory carries the JSON hint array
+        // so agents can identify which names are non-canonical and what to use instead.
         let hint_seq = session.next_server_seq();
         let _ = tx
             .send(Ok(ServerMessage {

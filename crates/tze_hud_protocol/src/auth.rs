@@ -286,7 +286,13 @@ impl CapabilityPolicy {
 
 /// Error produced when an unrecognized capability name is encountered.
 ///
-/// Conforms to configuration/spec.md Requirement: Structured Validation Error Collection.
+/// Carries the wire-level fields surfaced in `CONFIG_UNKNOWN_CAPABILITY` errors
+/// (`unknown` + `hint`). This is a subset of the full Structured Validation
+/// Error collection shape defined in configuration/spec.md §Requirement:
+/// Structured Validation Error Collection (which additionally requires
+/// `field_path`, `expected`, and `got`); those fields are not included here
+/// because capability name validation happens at the wire layer before any
+/// field-path context is available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownCapabilityError {
     /// The unrecognized capability name.
@@ -360,11 +366,22 @@ fn is_canonical_capability(cap: &str) -> bool {
     if let Some(rest) = cap.strip_prefix("publish_zone:") {
         return !rest.is_empty();
     }
-    // Parameterized: emit_scene_event:<non-empty>
+    // Parameterized: emit_scene_event:<non-empty>, but system. and scene. prefixes
+    // are reserved per configuration/spec.md §Capability Vocabulary — those names
+    // must be rejected with CONFIG_RESERVED_EVENT_PREFIX, not CONFIG_UNKNOWN_CAPABILITY.
+    // We reject them here (returning false) so the caller can report them as unknown;
+    // the session_server distinguishes the two error codes in its own validation step.
     if let Some(rest) = cap.strip_prefix("emit_scene_event:") {
-        return !rest.is_empty();
+        if rest.is_empty() {
+            return false;
+        }
+        // Reserved prefixes: system. and scene.
+        if rest.starts_with("system.") || rest.starts_with("scene.") {
+            return false;
+        }
+        return true;
     }
-    // lease:priority:<N> (any positive digit string)
+    // lease:priority:<N> (any non-empty ASCII digit string, including 0)
     if let Some(rest) = cap.strip_prefix("lease:priority:") {
         return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
@@ -389,6 +406,12 @@ fn canonical_hint(cap: &str) -> String {
         return format!(
             r#"did you mean "publish_zone:{zone}"? (pre-Round-14 name superseded by RFC 0005 Round 14)"#
         );
+    }
+    // Reserved emit_scene_event prefixes: system. and scene. are not allowed.
+    if let Some(rest) = cap.strip_prefix("emit_scene_event:") {
+        if rest.starts_with("system.") || rest.starts_with("scene.") {
+            return r#"emit_scene_event names with "system." or "scene." prefix are reserved; use a non-reserved event name (CONFIG_RESERVED_EVENT_PREFIX)"#.to_string();
+        }
     }
     // Legacy single-object names (create_tile → create_tiles, etc.).
     if cap == "create_tile" {
@@ -853,6 +876,33 @@ mod tests {
     #[test]
     fn test_kebab_case_rejected() {
         let caps = vec!["create-tiles".to_string()];
+        assert!(validate_canonical_capabilities(&caps).is_err());
+    }
+
+    /// emit_scene_event with system. prefix is rejected (CONFIG_RESERVED_EVENT_PREFIX path).
+    /// (configuration/spec.md §Capability Vocabulary: "system." and "scene." prefixes are reserved)
+    #[test]
+    fn test_emit_scene_event_system_prefix_rejected() {
+        let caps = vec!["emit_scene_event:system.shutdown".to_string()];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert_eq!(err[0].unknown, "emit_scene_event:system.shutdown");
+        assert!(err[0].hint.contains("reserved"), "hint must mention reserved prefix");
+    }
+
+    /// emit_scene_event with scene. prefix is rejected (CONFIG_RESERVED_EVENT_PREFIX path).
+    #[test]
+    fn test_emit_scene_event_scene_prefix_rejected() {
+        let caps = vec!["emit_scene_event:scene.refresh".to_string()];
+        let err = validate_canonical_capabilities(&caps).unwrap_err();
+        assert_eq!(err[0].unknown, "emit_scene_event:scene.refresh");
+        assert!(err[0].hint.contains("reserved"), "hint must mention reserved prefix");
+    }
+
+    /// emit_scene_event with empty event name is rejected.
+    #[test]
+    fn test_emit_scene_event_empty_suffix_rejected() {
+        let caps = vec!["emit_scene_event:".to_string()];
         assert!(validate_canonical_capabilities(&caps).is_err());
     }
 }
