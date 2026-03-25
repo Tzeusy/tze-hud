@@ -1,8 +1,17 @@
 [package]
 name = "tze_hud_validation"
-description = "Layer 2 visual regression validation via SSIM for tze_hud"
+description = "Layer 2 SSIM visual regression and Layer 4 developer visibility artifacts for tze_hud"
 version.workspace = true
 edition.workspace = true
+
+[[test]]
+name = "layer2_headless"
+path = "tests/layer2_headless.rs"
+required-features = ["headless"]
+
+[[test]]
+name = "layer4"
+path = "tests/layer4.rs"
 
 [features]
 # Enables Layer 2 SSIM tests that require headless GPU rendering.
