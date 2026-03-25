@@ -1007,6 +1007,24 @@ name = "Main"
 /// WHEN default_classification = "top_secret" THEN CONFIG_UNKNOWN_CLASSIFICATION.
 #[test]
 fn spec_unknown_classification_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+default_classification = "top_secret"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
+        "default_classification=top_secret should produce CONFIG_UNKNOWN_CLASSIFICATION, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
 
 /// WHEN default_viewer_class = "admin" THEN CONFIG_UNKNOWN_VIEWER_CLASS.
 #[test]
