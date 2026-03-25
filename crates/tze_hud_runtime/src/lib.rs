@@ -54,6 +54,7 @@ pub mod threads;
 pub mod window;
 pub mod session;
 pub mod admission;
+pub mod trace_capture;
 
 pub use agent_events::{
     AgentEventHandler, EmissionError, EmissionOutcome, EmissionResult,
@@ -205,3 +206,6 @@ pub use shell::badges::{
     DISCONNECTION_BADGE_ICON_COLOR,
     DISCONNECTION_CONTENT_SCRIM_COLOR,
 };
+
+// ── Record/Replay Trace capture ───────────────────────────────────────────────
+pub use trace_capture::{TraceRecorder, build_regression_trace};

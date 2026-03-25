@@ -16,6 +16,8 @@ pub mod diff;
 pub mod validation;
 pub mod test_scenes;
 pub mod calibration;
+pub mod trace;
+pub mod replay;
 
 // ── v1 subsystem trait contracts ─────────────────────────────────────────────
 pub mod lease;
@@ -90,3 +92,11 @@ pub use lease::degradation::{
     ENTRY_THRESHOLD_MS, ENTRY_WINDOW_FRAMES,
     RECOVERY_THRESHOLD_MS, RECOVERY_WINDOW_FRAMES,
 };
+
+// ── Record/Replay Trace harness ───────────────────────────────────────────────
+pub use trace::{
+    ReplayResult, ReplayStepOutcome,
+    SceneTrace, TraceEvent, TraceEventKind, TraceHeader, TraceTimestamp,
+    TracedAgentEvent, TracedInputEvent, TracedZonePublish,
+};
+pub use replay::{TraceReplayer, assert_trace_is_deterministic};
