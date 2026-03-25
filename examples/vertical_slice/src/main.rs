@@ -472,8 +472,10 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
             "error must reference tile budget: {}", err_msg);
 
         // Clean up the demo tab and lease.
+        // Use delete_tab (public API) rather than tabs.remove: it removes tiles
+        // belonging to the tab, handles active_tab fallback, and bumps version.
         state.scene.revoke_lease(demo_lease).ok();
-        state.scene.tabs.remove(&demo_tab);
+        state.scene.delete_tab(demo_tab).ok();
         println!("  Budget enforcement validated: tile budget rejection confirmed.");
     }
 
@@ -1089,10 +1091,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_handshake_completes_within_budget() {
         // Budget: handshake should complete in under 5000ms
+        // Bind to port 0 to get an ephemeral port, then release before tonic binds.
+        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let free_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
         let config = HeadlessConfig {
             width: 320,
             height: 240,
-            grpc_port: 50061,
+            grpc_port: free_port,
             psk: "test-key".to_string(),
             config_toml: None,
         };
@@ -1101,7 +1108,7 @@ mod tests {
 
         let start = Instant::now();
 
-        let mut client = HudSessionClient::connect("http://[::1]:50061").await.unwrap();
+        let mut client = HudSessionClient::connect(format!("http://[::1]:{free_port}")).await.unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(16);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
@@ -1619,17 +1626,23 @@ allow_dynamic_agents = false
 [agents.registered.restricted-agent]
 capabilities = ["create_tiles", "modify_own_tiles"]
 "#;
+        // Bind to port 0 to get an ephemeral port, then release the listener
+        // before tonic binds. Avoids hardcoded ports that may conflict in CI.
+        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let free_port = listener.local_addr().unwrap().port();
+        drop(listener);
+
         let config = HeadlessConfig {
             width: 320,
             height: 240,
-            grpc_port: 50065,
+            grpc_port: free_port,
             psk: "test-key".to_string(),
             config_toml: Some(toml.to_string()),
         };
         let runtime = HeadlessRuntime::new(config).await.unwrap();
         let _server = runtime.start_grpc_server().await.unwrap();
 
-        let mut client = HudSessionClient::connect("http://[::1]:50065").await.unwrap();
+        let mut client = HudSessionClient::connect(format!("http://[::1]:{free_port}")).await.unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(16);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
