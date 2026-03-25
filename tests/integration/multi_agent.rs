@@ -439,9 +439,8 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // ── Phase 1: Connect three agents concurrently ──────────────────────────
 
     let standard_caps = vec![
-        "create_tile".to_string(),
-        "create_node".to_string(),
-        "update_tile".to_string(),
+        "create_tiles".to_string(),
+        "modify_own_tiles".to_string(),
     ];
 
     // All three connect concurrently.
