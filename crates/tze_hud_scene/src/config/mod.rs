@@ -73,6 +73,11 @@ pub struct DisplayProfile {
     pub max_tiles: u32,
     pub max_texture_mb: u32,
     pub max_agents: u32,
+    /// Maximum agent update rate in Hz (per-agent state-stream ceiling).
+    ///
+    /// Per-agent `max_update_hz` MUST NOT exceed this value.
+    /// Violations produce `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE`.
+    pub max_agent_update_hz: u32,
     pub target_fps: u32,
     pub min_fps: u32,
     pub allow_background_zones: bool,
@@ -87,6 +92,7 @@ impl DisplayProfile {
             max_tiles: 1024,
             max_texture_mb: 2048,
             max_agents: 16,
+            max_agent_update_hz: 60,
             target_fps: 60,
             min_fps: 30,
             allow_background_zones: true,
@@ -101,6 +107,7 @@ impl DisplayProfile {
             max_tiles: 256,
             max_texture_mb: 512,
             max_agents: 8,
+            max_agent_update_hz: 60,
             target_fps: 60,
             min_fps: 1,
             allow_background_zones: false,
