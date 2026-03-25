@@ -1,0 +1,23 @@
+[package]
+name = "benchmark"
+description = "Layer-3 performance validation benchmark for tze_hud"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "benchmark"
+path = "src/main.rs"
+
+[features]
+headless = ["tze_hud_runtime/headless"]
+
+[dependencies]
+tze_hud_scene = { path = "../../crates/tze_hud_scene" }
+tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime" }
+tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

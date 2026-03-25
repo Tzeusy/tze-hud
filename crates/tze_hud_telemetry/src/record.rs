@@ -327,14 +327,22 @@ pub enum DegradationDirection {
 
 /// Per-session aggregated telemetry summary.
 ///
-/// Contains three independent LatencyBucket instances for the split latency
-/// contracts required by validation-framework/spec.md §"Split Latency Budgets":
-/// - `input_to_local_ack` — Stage 2 boundary (p99 < 4ms)
-/// - `input_to_scene_commit` — Stage 4 boundary (p99 < 50ms)
-/// - `input_to_next_present` — Stage 7 boundary (p99 < 33ms @ 60Hz)
+/// Covers all Layer-3 performance requirements:
+/// - Per-session totals: total_frames, fps, elapsed_us
+/// - Frame time percentiles (p50/p95/p99) via `frame_time`
+/// - Full latency breakdown: input_to_local_ack, input_to_scene_commit, input_to_next_present
+/// - Peak tracking: peak_frame_time_us, peak_tile_count
+/// - Violation counters: lease_violations, budget_overruns, sync_drift_violations
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionSummary {
+    /// Total frames rendered in this session.
     pub total_frames: u64,
+    /// Total session duration in microseconds (set externally when session ends).
+    pub elapsed_us: u64,
+    /// Average FPS over the session (computed from total_frames / elapsed_us).
+    /// Zero if elapsed_us == 0.
+    pub fps: f64,
+    /// Per-frame total time (Stage 1 start → Stage 7 end), microseconds.
     pub frame_time: LatencyBucket,
     /// input_to_local_ack — time from input event to Stage 2 completion.
     /// Spec: p99 < 4ms (4_000 µs). Purely local, no network.
@@ -349,17 +357,34 @@ pub struct SessionSummary {
     /// Spec: p99 < 33ms (33_000 µs) at 60Hz (two frames).
     #[serde(default)]
     pub input_to_next_present: LatencyBucket,
+    /// Hit-test latency.
     pub hit_test_latency: LatencyBucket,
+    /// Mutation batch validation latency.
     pub validation_latency: LatencyBucket,
+    /// Scene diff computation latency.
     pub diff_latency: LatencyBucket,
+    /// Lease acquire latency.
     pub lease_acquire_latency: LatencyBucket,
+    /// Agent connect latency.
     pub agent_connect_latency: LatencyBucket,
+    /// Peak single-frame time observed (microseconds).
+    pub peak_frame_time_us: u64,
+    /// Peak tile count seen in any single frame.
+    pub peak_tile_count: u32,
+    /// Number of lease violations observed (zero is the pass threshold).
+    pub lease_violations: u64,
+    /// Number of budget overruns observed (zero is the pass threshold).
+    pub budget_overruns: u64,
+    /// Number of sync drift violations (drift > 500µs).
+    pub sync_drift_violations: u64,
 }
 
 impl SessionSummary {
     pub fn new() -> Self {
         Self {
             total_frames: 0,
+            elapsed_us: 0,
+            fps: 0.0,
             frame_time: LatencyBucket::new("frame_time"),
             input_to_local_ack: LatencyBucket::new("input_to_local_ack"),
             input_to_scene_commit: LatencyBucket::new("input_to_scene_commit"),
@@ -369,6 +394,34 @@ impl SessionSummary {
             diff_latency: LatencyBucket::new("diff"),
             lease_acquire_latency: LatencyBucket::new("lease_acquire"),
             agent_connect_latency: LatencyBucket::new("agent_connect"),
+            peak_frame_time_us: 0,
+            peak_tile_count: 0,
+            lease_violations: 0,
+            budget_overruns: 0,
+            sync_drift_violations: 0,
+        }
+    }
+
+    /// Record a frame's telemetry into this summary.
+    ///
+    /// Updates total_frames, frame_time bucket, and peak_frame_time_us.
+    pub fn record_frame(&mut self, frame_time_us: u64, tile_count: u32) {
+        self.total_frames += 1;
+        self.frame_time.record(frame_time_us);
+        if frame_time_us > self.peak_frame_time_us {
+            self.peak_frame_time_us = frame_time_us;
+        }
+        if tile_count > self.peak_tile_count {
+            self.peak_tile_count = tile_count;
+        }
+    }
+
+    /// Finalize: compute FPS from total_frames and elapsed_us.
+    ///
+    /// Call this once the session ends and `elapsed_us` has been set.
+    pub fn finalize(&mut self) {
+        if self.elapsed_us > 0 {
+            self.fps = self.total_frames as f64 / (self.elapsed_us as f64 / 1_000_000.0);
         }
     }
 
@@ -460,6 +513,45 @@ mod tests {
         assert!(json.contains("input_to_local_ack_us"), "JSON must contain input_to_local_ack_us");
         assert!(json.contains("input_to_scene_commit_us"), "JSON must contain input_to_scene_commit_us");
         assert!(json.contains("input_to_next_present_us"), "JSON must contain input_to_next_present_us");
+    }
+
+    #[test]
+    fn test_session_summary_record_frame_updates_peaks() {
+        let mut summary = SessionSummary::new();
+        summary.record_frame(10_000, 5);
+        summary.record_frame(20_000, 3);
+        summary.record_frame(15_000, 8);
+
+        assert_eq!(summary.total_frames, 3);
+        assert_eq!(summary.peak_frame_time_us, 20_000);
+        assert_eq!(summary.peak_tile_count, 8);
+    }
+
+    #[test]
+    fn test_session_summary_finalize_computes_fps() {
+        let mut summary = SessionSummary::new();
+        summary.total_frames = 60;
+        summary.elapsed_us = 1_000_000; // 1 second
+        summary.finalize();
+        assert!((summary.fps - 60.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_session_summary_finalize_zero_elapsed() {
+        let mut summary = SessionSummary::new();
+        summary.total_frames = 10;
+        summary.elapsed_us = 0;
+        summary.finalize();
+        assert_eq!(summary.fps, 0.0);
+    }
+
+    #[test]
+    fn test_session_summary_has_input_to_next_present() {
+        let mut summary = SessionSummary::new();
+        summary.input_to_next_present.record(25_000);
+        assert_eq!(summary.input_to_next_present.p99(), Some(25_000));
+        let json = summary.to_json().unwrap();
+        assert!(json.contains("input_to_next_present"));
     }
 
     #[test]
