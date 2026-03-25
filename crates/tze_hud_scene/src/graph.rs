@@ -509,33 +509,65 @@ impl SceneGraph {
     /// Maximum nodes per tile (spec §Lease Caps).
     pub const MAX_NODES_PER_TILE: u32 = 64;
 
-    /// Grant a lease with a default (nil) session_id.
+    /// Grant a lease with a default (nil) session_id and normal priority (2).
     ///
-    /// Convenience wrapper; real callers should use `grant_lease_for_session`.
+    /// Convenience wrapper for tests and callers that do not need priority control.
+    /// Production callers should use `grant_lease_with_priority` or
+    /// `grant_lease_for_session` to persist the session-layer priority.
     pub fn grant_lease(
         &mut self,
         namespace: &str,
         ttl_ms: u64,
         capabilities: Vec<Capability>,
     ) -> SceneId {
-        self.grant_lease_for_session(namespace, SceneId::nil(), ttl_ms, capabilities)
+        self.grant_lease_for_session(namespace, SceneId::nil(), ttl_ms, crate::lease::priority::PRIORITY_DEFAULT, capabilities)
+    }
+
+    /// Grant a lease with an explicit priority and default (nil) session_id.
+    ///
+    /// Persists `priority` in the `Lease` record so that the degradation ladder
+    /// and arbitration engine can read it directly from the scene graph.
+    ///
+    /// Spec §Requirement: Priority Assignment (lease-governance/spec.md lines 49-60):
+    /// the caller MUST pass the clamped priority returned by `effective_priority` /
+    /// `clamp_requested_priority`; this function stores it verbatim.
+    ///
+    /// Panics if caps are exceeded (use `try_grant_lease_for_session` for graceful errors).
+    pub fn grant_lease_with_priority(
+        &mut self,
+        namespace: &str,
+        ttl_ms: u64,
+        priority: u8,
+        capabilities: Vec<Capability>,
+    ) -> SceneId {
+        self.grant_lease_for_session(namespace, SceneId::nil(), ttl_ms, priority, capabilities)
     }
 
     /// Grant a lease, enforcing runtime-wide and per-session caps.
     ///
-    /// Panics if caps are exceeded (use `try_grant_lease` for graceful errors).
+    /// Persists `priority` in the `Lease` record so that the degradation ladder
+    /// can sort by stored priority without consulting the session layer.
+    ///
+    /// Panics if caps are exceeded (use `try_grant_lease_for_session` for graceful errors).
     pub fn grant_lease_for_session(
         &mut self,
         namespace: &str,
         session_id: SceneId,
         ttl_ms: u64,
+        priority: u8,
         capabilities: Vec<Capability>,
     ) -> SceneId {
-        self.try_grant_lease_for_session(namespace, session_id, ttl_ms, capabilities)
+        self.try_grant_lease_for_session(namespace, session_id, ttl_ms, priority, capabilities)
             .expect("lease grant failed cap check")
     }
 
     /// Try to grant a lease, returning an error if runtime or session caps are exceeded.
+    ///
+    /// Persists `priority` in the `Lease` record so that the degradation ladder and
+    /// arbitration engine read stored priority directly from the scene graph.
+    ///
+    /// Spec §Requirement: Priority Assignment (lease-governance/spec.md lines 49-60):
+    /// callers MUST pass the effective (clamped) priority; this function stores it verbatim.
     ///
     /// Enforces (spec §Requirement: Lease Caps):
     /// - Max 64 leases per runtime across all agents (`MAX_RUNTIME_LEASES`).
@@ -547,6 +579,7 @@ impl SceneGraph {
         namespace: &str,
         session_id: SceneId,
         ttl_ms: u64,
+        priority: u8,
         capabilities: Vec<Capability>,
     ) -> Result<SceneId, LeaseError> {
         // Check runtime-wide cap
@@ -586,7 +619,10 @@ impl SceneGraph {
                 namespace: namespace.to_string(),
                 session_id,
                 state: LeaseState::Active,
-                priority: 2, // Normal (default) per RFC 0008 SS2.1
+                // Persist the effective priority so the degradation ladder can sort
+                // by (lease_priority ASC, z_order DESC) without consulting the session layer.
+                // Spec §Requirement: Priority Sort Semantics (lease-governance/spec.md lines 62-69).
+                priority,
                 granted_at_ms: now_ms,
                 ttl_ms,
                 renewal_policy: RenewalPolicy::default(),
@@ -4173,6 +4209,89 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let lease_id = scene.grant_lease("test", 60_000, vec![]);
         assert_eq!(scene.leases[&lease_id].priority, 2);
+    }
+
+    // ─── Priority Persistence Tests ─────────────────────────────────────
+    // Spec §Requirement: Priority Assignment (lease-governance/spec.md lines 49-60)
+    // Spec §Requirement: Priority Sort Semantics (lease-governance/spec.md lines 62-69)
+
+    /// WHEN grant_lease_with_priority is called with priority 1
+    /// THEN the persisted lease priority is 1.
+    ///
+    /// Validates that the scene graph stores the effective priority verbatim so the
+    /// degradation ladder can sort tiles by (lease_priority ASC, z_order DESC) without
+    /// consulting the session layer.
+    #[test]
+    fn test_grant_lease_with_priority_persists_value() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_high = scene.grant_lease_with_priority("agent-high", 60_000, 1, vec![]);
+        let lease_normal = scene.grant_lease_with_priority("agent-normal", 60_000, 2, vec![]);
+        let lease_low = scene.grant_lease_with_priority("agent-low", 60_000, 3, vec![]);
+
+        assert_eq!(scene.leases[&lease_high].priority, 1, "high priority must be stored as 1");
+        assert_eq!(scene.leases[&lease_normal].priority, 2, "normal priority must be stored as 2");
+        assert_eq!(scene.leases[&lease_low].priority, 3, "low priority must be stored as 3");
+    }
+
+    /// WHEN a lease is renewed THEN the stored priority is preserved unchanged.
+    ///
+    /// Spec: renewal updates the TTL clock but must not change the effective priority.
+    #[test]
+    fn test_renew_lease_preserves_priority() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease_with_priority("agent", 60_000, 1, vec![]);
+
+        // Verify priority before renewal.
+        assert_eq!(scene.leases[&lease_id].priority, 1);
+
+        // Renew the lease with a new TTL.
+        scene.renew_lease(lease_id, 120_000).expect("renewal must succeed");
+
+        // Priority must remain unchanged after renewal.
+        assert_eq!(
+            scene.leases[&lease_id].priority, 1,
+            "priority must be preserved across renewal"
+        );
+        // TTL must be updated.
+        assert_eq!(scene.leases[&lease_id].ttl_ms, 120_000);
+    }
+
+    /// WHEN multiple leases are granted with distinct priorities
+    /// THEN the degradation ladder shedding order is (priority DESC numerically, z_order ASC).
+    ///
+    /// Spec §Requirement: Tile Shedding Order (runtime-kernel/spec.md lines 263-270):
+    /// tiles with the highest lease_priority values (least important) shed first.
+    #[test]
+    fn test_grant_lease_with_priority_shedding_order() {
+        use crate::lease::priority::{shed_count_for_level4, shedding_order, TileSheddingEntry};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let _l_high = scene.grant_lease_with_priority("chrome", 60_000, 0, vec![]);
+        let _l_normal = scene.grant_lease_with_priority("agent-normal", 60_000, 2, vec![]);
+        let _l_low = scene.grant_lease_with_priority("agent-low", 60_000, 3, vec![]);
+
+        // Build TileSheddingEntry list using the stored priorities.
+        // (In production the runtime reads l.priority directly from the lease record.)
+        let entries: Vec<TileSheddingEntry> = scene
+            .leases
+            .values()
+            .enumerate()
+            .map(|(i, l)| TileSheddingEntry::new(i, l.priority, 5))
+            .collect();
+
+        let count = shed_count_for_level4(entries.len());
+        let shed = shedding_order(&entries, count);
+
+        // The shed entry must be the lease with the highest priority value (priority=3).
+        let shed_priorities: Vec<u8> = shed
+            .iter()
+            .map(|&i| entries[i].key.lease_priority)
+            .collect();
+        assert!(
+            shed_priorities.iter().all(|&p| p == 3),
+            "only the lowest-priority (highest value) lease should shed first; got {:?}",
+            shed_priorities
+        );
     }
 
     // ─── Resource Usage Tests ───────────────────────────────────────────
