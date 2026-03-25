@@ -273,14 +273,17 @@ impl LatencyBucket {
     ) -> Result<CalibrationStatus, String> {
         let Some(budget_us) = calibrated_budget_us else {
             // Per spec: uncalibrated results are warnings, not pass/fail.
-            let raw_p99 = self.p99().unwrap_or(0);
-            eprintln!(
-                "[UNCALIBRATED WARNING] '{}': no hardware calibration factors available. \
-                 Raw p99={}us, nominal_budget={}us. \
-                 Result cannot be used for pass/fail determination. \
-                 {{\"status\":\"uncalibrated\",\"reason\":\"no valid calibration factors available\",\"raw_value\":{}}}",
-                self.name, raw_p99, nominal_budget_us, raw_p99,
-            );
+            // Return Err if the bucket is empty — that is a real error regardless
+            // of calibration availability.
+            let raw_p99 = self.p99().ok_or_else(|| {
+                format!(
+                    "budget assertion failed for '{}': no samples recorded (uncalibrated path)",
+                    self.name
+                )
+            })?;
+            // Return structured status; callers decide how to report/log it.
+            // Do not emit directly to stderr from library code.
+            let _ = nominal_budget_us; // informational only in this path
             return Ok(CalibrationStatus::Uncalibrated { raw_p99 });
         };
 
@@ -658,6 +661,61 @@ mod tests {
     fn test_assert_p99_under_fails_with_no_samples() {
         let bucket = LatencyBucket::new("empty");
         let result = bucket.assert_p99_under(16_600);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no samples"));
+    }
+
+    #[test]
+    fn test_assert_p99_calibrated_uncalibrated_returns_uncalibrated_status() {
+        let mut bucket = LatencyBucket::new("test");
+        bucket.record(5_000);
+        let result = bucket.assert_p99_calibrated(None, 16_600);
+        assert!(result.is_ok(), "uncalibrated path must return Ok");
+        match result.unwrap() {
+            CalibrationStatus::Uncalibrated { raw_p99 } => {
+                assert!(raw_p99 > 0, "raw_p99 should be populated");
+            }
+            other => panic!("expected Uncalibrated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_assert_p99_calibrated_pass_when_within_budget() {
+        let mut bucket = LatencyBucket::new("test");
+        for _ in 0..100 {
+            bucket.record(5_000); // 5ms, well under 16.6ms budget
+        }
+        let result = bucket.assert_p99_calibrated(Some(16_600), 16_600);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            CalibrationStatus::Pass(p99) => assert_eq!(p99, 5_000),
+            other => panic!("expected Pass, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_assert_p99_calibrated_fail_when_over_budget() {
+        let mut bucket = LatencyBucket::new("test");
+        for _ in 0..100 {
+            bucket.record(20_000); // 20ms, over 16.6ms budget
+        }
+        let result = bucket.assert_p99_calibrated(Some(16_600), 16_600);
+        assert!(result.is_err(), "should fail when over calibrated budget");
+        assert!(result.unwrap_err().contains("exceeds calibrated budget"));
+    }
+
+    #[test]
+    fn test_assert_p99_calibrated_empty_bucket_returns_err_even_when_uncalibrated() {
+        let bucket = LatencyBucket::new("empty");
+        let result = bucket.assert_p99_calibrated(None, 16_600);
+        assert!(result.is_err(), "empty bucket should return Err even in uncalibrated path");
+        assert!(result.unwrap_err().contains("no samples"));
+    }
+
+    #[test]
+    fn test_assert_p99_calibrated_empty_bucket_returns_err_when_calibrated() {
+        let bucket = LatencyBucket::new("empty");
+        let result = bucket.assert_p99_calibrated(Some(16_600), 16_600);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no samples"));
     }

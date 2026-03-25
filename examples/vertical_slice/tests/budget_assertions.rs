@@ -74,6 +74,7 @@ async fn run_gpu_fill_calibration() {
         height: 600,
         grpc_port: 0,
         psk: "calib".to_string(),
+        config_toml: None,
     };
     let Ok(mut runtime) = HeadlessRuntime::new(config).await else {
         // GPU not available — leave gpu_fill_factor as None (uncalibrated).
@@ -123,19 +124,38 @@ async fn run_gpu_fill_calibration() {
 
 /// Measure texture upload throughput and return the hardware factor.
 ///
-/// Renders `UPLOAD_ROUNDS` frames while creating and destroying a tile with
-/// a fresh `SolidColor` node each frame (proxy for texture-backed tile creation
-/// — full GStreamer texture upload is deferred to a later implementation phase).
+/// Runs `UPLOAD_ROUNDS` create-and-destroy rounds, measuring the CPU-side
+/// scene-mutation cost as a proxy for texture-backed tile creation throughput.
+/// Each round creates a fresh `SolidColor` tile and immediately deletes it via
+/// `apply_batch`.  No `render_frame()` call is made; the timing covers the
+/// scene-graph mutation path only (full GStreamer texture upload is deferred to
+/// a later implementation phase).
 /// Returns a factor: 1.0 = reference hardware, >1.0 = slower.
 ///
 /// Per the validation-framework spec (line 143): this is calibration workload
 /// (3) — Upload-heavy resource calibration.
 async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64 {
-    /// Reference texture-upload proxy time per round on target hardware (µs).
-    /// Measured as the p50 of creating+rendering a fresh solid-color tile.
+    /// Reference scene-mutation proxy time per round on target hardware (µs).
+    /// Measured as the p50 of creating and destroying a fresh solid-color tile.
     const REFERENCE_UPLOAD_US: f64 = 500.0;
-    /// How many create-render-destroy rounds to measure.
+    /// How many create-destroy rounds to measure.
     const UPLOAD_ROUNDS: usize = 10;
+
+    // Set up a reusable lease before the timed loop to avoid lease bookkeeping
+    // accumulation skewing the per-round p50 measurement.
+    let (calib_tab, calib_lease) = {
+        let mut state = runtime.shared_state().lock().await;
+        let tab = if let Some(t) = state.scene.active_tab {
+            t
+        } else {
+            state.scene.create_tab("upload-calib", 0).unwrap()
+        };
+        let lease = state.scene.grant_lease("upload-calib", 60_000, vec![]);
+        if let Some(l) = state.scene.leases.get_mut(&lease) {
+            l.resource_budget.max_tiles = 4;
+        }
+        (tab, lease)
+    };
 
     let mut bucket = LatencyBucket::new("tex_upload_calib");
 
@@ -144,20 +164,10 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
         {
             let state_arc = runtime.shared_state().clone();
             let mut state = state_arc.lock().await;
-            // Get or create a tab for upload calibration
-            let tab = if let Some(t) = state.scene.active_tab {
-                t
-            } else {
-                state.scene.create_tab("upload-calib", 0).unwrap()
-            };
-            let lease = state.scene.grant_lease("upload-calib", 5_000, vec![]);
-            if let Some(l) = state.scene.leases.get_mut(&lease) {
-                l.resource_budget.max_tiles = 4;
-            }
             let tile_result = state.scene.create_tile(
-                tab,
+                calib_tab,
                 "upload-calib",
-                lease,
+                calib_lease,
                 Rect::new(0.0, 0.0, 64.0, 64.0),
                 200 + i as u32,
             );
@@ -171,7 +181,10 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
                     }),
                 };
                 let _ = state.scene.set_tile_root(tile_id, node);
-                // Delete the tile immediately to exercise the upload lifecycle
+                // Delete the tile immediately to exercise the upload lifecycle.
+                // Ignore apply_batch result in calibration: if delete is rejected,
+                // the round still gets timed and the factor degrades gracefully
+                // (calibration is best-effort, not a pass/fail path).
                 let batch = MutationBatch {
                     batch_id: SceneId::new(),
                     agent_namespace: "upload-calib".to_string(),
@@ -179,7 +192,7 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
                     timing_hints: None,
                     lease_id: None,
                 };
-                state.scene.apply_batch(&batch);
+                let _ = state.scene.apply_batch(&batch);
             }
         }
         bucket.record(start.elapsed().as_micros() as u64);
@@ -731,6 +744,7 @@ async fn test_texture_upload_p99_within_budget() {
         height: 300,
         grpc_port: 0,
         psk: "tex-upload-test".to_string(),
+        config_toml: None,
     };
     let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
@@ -740,6 +754,18 @@ async fn test_texture_upload_p99_within_budget() {
         state.scene.create_tab("upload-test", 0).unwrap();
     }
 
+    // Create one lease up-front and reuse it for all rounds to avoid lease
+    // bookkeeping accumulation that would skew p99 over later iterations.
+    let (tab, lease) = {
+        let mut state = runtime.shared_state().lock().await;
+        let tab = state.scene.active_tab.expect("active tab");
+        let lease = state.scene.grant_lease("upload-test", 60_000, vec![]);
+        if let Some(l) = state.scene.leases.get_mut(&lease) {
+            l.resource_budget.max_tiles = 4;
+        }
+        (tab, lease)
+    };
+
     let mut upload_bucket = LatencyBucket::new("texture_upload");
 
     for i in 0..UPLOAD_ROUNDS {
@@ -747,11 +773,6 @@ async fn test_texture_upload_p99_within_budget() {
         {
             let state_arc = runtime.shared_state().clone();
             let mut state = state_arc.lock().await;
-            let tab = state.scene.active_tab.expect("active tab");
-            let lease = state.scene.grant_lease("upload-test", 5_000, vec![]);
-            if let Some(l) = state.scene.leases.get_mut(&lease) {
-                l.resource_budget.max_tiles = 4;
-            }
             if let Ok(tile_id) = state.scene.create_tile(
                 tab,
                 "upload-test",
@@ -776,7 +797,12 @@ async fn test_texture_upload_p99_within_budget() {
                     timing_hints: None,
                     lease_id: None,
                 };
-                state.scene.apply_batch(&batch);
+                let result = state.scene.apply_batch(&batch);
+                assert!(
+                    result.applied,
+                    "DeleteTile mutation was not applied during texture upload budget test (round {}): {:?}",
+                    i, result.error
+                );
             }
         }
         upload_bucket.record(start.elapsed().as_micros() as u64);

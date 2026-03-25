@@ -397,21 +397,31 @@ pub fn scaled_budget(base_budget_us: u64, calibration: &CalibrationResult) -> u6
 /// callers must treat as "uncalibrated" per the validation-framework spec —
 /// they should emit a warning rather than a hard pass/fail assertion.
 ///
-/// Returns `Some(scaled_us)` when the GPU factor is known.
+/// Also returns `None` if the factor is not finite or not positive (e.g., `NaN`,
+/// `Inf`, or a negative deserialized value), preventing degenerate budget values.
+///
+/// Returns `Some(scaled_us)` when the GPU factor is known and valid.
 pub fn gpu_scaled_budget(base_budget_us: u64, calibration: &CalibrationResult) -> Option<u64> {
     let factor = calibration.gpu_fill_factor?;
+    if !factor.is_finite() || factor <= 0.0 {
+        return None;
+    }
     let scaled = base_budget_us as f64 * factor;
     Some((scaled as u64).max(1))
 }
 
 /// Scale a reference budget by the texture upload factor.
 ///
-/// Returns `None` when `texture_upload_factor` is not populated (uncalibrated).
+/// Returns `None` when `texture_upload_factor` is not populated (uncalibrated),
+/// or when the factor is not finite or not positive.
 pub fn texture_upload_scaled_budget(
     base_budget_us: u64,
     calibration: &CalibrationResult,
 ) -> Option<u64> {
     let factor = calibration.texture_upload_factor?;
+    if !factor.is_finite() || factor <= 0.0 {
+        return None;
+    }
     let scaled = base_budget_us as f64 * factor;
     Some((scaled as u64).max(1))
 }
@@ -495,9 +505,8 @@ pub fn current_calibration_with_gpu() -> CalibrationResult {
 pub fn set_gpu_factors(gpu_fill: f64, texture_upload: f64) {
     let gpu_fill = gpu_fill.clamp(0.1, 200.0);
     let texture_upload = texture_upload.clamp(0.1, 200.0);
-    if let Ok(mut guard) = GPU_FACTORS.write() {
-        *guard = (Some(gpu_fill), Some(texture_upload));
-    }
+    let mut guard = GPU_FACTORS.write().unwrap_or_else(|e| e.into_inner());
+    *guard = (Some(gpu_fill), Some(texture_upload));
 }
 
 // ─── Cache management ───────────────────────────────────────────────────────
