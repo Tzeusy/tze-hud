@@ -3128,6 +3128,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tze_hud_validation"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tze_hud_compositor",
+ "tze_hud_scene",
+]
+
+[[package]]
 name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
