@@ -229,8 +229,8 @@ impl HeadlessRuntime {
     /// `FrameTelemetry`.
     ///
     /// The compositor renders the current scene to the headless surface via
-    /// the surface-agnostic `render_frame()` path (spec line 198: no conditional
-    /// compilation in the render path).
+    /// `render_frame_headless()`, which includes the `copy_to_buffer` step so
+    /// that `read_pixels()` returns actual rendered pixel data after this call.
     pub async fn render_frame(&mut self) -> FrameTelemetry {
         let frame_start = Instant::now();
         let state = self.state.lock().await;
@@ -271,8 +271,10 @@ impl HeadlessRuntime {
         let tiles_visible = scene.visible_tiles().len() as u32;
         let stage5_us = s5_start.elapsed().as_micros() as u64;
 
-        // Stages 6 + 7: Render Encode + GPU Submit (handled by Compositor::render_frame)
-        let compositor_telemetry = self.compositor.render_frame(scene, &self.surface);
+        // Stages 6 + 7: Render Encode + GPU Submit (handled by Compositor::render_frame_headless)
+        // Must use render_frame_headless (not render_frame) so copy_to_buffer is called
+        // before queue.submit(), making read_pixels() return actual rendered pixel data.
+        let compositor_telemetry = self.compositor.render_frame_headless(scene, &self.surface);
         // Total frame time from Compositor covers encode + submit
         let stage6_us = compositor_telemetry.render_encode_us;
         let stage7_us = compositor_telemetry.gpu_submit_us;
@@ -428,6 +430,52 @@ mod tests {
             pixels.len(),
             128 * 96 * 4,
             "pixel buffer must be width * height * 4 bytes (RGBA8)"
+        );
+    }
+
+    /// Verify that read_pixels returns actual rendered content after render_frame().
+    ///
+    /// Regression test for the bug where render_frame() called compositor.render_frame()
+    /// instead of render_frame_headless(), causing copy_to_buffer to be skipped and
+    /// read_pixels() to return stale/zero data.
+    ///
+    /// The clear color in render_frame_headless is (r:0.05, g:0.05, b:0.1, a:1.0) in
+    /// linear space, which in Rgba8UnormSrgb encoding is approximately (48, 48, 80, 255).
+    /// The alpha channel MUST be 255 (fully opaque). Any all-zero pixel data indicates
+    /// the copy_to_buffer step was skipped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_headless_read_pixels_content_after_render() {
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            psk: "test".to_string(),
+        };
+        let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+        runtime.render_frame().await;
+        let pixels = runtime.read_pixels();
+
+        assert_eq!(
+            pixels.len(),
+            64 * 64 * 4,
+            "pixel buffer must be width * height * 4 bytes"
+        );
+
+        // Verify pixels are not all zero — all-zero means copy_to_buffer was skipped
+        // (the bug this test guards against: using render_frame instead of render_frame_headless).
+        let all_zero = pixels.iter().all(|&b| b == 0);
+        assert!(
+            !all_zero,
+            "read_pixels() returned all-zero data: copy_to_buffer was likely skipped. \
+             render_frame() must call render_frame_headless() for correct pixel readback."
+        );
+
+        // Verify alpha channel is 255 (fully opaque clear color).
+        // RGBA8 layout: [R, G, B, A, R, G, B, A, ...]
+        let alpha_nonopaque = pixels.chunks(4).any(|px| px[3] != 255);
+        assert!(
+            !alpha_nonopaque,
+            "expected fully-opaque pixels (alpha=255) from clear color render, got non-255 alpha"
         );
     }
 
