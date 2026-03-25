@@ -244,6 +244,76 @@ impl LatencyBucket {
             Some(p99) => Ok(p99),
         }
     }
+
+    /// Assert p99 against a hardware-normalized budget, or emit a warning if uncalibrated.
+    ///
+    /// Per the validation-framework spec (lines 154-156):
+    /// > When a performance test runs without valid calibration data, the test
+    /// > result MUST be marked as "uncalibrated" with a warning status, NOT
+    /// > reported as pass or fail.
+    ///
+    /// # Arguments
+    ///
+    /// * `calibrated_budget_us` — `Some(budget)` when a hardware-normalized budget
+    ///   is available (from `gpu_scaled_budget` or `texture_upload_scaled_budget`).
+    ///   `None` means the relevant calibration dimension has not been run.
+    /// * `nominal_budget_us` — the un-scaled reference budget, included in the
+    ///   warning message for observability.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(CalibrationStatus::Pass(p99))` — calibrated and within budget.
+    /// * `Ok(CalibrationStatus::Uncalibrated { raw_p99 })` — no calibration data;
+    ///   result is informational only (NOT a pass/fail determination).
+    /// * `Err(message)` — calibrated and over budget (hard failure).
+    pub fn assert_p99_calibrated(
+        &self,
+        calibrated_budget_us: Option<u64>,
+        nominal_budget_us: u64,
+    ) -> Result<CalibrationStatus, String> {
+        let Some(budget_us) = calibrated_budget_us else {
+            // Per spec: uncalibrated results are warnings, not pass/fail.
+            let raw_p99 = self.p99().unwrap_or(0);
+            eprintln!(
+                "[UNCALIBRATED WARNING] '{}': no hardware calibration factors available. \
+                 Raw p99={}us, nominal_budget={}us. \
+                 Result cannot be used for pass/fail determination. \
+                 {{\"status\":\"uncalibrated\",\"reason\":\"no valid calibration factors available\",\"raw_value\":{}}}",
+                self.name, raw_p99, nominal_budget_us, raw_p99,
+            );
+            return Ok(CalibrationStatus::Uncalibrated { raw_p99 });
+        };
+
+        match self.p99() {
+            None => Err(format!(
+                "budget assertion failed for '{}': no samples recorded",
+                self.name
+            )),
+            Some(p99) if p99 > budget_us => Err(format!(
+                "budget assertion failed for '{}': p99={p99}us exceeds calibrated \
+                 budget={budget_us}us (over by {}us, {:.1}%)",
+                self.name,
+                p99 - budget_us,
+                (p99 as f64 / budget_us as f64 - 1.0) * 100.0,
+            )),
+            Some(p99) => Ok(CalibrationStatus::Pass(p99)),
+        }
+    }
+}
+
+/// Result of a calibrated p99 budget assertion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CalibrationStatus {
+    /// Calibration data was available and the metric is within budget.
+    Pass(u64),
+    /// No calibration data available; result is informational only.
+    ///
+    /// Per validation-framework spec line 156, this MUST NOT be treated as
+    /// a pass or fail — it is a warning that calibration has not been run.
+    Uncalibrated {
+        /// The raw measured p99 in microseconds.
+        raw_p99: u64,
+    },
 }
 
 /// Tier in the budget enforcement ladder.

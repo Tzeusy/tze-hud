@@ -75,7 +75,11 @@ pub use test_scenes::{
     ClockMs, SceneSpec, TestSceneRegistry, InvariantViolation, SceneGraphTestExt,
     assert_layer0_invariants,
 };
-pub use calibration::{test_budget, CalibrationResult};
+pub use calibration::{
+    test_budget, current_calibration, current_calibration_with_gpu, set_gpu_factors,
+    scaled_budget, gpu_scaled_budget, texture_upload_scaled_budget,
+    CalibrationResult,
+};
 
 // ── Lease governance public API ───────────────────────────────────────────────
 pub use lease::priority::{
