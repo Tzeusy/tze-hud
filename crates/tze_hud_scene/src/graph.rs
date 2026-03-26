@@ -686,30 +686,35 @@ impl SceneGraph {
     /// - If the lease does not exist → `Err(LeaseNotFound)`.
     /// - If the lease is terminal → `Err(InvalidField { "lease_terminal" })`.
     /// - If `cap` is not in the lease scope → `Err(InvalidField { "capability_not_present" })`.
-    /// - On success → `Ok(())`.  The caller SHOULD emit a `LeaseStateChange` event
-    ///   (with `reason = "capability_revoked:<cap_name>"`) to notify the agent.
+    /// - On success → `Ok((capability_name, revoked_at_wall_us))`.  The caller MUST emit a
+    ///   [`LeaseEventKind::CapabilityRevoked`] audit event using the returned name and
+    ///   timestamp to populate its fields, then deliver it via `LeaseStateChange` on the
+    ///   `lease_changes` subscription.
     ///
     /// # Audit events
     ///
     /// This method does **not** push a [`LeaseAuditEvent`] directly (the lease module's
     /// audit channel is separate from the scene graph's mutation pipeline). Callers that
     /// route events through the `lease_changes` subscription MUST emit a `LeaseStateChange`
-    /// message after a successful call.
+    /// message after a successful call, using the returned `(capability_name, revoked_at_wall_us)`
+    /// to populate the [`LeaseEventKind::CapabilityRevoked`] fields.
     pub fn revoke_capability(
         &mut self,
         lease_id: SceneId,
         cap: &Capability,
-    ) -> Result<(), ValidationError> {
+    ) -> Result<(String, u64), ValidationError> {
         let lease = self
             .leases
             .get_mut(&lease_id)
             .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
 
+        let now_us = self.clock.now_us();
+
         use crate::lease::capability::{revoke_capability_from_lease, CapabilityRevocationError};
         match revoke_capability_from_lease(lease, cap) {
-            Ok(_cap_name) => {
+            Ok(cap_name) => {
                 self.version += 1;
-                Ok(())
+                Ok((cap_name, now_us))
             }
             Err(CapabilityRevocationError::LeaseTerminal) => {
                 Err(ValidationError::InvalidField {
@@ -4572,6 +4577,35 @@ mod tests {
     fn lease_capabilities_returns_none_for_unknown_id() {
         let scene = SceneGraph::new(1920.0, 1080.0);
         assert!(scene.lease_capabilities(&SceneId::new()).is_none());
+    }
+
+    /// WHEN revoke_capability succeeds
+    /// THEN it returns Ok((cap_name_string, revoked_at_wall_us)) so callers can populate
+    /// the LeaseEventKind::CapabilityRevoked audit event fields.
+    #[test]
+    fn revoke_capability_returns_cap_name_and_timestamp() {
+        let (mut scene, clock) = scene_with_test_clock();
+        clock.advance(1_000_000); // 1 second in μs
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles],
+        );
+        let (cap_name, revoked_at_us) = scene
+            .revoke_capability(lease_id, &Capability::CreateTiles)
+            .expect("revoke_capability must succeed");
+        // The name must identify the capability that was removed.
+        assert!(
+            cap_name.contains("CreateTile"),
+            "cap_name must identify CreateTiles, got: {:?}",
+            cap_name
+        );
+        // The timestamp must be non-zero (clock was advanced before the call).
+        assert!(
+            revoked_at_us > 0,
+            "revoked_at_wall_us must be non-zero, got: {}",
+            revoked_at_us
+        );
     }
 
     #[test]
