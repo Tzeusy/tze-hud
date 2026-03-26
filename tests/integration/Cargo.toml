@@ -26,6 +26,16 @@ path = "trace_regression.rs"
 name = "soak"
 path = "soak.rs"
 
+# E12.6: V1 thesis proof — capstone test demonstrating all 7 v1 success criteria.
+# Aggregates evidence from Layers 0-4, multi-agent integration, zone publish,
+# headless rendering, and performance budgets into a structured proof report.
+#
+# Run:
+#   cargo test --test v1_thesis -- --nocapture
+[[test]]
+name = "v1_thesis"
+path = "v1_thesis.rs"
+
 # Integration tests always run headless (no display server required).
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`
@@ -43,6 +53,7 @@ tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["headless", "dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
+tze_hud_validation = { path = "../../crates/tze_hud_validation" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
