@@ -125,6 +125,41 @@ pub struct FrameTelemetry {
     pub tiles_layout_recomputed: u32,
     /// Number of telemetry overflow drops since process start (non-blocking telemetry channel).
     pub telemetry_overflow_count: u64,
+
+    // ── Per-frame correctness fields ─────────────────────────────────────────
+    //
+    // RFC 0002 §3.2 Stage 8 requires per-frame invariant violation counts so
+    // that LLM-driven debugging can detect scene corruption at the frame level,
+    // not just at session boundary via SessionSummary counters.
+
+    /// Number of scene-commit rejections this frame (Stage 4 batches where
+    /// `applied == false`). Each rejected batch represents a scene mutation
+    /// that failed validation — lease checks, budget checks, bounds checks,
+    /// or post-mutation invariant checks (Stage 5 of the mutation pipeline).
+    ///
+    /// A non-zero value on any frame means at least one agent submitted an
+    /// invalid mutation batch. The session-level aggregate is tracked in
+    /// `SessionSummary::invariant_violations`.
+    #[serde(default)]
+    pub invariant_violations_this_frame: u32,
+
+    /// Number of Layer 0 structural invariant check failures this frame.
+    ///
+    /// Layer 0 checks (tile-tab refs, tile-lease refs, bounds positivity,
+    /// z-order uniqueness, etc.) are run by `assert_layer0_invariants` from
+    /// `tze_hud_scene::test_scenes`. In production the compositor does not run
+    /// the full Layer 0 suite every frame (it would be too expensive); this
+    /// field is populated by test harnesses that inject a Layer 0 check pass
+    /// into the telemetry pipeline.
+    ///
+    /// A non-zero value indicates a structural invariant failure that survived
+    /// Stage 5 validation — this is a stronger signal than
+    /// `invariant_violations_this_frame` and warrants immediate investigation.
+    ///
+    /// In production frames this field is 0 unless a Layer 0 check was
+    /// explicitly requested (e.g., via a debug mode flag or test fixture).
+    #[serde(default)]
+    pub layer0_checks_failed_this_frame: u32,
 }
 
 impl FrameTelemetry {
@@ -157,6 +192,8 @@ impl FrameTelemetry {
             hit_region_updates: 0,
             tiles_layout_recomputed: 0,
             telemetry_overflow_count: 0,
+            invariant_violations_this_frame: 0,
+            layer0_checks_failed_this_frame: 0,
         }
     }
 
@@ -405,7 +442,8 @@ pub enum DegradationDirection {
 /// - Frame time percentiles (p50/p95/p99) via `frame_time`
 /// - Full latency breakdown: input_to_local_ack, input_to_scene_commit, input_to_next_present
 /// - Peak tracking: peak_frame_time_us, peak_tile_count
-/// - Violation counters: lease_violations, budget_overruns, sync_drift_violations
+/// - Violation counters: lease_violations, budget_overruns, sync_drift_violations,
+///   invariant_violations (session aggregate of per-frame `invariant_violations_this_frame`)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SessionSummary {
@@ -458,6 +496,14 @@ pub struct SessionSummary {
     /// Number of sync drift violations (drift > 500µs).
     #[serde(default)]
     pub sync_drift_violations: u64,
+    /// Session aggregate of per-frame `invariant_violations_this_frame`.
+    ///
+    /// Counts the total number of scene-commit rejections (batches where
+    /// `applied == false`) across all frames in this session. Accumulated by
+    /// `record_frame_correctness`. Zero is the expected value for a healthy
+    /// session; non-zero indicates agents submitted invalid mutation batches.
+    #[serde(default)]
+    pub invariant_violations: u64,
 }
 
 impl SessionSummary {
@@ -480,6 +526,7 @@ impl SessionSummary {
             lease_violations: 0,
             budget_overruns: 0,
             sync_drift_violations: 0,
+            invariant_violations: 0,
         }
     }
 
@@ -495,6 +542,30 @@ impl SessionSummary {
         if tile_count > self.peak_tile_count {
             self.peak_tile_count = tile_count;
         }
+    }
+
+    /// Accumulate per-frame correctness counters into session totals.
+    ///
+    /// Call this after each frame (alongside or after `record_frame`) to
+    /// keep `invariant_violations` in sync with per-frame telemetry.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` — the `FrameTelemetry` record for the frame just completed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use tze_hud_telemetry::{SessionSummary, FrameTelemetry};
+    /// let mut summary = SessionSummary::new();
+    /// let mut frame = FrameTelemetry::new(1);
+    /// frame.invariant_violations_this_frame = 2;
+    /// summary.record_frame(frame.frame_time_us, frame.tile_count);
+    /// summary.record_frame_correctness(&frame);
+    /// assert_eq!(summary.invariant_violations, 2);
+    /// ```
+    pub fn record_frame_correctness(&mut self, frame: &FrameTelemetry) {
+        self.invariant_violations += frame.invariant_violations_this_frame as u64;
     }
 
     /// Finalize: compute FPS from total_frames and elapsed_us.
@@ -718,5 +789,103 @@ mod tests {
         let result = bucket.assert_p99_calibrated(Some(16_600), 16_600);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no samples"));
+    }
+
+    // ── Per-frame correctness fields (RFC 0002 §3.2 Stage 8) ─────────────────
+
+    /// Verify FrameTelemetry has per-frame invariant violation count field,
+    /// initialized to zero by FrameTelemetry::new().
+    #[test]
+    fn test_frame_telemetry_has_invariant_violations_this_frame_field() {
+        let frame = FrameTelemetry::new(1);
+        assert_eq!(
+            frame.invariant_violations_this_frame, 0,
+            "invariant_violations_this_frame must be zero-initialized"
+        );
+    }
+
+    /// Verify FrameTelemetry has per-frame Layer 0 check failure count field,
+    /// initialized to zero by FrameTelemetry::new().
+    #[test]
+    fn test_frame_telemetry_has_layer0_checks_failed_this_frame_field() {
+        let frame = FrameTelemetry::new(1);
+        assert_eq!(
+            frame.layer0_checks_failed_this_frame, 0,
+            "layer0_checks_failed_this_frame must be zero-initialized"
+        );
+    }
+
+    /// Verify per-frame correctness fields serialize to JSON with canonical names.
+    #[test]
+    fn test_frame_telemetry_correctness_fields_serialize_to_json() {
+        let mut frame = FrameTelemetry::new(1);
+        frame.invariant_violations_this_frame = 3;
+        frame.layer0_checks_failed_this_frame = 1;
+
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(
+            json.contains("invariant_violations_this_frame"),
+            "JSON must contain invariant_violations_this_frame"
+        );
+        assert!(
+            json.contains("layer0_checks_failed_this_frame"),
+            "JSON must contain layer0_checks_failed_this_frame"
+        );
+        assert!(json.contains("\"invariant_violations_this_frame\":3"), "value must be 3");
+        assert!(json.contains("\"layer0_checks_failed_this_frame\":1"), "value must be 1");
+    }
+
+    /// Verify record_frame_correctness accumulates invariant_violations into
+    /// SessionSummary.invariant_violations.
+    #[test]
+    fn test_session_summary_record_frame_correctness_accumulates_violations() {
+        let mut summary = SessionSummary::new();
+
+        let mut frame1 = FrameTelemetry::new(1);
+        frame1.invariant_violations_this_frame = 2;
+        summary.record_frame(frame1.frame_time_us, frame1.tile_count);
+        summary.record_frame_correctness(&frame1);
+
+        let mut frame2 = FrameTelemetry::new(2);
+        frame2.invariant_violations_this_frame = 0; // clean frame
+        summary.record_frame(frame2.frame_time_us, frame2.tile_count);
+        summary.record_frame_correctness(&frame2);
+
+        let mut frame3 = FrameTelemetry::new(3);
+        frame3.invariant_violations_this_frame = 1;
+        summary.record_frame(frame3.frame_time_us, frame3.tile_count);
+        summary.record_frame_correctness(&frame3);
+
+        assert_eq!(
+            summary.invariant_violations, 3,
+            "session total should be sum of per-frame counts: 2+0+1=3"
+        );
+        assert_eq!(summary.total_frames, 3);
+    }
+
+    /// Verify SessionSummary.invariant_violations is zero-initialized
+    /// and serializes with serde(default).
+    #[test]
+    fn test_session_summary_invariant_violations_zero_initialized() {
+        let summary = SessionSummary::new();
+        assert_eq!(summary.invariant_violations, 0);
+
+        // Verify it appears in JSON
+        let json = summary.to_json().unwrap();
+        assert!(
+            json.contains("invariant_violations"),
+            "JSON must contain invariant_violations field"
+        );
+    }
+
+    /// Verify that a frame with no violations produces zero counts.
+    #[test]
+    fn test_frame_telemetry_clean_frame_has_zero_violations() {
+        let frame = FrameTelemetry::new(42);
+        assert_eq!(frame.invariant_violations_this_frame, 0);
+        assert_eq!(frame.layer0_checks_failed_this_frame, 0);
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains("\"invariant_violations_this_frame\":0"));
+        assert!(json.contains("\"layer0_checks_failed_this_frame\":0"));
     }
 }

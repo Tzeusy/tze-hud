@@ -280,18 +280,22 @@ impl FramePipeline {
     /// batch. After commit, publishes an updated `HitTestSnapshot` via
     /// `ArcSwap`.
     ///
-    /// Returns (elapsed_us, mutations_applied).
+    /// Returns `(elapsed_us, mutations_applied, invariant_violations)`.
+    ///
+    /// - `mutations_applied`: count of individual mutations that were committed.
+    /// - `invariant_violations`: count of batches that were rejected (applied == false).
+    ///   RFC 0002 §3.2 Stage 8 requires per-frame invariant violation counts.
     ///
     /// **Spec**: RFC 0002 §3.2 — p99 < 1ms.
-    pub fn stage4_scene_commit<F>(&self, commit_fn: F) -> (u64, u32)
+    pub fn stage4_scene_commit<F>(&self, commit_fn: F) -> (u64, u32, u32)
     where
-        F: FnOnce() -> (u32, HitTestSnapshot),
+        F: FnOnce() -> (u32, u32, HitTestSnapshot),
     {
         let t0 = Instant::now();
-        let (mutations, new_snapshot) = commit_fn();
+        let (mutations, violations, new_snapshot) = commit_fn();
         // Publish updated snapshot via ArcSwap (atomic pointer swap)
         self.hit_test_snapshot.store(Arc::new(new_snapshot));
-        (t0.elapsed().as_micros() as u64, mutations)
+        (t0.elapsed().as_micros() as u64, mutations, violations)
     }
 
     // ── Stage 5: Layout Resolve ───────────────────────────────────────────────
@@ -399,7 +403,8 @@ impl FramePipeline {
     /// - `drain`:   Stage 1 — drain OS events
     /// - `feedback`: Stage 2 — apply local feedback given current snapshot
     /// - `intake`:  Stage 3 — drain mutation channel, return batch count
-    /// - `commit`:  Stage 4 — commit mutations, return (mutation count, new snapshot)
+    /// - `commit`:  Stage 4 — commit mutations, return (mutations_applied, violations, new snapshot)
+    ///   `violations` is the count of rejected batches this frame (RFC 0002 §3.2 Stage 8).
     /// - `layout`:  Stage 5 — incremental layout, return tiles recomputed
     /// - `encode`:  Stage 6 — build CommandEncoder (no GPU submit)
     /// - `submit`:  Stage 7 — submit + present
@@ -420,7 +425,7 @@ impl FramePipeline {
         Drain: FnOnce(),
         Feedback: FnOnce(&HitTestSnapshot),
         Intake: FnOnce() -> u32,
-        Commit: FnOnce() -> (u32, HitTestSnapshot),
+        Commit: FnOnce() -> (u32, u32, HitTestSnapshot),
         Layout: FnOnce() -> u32,
         Encode: FnOnce(),
         Submit: FnOnce(),
@@ -442,9 +447,11 @@ impl FramePipeline {
         telemetry.stage3_mutation_intake_us = stage3_us;
 
         // Stage 4: Scene Commit (Compositor thread)
-        let (stage4_us, mutations) = self.stage4_scene_commit(commit);
+        let (stage4_us, mutations, violations) = self.stage4_scene_commit(commit);
         telemetry.stage4_scene_commit_us = stage4_us;
         telemetry.mutations_applied = mutations;
+        // RFC 0002 §3.2 Stage 8: per-frame invariant violation count
+        telemetry.invariant_violations_this_frame = violations;
 
         // Stage 5: Layout Resolve (Compositor thread)
         let (stage5_us, tiles_recomputed) = self.stage5_layout_resolve(layout);
@@ -518,18 +525,24 @@ impl FramePipeline {
         // publish updated hit-test snapshot via ArcSwap.
         let s4_start = Instant::now();
         let mut mutations_applied = 0u32;
+        let mut invariant_violations_this_frame = 0u32;
         // Each batch is validated and applied independently (no coalescing)
         for batch in &pending_mutations {
             let result = scene_graph_mut.apply_batch(batch);
             if result.applied {
                 // Count each mutation in the batch that was applied
                 mutations_applied += batch.mutations.len() as u32;
+            } else {
+                // Batch was rejected — count as an invariant violation for telemetry.
+                // RFC 0002 §3.2 Stage 8 requires per-frame invariant violation counts.
+                invariant_violations_this_frame += 1;
             }
         }
         let new_snapshot = HitTestSnapshot::from_scene(scene_graph_mut);
         self.hit_test_snapshot.store(Arc::new(new_snapshot));
         telemetry.stage4_scene_commit_us = s4_start.elapsed().as_micros() as u64;
         telemetry.mutations_applied = mutations_applied;
+        telemetry.invariant_violations_this_frame = invariant_violations_this_frame;
 
         // Stage 5: Layout Resolve — incremental layout for changed tiles
         let s5_start = Instant::now();
@@ -863,13 +876,13 @@ mod tests {
 
         let l = log.clone();
         let empty_scene = SceneGraph::new(800.0, 600.0);
-        let mut scene = SceneGraph::new(800.0, 600.0);
+        let scene = SceneGraph::new(800.0, 600.0);
 
         let telemetry = pipeline.run_frame(
             || l.lock().unwrap().push(1), // Stage 1: Input Drain
             |_snapshot| l.lock().unwrap().push(2), // Stage 2: Local Feedback
             || { l.lock().unwrap().push(3); 0 }, // Stage 3: Mutation Intake
-            || { l.lock().unwrap().push(4); (0, HitTestSnapshot::from_scene(&empty_scene)) }, // Stage 4
+            || { l.lock().unwrap().push(4); (0, 0, HitTestSnapshot::from_scene(&empty_scene)) }, // Stage 4
             || { l.lock().unwrap().push(5); 0 }, // Stage 5: Layout Resolve
             || l.lock().unwrap().push(6), // Stage 6: Render Encode
             || l.lock().unwrap().push(7), // Stage 7: GPU Submit
@@ -906,7 +919,7 @@ mod tests {
             || {},
             |_| {},
             || 0,
-            || (0, HitTestSnapshot::from_scene(&empty_scene)),
+            || (0, 0, HitTestSnapshot::from_scene(&empty_scene)),
             || 0,
             || {},
             || {},
@@ -958,7 +971,7 @@ mod tests {
             || 0,
             move || {
                 let snap = HitTestSnapshot::from_scene(&scene_for_commit);
-                (0, snap)
+                (0, 0, snap)
             },
             || 0,
             || {},
@@ -1008,7 +1021,7 @@ mod tests {
             || {},
             |_| {},
             || 0,
-            || (0, HitTestSnapshot::from_scene(&empty_scene)),
+            || (0, 0, HitTestSnapshot::from_scene(&empty_scene)),
             || 0,
             || {},
             || {},
@@ -1036,7 +1049,7 @@ mod tests {
             || {},
             |_| {},
             || 0,
-            || (0, HitTestSnapshot::from_scene(&empty_scene)),
+            || (0, 0, HitTestSnapshot::from_scene(&empty_scene)),
             || 0,
             || {},
             || {},
@@ -1067,7 +1080,7 @@ mod tests {
             || {},
             |_| {},
             || 0,
-            || (0, HitTestSnapshot::from_scene(&empty_scene)),
+            || (0, 0, HitTestSnapshot::from_scene(&empty_scene)),
             || 0,
             || {},
             || {},
@@ -1378,6 +1391,100 @@ mod tests {
                 BudgetCheckOutcome::Reject(BudgetViolation::TileCountExceeded { .. })
             ),
             "9th tile creation with default budget (max_tiles=8) must be rejected"
+        );
+    }
+
+    // ─── Per-frame correctness fields (RFC 0002 §3.2 Stage 8) ────────────────
+
+    /// Verify that run_frame with a clean commit (no rejections) yields
+    /// invariant_violations_this_frame == 0.
+    #[test]
+    fn test_run_frame_zero_violations_on_clean_commit() {
+        let mut pipeline = FramePipeline::new();
+        let empty_scene = SceneGraph::new(800.0, 600.0);
+
+        let telemetry = pipeline.run_frame(
+            || {},
+            |_| {},
+            || 0,
+            // 0 mutations applied, 0 violations, clean snapshot
+            || (0, 0, HitTestSnapshot::from_scene(&empty_scene)),
+            || 0,
+            || {},
+            || {},
+            || false,
+        );
+
+        assert_eq!(
+            telemetry.invariant_violations_this_frame, 0,
+            "clean commit produces zero per-frame violations"
+        );
+        assert_eq!(
+            telemetry.layer0_checks_failed_this_frame, 0,
+            "layer0 field should be zero (production default)"
+        );
+    }
+
+    /// Verify that run_frame propagates a non-zero violation count from
+    /// the Stage 4 commit closure into FrameTelemetry.
+    #[test]
+    fn test_run_frame_propagates_violation_count_from_commit() {
+        let mut pipeline = FramePipeline::new();
+        let empty_scene = SceneGraph::new(800.0, 600.0);
+
+        let telemetry = pipeline.run_frame(
+            || {},
+            |_| {},
+            || 0,
+            // Simulate 3 rejected batches this frame
+            || (0, 3, HitTestSnapshot::from_scene(&empty_scene)),
+            || 0,
+            || {},
+            || {},
+            || false,
+        );
+
+        assert_eq!(
+            telemetry.invariant_violations_this_frame, 3,
+            "violation count from Stage 4 closure must be reflected in telemetry"
+        );
+    }
+
+    /// Verify run_scene_frame counts rejected batches as invariant violations.
+    ///
+    /// Submitting a batch to a non-existent lease triggers a LeaseNotFound
+    /// validation error → applied == false → violation counter increments.
+    #[test]
+    fn test_run_scene_frame_counts_rejected_batch_as_violation() {
+        use tze_hud_scene::mutation::{MutationBatch, SceneMutation};
+        use tze_hud_scene::types::SceneId;
+
+        let mut pipeline = FramePipeline::new();
+        let mut scene = SceneGraph::new(800.0, 600.0);
+
+        // Batch references a non-existent lease → will be rejected
+        let bogus_lease = SceneId::new();
+        let batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent".into(),
+            lease_id: Some(bogus_lease),
+            timing_hints: None,
+            mutations: vec![SceneMutation::CreateTab {
+                name: "X".into(),
+                display_order: 1,
+            }],
+        };
+
+        let telemetry = pipeline.run_scene_frame(
+            || {},
+            || {},
+            vec![batch],
+            &mut scene,
+        );
+
+        assert_eq!(
+            telemetry.invariant_violations_this_frame, 1,
+            "one rejected batch must increment invariant_violations_this_frame to 1"
         );
     }
 }
