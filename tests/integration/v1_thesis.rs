@@ -376,7 +376,7 @@ async fn create_tile_via_grpc(
                 .created_ids
                 .first()
                 .cloned()
-                .unwrap_or_default();
+                .ok_or_else(|| "Server accepted mutation but returned no created ID".to_string())?;
             Ok(tile_id)
         }
         Some(session_proto::server_message::Payload::MutationResult(result)) => {
@@ -938,9 +938,10 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         agent_b.namespace.clone(),
         agent_c.namespace.clone(),
     ];
-    let all_distinct = namespaces[0] != namespaces[1]
-        && namespaces[1] != namespaces[2]
-        && namespaces[0] != namespaces[2];
+    let all_distinct = {
+        use std::collections::HashSet;
+        namespaces.iter().collect::<HashSet<_>>().len() == namespaces.len()
+    };
 
     eprintln!(
         "    3 agents connected: {:?}. All distinct: {}",
@@ -964,21 +965,22 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     let total_tiles_created = 4usize;
     eprintln!("    {} tiles created across 3 agents", total_tiles_created);
 
-    // Verify namespace isolation (no cross-agent tile access)
+    // Verify namespace isolation (no cross-agent tile access).
+    // Group all tiles by namespace and verify:
+    // - exactly 3 distinct namespaces exist (no unexpected ones)
+    // - each expected agent has exactly the tiles it created
     let no_cross_access = {
+        use std::collections::HashMap;
         let state = runtime.shared_state().lock().await;
-        let a_tiles: Vec<_> = state.scene.tiles.values()
-            .filter(|t| t.namespace == agent_a.namespace)
-            .collect();
-        let b_tiles: Vec<_> = state.scene.tiles.values()
-            .filter(|t| t.namespace == agent_b.namespace)
-            .collect();
-        let c_tiles: Vec<_> = state.scene.tiles.values()
-            .filter(|t| t.namespace == agent_c.namespace)
-            .collect();
-
-        // Each agent's tiles are in their own namespace only
-        a_tiles.len() == 2 && b_tiles.len() == 1 && c_tiles.len() == 1
+        let mut tiles_by_ns: HashMap<String, usize> = HashMap::new();
+        for tile in state.scene.tiles.values() {
+            *tiles_by_ns.entry(tile.namespace.clone()).or_default() += 1;
+        }
+        // Exactly 3 namespaces; each agent owns the expected tile count
+        tiles_by_ns.len() == 3
+            && tiles_by_ns.get(&agent_a.namespace).copied().unwrap_or(0) == 2
+            && tiles_by_ns.get(&agent_b.namespace).copied().unwrap_or(0) == 1
+            && tiles_by_ns.get(&agent_c.namespace).copied().unwrap_or(0) == 1
     };
     eprintln!("    Namespace isolation verified: {}", no_cross_access);
 
