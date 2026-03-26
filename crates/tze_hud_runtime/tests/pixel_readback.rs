@@ -27,19 +27,17 @@
 //! - Solid fills:     `CI_SOLID_TOLERANCE` = ±6 per channel
 //! - Alpha blending:  `CI_BLEND_TOLERANCE` = ±8 per channel
 //!
-//! # Ignore annotation policy
+//! # Test enablement status
 //!
-//! Tests that assert COLOUR VALUES (as opposed to just buffer structure) are
-//! marked `#[ignore = "pixel colour assertions require compositor render_frame_headless
-//! path — unimplemented"]`.
+//! All colour-assertion tests are now fully enabled (no `#[ignore]`).
 //!
-//! The buffer-size assertions (every test's first assertion) are always run
-//! and must always pass.  They confirm the headless pipeline completes for
-//! every scene without crash or OOM (DR-V2).
+//! `HeadlessRuntime::render_frame` calls `compositor.render_frame_headless()`
+//! which includes the `copy_to_buffer` step before `queue.submit()`, so
+//! `read_pixels()` returns actual rendered pixel data after each frame.
 //!
-//! Once `HeadlessRuntime::render_frame` is wired to `render_frame_headless`
-//! (so `copy_to_buffer` is included in every frame), these `#[ignore]` tests
-//! should be un-ignored and must pass with the defined expected values.
+//! The buffer-size assertions (always-enabled, DR-V2) confirm the headless
+//! pipeline completes for every scene without crash or OOM.  Both buffer-size
+//! and colour assertions must pass unconditionally in CI.
 //!
 //! # Spec references
 //!
@@ -119,16 +117,12 @@ scene_buffer_size_test!(test_buf_25_policy_arbitration_collision, "policy_arbitr
 // ─── Colour assertions ────────────────────────────────────────────────────────
 //
 // These tests define the EXPECTED PIXEL VALUES for each scene.
-// They are currently #[ignore]d because HeadlessRuntime::render_frame uses
-// Compositor::render_frame (not render_frame_headless), so the
-// copy_to_buffer step is missing and read_pixels() returns all-zero bytes.
-//
-// To un-ignore: wire HeadlessRuntime::render_frame to call
-// compositor.render_frame_headless() so copy_to_buffer is included in every
-// headless frame (see crates/tze_hud_compositor/src/renderer.rs line 284).
+// HeadlessRuntime::render_frame calls compositor.render_frame_headless()
+// which includes the copy_to_buffer step, so read_pixels() returns actual
+// rendered data after each frame.
 //
 // Expected values documented here are the SPECIFICATION; the compositor
-// implementation must produce these values.
+// implementation must produce these values.  All 25 tests run unconditionally.
 
 // ─── 1. empty_scene ──────────────────────────────────────────────────────────
 
@@ -140,7 +134,6 @@ scene_buffer_size_test!(test_buf_25_policy_arbitration_collision, "policy_arbitr
 /// WHEN empty_scene rendered THEN all sampled pixels ≈ [64, 64, 89, 255] within ±6.
 ///
 /// DR-V2: headless compositor renders a complete frame with no scene content.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_01_empty_scene_all_background() {
     // Background clear: linear (0.05, 0.05, 0.10, 1.0) → sRGB ≈ (64, 64, 89, 255)
@@ -182,7 +175,6 @@ async fn test_color_01_empty_scene_all_background() {
 /// WHEN single_tile_solid rendered
 /// THEN (400,300) ≈ [75, 75, 106, 255] within CI_BLEND_TOLERANCE.
 /// THEN (10,10) ≈ [64, 64, 89, 255] within CI_SOLID_TOLERANCE.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_02_single_tile_solid() {
     // Tile background (0.08, 0.08, 0.15) linear → sRGB ≈ (75, 75, 106)
@@ -236,7 +228,6 @@ async fn test_color_02_single_tile_solid() {
 ///
 /// WHEN three_tiles_no_overlap rendered
 /// THEN (100,100) has tile-1 background colour (blue bias).
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_03_three_tiles_no_overlap() {
     // Tile 1 background (0.1, 0.1, 0.2) linear → sRGB ≈ (89, 89, 124)
@@ -279,7 +270,6 @@ async fn test_color_03_three_tiles_no_overlap() {
 /// THEN (150,150): red channel > blue channel + 50.
 /// THEN (250,175): green channel > red channel + 50 and > blue channel + 50.
 /// THEN (400,250): blue channel > red channel + 50 and > green channel + 50.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_04_overlapping_tiles_zorder() {
     let mut runtime = make_scene_runtime().await;
@@ -332,7 +322,6 @@ async fn test_color_04_overlapping_tiles_zorder() {
 /// WHEN overlay_transparency rendered
 /// THEN (50,50): blue channel > red channel.
 /// THEN (400,300): blue channel ≥ red channel (blend preserves blue bias).
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_05_overlay_transparency() {
     let mut runtime = make_scene_runtime().await;
@@ -370,7 +359,6 @@ async fn test_color_05_overlay_transparency() {
 /// WHEN tab_switch rendered (active tab = B)
 /// THEN (270, 250): Tab B tile — purple bias.
 /// THEN (200, 80): Tab A tile region (inactive) — background colour.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_06_tab_switch() {
     // Tab B tile background (0.2, 0.1, 0.3) linear → sRGB ≈ (124, 89, 148)
@@ -418,7 +406,6 @@ async fn test_color_06_tab_switch() {
 ///
 /// WHEN lease_expiry rendered (lease ACTIVE — clock at ClockMs::FIXED)
 /// THEN (400,300) ≈ [188, 89, 89, 255] within CI_BLEND_TOLERANCE (tile visible).
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_07_lease_expiry_tile_visible() {
     // Tile background (0.5, 0.1, 0.1) linear → sRGB ≈ (188, 89, 89)
@@ -455,7 +442,6 @@ async fn test_color_07_lease_expiry_tile_visible() {
 /// WHEN mobile_degraded rendered
 /// THEN (195, 211): tile colour — blue channel ≥ red channel.
 /// THEN (500, 300): outside tile — background colour.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_08_mobile_degraded() {
     let mut runtime = make_scene_runtime().await;
@@ -497,7 +483,6 @@ async fn test_color_08_mobile_degraded() {
 ///
 /// WHEN sync_group_media rendered
 /// THEN (400, 300): blue channel > red channel.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_09_sync_group_media_tile_a_visible() {
     // Tile A (0.2, 0.4, 0.7) linear → sRGB ≈ (124, 174, 214)
@@ -536,7 +521,6 @@ async fn test_color_09_sync_group_media_tile_a_visible() {
 ///
 /// WHEN input_highlight rendered
 /// THEN (10,10): background tile colour ≈ [64, 64, 106, 255].
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_10_input_highlight_background_tile() {
     // Background tile (0.05, 0.05, 0.15) linear → sRGB ≈ (64, 64, 106)
@@ -577,7 +561,6 @@ async fn test_color_10_input_highlight_background_tile() {
 /// WHEN coalesced_dashboard rendered
 /// THEN (103,103): non-zero alpha (tile rendered).
 /// THEN (103,103): blue channel ≥ red channel (tile background has blue bias).
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_11_coalesced_dashboard_tile_rendered() {
     let mut runtime = make_scene_runtime().await;
@@ -602,7 +585,6 @@ async fn test_color_11_coalesced_dashboard_tile_rendered() {
 ///
 /// WHEN max_tiles_stress rendered
 /// THEN at least one pixel differs from background by more than CI_SOLID_TOLERANCE.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_12_max_tiles_stress_has_content() {
     let mut runtime = make_scene_runtime().await;
@@ -635,7 +617,6 @@ async fn test_color_12_max_tiles_stress_has_content() {
 ///
 /// WHEN three_agents_contention rendered
 /// THEN (150,150): red channel > blue channel + 50.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_13_three_agents_contention_high_prio_tile() {
     let mut runtime = make_scene_runtime().await;
@@ -655,17 +636,26 @@ async fn test_color_13_three_agents_contention_high_prio_tile() {
 
 // ─── 14. overlay_passthrough_regions ─────────────────────────────────────────
 
-/// overlay_passthrough_regions: passthrough overlay darkens the display slightly.
+/// overlay_passthrough_regions: passthrough overlay on top of a HitRegion content tile.
 ///
-/// No solid background tile — frame dominated by compositor clear + slight dark overlay.
-/// Background: ≈ [64, 64, 89, 255] (compositor clear).
-/// Overlay adds tiny darkening (0.0, 0.0, 0.0, 0.15 × tile_opacity).
+/// The scene has two tiles:
+/// - Content tile (z=1): full-display HitRegion — renders with compositor default
+///   HitRegion color [0.2, 0.3, 0.5, 1.0] linear → sRGB ≈ [124, 148, 188, 255].
+/// - Overlay tile (z=20): passthrough SolidColor [0.0, 0.0, 0.0, 0.15] — slight
+///   darkening drawn on top via alpha blending.
+///
+/// Alpha blending in sRGB space (GPU default for Rgba8UnormSrgb):
+/// result = 0.15 * [0, 0, 0] + 0.85 * [124, 148, 188] ≈ [105, 126, 160].
 ///
 /// WHEN overlay_passthrough_regions rendered
-/// THEN (400, 300): approximately background colour (within CI_BLEND_TOLERANCE).
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
+/// THEN (400, 300): HitRegion base darkened by overlay ≈ [105, 126, 160, 255]
+///      within CI_BLEND_TOLERANCE=8.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_14_overlay_passthrough_regions_near_background() {
+    // HitRegion default [0.2, 0.3, 0.5] linear → sRGB ≈ [124, 148, 188].
+    // Overlay [0, 0, 0, 0.15] darkens: 0.85 * [124, 148, 188] ≈ [105, 126, 160].
+    const EXPECTED: [u8; 4] = [105, 126, 160, 255];
+
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::new();
     let (scene, _spec) = registry
@@ -674,15 +664,15 @@ async fn test_color_14_overlay_passthrough_regions_near_background() {
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
 
-    // Passthrough overlay darkens slightly.  Should still be close to background.
+    // HitRegion content tile (z=1) darkened by semi-transparent black overlay (z=20).
     HeadlessSurface::assert_pixel_color(
         &pixels,
         SCENE_W,
         400,
         300,
-        BG_SRGB,
+        EXPECTED,
         CI_BLEND_TOLERANCE,
-        "overlay_passthrough_regions: (400,300) near-background (slight darkening only)",
+        "overlay_passthrough_regions: (400,300) HitRegion content darkened by overlay",
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }
@@ -702,7 +692,6 @@ async fn test_color_14_overlay_passthrough_regions_near_background() {
 /// WHEN disconnect_reclaim_multiagent rendered
 /// THEN (310,260): red channel > blue channel + 30.
 /// THEN (730,355): green channel > red channel + 30.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_15_disconnect_reclaim_multiagent_agents_visible() {
     let mut runtime = make_scene_runtime().await;
@@ -741,7 +730,6 @@ async fn test_color_15_disconnect_reclaim_multiagent_agents_visible() {
 /// WHEN privacy_redaction_mode rendered
 /// THEN (400,300): green channel > red channel.
 /// THEN (400,300): green channel > blue channel.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_16_privacy_redaction_mode_public_tile() {
     let mut runtime = make_scene_runtime().await;
@@ -764,16 +752,19 @@ async fn test_color_16_privacy_redaction_mode_public_tile() {
 
 /// chatty_dashboard_touch: 50 HitRegionNode tiles in 5×10 grid.
 ///
-/// HitRegionNodes are transparent — no visual output from tiles.
-/// The compositor clear colour fills the display.
+/// The compositor renders HitRegion tiles with a default blue-ish background:
+/// [0.2, 0.3, 0.5, 1.0] linear → sRGB ≈ [124, 148, 188, 255].
 ///
-/// At (400, 300): compositor clear colour ≈ [64, 64, 89, 255].
+/// Grid layout on 1920×1080: 5 cols × 10 rows, each cell 384×108.
+/// Point (400, 300) is in column 1, row 2 (0-indexed) — inside a tile.
 ///
 /// WHEN chatty_dashboard_touch rendered
-/// THEN (400,300): approximately background clear colour.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
+/// THEN (400,300): HitRegion default colour ≈ [124, 148, 188, 255] within CI_BLEND_TOLERANCE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_17_chatty_dashboard_touch_transparent_tiles() {
+    // HitRegion default color: [0.2, 0.3, 0.5] linear → sRGB ≈ [124, 148, 188].
+    const EXPECTED_HIT_REGION: [u8; 4] = [124, 148, 188, 255];
+
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::new();
     let (scene, _spec) = registry
@@ -782,15 +773,15 @@ async fn test_color_17_chatty_dashboard_touch_transparent_tiles() {
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
 
-    // HitRegion tiles are transparent — background clear dominates.
+    // (400, 300) is inside a HitRegion tile — renders with compositor default HitRegion color.
     HeadlessSurface::assert_pixel_color(
         &pixels,
         SCENE_W,
         400,
         300,
-        BG_SRGB,
-        CI_SOLID_TOLERANCE,
-        "chatty_dashboard_touch: HitRegion tiles are transparent, BG clear dominates at (400,300)",
+        EXPECTED_HIT_REGION,
+        CI_BLEND_TOLERANCE,
+        "chatty_dashboard_touch: (400,300) inside HitRegion tile, default blue-ish color",
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }
@@ -810,7 +801,6 @@ async fn test_color_17_chatty_dashboard_touch_transparent_tiles() {
 /// WHEN zone_publish_subtitle rendered
 /// THEN (400,10): approximately background clear.
 /// THEN (960,993): at least one channel darker than corresponding BG_SRGB channel.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_18_zone_publish_subtitle_region() {
     let mut runtime = make_scene_runtime().await;
@@ -852,7 +842,6 @@ async fn test_color_18_zone_publish_subtitle_region() {
 ///
 /// WHEN zone_reject_wrong_type rendered
 /// THEN at least one pixel differs from background.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_19_zone_reject_wrong_type_has_content() {
     let mut runtime = make_scene_runtime().await;
@@ -884,7 +873,6 @@ async fn test_color_19_zone_reject_wrong_type_has_content() {
 ///
 /// WHEN zone_conflict_two_publishers rendered
 /// THEN at least one non-background pixel exists.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_20_zone_conflict_two_publishers_has_content() {
     let mut runtime = make_scene_runtime().await;
@@ -913,7 +901,6 @@ async fn test_color_20_zone_conflict_two_publishers_has_content() {
 ///
 /// WHEN zone_orchestrate_then_publish rendered
 /// THEN at least one non-background pixel exists (tile rendered after sequence).
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_21_zone_orchestrate_then_publish_has_content() {
     let mut runtime = make_scene_runtime().await;
@@ -942,7 +929,6 @@ async fn test_color_21_zone_orchestrate_then_publish_has_content() {
 ///
 /// WHEN zone_geometry_adapts_profile rendered
 /// THEN at least one non-background pixel exists.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_22_zone_geometry_adapts_profile_has_content() {
     let mut runtime = make_scene_runtime().await;
@@ -971,7 +957,6 @@ async fn test_color_22_zone_geometry_adapts_profile_has_content() {
 ///
 /// WHEN zone_disconnect_cleanup rendered (before disconnect)
 /// THEN at least one non-background pixel (tile active at build time).
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_23_zone_disconnect_cleanup_tile_initially_visible() {
     let mut runtime = make_scene_runtime().await;
@@ -1000,7 +985,6 @@ async fn test_color_23_zone_disconnect_cleanup_tile_initially_visible() {
 ///
 /// WHEN policy_matrix_basic rendered
 /// THEN at least one non-background pixel exists.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_24_policy_matrix_basic_has_content() {
     let mut runtime = make_scene_runtime().await;
@@ -1031,7 +1015,6 @@ async fn test_color_24_policy_matrix_basic_has_content() {
 ///
 /// WHEN policy_arbitration_collision rendered
 /// THEN at least one non-background pixel exists.
-#[ignore = "pixel colour assertions require compositor render_frame_headless path — pending"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_color_25_policy_arbitration_collision_has_content() {
     let mut runtime = make_scene_runtime().await;
