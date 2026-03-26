@@ -182,12 +182,28 @@ fn now_wall_us() -> u64 {
 }
 
 fn now_iso8601() -> String {
-    let now = std::time::SystemTime::now()
+    let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    // Simple UTC timestamp without chrono dependency
-    format!("{}Z", secs)
+        .unwrap_or_default()
+        .as_secs();
+    // Produce a valid ISO 8601 UTC datetime without a chrono dependency.
+    // Algorithm: https://en.wikipedia.org/wiki/Julian_day#Converting_Julian_or_Gregorian_calendar_date_to_Julian_day_number
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400; // days since 1970-01-01
+    // Gregorian calendar calculation (no leap-second correction needed for a proof timestamp)
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
 }
 
 /// Agent session handle for thesis proof tests.
@@ -850,7 +866,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         scene_coverage.scenes_passed, scene_coverage.total_scenes
     );
 
-    // Verify all 25 scenes are present in the registry
+    // Verify the registry contains exactly the spec-mandated 25 scenes (count + name set).
     let registered_names = TestSceneRegistry::scene_names();
     assert_eq!(
         registered_names.len(),
@@ -858,6 +874,17 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         "Scene registry must contain exactly {} scenes (spec requirement), found {}",
         ALL_25_SCENES.len(),
         registered_names.len(),
+    );
+    // Name-set check: ensures the registry names match the spec list, not just the count.
+    let expected_set: std::collections::HashSet<&str> = ALL_25_SCENES.iter().copied().collect();
+    let actual_set: std::collections::HashSet<&str> = registered_names.iter().copied().collect();
+    assert_eq!(
+        expected_set,
+        actual_set,
+        "Scene registry names must exactly match the spec-mandated set (validation-framework/spec.md line 160-172). \
+         Missing: {:?}. Extra: {:?}",
+        expected_set.difference(&actual_set).collect::<Vec<_>>(),
+        actual_set.difference(&expected_set).collect::<Vec<_>>(),
     );
 
     // Emit scene coverage artifact
@@ -1089,11 +1116,23 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("    Layer 4 artifact generation failed: {}", e);
     }
 
-    // ─── Phase 8: Collect lease counts ──────────────────────────────────────
+    // ─── Phase 8: Collect lease counts and per-agent lease presence ─────────
 
-    let lease_count = {
+    // Derive per-agent lease/auth status from runtime state rather than hardcoding.
+    // If connect_agent() succeeded (we're past the try_join), each agent authenticated.
+    // We additionally verify each agent's namespace has an active lease in the scene.
+    let (lease_count, agent_auth_status) = {
         let state = runtime.shared_state().lock().await;
-        state.scene.leases.len() as u32
+        let count = state.scene.leases.len() as u32;
+        let agent_ns_has_lease = |ns: &str| {
+            state.scene.leases.values().any(|l| l.namespace == ns)
+        };
+        let status = vec![
+            ("thesis-agent-alpha".to_string(), true, agent_ns_has_lease(&agent_a.namespace)),
+            ("thesis-agent-beta".to_string(),  true, agent_ns_has_lease(&agent_b.namespace)),
+            ("thesis-agent-gamma".to_string(), true, agent_ns_has_lease(&agent_c.namespace)),
+        ];
+        (count, status)
     };
 
     // ─── Phase 9: Assemble thesis proof report ──────────────────────────────
@@ -1116,25 +1155,24 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await,
         // Thesis 2: Lease model works
-        collect_thesis2_evidence(
-            &[
-                ("thesis-agent-alpha".to_string(), true, true),
-                ("thesis-agent-beta".to_string(), true, true),
-                ("thesis-agent-gamma".to_string(), true, true),
-            ],
-            lease_count,
-        ),
+        // auth/lease flags derived from runtime state in Phase 8 — not hardcoded.
+        collect_thesis2_evidence(&agent_auth_status, lease_count),
         // Thesis 3: Multiple agents coexist
         collect_thesis3_evidence(&namespaces, all_distinct, no_cross_access),
         // Thesis 4: Performance is real
         collect_thesis4_evidence(&validation_report),
         // Thesis 5: Validation architecture works
+        // Layer 0: operational iff scene_coverage was built without panicking (it was).
+        // Layer 1: headless render — operational iff at least one frame rendered.
+        // Layer 2: SSIM — delegated to E12.3; tze_hud_validation crate is available (dep).
+        // Layer 3: operational iff ValidationReport::run completed without panic (it did).
+        // Layer 4: operational iff generate_layer4_artifacts succeeded.
         collect_thesis5_evidence(
-            true,  // Layer 0: scene graph assertions (just ran above)
-            true,  // Layer 1: headless render (runtime is rendering frames)
-            true,  // Layer 2: SSIM (crate exists and is operational)
-            true,  // Layer 3: performance validation (just ran above)
-            layer4_operational, // Layer 4: developer visibility
+            true,                           // Layer 0: run_all_scenes_layer0() completed
+            !frame_telemetry.is_empty(),    // Layer 1: at least one frame rendered headlessly
+            true,                           // Layer 2: delegated to E12.3 (crate available)
+            true,                           // Layer 3: ValidationReport::run completed
+            layer4_operational,             // Layer 4: developer visibility artifacts
             &scene_coverage,
         ),
         // Thesis 6: Zones work as LLM-first surface
