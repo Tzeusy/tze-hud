@@ -140,6 +140,7 @@ pub struct FrameTelemetry {
     /// A non-zero value on any frame means at least one agent submitted an
     /// invalid mutation batch. The session-level aggregate is tracked in
     /// `SessionSummary::invariant_violations`.
+    #[serde(default)]
     pub invariant_violations_this_frame: u32,
 
     /// Number of Layer 0 structural invariant check failures this frame.
@@ -157,6 +158,7 @@ pub struct FrameTelemetry {
     ///
     /// In production frames this field is 0 unless a Layer 0 check was
     /// explicitly requested (e.g., via a debug mode flag or test fixture).
+    #[serde(default)]
     pub layer0_checks_failed_this_frame: u32,
 }
 

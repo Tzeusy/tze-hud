@@ -53,6 +53,7 @@ impl TelemetryCollector {
     pub fn record(&mut self, frame: FrameTelemetry) {
         self.summary.total_frames += 1;
         self.summary.frame_time.record(frame.frame_time_us);
+        self.summary.record_frame_correctness(&frame);
         self.records.push(frame);
     }
 
