@@ -69,6 +69,7 @@ pub mod window;
 pub mod session;
 pub mod admission;
 pub mod trace_capture;
+pub mod reload_triggers;
 
 pub use agent_events::{
     AgentEventHandler, EmissionError, EmissionOutcome, EmissionResult,
@@ -225,3 +226,6 @@ pub use shell::badges::{
 
 // ── Record/Replay Trace capture ───────────────────────────────────────────────
 pub use trace_capture::{TraceRecorder, build_regression_trace};
+
+// ── Reload triggers (RFC 0006 §9) ─────────────────────────────────────────────
+pub use reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};

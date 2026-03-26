@@ -42,11 +42,13 @@
 
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};
+use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 use tze_hud_compositor::{Compositor, HeadlessSurface};
 use tze_hud_config::TzeHudConfig;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_input::InputProcessor;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
+use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_scene::graph::SceneGraph;
@@ -430,6 +432,56 @@ impl HeadlessRuntime {
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         Ok(handle)
+    }
+
+    /// Start the `RuntimeService` gRPC server in the background.
+    ///
+    /// Satisfies RFC 0006 §9 (v1-mandatory) gRPC trigger requirement.
+    ///
+    /// The `RuntimeService.ReloadConfig` RPC accepts a TOML string, validates it,
+    /// and atomically applies the hot-reloadable sections via `RuntimeContext`.
+    ///
+    /// The server binds to `addr` (e.g. `"[::1]:50052"`). It is independent of
+    /// the `HudSession` gRPC server — you may co-host them on the same port via
+    /// `tonic::transport::Server::builder().add_service(...).add_service(...)`.
+    ///
+    /// Returns the server task handle. The caller must retain it to keep the
+    /// server running (dropping it keeps the task alive; use `.abort()` to stop).
+    pub async fn start_runtime_service_server(
+        &self,
+        addr: std::net::SocketAddr,
+    ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
+        let svc = RuntimeServiceImpl::new(Arc::clone(&self.runtime_context));
+        let handle = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RuntimeServiceServer::new(svc))
+                .serve(addr)
+                .await
+                .expect("RuntimeService gRPC server failed");
+        });
+
+        // Give the server a moment to bind.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        Ok(handle)
+    }
+
+    /// Install a SIGHUP listener that hot-reloads config from `config_path`.
+    ///
+    /// Satisfies RFC 0006 §9 (v1-mandatory) SIGHUP trigger requirement.
+    ///
+    /// On Unix: spawns a Tokio task that waits for SIGHUP signals and reloads
+    /// the config file at `config_path`, applying hot-reloadable sections via
+    /// `RuntimeContext`.
+    ///
+    /// On non-Unix (Windows): this is a no-op stub — use `ReloadConfig` gRPC instead.
+    ///
+    /// Returns the task handle. Dropping the handle keeps the task running.
+    pub fn start_sighup_listener(
+        &self,
+        config_path: impl Into<String> + Send + 'static,
+    ) -> tokio::task::JoinHandle<()> {
+        spawn_sighup_listener(Arc::clone(&self.runtime_context), config_path)
     }
 }
 
