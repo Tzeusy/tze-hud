@@ -37,6 +37,10 @@ pub use orphan::{
     ZonePublishResult,
     check_zone_publish_allowed,
 };
+pub use capability::{
+    CapabilityRevocationError,
+    revoke_capability_from_lease,
+};
 pub use cleanup::{
     POST_REVOCATION_FREE_DELAY_MS,
     RevocationKind,

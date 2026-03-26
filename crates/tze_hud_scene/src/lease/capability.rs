@@ -5,6 +5,7 @@
 //! - Requirement: Zone Publish Requires Active Lease (lease-governance/spec.md lines 213-224)
 //! - Requirement: Lease Suspension Freezes Zone Publications (lines 226-233)
 //! - Requirement: Lease Revocation Clears Zone Publications (lines 235-242)
+//! - RFC 0001 §3.3: Live capability revocation from active leases
 //!
 //! ## Zone publish gating
 //!
@@ -21,6 +22,13 @@
 //! | Lease ACTIVE but capability missing | `CAPABILITY_NOT_GRANTED`    |
 //! | Zone does not exist in active tab   | `ZONE_NOT_FOUND`            |
 //! | Lease is SUSPENDED (safe mode)      | `SAFE_MODE_ACTIVE`          |
+//!
+//! ## Live capability revocation
+//!
+//! RFC 0001 §3.3 specifies that capability enforcement happens at mutation time against
+//! the live capability scope, not merely at grant time. The [`revoke_capability_from_lease`]
+//! function removes a capability from an active lease's scope at runtime. Future mutations
+//! requiring that capability will be rejected with `CapabilityMissing`.
 
 use crate::types::{Capability, Lease, LeaseState};
 
@@ -131,6 +139,74 @@ pub fn check_zone_publish(
     }
 
     Ok(())
+}
+
+// ─── Live capability revocation ──────────────────────────────────────────────
+
+/// Error returned by [`revoke_capability_from_lease`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CapabilityRevocationError {
+    /// The lease is in a terminal state (Revoked, Expired, Released, Denied).
+    /// Live capability revocation is only meaningful on non-terminal leases.
+    LeaseTerminal,
+    /// The specified capability is not present in the lease's current scope.
+    /// This is a no-op signal; callers may choose to treat this as success.
+    CapabilityNotPresent,
+}
+
+impl std::fmt::Display for CapabilityRevocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CapabilityRevocationError::LeaseTerminal => {
+                write!(f, "LEASE_TERMINAL: capability revocation requires a non-terminal lease")
+            }
+            CapabilityRevocationError::CapabilityNotPresent => {
+                write!(f, "CAPABILITY_NOT_PRESENT: capability is not in the lease scope")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CapabilityRevocationError {}
+
+/// Remove `cap` from the capability scope of a live (non-terminal) lease.
+///
+/// # RFC 0001 §3.3
+///
+/// The spec requires that capability checks are enforced at mutation time against the
+/// live scope — not just at grant time. This function implements the live revocation path:
+/// after calling this, any attempt to use `cap` under `lease` will be rejected with
+/// `CapabilityMissing`.
+///
+/// # Behavior
+///
+/// - If the lease is terminal (`Revoked`, `Expired`, `Released`, `Denied`) → `Err(LeaseTerminal)`.
+/// - If `cap` is not currently in the scope → `Err(CapabilityNotPresent)`.
+/// - Otherwise, removes the capability in-place and returns `Ok(capability_name_string)`.
+///   The caller is responsible for emitting a [`LeaseEventKind::CapabilityRevoked`] audit
+///   event and notifying the agent via `LeaseStateChange`.
+///
+/// # State preservation
+///
+/// The lease remains in its current state (e.g., `Active`). Only the capability scope
+/// is narrowed. This is distinct from full lease revocation ([`Lease::revoke`]), which
+/// transitions the lease to the `Revoked` terminal state and removes all tiles.
+pub fn revoke_capability_from_lease(
+    lease: &mut Lease,
+    cap: &Capability,
+) -> Result<String, CapabilityRevocationError> {
+    if lease.state.is_terminal() {
+        return Err(CapabilityRevocationError::LeaseTerminal);
+    }
+    // Find and remove the capability.  Use positional removal to preserve order.
+    let pos = lease.capabilities.iter().position(|c| c == cap);
+    match pos {
+        None => Err(CapabilityRevocationError::CapabilityNotPresent),
+        Some(idx) => {
+            lease.capabilities.remove(idx);
+            Ok(format!("{:?}", cap))
+        }
+    }
 }
 
 // ─── Lease-revocation zone cleanup ───────────────────────────────────────────
@@ -306,5 +382,107 @@ mod tests {
         let lease = make_lease(LeaseState::Revoked, vec![]);
         assert!(should_clear_on_revoke(&lease, "agent.test"));
         assert!(!should_clear_on_revoke(&lease, "agent.other"));
+    }
+
+    // ── revoke_capability_from_lease ─────────────────────────────────────────
+
+    /// WHEN revoking a capability that exists in an active lease THEN it is removed
+    /// and Ok(name) is returned.
+    #[test]
+    fn revoke_capability_removes_cap_from_active_lease() {
+        let mut lease = make_lease(
+            LeaseState::Active,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let result = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles);
+        assert!(result.is_ok(), "should succeed: {:?}", result);
+        assert!(
+            !lease.capabilities.contains(&Capability::CreateTiles),
+            "CreateTiles should be removed"
+        );
+        assert!(
+            lease.capabilities.contains(&Capability::ModifyOwnTiles),
+            "ModifyOwnTiles should remain"
+        );
+    }
+
+    /// WHEN revoking a capability from a non-active (suspended) lease THEN the
+    /// capability is still removed — the lease is not terminal.
+    #[test]
+    fn revoke_capability_works_on_suspended_lease() {
+        let mut lease = make_lease(
+            LeaseState::Suspended,
+            vec![Capability::ManageTabs],
+        );
+        let result = revoke_capability_from_lease(&mut lease, &Capability::ManageTabs);
+        assert!(result.is_ok(), "suspended lease is not terminal: {:?}", result);
+        assert!(lease.capabilities.is_empty());
+    }
+
+    /// WHEN revoking a capability from a terminal (revoked) lease THEN LeaseTerminal
+    /// error is returned.
+    #[test]
+    fn revoke_capability_from_revoked_lease_returns_terminal_error() {
+        let mut lease = make_lease(
+            LeaseState::Revoked,
+            vec![Capability::CreateTiles],
+        );
+        let err = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles)
+            .unwrap_err();
+        assert_eq!(err, CapabilityRevocationError::LeaseTerminal);
+        // Capability must remain unchanged (no side-effect on error).
+        assert!(lease.capabilities.contains(&Capability::CreateTiles));
+    }
+
+    /// WHEN revoking a capability from a terminal (expired) lease THEN LeaseTerminal error.
+    #[test]
+    fn revoke_capability_from_expired_lease_returns_terminal_error() {
+        let mut lease = make_lease(LeaseState::Expired, vec![Capability::CreateTiles]);
+        let err = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles)
+            .unwrap_err();
+        assert_eq!(err, CapabilityRevocationError::LeaseTerminal);
+    }
+
+    /// WHEN revoking a capability that is NOT in the lease scope THEN
+    /// CapabilityNotPresent error is returned.
+    #[test]
+    fn revoke_capability_not_present_returns_error() {
+        let mut lease = make_lease(LeaseState::Active, vec![Capability::CreateTiles]);
+        let err = revoke_capability_from_lease(&mut lease, &Capability::ModifyOwnTiles)
+            .unwrap_err();
+        assert_eq!(err, CapabilityRevocationError::CapabilityNotPresent);
+        // Scope must remain unchanged.
+        assert_eq!(lease.capabilities, vec![Capability::CreateTiles]);
+    }
+
+    /// WHEN all capabilities are successively revoked THEN the scope becomes empty.
+    #[test]
+    fn revoke_all_capabilities_leaves_empty_scope() {
+        let mut lease = make_lease(
+            LeaseState::Active,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles, Capability::ManageTabs],
+        );
+        for cap in &[Capability::CreateTiles, Capability::ModifyOwnTiles, Capability::ManageTabs] {
+            revoke_capability_from_lease(&mut lease, cap).expect("should succeed");
+        }
+        assert!(lease.capabilities.is_empty(), "scope should be empty after all revocations");
+        assert_eq!(lease.state, LeaseState::Active, "lease must remain Active");
+    }
+
+    /// WHEN revoking a PublishZone capability THEN zone publish is subsequently rejected.
+    #[test]
+    fn revoke_publish_zone_capability_blocks_zone_publish() {
+        let mut lease = make_lease(
+            LeaseState::Active,
+            vec![Capability::PublishZone("subtitle".to_string())],
+        );
+        // Before revocation: publish succeeds.
+        assert!(check_zone_publish(Some(&lease), "subtitle", true).is_ok());
+        // Revoke the capability.
+        revoke_capability_from_lease(&mut lease, &Capability::PublishZone("subtitle".to_string()))
+            .expect("revocation should succeed");
+        // After revocation: publish is rejected.
+        let err = check_zone_publish(Some(&lease), "subtitle", true).unwrap_err();
+        assert_eq!(err, ZonePublishError::CapabilityNotGranted);
     }
 }

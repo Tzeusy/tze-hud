@@ -128,4 +128,17 @@ pub enum LeaseEventKind {
     Revoked { reason: RevokeReason },
     /// ACTIVE → RELEASED: agent voluntarily released the lease.
     Released,
+    /// Capability removed from an active lease at runtime (live capability revocation).
+    ///
+    /// The lease remains ACTIVE; only the specified capability is removed from its scope.
+    /// Future mutations requiring this capability will be rejected with `CapabilityMissing`.
+    ///
+    /// RFC 0001 §3.3: capability checks are enforced at mutation time against the live
+    /// capability scope, not merely at grant time.
+    CapabilityRevoked {
+        /// The name of the capability that was removed.
+        capability: String,
+        /// Wall-clock timestamp when the revocation occurred (microseconds).
+        revoked_at_wall_us: u64,
+    },
 }

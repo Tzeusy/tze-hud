@@ -671,6 +671,75 @@ impl SceneGraph {
         Ok(())
     }
 
+    /// Remove a specific capability from a live (non-terminal) lease at runtime.
+    ///
+    /// # RFC 0001 §3.3 — Live capability revocation
+    ///
+    /// The spec requires that capability checks enforce the live scope at mutation
+    /// time, not merely at grant time. This method removes `cap` from the lease's
+    /// current scope without revoking the lease itself. After this call, any
+    /// mutation that requires `cap` will be rejected with `CapabilityMissing`.
+    ///
+    /// # Behavior
+    ///
+    /// - The lease remains in its current state (e.g., `Active`). Tiles are NOT removed.
+    /// - If the lease does not exist → `Err(LeaseNotFound)`.
+    /// - If the lease is terminal → `Err(InvalidField { "lease_terminal" })`.
+    /// - If `cap` is not in the lease scope → `Err(InvalidField { "capability_not_present" })`.
+    /// - On success → `Ok(())`.  The caller SHOULD emit a `LeaseStateChange` event
+    ///   (with `reason = "capability_revoked:<cap_name>"`) to notify the agent.
+    ///
+    /// # Audit events
+    ///
+    /// This method does **not** push a [`LeaseAuditEvent`] directly (the lease module's
+    /// audit channel is separate from the scene graph's mutation pipeline). Callers that
+    /// route events through the `lease_changes` subscription MUST emit a `LeaseStateChange`
+    /// message after a successful call.
+    pub fn revoke_capability(
+        &mut self,
+        lease_id: SceneId,
+        cap: &Capability,
+    ) -> Result<(), ValidationError> {
+        let lease = self
+            .leases
+            .get_mut(&lease_id)
+            .ok_or(ValidationError::LeaseNotFound { id: lease_id })?;
+
+        use crate::lease::capability::{revoke_capability_from_lease, CapabilityRevocationError};
+        match revoke_capability_from_lease(lease, cap) {
+            Ok(_cap_name) => {
+                self.version += 1;
+                Ok(())
+            }
+            Err(CapabilityRevocationError::LeaseTerminal) => {
+                Err(ValidationError::InvalidField {
+                    field: "lease_terminal".into(),
+                    reason: format!(
+                        "lease {} is in terminal state {:?}; live capability revocation requires a non-terminal lease",
+                        lease_id, lease.state
+                    ),
+                })
+            }
+            Err(CapabilityRevocationError::CapabilityNotPresent) => {
+                Err(ValidationError::InvalidField {
+                    field: "capability_not_present".into(),
+                    reason: format!(
+                        "capability {:?} is not in the scope of lease {}",
+                        cap, lease_id
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Returns the current capability scope for a lease.
+    ///
+    /// Used to inspect the live capability scope after revocations.
+    /// Returns `None` if the lease is not found.
+    pub fn lease_capabilities(&self, lease_id: &SceneId) -> Option<&[Capability]> {
+        self.leases.get(lease_id).map(|l| l.capabilities.as_slice())
+    }
+
     pub fn renew_lease(&mut self, lease_id: SceneId, new_ttl_ms: u64) -> Result<(), ValidationError> {
         let lease = self
             .leases
@@ -4322,6 +4391,187 @@ mod tests {
         // Renew should fail (lease not active)
         let err = scene.renew_lease(lease_id, 120_000);
         assert!(err.is_err());
+    }
+
+    // ─── Live capability revocation tests (RFC 0001 §3.3) ───────────────────
+
+    /// WHEN a capability is revoked from an active lease
+    /// THEN the capability is removed from the scope and the lease stays Active.
+    #[test]
+    fn revoke_capability_removes_cap_from_active_lease() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        scene
+            .revoke_capability(lease_id, &Capability::CreateTiles)
+            .expect("revoke_capability must succeed");
+
+        let caps = scene.lease_capabilities(&lease_id).expect("lease must exist");
+        assert!(
+            !caps.contains(&Capability::CreateTiles),
+            "CreateTiles must be removed"
+        );
+        assert!(
+            caps.contains(&Capability::ModifyOwnTiles),
+            "ModifyOwnTiles must remain"
+        );
+        // Lease must still be Active.
+        assert_eq!(
+            scene.leases[&lease_id].state,
+            LeaseState::Active,
+            "lease must remain Active after capability revocation"
+        );
+    }
+
+    /// WHEN a capability is revoked
+    /// THEN subsequent mutations requiring that capability are rejected with CapabilityMissing.
+    ///
+    /// This is the core RFC 0001 §3.3 requirement: enforcement is at mutation time
+    /// against the live scope, not just at grant time.
+    #[test]
+    fn revoke_capability_blocks_subsequent_mutations() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles, Capability::ManageTabs],
+        );
+
+        // CreateTile (no capability check path) succeeds.
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .expect("create_tile must succeed before revocation");
+
+        // Revoke ManageTabs.
+        scene
+            .revoke_capability(lease_id, &Capability::ManageTabs)
+            .expect("revoke must succeed");
+
+        // Tab management is now blocked because ManageTabs was revoked.
+        let err = scene
+            .create_tab_with_lease("New Tab", 1, lease_id)
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::CapabilityMissing { .. }),
+            "expected CapabilityMissing after ManageTabs revocation, got {:?}",
+            err
+        );
+
+        // ModifyOwnTiles (not revoked) still works for tile mutations.
+        scene
+            .update_tile_bounds(tile_id, Rect::new(10.0, 10.0, 50.0, 50.0), "agent")
+            .expect("modify_own_tiles must still work");
+    }
+
+    /// WHEN revoke_capability is called on a non-existent lease
+    /// THEN LeaseNotFound is returned.
+    #[test]
+    fn revoke_capability_unknown_lease_returns_not_found() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let unknown_id = SceneId::new();
+        let err = scene
+            .revoke_capability(unknown_id, &Capability::CreateTiles)
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::LeaseNotFound { .. }),
+            "expected LeaseNotFound, got {:?}",
+            err
+        );
+    }
+
+    /// WHEN revoke_capability is called on a terminal (revoked) lease
+    /// THEN an InvalidField error is returned.
+    #[test]
+    fn revoke_capability_on_terminal_lease_returns_invalid_field() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTiles]);
+        scene.revoke_lease(lease_id).expect("full revoke must succeed");
+
+        let err = scene
+            .revoke_capability(lease_id, &Capability::CreateTiles)
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidField { ref field, .. } if field == "lease_terminal"),
+            "expected InvalidField(lease_terminal), got {:?}",
+            err
+        );
+    }
+
+    /// WHEN revoke_capability is called for a cap not in the lease scope
+    /// THEN an InvalidField error (capability_not_present) is returned.
+    #[test]
+    fn revoke_capability_not_in_scope_returns_invalid_field() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTiles]);
+        let err = scene
+            .revoke_capability(lease_id, &Capability::ManageTabs)
+            .unwrap_err();
+        assert!(
+            matches!(err, ValidationError::InvalidField { ref field, .. } if field == "capability_not_present"),
+            "expected InvalidField(capability_not_present), got {:?}",
+            err
+        );
+    }
+
+    /// WHEN all capabilities are revoked one by one
+    /// THEN the lease scope is empty and the lease remains Active.
+    #[test]
+    fn revoke_all_capabilities_leaves_empty_scope_and_active_lease() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        for cap in &[Capability::CreateTiles, Capability::ModifyOwnTiles] {
+            scene
+                .revoke_capability(lease_id, cap)
+                .expect("revoke must succeed");
+        }
+        let caps = scene.lease_capabilities(&lease_id).expect("lease must exist");
+        assert!(caps.is_empty(), "capability scope must be empty");
+        assert_eq!(
+            scene.leases[&lease_id].state,
+            LeaseState::Active,
+            "lease must remain Active"
+        );
+    }
+
+    /// WHEN a capability is revoked from a suspended (non-terminal) lease
+    /// THEN the capability is removed even in SUSPENDED state.
+    #[test]
+    fn revoke_capability_on_suspended_lease_succeeds() {
+        let (mut scene, clock) = scene_with_test_clock();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        // Suspend the lease (safe mode).
+        clock.advance(100);
+        scene.suspend_lease(&lease_id, clock.now_millis()).unwrap();
+
+        // Capability revocation must succeed on a suspended lease.
+        scene
+            .revoke_capability(lease_id, &Capability::CreateTiles)
+            .expect("revoke must work on suspended lease");
+
+        let caps = scene.lease_capabilities(&lease_id).expect("lease must exist");
+        assert!(
+            !caps.contains(&Capability::CreateTiles),
+            "CreateTiles must be removed from suspended lease"
+        );
+    }
+
+    /// lease_capabilities returns None for unknown lease IDs.
+    #[test]
+    fn lease_capabilities_returns_none_for_unknown_id() {
+        let scene = SceneGraph::new(1920.0, 1080.0);
+        assert!(scene.lease_capabilities(&SceneId::new()).is_none());
     }
 
     #[test]
