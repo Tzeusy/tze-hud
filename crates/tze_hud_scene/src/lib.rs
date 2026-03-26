@@ -92,6 +92,7 @@ pub use lease::priority::{
 pub use lease::capability::{
     check_zone_publish, has_publish_zone_capability, should_clear_on_revoke,
     ZonePublishError,
+    CapabilityRevocationError, revoke_capability_from_lease,
 };
 pub use lease::degradation::{
     DegradationLevel, DegradationTracker, FrameTimeWindow,
