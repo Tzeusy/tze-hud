@@ -55,6 +55,7 @@ pub mod budget;
 pub mod channels;
 pub mod degradation;
 pub mod headless;
+pub mod mcp;
 pub mod windowed;
 pub mod runtime_context;
 pub mod subscriptions;
@@ -108,6 +109,7 @@ pub use degradation::{
     DegradationConfig, DegradationController, DegradationLevel, TileDescriptor,
 };
 pub use headless::HeadlessRuntime;
+pub use mcp::{McpServerConfig, start_mcp_http_server};
 pub use windowed::{WindowedRuntime, WindowedConfig};
 pub use runtime_context::{FallbackPolicy, RuntimeContext, SharedRuntimeContext};
 pub use subscriptions::{

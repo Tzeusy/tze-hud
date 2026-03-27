@@ -102,6 +102,7 @@ use crate::channels::{
     frame_ready_channel, FrameReadyRx, FrameReadyTx, InputEvent, InputEventKind,
     INPUT_EVENT_CAPACITY,
 };
+use crate::mcp::{start_mcp_http_server, McpServerConfig};
 use crate::pipeline::FramePipeline;
 use crate::reload_triggers::RuntimeServiceImpl;
 use crate::runtime_context::{RuntimeContext, SharedRuntimeContext};
@@ -126,7 +127,15 @@ pub struct WindowedConfig {
     pub window: WindowConfig,
     /// gRPC server port.  Set to `0` to disable the gRPC server.
     pub grpc_port: u16,
-    /// Pre-shared key for session authentication.
+    /// MCP HTTP server port.  Set to `0` to disable the MCP server.
+    ///
+    /// The MCP server binds on all interfaces (`0.0.0.0`) at the given port.
+    /// It enforces PSK authentication on every request via HTTP
+    /// `Authorization: Bearer <psk>` or the JSON-RPC `_auth` param field.
+    ///
+    /// Default: 9090.
+    pub mcp_port: u16,
+    /// Pre-shared key for session authentication (gRPC and MCP).
     pub psk: String,
     /// Target frames per second.  Default: 60.
     pub target_fps: u32,
@@ -137,6 +146,7 @@ impl Default for WindowedConfig {
         Self {
             window: WindowConfig::default(),
             grpc_port: 50051,
+            mcp_port: 9090,
             psk: "tze-hud-key".to_string(),
             target_fps: 60,
         }
@@ -875,7 +885,7 @@ impl WindowedRuntime {
         // This will be driven by the loaded config in a future task.
         let fallback_unrestricted = true;
 
-        // ── Network runtime + gRPC server ──────────────────────────────────────
+        // ── Network runtime + gRPC + MCP HTTP servers ──────────────────────────
         // Spawn the Tokio multi-thread runtime for all network tasks (gRPC, MCP).
         // The runtime is created before the winit event loop so that network
         // services are available immediately after the process starts.
@@ -884,13 +894,73 @@ impl WindowedRuntime {
         // runtime for gRPC server, MCP bridge, session management."
         //
         // gRPC server is disabled when grpc_port == 0 (per WindowedConfig docs).
-        let (network_rt, network_handles) = start_network_services(
+        let (mut network_rt, mut network_handles) = start_network_services(
             cfg.grpc_port,
             &cfg.psk,
             shared_state.clone(),
             Arc::clone(&runtime_context),
             fallback_unrestricted,
         )?;
+
+        // ── MCP HTTP server ────────────────────────────────────────────────────
+        //
+        // MCP scene: the MCP server operates on a dedicated
+        // `Arc<Mutex<SceneGraph>>` initialised from the same genesis state as
+        // the gRPC `SharedState` scene.  Full scene coherence (a single shared
+        // `Arc<Mutex<SceneGraph>>` used by both gRPC and MCP) is deferred to a
+        // follow-up refactor of `SharedState`.
+        if cfg.mcp_port > 0 {
+            // Ensure we have a network runtime to host the MCP task. If gRPC
+            // was disabled (grpc_port == 0), network_rt is None and we need
+            // to create a fresh one for MCP.
+            if network_rt.is_none() {
+                match NetworkRuntime::new() {
+                    Ok(rt) => {
+                        tracing::info!("MCP: created dedicated network runtime (gRPC disabled)");
+                        network_rt = Some(rt);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "failed to create network runtime for MCP; MCP will not be available"
+                        );
+                    }
+                }
+            }
+
+            if let Some(ref rt) = network_rt {
+                let mcp_scene = Arc::new(Mutex::new(SceneGraph::new(width, height)));
+                let mcp_config = McpServerConfig {
+                    bind_addr: format!("0.0.0.0:{}", cfg.mcp_port)
+                        .parse()
+                        .expect("valid MCP bind addr"),
+                    psk: cfg.psk.clone(),
+                };
+                let mcp_shutdown = shutdown.clone();
+                match rt.rt.block_on(start_mcp_http_server(
+                    mcp_scene,
+                    mcp_config,
+                    mcp_shutdown,
+                )) {
+                    Ok(handle) => {
+                        network_handles.push(handle);
+                        tracing::info!(
+                            mcp_port = cfg.mcp_port,
+                            "MCP HTTP server started on network runtime"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            mcp_port = cfg.mcp_port,
+                            error = %e,
+                            "failed to bind MCP HTTP server; runtime will continue without MCP"
+                        );
+                    }
+                }
+            }
+        } else {
+            tracing::info!("MCP HTTP server disabled (mcp_port = 0)");
+        }
 
         let app_state = WindowedRuntimeState {
             config: cfg,
@@ -925,10 +995,18 @@ impl WindowedRuntime {
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(&mut app)?;
 
-        // ── Shutdown: abort network tasks, then join compositor ─────────────────
-        //
-        // The shutdown token was triggered via CloseRequested. Abort all spawned
-        // network tasks so gRPC servers do not linger past process exit.
+        // ── Post-event-loop cleanup ───────────────────────────────────────────
+
+        // Ensure shutdown is triggered before draining threads/tasks.
+        // WindowEvent::CloseRequested already triggers it in the normal path,
+        // but other exit paths (OS SIGTERM, explicit exit_loop) may not.
+        if !app.state.shutdown.is_triggered() {
+            app.state.shutdown.trigger(crate::threads::ShutdownReason::Clean);
+        }
+
+        // Abort all spawned network task handles (gRPC, MCP) so they do not
+        // linger past process exit.  The shutdown token already signals tasks
+        // to exit gracefully; abort() is a fallback for tasks that ignore it.
         for handle in app.state.network_handles.drain(..) {
             handle.abort();
         }
@@ -951,9 +1029,16 @@ impl WindowedRuntime {
             }
         }
 
-        // Drop the NetworkRuntime last — this shuts down the Tokio runtime and
-        // waits for all network tasks to terminate.
-        drop(app.state.network_rt.take());
+        // Shutdown the network runtime (drains gRPC + MCP tasks).
+        //
+        // `shutdown_timeout` gives tasks 500 ms to exit cleanly after the
+        // shutdown token was triggered above.  The MCP task exits promptly
+        // because it polls the `ShutdownToken`; gRPC tasks were already aborted.
+        if let Some(network_rt) = app.state.network_rt.take() {
+            tracing::info!("shutting down network runtime (gRPC, MCP tasks)...");
+            network_rt.rt.shutdown_timeout(std::time::Duration::from_millis(500));
+            tracing::info!("network runtime shutdown complete");
+        }
 
         Ok(())
     }
@@ -1092,6 +1177,7 @@ mod tests {
         let cfg = WindowedConfig::default();
         assert_eq!(cfg.target_fps, 60);
         assert_eq!(cfg.grpc_port, 50051);
+        assert_eq!(cfg.mcp_port, 9090);
         assert!(!cfg.psk.is_empty());
     }
 
