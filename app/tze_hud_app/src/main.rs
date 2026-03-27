@@ -300,12 +300,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     });
 
-    // Resolve config file path (for future config-file-driven startup).
+    // Resolve config file path and read its contents.
     // The resolved path is logged so operators can confirm which file is in use.
-    let config_path = resolve_config_path(opts.config_path.as_deref());
-    match &config_path {
+    let config_toml: Option<String> = match resolve_config_path(opts.config_path.as_deref()) {
         Ok(path) => {
-            tracing::info!(config_path = %path, "config file resolved");
+            match std::fs::read_to_string(&path) {
+                Ok(toml_src) => {
+                    tracing::info!(config_path = %path, "config file loaded");
+                    Some(toml_src)
+                }
+                Err(io_err) => {
+                    // If a path was explicitly given via --config, this is a hard error.
+                    // If it was auto-resolved, treat it as a warning and continue.
+                    if opts.config_path.is_some() {
+                        eprintln!("error: failed to read config file {path:?}: {io_err}");
+                        std::process::exit(1);
+                    }
+                    tracing::warn!(
+                        config_path = %path,
+                        error = %io_err,
+                        "config file found but not readable; using flag/env-var defaults"
+                    );
+                    None
+                }
+            }
         }
         Err(searched) => {
             // No config file found — run with flag/env-var defaults.
@@ -315,8 +333,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 searched = ?searched,
                 "no config file found; using flag/env-var defaults"
             );
+            None
         }
-    }
+    };
 
     tracing::info!(
         version = VERSION,
@@ -340,6 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mcp_port: opts.mcp_port,
         psk: opts.psk,
         target_fps: opts.fps,
+        config_toml,
     };
 
     let runtime = WindowedRuntime::new(config);
