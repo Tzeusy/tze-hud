@@ -908,11 +908,11 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
 
     // Pre-populate scene with tab and default zones
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab_id = state.scene.create_tab("V1-Thesis", 0)?;
-        state.scene.active_tab = Some(tab_id);
-        state.scene.zone_registry = ZoneRegistry::with_defaults();
-        drop(state);
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("V1-Thesis", 0)?;
+        scene.active_tab = Some(tab_id);
+        scene.zone_registry = ZoneRegistry::with_defaults();
     }
 
     let _server_handle = runtime.start_grpc_server().await?;
@@ -972,8 +972,9 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     let no_cross_access = {
         use std::collections::HashMap;
         let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
         let mut tiles_by_ns: HashMap<String, usize> = HashMap::new();
-        for tile in state.scene.tiles.values() {
+        for tile in scene.tiles.values() {
             *tiles_by_ns.entry(tile.namespace.clone()).or_default() += 1;
         }
         // Exactly 3 namespaces; each agent owns the expected tile count
@@ -1003,10 +1004,10 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     // Verify content is rendered in the zone
     let content_rendered = {
         let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
         // Check the zone exists and has active publishes
-        let zone_exists = state.scene.zone_registry.zones.contains_key("subtitle");
-        let has_publishes = state
-            .scene
+        let zone_exists = scene.zone_registry.zones.contains_key("subtitle");
+        let has_publishes = scene
             .zone_registry
             .active_publishes
             .get("subtitle")
@@ -1125,9 +1126,10 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     // We additionally verify each agent's namespace has an active lease in the scene.
     let (lease_count, agent_auth_status) = {
         let state = runtime.shared_state().lock().await;
-        let count = state.scene.leases.len() as u32;
+        let scene = state.scene.lock().await;
+        let count = scene.leases.len() as u32;
         let agent_ns_has_lease = |ns: &str| {
-            state.scene.leases.values().any(|l| l.namespace == ns)
+            scene.leases.values().any(|l| l.namespace == ns)
         };
         let status = vec![
             ("thesis-agent-alpha".to_string(), true, agent_ns_has_lease(&agent_a.namespace)),

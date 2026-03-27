@@ -235,7 +235,7 @@ impl HeadlessRuntime {
         let compositor = Compositor::new_headless(config.width, config.height).await?;
         let surface = HeadlessSurface::new(&compositor.device, config.width, config.height);
 
-        let scene = SceneGraph::new(config.width as f32, config.height as f32);
+        let scene = Arc::new(Mutex::new(SceneGraph::new(config.width as f32, config.height as f32)));
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&config.psk);
         let state = Arc::new(Mutex::new(SharedState {
             scene,
@@ -276,7 +276,11 @@ impl HeadlessRuntime {
     pub async fn render_frame(&mut self) -> FrameTelemetry {
         let frame_start = Instant::now();
         let state = self.state.lock().await;
-        let scene = &state.scene;
+        // Clone the Arc so we can release the SharedState lock before rendering.
+        let scene_arc = state.scene.clone();
+        drop(state);
+        let scene_guard = scene_arc.lock().await;
+        let scene = &*scene_guard;
 
         // ── Capture compositor render work upfront ────────────────────────────
         // The headless pipeline runs all stages in-process. The compositor's
@@ -361,9 +365,6 @@ impl HeadlessRuntime {
         telemetry.telemetry_overflow_count =
             self.pipeline.telemetry_overflow_count();
         telemetry.sync_legacy_aliases();
-
-
-        drop(state);
 
         // Stage 8: Telemetry Emit — non-blocking record into collector.
         // Timer wraps the actual emit so the measurement reflects its cost.

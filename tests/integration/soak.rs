@@ -519,14 +519,14 @@ async fn capture_snapshot(
     elapsed: Duration,
 ) -> ResourceSnapshot {
     let state = runtime.shared_state().lock().await;
-    let tile_count = state.scene.tile_count();
-    let node_count = state.scene.node_count();
-    let lease_count = state.scene.leases.len();
+    let scene = state.scene.lock().await;
+    let tile_count = scene.tile_count();
+    let node_count = scene.node_count();
+    let lease_count = scene.leases.len();
     let session_count = state.sessions.session_count();
 
     // Count total zone publication entries across all zones
-    let zone_entry_count = state
-        .scene
+    let zone_entry_count = scene
         .zone_registry
         .active_publishes
         .values()
@@ -573,7 +573,7 @@ async fn capture_agent_footprint(
     elapsed: Duration,
 ) -> AgentFootprint {
     let state = runtime.shared_state().lock().await;
-    let scene = &state.scene;
+    let scene = state.scene.lock().await;
 
     // Tiles owned by this namespace
     let ns_tiles: Vec<_> = scene
@@ -649,10 +649,11 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = HeadlessRuntime::new(runtime_cfg).await?;
 
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab_id = state.scene.create_tab("Soak-Tab", 0)?;
-        state.scene.active_tab = Some(tab_id);
-        state.scene.zone_registry = ZoneRegistry::with_defaults();
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("Soak-Tab", 0)?;
+        scene.active_tab = Some(tab_id);
+        scene.zone_registry = ZoneRegistry::with_defaults();
     }
 
     let _server_handle = runtime.start_grpc_server().await?;
@@ -824,10 +825,11 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
 
     {
         let runtime = runtime_cell.lock().await;
-        let mut state = runtime.shared_state().lock().await;
-        let tab_id = state.scene.create_tab("Cleanup-Tab", 0)?;
-        state.scene.active_tab = Some(tab_id);
-        state.scene.zone_registry = ZoneRegistry::with_defaults();
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("Cleanup-Tab", 0)?;
+        scene.active_tab = Some(tab_id);
+        scene.zone_registry = ZoneRegistry::with_defaults();
     }
 
     let _server_handle = {
@@ -924,7 +926,7 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
         {
             let mut runtime = runtime_cell.lock().await;
             // Expire leases that have timed out
-            let _expired = runtime.shared_state().lock().await.scene.expire_leases();
+            let _expired = runtime.shared_state().lock().await.scene.lock().await.expire_leases();
             runtime.render_frame().await;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1028,10 +1030,11 @@ async fn test_lease_expiry_frees_resources() -> Result<(), Box<dyn std::error::E
 
     {
         let runtime = runtime_cell.lock().await;
-        let mut state = runtime.shared_state().lock().await;
-        let tab_id = state.scene.create_tab("Expiry-Tab", 0)?;
-        state.scene.active_tab = Some(tab_id);
-        state.scene.zone_registry = ZoneRegistry::with_defaults();
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("Expiry-Tab", 0)?;
+        scene.active_tab = Some(tab_id);
+        scene.zone_registry = ZoneRegistry::with_defaults();
     }
 
     let _server_handle = {
@@ -1082,8 +1085,8 @@ async fn test_lease_expiry_frees_resources() -> Result<(), Box<dyn std::error::E
     // Call expire_leases() to process TTL-expired leases
     {
         let runtime = runtime_cell.lock().await;
-        let mut state = runtime.shared_state().lock().await;
-        let expired = state.scene.expire_leases();
+        let state = runtime.shared_state().lock().await;
+        let expired = state.scene.lock().await.expire_leases();
         eprintln!("[soak] expire_leases: {} leases expired", expired.len());
     }
 

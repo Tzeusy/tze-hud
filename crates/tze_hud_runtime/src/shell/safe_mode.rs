@@ -287,13 +287,15 @@ impl SafeModeController {
             let mut st = self.shared_state.lock().await;
 
             // Step 2: Suspend all ACTIVE leases (NOT revoke — spec §Safe Mode Suspends Leases).
-            st.scene.suspend_all_leases(now_ms);
-            let leases_suspended = st
-                .scene
-                .leases
-                .values()
-                .filter(|l| l.state == LeaseState::Suspended)
-                .count();
+            let leases_suspended = {
+                let mut scene = st.scene.lock().await;
+                scene.suspend_all_leases(now_ms);
+                scene
+                    .leases
+                    .values()
+                    .filter(|l| l.state == LeaseState::Suspended)
+                    .count()
+            };
 
             // Step 3: Signal safe mode active so mutation intake rejects new batches.
             st.safe_mode_active = true;
@@ -410,32 +412,34 @@ impl SafeModeController {
         let (leases_resumed, lease_resumes, sessions_notified) = {
             let mut st = self.shared_state.lock().await;
 
-            // Step 2a: Collect suspension info from suspended leases (before mutation).
+            // Step 2a: Collect suspension info and resume leases within the scene lock.
             let safe_mode_entered_ms = self.override_state.safe_mode_entered_at_ms;
-            let suspended_info: Vec<(SceneId, String, u64, u64)> = st
-                .scene
-                .leases
-                .values()
-                .filter(|l| l.state == LeaseState::Suspended)
-                .map(|l| {
-                    // suspension start time (use recorded suspended_at_ms or safe mode entry).
-                    let susp_at_ms = l.suspended_at_ms.unwrap_or(safe_mode_entered_ms);
-                    let susp_dur_us = now_ms.saturating_sub(susp_at_ms).saturating_mul(1_000);
-                    // Adjusted expiry = now_us + remaining TTL (in us).
-                    // For indefinite TTL (ttl_ms == 0), we use 0 as "no expiry" sentinel.
-                    let adjusted_expires_wall_us = if l.ttl_ms == 0 {
-                        0 // sentinel for indefinite
-                    } else {
-                        let remaining_ms = l.ttl_remaining_at_suspend_ms.unwrap_or(l.ttl_ms);
-                        now_us.saturating_add(remaining_ms.saturating_mul(1_000))
-                    };
-                    (l.id, l.namespace.clone(), adjusted_expires_wall_us, susp_dur_us)
-                })
-                .collect();
-
-            // Step 2b: Resume all SUSPENDED leases → ACTIVE; TTL adjusted.
-            st.scene.resume_all_leases(now_ms);
-            let leases_resumed = suspended_info.len();
+            let (suspended_info, leases_resumed) = {
+                let mut scene = st.scene.lock().await;
+                let suspended_info: Vec<(SceneId, String, u64, u64)> = scene
+                    .leases
+                    .values()
+                    .filter(|l| l.state == LeaseState::Suspended)
+                    .map(|l| {
+                        // suspension start time (use recorded suspended_at_ms or safe mode entry).
+                        let susp_at_ms = l.suspended_at_ms.unwrap_or(safe_mode_entered_ms);
+                        let susp_dur_us = now_ms.saturating_sub(susp_at_ms).saturating_mul(1_000);
+                        // Adjusted expiry = now_us + remaining TTL (in us).
+                        // For indefinite TTL (ttl_ms == 0), we use 0 as "no expiry" sentinel.
+                        let adjusted_expires_wall_us = if l.ttl_ms == 0 {
+                            0 // sentinel for indefinite
+                        } else {
+                            let remaining_ms = l.ttl_remaining_at_suspend_ms.unwrap_or(l.ttl_ms);
+                            now_us.saturating_add(remaining_ms.saturating_mul(1_000))
+                        };
+                        (l.id, l.namespace.clone(), adjusted_expires_wall_us, susp_dur_us)
+                    })
+                    .collect();
+                // Step 2b: Resume all SUSPENDED leases → ACTIVE; TTL adjusted.
+                scene.resume_all_leases(now_ms);
+                let leases_resumed = suspended_info.len();
+                (suspended_info, leases_resumed)
+            };
 
             // Build LeaseResume descriptors for the caller.
             let lease_resumes: Vec<LeaseResumeInfo> = suspended_info
@@ -590,9 +594,10 @@ mod tests {
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     fn make_shared_state() -> Arc<Mutex<SharedState>> {
+        use std::sync::Arc;
         use tze_hud_protocol::session::RuntimeDegradationLevel;
         Arc::new(Mutex::new(SharedState {
-            scene: SceneGraph::new(1920.0, 1080.0),
+            scene: Arc::new(Mutex::new(SceneGraph::new(1920.0, 1080.0))),
             sessions: SessionRegistry::new("test-key"),
             safe_mode_active: false,
             freeze_active: false,
@@ -617,8 +622,8 @@ mod tests {
 
     /// Grant an active lease in the scene graph; returns the lease ID.
     async fn grant_active_lease(ctrl: &SafeModeController, namespace: &str) -> SceneId {
-        let mut st = ctrl.shared_state.lock().await;
-        st.scene.grant_lease(namespace, 60_000, vec![])
+        let st = ctrl.shared_state.lock().await;
+        st.scene.lock().await.grant_lease(namespace, 60_000, vec![])
     }
 
     // ── 1. Entry protocol ─────────────────────────────────────────────────────
@@ -635,7 +640,7 @@ mod tests {
         // Verify lease is ACTIVE before entry.
         {
             let st = ctrl.shared_state.lock().await;
-            assert_eq!(st.scene.leases[&lease_id].state, LeaseState::Active);
+            assert_eq!(st.scene.lock().await.leases[&lease_id].state, LeaseState::Active);
         }
 
         let result = ctrl.enter_safe_mode_viewer_action().await;
@@ -648,7 +653,7 @@ mod tests {
         {
             let st = ctrl.shared_state.lock().await;
             assert_eq!(
-                st.scene.leases[&lease_id].state,
+                st.scene.lock().await.leases[&lease_id].state,
                 LeaseState::Suspended,
                 "lease must be SUSPENDED not REVOKED — identity preserved"
             );
@@ -781,7 +786,7 @@ mod tests {
         ctrl.enter_safe_mode_viewer_action().await;
         {
             let st = ctrl.shared_state.lock().await;
-            assert_eq!(st.scene.leases[&lease_id].state, LeaseState::Suspended);
+            assert_eq!(st.scene.lock().await.leases[&lease_id].state, LeaseState::Suspended);
         }
 
         // Exit: lease should return to ACTIVE.
@@ -794,7 +799,7 @@ mod tests {
         {
             let st = ctrl.shared_state.lock().await;
             assert_eq!(
-                st.scene.leases[&lease_id].state,
+                st.scene.lock().await.leases[&lease_id].state,
                 LeaseState::Active,
                 "lease must return to ACTIVE — agents do not re-request"
             );
@@ -813,7 +818,8 @@ mod tests {
 
         let (ns_before, priority_before) = {
             let st = ctrl.shared_state.lock().await;
-            let l = &st.scene.leases[&lease_id];
+            let scene = st.scene.lock().await;
+            let l = &scene.leases[&lease_id];
             (l.namespace.clone(), l.priority)
         };
 
@@ -822,7 +828,8 @@ mod tests {
 
         {
             let st = ctrl.shared_state.lock().await;
-            let l = &st.scene.leases[&lease_id];
+            let scene = st.scene.lock().await;
+            let l = &scene.leases[&lease_id];
             assert_eq!(l.namespace, ns_before, "namespace preserved across cycle");
             assert_eq!(l.priority, priority_before, "priority preserved across cycle");
         }
@@ -854,7 +861,7 @@ mod tests {
 
         let original_ttl = {
             let st = ctrl.shared_state.lock().await;
-            st.scene.leases[&lease_id].ttl_ms
+            st.scene.lock().await.leases[&lease_id].ttl_ms
         };
 
         ctrl.enter_safe_mode_viewer_action().await;
@@ -862,7 +869,7 @@ mod tests {
 
         let post_resume_ttl = {
             let st = ctrl.shared_state.lock().await;
-            st.scene.leases[&lease_id].ttl_ms
+            st.scene.lock().await.leases[&lease_id].ttl_ms
         };
 
         // The TTL after resume should be close to original (very little real time elapsed
@@ -962,7 +969,7 @@ mod tests {
 
         // Lease still SUSPENDED, not double-touched.
         let st = ctrl.shared_state.lock().await;
-        assert_eq!(st.scene.leases[&lease_id].state, LeaseState::Suspended);
+        assert_eq!(st.scene.lock().await.leases[&lease_id].state, LeaseState::Suspended);
     }
 
     /// Exiting safe mode when not active is a no-op.
@@ -1025,9 +1032,10 @@ mod tests {
 
         // Grant leases at multiple priorities (simulating policy_matrix_basic agents).
         {
-            let mut st = shared.lock().await;
+            let st = shared.lock().await;
+            let mut scene = st.scene.lock().await;
             for ns in ["system.agent", "high.priority.agent", "normal.agent", "low.agent"] {
-                st.scene.grant_lease(ns, 60_000, vec![]);
+                scene.grant_lease(ns, 60_000, vec![]);
             }
         }
 
@@ -1038,7 +1046,8 @@ mod tests {
         // All leases must be SUSPENDED regardless of priority.
         {
             let st = shared.lock().await;
-            let all_suspended = st.scene.leases.values().all(|l| {
+            let scene = st.scene.lock().await;
+            let all_suspended = scene.leases.values().all(|l| {
                 l.state == LeaseState::Suspended || l.state.is_terminal()
             });
             assert!(

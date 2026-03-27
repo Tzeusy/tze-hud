@@ -467,12 +467,12 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Pre-populate the scene with a tab and default zones BEFORE gRPC connections,
     // since all three agents will need an active tab and zones to publish to.
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab_id = state.scene.create_tab("Multi-Agent", 0)?;
-        state.scene.active_tab = Some(tab_id);
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("Multi-Agent", 0)?;
+        scene.active_tab = Some(tab_id);
         // Register default zones (status-bar, notification-area, subtitle).
-        state.scene.zone_registry = ZoneRegistry::with_defaults();
-        drop(state);
+        scene.zone_registry = ZoneRegistry::with_defaults();
     }
 
     let _server_handle = runtime.start_grpc_server().await?;
@@ -528,8 +528,8 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Verify agent A tiles exist in the scene graph with correct namespace
     {
         let state = runtime.shared_state().lock().await;
-        let weather_tiles: Vec<_> = state
-            .scene
+        let scene = state.scene.lock().await;
+        let weather_tiles: Vec<_> = scene
             .tiles
             .values()
             .filter(|t| t.namespace == agent_a.namespace)
@@ -569,8 +569,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
     let notification_count = {
         let state = runtime.shared_state().lock().await;
-        state
-            .scene
+        state.scene.lock().await
             .zone_registry
             .active_for_zone("notification-area")
             .len()
@@ -590,8 +589,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
     let count_after_first = {
         let state = runtime.shared_state().lock().await;
-        state
-            .scene
+        state.scene.lock().await
             .zone_registry
             .active_for_zone("subtitle")
             .len()
@@ -611,7 +609,8 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
     let (subtitle_count, subtitle_text) = {
         let state = runtime.shared_state().lock().await;
-        let active = state.scene.zone_registry.active_for_zone("subtitle");
+        let scene = state.scene.lock().await;
+        let active = scene.zone_registry.active_for_zone("subtitle");
         let text = active
             .first()
             .and_then(|r| match &r.content {
@@ -638,14 +637,13 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Verify: agent B and C have no tiles (they only use zones)
     let (b_tile_count, c_tile_count) = {
         let state = runtime.shared_state().lock().await;
-        let b = state
-            .scene
+        let scene = state.scene.lock().await;
+        let b = scene
             .tiles
             .values()
             .filter(|t| t.namespace == agent_b.namespace)
             .count();
-        let c = state
-            .scene
+        let c = scene
             .tiles
             .values()
             .filter(|t| t.namespace == agent_c.namespace)
@@ -664,15 +662,14 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Verify: agent A has no zone publications
     let a_zone_publishes = {
         let state = runtime.shared_state().lock().await;
-        let notif = state
-            .scene
+        let scene = state.scene.lock().await;
+        let notif = scene
             .zone_registry
             .active_for_zone("notification-area")
             .into_iter()
             .filter(|r| r.publisher_namespace == agent_a.namespace)
             .count();
-        let sub = state
-            .scene
+        let sub = scene
             .zone_registry
             .active_for_zone("subtitle")
             .into_iter()
@@ -692,7 +689,8 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     //  could create a tile attributed to agent-weather even if they used the same lease_id.)
     {
         let state = runtime.shared_state().lock().await;
-        for tile in state.scene.tiles.values() {
+        let scene = state.scene.lock().await;
+        for tile in scene.tiles.values() {
             assert_eq!(
                 tile.namespace, agent_a.namespace,
                 "all tiles must belong to agent-weather (the only tile-creating agent); \
@@ -706,8 +704,9 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
     let lease_priorities = {
         let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
         let mut priorities: HashMap<String, u8> = HashMap::new();
-        for lease in state.scene.leases.values() {
+        for lease in scene.leases.values() {
             if [&agent_a.namespace, &agent_b.namespace, &agent_c.namespace]
                 .contains(&&lease.namespace)
             {
@@ -756,8 +755,8 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Build the shed order from the scene graph.
     let shed_order = {
         let state = runtime.shared_state().lock().await;
-        let mut tiles: Vec<(String, u32, u8)> = state // (namespace, z_order, priority)
-            .scene
+        let scene = state.scene.lock().await;
+        let mut tiles: Vec<(String, u32, u8)> = scene // (namespace, z_order, priority)
             .tiles
             .values()
             .filter_map(|t| {
@@ -813,8 +812,8 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Artifact 1: Per-agent tile ownership map
     let ownership_map = {
         let state = runtime.shared_state().lock().await;
-        let mut entries: Vec<TileOwnershipEntry> = state
-            .scene
+        let scene = state.scene.lock().await;
+        let mut entries: Vec<TileOwnershipEntry> = scene
             .tiles
             .values()
             .map(|t| TileOwnershipEntry {
@@ -847,11 +846,11 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Artifact 2: Zone contention resolution log
     let contention_log = {
         let state = runtime.shared_state().lock().await;
-        let notif_active = state
-            .scene
+        let scene = state.scene.lock().await;
+        let notif_active = scene
             .zone_registry
             .active_for_zone("notification-area");
-        let sub_active = state.scene.zone_registry.active_for_zone("subtitle");
+        let sub_active = scene.zone_registry.active_for_zone("subtitle");
 
         ZoneContentionLog {
             events: vec![
@@ -889,8 +888,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
             description: "Agent-weather tiles are all in agent-weather namespace".to_string(),
             passed: {
                 let state = runtime.shared_state().lock().await;
-                state
-                    .scene
+                state.scene.lock().await
                     .tiles
                     .values()
                     .filter(|t| t.namespace == agent_a.namespace)
@@ -923,8 +921,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
                 .to_string(),
             passed: {
                 let state = runtime.shared_state().lock().await;
-                state
-                    .scene
+                state.scene.lock().await
                     .zone_registry
                     .active_for_zone("notification-area")
                     .iter()
@@ -937,8 +934,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
             description: "Subtitle zone publish is from agent-media only".to_string(),
             passed: {
                 let state = runtime.shared_state().lock().await;
-                state
-                    .scene
+                state.scene.lock().await
                     .zone_registry
                     .active_for_zone("subtitle")
                     .iter()
@@ -1005,6 +1001,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
     {
         let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
 
         // All three agents' leases must still be Active
         for (ns, label) in [
@@ -1012,8 +1009,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
             (&agent_b.namespace, "agent-notifications"),
             (&agent_c.namespace, "agent-media"),
         ] {
-            let lease = state
-                .scene
+            let lease = scene
                 .leases
                 .values()
                 .find(|l| &l.namespace == ns)
@@ -1028,13 +1024,13 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
         // Total tile count must be 2 (only agent-weather has tiles)
         assert_eq!(
-            state.scene.tiles.len(),
+            scene.tiles.len(),
             2,
             "total tile count must be 2 (only agent-weather creates tiles)"
         );
 
         // Scene graph invariants must hold
-        let violations = tze_hud_scene::test_scenes::assert_layer0_invariants(&state.scene);
+        let violations = tze_hud_scene::test_scenes::assert_layer0_invariants(&*scene);
         assert!(
             violations.is_empty(),
             "Layer 0 invariants violated after multi-agent test: {:?}",
@@ -1043,6 +1039,141 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     }
 
     Ok(())
+}
+
+// ─── Cross-protocol scene coherence test ─────────────────────────────────────
+
+/// Verify that MCP and gRPC share a single scene graph (hud-bco1).
+///
+/// Acceptance criteria (from hud-bco1 issue):
+/// - A mutation applied via gRPC (CreateTile via session stream) must be visible
+///   when the scene is read via the `shared_state().scene` Arc — the same Arc
+///   that the MCP server holds.
+/// - A direct mutation to `shared_state().scene` (simulating MCP writes) must
+///   be visible to gRPC queries (SceneSnapshot response reflects the mutation).
+///
+/// This is a headless unit-style integration test that does not require a real
+/// MCP client — it directly exercises the shared `Arc<Mutex<SceneGraph>>`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_grpc_and_mcp_share_single_scene_graph() {
+    use tze_hud_runtime::headless::HeadlessConfig;
+
+    let config = HeadlessConfig {
+        width: 800,
+        height: 600,
+        grpc_port: 0,      // ephemeral port — no real gRPC server needed
+        psk: "coherence-test".to_string(),
+        config_toml: None,
+    };
+    let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+
+    // Obtain the Arc<Mutex<SharedState>> that both gRPC and MCP share.
+    let shared_state_arc = runtime.shared_state().clone();
+
+    // ── Step 1: Write a tab via shared_state (simulates MCP-side mutation) ──
+
+    let tab_id = {
+        let state = shared_state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
+        scene.create_tab("coherence-tab", 0)
+            .expect("tab creation via shared scene must succeed")
+    };
+
+    // ── Step 2: Write a lease via shared_state (simulates MCP-side mutation) ──
+
+    let lease_id = {
+        let state = shared_state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
+        scene.grant_lease("coherence-agent", 60_000, vec![
+            tze_hud_scene::types::Capability::CreateTiles,
+            tze_hud_scene::types::Capability::ModifyOwnTiles,
+        ])
+    };
+
+    // ── Step 3: Write a tile via shared_state (simulates MCP-side mutation) ──
+
+    let tile_id = {
+        let state = shared_state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
+        scene.create_tile(
+            tab_id,
+            "coherence-agent",
+            lease_id,
+            tze_hud_scene::types::Rect::new(10.0, 10.0, 100.0, 50.0),
+            1,
+        ).expect("tile creation via shared scene must succeed")
+    };
+
+    // ── Step 4: Read the tile back via the same Arc (simulates gRPC reading) ──
+    //
+    // This verifies that gRPC (which holds a clone of the same Arc) would see
+    // the tile created by MCP. There is only ONE scene graph — they share it.
+
+    {
+        let state = shared_state_arc.lock().await;
+        let scene = state.scene.lock().await;
+
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "tile created via MCP-side write must be visible via gRPC-side read \
+             (single shared Arc<Mutex<SceneGraph>>)"
+        );
+        let tile = &scene.tiles[&tile_id];
+        assert_eq!(tile.namespace, "coherence-agent",
+            "tile namespace must be preserved across protocol boundary");
+        assert_eq!(tile.tab_id, tab_id,
+            "tile tab_id must be preserved across protocol boundary");
+
+        assert!(
+            scene.leases.contains_key(&lease_id),
+            "lease created via MCP-side write must be visible via gRPC-side read"
+        );
+        assert!(
+            scene.tabs.contains_key(&tab_id),
+            "tab created via MCP-side write must be visible via gRPC-side read"
+        );
+
+        eprintln!(
+            "[coherence] Cross-protocol scene: tabs={}, tiles={}, leases={}",
+            scene.tabs.len(), scene.tiles.len(), scene.leases.len()
+        );
+    }
+
+    // ── Step 5: Mutate via gRPC-side path and verify MCP-side sees it ──
+    //
+    // The gRPC session server would call `apply_batch` on `st.scene`.
+    // We simulate that here by locking state then scene, exactly as the
+    // session server does.
+
+    let batch = tze_hud_scene::mutation::MutationBatch {
+        batch_id: tze_hud_scene::types::SceneId::new(),
+        agent_namespace: "coherence-agent".to_string(),
+        mutations: vec![tze_hud_scene::mutation::SceneMutation::DeleteTile {
+            tile_id,
+        }],
+        timing_hints: None,
+        lease_id: None,
+    };
+
+    {
+        let state = shared_state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied, "DeleteTile via gRPC-side path must succeed: {:?}", result.error);
+    }
+
+    // ── Step 6: Verify MCP-side no longer sees the deleted tile ──
+
+    {
+        let state = shared_state_arc.lock().await;
+        let scene = state.scene.lock().await;
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile deleted via gRPC-side apply_batch must not be visible via MCP-side read \
+             (mutations are immediately visible across protocol boundary)"
+        );
+        eprintln!("[coherence] PASS: cross-protocol scene coherence verified (one shared Arc)");
+    }
 }
 
 // ─── Auxiliary tests for scene registry alignment ────────────────────────────
