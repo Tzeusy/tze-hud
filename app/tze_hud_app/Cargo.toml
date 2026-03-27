@@ -1,0 +1,17 @@
+[package]
+name = "tze_hud_app"
+description = "Canonical tze_hud runtime application binary — production entrypoint for windowed display runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tze_hud"
+path = "src/main.rs"
+
+[dependencies]
+tze_hud_runtime = { path = "../../crates/tze_hud_runtime" }
+tze_hud_config = { path = "../../crates/tze_hud_config" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
