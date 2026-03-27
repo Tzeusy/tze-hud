@@ -25,7 +25,7 @@ Collect these before executing:
 - `ssh_key_path` (default in local environment: `~/.ssh/ecdsa_home`)
 - `task_name` (default: `TzeHudInteractive`)
 - `mcp_http_url` (default: `http://tzehouse-windows.parrot-hen.ts.net:9090`)
-- `mcp_psk_env` (default: `TZE_HUD_PSK`)
+- `mcp_psk_env` (default: `MCP_TEST_PSK`)
 - `messages`: array of zone publishes
 
 Message shape:
@@ -125,7 +125,7 @@ Example:
 ```bash
 python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
   --url "$MCP_HTTP_URL" \
-  --psk-env TZE_HUD_PSK \
+  --psk-env MCP_TEST_PSK \
   --messages-file /tmp/hud-zone-messages.json \
   --list-zones
 ```

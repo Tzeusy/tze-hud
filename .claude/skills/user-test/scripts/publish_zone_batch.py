@@ -71,7 +71,7 @@ def load_messages(path: str) -> list[dict[str, Any]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish MCP zone message batch")
     parser.add_argument("--url", required=True, help="MCP HTTP URL, e.g. http://host:9090")
-    parser.add_argument("--psk-env", default="TZE_HUD_PSK", help="Environment variable containing PSK")
+    parser.add_argument("--psk-env", default="MCP_TEST_PSK", help="Environment variable containing PSK")
     parser.add_argument("--messages-file", required=True, help="Path to JSON array of message objects")
     parser.add_argument("--namespace", default="butler-test", help="Default namespace if message namespace missing")
     parser.add_argument("--ttl-us", type=int, default=60_000_000, help="Default TTL in microseconds")
