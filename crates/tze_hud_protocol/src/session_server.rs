@@ -700,6 +700,25 @@ impl StreamSession {
 /// still receives all degradation notices without the sender blocking.
 const BROADCAST_CHANNEL_CAPACITY: usize = 32;
 
+// ─── Capability Revocation Event ─────────────────────────────────────────────
+
+/// A runtime-initiated capability revocation command broadcast to all session handlers.
+///
+/// When the runtime calls [`HudSessionImpl::revoke_capability_on_lease`], it broadcasts
+/// this event. Each session handler checks whether any of its leases match `lease_id`
+/// and, if so, applies the revocation to the scene graph and notifies the agent via
+/// `CapabilityNotice(revoked=[capability_name])` and a `LeaseStateChange` audit event.
+///
+/// RFC 0001 §3.3: capability checks are enforced at mutation time against the live scope,
+/// not merely at grant time.
+#[derive(Clone, Debug)]
+pub struct CapabilityRevocationEvent {
+    /// The lease to narrow.
+    pub lease_id: tze_hud_scene::SceneId,
+    /// Canonical name of the capability to remove (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
+    pub capability_name: String,
+}
+
 // ─── Service implementation ─────────────────────────────────────────────────
 
 /// The bidirectional streaming session service implementation.
@@ -736,6 +755,13 @@ pub struct HudSessionImpl {
     /// Broadcast sender for transactional server-push notices (DegradationNotice).
     /// Cloned into each session handler task.
     pub degradation_tx: tokio::sync::broadcast::Sender<DegradationNotice>,
+    /// Broadcast sender for live capability revocation commands (RFC 0001 §3.3, GAP-G3-4).
+    ///
+    /// When the runtime calls `revoke_capability_on_lease`, it broadcasts a
+    /// `CapabilityRevocationEvent` here. Each active session handler subscribes
+    /// and processes revocations for leases it owns, applying the scene-graph
+    /// mutation and delivering the `CapabilityNotice` + `LeaseStateChange` responses.
+    pub capability_revocation_tx: tokio::sync::broadcast::Sender<CapabilityRevocationEvent>,
 }
 
 impl HudSessionImpl {
@@ -745,6 +771,7 @@ impl HudSessionImpl {
     /// for backwards compatibility. Prefer `new_with_config` for production.
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (capability_revocation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SharedState {
                 scene,
@@ -758,6 +785,7 @@ impl HudSessionImpl {
             agent_capabilities: Arc::new(HashMap::new()),
             fallback_unrestricted: true,
             degradation_tx,
+            capability_revocation_tx,
         }
     }
 
@@ -767,12 +795,14 @@ impl HudSessionImpl {
     /// for backwards compatibility. Prefer `from_shared_state_with_config` for production.
     pub fn from_shared_state(state: Arc<Mutex<SharedState>>, psk: &str) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (capability_revocation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
             agent_capabilities: Arc::new(HashMap::new()),
             fallback_unrestricted: true,
             degradation_tx,
+            capability_revocation_tx,
         }
     }
 
@@ -792,12 +822,14 @@ impl HudSessionImpl {
         fallback_unrestricted: bool,
     ) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (capability_revocation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
             agent_capabilities: Arc::new(agent_capabilities),
             fallback_unrestricted,
             degradation_tx,
+            capability_revocation_tx,
         }
     }
 
@@ -835,6 +867,43 @@ impl HudSessionImpl {
             Err(_) => 0,
         }
     }
+
+    /// Revoke a named capability from an active lease at runtime (RFC 0001 §3.3, GAP-G3-4).
+    ///
+    /// This is the end-to-end API for live capability revocation. It:
+    /// 1. Broadcasts a [`CapabilityRevocationEvent`] to all active session handlers.
+    /// 2. The session handler that owns `lease_id` receives the event, calls
+    ///    [`tze_hud_scene::graph::SceneGraph::revoke_capability`] to narrow the live scope,
+    ///    then delivers `CapabilityNotice(revoked=[capability_name])` and a `LeaseStateChange`
+    ///    audit event to the affected agent.
+    ///
+    /// After revocation, any attempt to use `capability_name` under `lease_id` will be
+    /// rejected by the existing capability-check path in the mutation pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `lease_id`        — The lease whose capability scope is being narrowed.
+    /// * `capability_name` — Canonical name of the capability to remove
+    ///                       (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
+    ///
+    /// # Returns
+    ///
+    /// The number of session handlers that received the revocation event (0 if the
+    /// lease is not owned by any currently-connected session).
+    pub fn revoke_capability_on_lease(
+        &self,
+        lease_id: tze_hud_scene::SceneId,
+        capability_name: impl Into<String>,
+    ) -> usize {
+        let event = CapabilityRevocationEvent {
+            lease_id,
+            capability_name: capability_name.into(),
+        };
+        match self.capability_revocation_tx.send(event) {
+            Ok(n) => n,
+            Err(_) => 0, // No active subscribers (no sessions connected)
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -856,6 +925,10 @@ impl HudSession for HudSessionImpl {
         // Subscribing here (rather than inside the task) ensures we don't miss notices
         // that arrive between task spawn and channel subscription.
         let mut degradation_rx = self.degradation_tx.subscribe();
+        // Subscribe to the capability revocation broadcast channel.
+        // Subscribing here ensures the session handler receives revocations issued
+        // immediately after it is spawned (before the task subscribes itself).
+        let mut capability_revocation_rx = self.capability_revocation_tx.subscribe();
 
         // Create outbound channel
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(
@@ -1140,6 +1213,38 @@ impl HudSession for HudSessionImpl {
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 // Broadcast channel closed — runtime is shutting down.
                                 // Treat as ungraceful disconnect.
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
+                        }
+                    }
+
+                    // ── Capability revocation broadcast (RFC 0001 §3.3, GAP-G3-4) ────
+                    //
+                    // The runtime can narrow an active lease's capability scope without
+                    // revoking the lease itself. The session handler applies the change
+                    // to the scene graph and notifies the agent with CapabilityNotice
+                    // + LeaseStateChange (both transactional — never dropped).
+                    revocation_result = capability_revocation_rx.recv() => {
+                        match revocation_result {
+                            Ok(event) => {
+                                // Only this session's leases are affected.
+                                if session.lease_ids.contains(&event.lease_id) {
+                                    handle_capability_revocation(
+                                        &state,
+                                        session,
+                                        &tx,
+                                        event,
+                                    ).await;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                // Missed revocation events. Log and continue; the capability
+                                // scope may be stale for those dropped events.
+                                // In production: emit a metric and re-query the live scope.
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                // Runtime shutting down — treat as ungraceful disconnect.
                                 session.transition(SessionState::Closed);
                                 break;
                             }
@@ -2931,6 +3036,135 @@ async fn handle_capability_request(
                         context,
                         hint,
                         error_code_enum: ErrorCode::PermissionDenied as i32,
+                    })),
+                }))
+                .await;
+        }
+    }
+}
+
+/// Handle a runtime-initiated capability revocation for a lease owned by this session.
+///
+/// Called by the session main loop when the session receives a [`CapabilityRevocationEvent`]
+/// for one of its own leases. This function:
+///
+/// 1. Converts the capability name to a [`Capability`] enum value.
+/// 2. Calls [`SceneGraph::revoke_capability`] to narrow the live scope.
+/// 3. Emits `CapabilityNotice(revoked=[cap_name])` to the agent (transactional).
+/// 4. Emits `LeaseStateChange` with a `CAPABILITY_REVOKED:<cap_name>` reason
+///    (transactional audit event; lease state remains ACTIVE).
+///
+/// RFC 0001 §3.3: Capability enforcement happens at mutation time against the live scope.
+/// After this function returns, any mutation that requires `capability_name` will be
+/// rejected by the existing require_capability() check in the mutation pipeline.
+///
+/// # Error handling
+///
+/// If the capability name is not a recognized canonical name, the revocation is a no-op
+/// and a `RuntimeError(CAPABILITY_NOT_PRESENT)` is sent to the agent for diagnostics.
+///
+/// If the lease is in a terminal state or the capability is not present, the function
+/// sends `RuntimeError(CAPABILITY_NOT_PRESENT)` and returns without modifying the scope.
+async fn handle_capability_revocation(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    event: CapabilityRevocationEvent,
+) {
+    // Map canonical capability name to enum value.
+    let Some(cap) = canonical_name_to_capability(&event.capability_name) else {
+        // Unknown capability name — emit a diagnostic and return.
+        let seq = session.next_server_seq();
+        let _ = tx
+            .send(Ok(ServerMessage {
+                sequence: seq,
+                timestamp_wall_us: now_wall_us(),
+                payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                    error_code: "CAPABILITY_NOT_PRESENT".to_string(),
+                    message: format!(
+                        "CapabilityRevocation: unknown capability name {:?} for lease {}",
+                        event.capability_name, event.lease_id
+                    ),
+                    context: format!("lease_id={}", event.lease_id),
+                    hint: String::new(),
+                    error_code_enum: ErrorCode::InvalidArgument as i32,
+                })),
+            }))
+            .await;
+        return;
+    };
+
+    // Apply the revocation to the scene graph.
+    let result = {
+        let mut st = state.lock().await;
+        st.scene.revoke_capability(event.lease_id, &cap)
+    };
+
+    match result {
+        Ok((cap_name, revoked_at_us)) => {
+            // Also remove from the session-level capability list so that
+            // mid-session CapabilityRequest re-grants are not polluted.
+            // (The session.capabilities list is used for CapabilityNotice.granted
+            // filtering; removing the revoked entry keeps the audit trail clean.)
+            session.capabilities.retain(|c| c != &event.capability_name);
+
+            let lease_id_bytes = scene_id_to_bytes(event.lease_id);
+            let reason = format!("CAPABILITY_REVOKED:{cap_name}");
+
+            // ── CapabilityNotice (transactional, RFC 0005 §5.3) ──────────────
+            // Tells the agent which capability was revoked so it can update its
+            // local capability inventory and stop issuing mutations that require it.
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::CapabilityNotice(CapabilityNotice {
+                        granted: Vec::new(),
+                        revoked: vec![event.capability_name.clone()],
+                        reason: reason.clone(),
+                        effective_at_server_seq: seq,
+                    })),
+                }))
+                .await;
+
+            // ── LeaseStateChange audit event (transactional) ─────────────────
+            // Carries the audit trail for the capability revocation. The lease
+            // state remains ACTIVE; only the capability scope is narrowed.
+            // RFC 0001 §3.3: "The lease remains in its current state; only the
+            // capability scope is narrowed."
+            let state_seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: state_seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::LeaseStateChange(LeaseStateChange {
+                        lease_id: lease_id_bytes,
+                        previous_state: "ACTIVE".to_string(),
+                        new_state: "ACTIVE".to_string(),
+                        reason,
+                        timestamp_wall_us: revoked_at_us,
+                    })),
+                }))
+                .await;
+        }
+        Err(e) => {
+            // The scene-graph rejected the revocation (lease terminal or cap missing).
+            // Report the error to the agent for diagnostics; do not alter state.
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::RuntimeError(RuntimeError {
+                        error_code: "CAPABILITY_NOT_PRESENT".to_string(),
+                        message: format!(
+                            "CapabilityRevocation failed for lease {}: {e}",
+                            event.lease_id
+                        ),
+                        context: format!("lease_id={}", event.lease_id),
+                        hint: String::new(),
+                        error_code_enum: ErrorCode::InvalidArgument as i32,
                     })),
                 }))
                 .await;
@@ -7443,5 +7677,333 @@ mod tests {
         // Give the server task time to clean up
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         // If we reach here without a panic, the cleanup path is safe.
+    }
+
+    // ─── Live capability revocation tests (RFC 0001 §3.3, GAP-G3-4) ────────────
+
+    /// Set up a test server that also returns the capability-revocation broadcast sender
+    /// (so tests can call `revoke_capability_on_lease` via the sender directly).
+    async fn setup_test_with_revocation_tx() -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+        Arc<Mutex<SharedState>>,
+        tokio::sync::broadcast::Sender<CapabilityRevocationEvent>,
+    ) {
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        let shared_state = service.state.clone();
+        let revocation_tx = service.capability_revocation_tx.clone();
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let incoming =
+                tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let client =
+            HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+                .await
+                .unwrap();
+
+        (client, handle, shared_state, revocation_tx)
+    }
+
+    /// Helper: do a full handshake with publish_zone:subtitle capability and acquire a lease.
+    /// Returns (tx, stream, lease_id_bytes).
+    async fn handshake_with_publish_zone_lease(
+        client: &mut HudSessionClient<tonic::transport::Channel>,
+    ) -> (
+        tokio::sync::mpsc::Sender<ClientMessage>,
+        tonic::Streaming<ServerMessage>,
+        Vec<u8>,
+        tze_hud_scene::SceneId,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: "revoke-test-agent".to_string(),
+                agent_display_name: "revoke-test-agent".to_string(),
+                pre_shared_key: "test-key".to_string(),
+                requested_capabilities: vec![
+                    "publish_zone:subtitle".to_string(),
+                    "create_tiles".to_string(),
+                ],
+                initial_subscriptions: vec![],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut response_stream = client.session(stream).await.unwrap().into_inner();
+
+        // Drain SessionEstablished + SceneSnapshot
+        let _established = response_stream.next().await.unwrap().unwrap();
+        let _snapshot   = response_stream.next().await.unwrap().unwrap();
+
+        // Request a lease with publish_zone:subtitle + create_tiles
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec![
+                    "publish_zone:subtitle".to_string(),
+                    "create_tiles".to_string(),
+                ],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // LeaseResponse
+        let lease_resp_msg = response_stream.next().await.unwrap().unwrap();
+        let lease_id_bytes = match &lease_resp_msg.payload {
+            Some(ServerPayload::LeaseResponse(lr)) => {
+                assert!(lr.granted, "Lease must be granted");
+                lr.lease_id.clone()
+            }
+            other => panic!("Expected LeaseResponse, got: {other:?}"),
+        };
+
+        // LeaseStateChange (REQUESTED → ACTIVE)
+        let _sc = response_stream.next().await.unwrap().unwrap();
+
+        // Parse lease_id back to SceneId.
+        // scene_id_to_bytes() uses as_uuid().as_bytes() (big-endian UUID bytes),
+        // so we must decode with from_uuid(Uuid::from_bytes()) to match.
+        let lease_arr: [u8; 16] = lease_id_bytes.as_slice().try_into()
+            .expect("lease_id must be 16 bytes");
+        let lease_scene_id = tze_hud_scene::SceneId::from_uuid(uuid::Uuid::from_bytes(lease_arr));
+
+        (tx, response_stream, lease_id_bytes, lease_scene_id)
+    }
+
+    /// WHEN the runtime revokes a capability from an active lease,
+    /// THEN the agent receives CapabilityNotice(revoked=[cap_name]).
+    #[tokio::test]
+    async fn test_revoke_capability_sends_capability_notice() {
+        let (mut client, _server, _state, revocation_tx) =
+            setup_test_with_revocation_tx().await;
+
+        let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
+            handshake_with_publish_zone_lease(&mut client).await;
+
+        // Revoke publish_zone:subtitle
+        let _ = revocation_tx.send(CapabilityRevocationEvent {
+            lease_id: lease_scene_id,
+            capability_name: "publish_zone:subtitle".to_string(),
+        });
+
+        // The agent should receive a CapabilityNotice with revoked=[publish_zone:subtitle]
+        let msg = stream.next().await.unwrap().unwrap();
+        match msg.payload {
+            Some(ServerPayload::CapabilityNotice(notice)) => {
+                assert!(
+                    notice.revoked.contains(&"publish_zone:subtitle".to_string()),
+                    "CapabilityNotice.revoked must contain publish_zone:subtitle"
+                );
+                assert!(
+                    notice.granted.is_empty(),
+                    "CapabilityNotice.granted must be empty for a revocation"
+                );
+            }
+            other => panic!("Expected CapabilityNotice, got: {other:?}"),
+        }
+    }
+
+    /// WHEN the runtime revokes a capability from an active lease,
+    /// THEN the agent receives LeaseStateChange with previous_state=ACTIVE, new_state=ACTIVE.
+    #[tokio::test]
+    async fn test_revoke_capability_sends_lease_state_change() {
+        let (mut client, _server, _state, revocation_tx) =
+            setup_test_with_revocation_tx().await;
+
+        let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
+            handshake_with_publish_zone_lease(&mut client).await;
+
+        // Revoke create_tiles
+        let _ = revocation_tx.send(CapabilityRevocationEvent {
+            lease_id: lease_scene_id,
+            capability_name: "create_tiles".to_string(),
+        });
+
+        // CapabilityNotice first
+        let _notice = stream.next().await.unwrap().unwrap();
+
+        // Then LeaseStateChange
+        let msg = stream.next().await.unwrap().unwrap();
+        match msg.payload {
+            Some(ServerPayload::LeaseStateChange(sc)) => {
+                assert_eq!(sc.previous_state, "ACTIVE", "Lease must stay ACTIVE");
+                assert_eq!(sc.new_state, "ACTIVE", "Lease must stay ACTIVE after capability revocation");
+                assert!(
+                    sc.reason.contains("CAPABILITY_REVOKED"),
+                    "LeaseStateChange reason must contain CAPABILITY_REVOKED"
+                );
+            }
+            other => panic!("Expected LeaseStateChange, got: {other:?}"),
+        }
+    }
+
+    /// WHEN a capability is revoked from a lease, THEN the lease scope is narrowed
+    /// in the scene graph and the capability is absent from the live scope.
+    #[tokio::test]
+    async fn test_revoke_capability_narrows_scene_graph_scope() {
+        let (mut client, _server, state, revocation_tx) =
+            setup_test_with_revocation_tx().await;
+
+        let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
+            handshake_with_publish_zone_lease(&mut client).await;
+
+        // Before revocation: verify the capability is present
+        {
+            let st = state.lock().await;
+            let caps = st.scene.lease_capabilities(&lease_scene_id)
+                .expect("lease must exist");
+            assert!(
+                caps.iter().any(|c| matches!(c, tze_hud_scene::types::Capability::PublishZone(z) if z == "subtitle")),
+                "publish_zone:subtitle must be in the live scope before revocation"
+            );
+        }
+
+        // Revoke
+        let _ = revocation_tx.send(CapabilityRevocationEvent {
+            lease_id: lease_scene_id,
+            capability_name: "publish_zone:subtitle".to_string(),
+        });
+
+        // Drain protocol messages
+        let _notice = stream.next().await.unwrap().unwrap();
+        let _sc     = stream.next().await.unwrap().unwrap();
+
+        // After revocation: the capability must be absent from the live scope
+        {
+            let st = state.lock().await;
+            let caps = st.scene.lease_capabilities(&lease_scene_id)
+                .expect("lease must still exist after capability revocation");
+            assert!(
+                !caps.iter().any(|c| matches!(c, tze_hud_scene::types::Capability::PublishZone(z) if z == "subtitle")),
+                "publish_zone:subtitle must be removed from the live scope after revocation"
+            );
+        }
+    }
+
+    /// WHEN a capability is revoked, THEN the lease remains in ACTIVE state.
+    #[tokio::test]
+    async fn test_revoke_capability_preserves_lease_active_state() {
+        let (mut client, _server, state, revocation_tx) =
+            setup_test_with_revocation_tx().await;
+
+        let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
+            handshake_with_publish_zone_lease(&mut client).await;
+
+        // Revoke one capability
+        let _ = revocation_tx.send(CapabilityRevocationEvent {
+            lease_id: lease_scene_id,
+            capability_name: "create_tiles".to_string(),
+        });
+        let _notice = stream.next().await.unwrap().unwrap();
+        let _sc     = stream.next().await.unwrap().unwrap();
+
+        // Lease must still be ACTIVE in the scene graph
+        let st = state.lock().await;
+        let lease = st.scene.leases.get(&lease_scene_id)
+            .expect("lease must still exist");
+        assert_eq!(
+            lease.state,
+            tze_hud_scene::types::LeaseState::Active,
+            "Lease must remain ACTIVE after capability revocation"
+        );
+    }
+
+    /// WHEN an unknown capability name is used in a revocation,
+    /// THEN the agent receives RuntimeError(INVALID_ARGUMENT) and the lease is unchanged.
+    #[tokio::test]
+    async fn test_revoke_unknown_capability_returns_error() {
+        let (mut client, _server, state, revocation_tx) =
+            setup_test_with_revocation_tx().await;
+
+        let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
+            handshake_with_publish_zone_lease(&mut client).await;
+
+        // Try to revoke a capability that doesn't exist in the vocabulary
+        let _ = revocation_tx.send(CapabilityRevocationEvent {
+            lease_id: lease_scene_id,
+            capability_name: "totally_unknown_capability".to_string(),
+        });
+
+        // Should get a RuntimeError
+        let msg = stream.next().await.unwrap().unwrap();
+        match msg.payload {
+            Some(ServerPayload::RuntimeError(e)) => {
+                assert_eq!(e.error_code, "CAPABILITY_NOT_PRESENT");
+            }
+            other => panic!("Expected RuntimeError, got: {other:?}"),
+        }
+
+        // Lease scope unchanged (still has both original capabilities)
+        let st = state.lock().await;
+        let caps = st.scene.lease_capabilities(&lease_scene_id)
+            .expect("lease must exist");
+        assert_eq!(caps.len(), 2, "Lease scope must be unchanged after failed revocation");
+    }
+
+    /// WHEN a capability that is not in the lease scope is revoked (noop),
+    /// THEN the agent receives RuntimeError(CAPABILITY_NOT_PRESENT).
+    #[tokio::test]
+    async fn test_revoke_absent_capability_returns_not_present() {
+        let (mut client, _server, _state, revocation_tx) =
+            setup_test_with_revocation_tx().await;
+
+        let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
+            handshake_with_publish_zone_lease(&mut client).await;
+
+        // manage_tabs is not in this lease's scope
+        let _ = revocation_tx.send(CapabilityRevocationEvent {
+            lease_id: lease_scene_id,
+            capability_name: "manage_tabs".to_string(),
+        });
+
+        // Should get a RuntimeError for capability not present
+        let msg = stream.next().await.unwrap().unwrap();
+        match msg.payload {
+            Some(ServerPayload::RuntimeError(e)) => {
+                assert_eq!(e.error_code, "CAPABILITY_NOT_PRESENT");
+            }
+            other => panic!("Expected RuntimeError for absent capability, got: {other:?}"),
+        }
+    }
+
+    /// WHEN revoke_capability_on_lease is called for a lease not owned by any session,
+    /// THEN the broadcast produces 0 receivers and no error.
+    #[tokio::test]
+    async fn test_revoke_capability_noop_for_unknown_lease_id() {
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+
+        // An unknown lease ID not owned by any session
+        let unknown_lease_id = tze_hud_scene::SceneId::new();
+        // No session is connected, so this should return 0 receivers
+        let n = service.revoke_capability_on_lease(unknown_lease_id, "create_tiles");
+        assert_eq!(n, 0, "No active sessions means 0 receivers");
     }
 }
