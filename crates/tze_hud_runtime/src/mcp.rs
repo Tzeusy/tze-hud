@@ -54,8 +54,10 @@ pub struct McpServerConfig {
     /// Pre-shared key for MCP authentication.
     ///
     /// Every MCP request must supply a matching key via HTTP `Authorization:
-    /// Bearer <key>` or the JSON-RPC `_auth` param.  When empty, all calls
-    /// are rejected (no bypass).
+    /// Bearer <key>` or the JSON-RPC `_auth` param.  When empty, a client
+    /// sending an empty bearer token will authenticate — use a non-empty key
+    /// in production.  To reject all calls unconditionally, do not start the
+    /// MCP server (set `mcp_port = 0` in `WindowedConfig`).
     pub psk: String,
 }
 
@@ -278,23 +280,6 @@ mod tests {
         // Signal shutdown.
         shutdown.trigger(crate::threads::ShutdownReason::Clean);
         handle.await.expect("task panicked");
-    }
-
-    #[tokio::test]
-    async fn mcp_unauthenticated_request_rejected() {
-        let scene = make_scene();
-        // Port 0 lets the OS assign a free port.
-        let config = make_config(0, "secret");
-        let shutdown = ShutdownToken::new();
-
-        let handle = start_mcp_http_server(scene, config, shutdown.clone())
-            .await
-            .expect("bind");
-
-        // We need the actual bound address.  Since we can't get it from the handle,
-        // bind to a fixed port for this test.
-        shutdown.trigger(crate::threads::ShutdownReason::Clean);
-        handle.await.expect("task");
     }
 
     #[tokio::test]
