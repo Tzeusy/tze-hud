@@ -57,8 +57,9 @@ pub mod urgency;
 
 use std::collections::{HashMap, VecDeque};
 
-use tze_hud_scene::events::{EventPayload, EventSource, InterruptionClass, SceneEvent,
-                             SceneEventBuilder};
+use tze_hud_scene::events::{
+    EventPayload, EventSource, InterruptionClass, SceneEvent, SceneEventBuilder,
+};
 
 pub use urgency::{EarnedUrgencyConfig, EarnedUrgencyTracker, UrgencyRecord};
 
@@ -285,11 +286,7 @@ impl AttentionBudgetTracker {
     /// Spec: scene-events/spec.md line 144:
     /// > WHEN an agent's rolling interruption count reaches 80% of limit
     /// > THEN the runtime MUST emit AttentionBudgetWarningEvent.
-    pub fn make_warning_event(
-        &mut self,
-        agent_namespace: &str,
-        now_us: u64,
-    ) -> SceneEvent {
+    pub fn make_warning_event(&mut self, agent_namespace: &str, now_us: u64) -> SceneEvent {
         let used = self.agent_count(agent_namespace);
         let limit = self
             .agent_budgets
@@ -328,11 +325,15 @@ mod tests {
         let mut tracker = AttentionBudgetTracker::new();
         // Exhaust budget first.
         for i in 0..=DEFAULT_AGENT_BUDGET {
-            tracker.record("agent_a", "zone_1", InterruptionClass::Normal, i as u64 * 1_000);
+            tracker.record(
+                "agent_a",
+                "zone_1",
+                InterruptionClass::Normal,
+                i as u64 * 1_000,
+            );
         }
         // CRITICAL still passes.
-        let outcome =
-            tracker.record("agent_a", "zone_1", InterruptionClass::Critical, 100_000);
+        let outcome = tracker.record("agent_a", "zone_1", InterruptionClass::Critical, 100_000);
         assert_eq!(outcome, AttentionBudgetOutcome::CriticalExempt);
     }
 
@@ -342,8 +343,7 @@ mod tests {
         let mut tracker = AttentionBudgetTracker::new();
         // Emit many SILENT events.
         for i in 0..100 {
-            let outcome =
-                tracker.record("agent_a", "zone_1", InterruptionClass::Silent, i * 1_000);
+            let outcome = tracker.record("agent_a", "zone_1", InterruptionClass::Silent, i * 1_000);
             assert_eq!(outcome, AttentionBudgetOutcome::SilentPassthrough);
         }
         // Agent budget count must remain 0.
@@ -371,9 +371,18 @@ mod tests {
 
         // Record warn_at-1 events — should all be Ok.
         for i in 0..(warn_at - 1) {
-            let outcome =
-                tracker.record("agent_a", "zone_high", InterruptionClass::Normal, i as u64 * 1_000);
-            assert_eq!(outcome, AttentionBudgetOutcome::Ok, "event {} should be Ok", i + 1);
+            let outcome = tracker.record(
+                "agent_a",
+                "zone_high",
+                InterruptionClass::Normal,
+                i as u64 * 1_000,
+            );
+            assert_eq!(
+                outcome,
+                AttentionBudgetOutcome::Ok,
+                "event {} should be Ok",
+                i + 1
+            );
         }
         // 16th event triggers agent-level warning.
         let outcome = tracker.record(
@@ -394,7 +403,12 @@ mod tests {
         let mut tracker = AttentionBudgetTracker::new();
         // Fill to limit.
         for i in 0..DEFAULT_AGENT_BUDGET {
-            tracker.record("agent_a", "zone_1", InterruptionClass::Normal, i as u64 * 1_000);
+            tracker.record(
+                "agent_a",
+                "zone_1",
+                InterruptionClass::Normal,
+                i as u64 * 1_000,
+            );
         }
         // Next event (21st) → exhausted.
         let outcome = tracker.record(
@@ -413,12 +427,16 @@ mod tests {
     fn critical_exempt_when_budget_exhausted() {
         let mut tracker = AttentionBudgetTracker::new();
         for i in 0..=DEFAULT_AGENT_BUDGET {
-            tracker.record("agent_a", "zone_1", InterruptionClass::Normal, i as u64 * 1_000);
+            tracker.record(
+                "agent_a",
+                "zone_1",
+                InterruptionClass::Normal,
+                i as u64 * 1_000,
+            );
         }
         assert!(tracker.is_agent_exhausted("agent_a"));
 
-        let outcome =
-            tracker.record("agent_a", "zone_1", InterruptionClass::Critical, 999_999);
+        let outcome = tracker.record("agent_a", "zone_1", InterruptionClass::Critical, 999_999);
         assert_eq!(outcome, AttentionBudgetOutcome::CriticalExempt);
     }
 
@@ -445,8 +463,12 @@ mod tests {
         // Note: cutoff uses saturating_sub so cutoff = 61_000_000 - 60_000_000 = 1_000_000.
         // Events at t=0 < cutoff=1_000_000 → expired.
         let now_recovered = 61_000_000u64;
-        let outcome =
-            tracker.record("agent_a", "zone_high", InterruptionClass::Normal, now_recovered);
+        let outcome = tracker.record(
+            "agent_a",
+            "zone_high",
+            InterruptionClass::Normal,
+            now_recovered,
+        );
         // Only 1 event in window now — under threshold.
         assert_eq!(outcome, AttentionBudgetOutcome::Ok);
     }
@@ -462,7 +484,12 @@ mod tests {
 
         // Fill zone budget (10 events).
         for i in 0..DEFAULT_ZONE_BUDGET {
-            tracker.record("agent_a", "zone_1", InterruptionClass::Normal, i as u64 * 1_000);
+            tracker.record(
+                "agent_a",
+                "zone_1",
+                InterruptionClass::Normal,
+                i as u64 * 1_000,
+            );
         }
         assert!(tracker.is_zone_exhausted("zone_1"));
     }
@@ -475,7 +502,12 @@ mod tests {
 
         // 30 events — should exhaust exactly at limit.
         for i in 0..DEFAULT_STACK_ZONE_BUDGET {
-            tracker.record("agent_a", "stack_zone", InterruptionClass::Normal, i as u64 * 1_000);
+            tracker.record(
+                "agent_a",
+                "stack_zone",
+                InterruptionClass::Normal,
+                i as u64 * 1_000,
+            );
         }
         assert!(tracker.is_zone_exhausted("stack_zone"));
     }
@@ -488,7 +520,12 @@ mod tests {
         let mut tracker = AttentionBudgetTracker::new();
         // Record 16 interruptions to put agent at warning level.
         for i in 0..16 {
-            tracker.record("agent_a", "zone_1", InterruptionClass::Normal, i as u64 * 1_000);
+            tracker.record(
+                "agent_a",
+                "zone_1",
+                InterruptionClass::Normal,
+                i as u64 * 1_000,
+            );
         }
         let evt = tracker.make_warning_event("agent_a", 16_000);
         assert!(

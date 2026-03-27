@@ -7,103 +7,133 @@
 //! All types are constructable, mutable, queryable, serializable,
 //! and assertable without any GPU context.
 
-pub mod clock;
-pub mod timing;
-pub mod types;
-pub mod graph;
-pub mod mutation;
-pub mod diff;
-pub mod validation;
-pub mod test_scenes;
-pub mod invariants;
 pub mod calibration;
-pub mod trace;
+pub mod clock;
+pub mod diff;
+pub mod graph;
+pub mod invariants;
+pub mod mutation;
 pub mod replay;
+pub mod test_scenes;
+pub mod timing;
+pub mod trace;
+pub mod types;
+pub mod validation;
 
 // ── v1 subsystem trait contracts ─────────────────────────────────────────────
+pub mod config;
+pub mod events;
 pub mod lease;
 pub mod policy;
-pub mod events;
 pub mod resource;
-pub mod config;
 
-pub use clock::{Clock, SimulatedClock, SystemClock, TestClock};
-pub use timing::{
-    ClockOffset, DurationUs, MonoUs, WallUs,
-    // TimingHints and supporting types
-    DeliveryPolicy, MessageClass, Schedule, TimingHints,
-    // Errors and warnings
-    TimingError, TimingWarning,
-    // Scheduling helpers
-    is_in_scope_for_frame, validate_timing_hints, TimestampValidationInput,
-    // Relative scheduling primitives (rig-wu3q)
-    resolve_after_us, resolve_frames_from_now, resolve_next_frame, resolve_schedule,
-    IntakeContext,
-    // Pending queue
-    PendingEntry, PendingQueue,
-    // Expiration heap
-    ExpirationEntry, ExpirationHeap,
-    // Staleness
-    TileStaleness,
-    // Drift detection / ClockSync
-    handle_clock_sync, ClockDriftEstimator, ClockSyncRequest, ClockSyncResponse,
-    SessionClockSync, VsyncSyncPoint,
-    // Timing configuration
-    TimingConfig, TimingConfigError,
-    // Sync group coordination (rig-cruk)
-    CommitDecision, FrameSyncDriftRecord, OrphanReason, SyncDriftHighAlert, SyncGroupArrival,
-    SyncGroupEvent, SyncGroupOrphanState, TileArrival, DEFAULT_SYNC_DRIFT_BUDGET_US,
-    ORPHAN_GRACE_PERIOD_US, apply_decision, check_sync_group_ownership, compute_spread,
-    evaluate_commit, evaluate_frame_drift,
+pub use calibration::{
+    CalibrationResult, current_calibration, current_calibration_with_gpu, gpu_scaled_budget,
+    scaled_budget, set_gpu_factors, test_budget, texture_upload_scaled_budget,
 };
-pub use types::*;
+pub use clock::{Clock, SimulatedClock, SystemClock, TestClock};
+pub use diff::{DiffEntry, SceneDiff};
 pub use graph::{
-    SceneGraph, SyncGroupCommitDecision,
+    MAX_MARKDOWN_BYTES,
+    MAX_NODES_PER_TILE,
+    MAX_TAB_NAME_BYTES,
     // RFC 0001 §2.1 scene-level capacity constants
-    MAX_TABS, MAX_TILES_PER_TAB, MAX_NODES_PER_TILE, MAX_TAB_NAME_BYTES, MAX_MARKDOWN_BYTES,
+    MAX_TABS,
+    MAX_TILES_PER_TAB,
+    SceneGraph,
+    SyncGroupCommitDecision,
     // RFC 0001 §2.3 zone band reservation
     ZONE_TILE_Z_MIN,
     // Node data validation
     validate_text_markdown_node_data,
 };
-pub use mutation::{BatchTimingHints, MutationBatch, MutationResult, SceneMutation, MAX_BATCH_SIZE};
 /// Backward-compatible re-export alias for [`BatchTimingHints`].
 pub use mutation::BatchTimingHints as MutationTimingHints;
-pub use diff::{SceneDiff, DiffEntry};
-pub use validation::{
-    BatchRejected, BatchValidationError, ValidationError, ValidationErrorCode,
+pub use mutation::{
+    BatchTimingHints, MAX_BATCH_SIZE, MutationBatch, MutationResult, SceneMutation,
 };
 pub use test_scenes::{
-    ClockMs, SceneSpec, TestSceneRegistry, InvariantViolation, SceneGraphTestExt,
+    ClockMs, InvariantViolation, SceneGraphTestExt, SceneSpec, TestSceneRegistry,
     assert_layer0_invariants,
 };
-pub use calibration::{
-    test_budget, current_calibration, current_calibration_with_gpu, set_gpu_factors,
-    scaled_budget, gpu_scaled_budget, texture_upload_scaled_budget,
-    CalibrationResult,
+pub use timing::{
+    ClockDriftEstimator,
+    ClockOffset,
+    ClockSyncRequest,
+    ClockSyncResponse,
+    // Sync group coordination (rig-cruk)
+    CommitDecision,
+    DEFAULT_SYNC_DRIFT_BUDGET_US,
+    // TimingHints and supporting types
+    DeliveryPolicy,
+    DurationUs,
+    // Expiration heap
+    ExpirationEntry,
+    ExpirationHeap,
+    FrameSyncDriftRecord,
+    IntakeContext,
+    MessageClass,
+    MonoUs,
+    ORPHAN_GRACE_PERIOD_US,
+    OrphanReason,
+    // Pending queue
+    PendingEntry,
+    PendingQueue,
+    Schedule,
+    SessionClockSync,
+    SyncDriftHighAlert,
+    SyncGroupArrival,
+    SyncGroupEvent,
+    SyncGroupOrphanState,
+    TileArrival,
+    // Staleness
+    TileStaleness,
+    TimestampValidationInput,
+    // Timing configuration
+    TimingConfig,
+    TimingConfigError,
+    // Errors and warnings
+    TimingError,
+    TimingHints,
+    TimingWarning,
+    VsyncSyncPoint,
+    WallUs,
+    apply_decision,
+    check_sync_group_ownership,
+    compute_spread,
+    evaluate_commit,
+    evaluate_frame_drift,
+    // Drift detection / ClockSync
+    handle_clock_sync,
+    // Scheduling helpers
+    is_in_scope_for_frame,
+    // Relative scheduling primitives (rig-wu3q)
+    resolve_after_us,
+    resolve_frames_from_now,
+    resolve_next_frame,
+    resolve_schedule,
+    validate_timing_hints,
 };
+pub use types::*;
+pub use validation::{BatchRejected, BatchValidationError, ValidationError, ValidationErrorCode};
 
 // ── Lease governance public API ───────────────────────────────────────────────
-pub use lease::priority::{
-    clamp_requested_priority, shed_count_for_level4, shedding_order,
-    TileSortKey, TileSheddingEntry,
-    PRIORITY_DEFAULT, PRIORITY_HIGH, PRIORITY_SYSTEM,
-};
 pub use lease::capability::{
-    check_zone_publish, has_publish_zone_capability, should_clear_on_revoke,
-    ZonePublishError,
-    CapabilityRevocationError, revoke_capability_from_lease,
+    CapabilityRevocationError, ZonePublishError, check_zone_publish, has_publish_zone_capability,
+    revoke_capability_from_lease, should_clear_on_revoke,
 };
 pub use lease::degradation::{
-    DegradationLevel, DegradationTracker, FrameTimeWindow,
-    ENTRY_THRESHOLD_MS, ENTRY_WINDOW_FRAMES,
+    DegradationLevel, DegradationTracker, ENTRY_THRESHOLD_MS, ENTRY_WINDOW_FRAMES, FrameTimeWindow,
     RECOVERY_THRESHOLD_MS, RECOVERY_WINDOW_FRAMES,
+};
+pub use lease::priority::{
+    PRIORITY_DEFAULT, PRIORITY_HIGH, PRIORITY_SYSTEM, TileSheddingEntry, TileSortKey,
+    clamp_requested_priority, shed_count_for_level4, shedding_order,
 };
 
 // ── Record/Replay Trace harness ───────────────────────────────────────────────
-pub use trace::{
-    ReplayResult, ReplayStepOutcome,
-    SceneTrace, TraceEvent, TraceEventKind, TraceHeader, TraceTimestamp,
-    TracedAgentEvent, TracedInputEvent, TracedZonePublish,
-};
 pub use replay::{TraceReplayer, assert_trace_is_deterministic};
+pub use trace::{
+    ReplayResult, ReplayStepOutcome, SceneTrace, TraceEvent, TraceEventKind, TraceHeader,
+    TraceTimestamp, TracedAgentEvent, TracedInputEvent, TracedZonePublish,
+};

@@ -167,7 +167,12 @@ mod tests {
         let mut tracker = EarnedUrgencyTracker::new(); // threshold=4
         for i in 0..4 {
             let result = tracker.record_high_event("agent_a", i * 1_000_000);
-            assert_eq!(result, UrgencyRecord::Ok, "event {} should be under threshold", i);
+            assert_eq!(
+                result,
+                UrgencyRecord::Ok,
+                "event {} should be under threshold",
+                i
+            );
         }
         // 4 events, threshold is 4 — still Ok (needs > 4 to warn).
         assert_eq!(tracker.high_count("agent_a"), 4);
@@ -208,9 +213,17 @@ mod tests {
         let now = 61_000_000;
         let result = tracker.record_high_event("agent_a", now);
         // Only 1 event in window now — under threshold.
-        assert_eq!(result, UrgencyRecord::Ok, "after expiry, single new event should be Ok");
+        assert_eq!(
+            result,
+            UrgencyRecord::Ok,
+            "after expiry, single new event should be Ok"
+        );
         // After the fresh record, the window contains only the one fresh event.
-        assert_eq!(tracker.high_count("agent_a"), 1, "only the fresh event should remain");
+        assert_eq!(
+            tracker.high_count("agent_a"),
+            1,
+            "only the fresh event should remain"
+        );
     }
 
     /// Events exactly at window boundary are included.

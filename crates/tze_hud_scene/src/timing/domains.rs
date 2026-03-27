@@ -54,8 +54,9 @@ use serde::{Deserialize, Serialize};
 /// let wall: WallUs = WallUs(1_000_000);
 /// let mono: MonoUs = wall; // ERROR: mismatched types
 /// ```
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
-         Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[repr(transparent)]
 pub struct WallUs(pub u64);
 
@@ -128,8 +129,9 @@ impl std::fmt::Display for WallUs {
 /// let mono: MonoUs = MonoUs(5_000_000);
 /// let wall: WallUs = mono; // ERROR: mismatched types
 /// ```
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
-         Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[repr(transparent)]
 pub struct MonoUs(pub u64);
 
@@ -184,8 +186,9 @@ impl std::fmt::Display for MonoUs {
 /// absolute point in time.  Such fields MUST NOT carry a `_wall_us` or
 /// `_mono_us` suffix; they use a plain unit description (e.g. `after_us`,
 /// `duration_us`, `ttl_us`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
-         Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[repr(transparent)]
 pub struct DurationUs(pub u64);
 

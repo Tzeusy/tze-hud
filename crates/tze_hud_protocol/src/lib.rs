@@ -4,14 +4,14 @@
 //! and client helpers for agent communication.
 
 pub mod auth;
+pub mod convert;
+pub mod dedup;
+pub mod lease;
 pub mod mcp_bridge;
 pub mod session;
-pub mod convert;
 pub mod session_server;
-pub mod token;
-pub mod dedup;
 pub mod subscriptions;
-pub mod lease;
+pub mod token;
 
 /// Generated protobuf types and gRPC service definitions.
 ///

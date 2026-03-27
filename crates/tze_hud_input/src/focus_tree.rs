@@ -36,10 +36,7 @@ pub enum FocusOwner {
     /// A tile holds focus at tile level (no focusable HitRegionNode).
     Tile(SceneId),
     /// A specific HitRegionNode within a tile holds focus.
-    Node {
-        tile_id: SceneId,
-        node_id: SceneId,
-    },
+    Node { tile_id: SceneId, node_id: SceneId },
 }
 
 impl FocusOwner {
@@ -197,13 +194,25 @@ mod tests {
         let n1 = make_id();
         let n2 = make_id();
 
-        tree.set_focus(FocusOwner::Node { tile_id: t1, node_id: n1 });
-        tree.set_focus(FocusOwner::Node { tile_id: t2, node_id: n2 });
+        tree.set_focus(FocusOwner::Node {
+            tile_id: t1,
+            node_id: n1,
+        });
+        tree.set_focus(FocusOwner::Node {
+            tile_id: t2,
+            node_id: n2,
+        });
         tree.set_focus(FocusOwner::Tile(t2)); // second t2 entry
 
         // Destroy t2; fallback should skip both t2 entries and return t1/n1.
         let fallback = tree.pop_fallback(t2);
-        assert_eq!(fallback, FocusOwner::Node { tile_id: t1, node_id: n1 });
+        assert_eq!(
+            fallback,
+            FocusOwner::Node {
+                tile_id: t1,
+                node_id: n1
+            }
+        );
     }
 
     #[test]
@@ -212,7 +221,10 @@ mod tests {
         let t1 = make_id();
         let n1 = make_id();
 
-        tree.set_focus(FocusOwner::Node { tile_id: t1, node_id: n1 });
+        tree.set_focus(FocusOwner::Node {
+            tile_id: t1,
+            node_id: n1,
+        });
         tree.set_focus(FocusOwner::Tile(t1));
 
         let fallback = tree.pop_fallback(t1);
@@ -226,7 +238,10 @@ mod tests {
         let t2 = make_id();
         let n1 = make_id();
 
-        tree.set_focus(FocusOwner::Node { tile_id: t1, node_id: n1 });
+        tree.set_focus(FocusOwner::Node {
+            tile_id: t1,
+            node_id: n1,
+        });
         tree.set_focus(FocusOwner::Tile(t2));
 
         tree.remove_from_history(t1);
@@ -240,6 +255,13 @@ mod tests {
         let n = make_id();
         assert_eq!(FocusOwner::None.tile_id(), None);
         assert_eq!(FocusOwner::Tile(t).tile_id(), Some(t));
-        assert_eq!(FocusOwner::Node { tile_id: t, node_id: n }.tile_id(), Some(t));
+        assert_eq!(
+            FocusOwner::Node {
+                tile_id: t,
+                node_id: n
+            }
+            .tile_id(),
+            Some(t)
+        );
     }
 }

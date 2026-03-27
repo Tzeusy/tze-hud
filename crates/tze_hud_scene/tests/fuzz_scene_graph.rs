@@ -26,7 +26,7 @@
 use proptest::prelude::*;
 use tze_hud_scene::{
     graph::SceneGraph,
-    mutation::{MutationBatch, SceneMutation, MAX_BATCH_SIZE},
+    mutation::{MAX_BATCH_SIZE, MutationBatch, SceneMutation},
     test_scenes::assert_layer0_invariants,
     types::{
         Capability, FontFamily, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
@@ -159,12 +159,20 @@ impl Oracle {
 
     /// Pick a random tab id, or None if no tabs exist.
     fn random_tab(&self, idx: usize) -> Option<SceneId> {
-        if self.tab_ids.is_empty() { None } else { Some(self.tab_ids[idx % self.tab_ids.len()]) }
+        if self.tab_ids.is_empty() {
+            None
+        } else {
+            Some(self.tab_ids[idx % self.tab_ids.len()])
+        }
     }
 
     /// Pick a random tile id, or None if no tiles exist.
     fn random_tile(&self, idx: usize) -> Option<SceneId> {
-        if self.tile_ids.is_empty() { None } else { Some(self.tile_ids[idx % self.tile_ids.len()]) }
+        if self.tile_ids.is_empty() {
+            None
+        } else {
+            Some(self.tile_ids[idx % self.tile_ids.len()])
+        }
     }
 
     /// Pick a random lease id, or None if no leases exist.
@@ -193,12 +201,16 @@ fn run_fuzz_sequence(ops: &[FuzzOp]) {
     let mut oracle = Oracle::new();
 
     // Pre-populate with one lease and one tab so early operations have targets.
-    let initial_lease = graph.grant_lease(AGENT, 300_000, vec![
-        Capability::CreateTile,
-        Capability::CreateNode,
-        Capability::ManageTabs,
-        Capability::ModifyOwnTiles,
-    ]);
+    let initial_lease = graph.grant_lease(
+        AGENT,
+        300_000,
+        vec![
+            Capability::CreateTile,
+            Capability::CreateNode,
+            Capability::ManageTabs,
+            Capability::ModifyOwnTiles,
+        ],
+    );
     oracle.lease_ids.push(initial_lease);
 
     let initial_tab = graph.create_tab("FuzzTab", 0).unwrap();
@@ -218,7 +230,10 @@ fn run_fuzz_sequence(ops: &[FuzzOp]) {
 
 fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: usize) {
     match op {
-        FuzzOp::CreateTab { name, display_order } => {
+        FuzzOp::CreateTab {
+            name,
+            display_order,
+        } => {
             if oracle.tab_ids.len() < 10 {
                 match graph.create_tab(name, *display_order) {
                     Ok(id) => oracle.tab_ids.push(id),
@@ -232,8 +247,12 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
                 if graph.delete_tab(tab_id).is_ok() {
                     oracle.tab_ids.retain(|&id| id != tab_id);
                     // Tiles in this tab were also deleted.
-                    oracle.tile_ids.retain(|&tile_id| graph.tiles.contains_key(&tile_id));
-                    oracle.node_ids.retain(|&node_id| graph.nodes.contains_key(&node_id));
+                    oracle
+                        .tile_ids
+                        .retain(|&tile_id| graph.tiles.contains_key(&tile_id));
+                    oracle
+                        .node_ids
+                        .retain(|&node_id| graph.nodes.contains_key(&node_id));
                 }
             }
         }
@@ -268,7 +287,9 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
             if let Some(tile_id) = oracle.random_tile(idx) {
                 if graph.delete_tile(tile_id, AGENT).is_ok() {
                     oracle.tile_ids.retain(|&id| id != tile_id);
-                    oracle.node_ids.retain(|&node_id| graph.nodes.contains_key(&node_id));
+                    oracle
+                        .node_ids
+                        .retain(|&node_id| graph.nodes.contains_key(&node_id));
                 }
             }
         }
@@ -313,7 +334,10 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
 
         FuzzOp::SetTileRoot { node } => {
             if let Some(tile_id) = oracle.random_tile(idx) {
-                let fresh_node = Node { id: SceneId::new(), ..node.clone() };
+                let fresh_node = Node {
+                    id: SceneId::new(),
+                    ..node.clone()
+                };
                 if graph.set_tile_root(tile_id, fresh_node.clone()).is_ok() {
                     oracle.node_ids.push(fresh_node.id);
                 }
@@ -322,8 +346,14 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
 
         FuzzOp::AddNode { node } => {
             if let Some(tile_id) = oracle.random_tile(idx) {
-                let fresh_node = Node { id: SceneId::new(), ..node.clone() };
-                if graph.add_node_to_tile(tile_id, None, fresh_node.clone()).is_ok() {
+                let fresh_node = Node {
+                    id: SceneId::new(),
+                    ..node.clone()
+                };
+                if graph
+                    .add_node_to_tile(tile_id, None, fresh_node.clone())
+                    .is_ok()
+                {
                     oracle.node_ids.push(fresh_node.id);
                 }
             }
@@ -331,11 +361,15 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
 
         FuzzOp::GrantLease => {
             if oracle.lease_ids.len() < 5 {
-                let id = graph.grant_lease(AGENT, 300_000, vec![
-                    Capability::CreateTile,
-                    Capability::CreateNode,
-                    Capability::ModifyOwnTiles,
-                ]);
+                let id = graph.grant_lease(
+                    AGENT,
+                    300_000,
+                    vec![
+                        Capability::CreateTile,
+                        Capability::CreateNode,
+                        Capability::ModifyOwnTiles,
+                    ],
+                );
                 oracle.lease_ids.push(id);
             }
         }
@@ -346,8 +380,12 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
                     if graph.revoke_lease(lease_id).is_ok() {
                         oracle.lease_ids.retain(|&id| id != lease_id);
                         // Revoking removes tiles owned by that lease.
-                        oracle.tile_ids.retain(|&tile_id| graph.tiles.contains_key(&tile_id));
-                        oracle.node_ids.retain(|&node_id| graph.nodes.contains_key(&node_id));
+                        oracle
+                            .tile_ids
+                            .retain(|&tile_id| graph.tiles.contains_key(&tile_id));
+                        oracle
+                            .node_ids
+                            .retain(|&node_id| graph.nodes.contains_key(&node_id));
                     }
                 }
             }
@@ -671,11 +709,15 @@ proptest! {
 fn test_100k_deterministic_tile_mutations() {
     let mut graph = SceneGraph::new(1920.0, 1080.0);
     let tab = graph.create_tab("Main", 0).unwrap();
-    let lease = graph.grant_lease("load.agent", 300_000, vec![
-        Capability::CreateTile,
-        Capability::CreateNode,
-        Capability::ModifyOwnTiles,
-    ]);
+    let lease = graph.grant_lease(
+        "load.agent",
+        300_000,
+        vec![
+            Capability::CreateTile,
+            Capability::CreateNode,
+            Capability::ModifyOwnTiles,
+        ],
+    );
 
     // Use a fixed pool of tile IDs — create 8 tiles then rotate through updates/deletes.
     let mut live_tiles: std::collections::VecDeque<SceneId> = std::collections::VecDeque::new();
@@ -744,7 +786,10 @@ fn test_100k_deterministic_tile_mutations() {
 
     // Final invariant check
     let violations = assert_layer0_invariants(&graph);
-    assert!(violations.is_empty(), "Layer 0 violations at end of 100k test: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations at end of 100k test: {violations:?}"
+    );
 
     // Clean up all remaining tiles
     let remaining: Vec<SceneId> = live_tiles.into_iter().collect();
@@ -762,10 +807,11 @@ fn test_100k_deterministic_tile_mutations() {
 fn test_invalid_opacity_rejected() {
     let mut graph = SceneGraph::new(1920.0, 1080.0);
     let tab = graph.create_tab("Tab", 0).unwrap();
-    let lease = graph.grant_lease(AGENT, 300_000, vec![
-        Capability::CreateTile,
-        Capability::ModifyOwnTiles,
-    ]);
+    let lease = graph.grant_lease(
+        AGENT,
+        300_000,
+        vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+    );
     let tile_id = graph
         .create_tile(tab, AGENT, lease, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
         .unwrap();
@@ -783,7 +829,10 @@ fn test_invalid_opacity_rejected() {
     assert!(result.is_ok(), "valid opacity must be accepted");
 
     let violations = assert_layer0_invariants(&graph);
-    assert!(violations.is_empty(), "Layer 0 violations after opacity tests: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after opacity tests: {violations:?}"
+    );
 }
 
 /// Empty tab name must be rejected (RFC 0001 §2.2).
@@ -801,7 +850,10 @@ fn test_oversized_tab_name_rejected() {
     let mut graph = SceneGraph::new(1920.0, 1080.0);
     let long_name = "x".repeat(MAX_TAB_NAME_BYTES + 1);
     let result = graph.create_tab(&long_name, 0);
-    assert!(result.is_err(), "tab name > MAX_TAB_NAME_BYTES must be rejected");
+    assert!(
+        result.is_err(),
+        "tab name > MAX_TAB_NAME_BYTES must be rejected"
+    );
 }
 
 /// TextMarkdown content exceeding MAX_MARKDOWN_BYTES must be rejected.
@@ -810,30 +862,37 @@ fn test_oversized_markdown_content_rejected() {
     use tze_hud_scene::graph::MAX_MARKDOWN_BYTES;
     let mut graph = SceneGraph::new(1920.0, 1080.0);
     let tab = graph.create_tab("Tab", 0).unwrap();
-    let lease = graph.grant_lease(AGENT, 300_000, vec![
-        Capability::CreateTile,
-        Capability::CreateNode,
-    ]);
+    let lease = graph.grant_lease(
+        AGENT,
+        300_000,
+        vec![Capability::CreateTile, Capability::CreateNode],
+    );
     let tile_id = graph
         .create_tile(tab, AGENT, lease, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
         .unwrap();
 
     let huge_content = "x".repeat(MAX_MARKDOWN_BYTES + 1);
-    let result = graph.set_tile_root(tile_id, Node {
-        id: SceneId::new(),
-        children: vec![],
-        data: NodeData::TextMarkdown(TextMarkdownNode {
-            content: huge_content,
-            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-            font_size_px: 14.0,
-            font_family: FontFamily::SystemSansSerif,
-            color: Rgba::WHITE,
-            background: None,
-            alignment: TextAlign::Start,
-            overflow: TextOverflow::Clip,
-        }),
-    });
-    assert!(result.is_err(), "oversized markdown content must be rejected");
+    let result = graph.set_tile_root(
+        tile_id,
+        Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: huge_content,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba::WHITE,
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        },
+    );
+    assert!(
+        result.is_err(),
+        "oversized markdown content must be rejected"
+    );
 }
 
 /// MAX_TABS limit must be enforced.
@@ -849,10 +908,16 @@ fn test_max_tabs_limit_enforced() {
 
     // One more must fail.
     let result = graph.create_tab("Overflow", MAX_TABS as u32);
-    assert!(result.is_err(), "tab creation beyond MAX_TABS must be rejected");
+    assert!(
+        result.is_err(),
+        "tab creation beyond MAX_TABS must be rejected"
+    );
 
     let violations = assert_layer0_invariants(&graph);
-    assert!(violations.is_empty(), "Layer 0 violations at max tabs: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations at max tabs: {violations:?}"
+    );
 }
 
 /// Z-order in the zone-reserved range must be rejected for agent-created tiles.
@@ -863,9 +928,27 @@ fn test_zone_reserved_z_order_rejected() {
     let tab = graph.create_tab("Tab", 0).unwrap();
     let lease = graph.grant_lease(AGENT, 300_000, vec![Capability::CreateTile]);
 
-    let result = graph.create_tile(tab, AGENT, lease, Rect::new(0.0, 0.0, 100.0, 100.0), ZONE_TILE_Z_MIN);
-    assert!(result.is_err(), "z_order at ZONE_TILE_Z_MIN must be rejected");
+    let result = graph.create_tile(
+        tab,
+        AGENT,
+        lease,
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        ZONE_TILE_Z_MIN,
+    );
+    assert!(
+        result.is_err(),
+        "z_order at ZONE_TILE_Z_MIN must be rejected"
+    );
 
-    let result = graph.create_tile(tab, AGENT, lease, Rect::new(0.0, 0.0, 100.0, 100.0), u32::MAX);
-    assert!(result.is_err(), "z_order=u32::MAX must be rejected (zone-reserved range)");
+    let result = graph.create_tile(
+        tab,
+        AGENT,
+        lease,
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        u32::MAX,
+    );
+    assert!(
+        result.is_err(),
+        "z_order=u32::MAX must be rejected (zone-reserved range)"
+    );
 }

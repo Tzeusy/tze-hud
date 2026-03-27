@@ -85,12 +85,7 @@ pub fn compute_phash(rgba: &[u8], width: u32, height: u32) -> PHash {
 }
 
 /// Compare two images by perceptual hash and decide whether to proceed with SSIM.
-pub fn pre_screen(
-    src_rgba: &[u8],
-    ref_rgba: &[u8],
-    width: u32,
-    height: u32,
-) -> PreScreenResult {
+pub fn pre_screen(src_rgba: &[u8], ref_rgba: &[u8], width: u32, height: u32) -> PreScreenResult {
     let src_hash = compute_phash(src_rgba, width, height);
     let ref_hash = compute_phash(ref_rgba, width, height);
 

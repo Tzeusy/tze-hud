@@ -1,24 +1,53 @@
 //! Scene diff computation — detect what changed between two scene versions.
 
-use crate::types::*;
 use crate::graph::SceneGraph;
+use crate::types::*;
 use serde::{Deserialize, Serialize};
 
 /// A diff entry describing a single change.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum DiffEntry {
-    TabAdded { id: SceneId },
-    TabRemoved { id: SceneId },
-    TileAdded { id: SceneId },
-    TileRemoved { id: SceneId },
-    TileBoundsChanged { id: SceneId, old: Rect, new: Rect },
-    TileZOrderChanged { id: SceneId, old: u32, new: u32 },
-    NodeAdded { id: SceneId },
-    NodeRemoved { id: SceneId },
-    NodeDataChanged { id: SceneId },
-    ActiveTabChanged { old: Option<SceneId>, new: Option<SceneId> },
-    LeaseAdded { id: SceneId },
-    LeaseRemoved { id: SceneId },
+    TabAdded {
+        id: SceneId,
+    },
+    TabRemoved {
+        id: SceneId,
+    },
+    TileAdded {
+        id: SceneId,
+    },
+    TileRemoved {
+        id: SceneId,
+    },
+    TileBoundsChanged {
+        id: SceneId,
+        old: Rect,
+        new: Rect,
+    },
+    TileZOrderChanged {
+        id: SceneId,
+        old: u32,
+        new: u32,
+    },
+    NodeAdded {
+        id: SceneId,
+    },
+    NodeRemoved {
+        id: SceneId,
+    },
+    NodeDataChanged {
+        id: SceneId,
+    },
+    ActiveTabChanged {
+        old: Option<SceneId>,
+        new: Option<SceneId>,
+    },
+    LeaseAdded {
+        id: SceneId,
+    },
+    LeaseRemoved {
+        id: SceneId,
+    },
 }
 
 /// A complete diff between two scene graph states.
@@ -134,12 +163,22 @@ mod tests {
         let scene_before = scene1.clone();
 
         scene1
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         let diff = SceneDiff::compute(&scene_before, &scene1);
         assert!(!diff.is_empty());
-        assert!(diff.entries.iter().any(|e| matches!(e, DiffEntry::TileAdded { .. })));
+        assert!(
+            diff.entries
+                .iter()
+                .any(|e| matches!(e, DiffEntry::TileAdded { .. }))
+        );
     }
 
     #[test]

@@ -73,7 +73,11 @@ impl ViewerClass {
 
     /// Most restrictive of two viewer classes (spec §2.2).
     pub fn most_restrictive(a: ViewerClass, b: ViewerClass) -> ViewerClass {
-        if a.restriction_level() >= b.restriction_level() { a } else { b }
+        if a.restriction_level() >= b.restriction_level() {
+            a
+        } else {
+            b
+        }
     }
 }
 

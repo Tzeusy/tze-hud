@@ -37,14 +37,9 @@ use tze_hud_scene::{
 // call copy_to_buffer; only compositor.render_frame_headless() does.
 // Layer 2 tests need actual pixel data, so we go through the compositor directly.
 use tze_hud_validation::{
-    Layer2Validator, TestType,
-    SSIM_THRESHOLD_LAYOUT, SSIM_THRESHOLD_MEDIA,
-    compute_ssim, pre_screen,
-    generate_heatmap, encode_heatmap_png,
-    SsimFailureRecord,
-    ValidationError,
-    GoldenStore,
-    BACKEND_SOFTWARE,
+    BACKEND_SOFTWARE, GoldenStore, Layer2Validator, SSIM_THRESHOLD_LAYOUT, SSIM_THRESHOLD_MEDIA,
+    SsimFailureRecord, TestType, ValidationError, compute_ssim, encode_heatmap_png,
+    generate_heatmap, pre_screen,
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -54,8 +49,14 @@ fn solid_color_scene(w: f32, h: f32, color: Rgba) -> SceneGraph {
     use tze_hud_scene::types::{Node, NodeData, SceneId};
     let mut g = SceneGraph::new(w, h);
     let tab = g.create_tab("Main", 0).unwrap();
-    let lease = g.grant_lease("agent.test", 600_000, vec![Capability::CreateTile, Capability::CreateNode]);
-    let tile = g.create_tile(tab, "agent.test", lease, Rect::new(0.0, 0.0, w, h), 0).unwrap();
+    let lease = g.grant_lease(
+        "agent.test",
+        600_000,
+        vec![Capability::CreateTile, Capability::CreateNode],
+    );
+    let tile = g
+        .create_tile(tab, "agent.test", lease, Rect::new(0.0, 0.0, w, h), 0)
+        .unwrap();
     let node = Node {
         id: SceneId::new(),
         children: vec![],
@@ -74,7 +75,8 @@ fn solid_color_scene(w: f32, h: f32, color: Rgba) -> SceneGraph {
 /// is called within the same command encoder as the render pass, making
 /// `surface.read_pixels()` return the current frame's actual pixel data.
 async fn render_scene(scene: SceneGraph, w: u32, h: u32) -> Vec<u8> {
-    let mut compositor = Compositor::new_headless(w, h).await
+    let mut compositor = Compositor::new_headless(w, h)
+        .await
         .expect("headless compositor");
     let surface = HeadlessSurface::new(&compositor.device, w, h);
     compositor.render_frame_headless(&scene, &surface);
@@ -87,8 +89,8 @@ fn temp_golden_dir() -> (PathBuf, GoldenStore) {
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join(format!("tze_hud_l2_headless_{}_{}", std::process::id(), n));
+    let dir =
+        std::env::temp_dir().join(format!("tze_hud_l2_headless_{}_{}", std::process::id(), n));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let store = GoldenStore::new(&dir);
@@ -139,7 +141,11 @@ async fn rendered_frame_self_ssim_is_one() {
     let scene = solid_color_scene(w as f32, h as f32, Rgba::new(0.78, 0.39, 0.20, 1.0));
     let pixels = render_scene(scene, w, h).await;
 
-    assert_eq!(pixels.len(), (w * h * 4) as usize, "pixel buffer must be correct size");
+    assert_eq!(
+        pixels.len(),
+        (w * h * 4) as usize,
+        "pixel buffer must be correct size"
+    );
 
     let result = compute_ssim(&pixels, &pixels, w, h);
     assert!(
@@ -216,18 +222,30 @@ async fn failure_output_has_required_fields() {
 
     // 3. Diff heatmap: generate and verify it encodes as PNG.
     let heatmap = generate_heatmap(&white_pixels, &black_pixels, w, h);
-    assert_eq!(heatmap.len(), (w * h * 4) as usize, "heatmap must match input size");
-    let png = encode_heatmap_png(&heatmap, w, h)
-        .expect("heatmap must encode as PNG");
+    assert_eq!(
+        heatmap.len(),
+        (w * h * 4) as usize,
+        "heatmap must match input size"
+    );
+    let png = encode_heatmap_png(&heatmap, w, h).expect("heatmap must encode as PNG");
     assert!(png.len() > 0, "heatmap PNG must not be empty");
     assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "heatmap must be valid PNG");
 
     // 4. JSON failure details: spec requires structured JSON.
     let json = record.to_json();
-    assert!(json.contains("\"scene_name\""), "JSON must include scene_name");
+    assert!(
+        json.contains("\"scene_name\""),
+        "JSON must include scene_name"
+    );
     assert!(json.contains("\"backend\""), "JSON must include backend");
-    assert!(json.contains("\"threshold\""), "JSON must include threshold");
-    assert!(json.contains("\"actual_ssim\""), "JSON must include actual_ssim");
+    assert!(
+        json.contains("\"threshold\""),
+        "JSON must include threshold"
+    );
+    assert!(
+        json.contains("\"actual_ssim\""),
+        "JSON must include actual_ssim"
+    );
     assert!(json.contains("\"regions\""), "JSON must include regions");
     assert!(json.contains("\"delta\""), "JSON must include delta");
     assert!(json.contains("\"passed\""), "JSON must include passed");
@@ -256,18 +274,25 @@ async fn golden_update_then_compare_passes() {
     let (dir, store) = temp_golden_dir();
 
     // Naming convention: {scene_name}_{backend}.png
-    let path = store.update("test_golden_scene", BACKEND_SOFTWARE, &pixels, w, h)
+    let path = store
+        .update("test_golden_scene", BACKEND_SOFTWARE, &pixels, w, h)
         .expect("golden update must succeed");
     assert!(
-        path.file_name().unwrap().to_str().unwrap()
-            == "test_golden_scene_software.png",
+        path.file_name().unwrap().to_str().unwrap() == "test_golden_scene_software.png",
         "golden file must follow naming convention {{scene_name}}_{{backend}}.png"
     );
 
     // Load and compare against same pixels → must pass.
     let validator = Layer2Validator::new(&dir);
     let outcome = validator
-        .compare("test_golden_scene", BACKEND_SOFTWARE, TestType::Layout, &pixels, w, h)
+        .compare(
+            "test_golden_scene",
+            BACKEND_SOFTWARE,
+            TestType::Layout,
+            &pixels,
+            w,
+            h,
+        )
         .expect("identical rendered vs golden must pass");
     assert!(outcome.passed);
 
@@ -337,7 +362,9 @@ async fn layer2_validator_regression_returns_structured_error() {
     let golden_pixels = render_scene(golden_scene, w, h).await;
 
     let (dir, store) = temp_golden_dir();
-    store.update("regression_scene", BACKEND_SOFTWARE, &golden_pixels, w, h).unwrap();
+    store
+        .update("regression_scene", BACKEND_SOFTWARE, &golden_pixels, w, h)
+        .unwrap();
 
     let different_scene = solid_color_scene(w as f32, h as f32, Rgba::WHITE);
     let different_pixels = render_scene(different_scene, w, h).await;
@@ -358,9 +385,14 @@ async fn layer2_validator_regression_returns_structured_error() {
         Ok(outcome) => {
             assert!(!outcome.passed, "black vs white must fail SSIM regression");
             assert_eq!(outcome.record.scene_name, "regression_scene");
-            assert!(outcome.record.actual_ssim < outcome.record.threshold,
-                "actual SSIM must be below threshold");
-            assert!(outcome.record.delta < 0.0, "delta must be negative when failing");
+            assert!(
+                outcome.record.actual_ssim < outcome.record.threshold,
+                "actual SSIM must be below threshold"
+            );
+            assert!(
+                outcome.record.delta < 0.0,
+                "delta must be negative when failing"
+            );
         }
         Err(e) => panic!("expected Ok(failed outcome), got Err: {:?}", e),
     }

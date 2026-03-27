@@ -25,7 +25,7 @@
 //! All checks are pure functions: no GPU, no rendering, no I/O.
 //! The full suite must run in <2 seconds on CI.
 
-use crate::graph::{SceneGraph, ZONE_TILE_Z_MIN, MAX_TABS, MAX_TILES_PER_TAB, MAX_NODES_PER_TILE};
+use crate::graph::{MAX_NODES_PER_TILE, MAX_TABS, MAX_TILES_PER_TAB, SceneGraph, ZONE_TILE_Z_MIN};
 use crate::mutation::MAX_BATCH_SIZE;
 use crate::types::{InputMode, LeaseState, NodeData, SceneId};
 use std::collections::{HashMap, HashSet};
@@ -48,7 +48,10 @@ pub struct InvariantViolation {
 
 impl InvariantViolation {
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -269,7 +272,10 @@ pub fn check_node_acyclic(graph: &SceneGraph) -> Vec<InvariantViolation> {
         if has_cycle(node_id, graph, &mut path, &mut visited_global) {
             violations.push(InvariantViolation::new(
                 "node_cycle_detected",
-                format!("cycle detected in node graph starting from node {}", node_id),
+                format!(
+                    "cycle detected in node graph starting from node {}",
+                    node_id
+                ),
             ));
             // Only report once per cycle entry to keep output manageable.
         }
@@ -286,7 +292,10 @@ pub fn check_tile_tab_refs(graph: &SceneGraph) -> Vec<InvariantViolation> {
         .map(|t| {
             InvariantViolation::new(
                 "orphan_tile_tab",
-                format!("tile {} references tab {} which does not exist", t.id, t.tab_id),
+                format!(
+                    "tile {} references tab {} which does not exist",
+                    t.id, t.tab_id
+                ),
             )
         })
         .collect()
@@ -301,7 +310,10 @@ pub fn check_tile_lease_refs(graph: &SceneGraph) -> Vec<InvariantViolation> {
         .map(|t| {
             InvariantViolation::new(
                 "orphan_tile_lease",
-                format!("tile {} references lease {} which does not exist", t.id, t.lease_id),
+                format!(
+                    "tile {} references lease {} which does not exist",
+                    t.id, t.lease_id
+                ),
             )
         })
         .collect()
@@ -338,8 +350,14 @@ pub fn check_tile_bounds_within_display(graph: &SceneGraph) -> Vec<InvariantViol
                 format!(
                     "tile {} bounds ({},{} {}×{}) exceed display area ({},{} {}×{})",
                     t.id,
-                    t.bounds.x, t.bounds.y, t.bounds.width, t.bounds.height,
-                    display.x, display.y, display.width, display.height,
+                    t.bounds.x,
+                    t.bounds.y,
+                    t.bounds.width,
+                    t.bounds.height,
+                    display.x,
+                    display.y,
+                    display.width,
+                    display.height,
                 ),
             )
         })
@@ -355,7 +373,10 @@ pub fn check_tile_opacity_range(graph: &SceneGraph) -> Vec<InvariantViolation> {
         .map(|t| {
             InvariantViolation::new(
                 "tile_opacity_out_of_range",
-                format!("tile {} has opacity {} (must be in [0.0, 1.0])", t.id, t.opacity),
+                format!(
+                    "tile {} has opacity {} (must be in [0.0, 1.0])",
+                    t.id, t.opacity
+                ),
             )
         })
         .collect()
@@ -371,7 +392,10 @@ pub fn check_node_tile_backlinks(graph: &SceneGraph) -> Vec<InvariantViolation> 
             if !graph.nodes.contains_key(&root_id) {
                 violations.push(InvariantViolation::new(
                     "missing_root_node",
-                    format!("tile {} root_node {} does not exist in nodes map", tile.id, root_id),
+                    format!(
+                        "tile {} root_node {} does not exist in nodes map",
+                        tile.id, root_id
+                    ),
                 ));
             }
         }
@@ -382,7 +406,10 @@ pub fn check_node_tile_backlinks(graph: &SceneGraph) -> Vec<InvariantViolation> 
             if !graph.nodes.contains_key(child_id) {
                 violations.push(InvariantViolation::new(
                     "missing_child_node",
-                    format!("node {} child {} does not exist in nodes map", node.id, child_id),
+                    format!(
+                        "node {} child {} does not exist in nodes map",
+                        node.id, child_id
+                    ),
                 ));
             }
         }
@@ -400,7 +427,10 @@ pub fn check_hit_region_state_consistency(graph: &SceneGraph) -> Vec<InvariantVi
             if !graph.hit_region_states.contains_key(&node.id) {
                 violations.push(InvariantViolation::new(
                     "missing_hit_region_state",
-                    format!("hit region node {} has no entry in hit_region_states", node.id),
+                    format!(
+                        "hit region node {} has no entry in hit_region_states",
+                        node.id
+                    ),
                 ));
             }
         }
@@ -410,7 +440,10 @@ pub fn check_hit_region_state_consistency(graph: &SceneGraph) -> Vec<InvariantVi
         match graph.nodes.get(node_id) {
             None => violations.push(InvariantViolation::new(
                 "orphan_hit_region_state",
-                format!("hit_region_states entry {} has no corresponding node", node_id),
+                format!(
+                    "hit_region_states entry {} has no corresponding node",
+                    node_id
+                ),
             )),
             Some(node) if !matches!(node.data, NodeData::HitRegion(_)) => {
                 violations.push(InvariantViolation::new(
@@ -515,7 +548,10 @@ pub fn check_lease_id_key_consistency(graph: &SceneGraph) -> Vec<InvariantViolat
         .map(|(key, lease)| {
             InvariantViolation::new(
                 "lease_id_key_mismatch",
-                format!("leases map key {} does not match lease.id {}", key, lease.id),
+                format!(
+                    "leases map key {} does not match lease.id {}",
+                    key, lease.id
+                ),
             )
         })
         .collect()
@@ -528,10 +564,7 @@ pub fn check_tab_name_nonempty(graph: &SceneGraph) -> Vec<InvariantViolation> {
         .values()
         .filter(|t| t.name.is_empty())
         .map(|t| {
-            InvariantViolation::new(
-                "empty_tab_name",
-                format!("tab {} has an empty name", t.id),
-            )
+            InvariantViolation::new("empty_tab_name", format!("tab {} has an empty name", t.id))
         })
         .collect()
 }
@@ -614,10 +647,7 @@ pub fn check_max_batch_size_constant(_graph: &SceneGraph) -> Vec<InvariantViolat
     if MAX_BATCH_SIZE > 1_000 {
         vec![InvariantViolation::new(
             "max_batch_size_exceeds_spec",
-            format!(
-                "MAX_BATCH_SIZE={} but spec requires ≤1000",
-                MAX_BATCH_SIZE
-            ),
+            format!("MAX_BATCH_SIZE={} but spec requires ≤1000", MAX_BATCH_SIZE),
         )]
     } else {
         vec![]
@@ -675,7 +705,10 @@ pub fn check_lease_priority_range(graph: &SceneGraph) -> Vec<InvariantViolation>
         .map(|l| {
             InvariantViolation::new(
                 "lease_priority_out_of_range",
-                format!("lease {} has priority {} (must be in [0, 4])", l.id, l.priority),
+                format!(
+                    "lease {} has priority {} (must be in [0, 4])",
+                    l.id, l.priority
+                ),
             )
         })
         .collect()
@@ -714,15 +747,16 @@ pub fn check_lease_ttl_nonzero_if_not_terminal(graph: &SceneGraph) -> Vec<Invari
 /// Denied (rejected before grant) in which case granted_at_ms is legitimately 0.
 ///
 /// Spec: lease-governance/spec.md lines 10-25.
-pub fn check_lease_granted_at_nonzero_if_not_requested(graph: &SceneGraph) -> Vec<InvariantViolation> {
+pub fn check_lease_granted_at_nonzero_if_not_requested(
+    graph: &SceneGraph,
+) -> Vec<InvariantViolation> {
     graph
         .leases
         .values()
         .filter(|l| {
             // Requested: no grant yet — OK to have granted_at_ms == 0.
             // Denied: rejected before grant — also OK to have granted_at_ms == 0.
-            !matches!(l.state, LeaseState::Requested | LeaseState::Denied)
-                && l.granted_at_ms == 0
+            !matches!(l.state, LeaseState::Requested | LeaseState::Denied) && l.granted_at_ms == 0
         })
         .map(|l| {
             InvariantViolation::new(
@@ -774,10 +808,7 @@ pub fn check_lease_orphaned_fields_consistency(graph: &SceneGraph) -> Vec<Invari
         .map(|l| {
             InvariantViolation::new(
                 "orphaned_lease_missing_disconnected_at_ms",
-                format!(
-                    "lease {} is Orphaned but disconnected_at_ms is None",
-                    l.id
-                ),
+                format!("lease {} is Orphaned but disconnected_at_ms is None", l.id),
             )
         })
         .collect()
@@ -816,10 +847,7 @@ pub fn check_terminal_lease_has_no_tiles(graph: &SceneGraph) -> Vec<InvariantVio
         .map(|t| {
             InvariantViolation::new(
                 "tile_owned_by_terminal_lease",
-                format!(
-                    "tile {} is owned by terminal lease {}",
-                    t.id, t.lease_id
-                ),
+                format!("tile {} is owned by terminal lease {}", t.id, t.lease_id),
             )
         })
         .collect()
@@ -1022,10 +1050,7 @@ pub fn check_focused_node_is_hit_region(graph: &SceneGraph) -> Vec<InvariantViol
             if !matches!(node.data, NodeData::HitRegion(_)) {
                 Some(InvariantViolation::new(
                     "focused_node_not_hit_region",
-                    format!(
-                        "node {} is focused but is not a HitRegionNode",
-                        node_id
-                    ),
+                    format!("node {} is focused but is not a HitRegionNode", node_id),
                 ))
             } else {
                 None
@@ -1145,15 +1170,21 @@ pub fn check_hit_region_bounds_within_tile(graph: &SceneGraph) -> Vec<InvariantV
             continue;
         };
         // In tile-local coordinates: hr.bounds.x/y are tile-relative.
-        let tile_local_rect = crate::types::Rect::new(0.0, 0.0, tile.bounds.width, tile.bounds.height);
+        let tile_local_rect =
+            crate::types::Rect::new(0.0, 0.0, tile.bounds.width, tile.bounds.height);
         if !hr.bounds.is_within(&tile_local_rect) {
             violations.push(InvariantViolation::new(
                 "hit_region_bounds_outside_tile",
                 format!(
                     "hit region node {} bounds ({},{} {}×{}) exceed tile {} local area ({}×{})",
                     node.id,
-                    hr.bounds.x, hr.bounds.y, hr.bounds.width, hr.bounds.height,
-                    tile_id, tile.bounds.width, tile.bounds.height,
+                    hr.bounds.x,
+                    hr.bounds.y,
+                    hr.bounds.width,
+                    hr.bounds.height,
+                    tile_id,
+                    tile.bounds.width,
+                    tile.bounds.height,
                 ),
             ));
         }
@@ -1209,10 +1240,7 @@ pub fn check_passthrough_tile_has_no_focused_node(graph: &SceneGraph) -> Vec<Inv
                 if state.focused {
                     violations.push(InvariantViolation::new(
                         "focused_node_in_passthrough_tile_direct",
-                        format!(
-                            "node {} in passthrough tile {} is focused",
-                            nid, tile.id
-                        ),
+                        format!("node {} in passthrough tile {} is focused", nid, tile.id),
                     ));
                 }
             }
@@ -1384,7 +1412,9 @@ pub fn check_zone_stack_depth_within_limit(graph: &SceneGraph) -> Vec<InvariantV
                     "stack_zone_depth_exceeded",
                     format!(
                         "zone '{}' has Stack(max_depth={}) contention but {} active publications",
-                        zone_name, max_depth, pubs.len()
+                        zone_name,
+                        max_depth,
+                        pubs.len()
                     ),
                 ));
             }
@@ -1566,9 +1596,7 @@ pub fn check_sync_group_commit_policy_valid(graph: &SceneGraph) -> Vec<Invariant
     graph
         .sync_groups
         .values()
-        .filter(|sg| {
-            sg.commit_policy == SyncCommitPolicy::AllOrDefer && sg.max_deferrals == 0
-        })
+        .filter(|sg| sg.commit_policy == SyncCommitPolicy::AllOrDefer && sg.max_deferrals == 0)
         .map(|sg| {
             InvariantViolation::new(
                 "sync_group_allordefer_max_deferrals_zero",
@@ -1626,11 +1654,11 @@ pub fn check_version_non_decreasing(graph: &SceneGraph) -> Vec<InvariantViolatio
 mod tests {
     use super::*;
     use crate::graph::SceneGraph;
-    use crate::types::{
-        Capability, HitRegionNode, InputMode, LeaseState, Node, NodeData, Rect,
-        ResourceBudget, Rgba, SceneId, SolidColorNode,
-    };
     use crate::test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants};
+    use crate::types::{
+        Capability, HitRegionNode, InputMode, LeaseState, Node, NodeData, Rect, ResourceBudget,
+        Rgba, SceneId, SolidColorNode,
+    };
 
     fn make_graph() -> SceneGraph {
         SceneGraph::new(1920.0, 1080.0)
@@ -1642,7 +1670,10 @@ mod tests {
     #[test]
     fn empty_graph_has_no_violations() {
         let graph = make_graph();
-        assert!(check_all(&graph).is_empty(), "empty graph must pass all checks");
+        assert!(
+            check_all(&graph).is_empty(),
+            "empty graph must pass all checks"
+        );
     }
 
     /// WHEN a tab is added with correct structure THEN no violations.
@@ -1661,7 +1692,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 5)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                5,
+            )
             .unwrap();
         // Insert second tile with same z_order directly
         let tile2_id = SceneId::new();
@@ -1697,7 +1734,13 @@ mod tests {
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let real_tab = graph.create_tab("Temp", 0).unwrap();
         graph
-            .create_tile(real_tab, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                real_tab,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         graph.tabs.remove(&real_tab);
         let v = check_tile_tab_refs(&graph);
@@ -1712,7 +1755,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         graph.leases.remove(&lease_id);
         let v = check_tile_lease_refs(&graph);
@@ -1727,7 +1776,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         graph.tiles.get_mut(&tile_id).unwrap().opacity = 1.5;
         let v = check_tile_opacity_range(&graph);
@@ -1787,7 +1842,10 @@ mod tests {
     #[test]
     fn max_batch_size_is_1000() {
         use crate::mutation::MAX_BATCH_SIZE;
-        assert_eq!(MAX_BATCH_SIZE, 1_000, "MAX_BATCH_SIZE must be 1000 per spec");
+        assert_eq!(
+            MAX_BATCH_SIZE, 1_000,
+            "MAX_BATCH_SIZE must be 1000 per spec"
+        );
     }
 
     /// WHEN MAX_BATCH_SIZE == 1000 THEN check_max_batch_size_constant passes.
@@ -1871,7 +1929,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         // Move to terminal state
         graph.leases.get_mut(&lease_id).unwrap().state = LeaseState::Revoked;
@@ -1887,7 +1951,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent-a", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent-a", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent-a",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         // Corrupt tile namespace
         graph.tiles.get_mut(&tile_id).unwrap().namespace = "agent-b".into();
@@ -1903,7 +1973,12 @@ mod tests {
     fn resource_budget_max_tiles_zero_detected() {
         let mut graph = make_graph();
         let lease_id = graph.grant_lease("test", 60_000, vec![]);
-        graph.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 0;
+        graph
+            .leases
+            .get_mut(&lease_id)
+            .unwrap()
+            .resource_budget
+            .max_tiles = 0;
         let v = check_resource_budget_max_tiles_nonzero(&graph);
         assert!(!v.is_empty());
         assert_eq!(v[0].code, "resource_budget_max_tiles_zero");
@@ -1914,7 +1989,12 @@ mod tests {
     fn resource_budget_max_nodes_zero_detected() {
         let mut graph = make_graph();
         let lease_id = graph.grant_lease("test", 60_000, vec![]);
-        graph.leases.get_mut(&lease_id).unwrap().resource_budget.max_nodes_per_tile = 0;
+        graph
+            .leases
+            .get_mut(&lease_id)
+            .unwrap()
+            .resource_budget
+            .max_nodes_per_tile = 0;
         let v = check_resource_budget_max_nodes_nonzero(&graph);
         assert!(!v.is_empty());
         assert_eq!(v[0].code, "resource_budget_max_nodes_per_tile_zero");
@@ -1929,7 +2009,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 800.0, 600.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                1,
+            )
             .unwrap();
 
         // Add root HitRegionNode using set_tile_root
@@ -1960,7 +2046,9 @@ mod tests {
                 ..Default::default()
             }),
         };
-        graph.add_node_to_tile(tile_id, Some(node1_id), child_node).expect("add child");
+        graph
+            .add_node_to_tile(tile_id, Some(node1_id), child_node)
+            .expect("add child");
 
         // Focus both
         graph.update_focused_state(node1_id, true);
@@ -1977,7 +2065,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 400.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 400.0),
+                1,
+            )
             .unwrap();
 
         let node_id = SceneId::new();
@@ -2096,7 +2190,7 @@ mod tests {
                     zone_name: zone_name.clone(),
                     publisher_namespace: "a1".into(),
                     content: ZoneContent::StreamText("hello".into()),
-                    published_at_wall_us: 1_000_000,  // microseconds
+                    published_at_wall_us: 1_000_000, // microseconds
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
@@ -2105,7 +2199,7 @@ mod tests {
                     zone_name: zone_name.clone(),
                     publisher_namespace: "a2".into(),
                     content: ZoneContent::StreamText("world".into()),
-                    published_at_wall_us: 2_000_000,  // microseconds
+                    published_at_wall_us: 2_000_000, // microseconds
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
@@ -2126,7 +2220,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         {
             let tile = graph.tiles.get_mut(&tile_id).unwrap();
@@ -2145,7 +2245,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         // Force version back to 0
         graph.version = 0;
@@ -2259,7 +2365,7 @@ mod tests {
                 zone_name: zone_name.clone(),
                 publisher_namespace: "agent".into(),
                 content: ZoneContent::StreamText("hello".into()),
-                published_at_wall_us: 10_000_000,  // microseconds
+                published_at_wall_us: 10_000_000, // microseconds
                 merge_key: None,
                 expires_at_wall_us: Some(5_000_000), // earlier than published_at_wall_us
                 content_classification: None,
@@ -2267,7 +2373,10 @@ mod tests {
         );
         let v = check_zone_publish_record_expires_at_valid(&graph);
         assert!(!v.is_empty());
-        assert_eq!(v[0].code, "zone_publish_record_expires_at_before_published_at");
+        assert_eq!(
+            v[0].code,
+            "zone_publish_record_expires_at_before_published_at"
+        );
     }
 
     // ── Node count per tile ────────────────────────────────────────────────
@@ -2280,7 +2389,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 800.0, 600.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 800.0, 600.0),
+                1,
+            )
             .unwrap();
 
         // Add MAX_NODES_PER_TILE + 1 solid color nodes in a chain
@@ -2338,7 +2453,13 @@ mod tests {
         use crate::types::Tab;
         graph.tabs.insert(
             fake_key,
-            Tab { id: real_id, name: "Test".into(), display_order: 0, created_at_ms: 1, tab_switch_on_event: None },
+            Tab {
+                id: real_id,
+                name: "Test".into(),
+                display_order: 0,
+                created_at_ms: 1,
+                tab_switch_on_event: None,
+            },
         );
         graph.version = 1;
         let v = check_tab_id_key_consistency(&graph);
@@ -2353,7 +2474,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         // Insert a tile with mismatched key
         let real_tile_id = SceneId::new();
@@ -2428,7 +2555,12 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         // Set max_tiles = 1 so the second tile triggers a budget violation
-        graph.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 1;
+        graph
+            .leases
+            .get_mut(&lease_id)
+            .unwrap()
+            .resource_budget
+            .max_tiles = 1;
         // Insert two tiles directly (bypassing mutation validation) to force the violation
         use crate::types::Tile;
         let tile1_id = SceneId::new();
@@ -2467,7 +2599,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 400.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 400.0),
+                1,
+            )
             .unwrap();
         let root_node = Node {
             id: SceneId::new(),
@@ -2491,7 +2629,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         {
             let tile = graph.tiles.get_mut(&tile_id).unwrap();
@@ -2577,7 +2721,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 400.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 400.0),
+                1,
+            )
             .unwrap();
         // Make the tile Passthrough
         graph.tiles.get_mut(&tile_id).unwrap().input_mode = InputMode::Passthrough;
@@ -2598,7 +2748,10 @@ mod tests {
         graph.update_focused_state(node_id, true);
 
         let v = check_passthrough_tile_has_no_focused_node(&graph);
-        assert!(!v.is_empty(), "expected focused node in passthrough tile violation");
+        assert!(
+            !v.is_empty(),
+            "expected focused node in passthrough tile violation"
+        );
     }
 
     // ── Lease granted_at ───────────────────────────────────────────────────
@@ -2628,7 +2781,13 @@ mod tests {
         // Normal lease (priority 2 = default)
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         // Manually push z_order into the zone band
         graph.tiles.get_mut(&tile_id).unwrap().z_order = ZONE_TILE_Z_MIN;
@@ -2646,7 +2805,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         // Manually set root_node to a non-existent ID
         let phantom_id = SceneId::new();
@@ -2665,7 +2830,13 @@ mod tests {
         let tab_id = graph.create_tab("Main", 0).unwrap();
         let lease_id = graph.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = graph
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         // Extend bounds past display edge
         graph.tiles.get_mut(&tile_id).unwrap().bounds = Rect::new(1900.0, 0.0, 200.0, 100.0);
@@ -2683,7 +2854,14 @@ mod tests {
         let mut graph = make_graph();
         let sg_id = SyncGroupId::new();
         let phantom_tile_id = SceneId::new();
-        let mut sg = SyncGroup::new(sg_id, None, "agent".into(), SyncCommitPolicy::AllOrDefer, 3, 1_000_000);
+        let mut sg = SyncGroup::new(
+            sg_id,
+            None,
+            "agent".into(),
+            SyncCommitPolicy::AllOrDefer,
+            3,
+            1_000_000,
+        );
         sg.members.insert(phantom_tile_id);
         graph.sync_groups.insert(sg_id, sg);
         let v = check_sync_group_member_back_refs(&graph);

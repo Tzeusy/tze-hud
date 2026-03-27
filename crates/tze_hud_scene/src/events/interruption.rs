@@ -106,7 +106,10 @@ mod tests {
     /// WHEN an agent requests CRITICAL THEN it is downgraded to HIGH (spec line 61).
     #[test]
     fn agent_critical_downgraded_to_high() {
-        assert_eq!(apply_agent_class(InterruptionClass::Critical), InterruptionClass::High);
+        assert_eq!(
+            apply_agent_class(InterruptionClass::Critical),
+            InterruptionClass::High
+        );
     }
 
     /// HIGH, NORMAL, LOW, SILENT pass through unchanged.
@@ -118,7 +121,11 @@ mod tests {
             InterruptionClass::Low,
             InterruptionClass::Silent,
         ] {
-            assert_eq!(apply_agent_class(cls), cls, "class {cls:?} should pass unchanged");
+            assert_eq!(
+                apply_agent_class(cls),
+                cls,
+                "class {cls:?} should pass unchanged"
+            );
         }
     }
 
@@ -158,7 +165,8 @@ mod tests {
     fn classify_critical_agent_with_critical_ceiling() {
         // CRITICAL downgraded to HIGH, ceiling is CRITICAL (=0), HIGH(=1) > CRITICAL(=0),
         // so the more restrictive (higher numeric) wins → HIGH.
-        let effective = classify_agent_event(InterruptionClass::Critical, InterruptionClass::Critical);
+        let effective =
+            classify_agent_event(InterruptionClass::Critical, InterruptionClass::Critical);
         assert_eq!(effective, InterruptionClass::High);
     }
 

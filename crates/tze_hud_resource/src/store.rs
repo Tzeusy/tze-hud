@@ -145,9 +145,9 @@ impl EphemeralStore {
 mod tests {
     use super::*;
     use crate::types::ResourceStoreConfig;
-    use crate::upload::{UploadId, UploadStartRequest};
-    use crate::validation::{test_helpers::minimal_png_1x1, AgentBudget};
     use crate::types::ResourceType;
+    use crate::upload::{UploadId, UploadStartRequest};
+    use crate::validation::{AgentBudget, test_helpers::minimal_png_1x1};
 
     fn default_store() -> EphemeralStore {
         EphemeralStore::new(ResourceStoreConfig::default())
@@ -172,10 +172,14 @@ mod tests {
     fn fresh_store_is_empty() {
         let store = default_store();
         assert_eq!(
-            store.resource_count(), 0,
+            store.resource_count(),
+            0,
             "EphemeralStore must be empty on construction (spec lines 244-246)"
         );
-        assert!(store.is_empty(), "is_empty() must return true for a fresh store");
+        assert!(
+            store.is_empty(),
+            "is_empty() must return true for a fresh store"
+        );
     }
 
     /// WHEN a new EphemeralStore is created
@@ -253,7 +257,8 @@ mod tests {
             "get() must return None for any previously-stored ResourceId after restart"
         );
         assert_eq!(
-            session2.resource_count(), 0,
+            session2.resource_count(),
+            0,
             "resource_count must be 0 after restart"
         );
     }

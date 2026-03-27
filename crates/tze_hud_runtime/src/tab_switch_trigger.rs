@@ -86,7 +86,10 @@ pub enum TabSwitchOutcome {
     /// (e.g. quiet hours active, spec line 246).
     Deferred { tab_id: SceneId },
     /// Tab switch succeeded. Caller must emit `ActiveTabChangedEvent`.
-    Switched { tab_id: SceneId, previous_tab_id: Option<SceneId> },
+    Switched {
+        tab_id: SceneId,
+        previous_tab_id: Option<SceneId>,
+    },
 }
 
 // ─── Trigger ─────────────────────────────────────────────────────────────────
@@ -144,7 +147,9 @@ impl<G: AttentionGate> TabSwitchTrigger<G> {
 
         // Check attention gate (quiet hours, attention budget) — spec line 246.
         if !self.gate.allow_tab_switch(bare_name) {
-            return TabSwitchOutcome::Deferred { tab_id: target_tab_id };
+            return TabSwitchOutcome::Deferred {
+                tab_id: target_tab_id,
+            };
         }
 
         // Perform the switch.
@@ -208,7 +213,11 @@ mod tests {
                 previous_tab_id: Some(tab_a),
             }
         );
-        assert_eq!(graph.active_tab, Some(tab_b), "active tab must switch to tab_b");
+        assert_eq!(
+            graph.active_tab,
+            Some(tab_b),
+            "active tab must switch to tab_b"
+        );
     }
 
     /// Agent-independence: two different bare-name namespaces map to the same
@@ -330,10 +339,7 @@ mod tests {
             Some("system.degradation_changed".to_string());
 
         // find_tab_for_event must NOT return tab_b for a system.* event name.
-        assert_eq!(
-            graph.find_tab_for_event("system.degradation_changed"),
-            None
-        );
+        assert_eq!(graph.find_tab_for_event("system.degradation_changed"), None);
     }
 
     /// When tab_switch_on_event is None, the tab is not matched.
@@ -404,8 +410,7 @@ mod tests {
     fn set_tab_switch_on_event_rejects_scene_prefix() {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
-        let result =
-            graph.set_tab_switch_on_event(tab_id, Some("scene.tile.created".to_string()));
+        let result = graph.set_tab_switch_on_event(tab_id, Some("scene.tile.created".to_string()));
         assert!(
             result.is_err(),
             "scene.* bare names must be rejected at configuration time"
@@ -418,12 +423,16 @@ mod tests {
         let mut graph = make_graph();
         let tab_id = graph.create_tab("Main", 0).unwrap();
         // Single segment — no dot
-        assert!(graph
-            .set_tab_switch_on_event(tab_id, Some("doorbell".to_string()))
-            .is_err());
+        assert!(
+            graph
+                .set_tab_switch_on_event(tab_id, Some("doorbell".to_string()))
+                .is_err()
+        );
         // Uppercase
-        assert!(graph
-            .set_tab_switch_on_event(tab_id, Some("Doorbell.Ring".to_string()))
-            .is_err());
+        assert!(
+            graph
+                .set_tab_switch_on_event(tab_id, Some("Doorbell.Ring".to_string()))
+                .is_err()
+        );
     }
 }

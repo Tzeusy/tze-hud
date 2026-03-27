@@ -109,7 +109,11 @@ impl SceneGraph {
     ///
     /// RFC 0001 §2.2: Tab name must be non-empty, ≤ 128 UTF-8 bytes.
     /// Scene must not already have 256 tabs (MAX_TABS). RFC 0001 §2.1.
-    pub fn create_tab(&mut self, name: &str, display_order: u32) -> Result<SceneId, ValidationError> {
+    pub fn create_tab(
+        &mut self,
+        name: &str,
+        display_order: u32,
+    ) -> Result<SceneId, ValidationError> {
         self.create_tab_checked(name, display_order, None)
     }
 
@@ -161,7 +165,9 @@ impl SceneGraph {
         }
         // Check display_order uniqueness
         if self.tabs.values().any(|t| t.display_order == display_order) {
-            return Err(ValidationError::DuplicateDisplayOrder { order: display_order });
+            return Err(ValidationError::DuplicateDisplayOrder {
+                order: display_order,
+            });
         }
         let id = SceneId::new();
         let now_ms = self.clock.now_millis();
@@ -520,7 +526,13 @@ impl SceneGraph {
         ttl_ms: u64,
         capabilities: Vec<Capability>,
     ) -> SceneId {
-        self.grant_lease_for_session(namespace, SceneId::nil(), ttl_ms, crate::lease::priority::PRIORITY_DEFAULT, capabilities)
+        self.grant_lease_for_session(
+            namespace,
+            SceneId::nil(),
+            ttl_ms,
+            crate::lease::priority::PRIORITY_DEFAULT,
+            capabilities,
+        )
     }
 
     /// Grant a lease with an explicit priority and default (nil) session_id.
@@ -589,10 +601,12 @@ impl SceneGraph {
             .filter(|l| !l.state.is_terminal())
             .count();
         if non_terminal_count >= Self::MAX_RUNTIME_LEASES {
-            return Err(LeaseError::CapsExceeded(CapsError::MaxRuntimeLeasesExceeded {
-                current: non_terminal_count,
-                limit: Self::MAX_RUNTIME_LEASES,
-            }));
+            return Err(LeaseError::CapsExceeded(
+                CapsError::MaxRuntimeLeasesExceeded {
+                    current: non_terminal_count,
+                    limit: Self::MAX_RUNTIME_LEASES,
+                },
+            ));
         }
 
         // Check per-session cap (if session_id is non-nil)
@@ -603,10 +617,12 @@ impl SceneGraph {
                 .filter(|l| l.session_id == session_id && !l.state.is_terminal())
                 .count();
             if session_count >= Self::MAX_LEASES_PER_SESSION {
-                return Err(LeaseError::CapsExceeded(CapsError::MaxSessionLeasesExceeded {
-                    current: session_count,
-                    limit: Self::MAX_LEASES_PER_SESSION,
-                }));
+                return Err(LeaseError::CapsExceeded(
+                    CapsError::MaxSessionLeasesExceeded {
+                        current: session_count,
+                        limit: Self::MAX_LEASES_PER_SESSION,
+                    },
+                ));
             }
         }
 
@@ -710,21 +726,19 @@ impl SceneGraph {
 
         let now_us = self.clock.now_us();
 
-        use crate::lease::capability::{revoke_capability_from_lease, CapabilityRevocationError};
+        use crate::lease::capability::{CapabilityRevocationError, revoke_capability_from_lease};
         match revoke_capability_from_lease(lease, cap) {
             Ok(cap_name) => {
                 self.version += 1;
                 Ok((cap_name, now_us))
             }
-            Err(CapabilityRevocationError::LeaseTerminal) => {
-                Err(ValidationError::InvalidField {
-                    field: "lease_terminal".into(),
-                    reason: format!(
-                        "lease {} is in terminal state {:?}; live capability revocation requires a non-terminal lease",
-                        lease_id, lease.state
-                    ),
-                })
-            }
+            Err(CapabilityRevocationError::LeaseTerminal) => Err(ValidationError::InvalidField {
+                field: "lease_terminal".into(),
+                reason: format!(
+                    "lease {} is in terminal state {:?}; live capability revocation requires a non-terminal lease",
+                    lease_id, lease.state
+                ),
+            }),
             Err(CapabilityRevocationError::CapabilityNotPresent) => {
                 Err(ValidationError::InvalidField {
                     field: "capability_not_present".into(),
@@ -745,7 +759,11 @@ impl SceneGraph {
         self.leases.get(lease_id).map(|l| l.capabilities.as_slice())
     }
 
-    pub fn renew_lease(&mut self, lease_id: SceneId, new_ttl_ms: u64) -> Result<(), ValidationError> {
+    pub fn renew_lease(
+        &mut self,
+        lease_id: SceneId,
+        new_ttl_ms: u64,
+    ) -> Result<(), ValidationError> {
         let lease = self
             .leases
             .get_mut(&lease_id)
@@ -961,7 +979,9 @@ impl SceneGraph {
             publishes.retain(|r| r.publisher_namespace != namespace);
         }
         // Remove empty entries for cleanliness
-        self.zone_registry.active_publishes.retain(|_, v| !v.is_empty());
+        self.zone_registry
+            .active_publishes
+            .retain(|_, v| !v.is_empty());
     }
 
     // ─── Budget enforcement ─────────────────────────────────────────────
@@ -1387,10 +1407,7 @@ impl SceneGraph {
         if !(0.0..=1.0).contains(&opacity) {
             return Err(ValidationError::InvalidField {
                 field: "opacity".into(),
-                reason: format!(
-                    "opacity {} is not in [0.0, 1.0]",
-                    opacity
-                ),
+                reason: format!("opacity {} is not in [0.0, 1.0]", opacity),
             });
         }
 
@@ -1606,9 +1623,7 @@ impl SceneGraph {
         }
 
         // Enforce per-tile node count limit (RFC 0001 §2.1: max 64 nodes)
-        let current_count = self.count_nodes_in_tile(
-            self.tiles.get(&tile_id).unwrap()
-        ) as usize;
+        let current_count = self.count_nodes_in_tile(self.tiles.get(&tile_id).unwrap()) as usize;
         if current_count >= MAX_NODES_PER_TILE {
             return Err(ValidationError::NodeCountExceeded {
                 tile_id,
@@ -1806,7 +1821,7 @@ impl SceneGraph {
         group_id: SceneId,
         tiles_with_pending: &std::collections::BTreeSet<SceneId>,
     ) -> Result<SyncGroupCommitDecision, ValidationError> {
-        use crate::timing::sync_commit::{evaluate_commit, apply_decision, CommitDecision};
+        use crate::timing::sync_commit::{CommitDecision, apply_decision, evaluate_commit};
 
         let group = self
             .sync_groups
@@ -1818,13 +1833,15 @@ impl SceneGraph {
         // Translate CommitDecision → SyncGroupCommitDecision and apply state
         // changes to the group.
         let result = match &decision {
-            CommitDecision::Commit { tiles } => {
-                SyncGroupCommitDecision::Commit { tiles: tiles.clone() }
-            }
+            CommitDecision::Commit { tiles } => SyncGroupCommitDecision::Commit {
+                tiles: tiles.clone(),
+            },
             CommitDecision::Defer => SyncGroupCommitDecision::Defer,
-            CommitDecision::ForceCommit { committed_tiles, .. } => {
-                SyncGroupCommitDecision::ForceCommit { tiles: committed_tiles.clone() }
-            }
+            CommitDecision::ForceCommit {
+                committed_tiles, ..
+            } => SyncGroupCommitDecision::ForceCommit {
+                tiles: committed_tiles.clone(),
+            },
         };
 
         // Apply state mutation (deferral_count update) to the group.
@@ -1849,8 +1866,14 @@ impl SceneGraph {
     ) -> Result<(), ValidationError> {
         use crate::timing::sync_group::check_sync_group_ownership;
 
-        let tile = self.tiles.get(&tile_id).ok_or(ValidationError::TileNotFound { id: tile_id })?;
-        let group = self.sync_groups.get(&group_id).ok_or(ValidationError::SyncGroupNotFound { id: group_id })?;
+        let tile = self
+            .tiles
+            .get(&tile_id)
+            .ok_or(ValidationError::TileNotFound { id: tile_id })?;
+        let group = self
+            .sync_groups
+            .get(&group_id)
+            .ok_or(ValidationError::SyncGroupNotFound { id: group_id })?;
 
         check_sync_group_ownership(agent_namespace, &tile.namespace, &group.owner_namespace)
             .map_err(|reason| ValidationError::SyncGroupOwnershipViolation { reason })?;
@@ -1900,11 +1923,7 @@ impl SceneGraph {
             Some(id) => id,
             None => return vec![],
         };
-        let mut tiles: Vec<&Tile> = self
-            .tiles
-            .values()
-            .filter(|t| t.tab_id == active)
-            .collect();
+        let mut tiles: Vec<&Tile> = self.tiles.values().filter(|t| t.tab_id == active).collect();
         tiles.sort_by_key(|t| t.z_order);
         tiles
     }
@@ -2006,7 +2025,11 @@ impl SceneGraph {
                             }
                         })
                         .unwrap_or_default();
-                    return HitResult::NodeHit { tile_id: tile.id, node_id, interaction_id };
+                    return HitResult::NodeHit {
+                        tile_id: tile.id,
+                        node_id,
+                        interaction_id,
+                    };
                 }
             }
 
@@ -2138,10 +2161,11 @@ impl SceneGraph {
     ) -> Result<(), ValidationError> {
         // Check zone exists and content type is accepted
         let (contention_policy, max_publishers, accepted) = {
-            let zone = self
-                .zone_registry
-                .get_by_name(zone_name)
-                .ok_or_else(|| ValidationError::ZoneNotFound { name: zone_name.to_string() })?;
+            let zone = self.zone_registry.get_by_name(zone_name).ok_or_else(|| {
+                ValidationError::ZoneNotFound {
+                    name: zone_name.to_string(),
+                }
+            })?;
             let accepted = Self::content_media_type(&content)
                 .map(|mt| zone.accepted_media_types.contains(&mt))
                 .unwrap_or(true);
@@ -2203,9 +2227,10 @@ impl SceneGraph {
             ContentionPolicy::MergeByKey { max_keys } => {
                 let key = merge_key.clone().unwrap_or_default();
                 // Replace existing entry with same key
-                if let Some(pos) = publishes.iter().position(|r| {
-                    r.merge_key.as_deref().unwrap_or("") == key.as_str()
-                }) {
+                if let Some(pos) = publishes
+                    .iter()
+                    .position(|r| r.merge_key.as_deref().unwrap_or("") == key.as_str())
+                {
                     publishes[pos] = record;
                 } else {
                     // Check key count limit
@@ -2312,7 +2337,14 @@ impl SceneGraph {
         }
 
         // Lease is Active — delegate to unchecked publish.
-        self.publish_to_zone(zone_name, content, publisher_namespace, merge_key, None, None)
+        self.publish_to_zone(
+            zone_name,
+            content,
+            publisher_namespace,
+            merge_key,
+            None,
+            None,
+        )
     }
 
     /// Budget-driven revocation: transitions all non-terminal session leases to
@@ -2420,7 +2452,9 @@ impl SceneGraph {
     /// use [`clear_zone_for_publisher`].
     pub fn clear_zone(&mut self, zone_name: &str) -> Result<(), ValidationError> {
         if !self.zone_registry.zones.contains_key(zone_name) {
-            return Err(ValidationError::ZoneNotFound { name: zone_name.to_string() });
+            return Err(ValidationError::ZoneNotFound {
+                name: zone_name.to_string(),
+            });
         }
         self.zone_registry.active_publishes.remove(zone_name);
         self.version += 1;
@@ -2437,7 +2471,9 @@ impl SceneGraph {
         publisher_namespace: &str,
     ) -> Result<(), ValidationError> {
         if !self.zone_registry.zones.contains_key(zone_name) {
-            return Err(ValidationError::ZoneNotFound { name: zone_name.to_string() });
+            return Err(ValidationError::ZoneNotFound {
+                name: zone_name.to_string(),
+            });
         }
         if let Some(publishes) = self.zone_registry.active_publishes.get_mut(zone_name) {
             let before = publishes.len();
@@ -2500,18 +2536,12 @@ impl SceneGraph {
             .collect();
 
         // Tiles: keyed by SceneId (BTreeMap — SceneId implements Ord).
-        let tiles: std::collections::BTreeMap<SceneId, Tile> = self
-            .tiles
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
+        let tiles: std::collections::BTreeMap<SceneId, Tile> =
+            self.tiles.iter().map(|(k, v)| (*k, v.clone())).collect();
 
         // Nodes: keyed by SceneId.
-        let nodes: std::collections::BTreeMap<SceneId, Node> = self
-            .nodes
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
+        let nodes: std::collections::BTreeMap<SceneId, Node> =
+            self.nodes.iter().map(|(k, v)| (*k, v.clone())).collect();
 
         // Zone registry: BTreeMap for both zone_types and active_publications.
         let zone_types: std::collections::BTreeMap<String, ZoneDefinition> = self
@@ -2603,7 +2633,6 @@ impl SceneGraph {
     }
 }
 
-
 fn now_micros() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2631,8 +2660,7 @@ mod tests {
     /// Convenience: build a SceneGraph backed by a TestClock starting at t=1000ms.
     fn scene_with_test_clock() -> (SceneGraph, TestClock) {
         let clock = TestClock::new(1_000);
-        let scene =
-            SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
         (scene, clock)
     }
 
@@ -2653,11 +2681,23 @@ mod tests {
 
         // Create two tiles
         let tile1_id = scene
-            .create_tile(tab_id, "test-agent", lease_id, Rect::new(10.0, 10.0, 400.0, 300.0), 1)
+            .create_tile(
+                tab_id,
+                "test-agent",
+                lease_id,
+                Rect::new(10.0, 10.0, 400.0, 300.0),
+                1,
+            )
             .unwrap();
 
         let tile2_id = scene
-            .create_tile(tab_id, "test-agent", lease_id, Rect::new(420.0, 10.0, 400.0, 300.0), 2)
+            .create_tile(
+                tab_id,
+                "test-agent",
+                lease_id,
+                Rect::new(420.0, 10.0, 400.0, 300.0),
+                2,
+            )
             .unwrap();
 
         assert_eq!(scene.tile_count(), 2);
@@ -2703,7 +2743,13 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
 
         let tile_id = scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(100.0, 100.0, 400.0, 300.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
             .unwrap();
 
         let hr_node_id = SceneId::new();
@@ -2746,7 +2792,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         let json = scene.snapshot_json().unwrap();
@@ -2766,7 +2818,13 @@ mod tests {
         // Clock is at t=1000; lease expires at t=1500.
         let lease_id = scene.grant_lease("test", 500, vec![Capability::CreateTile]);
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         assert_eq!(scene.tile_count(), 1);
@@ -2815,10 +2873,22 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
 
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(200.0, 0.0, 100.0, 100.0), 2)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(200.0, 0.0, 100.0, 100.0),
+                2,
+            )
             .unwrap();
 
         assert_eq!(scene.tile_count(), 2);
@@ -2834,9 +2904,33 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test", 60_000, vec![]);
 
-        scene.create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 5).unwrap();
-        scene.create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1).unwrap();
-        scene.create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 3).unwrap();
+        scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                5,
+            )
+            .unwrap();
+        scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
+            .unwrap();
+        scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                3,
+            )
+            .unwrap();
 
         let visible = scene.visible_tiles();
         assert_eq!(visible.len(), 3);
@@ -2914,7 +3008,9 @@ mod tests {
     }
 
     fn dummy_token() -> ZonePublishToken {
-        ZonePublishToken { token: vec![0xDE, 0xAD, 0xBE, 0xEF] }
+        ZonePublishToken {
+            token: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        }
     }
 
     #[test]
@@ -2948,11 +3044,15 @@ mod tests {
         scene.register_zone(make_subtitle_zone());
         scene.register_zone(make_notification_zone());
 
-        let stream_text_zones = scene.zone_registry.zones_accepting(ZoneMediaType::StreamText);
+        let stream_text_zones = scene
+            .zone_registry
+            .zones_accepting(ZoneMediaType::StreamText);
         assert_eq!(stream_text_zones.len(), 1);
         assert_eq!(stream_text_zones[0].name, "subtitle");
 
-        let notif_zones = scene.zone_registry.zones_accepting(ZoneMediaType::ShortTextWithIcon);
+        let notif_zones = scene
+            .zone_registry
+            .zones_accepting(ZoneMediaType::ShortTextWithIcon);
         assert_eq!(notif_zones.len(), 1);
         assert_eq!(notif_zones[0].name, "notifications");
     }
@@ -2996,7 +3096,10 @@ mod tests {
             None,
             None,
         );
-        assert!(matches!(result, Err(ValidationError::ZoneMediaTypeMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(ValidationError::ZoneMediaTypeMismatch { .. })
+        ));
     }
 
     #[test]
@@ -3004,12 +3107,33 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
 
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("first".to_string()), "a1", None, None, None).unwrap();
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("second".to_string()), "a2", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("first".to_string()),
+                "a1",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("second".to_string()),
+                "a2",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("subtitle");
         assert_eq!(publishes.len(), 1);
-        assert_eq!(publishes[0].content, ZoneContent::StreamText("second".to_string()));
+        assert_eq!(
+            publishes[0].content,
+            ZoneContent::StreamText("second".to_string())
+        );
         assert_eq!(publishes[0].publisher_namespace, "a2");
     }
 
@@ -3018,21 +3142,59 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_notification_zone()); // Stack { max_depth: 3 }
 
-        let notification = |text: &str| ZoneContent::Notification(NotificationPayload {
-            text: text.to_string(),
-            icon: "".to_string(),
-            urgency: 1,
-        });
+        let notification = |text: &str| {
+            ZoneContent::Notification(NotificationPayload {
+                text: text.to_string(),
+                icon: "".to_string(),
+                urgency: 1,
+            })
+        };
 
-        scene.publish_to_zone("notifications", notification("msg1"), "a1", None, None, None).unwrap();
-        scene.publish_to_zone("notifications", notification("msg2"), "a2", None, None, None).unwrap();
-        scene.publish_to_zone("notifications", notification("msg3"), "a3", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "notifications",
+                notification("msg1"),
+                "a1",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "notifications",
+                notification("msg2"),
+                "a2",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "notifications",
+                notification("msg3"),
+                "a3",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("notifications");
         assert_eq!(publishes.len(), 3);
 
         // 4th publish should trim the oldest
-        scene.publish_to_zone("notifications", notification("msg4"), "a4", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "notifications",
+                notification("msg4"),
+                "a4",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         let publishes = scene.zone_registry.active_for_zone("notifications");
         assert_eq!(publishes.len(), 3);
         // Oldest (msg1) should be gone, newest (msg4) at end
@@ -3118,7 +3280,10 @@ mod tests {
         let (mut scene, _tab, _tiles) = make_scene_with_tiles(0);
         let fake_id = SceneId::new();
         let result = scene.delete_sync_group(fake_id);
-        assert!(matches!(result, Err(ValidationError::SyncGroupNotFound { .. })));
+        assert!(matches!(
+            result,
+            Err(ValidationError::SyncGroupNotFound { .. })
+        ));
     }
 
     #[test]
@@ -3218,17 +3383,47 @@ mod tests {
         };
 
         // Publish with different keys
-        scene.publish_to_zone("status-bar", kv("clock", "12:00"), "a1", Some("clock".to_string()), None, None).unwrap();
-        scene.publish_to_zone("status-bar", kv("battery", "80%"), "a2", Some("battery".to_string()), None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "status-bar",
+                kv("clock", "12:00"),
+                "a1",
+                Some("clock".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "status-bar",
+                kv("battery", "80%"),
+                "a2",
+                Some("battery".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("status-bar");
         assert_eq!(publishes.len(), 2);
 
         // Update existing key "clock"
-        scene.publish_to_zone("status-bar", kv("clock", "12:01"), "a1", Some("clock".to_string()), None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "status-bar",
+                kv("clock", "12:01"),
+                "a1",
+                Some("clock".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
         let publishes = scene.zone_registry.active_for_zone("status-bar");
         assert_eq!(publishes.len(), 2); // Still 2 (clock replaced, battery retained)
-        let clock = publishes.iter().find(|r| r.merge_key.as_deref() == Some("clock")).unwrap();
+        let clock = publishes
+            .iter()
+            .find(|r| r.merge_key.as_deref() == Some("clock"))
+            .unwrap();
         if let ZoneContent::StatusBar(sb) = &clock.content {
             assert_eq!(sb.entries["clock"], "12:01");
         } else {
@@ -3260,8 +3455,26 @@ mod tests {
         };
         scene.register_zone(zone);
 
-        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::WHITE), "a1", None, None, None).unwrap();
-        scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::BLACK), "a2", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "pip",
+                ZoneContent::SolidColor(Rgba::WHITE),
+                "a1",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "pip",
+                ZoneContent::SolidColor(Rgba::BLACK),
+                "a2",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let publishes = scene.zone_registry.active_for_zone("pip");
         assert_eq!(publishes.len(), 1);
@@ -3273,7 +3486,16 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
 
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "a1", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("hello".to_string()),
+                "a1",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
 
         scene.clear_zone("subtitle").unwrap();
@@ -3291,7 +3513,16 @@ mod tests {
     fn test_zone_registry_snapshot() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hi".to_string()), "a1", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("hi".to_string()),
+                "a1",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         let snap = scene.zone_registry.snapshot();
         assert_eq!(snap.zones.len(), 1);
@@ -3309,16 +3540,14 @@ mod tests {
         let batch = MutationBatch {
             batch_id: SceneId::new(),
             agent_namespace: "agent".to_string(),
-            mutations: vec![
-                SceneMutation::PublishToZone {
-                    zone_name: "subtitle".to_string(),
-                    content: ZoneContent::StreamText("batch publish".to_string()),
-                    publish_token: dummy_token(),
-                    merge_key: None,
-                    expires_at_wall_us: None,
-                    content_classification: None,
-                },
-            ],
+            mutations: vec![SceneMutation::PublishToZone {
+                zone_name: "subtitle".to_string(),
+                content: ZoneContent::StreamText("batch publish".to_string()),
+                publish_token: dummy_token(),
+                merge_key: None,
+                expires_at_wall_us: None,
+                content_classification: None,
+            }],
             timing_hints: None,
             lease_id: None,
         };
@@ -3327,7 +3556,10 @@ mod tests {
         assert!(result.applied, "batch should be applied");
         let publishes = scene.zone_registry.active_for_zone("subtitle");
         assert_eq!(publishes.len(), 1);
-        assert_eq!(publishes[0].content, ZoneContent::StreamText("batch publish".to_string()));
+        assert_eq!(
+            publishes[0].content,
+            ZoneContent::StreamText("batch publish".to_string())
+        );
     }
 
     #[test]
@@ -3336,7 +3568,16 @@ mod tests {
         // Publish as "agent", then clear as "agent" — should clear.
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         scene.register_zone(make_subtitle_zone());
-        scene.publish_to_zone("subtitle", ZoneContent::StreamText("hello".to_string()), "agent", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("hello".to_string()),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
 
         use crate::mutation::{MutationBatch, SceneMutation};
@@ -3344,12 +3585,10 @@ mod tests {
         let batch = MutationBatch {
             batch_id: SceneId::new(),
             agent_namespace: "agent".to_string(),
-            mutations: vec![
-                SceneMutation::ClearZone {
-                    zone_name: "subtitle".to_string(),
-                    publish_token: dummy_token(),
-                },
-            ],
+            mutations: vec![SceneMutation::ClearZone {
+                zone_name: "subtitle".to_string(),
+                publish_token: dummy_token(),
+            }],
             timing_hints: None,
             lease_id: None,
         };
@@ -3387,8 +3626,26 @@ mod tests {
         };
         scene.register_zone(stack_zone);
 
-        scene.publish_to_zone("shared", ZoneContent::StreamText("from a1".to_string()), "a1", None, None, None).unwrap();
-        scene.publish_to_zone("shared", ZoneContent::StreamText("from a2".to_string()), "a2", None, None, None).unwrap();
+        scene
+            .publish_to_zone(
+                "shared",
+                ZoneContent::StreamText("from a1".to_string()),
+                "a1",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "shared",
+                ZoneContent::StreamText("from a2".to_string()),
+                "a2",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
         assert_eq!(scene.zone_registry.active_for_zone("shared").len(), 2);
 
         // Clear only "a1"'s publication
@@ -3475,15 +3732,21 @@ mod tests {
         pending.insert(tiles[0]);
 
         // Frame 1: deferral_count goes 0 → 1
-        let d1 = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+        let d1 = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
         assert_eq!(d1, SyncGroupCommitDecision::Defer);
 
         // Frame 2: deferral_count goes 1 → 2
-        let d2 = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+        let d2 = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
         assert_eq!(d2, SyncGroupCommitDecision::Defer);
 
         // Frame 3: deferral_count == max_deferrals (2) → force commit
-        let d3 = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+        let d3 = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
         match d3 {
             SyncGroupCommitDecision::ForceCommit { tiles: committed } => {
                 // Only tile[0] should be committed (tile[1] has no pending)
@@ -3510,16 +3773,21 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(scene.sync_group_count(), SceneGraph::MAX_SYNC_GROUPS_PER_NAMESPACE);
+        assert_eq!(
+            scene.sync_group_count(),
+            SceneGraph::MAX_SYNC_GROUPS_PER_NAMESPACE
+        );
 
         // 17th should fail
-        let result =
-            scene.create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3);
-        assert!(matches!(result, Err(ValidationError::SyncGroupLimitExceeded { .. })));
+        let result = scene.create_sync_group(None, "agent", SyncCommitPolicy::AllOrDefer, 3);
+        assert!(matches!(
+            result,
+            Err(ValidationError::SyncGroupLimitExceeded { .. })
+        ));
 
         // A different namespace can still create groups
-        let other_group = scene
-            .create_sync_group(None, "other-agent", SyncCommitPolicy::AllOrDefer, 3);
+        let other_group =
+            scene.create_sync_group(None, "other-agent", SyncCommitPolicy::AllOrDefer, 3);
         assert!(other_group.is_ok());
     }
 
@@ -3546,7 +3814,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateNode]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 300.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(64, 48);
@@ -3618,7 +3892,13 @@ mod tests {
         let tab_id = scene.create_tab("Tab", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(10.0, 10.0, 200.0, 150.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(10.0, 10.0, 200.0, 150.0),
+                1,
+            )
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(16, 16);
@@ -3651,8 +3931,10 @@ mod tests {
         // Verify the node data survived the roundtrip.
         for (_id, n) in &restored.nodes {
             if let NodeData::StaticImage(si) = &n.data {
-                assert_eq!(si.resource_id, resource_id,
-                    "resource_id must survive snapshot roundtrip");
+                assert_eq!(
+                    si.resource_id, resource_id,
+                    "resource_id must survive snapshot roundtrip"
+                );
                 assert_eq!(si.fit_mode, ImageFitMode::Cover);
                 assert_eq!(si.width, 16);
                 assert_eq!(si.height, 16);
@@ -3668,7 +3950,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(8, 8);
@@ -3741,10 +4029,13 @@ mod tests {
 
         // Suspend again from Suspended state (invalid)
         let err = scene.suspend_lease(&lease_id, 2000).unwrap_err();
-        assert!(matches!(err, LeaseError::InvalidTransition {
-            from: LeaseState::Suspended,
-            to: LeaseState::Suspended,
-        }));
+        assert!(matches!(
+            err,
+            LeaseError::InvalidTransition {
+                from: LeaseState::Suspended,
+                to: LeaseState::Suspended,
+            }
+        ));
     }
 
     #[test]
@@ -3775,10 +4066,13 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![]);
 
         let err = scene.resume_lease(&lease_id, 1000).unwrap_err();
-        assert!(matches!(err, LeaseError::InvalidTransition {
-            from: LeaseState::Active,
-            to: LeaseState::Active,
-        }));
+        assert!(matches!(
+            err,
+            LeaseError::InvalidTransition {
+                from: LeaseState::Active,
+                to: LeaseState::Active,
+            }
+        ));
     }
 
     #[test]
@@ -3787,7 +4081,9 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![]);
 
         clock.advance(5_000);
-        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .disconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
 
         let lease = &scene.leases[&lease_id];
         assert_eq!(lease.state, LeaseState::Orphaned);
@@ -3802,10 +4098,13 @@ mod tests {
         scene.suspend_lease(&lease_id, 1000).unwrap();
 
         let err = scene.disconnect_lease(&lease_id, 2000).unwrap_err();
-        assert!(matches!(err, LeaseError::InvalidTransition {
-            from: LeaseState::Suspended,
-            to: LeaseState::Orphaned,
-        }));
+        assert!(matches!(
+            err,
+            LeaseError::InvalidTransition {
+                from: LeaseState::Suspended,
+                to: LeaseState::Orphaned,
+            }
+        ));
     }
 
     #[test]
@@ -3814,11 +4113,15 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![]);
 
         clock.advance(5_000);
-        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .disconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
 
         // Reconnect within the 30s grace period
         clock.advance(10_000);
-        scene.reconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .reconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
 
         let lease = &scene.leases[&lease_id];
         assert_eq!(lease.state, LeaseState::Active);
@@ -3832,11 +4135,15 @@ mod tests {
         let lease_id = scene.grant_lease("test", 120_000, vec![]);
 
         clock.advance(5_000);
-        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .disconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
 
         // Advance past the 30s grace period
         clock.advance(31_000);
-        let err = scene.reconnect_lease(&lease_id, clock.now_millis()).unwrap_err();
+        let err = scene
+            .reconnect_lease(&lease_id, clock.now_millis())
+            .unwrap_err();
         assert!(matches!(err, LeaseError::InvalidTransition { .. }));
     }
 
@@ -3869,11 +4176,19 @@ mod tests {
         scene.leases.get_mut(&lease_id).unwrap().revoke().unwrap();
 
         // Already revoked — should fail
-        let err = scene.leases.get_mut(&lease_id).unwrap().revoke().unwrap_err();
-        assert!(matches!(err, LeaseError::InvalidTransition {
-            from: LeaseState::Revoked,
-            to: LeaseState::Revoked,
-        }));
+        let err = scene
+            .leases
+            .get_mut(&lease_id)
+            .unwrap()
+            .revoke()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            LeaseError::InvalidTransition {
+                from: LeaseState::Revoked,
+                to: LeaseState::Revoked,
+            }
+        ));
     }
 
     #[test]
@@ -3924,7 +4239,12 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
 
         // Set budget to max 2 tiles
-        scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 2;
+        scene
+            .leases
+            .get_mut(&lease_id)
+            .unwrap()
+            .resource_budget
+            .max_tiles = 2;
 
         // Create 2 tiles (OK)
         for i in 0..2 {
@@ -3972,7 +4292,12 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
 
         // Set budget to max 5 tiles; soft limit at 80% = 4 tiles
-        scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 5;
+        scene
+            .leases
+            .get_mut(&lease_id)
+            .unwrap()
+            .resource_budget
+            .max_tiles = 5;
 
         // Create 4 tiles (should trigger soft limit warning on the 4th)
         for i in 0..4 {
@@ -4092,17 +4417,26 @@ mod tests {
         // Should NOT be expired (TTL paused)
         assert!(!scene.leases[&lease_id].is_expired(clock.now_millis()));
         // Remaining should still be 5_000
-        assert_eq!(scene.leases[&lease_id].remaining_ms(clock.now_millis()), 5_000);
+        assert_eq!(
+            scene.leases[&lease_id].remaining_ms(clock.now_millis()),
+            5_000
+        );
 
         // Resume
         scene.resume_lease(&lease_id, clock.now_millis()).unwrap();
         // Now remaining should be 5_000 from the resume point
-        assert_eq!(scene.leases[&lease_id].remaining_ms(clock.now_millis()), 5_000);
+        assert_eq!(
+            scene.leases[&lease_id].remaining_ms(clock.now_millis()),
+            5_000
+        );
 
         // Advance 4 seconds — not yet expired
         clock.advance(4_000);
         assert!(!scene.leases[&lease_id].is_expired(clock.now_millis()));
-        assert_eq!(scene.leases[&lease_id].remaining_ms(clock.now_millis()), 1_000);
+        assert_eq!(
+            scene.leases[&lease_id].remaining_ms(clock.now_millis()),
+            1_000
+        );
 
         // Advance 2 more seconds — now expired
         clock.advance(2_000);
@@ -4117,17 +4451,27 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test", 120_000, vec![Capability::CreateTile]);
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         // Disconnect
         clock.advance(5_000);
-        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .disconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
         assert_eq!(scene.tile_count(), 1); // Tiles preserved
 
         // Reconnect within grace (30s)
         clock.advance(15_000);
-        scene.reconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .reconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
         assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
         assert_eq!(scene.tile_count(), 1); // Tiles still there
     }
@@ -4138,12 +4482,20 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test", 120_000, vec![Capability::CreateTile]);
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         // Disconnect
         clock.advance(5_000);
-        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .disconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
 
         // Grace period expires (30s)
         clock.advance(31_000);
@@ -4159,7 +4511,9 @@ mod tests {
         let lease_id = scene.grant_lease("test", 120_000, vec![]);
 
         clock.advance(5_000);
-        scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+        scene
+            .disconnect_lease(&lease_id, clock.now_millis())
+            .unwrap();
 
         // Not expired yet
         clock.advance(29_000);
@@ -4249,7 +4603,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test", 600_000, vec![Capability::CreateTile]);
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         clock.advance(1_000);
@@ -4272,7 +4632,10 @@ mod tests {
     fn test_renewal_policy_defaults_to_manual() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let lease_id = scene.grant_lease("test", 60_000, vec![]);
-        assert_eq!(scene.leases[&lease_id].renewal_policy, RenewalPolicy::Manual);
+        assert_eq!(
+            scene.leases[&lease_id].renewal_policy,
+            RenewalPolicy::Manual
+        );
     }
 
     #[test]
@@ -4299,9 +4662,18 @@ mod tests {
         let lease_normal = scene.grant_lease_with_priority("agent-normal", 60_000, 2, vec![]);
         let lease_low = scene.grant_lease_with_priority("agent-low", 60_000, 3, vec![]);
 
-        assert_eq!(scene.leases[&lease_high].priority, 1, "high priority must be stored as 1");
-        assert_eq!(scene.leases[&lease_normal].priority, 2, "normal priority must be stored as 2");
-        assert_eq!(scene.leases[&lease_low].priority, 3, "low priority must be stored as 3");
+        assert_eq!(
+            scene.leases[&lease_high].priority, 1,
+            "high priority must be stored as 1"
+        );
+        assert_eq!(
+            scene.leases[&lease_normal].priority, 2,
+            "normal priority must be stored as 2"
+        );
+        assert_eq!(
+            scene.leases[&lease_low].priority, 3,
+            "low priority must be stored as 3"
+        );
     }
 
     /// WHEN a lease is renewed THEN the stored priority is preserved unchanged.
@@ -4316,7 +4688,9 @@ mod tests {
         assert_eq!(scene.leases[&lease_id].priority, 1);
 
         // Renew the lease with a new TTL.
-        scene.renew_lease(lease_id, 120_000).expect("renewal must succeed");
+        scene
+            .renew_lease(lease_id, 120_000)
+            .expect("renewal must succeed");
 
         // Priority must remain unchanged after renewal.
         assert_eq!(
@@ -4334,7 +4708,7 @@ mod tests {
     /// tiles with the highest lease_priority values (least important) shed first.
     #[test]
     fn test_grant_lease_with_priority_shedding_order() {
-        use crate::lease::priority::{shed_count_for_level4, shedding_order, TileSheddingEntry};
+        use crate::lease::priority::{TileSheddingEntry, shed_count_for_level4, shedding_order};
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let _l_high = scene.grant_lease_with_priority("chrome", 60_000, 0, vec![]);
@@ -4374,10 +4748,22 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
 
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
         scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(200.0, 0.0, 100.0, 100.0), 2)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(200.0, 0.0, 100.0, 100.0),
+                2,
+            )
             .unwrap();
 
         let usage = scene.lease_resource_usage(&lease_id);
@@ -4414,7 +4800,9 @@ mod tests {
             .revoke_capability(lease_id, &Capability::CreateTiles)
             .expect("revoke_capability must succeed");
 
-        let caps = scene.lease_capabilities(&lease_id).expect("lease must exist");
+        let caps = scene
+            .lease_capabilities(&lease_id)
+            .expect("lease must exist");
         assert!(
             !caps.contains(&Capability::CreateTiles),
             "CreateTiles must be removed"
@@ -4443,12 +4831,22 @@ mod tests {
         let lease_id = scene.grant_lease(
             "agent",
             60_000,
-            vec![Capability::CreateTiles, Capability::ModifyOwnTiles, Capability::ManageTabs],
+            vec![
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::ManageTabs,
+            ],
         );
 
         // CreateTile (no capability check path) succeeds.
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .expect("create_tile must succeed before revocation");
 
         // Revoke ManageTabs.
@@ -4494,7 +4892,9 @@ mod tests {
     fn revoke_capability_on_terminal_lease_returns_invalid_field() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTiles]);
-        scene.revoke_lease(lease_id).expect("full revoke must succeed");
+        scene
+            .revoke_lease(lease_id)
+            .expect("full revoke must succeed");
 
         let err = scene
             .revoke_capability(lease_id, &Capability::CreateTiles)
@@ -4537,7 +4937,9 @@ mod tests {
                 .revoke_capability(lease_id, cap)
                 .expect("revoke must succeed");
         }
-        let caps = scene.lease_capabilities(&lease_id).expect("lease must exist");
+        let caps = scene
+            .lease_capabilities(&lease_id)
+            .expect("lease must exist");
         assert!(caps.is_empty(), "capability scope must be empty");
         assert_eq!(
             scene.leases[&lease_id].state,
@@ -4565,7 +4967,9 @@ mod tests {
             .revoke_capability(lease_id, &Capability::CreateTiles)
             .expect("revoke must work on suspended lease");
 
-        let caps = scene.lease_capabilities(&lease_id).expect("lease must exist");
+        let caps = scene
+            .lease_capabilities(&lease_id)
+            .expect("lease must exist");
         assert!(
             !caps.contains(&Capability::CreateTiles),
             "CreateTiles must be removed from suspended lease"
@@ -4586,11 +4990,7 @@ mod tests {
     fn revoke_capability_returns_cap_name_and_timestamp() {
         let (mut scene, clock) = scene_with_test_clock();
         clock.advance(1_000_000); // 1 second in μs
-        let lease_id = scene.grant_lease(
-            "agent",
-            60_000,
-            vec![Capability::CreateTiles],
-        );
+        let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTiles]);
         let (cap_name, revoked_at_us) = scene
             .revoke_capability(lease_id, &Capability::CreateTiles)
             .expect("revoke_capability must succeed");
@@ -4614,7 +5014,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test", 500, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         clock.advance(501);
@@ -4635,8 +5041,8 @@ mod spec_scenarios {
     use super::*;
     use crate::clock::TestClock;
     use crate::types::{
-        Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
-        TextMarkdownNode, FontFamily, TextAlign, TextOverflow, HitRegionNode,
+        Capability, FontFamily, HitRegionNode, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
+        TextAlign, TextMarkdownNode, TextOverflow,
     };
     use std::sync::Arc;
 
@@ -4658,7 +5064,9 @@ mod spec_scenarios {
     fn tab_limit_256_enforced() {
         let mut scene = make_scene();
         for i in 0..MAX_TABS {
-            scene.create_tab(&format!("Tab {}", i), i as u32).expect("should create tab");
+            scene
+                .create_tab(&format!("Tab {}", i), i as u32)
+                .expect("should create tab");
         }
         assert_eq!(scene.tabs.len(), MAX_TABS);
         let err = scene.create_tab("Overflow", MAX_TABS as u32).unwrap_err();
@@ -4687,12 +5095,24 @@ mod spec_scenarios {
             let y = (i / 40) as f32 * 42.0;
             if x + 40.0 <= 1920.0 && y + 40.0 <= 1080.0 {
                 scene
-                    .create_tile(tab_id, "agent", lease_id, Rect::new(x, y, 40.0, 40.0), i as u32)
+                    .create_tile(
+                        tab_id,
+                        "agent",
+                        lease_id,
+                        Rect::new(x, y, 40.0, 40.0),
+                        i as u32,
+                    )
                     .expect("should create tile within limit");
             } else {
                 // Re-use same position for tiles that would go out of bounds (unchecked path ignores bounds)
                 scene
-                    .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 1.0, 1.0), i as u32)
+                    .create_tile(
+                        tab_id,
+                        "agent",
+                        lease_id,
+                        Rect::new(0.0, 0.0, 1.0, 1.0),
+                        i as u32,
+                    )
                     .expect("should create tile within limit");
             }
         }
@@ -4702,7 +5122,13 @@ mod spec_scenarios {
         );
 
         let err = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 1.0, 1.0), MAX_TILES_PER_TAB as u32)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                MAX_TILES_PER_TAB as u32,
+            )
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::BudgetExceeded { .. }),
@@ -4719,9 +5145,19 @@ mod spec_scenarios {
     fn node_limit_64_per_tile_enforced() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile, Capability::CreateNode]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTile, Capability::CreateNode],
+        );
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 400.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 400.0),
+                1,
+            )
             .unwrap();
 
         // Add root node first, then chain children off the root.
@@ -4734,7 +5170,9 @@ mod spec_scenarios {
                 bounds: Rect::new(0.0, 0.0, 400.0, 400.0),
             }),
         };
-        scene.add_node_to_tile(tile_id, None, root_node).expect("root should be added");
+        scene
+            .add_node_to_tile(tile_id, None, root_node)
+            .expect("root should be added");
 
         // Add MAX_NODES_PER_TILE - 1 children off the root (total will be MAX_NODES_PER_TILE)
         for i in 1..MAX_NODES_PER_TILE {
@@ -4746,13 +5184,18 @@ mod spec_scenarios {
                     bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
                 }),
             };
-            scene.add_node_to_tile(tile_id, Some(root_id), child)
+            scene
+                .add_node_to_tile(tile_id, Some(root_id), child)
                 .unwrap_or_else(|e| panic!("should add child {} ok: {:?}", i, e));
         }
 
         // Verify we have exactly MAX_NODES_PER_TILE nodes in the tile
         let count = scene.count_node_subtree(root_id);
-        assert_eq!(count as usize, MAX_NODES_PER_TILE, "should have exactly {} nodes", MAX_NODES_PER_TILE);
+        assert_eq!(
+            count as usize, MAX_NODES_PER_TILE,
+            "should have exactly {} nodes",
+            MAX_NODES_PER_TILE
+        );
 
         // One more should be rejected
         let overflow_node = Node {
@@ -4763,7 +5206,9 @@ mod spec_scenarios {
                 bounds: Rect::new(0.0, 0.0, 10.0, 10.0),
             }),
         };
-        let err = scene.add_node_to_tile(tile_id, Some(root_id), overflow_node).unwrap_err();
+        let err = scene
+            .add_node_to_tile(tile_id, Some(root_id), overflow_node)
+            .unwrap_err();
         assert!(
             matches!(err, ValidationError::NodeCountExceeded { .. }),
             "expected NodeCountExceeded, got {:?}",
@@ -4781,7 +5226,13 @@ mod spec_scenarios {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
         let node_id = SceneId::new();
@@ -4794,11 +5245,19 @@ mod spec_scenarios {
             }),
         };
         // First insertion succeeds
-        scene.add_node_to_tile(tile_id, None, node.clone()).expect("first insert should succeed");
+        scene
+            .add_node_to_tile(tile_id, None, node.clone())
+            .expect("first insert should succeed");
 
         // Second insertion with the same node ID should fail
         let tile_id2 = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(200.0, 0.0, 200.0, 200.0), 2)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(200.0, 0.0, 200.0, 200.0),
+                2,
+            )
             .unwrap();
         let err = scene.add_node_to_tile(tile_id2, None, node).unwrap_err();
         assert!(
@@ -4833,7 +5292,9 @@ mod spec_scenarios {
         let mut scene = make_scene();
         // Lease with no capabilities
         let lease_id = scene.grant_lease("agent", 300_000, vec![]);
-        let err = scene.create_tab_with_lease("My Tab", 0, lease_id).unwrap_err();
+        let err = scene
+            .create_tab_with_lease("My Tab", 0, lease_id)
+            .unwrap_err();
         assert!(
             matches!(err, ValidationError::CapabilityMissing { ref capability } if capability.contains("ManageTabs")),
             "expected CapabilityMissing(ManageTabs), got {:?}",
@@ -4850,7 +5311,9 @@ mod spec_scenarios {
         let mut scene = make_scene();
         let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::ManageTabs]);
         let tab_id = scene.create_tab_with_lease("New Tab", 0, lease_id).unwrap();
-        scene.switch_active_tab_with_lease(tab_id, lease_id).unwrap();
+        scene
+            .switch_active_tab_with_lease(tab_id, lease_id)
+            .unwrap();
         assert_eq!(scene.active_tab, Some(tab_id));
     }
 
@@ -4879,16 +5342,36 @@ mod spec_scenarios {
         // No capabilities — should fail
         let lease_no_caps = scene.grant_lease("agent", 300_000, vec![]);
         let err = scene
-            .create_tile_checked(tab_id, "agent", lease_no_caps, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile_checked(
+                tab_id,
+                "agent",
+                lease_no_caps,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap_err();
-        assert!(matches!(err, ValidationError::CapabilityMissing { .. }), "got {:?}", err);
+        assert!(
+            matches!(err, ValidationError::CapabilityMissing { .. }),
+            "got {:?}",
+            err
+        );
 
         // Only create_tiles (not modify_own_tiles) — should still fail
         let lease_create_only = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles]);
         let err = scene
-            .create_tile_checked(tab_id, "agent", lease_create_only, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile_checked(
+                tab_id,
+                "agent",
+                lease_create_only,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap_err();
-        assert!(matches!(err, ValidationError::CapabilityMissing { .. }), "got {:?}", err);
+        assert!(
+            matches!(err, ValidationError::CapabilityMissing { .. }),
+            "got {:?}",
+            err
+        );
 
         // Full capabilities — should succeed
         let lease_full = scene.grant_lease(
@@ -4897,7 +5380,13 @@ mod spec_scenarios {
             vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let tile_id = scene
-            .create_tile_checked(tab_id, "agent", lease_full, Rect::new(0.0, 0.0, 200.0, 200.0), 5)
+            .create_tile_checked(
+                tab_id,
+                "agent",
+                lease_full,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                5,
+            )
             .unwrap();
         assert_eq!(scene.tiles[&tile_id].z_order, 5);
         assert!((scene.tiles[&tile_id].opacity - 1.0).abs() < f32::EPSILON);
@@ -4911,9 +5400,19 @@ mod spec_scenarios {
     fn tile_mutation_with_expired_lease_rejected() {
         let (mut scene, clock) = make_scene_with_clock();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 100, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            100,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
         // Advance clock past TTL
@@ -4937,24 +5436,45 @@ mod spec_scenarios {
     fn delete_tile_removes_tile_and_nodes() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
         let node_id = SceneId::new();
-        scene.set_tile_root(tile_id, Node {
-            id: node_id,
-            children: vec![],
-            data: NodeData::SolidColor(SolidColorNode {
-                color: Rgba::WHITE,
-                bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::WHITE,
+                        bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                    }),
+                },
+            )
+            .unwrap();
         assert!(scene.nodes.contains_key(&node_id));
 
         scene.delete_tile(tile_id, "agent").unwrap();
-        assert!(!scene.tiles.contains_key(&tile_id), "tile should be removed");
-        assert!(!scene.nodes.contains_key(&node_id), "nodes should be removed with tile");
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile should be removed"
+        );
+        assert!(
+            !scene.nodes.contains_key(&node_id),
+            "nodes should be removed with tile"
+        );
     }
 
     // ─ Opacity out of range (spec line 109) ──────────────────────────────────
@@ -4965,20 +5485,38 @@ mod spec_scenarios {
     fn opacity_out_of_range_rejected() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
-        let err = scene.update_tile_opacity(tile_id, 1.5, "agent").unwrap_err();
+        let err = scene
+            .update_tile_opacity(tile_id, 1.5, "agent")
+            .unwrap_err();
         assert!(
             matches!(err, ValidationError::InvalidField { ref field, .. } if field == "opacity"),
             "expected InvalidField(opacity), got {:?}",
             err
         );
 
-        let err2 = scene.update_tile_opacity(tile_id, -0.1, "agent").unwrap_err();
-        assert!(matches!(err2, ValidationError::InvalidField { .. }), "got {:?}", err2);
+        let err2 = scene
+            .update_tile_opacity(tile_id, -0.1, "agent")
+            .unwrap_err();
+        assert!(
+            matches!(err2, ValidationError::InvalidField { .. }),
+            "got {:?}",
+            err2
+        );
     }
 
     // ─ Zero-size bounds (spec line 113) ──────────────────────────────────────
@@ -4992,7 +5530,11 @@ mod spec_scenarios {
 
         // create_tile_checked requires CreateTiles + ModifyOwnTiles; use correct capabilities
         // so the bounds check is reached (not capability check).
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
 
         let err = scene
             .create_tile_checked(
@@ -5005,13 +5547,20 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::BoundsOutOfRange { .. }),
-            "expected BoundsOutOfRange, got {:?}", err
+            "expected BoundsOutOfRange, got {:?}",
+            err
         );
 
         // Use the basic create_tile (no capability check) to also confirm bounds are rejected
         let lease_unchecked = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
         let err2 = scene
-            .create_tile(tab_id, "agent", lease_unchecked, Rect::new(0.0, 0.0, 0.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_unchecked,
+                Rect::new(0.0, 0.0, 0.0, 100.0),
+                1,
+            )
             .unwrap_err();
         assert!(
             matches!(err2, ValidationError::BoundsOutOfRange { .. }),
@@ -5031,7 +5580,13 @@ mod spec_scenarios {
         let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
 
         let err = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(1800.0, 0.0, 200.0, 100.0), 1) // x + w = 2000 > 1920
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(1800.0, 0.0, 200.0, 100.0),
+                1,
+            ) // x + w = 2000 > 1920
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::BoundsOutOfRange { .. }),
@@ -5051,7 +5606,13 @@ mod spec_scenarios {
         let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
 
         let err = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), ZONE_TILE_Z_MIN)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                ZONE_TILE_Z_MIN,
+            )
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::InvalidField { ref field, .. } if field == "z_order"),
@@ -5061,13 +5622,29 @@ mod spec_scenarios {
 
         // Also reject z_order above the threshold
         let err2 = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), ZONE_TILE_Z_MIN + 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                ZONE_TILE_Z_MIN + 1,
+            )
             .unwrap_err();
-        assert!(matches!(err2, ValidationError::InvalidField { .. }), "got {:?}", err2);
+        assert!(
+            matches!(err2, ValidationError::InvalidField { .. }),
+            "got {:?}",
+            err2
+        );
 
         // z_order just below threshold is fine
         scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), ZONE_TILE_Z_MIN - 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                ZONE_TILE_Z_MIN - 1,
+            )
             .expect("z_order just below ZONE_TILE_Z_MIN must succeed");
     }
 
@@ -5108,9 +5685,19 @@ mod spec_scenarios {
     fn cross_namespace_tile_access_denied() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let cal_lease = scene.grant_lease("cal", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let cal_lease = scene.grant_lease(
+            "cal",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
-            .create_tile(tab_id, "cal", cal_lease, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "cal",
+                cal_lease,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
         // weather-agent tries to update bounds of cal's tile
@@ -5156,13 +5743,24 @@ mod spec_scenarios {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
-        scene.create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1).unwrap();
+        scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
+            .unwrap();
         assert_eq!(scene.tile_count(), 1);
 
         scene.delete_tab(tab_id).unwrap();
         assert_eq!(scene.tabs.len(), 0, "tab should be removed");
         assert_eq!(scene.tile_count(), 0, "tiles should be removed with tab");
-        assert_eq!(scene.active_tab, None, "active_tab should be None after deleting last tab");
+        assert_eq!(
+            scene.active_tab, None,
+            "active_tab should be None after deleting last tab"
+        );
     }
 
     #[test]
@@ -5180,7 +5778,11 @@ mod spec_scenarios {
         let _tab_b = scene.create_tab("B", 1).unwrap();
         // Try to give tab_a the same order as tab_b
         let err = scene.reorder_tab(tab_a, 1).unwrap_err();
-        assert!(matches!(err, ValidationError::DuplicateDisplayOrder { .. }), "got {:?}", err);
+        assert!(
+            matches!(err, ValidationError::DuplicateDisplayOrder { .. }),
+            "got {:?}",
+            err
+        );
     }
 
     // ─ Opacity valid range ────────────────────────────────────────────────────
@@ -5189,9 +5791,19 @@ mod spec_scenarios {
     fn tile_opacity_accepts_boundary_values() {
         let mut scene = make_scene();
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::CreateTiles, Capability::ModifyOwnTiles]);
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         scene.update_tile_opacity(tile_id, 0.0, "agent").unwrap();
@@ -5208,11 +5820,16 @@ mod spec_scenarios {
 
     #[test]
     fn all_25_test_scenes_pass_layer0_invariants() {
-        use crate::test_scenes::{assert_layer0_invariants, ClockMs, TestSceneRegistry};
+        use crate::test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants};
 
         let registry = TestSceneRegistry::new();
         let names = TestSceneRegistry::scene_names();
-        assert_eq!(names.len(), 25, "must have exactly 25 registered scenes, got {}", names.len());
+        assert_eq!(
+            names.len(),
+            25,
+            "must have exactly 25 registered scenes, got {}",
+            names.len()
+        );
 
         for name in names {
             let (graph, _spec) = registry
@@ -5273,8 +5890,8 @@ mod spec_scenarios {
 
         // StaticImageNode — constructable without GPU context
         // RS-4: uses resource_id + decoded_bytes, no raw blob data embedded.
-        use crate::types::StaticImageNode;
         use crate::types::ImageFitMode;
+        use crate::types::StaticImageNode;
         let _ = Node {
             id: SceneId::new(),
             children: vec![],

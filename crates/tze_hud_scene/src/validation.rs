@@ -55,7 +55,11 @@ pub enum ValidationError {
 
     /// A tile already has the maximum number of nodes (64 per RFC 0001 §2.1).
     #[error("node count exceeded for tile {tile_id}: has {current}, limit {limit}")]
-    NodeCountExceeded { tile_id: SceneId, current: usize, limit: usize },
+    NodeCountExceeded {
+        tile_id: SceneId,
+        current: usize,
+        limit: usize,
+    },
 
     #[error("capability missing: {capability}")]
     CapabilityMissing { capability: String },
@@ -96,7 +100,9 @@ pub enum ValidationError {
 
     /// A mutation was rejected because the requesting agent does not own the target tile.
     /// RFC 0001 §1.2: namespace isolation.
-    #[error("namespace mismatch: tile {tile_id} belongs to namespace '{tile_namespace}', not '{agent_namespace}'")]
+    #[error(
+        "namespace mismatch: tile {tile_id} belongs to namespace '{tile_namespace}', not '{agent_namespace}'"
+    )]
     NamespaceMismatch {
         tile_id: SceneId,
         tile_namespace: String,
@@ -108,15 +114,20 @@ pub enum ValidationError {
     CycleDetected { node_id: SceneId },
 
     /// Two non-passthrough tiles on the same tab share a z_order with overlapping bounds.
-    #[error("z-order conflict: tiles {tile_a} and {tile_b} share z_order {z_order} with overlapping bounds")]
-    ZOrderConflict { tile_a: SceneId, tile_b: SceneId, z_order: u32 },
+    #[error(
+        "z-order conflict: tiles {tile_a} and {tile_b} share z_order {z_order} with overlapping bounds"
+    )]
+    ZOrderConflict {
+        tile_a: SceneId,
+        tile_b: SceneId,
+        z_order: u32,
+    },
 
     /// Batch size exceeded the 1000-mutation hard limit.
     #[error("batch size exceeded: max {max}, got {got}")]
     BatchSizeExceeded { max: usize, got: usize },
 
     // ── Lease-state zone-publish errors (spec §Zone Publish Requires Active Lease) ──
-
     /// Zone publish rejected: no active lease found for publisher namespace.
     ///
     /// Spec line 214: "Missing lease MUST produce `LEASE_NOT_FOUND`".
@@ -261,7 +272,9 @@ impl ValidationErrorCode {
             ValidationError::SyncGroupMemberLimitExceeded { .. } => {
                 Self::SyncGroupMemberLimitExceeded
             }
-            ValidationError::SyncGroupOwnershipViolation { .. } => Self::SyncGroupOwnershipViolation,
+            ValidationError::SyncGroupOwnershipViolation { .. } => {
+                Self::SyncGroupOwnershipViolation
+            }
             ValidationError::CycleDetected { .. } => Self::CycleDetected,
             ValidationError::ZOrderConflict { .. } => Self::ZOrderConflict,
             ValidationError::BatchSizeExceeded { .. } => Self::BatchSizeExceeded,
@@ -364,11 +377,14 @@ fn build_context_and_hint(
             json!({ "field": "id", "value": id.to_string(), "constraint": "id must be unique in the scene graph" }),
             None,
         ),
-        ValidationError::BoundsOutOfRange { reason } => (
-            json!({ "field": "bounds", "constraint": reason }),
-            None,
-        ),
-        ValidationError::NodeCountExceeded { tile_id, current, limit } => (
+        ValidationError::BoundsOutOfRange { reason } => {
+            (json!({ "field": "bounds", "constraint": reason }), None)
+        }
+        ValidationError::NodeCountExceeded {
+            tile_id,
+            current,
+            limit,
+        } => (
             json!({ "field": "node_count", "value": current, "constraint": format!("max {} nodes per tile", limit), "tile_id": tile_id.to_string() }),
             None,
         ),
@@ -376,7 +392,11 @@ fn build_context_and_hint(
             json!({ "field": "resource_id", "value": id.to_string(), "constraint": "resource must be registered" }),
             None,
         ),
-        ValidationError::NamespaceMismatch { tile_id, tile_namespace, agent_namespace } => (
+        ValidationError::NamespaceMismatch {
+            tile_id,
+            tile_namespace,
+            agent_namespace,
+        } => (
             json!({ "field": "namespace", "value": agent_namespace, "constraint": format!("tile {} belongs to namespace '{}'", tile_id, tile_namespace) }),
             None,
         ),
@@ -384,10 +404,9 @@ fn build_context_and_hint(
             json!({ "field": "resource_budget", "value": resource, "constraint": "must not exceed lease budget" }),
             Some(json!({ "action": "reduce_resource_usage", "resource": resource })),
         ),
-        ValidationError::InvalidField { field, reason } => (
-            json!({ "field": field, "constraint": reason }),
-            None,
-        ),
+        ValidationError::InvalidField { field, reason } => {
+            (json!({ "field": field, "constraint": reason }), None)
+        }
         ValidationError::BatchSizeExceeded { max, got } => (
             json!({ "field": "mutations", "value": got, "constraint": format!("max {} mutations per batch", max) }),
             Some(json!({ "action": "split_batch", "max_batch_size": max })),
@@ -396,7 +415,11 @@ fn build_context_and_hint(
             json!({ "field": "node_id", "value": node_id.to_string(), "constraint": "node tree must be acyclic" }),
             None,
         ),
-        ValidationError::ZOrderConflict { tile_a, tile_b, z_order } => (
+        ValidationError::ZOrderConflict {
+            tile_a,
+            tile_b,
+            z_order,
+        } => (
             json!({
                 "field": "z_order",
                 "value": z_order,
@@ -445,10 +468,9 @@ fn build_context_and_hint(
             json!({ "field": "member_count", "constraint": format!("max {} tiles per sync group", limit) }),
             None,
         ),
-        ValidationError::SyncGroupOwnershipViolation { reason } => (
-            json!({ "field": "sync_group", "constraint": reason }),
-            None,
-        ),
+        ValidationError::SyncGroupOwnershipViolation { reason } => {
+            (json!({ "field": "sync_group", "constraint": reason }), None)
+        }
         ValidationError::ZonePublishLeaseNotFound { namespace } => (
             json!({ "field": "lease", "value": namespace, "constraint": "active lease required for zone publish" }),
             None,
@@ -511,7 +533,11 @@ impl BatchRejected {
     ///
     /// Sets `mutation_index = None` to signal that the error is not attributable
     /// to any specific mutation within the batch.
-    pub fn batch_level(batch_id: SceneId, mutation_type: impl Into<String>, error: &ValidationError) -> Self {
+    pub fn batch_level(
+        batch_id: SceneId,
+        mutation_type: impl Into<String>,
+        error: &ValidationError,
+    ) -> Self {
         Self {
             batch_id,
             errors: vec![BatchValidationError::from_validation_error(
@@ -526,5 +552,4 @@ impl BatchRejected {
     pub fn primary_code(&self) -> Option<ValidationErrorCode> {
         self.errors.first().map(|e| e.code)
     }
-
 }

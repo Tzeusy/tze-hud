@@ -75,7 +75,10 @@ pub struct TileSortKey {
 impl TileSortKey {
     /// Construct a sort key from lease priority and tile z-order.
     pub fn new(lease_priority: u8, z_order: u32) -> Self {
-        TileSortKey { lease_priority, z_order }
+        TileSortKey {
+            lease_priority,
+            z_order,
+        }
     }
 
     /// Returns `true` if `self` should render *above* `other`.
@@ -84,7 +87,7 @@ impl TileSortKey {
     /// or, when priorities are equal, if its `z_order` is higher.
     pub fn renders_above(&self, other: &TileSortKey) -> bool {
         match self.lease_priority.cmp(&other.lease_priority) {
-            std::cmp::Ordering::Less => true,    // lower priority number = higher rendering priority
+            std::cmp::Ordering::Less => true, // lower priority number = higher rendering priority
             std::cmp::Ordering::Greater => false,
             std::cmp::Ordering::Equal => self.z_order > other.z_order,
         }
@@ -112,7 +115,7 @@ impl Ord for TileSortKey {
         // Secondary: z_order DESC (higher z_order = renders above within same priority)
         match self.lease_priority.cmp(&other.lease_priority) {
             std::cmp::Ordering::Equal => other.z_order.cmp(&self.z_order), // DESC
-            ord => ord, // ASC
+            ord => ord,                                                    // ASC
         }
     }
 }
@@ -159,12 +162,12 @@ pub fn shedding_order(tiles: &[TileSheddingEntry], count: usize) -> Vec<usize> {
     // Least important = highest lease_priority value (numerically), then lowest z_order.
     //   primary:   lease_priority DESC (b cmp a → DESC; highest value = least important)
     //   secondary: z_order ASC        (a cmp b → ASC;  lowest z_order = less important)
-    sorted.sort_by(|a, b| {
-        match b.key.lease_priority.cmp(&a.key.lease_priority) {
+    sorted.sort_by(
+        |a, b| match b.key.lease_priority.cmp(&a.key.lease_priority) {
             std::cmp::Ordering::Equal => a.key.z_order.cmp(&b.key.z_order),
             ord => ord,
-        }
-    });
+        },
+    );
 
     // Take the first `count` entries: they are the least important tiles to shed.
     sorted.iter().take(count).map(|e| e.index).collect()
@@ -256,7 +259,7 @@ mod tests {
         ];
         keys.sort();
         assert_eq!(keys[0], TileSortKey::new(1, 10)); // highest-priority tile first
-        assert_eq!(keys[2], TileSortKey::new(3, 1));  // lowest-priority tile last
+        assert_eq!(keys[2], TileSortKey::new(3, 1)); // lowest-priority tile last
     }
 
     // ── Shedding order ───────────────────────────────────────────────────────
@@ -275,7 +278,11 @@ mod tests {
             TileSheddingEntry::new(2, 3, 1),  // low-prio, low-z — least important
         ];
         let shed = shedding_order(&tiles, 1);
-        assert_eq!(shed, vec![2], "tile index 2 (priority=3, z=1) should shed first");
+        assert_eq!(
+            shed,
+            vec![2],
+            "tile index 2 (priority=3, z=1) should shed first"
+        );
     }
 
     /// With equal priorities, lower z_order is shed first.
@@ -325,6 +332,9 @@ mod tests {
         assert_eq!(shed2[1], 1, "normal_prio sheds second");
 
         // High-prio tile (index 0) must never be in a 2-tile shed from 3.
-        assert!(!shed2.contains(&0), "high_prio tile must not shed before low and normal");
+        assert!(
+            !shed2.contains(&0),
+            "high_prio tile must not shed before low and normal"
+        );
     }
 }

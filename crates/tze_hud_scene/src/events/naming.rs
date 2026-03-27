@@ -59,7 +59,10 @@ impl fmt::Display for NamingError {
         match self {
             NamingError::Empty => write!(f, "event type must not be empty"),
             NamingError::EmptySegment { position } => {
-                write!(f, "empty segment at position {position} (consecutive dots?)")
+                write!(
+                    f,
+                    "empty segment at position {position} (consecutive dots?)"
+                )
             }
             NamingError::InvalidCharacter { segment, ch } => write!(
                 f,
@@ -77,7 +80,10 @@ impl fmt::Display for NamingError {
                 "agent bare name must have at least two segments (e.g. \"doorbell.ring\")"
             ),
             NamingError::UnknownPrefix => {
-                write!(f, "event type must start with scene., agent., system., or input.")
+                write!(
+                    f,
+                    "event type must start with scene., agent., system., or input."
+                )
             }
         }
     }

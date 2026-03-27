@@ -152,9 +152,7 @@ impl TimingConfig {
             });
         }
 
-        if self.max_future_schedule_us < 1_000_000
-            || self.max_future_schedule_us > 3_600_000_000
-        {
+        if self.max_future_schedule_us < 1_000_000 || self.max_future_schedule_us > 3_600_000_000 {
             errors.push(TimingConfigError {
                 field: "max_future_schedule_us",
                 got: self.max_future_schedule_us.to_string(),
@@ -170,9 +168,7 @@ impl TimingConfig {
             });
         }
 
-        if self.pending_queue_depth_per_agent < 16
-            || self.pending_queue_depth_per_agent > 4096
-        {
+        if self.pending_queue_depth_per_agent < 16 || self.pending_queue_depth_per_agent > 4096 {
             errors.push(TimingConfigError {
                 field: "pending_queue_depth_per_agent",
                 got: self.pending_queue_depth_per_agent.to_string(),

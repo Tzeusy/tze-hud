@@ -39,9 +39,9 @@
 //! NOT focus/IME events. An agent not subscribed to either receives no events
 //! from the batch (the batch is not delivered at all).
 
+use crate::proto::session::ServerMessage;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::proto::{EventBatch, InputEnvelope, input_envelope};
-use crate::proto::session::ServerMessage;
 use tonic::Status;
 
 /// Well-known subscription category names (RFC 0005 §7.1, RFC 0010 §1.2).
@@ -87,8 +87,8 @@ fn required_capability(cat: &str) -> Option<&'static str> {
         category::INPUT_EVENTS => Some("access_input_events"),
         category::FOCUS_EVENTS => Some("access_input_events"),
         category::DEGRADATION_NOTICES => None, // mandatory
-        category::LEASE_CHANGES => None,        // mandatory
-        category::ZONE_EVENTS => Some("publish_zone:"),  // prefix match below
+        category::LEASE_CHANGES => None,       // mandatory
+        category::ZONE_EVENTS => Some("publish_zone:"), // prefix match below
         category::TELEMETRY_FRAMES => Some("read_telemetry"),
         category::ATTENTION_EVENTS => Some("read_scene_topology"),
         category::AGENT_EVENTS => Some("subscribe_scene_events"),
@@ -98,7 +98,10 @@ fn required_capability(cat: &str) -> Option<&'static str> {
 
 /// Returns `true` if `category` is mandatory (always active, cannot be filtered).
 pub fn is_mandatory(category: &str) -> bool {
-    matches!(category, category::DEGRADATION_NOTICES | category::LEASE_CHANGES)
+    matches!(
+        category,
+        category::DEGRADATION_NOTICES | category::LEASE_CHANGES
+    )
 }
 
 /// Returns `true` if the agent has the capability required for `category`.
@@ -111,11 +114,9 @@ pub fn is_mandatory(category: &str) -> bool {
 /// subscription categories by requesting a synthetic `"__unknown__"` capability.
 fn has_required_capability(category: &str, capabilities: &[String]) -> bool {
     match required_capability(category) {
-        None => true, // mandatory — no capability check
+        None => true,                 // mandatory — no capability check
         Some("__unknown__") => false, // unknown category — unconditionally denied
-        Some("publish_zone:") => capabilities
-            .iter()
-            .any(|c| c.starts_with("publish_zone:")),
+        Some("publish_zone:") => capabilities.iter().any(|c| c.starts_with("publish_zone:")),
         Some(req) => capabilities.iter().any(|c| c == req),
     }
 }
@@ -353,7 +354,9 @@ mod tests {
     fn test_mandatory_always_active_even_if_not_requested() {
         let result = filter_subscriptions(&[], &[]);
         assert!(
-            result.active.contains(&category::DEGRADATION_NOTICES.to_string()),
+            result
+                .active
+                .contains(&category::DEGRADATION_NOTICES.to_string()),
             "DEGRADATION_NOTICES must always be active"
         );
         assert!(
@@ -451,7 +454,9 @@ mod tests {
             &[],
         );
         assert!(
-            result.active.contains(&category::DEGRADATION_NOTICES.to_string()),
+            result
+                .active
+                .contains(&category::DEGRADATION_NOTICES.to_string()),
             "DEGRADATION_NOTICES cannot be removed"
         );
         assert!(
@@ -470,16 +475,16 @@ mod tests {
             category::LEASE_CHANGES.to_string(),
         ];
         let caps = vec!["read_scene_topology".to_string()];
-        let result = apply_subscription_change(
-            &current,
-            &["SCENE_TOPOLOGY".to_string()],
-            &[],
-            &caps,
-        );
+        let result =
+            apply_subscription_change(&current, &["SCENE_TOPOLOGY".to_string()], &[], &caps);
         assert!(result.active.contains(&"SCENE_TOPOLOGY".to_string()));
         assert!(result.denied.is_empty());
         // Mandatory subscriptions still present
-        assert!(result.active.contains(&category::DEGRADATION_NOTICES.to_string()));
+        assert!(
+            result
+                .active
+                .contains(&category::DEGRADATION_NOTICES.to_string())
+        );
         assert!(result.active.contains(&category::LEASE_CHANGES.to_string()));
     }
 
@@ -489,12 +494,7 @@ mod tests {
             category::DEGRADATION_NOTICES.to_string(),
             category::LEASE_CHANGES.to_string(),
         ];
-        let result = apply_subscription_change(
-            &current,
-            &["SCENE_TOPOLOGY".to_string()],
-            &[],
-            &[],
-        );
+        let result = apply_subscription_change(&current, &["SCENE_TOPOLOGY".to_string()], &[], &[]);
         assert!(!result.active.contains(&"SCENE_TOPOLOGY".to_string()));
         assert!(result.denied.contains(&"SCENE_TOPOLOGY".to_string()));
     }
@@ -506,14 +506,13 @@ mod tests {
             category::LEASE_CHANGES.to_string(),
             "SCENE_TOPOLOGY".to_string(),
         ];
-        let result = apply_subscription_change(
-            &current,
-            &[],
-            &["SCENE_TOPOLOGY".to_string()],
-            &[],
-        );
+        let result = apply_subscription_change(&current, &[], &["SCENE_TOPOLOGY".to_string()], &[]);
         assert!(!result.active.contains(&"SCENE_TOPOLOGY".to_string()));
-        assert!(result.active.contains(&category::DEGRADATION_NOTICES.to_string()));
+        assert!(
+            result
+                .active
+                .contains(&category::DEGRADATION_NOTICES.to_string())
+        );
         assert!(result.active.contains(&category::LEASE_CHANGES.to_string()));
     }
 
@@ -549,18 +548,20 @@ mod tests {
                 },
                 // key down — input variant
                 InputEnvelope {
-                    event: Some(input_envelope::Event::KeyDown(
-                        crate::proto::KeyDownEvent {
-                            tile_id: vec![0u8; 16],
-                            ..Default::default()
-                        },
-                    )),
+                    event: Some(input_envelope::Event::KeyDown(crate::proto::KeyDownEvent {
+                        tile_id: vec![0u8; 16],
+                        ..Default::default()
+                    })),
                 },
             ],
         };
 
         let filtered = filter_event_batch(batch, &subs).expect("batch should not be empty");
-        assert_eq!(filtered.events.len(), 2, "focus event should be filtered out");
+        assert_eq!(
+            filtered.events.len(),
+            2,
+            "focus event should be filtered out"
+        );
         // Verify ordering preserved: pointer_down, key_down
         assert!(matches!(
             &filtered.events[0].event,
@@ -594,7 +595,11 @@ mod tests {
         };
 
         let filtered = filter_event_batch(batch, &subs).expect("batch should not be empty");
-        assert_eq!(filtered.events.len(), 1, "pointer event should be filtered out");
+        assert_eq!(
+            filtered.events.len(),
+            1,
+            "pointer event should be filtered out"
+        );
         assert!(matches!(
             &filtered.events[0].event,
             Some(input_envelope::Event::FocusGained(_))

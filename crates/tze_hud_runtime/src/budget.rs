@@ -401,11 +401,7 @@ impl BudgetEnforcer {
     ///
     /// Call once per frame after mutation intake. Returns the list of namespaces
     /// that have been revoked this tick (the caller must tear down those sessions).
-    pub fn tick(
-        &mut self,
-        now: Instant,
-        sink: &mut dyn BudgetTelemetrySink,
-    ) -> Vec<String> {
+    pub fn tick(&mut self, now: Instant, sink: &mut dyn BudgetTelemetrySink) -> Vec<String> {
         self.frame_number += 1;
         let mut revoked = Vec::new();
 
@@ -423,7 +419,9 @@ impl BudgetEnforcer {
                 BudgetState::Normal => {
                     if currently_violated {
                         let violation_kind = Self::primary_violation_kind(state);
-                        state.budget_state = BudgetState::Warning { first_exceeded: now };
+                        state.budget_state = BudgetState::Warning {
+                            first_exceeded: now,
+                        };
                         sink.emit_violation(BudgetViolationEvent {
                             namespace: namespace.clone(),
                             new_tier: BudgetTier::Warning,
@@ -450,9 +448,8 @@ impl BudgetEnforcer {
                             namespace: namespace.clone(),
                             new_tier: BudgetTier::Throttled,
                             violation_kind: Self::primary_violation_kind(state),
-                            timestamp_us: throttled_since
-                                .duration_since(self.epoch)
-                                .as_micros() as u64,
+                            timestamp_us: throttled_since.duration_since(self.epoch).as_micros()
+                                as u64,
                             detail: format!(
                                 "Agent '{}' throttled after 5s warning grace; update rate halved",
                                 namespace
@@ -523,7 +520,11 @@ impl BudgetEnforcer {
 
         // Shed approximately 25% of tiles (at least 1).
         let shed_count = ((sorted.len() as f32 * 0.25).ceil() as usize).max(1);
-        let shed_ids: Vec<SceneId> = sorted.iter().take(shed_count).map(|(id, _, _)| *id).collect();
+        let shed_ids: Vec<SceneId> = sorted
+            .iter()
+            .take(shed_count)
+            .map(|(id, _, _)| *id)
+            .collect();
 
         self.consecutive_shed_frames += 1;
 
@@ -760,7 +761,9 @@ mod tests {
 
         // Simulate Warning state that is already past the grace period
         let past = Instant::now() - Duration::from_secs(6);
-        state.budget_state = BudgetState::Warning { first_exceeded: past };
+        state.budget_state = BudgetState::Warning {
+            first_exceeded: past,
+        };
 
         enforcer.tick(Instant::now(), &mut sink);
 
@@ -777,7 +780,11 @@ mod tests {
             .iter()
             .filter(|e| e.new_tier == BudgetTier::Throttled)
             .collect();
-        assert_eq!(throttle_events.len(), 1, "Expected exactly one Throttle event");
+        assert_eq!(
+            throttle_events.len(),
+            1,
+            "Expected exactly one Throttle event"
+        );
     }
 
     #[test]
@@ -833,7 +840,10 @@ mod tests {
             .iter()
             .filter(|e| e.new_tier == BudgetTier::Revoked)
             .collect();
-        assert!(!revoke_events.is_empty(), "Expected a Revoked telemetry event");
+        assert!(
+            !revoke_events.is_empty(),
+            "Expected a Revoked telemetry event"
+        );
     }
 
     #[test]
@@ -861,7 +871,10 @@ mod tests {
             .iter()
             .filter(|e| e.new_tier == BudgetTier::Revoked)
             .collect();
-        assert!(!revoke_events.is_empty(), "Expected revocation telemetry event");
+        assert!(
+            !revoke_events.is_empty(),
+            "Expected revocation telemetry event"
+        );
     }
 
     #[test]
@@ -874,7 +887,10 @@ mod tests {
             revoked = enforcer.report_invariant_violation("agent-g", Instant::now(), &mut sink);
         }
 
-        assert!(revoked, "Expected revocation after too many invariant violations");
+        assert!(
+            revoked,
+            "Expected revocation after too many invariant violations"
+        );
         assert!(
             matches!(
                 enforcer.agent_state("agent-g").unwrap().budget_state,
@@ -894,8 +910,10 @@ mod tests {
             ("ns", SceneId::new(), 0u32, 1u32),
             ("ns", SceneId::new(), 1u32, 0u32),
         ];
-        let refs: Vec<(&str, SceneId, u32, u32)> =
-            tiles.iter().map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo)).collect();
+        let refs: Vec<(&str, SceneId, u32, u32)> = tiles
+            .iter()
+            .map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo))
+            .collect();
 
         let shed = enforcer.frame_guardian_shed(&refs, 2_000, &mut sink); // 2ms < 3ms threshold
         assert!(shed.is_empty(), "Should not shed under threshold");
@@ -911,12 +929,11 @@ mod tests {
 
         // id_high: lease_priority=0 (most important), z_order=10
         // id_low: lease_priority=5 (least important), z_order=1
-        let tiles = vec![
-            ("ns", id_high, 0u32, 10u32),
-            ("ns", id_low, 5u32, 1u32),
-        ];
-        let refs: Vec<(&str, SceneId, u32, u32)> =
-            tiles.iter().map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo)).collect();
+        let tiles = vec![("ns", id_high, 0u32, 10u32), ("ns", id_low, 5u32, 1u32)];
+        let refs: Vec<(&str, SceneId, u32, u32)> = tiles
+            .iter()
+            .map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo))
+            .collect();
 
         let shed = enforcer.frame_guardian_shed(&refs, 4_000, &mut sink); // 4ms > 3ms threshold
 
@@ -943,8 +960,10 @@ mod tests {
             ("ns", SceneId::new(), 2u32, 0u32),
             ("ns", SceneId::new(), 3u32, 0u32),
         ];
-        let refs: Vec<(&str, SceneId, u32, u32)> =
-            tiles.iter().map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo)).collect();
+        let refs: Vec<(&str, SceneId, u32, u32)> = tiles
+            .iter()
+            .map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo))
+            .collect();
 
         for _ in 0..3 {
             enforcer.frame_guardian_shed(&refs, 5_000, &mut sink);
@@ -960,8 +979,10 @@ mod tests {
         let (mut enforcer, mut sink) = make_enforcer();
 
         let tiles = vec![("ns", SceneId::new(), 0u32, 1u32)];
-        let refs: Vec<(&str, SceneId, u32, u32)> =
-            tiles.iter().map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo)).collect();
+        let refs: Vec<(&str, SceneId, u32, u32)> = tiles
+            .iter()
+            .map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo))
+            .collect();
 
         enforcer.frame_guardian_shed(&refs, 5_000, &mut sink);
         assert_eq!(enforcer.consecutive_shed_frames(), 1);
@@ -992,7 +1013,10 @@ mod tests {
         // max_tiles = 2; requesting 3 new tiles
         let outcome = enforcer.check_mutation("agent-i", 3, 0, 0, Instant::now(), &mut sink);
         assert!(
-            matches!(outcome, BudgetCheckOutcome::Reject(BudgetViolation::TileCountExceeded { .. })),
+            matches!(
+                outcome,
+                BudgetCheckOutcome::Reject(BudgetViolation::TileCountExceeded { .. })
+            ),
             "Should reject over tile limit"
         );
     }

@@ -33,21 +33,18 @@
 
 use std::sync::Arc;
 
+use tze_hud_scene::lease::{
+    GracePeriodTimer, ORPHAN_GRACE_PERIOD_MS, POST_REVOCATION_FREE_DELAY_MS, TileVisualHint,
+};
 use tze_hud_scene::{
-    Clock,
-    TestClock,
+    Clock, TestClock,
     graph::SceneGraph,
     mutation::{MutationBatch, SceneMutation},
     test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants},
     types::{
-        Capability, LayerAttachment, LeaseState, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
+        Capability, LayerAttachment, LeaseState, Node, NodeData, Rect, Rgba, SceneId,
+        SolidColorNode,
     },
-};
-use tze_hud_scene::lease::{
-    GracePeriodTimer,
-    TileVisualHint,
-    ORPHAN_GRACE_PERIOD_MS,
-    POST_REVOCATION_FREE_DELAY_MS,
 };
 
 // ─── Test helper: TransitionLog ──────────────────────────────────────────────
@@ -133,7 +130,11 @@ fn apply_create_tile(
     };
     let result = scene.apply_batch(&batch);
     assert!(result.applied, "CreateTile should succeed");
-    assert_eq!(result.created_ids.len(), 1, "CreateTile should produce exactly one created_id");
+    assert_eq!(
+        result.created_ids.len(),
+        1,
+        "CreateTile should produce exactly one created_id"
+    );
     result.created_ids[0]
 }
 
@@ -164,13 +165,23 @@ fn test_full_session_lifecycle_state_transitions() {
 
     // ── Step 1: Connect + Auth ─────────────────────────────────────────────
     let tab_id = scene.create_tab("Main", 0).expect("create_tab");
-    let lease_id = scene.grant_lease("agent.alpha", 60_000, vec![
-        Capability::CreateTile,
-        Capability::UpdateTile,
-        Capability::DeleteTile,
-    ]);
+    let lease_id = scene.grant_lease(
+        "agent.alpha",
+        60_000,
+        vec![
+            Capability::CreateTile,
+            Capability::UpdateTile,
+            Capability::DeleteTile,
+        ],
+    );
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
-    log.record("connect_auth", 1_000, &scene, Some(lease_id), "session established");
+    log.record(
+        "connect_auth",
+        1_000,
+        &scene,
+        Some(lease_id),
+        "session established",
+    );
 
     // ── Step 2: Mutate (create tile + set root) ────────────────────────────
     let tile_id = apply_create_tile(
@@ -185,43 +196,84 @@ fn test_full_session_lifecycle_state_transitions() {
         &mut scene,
         tile_id,
         "agent.alpha",
-        make_solid_node(Rect::new(0.0, 0.0, 400.0, 300.0), Rgba::new(0.2, 0.4, 0.8, 1.0)),
+        make_solid_node(
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            Rgba::new(0.2, 0.4, 0.8, 1.0),
+        ),
     );
     assert_eq!(scene.tile_count(), 1);
-    log.record("mutate", 1_100, &scene, Some(lease_id), "tile created and rooted");
+    log.record(
+        "mutate",
+        1_100,
+        &scene,
+        Some(lease_id),
+        "tile created and rooted",
+    );
 
     // Layer 0 invariants must hold after mutation
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after mutate: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after mutate: {violations:?}"
+    );
 
     // ── Step 3: Disconnect ─────────────────────────────────────────────────
     clock.advance(500);
     let disconnect_time = clock.now_millis();
-    scene.disconnect_lease(&lease_id, disconnect_time).expect("disconnect_lease");
+    scene
+        .disconnect_lease(&lease_id, disconnect_time)
+        .expect("disconnect_lease");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
     // Tile still exists during grace period
-    assert_eq!(scene.tile_count(), 1, "tile must persist during grace period");
-    log.record("disconnect", disconnect_time, &scene, Some(lease_id), "entered grace period");
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "tile must persist during grace period"
+    );
+    log.record(
+        "disconnect",
+        disconnect_time,
+        &scene,
+        Some(lease_id),
+        "entered grace period",
+    );
 
     // ── Step 4: Reconnect within grace period ─────────────────────────────
     clock.advance(5_000); // 5 s < 30 s grace
     let reconnect_time = clock.now_millis();
-    scene.reconnect_lease(&lease_id, reconnect_time).expect("reconnect_lease");
+    scene
+        .reconnect_lease(&lease_id, reconnect_time)
+        .expect("reconnect_lease");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
     // Tile must still exist after reclaim
     assert_eq!(scene.tile_count(), 1, "tile reclaimed on reconnect");
-    log.record("reconnect_within_grace", reconnect_time, &scene, Some(lease_id), "lease reclaimed");
+    log.record(
+        "reconnect_within_grace",
+        reconnect_time,
+        &scene,
+        Some(lease_id),
+        "lease reclaimed",
+    );
 
     // Layer 0 invariants still hold
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after reconnect: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after reconnect: {violations:?}"
+    );
 
     // ── Step 5: Safe mode entry ────────────────────────────────────────────
     clock.advance(1_000);
     let safe_mode_enter_time = clock.now_millis();
     scene.suspend_all_leases(safe_mode_enter_time);
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Suspended);
-    log.record("safe_mode_enter", safe_mode_enter_time, &scene, Some(lease_id), "all leases suspended");
+    log.record(
+        "safe_mode_enter",
+        safe_mode_enter_time,
+        &scene,
+        Some(lease_id),
+        "all leases suspended",
+    );
 
     // Mutations must be rejected while suspended
     let rejected_batch = MutationBatch {
@@ -239,15 +291,31 @@ fn test_full_session_lifecycle_state_transitions() {
     };
     let rejected = scene.apply_batch(&rejected_batch);
     assert!(!rejected.applied, "mutations must be rejected in safe mode");
-    assert_eq!(scene.tile_count(), 1, "tile count unchanged after rejected mutation");
-    log.record("safe_mode_reject", safe_mode_enter_time, &scene, Some(lease_id), "mutation rejected");
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "tile count unchanged after rejected mutation"
+    );
+    log.record(
+        "safe_mode_reject",
+        safe_mode_enter_time,
+        &scene,
+        Some(lease_id),
+        "mutation rejected",
+    );
 
     // ── Step 6: Safe mode exit ─────────────────────────────────────────────
     clock.advance(2_000);
     let safe_mode_exit_time = clock.now_millis();
     scene.resume_all_leases(safe_mode_exit_time);
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
-    log.record("safe_mode_exit", safe_mode_exit_time, &scene, Some(lease_id), "leases resumed");
+    log.record(
+        "safe_mode_exit",
+        safe_mode_exit_time,
+        &scene,
+        Some(lease_id),
+        "leases resumed",
+    );
 
     // Mutations accepted again after safe mode exit
     let post_safe_tile_id = apply_create_tile(
@@ -259,27 +327,61 @@ fn test_full_session_lifecycle_state_transitions() {
         2,
     );
     assert_eq!(scene.tile_count(), 2);
-    log.record("mutate_post_safe_mode", safe_mode_exit_time + 100, &scene, Some(lease_id), "mutation accepted after safe mode exit");
+    log.record(
+        "mutate_post_safe_mode",
+        safe_mode_exit_time + 100,
+        &scene,
+        Some(lease_id),
+        "mutation accepted after safe mode exit",
+    );
 
     // ── Step 7: Graceful close (release) ──────────────────────────────────
     scene.revoke_lease(lease_id).expect("revoke_lease");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Revoked);
     // All tiles owned by this lease are removed on revocation
-    assert_eq!(scene.tile_count(), 0, "all tiles removed on lease revocation");
-    log.record("close", clock.now_millis(), &scene, Some(lease_id), "lease revoked, tiles cleaned up");
+    assert_eq!(
+        scene.tile_count(),
+        0,
+        "all tiles removed on lease revocation"
+    );
+    log.record(
+        "close",
+        clock.now_millis(),
+        &scene,
+        Some(lease_id),
+        "lease revoked, tiles cleaned up",
+    );
 
     // ── Artifact: emit state-transition log ───────────────────────────────
     let json_log = log.to_json();
-    assert!(json_log.contains("connect_auth"), "log must include connect_auth step");
-    assert!(json_log.contains("disconnect"), "log must include disconnect step");
-    assert!(json_log.contains("reconnect_within_grace"), "log must include reconnect step");
-    assert!(json_log.contains("safe_mode_enter"), "log must include safe_mode_enter step");
-    assert!(json_log.contains("safe_mode_exit"), "log must include safe_mode_exit step");
+    assert!(
+        json_log.contains("connect_auth"),
+        "log must include connect_auth step"
+    );
+    assert!(
+        json_log.contains("disconnect"),
+        "log must include disconnect step"
+    );
+    assert!(
+        json_log.contains("reconnect_within_grace"),
+        "log must include reconnect step"
+    );
+    assert!(
+        json_log.contains("safe_mode_enter"),
+        "log must include safe_mode_enter step"
+    );
+    assert!(
+        json_log.contains("safe_mode_exit"),
+        "log must include safe_mode_exit step"
+    );
     assert!(json_log.contains("close"), "log must include close step");
 
     // Final invariant check
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations at session close: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations at session close: {violations:?}"
+    );
 
     // Suppress unused variable warning for the post_safe tile (it was deleted on revoke)
     let _ = post_safe_tile_id;
@@ -299,42 +401,107 @@ fn test_reconnect_within_grace_period_delivers_snapshot() {
     let lease_id = scene.grant_lease("agent.bravo", 120_000, vec![Capability::CreateTile]);
 
     // Establish 3 tiles before disconnect
-    let tile_a = apply_create_tile(&mut scene, tab_id, "agent.bravo", lease_id, Rect::new(0.0, 0.0, 200.0, 150.0), 1);
-    let tile_b = apply_create_tile(&mut scene, tab_id, "agent.bravo", lease_id, Rect::new(210.0, 0.0, 200.0, 150.0), 2);
-    let tile_c = apply_create_tile(&mut scene, tab_id, "agent.bravo", lease_id, Rect::new(0.0, 160.0, 200.0, 150.0), 3);
+    let tile_a = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.bravo",
+        lease_id,
+        Rect::new(0.0, 0.0, 200.0, 150.0),
+        1,
+    );
+    let tile_b = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.bravo",
+        lease_id,
+        Rect::new(210.0, 0.0, 200.0, 150.0),
+        2,
+    );
+    let tile_c = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.bravo",
+        lease_id,
+        Rect::new(0.0, 160.0, 200.0, 150.0),
+        3,
+    );
     assert_eq!(scene.tile_count(), 3);
 
     // Disconnect
     clock.advance(1_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Snapshot taken while in grace period — tiles still exist.
     // Deserialize the snapshot to validate it faithfully captures the scene state.
     let grace_snapshot_json = scene.snapshot_json().expect("snapshot_json");
     let snapshot_scene = SceneGraph::from_json(&grace_snapshot_json).expect("deserialize snapshot");
-    assert_eq!(snapshot_scene.tile_count(), 3, "snapshot must contain all 3 tiles during grace period");
-    assert!(snapshot_scene.tiles.contains_key(&tile_a), "snapshot must contain tile_a in grace period");
-    assert!(snapshot_scene.tiles.contains_key(&tile_b), "snapshot must contain tile_b in grace period");
-    assert!(snapshot_scene.tiles.contains_key(&tile_c), "snapshot must contain tile_c in grace period");
+    assert_eq!(
+        snapshot_scene.tile_count(),
+        3,
+        "snapshot must contain all 3 tiles during grace period"
+    );
+    assert!(
+        snapshot_scene.tiles.contains_key(&tile_a),
+        "snapshot must contain tile_a in grace period"
+    );
+    assert!(
+        snapshot_scene.tiles.contains_key(&tile_b),
+        "snapshot must contain tile_b in grace period"
+    );
+    assert!(
+        snapshot_scene.tiles.contains_key(&tile_c),
+        "snapshot must contain tile_c in grace period"
+    );
 
     // Reconnect within grace (5 s << 30 s default grace)
     clock.advance(5_000);
-    scene.reconnect_lease(&lease_id, clock.now_millis()).expect("reconnect");
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Active, "lease must be Active after reconnect");
+    scene
+        .reconnect_lease(&lease_id, clock.now_millis())
+        .expect("reconnect");
+    assert_eq!(
+        scene.leases[&lease_id].state,
+        LeaseState::Active,
+        "lease must be Active after reconnect"
+    );
 
     // All 3 tiles still present — this constitutes full SceneSnapshot recovery
-    assert_eq!(scene.tile_count(), 3, "all tiles survive reconnect within grace period");
-    assert!(scene.tiles.contains_key(&tile_a), "tile_a must be reclaimed");
-    assert!(scene.tiles.contains_key(&tile_b), "tile_b must be reclaimed");
-    assert!(scene.tiles.contains_key(&tile_c), "tile_c must be reclaimed");
+    assert_eq!(
+        scene.tile_count(),
+        3,
+        "all tiles survive reconnect within grace period"
+    );
+    assert!(
+        scene.tiles.contains_key(&tile_a),
+        "tile_a must be reclaimed"
+    );
+    assert!(
+        scene.tiles.contains_key(&tile_b),
+        "tile_b must be reclaimed"
+    );
+    assert!(
+        scene.tiles.contains_key(&tile_c),
+        "tile_c must be reclaimed"
+    );
 
     // Can mutate immediately after reconnect
-    let post_reconnect_tile = apply_create_tile(&mut scene, tab_id, "agent.bravo", lease_id, Rect::new(210.0, 160.0, 200.0, 150.0), 4);
+    let post_reconnect_tile = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.bravo",
+        lease_id,
+        Rect::new(210.0, 160.0, 200.0, 150.0),
+        4,
+    );
     assert_eq!(scene.tile_count(), 4);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after reconnect: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after reconnect: {violations:?}"
+    );
 
     let _ = post_reconnect_tile;
 }
@@ -353,13 +520,29 @@ fn test_reconnect_after_grace_period_expiry_clears_state() {
     // Use a long TTL; this test exercises grace-period expiry, not TTL expiry
     let lease_id = scene.grant_lease("agent.charlie", 9_000_000, vec![Capability::CreateTile]);
 
-    apply_create_tile(&mut scene, tab_id, "agent.charlie", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
-    apply_create_tile(&mut scene, tab_id, "agent.charlie", lease_id, Rect::new(210.0, 0.0, 200.0, 200.0), 2);
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.charlie",
+        lease_id,
+        Rect::new(0.0, 0.0, 200.0, 200.0),
+        1,
+    );
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.charlie",
+        lease_id,
+        Rect::new(210.0, 0.0, 200.0, 200.0),
+        2,
+    );
     assert_eq!(scene.tile_count(), 2);
 
     // Disconnect agent
     clock.advance(1_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Advance past grace period (default 30 s)
@@ -367,15 +550,32 @@ fn test_reconnect_after_grace_period_expiry_clears_state() {
 
     // Run expiry sweep — this should clean up the disconnected lease
     let expiries = scene.expire_leases();
-    assert!(!expiries.is_empty(), "at least one lease should have expired");
+    assert!(
+        !expiries.is_empty(),
+        "at least one lease should have expired"
+    );
 
-    let expired = expiries.iter().find(|e| e.lease_id == lease_id)
+    let expired = expiries
+        .iter()
+        .find(|e| e.lease_id == lease_id)
         .expect("agent.charlie lease must be in expiry list");
-    assert_eq!(expired.terminal_state, LeaseState::Expired, "grace-expired lease must be Expired");
-    assert_eq!(expired.removed_tiles.len(), 2, "both tiles must be removed on grace expiry");
+    assert_eq!(
+        expired.terminal_state,
+        LeaseState::Expired,
+        "grace-expired lease must be Expired"
+    );
+    assert_eq!(
+        expired.removed_tiles.len(),
+        2,
+        "both tiles must be removed on grace expiry"
+    );
 
     // Zero footprint: no tiles, no active leases for this agent
-    assert_eq!(scene.tile_count(), 0, "zero tiles after grace expiry — zero footprint");
+    assert_eq!(
+        scene.tile_count(),
+        0,
+        "zero tiles after grace expiry — zero footprint"
+    );
     assert_eq!(
         scene.leases[&lease_id].state,
         LeaseState::Expired,
@@ -385,11 +585,21 @@ fn test_reconnect_after_grace_period_expiry_clears_state() {
     // Agent can start a fresh session (new lease on same namespace)
     let fresh_lease_id = scene.grant_lease("agent.charlie", 60_000, vec![Capability::CreateTile]);
     assert_eq!(scene.leases[&fresh_lease_id].state, LeaseState::Active);
-    let fresh_tile = apply_create_tile(&mut scene, tab_id, "agent.charlie", fresh_lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
+    let fresh_tile = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.charlie",
+        fresh_lease_id,
+        Rect::new(0.0, 0.0, 200.0, 200.0),
+        1,
+    );
     assert_eq!(scene.tile_count(), 1);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after fresh session: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after fresh session: {violations:?}"
+    );
 
     let _ = fresh_tile;
 }
@@ -411,9 +621,30 @@ fn test_safe_mode_suspends_all_leases() {
     let lease_b = scene.grant_lease("agent.b", 60_000, vec![Capability::CreateTile]);
     let lease_c = scene.grant_lease("agent.c", 60_000, vec![Capability::CreateTile]);
 
-    apply_create_tile(&mut scene, tab_id, "agent.a", lease_a, Rect::new(0.0, 0.0, 300.0, 200.0), 1);
-    apply_create_tile(&mut scene, tab_id, "agent.b", lease_b, Rect::new(310.0, 0.0, 300.0, 200.0), 2);
-    apply_create_tile(&mut scene, tab_id, "agent.c", lease_c, Rect::new(620.0, 0.0, 300.0, 200.0), 3);
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.a",
+        lease_a,
+        Rect::new(0.0, 0.0, 300.0, 200.0),
+        1,
+    );
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.b",
+        lease_b,
+        Rect::new(310.0, 0.0, 300.0, 200.0),
+        2,
+    );
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.c",
+        lease_c,
+        Rect::new(620.0, 0.0, 300.0, 200.0),
+        3,
+    );
 
     assert_eq!(scene.tile_count(), 3);
 
@@ -422,15 +653,31 @@ fn test_safe_mode_suspends_all_leases() {
     scene.suspend_all_leases(safe_enter_ms);
 
     // All three leases must be Suspended
-    assert_eq!(scene.leases[&lease_a].state, LeaseState::Suspended, "lease_a must be Suspended");
-    assert_eq!(scene.leases[&lease_b].state, LeaseState::Suspended, "lease_b must be Suspended");
-    assert_eq!(scene.leases[&lease_c].state, LeaseState::Suspended, "lease_c must be Suspended");
+    assert_eq!(
+        scene.leases[&lease_a].state,
+        LeaseState::Suspended,
+        "lease_a must be Suspended"
+    );
+    assert_eq!(
+        scene.leases[&lease_b].state,
+        LeaseState::Suspended,
+        "lease_b must be Suspended"
+    );
+    assert_eq!(
+        scene.leases[&lease_c].state,
+        LeaseState::Suspended,
+        "lease_c must be Suspended"
+    );
 
     // Tiles still exist — suspension preserves state
     assert_eq!(scene.tile_count(), 3, "tiles preserved during safe mode");
 
     // All mutations must be rejected
-    for (ns, lease_id) in [("agent.a", lease_a), ("agent.b", lease_b), ("agent.c", lease_c)] {
+    for (ns, lease_id) in [
+        ("agent.a", lease_a),
+        ("agent.b", lease_b),
+        ("agent.c", lease_c),
+    ] {
         let batch = MutationBatch {
             batch_id: SceneId::new(),
             agent_namespace: ns.to_string(),
@@ -445,12 +692,22 @@ fn test_safe_mode_suspends_all_leases() {
             lease_id: None,
         };
         let result = scene.apply_batch(&batch);
-        assert!(!result.applied, "mutations for {ns} must be rejected in safe mode");
+        assert!(
+            !result.applied,
+            "mutations for {ns} must be rejected in safe mode"
+        );
     }
-    assert_eq!(scene.tile_count(), 3, "tile count unchanged after rejected mutations");
+    assert_eq!(
+        scene.tile_count(),
+        3,
+        "tile count unchanged after rejected mutations"
+    );
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations during safe mode: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations during safe mode: {violations:?}"
+    );
 }
 
 // ─── Test 5: Safe mode exit resumes leases, mutations accepted ────────────────
@@ -465,7 +722,14 @@ fn test_safe_mode_exit_resumes_leases_and_accepts_mutations() {
 
     let tab_id = scene.create_tab("Main", 0).expect("create_tab");
     let lease_id = scene.grant_lease("agent.delta", 60_000, vec![Capability::CreateTile]);
-    apply_create_tile(&mut scene, tab_id, "agent.delta", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.delta",
+        lease_id,
+        Rect::new(0.0, 0.0, 200.0, 200.0),
+        1,
+    );
 
     // Enter safe mode
     clock.advance(1_000);
@@ -479,7 +743,11 @@ fn test_safe_mode_exit_resumes_leases_and_accepts_mutations() {
     // Exit safe mode
     let exit_ms = clock.now_millis();
     scene.resume_all_leases(exit_ms);
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Active, "lease must be Active after safe mode exit");
+    assert_eq!(
+        scene.leases[&lease_id].state,
+        LeaseState::Active,
+        "lease must be Active after safe mode exit"
+    );
 
     // Mutations accepted immediately after exit
     let new_tile = apply_create_tile(
@@ -490,16 +758,25 @@ fn test_safe_mode_exit_resumes_leases_and_accepts_mutations() {
         Rect::new(210.0, 0.0, 200.0, 200.0),
         2,
     );
-    assert_eq!(scene.tile_count(), 2, "new tile created after safe mode exit");
+    assert_eq!(
+        scene.tile_count(),
+        2,
+        "new tile created after safe mode exit"
+    );
 
     // TTL check: the lease's remaining TTL must still be positive
     // (suspension pauses TTL clock per RFC 0008 §4.3)
     let lease = &scene.leases[&lease_id];
-    assert!(lease.ttl_remaining_at_suspend_ms.is_some() || lease.ttl_ms > 0,
-        "lease TTL accounting preserved through suspension");
+    assert!(
+        lease.ttl_remaining_at_suspend_ms.is_some() || lease.ttl_ms > 0,
+        "lease TTL accounting preserved through suspension"
+    );
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after safe mode exit: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after safe mode exit: {violations:?}"
+    );
 
     let _ = new_tile;
 }
@@ -527,14 +804,38 @@ fn test_freeze_plus_safe_mode_interaction() {
     let lease_active = scene.grant_lease("agent.echo", 60_000, vec![Capability::CreateTile]);
     let lease_frozen = scene.grant_lease("agent.echo.frozen", 30_000, vec![Capability::CreateTile]);
 
-    apply_create_tile(&mut scene, tab_id, "agent.echo", lease_active, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
-    apply_create_tile(&mut scene, tab_id, "agent.echo.frozen", lease_frozen, Rect::new(210.0, 0.0, 200.0, 200.0), 2);
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.echo",
+        lease_active,
+        Rect::new(0.0, 0.0, 200.0, 200.0),
+        1,
+    );
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.echo.frozen",
+        lease_frozen,
+        Rect::new(210.0, 0.0, 200.0, 200.0),
+        2,
+    );
 
     // Simulate a "freeze" on lease_frozen by suspending it directly
     clock.advance(1_000);
-    scene.suspend_lease(&lease_frozen, clock.now_millis()).expect("freeze lease_frozen");
-    assert_eq!(scene.leases[&lease_frozen].state, LeaseState::Suspended, "lease_frozen is frozen/suspended");
-    assert_eq!(scene.leases[&lease_active].state, LeaseState::Active, "lease_active is still active");
+    scene
+        .suspend_lease(&lease_frozen, clock.now_millis())
+        .expect("freeze lease_frozen");
+    assert_eq!(
+        scene.leases[&lease_frozen].state,
+        LeaseState::Suspended,
+        "lease_frozen is frozen/suspended"
+    );
+    assert_eq!(
+        scene.leases[&lease_active].state,
+        LeaseState::Active,
+        "lease_active is still active"
+    );
 
     // Safe mode entry: should suspend all Active leases (lease_active),
     // and leave already-Suspended leases as-is
@@ -542,11 +843,22 @@ fn test_freeze_plus_safe_mode_interaction() {
     let safe_enter_ms = clock.now_millis();
     scene.suspend_all_leases(safe_enter_ms);
 
-    assert_eq!(scene.leases[&lease_active].state, LeaseState::Suspended, "lease_active suspended by safe mode");
-    assert_eq!(scene.leases[&lease_frozen].state, LeaseState::Suspended, "lease_frozen remains suspended (not double-suspended)");
+    assert_eq!(
+        scene.leases[&lease_active].state,
+        LeaseState::Suspended,
+        "lease_active suspended by safe mode"
+    );
+    assert_eq!(
+        scene.leases[&lease_frozen].state,
+        LeaseState::Suspended,
+        "lease_frozen remains suspended (not double-suspended)"
+    );
 
     // Neither lease may mutate
-    for (ns, lid) in [("agent.echo", lease_active), ("agent.echo.frozen", lease_frozen)] {
+    for (ns, lid) in [
+        ("agent.echo", lease_active),
+        ("agent.echo.frozen", lease_frozen),
+    ] {
         let batch = MutationBatch {
             batch_id: SceneId::new(),
             agent_namespace: ns.to_string(),
@@ -560,7 +872,10 @@ fn test_freeze_plus_safe_mode_interaction() {
             timing_hints: None,
             lease_id: None,
         };
-        assert!(!scene.apply_batch(&batch).applied, "{ns} must not mutate during safe mode");
+        assert!(
+            !scene.apply_batch(&batch).applied,
+            "{ns} must not mutate during safe mode"
+        );
     }
 
     // Safe mode exit: resume all suspended leases
@@ -571,16 +886,41 @@ fn test_freeze_plus_safe_mode_interaction() {
     // Both leases resume after safe mode exit
     // (lease_frozen was frozen before safe mode; after safe mode exit it is also
     // resumed — this models "safe mode cancels active freeze" semantics)
-    assert_eq!(scene.leases[&lease_active].state, LeaseState::Active, "lease_active resumed");
-    assert_eq!(scene.leases[&lease_frozen].state, LeaseState::Active, "freeze cancelled by safe mode exit");
+    assert_eq!(
+        scene.leases[&lease_active].state,
+        LeaseState::Active,
+        "lease_active resumed"
+    );
+    assert_eq!(
+        scene.leases[&lease_frozen].state,
+        LeaseState::Active,
+        "freeze cancelled by safe mode exit"
+    );
 
     // Both can now mutate
-    apply_create_tile(&mut scene, tab_id, "agent.echo", lease_active, Rect::new(0.0, 210.0, 200.0, 200.0), 3);
-    apply_create_tile(&mut scene, tab_id, "agent.echo.frozen", lease_frozen, Rect::new(210.0, 210.0, 200.0, 200.0), 4);
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.echo",
+        lease_active,
+        Rect::new(0.0, 210.0, 200.0, 200.0),
+        3,
+    );
+    apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.echo.frozen",
+        lease_frozen,
+        Rect::new(210.0, 210.0, 200.0, 200.0),
+        4,
+    );
     assert_eq!(scene.tile_count(), 4);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after freeze+safe_mode: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after freeze+safe_mode: {violations:?}"
+    );
 }
 
 // ─── Test 7: disconnect_reclaim_multiagent scene ─────────────────────────────
@@ -605,50 +945,98 @@ fn test_disconnect_reclaim_multiagent_scene() {
 
     // Layer 0 invariants on the constructed scene
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations on scene construction: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations on scene construction: {violations:?}"
+    );
 
     // The scene should have 3 agents (agent.one, agent.two, agent.three)
     assert_eq!(spec.expected_tab_count, 1, "scene should have 1 tab");
-    assert!(spec.expected_tile_count >= 3, "scene should have at least 3 tiles (one per agent)");
+    assert!(
+        spec.expected_tile_count >= 3,
+        "scene should have at least 3 tiles (one per agent)"
+    );
 
     // Find the leases for each agent namespace
-    let lease_one = scene.leases.values()
+    let lease_one = scene
+        .leases
+        .values()
         .find(|l| l.namespace == "agent.one")
         .map(|l| l.id)
         .expect("agent.one lease must exist");
-    let lease_two = scene.leases.values()
+    let lease_two = scene
+        .leases
+        .values()
         .find(|l| l.namespace == "agent.two")
         .map(|l| l.id)
         .expect("agent.two lease must exist");
-    let lease_three = scene.leases.values()
+    let lease_three = scene
+        .leases
+        .values()
         .find(|l| l.namespace == "agent.three")
         .map(|l| l.id)
         .expect("agent.three lease must exist");
 
     // All start Active
-    assert_eq!(scene.leases[&lease_one].state, LeaseState::Active, "agent.one: Active");
-    assert_eq!(scene.leases[&lease_two].state, LeaseState::Active, "agent.two: Active");
-    assert_eq!(scene.leases[&lease_three].state, LeaseState::Active, "agent.three: Active");
+    assert_eq!(
+        scene.leases[&lease_one].state,
+        LeaseState::Active,
+        "agent.one: Active"
+    );
+    assert_eq!(
+        scene.leases[&lease_two].state,
+        LeaseState::Active,
+        "agent.two: Active"
+    );
+    assert_eq!(
+        scene.leases[&lease_three].state,
+        LeaseState::Active,
+        "agent.three: Active"
+    );
 
     let initial_tile_count = scene.tile_count();
-    let tiles_of_one: Vec<SceneId> = scene.tiles.values()
+    let tiles_of_one: Vec<SceneId> = scene
+        .tiles
+        .values()
         .filter(|t| t.namespace == "agent.one")
         .map(|t| t.id)
         .collect();
-    let tiles_of_two_count = scene.tiles.values().filter(|t| t.namespace == "agent.two").count();
-    let tiles_of_three_count = scene.tiles.values().filter(|t| t.namespace == "agent.three").count();
+    let tiles_of_two_count = scene
+        .tiles
+        .values()
+        .filter(|t| t.namespace == "agent.two")
+        .count();
+    let tiles_of_three_count = scene
+        .tiles
+        .values()
+        .filter(|t| t.namespace == "agent.three")
+        .count();
 
     // ── Step: agent.one disconnects ────────────────────────────────────────
     let now_ms = ClockMs::FIXED.0 + 1_000;
-    scene.disconnect_lease(&lease_one, now_ms).expect("disconnect agent.one");
+    scene
+        .disconnect_lease(&lease_one, now_ms)
+        .expect("disconnect agent.one");
     assert_eq!(scene.leases[&lease_one].state, LeaseState::Orphaned);
 
     // agent.two and agent.three are unaffected
-    assert_eq!(scene.leases[&lease_two].state, LeaseState::Active, "agent.two unaffected by agent.one disconnect");
-    assert_eq!(scene.leases[&lease_three].state, LeaseState::Active, "agent.three unaffected by agent.one disconnect");
+    assert_eq!(
+        scene.leases[&lease_two].state,
+        LeaseState::Active,
+        "agent.two unaffected by agent.one disconnect"
+    );
+    assert_eq!(
+        scene.leases[&lease_three].state,
+        LeaseState::Active,
+        "agent.three unaffected by agent.one disconnect"
+    );
 
     // Tile count unchanged during grace period
-    assert_eq!(scene.tile_count(), initial_tile_count, "tiles preserved during grace period");
+    assert_eq!(
+        scene.tile_count(),
+        initial_tile_count,
+        "tiles preserved during grace period"
+    );
 
     // agent.two and agent.three can still mutate
     let active_tab = scene.active_tab.expect("active tab must exist");
@@ -657,7 +1045,9 @@ fn test_disconnect_reclaim_multiagent_scene() {
             batch_id: SceneId::new(),
             agent_namespace: ns.to_string(),
             mutations: vec![SceneMutation::UpdateTileBounds {
-                tile_id: *scene.tiles.values()
+                tile_id: *scene
+                    .tiles
+                    .values()
                     .find(|t| t.namespace == ns)
                     .map(|t| &t.id)
                     .expect("tile must exist"),
@@ -667,27 +1057,56 @@ fn test_disconnect_reclaim_multiagent_scene() {
             lease_id: None,
         };
         let result = scene.apply_batch(&batch);
-        assert!(result.applied, "{ns} must be able to mutate while agent.one is disconnected");
+        assert!(
+            result.applied,
+            "{ns} must be able to mutate while agent.one is disconnected"
+        );
     }
 
     // ── Step: agent.one reconnects within grace ────────────────────────────
     let reconnect_ms = now_ms + 5_000; // 5 s < 30 s grace
-    scene.reconnect_lease(&lease_one, reconnect_ms).expect("reconnect agent.one");
-    assert_eq!(scene.leases[&lease_one].state, LeaseState::Active, "agent.one: reclaimed");
+    scene
+        .reconnect_lease(&lease_one, reconnect_ms)
+        .expect("reconnect agent.one");
+    assert_eq!(
+        scene.leases[&lease_one].state,
+        LeaseState::Active,
+        "agent.one: reclaimed"
+    );
 
     // agent.one's tiles all survive
     for &tile_id in &tiles_of_one {
-        assert!(scene.tiles.contains_key(&tile_id), "agent.one tile {tile_id} must survive reconnect");
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "agent.one tile {tile_id} must survive reconnect"
+        );
     }
 
     // Other agents unaffected
-    let final_tiles_of_two = scene.tiles.values().filter(|t| t.namespace == "agent.two").count();
-    let final_tiles_of_three = scene.tiles.values().filter(|t| t.namespace == "agent.three").count();
-    assert_eq!(final_tiles_of_two, tiles_of_two_count, "agent.two tile count unchanged");
-    assert_eq!(final_tiles_of_three, tiles_of_three_count, "agent.three tile count unchanged");
+    let final_tiles_of_two = scene
+        .tiles
+        .values()
+        .filter(|t| t.namespace == "agent.two")
+        .count();
+    let final_tiles_of_three = scene
+        .tiles
+        .values()
+        .filter(|t| t.namespace == "agent.three")
+        .count();
+    assert_eq!(
+        final_tiles_of_two, tiles_of_two_count,
+        "agent.two tile count unchanged"
+    );
+    assert_eq!(
+        final_tiles_of_three, tiles_of_three_count,
+        "agent.three tile count unchanged"
+    );
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations at end of multiagent scene: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations at end of multiagent scene: {violations:?}"
+    );
 
     let _ = active_tab;
 }
@@ -705,28 +1124,86 @@ fn test_zero_resource_footprint_after_disconnect_and_expiry() {
     let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
 
     let tab_id = scene.create_tab("Main", 0).expect("create_tab");
-    let lease_id = scene.grant_lease("agent.foxtrot", 9_000_000, vec![
-        Capability::CreateTile,
-        Capability::CreateNode,
-    ]);
+    let lease_id = scene.grant_lease(
+        "agent.foxtrot",
+        9_000_000,
+        vec![Capability::CreateTile, Capability::CreateNode],
+    );
 
     // Create multiple tiles with nodes
-    let tile_a = apply_create_tile(&mut scene, tab_id, "agent.foxtrot", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
-    let tile_b = apply_create_tile(&mut scene, tab_id, "agent.foxtrot", lease_id, Rect::new(210.0, 0.0, 200.0, 200.0), 2);
-    let tile_c = apply_create_tile(&mut scene, tab_id, "agent.foxtrot", lease_id, Rect::new(0.0, 210.0, 200.0, 200.0), 3);
+    let tile_a = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.foxtrot",
+        lease_id,
+        Rect::new(0.0, 0.0, 200.0, 200.0),
+        1,
+    );
+    let tile_b = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.foxtrot",
+        lease_id,
+        Rect::new(210.0, 0.0, 200.0, 200.0),
+        2,
+    );
+    let tile_c = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.foxtrot",
+        lease_id,
+        Rect::new(0.0, 210.0, 200.0, 200.0),
+        3,
+    );
 
     // Add content nodes to the tiles
-    apply_set_tile_root(&mut scene, tile_a, "agent.foxtrot", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(1.0, 0.0, 0.0, 1.0)));
-    apply_set_tile_root(&mut scene, tile_b, "agent.foxtrot", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(0.0, 1.0, 0.0, 1.0)));
-    apply_set_tile_root(&mut scene, tile_c, "agent.foxtrot", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::new(0.0, 0.0, 1.0, 1.0)));
+    apply_set_tile_root(
+        &mut scene,
+        tile_a,
+        "agent.foxtrot",
+        make_solid_node(
+            Rect::new(0.0, 0.0, 200.0, 200.0),
+            Rgba::new(1.0, 0.0, 0.0, 1.0),
+        ),
+    );
+    apply_set_tile_root(
+        &mut scene,
+        tile_b,
+        "agent.foxtrot",
+        make_solid_node(
+            Rect::new(0.0, 0.0, 200.0, 200.0),
+            Rgba::new(0.0, 1.0, 0.0, 1.0),
+        ),
+    );
+    apply_set_tile_root(
+        &mut scene,
+        tile_c,
+        "agent.foxtrot",
+        make_solid_node(
+            Rect::new(0.0, 0.0, 200.0, 200.0),
+            Rgba::new(0.0, 0.0, 1.0, 1.0),
+        ),
+    );
 
     assert_eq!(scene.tile_count(), 3);
     assert_eq!(scene.node_count(), 3, "one node per tile");
 
     // Also create a second (unrelated) agent — its resources must survive expiry
     let lease_other = scene.grant_lease("agent.golf", 9_000_000, vec![Capability::CreateTile]);
-    let tile_other = apply_create_tile(&mut scene, tab_id, "agent.golf", lease_other, Rect::new(600.0, 0.0, 200.0, 200.0), 10);
-    apply_set_tile_root(&mut scene, tile_other, "agent.golf", make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::WHITE));
+    let tile_other = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.golf",
+        lease_other,
+        Rect::new(600.0, 0.0, 200.0, 200.0),
+        10,
+    );
+    apply_set_tile_root(
+        &mut scene,
+        tile_other,
+        "agent.golf",
+        make_solid_node(Rect::new(0.0, 0.0, 200.0, 200.0), Rgba::WHITE),
+    );
     assert_eq!(scene.tile_count(), 4);
 
     // Record pre-disconnect state
@@ -734,44 +1211,78 @@ fn test_zero_resource_footprint_after_disconnect_and_expiry() {
 
     // Disconnect agent.foxtrot
     clock.advance(1_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
 
     // Advance past grace period
     clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 5_000);
 
     // Lease expiry sweep
     let expiries = scene.expire_leases();
-    let foxtrot_expiry = expiries.iter().find(|e| e.lease_id == lease_id)
+    let foxtrot_expiry = expiries
+        .iter()
+        .find(|e| e.lease_id == lease_id)
         .expect("foxtrot lease must expire");
     assert_eq!(foxtrot_expiry.terminal_state, LeaseState::Expired);
-    assert_eq!(foxtrot_expiry.removed_tiles.len(), 3, "all 3 foxtrot tiles removed");
+    assert_eq!(
+        foxtrot_expiry.removed_tiles.len(),
+        3,
+        "all 3 foxtrot tiles removed"
+    );
 
     // ── Resource footprint checks ──────────────────────────────────────────
 
     // Zero tiles for the expired agent
-    let foxtrot_tiles: Vec<_> = scene.tiles.values()
+    let foxtrot_tiles: Vec<_> = scene
+        .tiles
+        .values()
         .filter(|t| t.namespace == "agent.foxtrot")
         .collect();
-    assert!(foxtrot_tiles.is_empty(), "zero tiles for expired agent (zero footprint)");
+    assert!(
+        foxtrot_tiles.is_empty(),
+        "zero tiles for expired agent (zero footprint)"
+    );
 
     // Zero nodes for expired agent (nodes removed with tiles)
-    assert_eq!(scene.node_count(), 1, "only 1 node remains (agent.golf's tile)");
+    assert_eq!(
+        scene.node_count(),
+        1,
+        "only 1 node remains (agent.golf's tile)"
+    );
 
     // Zero hit-region states for expired agent
     let foxtrot_tile_ids = [tile_a, tile_b, tile_c];
     for tile_id in foxtrot_tile_ids {
-        assert!(!scene.tiles.contains_key(&tile_id), "tile {tile_id} must be removed");
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile {tile_id} must be removed"
+        );
     }
 
     // agent.golf's resources are untouched
-    assert!(scene.tiles.contains_key(&tile_other), "agent.golf tile survives foxtrot expiry");
-    assert_eq!(scene.leases[&lease_other].state, LeaseState::Active, "agent.golf lease unaffected");
+    assert!(
+        scene.tiles.contains_key(&tile_other),
+        "agent.golf tile survives foxtrot expiry"
+    );
+    assert_eq!(
+        scene.leases[&lease_other].state,
+        LeaseState::Active,
+        "agent.golf lease unaffected"
+    );
 
     // Lease in terminal state
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Expired, "foxtrot lease in Expired terminal state");
+    assert_eq!(
+        scene.leases[&lease_id].state,
+        LeaseState::Expired,
+        "foxtrot lease in Expired terminal state"
+    );
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after zero-footprint cleanup: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after zero-footprint cleanup: {violations:?}"
+    );
 }
 
 // ─── Test 9: Lease timeline artifact ─────────────────────────────────────────
@@ -812,25 +1323,33 @@ fn test_lease_lifecycle_timeline_artifact() {
 
     // Suspend (simulate freeze / safe mode)
     clock.advance(1_000);
-    scene.suspend_lease(&lease_id, clock.now_millis()).expect("suspend");
+    scene
+        .suspend_lease(&lease_id, clock.now_millis())
+        .expect("suspend");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Suspended);
     record!("suspend — ACTIVE → SUSPENDED");
 
     // Resume
     clock.advance(2_000);
-    scene.resume_lease(&lease_id, clock.now_millis()).expect("resume");
+    scene
+        .resume_lease(&lease_id, clock.now_millis())
+        .expect("resume");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
     record!("resume — SUSPENDED → ACTIVE");
 
     // Disconnect (grace period start)
     clock.advance(500);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
     record!("disconnect — ACTIVE → ORPHANED");
 
     // Reconnect (within grace)
     clock.advance(3_000);
-    scene.reconnect_lease(&lease_id, clock.now_millis()).expect("reconnect");
+    scene
+        .reconnect_lease(&lease_id, clock.now_millis())
+        .expect("reconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
     record!("reconnect — ORPHANED → ACTIVE");
 
@@ -842,22 +1361,50 @@ fn test_lease_lifecycle_timeline_artifact() {
 
     // Emit timeline as JSON (artifact output)
     let json = serde_json::to_string_pretty(&timeline).expect("timeline serialisation");
-    assert!(json.contains("ACTIVE"), "timeline must contain ACTIVE state");
-    assert!(json.contains("SUSPENDED"), "timeline must contain SUSPENDED state");
-    assert!(json.contains("ORPHANED"), "timeline must contain ORPHANED state");
-    assert!(json.contains("REVOKED"), "timeline must contain REVOKED state");
+    assert!(
+        json.contains("ACTIVE"),
+        "timeline must contain ACTIVE state"
+    );
+    assert!(
+        json.contains("SUSPENDED"),
+        "timeline must contain SUSPENDED state"
+    );
+    assert!(
+        json.contains("ORPHANED"),
+        "timeline must contain ORPHANED state"
+    );
+    assert!(
+        json.contains("REVOKED"),
+        "timeline must contain REVOKED state"
+    );
 
     // Verify all transitions occurred in the expected order
     let states: Vec<&str> = timeline.iter().map(|e| e.state.as_str()).collect();
-    assert_eq!(states, vec!["Active", "Suspended", "Active", "Orphaned", "Active", "Revoked"]);
+    assert_eq!(
+        states,
+        vec![
+            "Active",
+            "Suspended",
+            "Active",
+            "Orphaned",
+            "Active",
+            "Revoked"
+        ]
+    );
 
     // Revoked is terminal — reconnect must fail
-    assert!(scene.reconnect_lease(&lease_id, clock.now_millis()).is_err(),
-        "reconnect on Revoked lease must fail");
+    assert!(
+        scene
+            .reconnect_lease(&lease_id, clock.now_millis())
+            .is_err(),
+        "reconnect on Revoked lease must fail"
+    );
 
     // Revoke on already-revoked must fail (terminal state)
-    assert!(scene.revoke_lease(lease_id).is_err(),
-        "double-revoke must fail (terminal state)");
+    assert!(
+        scene.revoke_lease(lease_id).is_err(),
+        "double-revoke must fail (terminal state)"
+    );
 }
 
 // ─── Test 10: Safe mode resource footprint measurement ───────────────────────
@@ -884,7 +1431,11 @@ fn test_resource_footprint_measurements() {
     let lease_id = scene.grant_lease("footprint.agent", 9_000_000, vec![Capability::CreateTile]);
 
     let active_leases = |scene: &SceneGraph| {
-        scene.leases.values().filter(|l| l.state == LeaseState::Active).count()
+        scene
+            .leases
+            .values()
+            .filter(|l| l.state == LeaseState::Active)
+            .count()
     };
 
     let mut samples: Vec<FootprintSample> = Vec::new();
@@ -905,8 +1456,14 @@ fn test_resource_footprint_measurements() {
 
     // Active: create tiles
     for i in 0..5u32 {
-        apply_create_tile(&mut scene, tab_id, "footprint.agent", lease_id,
-            Rect::new((i as f32) * 210.0, 0.0, 200.0, 200.0), i + 1);
+        apply_create_tile(
+            &mut scene,
+            tab_id,
+            "footprint.agent",
+            lease_id,
+            Rect::new((i as f32) * 210.0, 0.0, 200.0, 200.0),
+            i + 1,
+        );
     }
     sample!("active_5_tiles");
     assert_eq!(scene.tile_count(), 5);
@@ -925,7 +1482,9 @@ fn test_resource_footprint_measurements() {
 
     // Orphaned (grace period)
     clock.advance(500);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
     sample!("orphaned_grace_period");
     assert_eq!(scene.tile_count(), 5, "tiles persist during grace period");
 
@@ -939,13 +1498,22 @@ fn test_resource_footprint_measurements() {
 
     // Emit footprint JSON
     let json = serde_json::to_string_pretty(&samples).expect("footprint serialisation");
-    assert!(json.contains("zero_footprint"), "footprint JSON must include zero_footprint phase");
+    assert!(
+        json.contains("zero_footprint"),
+        "footprint JSON must include zero_footprint phase"
+    );
 
     // Verify zero-footprint phase
-    let zero_phase = samples.iter().find(|s| s.phase == "expired_zero_footprint").unwrap();
+    let zero_phase = samples
+        .iter()
+        .find(|s| s.phase == "expired_zero_footprint")
+        .unwrap();
     assert_eq!(zero_phase.tile_count, 0, "zero tiles at expired phase");
     assert_eq!(zero_phase.node_count, 0, "zero nodes at expired phase");
-    assert_eq!(zero_phase.active_lease_count, 0, "zero active leases at expired phase");
+    assert_eq!(
+        zero_phase.active_lease_count, 0,
+        "zero active leases at expired phase"
+    );
 }
 
 // ─── Zone helper ─────────────────────────────────────────────────────────────
@@ -953,8 +1521,8 @@ fn test_resource_footprint_measurements() {
 /// Build a minimal stream-text zone definition for use in tests.
 fn make_stream_text_zone(name: &str) -> tze_hud_scene::types::ZoneDefinition {
     use tze_hud_scene::types::{
-        ContentionPolicy, GeometryPolicy, DisplayEdge, RenderingPolicy,
-        ZoneDefinition, ZoneMediaType,
+        ContentionPolicy, DisplayEdge, GeometryPolicy, RenderingPolicy, ZoneDefinition,
+        ZoneMediaType,
     };
     ZoneDefinition {
         id: SceneId::new(),
@@ -973,7 +1541,7 @@ fn make_stream_text_zone(name: &str) -> tze_hud_scene::types::ZoneDefinition {
         transport_constraint: None,
         auto_clear_ms: None,
         ephemeral: false,
-    layer_attachment: LayerAttachment::Content,
+        layer_attachment: LayerAttachment::Content,
     }
 }
 
@@ -993,8 +1561,22 @@ fn test_disconnection_badge_set_on_orphan() {
     let tab_id = scene.create_tab("Main", 0).expect("create_tab");
     let lease_id = scene.grant_lease("agent.hotel", 60_000, vec![Capability::CreateTile]);
 
-    let tile_a = apply_create_tile(&mut scene, tab_id, "agent.hotel", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
-    let tile_b = apply_create_tile(&mut scene, tab_id, "agent.hotel", lease_id, Rect::new(210.0, 0.0, 200.0, 200.0), 2);
+    let tile_a = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.hotel",
+        lease_id,
+        Rect::new(0.0, 0.0, 200.0, 200.0),
+        1,
+    );
+    let tile_b = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.hotel",
+        lease_id,
+        Rect::new(210.0, 0.0, 200.0, 200.0),
+        2,
+    );
 
     // Tiles start with no badge
     assert_eq!(scene.tiles[&tile_a].visual_hint, TileVisualHint::None);
@@ -1002,7 +1584,9 @@ fn test_disconnection_badge_set_on_orphan() {
 
     // Disconnect: badge must be set (spec: within 1 frame)
     clock.advance(1_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Both tiles must now show DisconnectionBadge
@@ -1019,7 +1603,9 @@ fn test_disconnection_badge_set_on_orphan() {
 
     // Reconnect: badge must clear (spec line 141: within 1 frame)
     clock.advance(5_000);
-    scene.reconnect_lease(&lease_id, clock.now_millis()).expect("reconnect");
+    scene
+        .reconnect_lease(&lease_id, clock.now_millis())
+        .expect("reconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Active);
 
     assert_eq!(
@@ -1034,7 +1620,10 @@ fn test_disconnection_badge_set_on_orphan() {
     );
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after badge test: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after badge test: {violations:?}"
+    );
 }
 
 // ─── Test 12: Zone publications cleared on lease expiry ───────────────────────
@@ -1060,37 +1649,64 @@ fn test_zone_publications_cleared_on_lease_expiry() {
     let lease_id = scene.grant_lease("agent.india", 5_000, vec![Capability::CreateTile]);
 
     // Agent publishes to subtitle zone
-    scene.publish_to_zone(
-        "subtitle",
-        ZoneContent::StreamText("Hello from agent.india".to_string()),
-        "agent.india",
-        None,
-        None,
-        None,
-    ).expect("publish_to_zone");
+    scene
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("Hello from agent.india".to_string()),
+            "agent.india",
+            None,
+            None,
+            None,
+        )
+        .expect("publish_to_zone");
 
     // Zone should have active publication
-    assert!(!scene.zone_registry.active_publishes.get("subtitle").map(|v| v.is_empty()).unwrap_or(true),
-        "zone must have active publish before expiry");
+    assert!(
+        !scene
+            .zone_registry
+            .active_publishes
+            .get("subtitle")
+            .map(|v| v.is_empty())
+            .unwrap_or(true),
+        "zone must have active publish before expiry"
+    );
 
     // Disconnect agent.india
     clock.advance(1_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
 
     // Zone publication still present during grace period
-    assert!(!scene.zone_registry.active_publishes.get("subtitle").map(|v| v.is_empty()).unwrap_or(true),
-        "zone publish must persist during grace period (stale-badged but visible)");
+    assert!(
+        !scene
+            .zone_registry
+            .active_publishes
+            .get("subtitle")
+            .map(|v| v.is_empty())
+            .unwrap_or(true),
+        "zone publish must persist during grace period (stale-badged but visible)"
+    );
 
     // Advance past grace period
     clock.advance(SceneGraph::DEFAULT_GRACE_PERIOD_MS + 1_000);
     let expiries = scene.expire_leases();
-    assert!(!expiries.is_empty(), "expiry sweep must find the expired lease");
+    assert!(
+        !expiries.is_empty(),
+        "expiry sweep must find the expired lease"
+    );
 
     // Zone publication must now be cleared
-    let still_active = scene.zone_registry.active_publishes.get("subtitle")
+    let still_active = scene
+        .zone_registry
+        .active_publishes
+        .get("subtitle")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    assert!(!still_active, "zone publication must be cleared after lease expiry");
+    assert!(
+        !still_active,
+        "zone publication must be cleared after lease expiry"
+    );
 }
 
 // ─── Test 13: Zone publish rejected when lease is orphaned ────────────────────
@@ -1114,16 +1730,20 @@ fn test_zone_publish_rejected_when_lease_orphaned() {
     let lease_id = scene.grant_lease("agent.juliet", 60_000, vec![Capability::CreateTile]);
 
     // Publish while active — must succeed
-    scene.publish_to_zone_with_lease(
-        "subtitle",
-        ZoneContent::StreamText("first".to_string()),
-        "agent.juliet",
-        None,
-    ).expect("publish while active must succeed");
+    scene
+        .publish_to_zone_with_lease(
+            "subtitle",
+            ZoneContent::StreamText("first".to_string()),
+            "agent.juliet",
+            None,
+        )
+        .expect("publish while active must succeed");
 
     // Disconnect agent
     clock.advance(1_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // New publish attempt while orphaned — must be rejected
@@ -1135,16 +1755,25 @@ fn test_zone_publish_rejected_when_lease_orphaned() {
     );
 
     assert!(
-        matches!(result, Err(ValidationError::ZonePublishLeaseOrphaned { .. })),
+        matches!(
+            result,
+            Err(ValidationError::ZonePublishLeaseOrphaned { .. })
+        ),
         "zone publish from orphaned lease must return ZonePublishLeaseOrphaned, got: {:?}",
         result
     );
 
     // Existing publication must still be present (stale-badged)
-    let pubs = scene.zone_registry.active_publishes.get("subtitle")
+    let pubs = scene
+        .zone_registry
+        .active_publishes
+        .get("subtitle")
         .map(|v| v.len())
         .unwrap_or(0);
-    assert_eq!(pubs, 1, "existing zone publication must still be visible during orphan");
+    assert_eq!(
+        pubs, 1,
+        "existing zone publication must still be visible during orphan"
+    );
 }
 
 // ─── Test 14: Budget-driven revocation bypasses grace period ─────────────────
@@ -1163,13 +1792,34 @@ fn test_budget_revocation_bypasses_grace_and_zero_footprint() {
     let tab_id = scene.create_tab("Main", 0).expect("create_tab");
     let lease_id = scene.grant_lease("agent.kilo", 60_000, vec![Capability::CreateTile]);
 
-    let tile_a = apply_create_tile(&mut scene, tab_id, "agent.kilo", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1);
-    let tile_b = apply_create_tile(&mut scene, tab_id, "agent.kilo", lease_id, Rect::new(210.0, 0.0, 200.0, 200.0), 2);
+    let tile_a = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.kilo",
+        lease_id,
+        Rect::new(0.0, 0.0, 200.0, 200.0),
+        1,
+    );
+    let tile_b = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.kilo",
+        lease_id,
+        Rect::new(210.0, 0.0, 200.0, 200.0),
+        2,
+    );
     assert_eq!(scene.tile_count(), 2);
 
     // Also grant a second agent that must be unaffected
     let other_lease = scene.grant_lease("agent.lima", 60_000, vec![Capability::CreateTile]);
-    let tile_other = apply_create_tile(&mut scene, tab_id, "agent.lima", other_lease, Rect::new(500.0, 0.0, 200.0, 200.0), 3);
+    let tile_other = apply_create_tile(
+        &mut scene,
+        tab_id,
+        "agent.lima",
+        other_lease,
+        Rect::new(500.0, 0.0, 200.0, 200.0),
+        3,
+    );
     assert_eq!(scene.tile_count(), 3);
 
     // ── Initiate budget-driven revocation ─────────────────────────────────
@@ -1178,19 +1828,29 @@ fn test_budget_revocation_bypasses_grace_and_zero_footprint() {
 
     assert_eq!(specs.len(), 1, "one lease for agent.kilo");
     // Lease is now REVOKED (not ORPHANED — grace bypassed)
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Revoked,
-        "budget revocation must set state=REVOKED immediately (not ORPHANED)");
+    assert_eq!(
+        scene.leases[&lease_id].state,
+        LeaseState::Revoked,
+        "budget revocation must set state=REVOKED immediately (not ORPHANED)"
+    );
 
     // Tiles still exist at t+0ms (pending 100ms free delay)
     // Note: initiate only marks for removal; finalize does the actual free.
-    assert_eq!(specs[0].bypasses_grace_period(), true,
-        "budget policy revocation must bypass grace period");
+    assert_eq!(
+        specs[0].bypasses_grace_period(),
+        true,
+        "budget policy revocation must bypass grace period"
+    );
 
     // Verify the spec has the right free delay
-    assert!(!specs[0].is_ready_to_free(clock.now_millis()),
-        "not ready to free at t=0 after revocation");
-    assert!(!specs[0].is_ready_to_free(clock.now_millis() + POST_REVOCATION_FREE_DELAY_MS - 1),
-        "not ready at 99ms");
+    assert!(
+        !specs[0].is_ready_to_free(clock.now_millis()),
+        "not ready to free at t=0 after revocation"
+    );
+    assert!(
+        !specs[0].is_ready_to_free(clock.now_millis() + POST_REVOCATION_FREE_DELAY_MS - 1),
+        "not ready at 99ms"
+    );
 
     // ── After 100ms delay: finalize cleanup ───────────────────────────────
     clock.advance(POST_REVOCATION_FREE_DELAY_MS);
@@ -1198,17 +1858,32 @@ fn test_budget_revocation_bypasses_grace_and_zero_footprint() {
     assert_eq!(finalized, 1, "exactly 1 spec finalized");
 
     // Tiles removed — zero footprint
-    assert!(!scene.tiles.contains_key(&tile_a), "tile_a removed after budget revocation");
-    assert!(!scene.tiles.contains_key(&tile_b), "tile_b removed after budget revocation");
+    assert!(
+        !scene.tiles.contains_key(&tile_a),
+        "tile_a removed after budget revocation"
+    );
+    assert!(
+        !scene.tiles.contains_key(&tile_b),
+        "tile_b removed after budget revocation"
+    );
     assert_eq!(scene.tile_count(), 1, "only agent.lima tile remains");
 
     // Other agent unaffected
-    assert!(scene.tiles.contains_key(&tile_other), "agent.lima tile survives kilo revocation");
-    assert_eq!(scene.leases[&other_lease].state, LeaseState::Active,
-        "agent.lima lease unaffected");
+    assert!(
+        scene.tiles.contains_key(&tile_other),
+        "agent.lima tile survives kilo revocation"
+    );
+    assert_eq!(
+        scene.leases[&other_lease].state,
+        LeaseState::Active,
+        "agent.lima lease unaffected"
+    );
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after budget revocation: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after budget revocation: {violations:?}"
+    );
 
     let _ = (tile_a, tile_b, tile_other);
 }
@@ -1262,9 +1937,14 @@ fn test_grace_period_timer_precision_integration() {
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Reconnect at 29,950ms — must succeed
-    scene.reconnect_lease(&lease_id, 29_950).expect("reconnect at 29,950ms must succeed (spec lines 152-154)");
-    assert_eq!(scene.leases[&lease_id].state, LeaseState::Active,
-        "lease must be Active after reconnect at 29,950ms");
+    scene
+        .reconnect_lease(&lease_id, 29_950)
+        .expect("reconnect at 29,950ms must succeed (spec lines 152-154)");
+    assert_eq!(
+        scene.leases[&lease_id].state,
+        LeaseState::Active,
+        "lease must be Active after reconnect at 29,950ms"
+    );
 }
 
 // ─── Test 16: Zone publications cleared on revoke_lease ──────────────────────
@@ -1285,21 +1965,42 @@ fn test_zone_publications_cleared_on_revoke_lease() {
     let lease_id = scene.grant_lease("agent.november", 60_000, vec![]);
 
     // Publish while active
-    scene.publish_to_zone("status", ZoneContent::StreamText("active".into()), "agent.november", None, None, None)
+    scene
+        .publish_to_zone(
+            "status",
+            ZoneContent::StreamText("active".into()),
+            "agent.november",
+            None,
+            None,
+            None,
+        )
         .expect("publish");
 
-    assert!(!scene.zone_registry.active_publishes.get("status").map(|v| v.is_empty()).unwrap_or(true),
-        "zone must have publication before revocation");
+    assert!(
+        !scene
+            .zone_registry
+            .active_publishes
+            .get("status")
+            .map(|v| v.is_empty())
+            .unwrap_or(true),
+        "zone must have publication before revocation"
+    );
 
     // Revoke lease
     scene.revoke_lease(lease_id).expect("revoke_lease");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Revoked);
 
     // Zone publication must be cleared
-    let still_active = scene.zone_registry.active_publishes.get("status")
+    let still_active = scene
+        .zone_registry
+        .active_publishes
+        .get("status")
         .map(|v| !v.is_empty())
         .unwrap_or(false);
-    assert!(!still_active, "zone publication must be cleared after revoke_lease");
+    assert!(
+        !still_active,
+        "zone publication must be cleared after revoke_lease"
+    );
 }
 
 // ─── Test 17: TTL continues running during orphan state ──────────────────────
@@ -1320,10 +2021,15 @@ fn test_ttl_continues_during_orphan_state() {
     // Advance 2,000ms (TTL now 8,000ms remaining)
     clock.advance(2_000);
     let ttl_at_2s = scene.leases[&lease_id].remaining_ms(clock.now_millis());
-    assert!(ttl_at_2s <= 8_100 && ttl_at_2s >= 7_900, "TTL ≈ 8,000ms at t=2s, got {ttl_at_2s}");
+    assert!(
+        ttl_at_2s <= 8_100 && ttl_at_2s >= 7_900,
+        "TTL ≈ 8,000ms at t=2s, got {ttl_at_2s}"
+    );
 
     // Disconnect (orphan) at t=2,000ms
-    scene.disconnect_lease(&lease_id, clock.now_millis()).expect("disconnect");
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Advance another 4,000ms while orphaned (TTL must continue counting down)
@@ -1336,5 +2042,8 @@ fn test_ttl_continues_during_orphan_state() {
     );
 
     // Verify the TTL is actually smaller than at t=2s (proving clock ran during orphan)
-    assert!(ttl_at_6s < ttl_at_2s, "TTL must have decreased during orphan state");
+    assert!(
+        ttl_at_6s < ttl_at_2s,
+        "TTL must have decreased during orphan state"
+    );
 }

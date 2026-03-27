@@ -3,8 +3,8 @@
 //! Each test corresponds to a WHEN/THEN scenario from the issue acceptance
 //! criteria (rig-j90m, rig-umgy) and `configuration/spec.md`.
 
-use tze_hud_scene::config::{ConfigErrorCode, ConfigLoader, ParseError};
 use crate::loader::TzeHudConfig;
+use tze_hud_scene::config::{ConfigErrorCode, ConfigLoader, ParseError};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -47,7 +47,8 @@ fn spec_parse_error_includes_line_column() {
 /// WHEN no config file found at any location THEN Err lists searched paths.
 #[test]
 fn spec_no_config_found_lists_searched_paths() {
-    let result = TzeHudConfig::resolve_config_path(Some("/tmp/tze_hud_no_such_file_j90m_test.toml"));
+    let result =
+        TzeHudConfig::resolve_config_path(Some("/tmp/tze_hud_no_such_file_j90m_test.toml"));
     match result {
         Err(paths) => {
             assert!(!paths.is_empty(), "searched paths must be listed");
@@ -70,7 +71,10 @@ name = "Home"
 "#;
     let loader = parse_ok(toml);
     let resolved = loader.freeze();
-    assert!(resolved.is_ok(), "minimal config should freeze successfully");
+    assert!(
+        resolved.is_ok(),
+        "minimal config should freeze successfully"
+    );
     let config = resolved.unwrap();
     assert_eq!(config.tab_names, vec!["Home".to_string()]);
 }
@@ -84,7 +88,9 @@ profile = "full-display"
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_no_tabs = errors.iter().any(|e| matches!(e.code, ConfigErrorCode::NoTabs));
+    let has_no_tabs = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::NoTabs));
     assert!(has_no_tabs, "no [[tabs]] should produce CONFIG_NO_TABS");
 }
 
@@ -104,10 +110,13 @@ name = "Main"
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_includes_error = errors.iter().any(|e| {
-        matches!(e.code, ConfigErrorCode::ConfigIncludesNotSupported)
-    });
-    assert!(has_includes_error, "includes field should produce CONFIG_INCLUDES_NOT_SUPPORTED");
+    let has_includes_error = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::ConfigIncludesNotSupported));
+    assert!(
+        has_includes_error,
+        "includes field should produce CONFIG_INCLUDES_NOT_SUPPORTED"
+    );
 }
 
 // ── Spec §Structured Validation Error Collection ──────────────────────────────
@@ -153,7 +162,9 @@ name = "Morning"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::DuplicateTabName)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::DuplicateTabName)),
         "should have CONFIG_DUPLICATE_TAB_NAME error"
     );
 }
@@ -176,7 +187,9 @@ default_tab = true
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::MultipleDefaultTabs)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::MultipleDefaultTabs)),
         "should have CONFIG_MULTIPLE_DEFAULT_TABS error"
     );
 }
@@ -200,7 +213,9 @@ reserved_bottom_fraction = 0.5
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidReservedFraction)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::InvalidReservedFraction)),
         "reserved_top + reserved_bottom = 1.0 should produce CONFIG_INVALID_RESERVED_FRACTION"
     );
 }
@@ -224,8 +239,13 @@ name = "Main"
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_fps_error = errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidFpsRange));
-    assert!(has_fps_error, "target_fps < min_fps should produce CONFIG_INVALID_FPS_RANGE");
+    let has_fps_error = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::InvalidFpsRange));
+    assert!(
+        has_fps_error,
+        "target_fps < min_fps should produce CONFIG_INVALID_FPS_RANGE"
+    );
 }
 
 // ── Spec §Degradation Threshold Ordering ──────────────────────────────────────
@@ -247,7 +267,9 @@ coalesce_frame_ms = 14.0
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::DegradationThresholdOrder)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::DegradationThresholdOrder)),
         "out-of-order thresholds should produce CONFIG_DEGRADATION_THRESHOLD_ORDER"
     );
 }
@@ -271,7 +293,10 @@ tab_switch_on_event = "doorbell.ring"
         .iter()
         .filter(|e| matches!(e.code, ConfigErrorCode::InvalidEventName))
         .collect();
-    assert!(event_errors.is_empty(), "valid event name should not produce errors");
+    assert!(
+        event_errors.is_empty(),
+        "valid event name should not produce errors"
+    );
 }
 
 /// WHEN tab_switch_on_event = "Doorbell-Ring" THEN CONFIG_INVALID_EVENT_NAME.
@@ -288,7 +313,9 @@ tab_switch_on_event = "Doorbell-Ring"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidEventName)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::InvalidEventName)),
         "invalid event name should produce CONFIG_INVALID_EVENT_NAME"
     );
 }
@@ -310,7 +337,10 @@ tab_switch_on_event = ""
         .iter()
         .filter(|e| matches!(e.code, ConfigErrorCode::InvalidEventName))
         .collect();
-    assert!(event_errors.is_empty(), "empty event name must not produce an error");
+    assert!(
+        event_errors.is_empty(),
+        "empty event name must not produce an error"
+    );
 }
 
 // ── Spec §Schema Export ───────────────────────────────────────────────────────
@@ -336,18 +366,30 @@ name = "Main"
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_mobile_error = errors.iter().any(|e| {
-        matches!(e.code, ConfigErrorCode::MobileProfileNotExercised)
-    });
-    assert!(has_mobile_error, "mobile profile should produce CONFIG_MOBILE_PROFILE_NOT_EXERCISED");
+    let has_mobile_error = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::MobileProfileNotExercised));
+    assert!(
+        has_mobile_error,
+        "mobile profile should produce CONFIG_MOBILE_PROFILE_NOT_EXERCISED"
+    );
     // Must NOT produce CONFIG_UNKNOWN_PROFILE (it's a distinct error).
-    let has_unknown = errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownProfile));
-    assert!(!has_unknown, "mobile profile must NOT produce CONFIG_UNKNOWN_PROFILE");
+    let has_unknown = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::UnknownProfile));
+    assert!(
+        !has_unknown,
+        "mobile profile must NOT produce CONFIG_UNKNOWN_PROFILE"
+    );
     // Hint must mention full-display or headless.
-    let mobile_error = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::MobileProfileNotExercised)).unwrap();
+    let mobile_error = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::MobileProfileNotExercised))
+        .unwrap();
     assert!(
         mobile_error.hint.contains("full-display") || mobile_error.hint.contains("headless"),
-        "hint should suggest full-display or headless, got: {:?}", mobile_error.hint
+        "hint should suggest full-display or headless, got: {:?}",
+        mobile_error.hint
     );
 }
 
@@ -369,7 +411,9 @@ name = "Main"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::HeadlessNotExtendable)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::HeadlessNotExtendable)),
         "extends=headless must produce CONFIG_HEADLESS_NOT_EXTENDABLE, got: {:?}",
         errors.iter().map(|e| &e.code).collect::<Vec<_>>()
     );
@@ -431,15 +475,21 @@ name = "Main"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
         "max_tiles=2048 exceeding base 1024 should produce BUDGET_ESCALATION, got: {:?}",
         errors.iter().map(|e| &e.code).collect::<Vec<_>>()
     );
     // Error should identify the offending field.
-    let budget_error = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)).unwrap();
+    let budget_error = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation))
+        .unwrap();
     assert!(
         budget_error.field_path.contains("max_tiles"),
-        "error should identify max_tiles field, got: {:?}", budget_error.field_path
+        "error should identify max_tiles field, got: {:?}",
+        budget_error.field_path
     );
 }
 
@@ -461,7 +511,9 @@ name = "Main"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileCapabilityEscalation)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ProfileCapabilityEscalation)),
         "allow_background_zones=true over mobile base should produce CAPABILITY_ESCALATION, got: {:?}",
         errors.iter().map(|e| &e.code).collect::<Vec<_>>()
     );
@@ -491,7 +543,8 @@ name = "Main"
     let has_conflict = errors.iter().any(|e| {
         matches!(
             e.code,
-            ConfigErrorCode::HeadlessNotExtendable | ConfigErrorCode::ProfileExtendsConflictsWithProfile
+            ConfigErrorCode::HeadlessNotExtendable
+                | ConfigErrorCode::ProfileExtendsConflictsWithProfile
         )
     });
     assert!(
@@ -518,7 +571,9 @@ name = "Main"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileExtendsConflictsWithProfile)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ProfileExtendsConflictsWithProfile)),
         "profile=full-display + extends=mobile must produce EXTENDS_CONFLICTS, got: {:?}",
         errors.iter().map(|e| &e.code).collect::<Vec<_>>()
     );
@@ -586,7 +641,10 @@ name = "T"
     let loader = parse_ok(toml);
     let resolved = loader.freeze().expect("freeze should succeed");
     assert_eq!(resolved.profile.name, "headless");
-    assert_eq!(resolved.profile.max_tiles, 256, "headless budget preserved with custom dimensions");
+    assert_eq!(
+        resolved.profile.max_tiles, 256,
+        "headless budget preserved with custom dimensions"
+    );
 }
 
 // ── Spec §Capability Vocabulary ───────────────────────────────────────────────
@@ -606,10 +664,13 @@ capabilities = ["createTiles"]
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_cap_error = errors.iter().any(|e| {
-        matches!(e.code, ConfigErrorCode::UnknownCapability)
-    });
-    assert!(has_cap_error, "non-canonical capability 'createTiles' should produce UNKNOWN_CAPABILITY");
+    let has_cap_error = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::UnknownCapability));
+    assert!(
+        has_cap_error,
+        "non-canonical capability 'createTiles' should produce UNKNOWN_CAPABILITY"
+    );
 }
 
 /// WHEN emit_scene_event:system.shutdown used THEN CONFIG_RESERVED_EVENT_PREFIX.
@@ -627,10 +688,13 @@ capabilities = ["emit_scene_event:system.shutdown"]
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_reserved = errors.iter().any(|e| {
-        matches!(e.code, ConfigErrorCode::ReservedEventPrefix)
-    });
-    assert!(has_reserved, "emit_scene_event:system.* should produce CONFIG_RESERVED_EVENT_PREFIX");
+    let has_reserved = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::ReservedEventPrefix));
+    assert!(
+        has_reserved,
+        "emit_scene_event:system.* should produce CONFIG_RESERVED_EVENT_PREFIX"
+    );
 }
 
 /// WHEN canonical capabilities ["create_tiles", "publish_zone:subtitle", "emit_scene_event:doorbell.ring"]
@@ -707,7 +771,9 @@ capabilities = ["emit_scene_event:scene.render"]
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ReservedEventPrefix)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ReservedEventPrefix)),
         "emit_scene_event:scene.* should produce CONFIG_RESERVED_EVENT_PREFIX"
     );
 }
@@ -889,10 +955,16 @@ name = "T"
 "#;
     let loader = parse_ok(toml);
     let resolved = loader.freeze().expect("freeze should succeed");
-    assert_eq!(resolved.profile.max_tiles, 512, "override max_tiles should be applied");
+    assert_eq!(
+        resolved.profile.max_tiles, 512,
+        "override max_tiles should be applied"
+    );
     assert_eq!(resolved.profile.name, "custom");
     // Other values fall back to base.
-    assert_eq!(resolved.profile.max_texture_mb, 2048, "non-overridden fields use base values");
+    assert_eq!(
+        resolved.profile.max_texture_mb, 2048,
+        "non-overridden fields use base values"
+    );
 }
 
 // ── Spec §Zone Registry — per-tab zone-type reference validation ──────────────
@@ -963,7 +1035,9 @@ zones = ["news_ticker"]
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
         "unknown zone type should produce CONFIG_UNKNOWN_ZONE_TYPE, got: {:?}",
         errors.iter().map(|e| &e.code).collect::<Vec<_>>()
     );
@@ -1020,7 +1094,9 @@ default_classification = "top_secret"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
         "default_classification=top_secret should produce CONFIG_UNKNOWN_CLASSIFICATION, got: {:?}",
         errors.iter().map(|e| &e.code).collect::<Vec<_>>()
     );
@@ -1042,7 +1118,9 @@ default_viewer_class = "admin"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownViewerClass)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownViewerClass)),
         "default_viewer_class=admin should produce CONFIG_UNKNOWN_VIEWER_CLASS"
     );
 }
@@ -1076,7 +1154,11 @@ multi_viewer_policy = "most_restrictive"
             )
         })
         .collect();
-    assert!(privacy_errors.is_empty(), "valid privacy section should not produce errors, got: {:?}", privacy_errors);
+    assert!(
+        privacy_errors.is_empty(),
+        "valid privacy section should not produce errors, got: {:?}",
+        privacy_errors
+    );
 }
 
 // ── Spec §Quiet Hours Configuration (rig-mop4) ────────────────────────────────
@@ -1099,14 +1181,20 @@ pass_through_class = "urgent"
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass)),
         "doctrine name 'urgent' should produce CONFIG_UNKNOWN_INTERRUPTION_CLASS"
     );
-    let err = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass)).unwrap();
+    let err = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass))
+        .unwrap();
     // Per spec line 239 and RFC 0010 §3.1: "urgent" → canonical "HIGH".
     assert!(
         err.hint.contains("HIGH"),
-        "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}", err.hint
+        "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}",
+        err.hint
     );
 }
 
@@ -1130,7 +1218,11 @@ pass_through_class = "HIGH"
         .iter()
         .filter(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass))
         .collect();
-    assert!(qh_errors.is_empty(), "HIGH is a valid pass_through_class, got errors: {:?}", qh_errors);
+    assert!(
+        qh_errors.is_empty(),
+        "HIGH is a valid pass_through_class, got errors: {:?}",
+        qh_errors
+    );
 }
 
 // ── Spec §Redaction Style Ownership (rig-mop4) ────────────────────────────────
@@ -1156,7 +1248,8 @@ redaction_style = "pattern"
         .collect();
     assert!(
         redaction_errors.is_empty(),
-        "redaction_style in [privacy] should be accepted, got: {:?}", redaction_errors
+        "redaction_style in [privacy] should be accepted, got: {:?}",
+        redaction_errors
     );
 }
 
@@ -1174,7 +1267,9 @@ fn spec_unknown_zone_type_produces_error() {
     let mut errors = Vec::new();
     validate_zone_type_ref("news_ticker", "tabs[0].zones.news_ticker", &[], &mut errors);
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
         "unknown zone type should produce CONFIG_UNKNOWN_ZONE_TYPE"
     );
 }
@@ -1215,7 +1310,8 @@ max_tiles = 4
         .collect();
     assert!(
         budget_errors.is_empty(),
-        "max_tiles=4 within profile ceiling should be accepted, got: {:?}", budget_errors
+        "max_tiles=4 within profile ceiling should be accepted, got: {:?}",
+        budget_errors
     );
 }
 
@@ -1236,16 +1332,33 @@ max_tiles = 2048
     let loader = parse_ok(toml);
     let errors = loader.validate();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)),
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)),
         "max_tiles=2048 exceeding profile ceiling 1024 should produce CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE"
     );
-    let err = errors.iter().find(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)).unwrap();
+    let err = errors
+        .iter()
+        .find(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile))
+        .unwrap();
     // Must identify the agent.
-    assert!(err.hint.contains("big_agent"), "error hint should identify agent, got: {:?}", err.hint);
+    assert!(
+        err.hint.contains("big_agent"),
+        "error hint should identify agent, got: {:?}",
+        err.hint
+    );
     // Must identify the field.
-    assert!(err.field_path.contains("max_tiles"), "error path should identify field, got: {:?}", err.field_path);
+    assert!(
+        err.field_path.contains("max_tiles"),
+        "error path should identify field, got: {:?}",
+        err.field_path
+    );
     // Must identify the ceiling.
-    assert!(err.expected.contains("1024"), "error should identify ceiling 1024, got: {:?}", err.expected);
+    assert!(
+        err.expected.contains("1024"),
+        "error should identify ceiling 1024, got: {:?}",
+        err.expected
+    );
 }
 
 // ── Spec §Dynamic Agent Policy (rig-mop4) ────────────────────────────────────
@@ -1342,11 +1455,17 @@ name = "Main"
 default_classification = "top_secret"
 "#;
     let result = reload_config(bad_toml);
-    assert!(result.is_err(), "reload with validation error should return Err");
+    assert!(
+        result.is_err(),
+        "reload with validation error should return Err"
+    );
     let errors = result.unwrap_err();
     assert!(
-        errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
-        "should return validation error from reload, got: {:?}", errors
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
+        "should return validation error from reload, got: {:?}",
+        errors
     );
 }
 
@@ -1367,13 +1486,16 @@ max_update_hz = 30
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_budget_error = errors.iter().any(|e| {
-        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
-    });
+    let has_budget_error = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile));
     assert!(
         !has_budget_error,
         "max_update_hz=30 within full-display ceiling of 60 should be accepted, got: {:?}",
-        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+        errors
+            .iter()
+            .map(|e| (&e.code, &e.field_path))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1400,16 +1522,21 @@ max_update_hz = 120
         budget_error.is_some(),
         "max_update_hz=120 exceeding full-display ceiling of 60 should produce \
          CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE, got: {:?}",
-        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+        errors
+            .iter()
+            .map(|e| (&e.code, &e.field_path))
+            .collect::<Vec<_>>()
     );
     let err = budget_error.unwrap();
     assert!(
         err.field_path.contains("agent_a"),
-        "error field_path should identify the agent name, got: {:?}", err.field_path
+        "error field_path should identify the agent name, got: {:?}",
+        err.field_path
     );
     assert!(
         err.field_path.contains("max_update_hz"),
-        "error field_path should identify the field, got: {:?}", err.field_path
+        "error field_path should identify the field, got: {:?}",
+        err.field_path
     );
 }
 
@@ -1428,13 +1555,16 @@ max_update_hz = 60
 "#;
     let loader = parse_ok(toml);
     let errors = loader.validate();
-    let has_budget_error = errors.iter().any(|e| {
-        matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
-    });
+    let has_budget_error = errors
+        .iter()
+        .any(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile));
     assert!(
         !has_budget_error,
         "max_update_hz=60 equal to full-display ceiling of 60 should be accepted, got: {:?}",
-        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+        errors
+            .iter()
+            .map(|e| (&e.code, &e.field_path))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1490,7 +1620,10 @@ name = "Main"
         has_escalation,
         "max_agent_update_hz=120 exceeding full-display base of 60 should produce \
          CONFIG_PROFILE_BUDGET_ESCALATION, got: {:?}",
-        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+        errors
+            .iter()
+            .map(|e| (&e.code, &e.field_path))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1552,6 +1685,9 @@ max_update_hz = 45
         budget_error.is_some(),
         "max_update_hz=45 exceeding custom ceiling of 30 should produce \
          CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE, got: {:?}",
-        errors.iter().map(|e| (&e.code, &e.field_path)).collect::<Vec<_>>()
+        errors
+            .iter()
+            .map(|e| (&e.code, &e.field_path))
+            .collect::<Vec<_>>()
     );
 }

@@ -48,9 +48,9 @@
 //! tze_hud --grpc-port 0
 //! ```
 
-use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
-use tze_hud_runtime::window::{WindowConfig, WindowMode};
 use tze_hud_config::resolve_config_path;
+use tze_hud_runtime::window::{WindowConfig, WindowMode};
+use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BIN_NAME: &str = "tze_hud";
@@ -99,7 +99,11 @@ NOTES:
 }
 
 fn print_version() {
-    println!("{BIN_NAME} {VERSION}", BIN_NAME = BIN_NAME, VERSION = VERSION);
+    println!(
+        "{BIN_NAME} {VERSION}",
+        BIN_NAME = BIN_NAME,
+        VERSION = VERSION
+    );
 }
 
 /// Parsed startup options.
@@ -191,9 +195,9 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
             }
             "--window-mode" => {
                 i += 1;
-                let val = args
-                    .get(i)
-                    .ok_or_else(|| "--window-mode requires an argument: fullscreen | overlay".to_string())?;
+                let val = args.get(i).ok_or_else(|| {
+                    "--window-mode requires an argument: fullscreen | overlay".to_string()
+                })?;
                 opts.window_mode = parse_window_mode(val)?;
             }
             "--width" => {
@@ -249,7 +253,9 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                     .map_err(|_| format!("--fps: invalid integer: {val:?}"))?;
             }
             flag if flag.starts_with('-') => {
-                return Err(format!("unknown flag: {flag}\nRun '{BIN_NAME} --help' for usage."));
+                return Err(format!(
+                    "unknown flag: {flag}\nRun '{BIN_NAME} --help' for usage."
+                ));
             }
             _ => {
                 return Err(format!(
@@ -280,15 +286,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if log_json {
         tracing_subscriber::fmt()
             .json()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_env("TZE_HUD_LOG"),
-            )
+            .with_env_filter(tracing_subscriber::EnvFilter::from_env("TZE_HUD_LOG"))
             .init();
     } else {
         tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_env("TZE_HUD_LOG"),
-            )
+            .with_env_filter(tracing_subscriber::EnvFilter::from_env("TZE_HUD_LOG"))
             .init();
     }
 
@@ -383,9 +385,18 @@ mod tests {
 
     #[test]
     fn parse_window_mode_fullscreen() {
-        assert_eq!(parse_window_mode("fullscreen").unwrap(), WindowMode::Fullscreen);
-        assert_eq!(parse_window_mode("FULLSCREEN").unwrap(), WindowMode::Fullscreen);
-        assert_eq!(parse_window_mode("Fullscreen").unwrap(), WindowMode::Fullscreen);
+        assert_eq!(
+            parse_window_mode("fullscreen").unwrap(),
+            WindowMode::Fullscreen
+        );
+        assert_eq!(
+            parse_window_mode("FULLSCREEN").unwrap(),
+            WindowMode::Fullscreen
+        );
+        assert_eq!(
+            parse_window_mode("Fullscreen").unwrap(),
+            WindowMode::Fullscreen
+        );
     }
 
     #[test]
@@ -397,8 +408,14 @@ mod tests {
     #[test]
     fn parse_window_mode_unknown_returns_error() {
         let err = parse_window_mode("windowed").unwrap_err();
-        assert!(err.contains("windowed"), "error should mention the bad value");
-        assert!(err.contains("fullscreen") || err.contains("overlay"), "error should mention valid values");
+        assert!(
+            err.contains("windowed"),
+            "error should mention the bad value"
+        );
+        assert!(
+            err.contains("fullscreen") || err.contains("overlay"),
+            "error should mention valid values"
+        );
     }
 
     // ── parse_options: defaults ───────────────────────────────────────────────
@@ -435,7 +452,9 @@ mod tests {
     fn parse_options_window_mode_overlay() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
-        unsafe { std::env::remove_var("TZE_HUD_WINDOW_MODE"); }
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+        }
         let args: Vec<String> = vec!["--window-mode".to_string(), "overlay".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.window_mode, WindowMode::Overlay);
@@ -450,8 +469,10 @@ mod tests {
             std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
         }
         let args: Vec<String> = vec![
-            "--width".to_string(), "1280".to_string(),
-            "--height".to_string(), "720".to_string(),
+            "--width".to_string(),
+            "1280".to_string(),
+            "--height".to_string(),
+            "720".to_string(),
         ];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.width, 1280);
@@ -462,7 +483,9 @@ mod tests {
     fn parse_options_grpc_port_zero_disables() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
-        unsafe { std::env::remove_var("TZE_HUD_GRPC_PORT"); }
+        unsafe {
+            std::env::remove_var("TZE_HUD_GRPC_PORT");
+        }
         let args: Vec<String> = vec!["--grpc-port".to_string(), "0".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.grpc_port, 0);
@@ -472,7 +495,9 @@ mod tests {
     fn parse_options_mcp_port() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
-        unsafe { std::env::remove_var("TZE_HUD_MCP_PORT"); }
+        unsafe {
+            std::env::remove_var("TZE_HUD_MCP_PORT");
+        }
         let args: Vec<String> = vec!["--mcp-port".to_string(), "8080".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.mcp_port, 8080);
@@ -482,7 +507,9 @@ mod tests {
     fn parse_options_mcp_port_zero_disables() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
-        unsafe { std::env::remove_var("TZE_HUD_MCP_PORT"); }
+        unsafe {
+            std::env::remove_var("TZE_HUD_MCP_PORT");
+        }
         let args: Vec<String> = vec!["--mcp-port".to_string(), "0".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.mcp_port, 0);
@@ -492,7 +519,9 @@ mod tests {
     fn parse_options_fps() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
-        unsafe { std::env::remove_var("TZE_HUD_FPS"); }
+        unsafe {
+            std::env::remove_var("TZE_HUD_FPS");
+        }
         let args: Vec<String> = vec!["--fps".to_string(), "30".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.fps, 30);
@@ -500,16 +529,24 @@ mod tests {
 
     #[test]
     fn parse_options_config_path() {
-        let args: Vec<String> = vec!["--config".to_string(), "/etc/tze_hud/config.toml".to_string()];
+        let args: Vec<String> = vec![
+            "--config".to_string(),
+            "/etc/tze_hud/config.toml".to_string(),
+        ];
         let opts = parse_options(&args).unwrap();
-        assert_eq!(opts.config_path.as_deref(), Some("/etc/tze_hud/config.toml"));
+        assert_eq!(
+            opts.config_path.as_deref(),
+            Some("/etc/tze_hud/config.toml")
+        );
     }
 
     #[test]
     fn parse_options_psk() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
-        unsafe { std::env::remove_var("TZE_HUD_PSK"); }
+        unsafe {
+            std::env::remove_var("TZE_HUD_PSK");
+        }
         let args: Vec<String> = vec!["--psk".to_string(), "my-secret-key".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.psk, "my-secret-key");
@@ -521,21 +558,29 @@ mod tests {
     fn parse_options_unknown_flag_returns_error() {
         let args: Vec<String> = vec!["--unknown-flag".to_string()];
         let err = parse_options(&args).unwrap_err();
-        assert!(err.contains("unknown flag"), "error should mention unknown flag");
+        assert!(
+            err.contains("unknown flag"),
+            "error should mention unknown flag"
+        );
     }
 
     #[test]
     fn parse_options_window_mode_missing_value_returns_error() {
         let args: Vec<String> = vec!["--window-mode".to_string()];
         let err = parse_options(&args).unwrap_err();
-        assert!(err.contains("--window-mode"), "error should mention the flag");
+        assert!(
+            err.contains("--window-mode"),
+            "error should mention the flag"
+        );
     }
 
     #[test]
     fn parse_options_width_non_integer_returns_error() {
         let _guard = ENV_VAR_MUTEX.lock().unwrap();
         // Safety: single-threaded within ENV_VAR_MUTEX guard.
-        unsafe { std::env::remove_var("TZE_HUD_WINDOW_WIDTH"); }
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+        }
         let args: Vec<String> = vec!["--width".to_string(), "bad".to_string()];
         let err = parse_options(&args).unwrap_err();
         assert!(err.contains("--width"), "error should mention the flag");
@@ -545,6 +590,9 @@ mod tests {
     fn parse_options_positional_arg_returns_error() {
         let args: Vec<String> = vec!["unexpected".to_string()];
         let err = parse_options(&args).unwrap_err();
-        assert!(err.contains("unexpected positional argument"), "error should explain positional arg");
+        assert!(
+            err.contains("unexpected positional argument"),
+            "error should explain positional arg"
+        );
     }
 }

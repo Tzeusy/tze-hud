@@ -39,8 +39,13 @@ use crate::raw::RawPrivacy;
 pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "household", "private", "sensitive"];
 
 /// Valid `default_viewer_class` values (from spec §Privacy Configuration Defaults).
-pub const VALID_VIEWER_CLASSES: &[&str] =
-    &["owner", "household_member", "known_guest", "unknown", "nobody"];
+pub const VALID_VIEWER_CLASSES: &[&str] = &[
+    "owner",
+    "household_member",
+    "known_guest",
+    "unknown",
+    "nobody",
+];
 
 /// Valid `redaction_style` values (from spec §Privacy Configuration Defaults).
 pub const VALID_REDACTION_STYLES: &[&str] = &["pattern", "blank"];
@@ -52,8 +57,7 @@ pub const VALID_MULTI_VIEWER_POLICIES: &[&str] = &["most_restrictive", "least_re
 /// (from spec §Quiet Hours Configuration, RFC 0010 §3.1).
 ///
 /// Note: doctrine names like "urgent" and "gentle" are NOT valid here.
-pub const VALID_INTERRUPTION_CLASSES: &[&str] =
-    &["CRITICAL", "HIGH", "NORMAL", "LOW", "SILENT"];
+pub const VALID_INTERRUPTION_CLASSES: &[&str] = &["CRITICAL", "HIGH", "NORMAL", "LOW", "SILENT"];
 
 /// Maps doctrine names to their canonical interruption class equivalents.
 /// Used to produce helpful hints when a doctrine name is provided.
@@ -61,11 +65,11 @@ pub const VALID_INTERRUPTION_CLASSES: &[&str] =
 /// Source: RFC 0010 §3.1 — "Urgent" renamed to HIGH for consistency with RFC 0009
 /// severity levels; "gentle" renamed to LOW.
 const DOCTRINE_TO_CANONICAL: &[(&str, &str)] = &[
-    ("urgent", "HIGH"),   // RFC 0010 §3.1: "Urgent" → HIGH
+    ("urgent", "HIGH"), // RFC 0010 §3.1: "Urgent" → HIGH
     ("high", "HIGH"),
     ("normal", "NORMAL"),
     ("low", "LOW"),
-    ("gentle", "LOW"),    // RFC 0010 §3.1: "Gentle" → LOW
+    ("gentle", "LOW"), // RFC 0010 §3.1: "Gentle" → LOW
     ("silent", "SILENT"),
     ("critical", "CRITICAL"),
 ];
@@ -78,102 +82,108 @@ const DOCTRINE_TO_CANONICAL: &[(&str, &str)] = &[
 pub fn validate_privacy(privacy: &RawPrivacy, errors: &mut Vec<ConfigError>) {
     // ── default_classification ────────────────────────────────────────────────
     if let Some(cls) = &privacy.default_classification
-        && !VALID_CLASSIFICATIONS.contains(&cls.as_str()) {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::UnknownClassification,
-                field_path: "privacy.default_classification".into(),
-                expected: format!("one of: {}", VALID_CLASSIFICATIONS.join(", ")),
-                got: format!("{cls:?}"),
-                hint: format!(
-                    "unknown classification {:?}; valid values: {}",
-                    cls,
-                    VALID_CLASSIFICATIONS.join(", ")
-                ),
-            });
-        }
+        && !VALID_CLASSIFICATIONS.contains(&cls.as_str())
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::UnknownClassification,
+            field_path: "privacy.default_classification".into(),
+            expected: format!("one of: {}", VALID_CLASSIFICATIONS.join(", ")),
+            got: format!("{cls:?}"),
+            hint: format!(
+                "unknown classification {:?}; valid values: {}",
+                cls,
+                VALID_CLASSIFICATIONS.join(", ")
+            ),
+        });
+    }
 
     // ── default_viewer_class ──────────────────────────────────────────────────
     if let Some(vc) = &privacy.default_viewer_class
-        && !VALID_VIEWER_CLASSES.contains(&vc.as_str()) {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::UnknownViewerClass,
-                field_path: "privacy.default_viewer_class".into(),
-                expected: format!("one of: {}", VALID_VIEWER_CLASSES.join(", ")),
-                got: format!("{vc:?}"),
-                hint: format!(
-                    "unknown viewer class {:?}; valid values: {}",
-                    vc,
-                    VALID_VIEWER_CLASSES.join(", ")
-                ),
-            });
-        }
+        && !VALID_VIEWER_CLASSES.contains(&vc.as_str())
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::UnknownViewerClass,
+            field_path: "privacy.default_viewer_class".into(),
+            expected: format!("one of: {}", VALID_VIEWER_CLASSES.join(", ")),
+            got: format!("{vc:?}"),
+            hint: format!(
+                "unknown viewer class {:?}; valid values: {}",
+                vc,
+                VALID_VIEWER_CLASSES.join(", ")
+            ),
+        });
+    }
 
     // ── redaction_style ───────────────────────────────────────────────────────
     if let Some(rs) = &privacy.redaction_style
-        && !VALID_REDACTION_STYLES.contains(&rs.as_str()) {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::Other("CONFIG_UNKNOWN_REDACTION_STYLE".into()),
-                field_path: "privacy.redaction_style".into(),
-                expected: format!("one of: {}", VALID_REDACTION_STYLES.join(", ")),
-                got: format!("{rs:?}"),
-                hint: format!(
-                    "unknown redaction_style {:?}; valid values: {}",
-                    rs,
-                    VALID_REDACTION_STYLES.join(", ")
-                ),
-            });
-        }
+        && !VALID_REDACTION_STYLES.contains(&rs.as_str())
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::Other("CONFIG_UNKNOWN_REDACTION_STYLE".into()),
+            field_path: "privacy.redaction_style".into(),
+            expected: format!("one of: {}", VALID_REDACTION_STYLES.join(", ")),
+            got: format!("{rs:?}"),
+            hint: format!(
+                "unknown redaction_style {:?}; valid values: {}",
+                rs,
+                VALID_REDACTION_STYLES.join(", ")
+            ),
+        });
+    }
 
     // ── multi_viewer_policy ───────────────────────────────────────────────────
     if let Some(mvp) = &privacy.multi_viewer_policy
-        && !VALID_MULTI_VIEWER_POLICIES.contains(&mvp.as_str()) {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::Other("CONFIG_UNKNOWN_MULTI_VIEWER_POLICY".into()),
-                field_path: "privacy.multi_viewer_policy".into(),
-                expected: format!("one of: {}", VALID_MULTI_VIEWER_POLICIES.join(", ")),
-                got: format!("{mvp:?}"),
-                hint: format!(
-                    "unknown multi_viewer_policy {:?}; valid values: {}",
-                    mvp,
-                    VALID_MULTI_VIEWER_POLICIES.join(", ")
-                ),
-            });
-        }
+        && !VALID_MULTI_VIEWER_POLICIES.contains(&mvp.as_str())
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::Other("CONFIG_UNKNOWN_MULTI_VIEWER_POLICY".into()),
+            field_path: "privacy.multi_viewer_policy".into(),
+            expected: format!("one of: {}", VALID_MULTI_VIEWER_POLICIES.join(", ")),
+            got: format!("{mvp:?}"),
+            hint: format!(
+                "unknown multi_viewer_policy {:?}; valid values: {}",
+                mvp,
+                VALID_MULTI_VIEWER_POLICIES.join(", ")
+            ),
+        });
+    }
 
     // ── quiet_hours ───────────────────────────────────────────────────────────
     if let Some(qh) = &privacy.quiet_hours {
         if let Some(ptc) = &qh.pass_through_class
-            && !VALID_INTERRUPTION_CLASSES.contains(&ptc.as_str()) {
-                // Produce a helpful hint if the user used a doctrine name.
-                let hint = find_doctrine_hint(ptc);
-                errors.push(ConfigError {
-                    code: ConfigErrorCode::UnknownInterruptionClass,
-                    field_path: "privacy.quiet_hours.pass_through_class".into(),
-                    expected: format!(
-                        "canonical InterruptionClass enum name: one of {}",
-                        VALID_INTERRUPTION_CLASSES.join(", ")
-                    ),
-                    got: format!("{ptc:?}"),
-                    hint,
-                });
-            }
+            && !VALID_INTERRUPTION_CLASSES.contains(&ptc.as_str())
+        {
+            // Produce a helpful hint if the user used a doctrine name.
+            let hint = find_doctrine_hint(ptc);
+            errors.push(ConfigError {
+                code: ConfigErrorCode::UnknownInterruptionClass,
+                field_path: "privacy.quiet_hours.pass_through_class".into(),
+                expected: format!(
+                    "canonical InterruptionClass enum name: one of {}",
+                    VALID_INTERRUPTION_CLASSES.join(", ")
+                ),
+                got: format!("{ptc:?}"),
+                hint,
+            });
+        }
 
         // Validate quiet_mode_display values.
         const VALID_QUIET_MODE_DISPLAY: &[&str] = &["dim", "clock_only", "off"];
         if let Some(qmd) = &qh.quiet_mode_display
-            && !VALID_QUIET_MODE_DISPLAY.contains(&qmd.as_str()) {
-                errors.push(ConfigError {
-                    code: ConfigErrorCode::Other("CONFIG_UNKNOWN_QUIET_MODE_DISPLAY".into()),
-                    field_path: "privacy.quiet_hours.quiet_mode_display".into(),
-                    expected: format!("one of: {}", VALID_QUIET_MODE_DISPLAY.join(", ")),
-                    got: format!("{qmd:?}"),
-                    hint: format!(
-                        "unknown quiet_mode_display {:?}; valid values: {}",
-                        qmd,
-                        VALID_QUIET_MODE_DISPLAY.join(", ")
-                    ),
-                });
-            }
+            && !VALID_QUIET_MODE_DISPLAY.contains(&qmd.as_str())
+        {
+            errors.push(ConfigError {
+                code: ConfigErrorCode::Other("CONFIG_UNKNOWN_QUIET_MODE_DISPLAY".into()),
+                field_path: "privacy.quiet_hours.quiet_mode_display".into(),
+                expected: format!("one of: {}", VALID_QUIET_MODE_DISPLAY.join(", ")),
+                got: format!("{qmd:?}"),
+                hint: format!(
+                    "unknown quiet_mode_display {:?}; valid values: {}",
+                    qmd,
+                    VALID_QUIET_MODE_DISPLAY.join(", ")
+                ),
+            });
+        }
     }
 }
 
@@ -281,7 +291,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_privacy(&privacy, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
             "top_secret classification should produce CONFIG_UNKNOWN_CLASSIFICATION"
         );
     }
@@ -299,7 +311,11 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e.code, ConfigErrorCode::UnknownClassification))
                 .collect();
-            assert!(cls_errors.is_empty(), "classification {:?} should be valid", cls);
+            assert!(
+                cls_errors.is_empty(),
+                "classification {:?} should be valid",
+                cls
+            );
         }
     }
 
@@ -312,7 +328,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_privacy(&privacy, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownViewerClass)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::UnknownViewerClass)),
             "admin viewer class should produce CONFIG_UNKNOWN_VIEWER_CLASS"
         );
     }
@@ -330,7 +348,11 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e.code, ConfigErrorCode::UnknownViewerClass))
                 .collect();
-            assert!(vc_errors.is_empty(), "viewer class {:?} should be valid", vc);
+            assert!(
+                vc_errors.is_empty(),
+                "viewer class {:?} should be valid",
+                vc
+            );
         }
     }
 
@@ -354,13 +376,17 @@ mod tests {
             .iter()
             .filter(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass))
             .collect();
-        assert!(!ptc_errors.is_empty(), "doctrine name 'urgent' should produce CONFIG_UNKNOWN_INTERRUPTION_CLASS");
+        assert!(
+            !ptc_errors.is_empty(),
+            "doctrine name 'urgent' should produce CONFIG_UNKNOWN_INTERRUPTION_CLASS"
+        );
         // Per spec line 239 and RFC 0010 §3.1: "urgent" maps to canonical "HIGH".
         // The hint must suggest "HIGH" specifically.
         let hint = &ptc_errors[0].hint;
         assert!(
             hint.contains("HIGH"),
-            "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}", hint
+            "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}",
+            hint
         );
     }
 
@@ -380,7 +406,11 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e.code, ConfigErrorCode::UnknownInterruptionClass))
                 .collect();
-            assert!(ptc_errors.is_empty(), "pass_through_class {:?} should be valid", ptc);
+            assert!(
+                ptc_errors.is_empty(),
+                "pass_through_class {:?} should be valid",
+                ptc
+            );
         }
     }
 
@@ -390,30 +420,72 @@ mod tests {
     fn test_quiet_hours_high_pass_through_class() {
         // Spec scenario: pass_through_class = "HIGH" → CRITICAL and HIGH pass; NORMAL queued;
         // LOW discarded; SILENT unaffected.
-        assert_eq!(quiet_hours_action("CRITICAL", "HIGH"), QuietHoursAction::PassThrough);
-        assert_eq!(quiet_hours_action("HIGH", "HIGH"), QuietHoursAction::PassThrough);
-        assert_eq!(quiet_hours_action("NORMAL", "HIGH"), QuietHoursAction::Queue);
+        assert_eq!(
+            quiet_hours_action("CRITICAL", "HIGH"),
+            QuietHoursAction::PassThrough
+        );
+        assert_eq!(
+            quiet_hours_action("HIGH", "HIGH"),
+            QuietHoursAction::PassThrough
+        );
+        assert_eq!(
+            quiet_hours_action("NORMAL", "HIGH"),
+            QuietHoursAction::Queue
+        );
         assert_eq!(quiet_hours_action("LOW", "HIGH"), QuietHoursAction::Discard);
-        assert_eq!(quiet_hours_action("SILENT", "HIGH"), QuietHoursAction::Unaffected);
+        assert_eq!(
+            quiet_hours_action("SILENT", "HIGH"),
+            QuietHoursAction::Unaffected
+        );
     }
 
     #[test]
     fn test_quiet_hours_critical_pass_through_class() {
         // Only CRITICAL passes; SILENT unaffected.
-        assert_eq!(quiet_hours_action("CRITICAL", "CRITICAL"), QuietHoursAction::PassThrough);
-        assert_eq!(quiet_hours_action("HIGH", "CRITICAL"), QuietHoursAction::Queue);
-        assert_eq!(quiet_hours_action("NORMAL", "CRITICAL"), QuietHoursAction::Queue);
-        assert_eq!(quiet_hours_action("LOW", "CRITICAL"), QuietHoursAction::Discard);
-        assert_eq!(quiet_hours_action("SILENT", "CRITICAL"), QuietHoursAction::Unaffected);
+        assert_eq!(
+            quiet_hours_action("CRITICAL", "CRITICAL"),
+            QuietHoursAction::PassThrough
+        );
+        assert_eq!(
+            quiet_hours_action("HIGH", "CRITICAL"),
+            QuietHoursAction::Queue
+        );
+        assert_eq!(
+            quiet_hours_action("NORMAL", "CRITICAL"),
+            QuietHoursAction::Queue
+        );
+        assert_eq!(
+            quiet_hours_action("LOW", "CRITICAL"),
+            QuietHoursAction::Discard
+        );
+        assert_eq!(
+            quiet_hours_action("SILENT", "CRITICAL"),
+            QuietHoursAction::Unaffected
+        );
     }
 
     #[test]
     fn test_quiet_hours_normal_pass_through_class() {
-        assert_eq!(quiet_hours_action("CRITICAL", "NORMAL"), QuietHoursAction::PassThrough);
-        assert_eq!(quiet_hours_action("HIGH", "NORMAL"), QuietHoursAction::PassThrough);
-        assert_eq!(quiet_hours_action("NORMAL", "NORMAL"), QuietHoursAction::PassThrough);
-        assert_eq!(quiet_hours_action("LOW", "NORMAL"), QuietHoursAction::Discard);
-        assert_eq!(quiet_hours_action("SILENT", "NORMAL"), QuietHoursAction::Unaffected);
+        assert_eq!(
+            quiet_hours_action("CRITICAL", "NORMAL"),
+            QuietHoursAction::PassThrough
+        );
+        assert_eq!(
+            quiet_hours_action("HIGH", "NORMAL"),
+            QuietHoursAction::PassThrough
+        );
+        assert_eq!(
+            quiet_hours_action("NORMAL", "NORMAL"),
+            QuietHoursAction::PassThrough
+        );
+        assert_eq!(
+            quiet_hours_action("LOW", "NORMAL"),
+            QuietHoursAction::Discard
+        );
+        assert_eq!(
+            quiet_hours_action("SILENT", "NORMAL"),
+            QuietHoursAction::Unaffected
+        );
     }
 
     #[test]
@@ -423,6 +495,9 @@ mod tests {
         let privacy = RawPrivacy::default();
         let mut errors = Vec::new();
         validate_privacy(&privacy, &mut errors);
-        assert!(errors.is_empty(), "absent privacy fields should not produce errors");
+        assert!(
+            errors.is_empty(),
+            "absent privacy fields should not produce errors"
+        );
     }
 }

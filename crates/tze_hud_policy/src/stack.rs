@@ -23,10 +23,9 @@
 
 use crate::attention::{AttentionDecision, evaluate_attention as eval_attention_pure};
 use crate::types::{
-    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome,
-    AttentionContext, BlockReason, ContentContext, MutationKind, OverrideState,
-    PolicyContext, PrivacyContext, QueueReason, RedactionReason, ResourceContext,
-    SecurityContext, VisibilityClassification,
+    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, AttentionContext,
+    BlockReason, ContentContext, MutationKind, OverrideState, PolicyContext, PrivacyContext,
+    QueueReason, RedactionReason, ResourceContext, SecurityContext, VisibilityClassification,
 };
 use tze_hud_scene::{SceneId, types::ContentionPolicy};
 
@@ -111,10 +110,8 @@ impl ArbitrationStack {
         }
 
         // Level 2: Privacy decoration (Transform — never suppresses zone publications)
-        let redacted = self.evaluate_level2_privacy_redaction(
-            &ctx.privacy_context,
-            content_classification,
-        );
+        let redacted =
+            self.evaluate_level2_privacy_redaction(&ctx.privacy_context, content_classification);
 
         // Level 4: Attention gate
         let attention_outcome =
@@ -123,7 +120,11 @@ impl ArbitrationStack {
         // Compose Level 2 (Transform) with Level 4 (Block).
         // If both would apply: queued-with-redaction (spec §7.3).
         match attention_outcome {
-            Some(ArbitrationOutcome::Queue { queue_reason, earliest_present_us, .. }) => {
+            Some(ArbitrationOutcome::Queue {
+                queue_reason,
+                earliest_present_us,
+                ..
+            }) => {
                 // Level 4 blocks; if Level 2 would also redact, compose them.
                 return ArbitrationOutcome::Queue {
                     queue_reason,
@@ -149,7 +150,8 @@ impl ArbitrationStack {
 
         // All levels passed.
         if redacted {
-            let redaction_reason = self.compute_redaction_reason(&ctx.privacy_context, content_classification);
+            let redaction_reason =
+                self.compute_redaction_reason(&ctx.privacy_context, content_classification);
             ArbitrationOutcome::CommitRedacted { redaction_reason }
         } else {
             ArbitrationOutcome::Commit
@@ -203,7 +205,9 @@ impl ArbitrationStack {
         _mutation_ref: SceneId,
     ) -> Option<ArbitrationOutcome> {
         if state.freeze_active {
-            Some(ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze })
+            Some(ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze,
+            })
         } else {
             None
         }
@@ -323,7 +327,9 @@ impl ArbitrationStack {
                 // LOW during quiet hours — silently dropped, no error to agent.
                 // ArbitrationOutcome has no Discard variant; Shed is the correct mapping
                 // (no structured error emitted, zone-state effects do not apply).
-                Some(ArbitrationOutcome::Shed { degradation_level: 0 })
+                Some(ArbitrationOutcome::Shed {
+                    degradation_level: 0,
+                })
             }
             AttentionDecision::QueueQuietHours { window_end_us } => {
                 Some(ArbitrationOutcome::Queue {
@@ -332,13 +338,18 @@ impl ArbitrationStack {
                     redacted: false, // overwritten by Level 2 compose logic in caller
                 })
             }
-            AttentionDecision::Coalesce { per_agent, per_zone, budget_refill_us } => {
-                Some(ArbitrationOutcome::Queue {
-                    queue_reason: QueueReason::AttentionBudgetExhausted { per_agent, per_zone },
-                    earliest_present_us: budget_refill_us,
-                    redacted: false,
-                })
-            }
+            AttentionDecision::Coalesce {
+                per_agent,
+                per_zone,
+                budget_refill_us,
+            } => Some(ArbitrationOutcome::Queue {
+                queue_reason: QueueReason::AttentionBudgetExhausted {
+                    per_agent,
+                    per_zone,
+                },
+                earliest_present_us: budget_refill_us,
+                redacted: false,
+            }),
         }
     }
 
@@ -435,7 +446,9 @@ impl ArbitrationStack {
                 None
             }
             // LatestWins and MergeByKey always accept (no eviction rejection possible).
-            Some(ContentionPolicy::LatestWins) | Some(ContentionPolicy::MergeByKey { .. }) | None => None,
+            Some(ContentionPolicy::LatestWins)
+            | Some(ContentionPolicy::MergeByKey { .. })
+            | None => None,
         }
     }
 
@@ -447,13 +460,41 @@ impl ArbitrationStack {
     pub fn assert_stack_invariants(&self) {
         let levels = ArbitrationLevel::ALL;
         assert_eq!(levels.len(), 7, "Stack must contain exactly 7 levels");
-        assert_eq!(levels[0], ArbitrationLevel::HumanOverride, "Level 0 must be HumanOverride");
-        assert_eq!(levels[1], ArbitrationLevel::Safety, "Level 1 must be Safety");
-        assert_eq!(levels[2], ArbitrationLevel::Privacy, "Level 2 must be Privacy");
-        assert_eq!(levels[3], ArbitrationLevel::Security, "Level 3 must be Security");
-        assert_eq!(levels[4], ArbitrationLevel::Attention, "Level 4 must be Attention");
-        assert_eq!(levels[5], ArbitrationLevel::Resource, "Level 5 must be Resource");
-        assert_eq!(levels[6], ArbitrationLevel::Content, "Level 6 must be Content");
+        assert_eq!(
+            levels[0],
+            ArbitrationLevel::HumanOverride,
+            "Level 0 must be HumanOverride"
+        );
+        assert_eq!(
+            levels[1],
+            ArbitrationLevel::Safety,
+            "Level 1 must be Safety"
+        );
+        assert_eq!(
+            levels[2],
+            ArbitrationLevel::Privacy,
+            "Level 2 must be Privacy"
+        );
+        assert_eq!(
+            levels[3],
+            ArbitrationLevel::Security,
+            "Level 3 must be Security"
+        );
+        assert_eq!(
+            levels[4],
+            ArbitrationLevel::Attention,
+            "Level 4 must be Attention"
+        );
+        assert_eq!(
+            levels[5],
+            ArbitrationLevel::Resource,
+            "Level 5 must be Resource"
+        );
+        assert_eq!(
+            levels[6],
+            ArbitrationLevel::Content,
+            "Level 6 must be Content"
+        );
         for (i, level) in levels.iter().enumerate() {
             assert_eq!(level.index(), i as u8, "Level index must match position");
         }

@@ -154,11 +154,7 @@ impl FontCache {
     /// LRU eviction policy runs to reclaim space if needed.
     ///
     /// Returns the handle for the font.
-    pub fn insert_agent(
-        &mut self,
-        resource_id: ResourceId,
-        byte_cost: usize,
-    ) -> CachedFontHandle {
+    pub fn insert_agent(&mut self, resource_id: ResourceId, byte_cost: usize) -> CachedFontHandle {
         let key = FontCacheKey::Resource(resource_id);
 
         if self.entries.contains_key(&key) {
@@ -363,7 +359,10 @@ mod tests {
         }
 
         // Bundled font must still be present.
-        assert!(cache.contains(&bundled_key), "bundled font must never be evicted");
+        assert!(
+            cache.contains(&bundled_key),
+            "bundled font must never be evicted"
+        );
     }
 
     // Acceptance: LRU eviction evicts agent fonts, not system/bundled [spec line 276-277].
@@ -408,11 +407,16 @@ mod tests {
 
         // Request a custom font that is NOT in the cache.
         let missing = rid(0xFF);
-        let handle = cache.resolve_agent_font_or_fallback(missing)
+        let handle = cache
+            .resolve_agent_font_or_fallback(missing)
             .expect("fallback must be present when SystemSansSerif is pre-inserted");
 
         // Must silently fall back to SystemSansSerif (no error).
-        assert_eq!(handle.key(), &fallback_key, "must fall back to SystemSansSerif");
+        assert_eq!(
+            handle.key(),
+            &fallback_key,
+            "must fall back to SystemSansSerif"
+        );
     }
 
     // Acceptance: font cache exceeds limit → LRU agent eviction first.
@@ -429,12 +433,18 @@ mod tests {
         // Insert a 3rd font: should evict rid(0x02) (least recently used).
         cache.insert_agent(rid(0x03), 1 * 1024 * 1024);
 
-        assert!(!cache.contains(&FontCacheKey::Resource(rid(0x02))),
-            "LRU font should be evicted");
-        assert!(cache.contains(&FontCacheKey::Resource(rid(0x01))),
-            "MRU font should remain");
-        assert!(cache.contains(&FontCacheKey::Resource(rid(0x03))),
-            "new font should be present");
+        assert!(
+            !cache.contains(&FontCacheKey::Resource(rid(0x02))),
+            "LRU font should be evicted"
+        );
+        assert!(
+            cache.contains(&FontCacheKey::Resource(rid(0x01))),
+            "MRU font should remain"
+        );
+        assert!(
+            cache.contains(&FontCacheKey::Resource(rid(0x03))),
+            "new font should be present"
+        );
     }
 
     // Acceptance: inserting same agent font twice promotes it in LRU.
@@ -452,8 +462,14 @@ mod tests {
         // Insert C (1 MiB): B should be evicted (LRU), not A.
         cache.insert_agent(rid(0xC), 1024 * 1024);
 
-        assert!(cache.contains(&FontCacheKey::Resource(rid(0xA))), "A promoted — must stay");
-        assert!(!cache.contains(&FontCacheKey::Resource(rid(0xB))), "B LRU — must be evicted");
+        assert!(
+            cache.contains(&FontCacheKey::Resource(rid(0xA))),
+            "A promoted — must stay"
+        );
+        assert!(
+            !cache.contains(&FontCacheKey::Resource(rid(0xB))),
+            "B LRU — must be evicted"
+        );
         assert!(cache.contains(&FontCacheKey::Resource(rid(0xC))));
     }
 }

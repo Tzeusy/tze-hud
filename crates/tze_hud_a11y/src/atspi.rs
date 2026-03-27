@@ -18,7 +18,7 @@
 
 #![cfg(target_os = "linux")]
 
-use tze_hud_scene::{SceneId, SceneGraph};
+use tze_hud_scene::{SceneGraph, SceneId};
 
 use crate::{AccessibilityTree, LivePoliteness, WarnOnce};
 
@@ -37,7 +37,9 @@ pub struct AtspiAccessibility {
 impl AtspiAccessibility {
     /// Create a new AT-SPI2 bridge stub.
     pub fn new() -> Self {
-        Self { warner: WarnOnce::new() }
+        Self {
+            warner: WarnOnce::new(),
+        }
     }
 }
 

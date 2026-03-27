@@ -33,8 +33,8 @@ use tokio::sync::Mutex;
 
 use crate::dedup::{DedupIndex, ResourceRecord};
 use crate::types::{
-    ResourceError, ResourceId, ResourceStoreConfig, ResourceStored, ResourceType,
-    CHUNK_SIZE_LIMIT, INLINE_SIZE_LIMIT, MAX_CONCURRENT_UPLOADS_PER_AGENT,
+    CHUNK_SIZE_LIMIT, INLINE_SIZE_LIMIT, MAX_CONCURRENT_UPLOADS_PER_AGENT, ResourceError,
+    ResourceId, ResourceStoreConfig, ResourceStored, ResourceType,
 };
 use crate::validation::{
     AgentBudget, check_budget, check_capability, check_hash, check_raw_size, check_resource_type,
@@ -312,12 +312,9 @@ impl ResourceStore {
             .get_mut(agent_namespace)
             .ok_or_else(|| ResourceError::InvalidChunk("no uploads in flight for agent".into()))?;
 
-        let inflight = uploads
-            .inflight
-            .get_mut(&upload_id)
-            .ok_or_else(|| ResourceError::InvalidChunk(format!(
-                "unknown upload_id {:?}", upload_id
-            )))?;
+        let inflight = uploads.inflight.get_mut(&upload_id).ok_or_else(|| {
+            ResourceError::InvalidChunk(format!("unknown upload_id {:?}", upload_id))
+        })?;
 
         if chunk_index != inflight.next_chunk_index {
             return Err(ResourceError::InvalidChunk(format!(
@@ -367,21 +364,22 @@ impl ResourceStore {
         // Extract the inflight state.
         let (resource_type, expected_hash, assembled, width, height) = {
             let mut guard = self.agent_uploads.lock().await;
-            let uploads = guard
-                .get_mut(agent_namespace)
-                .ok_or_else(|| ResourceError::InvalidChunk(
-                    "no uploads in flight for agent".into(),
-                ))?;
+            let uploads = guard.get_mut(agent_namespace).ok_or_else(|| {
+                ResourceError::InvalidChunk("no uploads in flight for agent".into())
+            })?;
 
-            let inflight = uploads
-                .inflight
-                .remove(&upload_id)
-                .ok_or_else(|| ResourceError::InvalidChunk(format!(
-                    "unknown upload_id {:?}", upload_id
-                )))?;
+            let inflight = uploads.inflight.remove(&upload_id).ok_or_else(|| {
+                ResourceError::InvalidChunk(format!("unknown upload_id {:?}", upload_id))
+            })?;
 
             let assembled = inflight.assemble();
-            (inflight.resource_type, inflight.expected_hash, assembled, inflight.width, inflight.height)
+            (
+                inflight.resource_type,
+                inflight.expected_hash,
+                assembled,
+                inflight.width,
+                inflight.height,
+            )
         };
 
         self.complete_upload(
@@ -419,10 +417,7 @@ impl ResourceStore {
     /// Current number of in-flight uploads for an agent.
     pub async fn in_flight_count(&self, agent_namespace: &str) -> usize {
         let guard = self.agent_uploads.lock().await;
-        guard
-            .get(agent_namespace)
-            .map(|u| u.count())
-            .unwrap_or(0)
+        guard.get(agent_namespace).map(|u| u.count()).unwrap_or(0)
     }
 
     // ─── Internal: complete upload and store ──────────────────────────────────
@@ -555,8 +550,8 @@ mod tests {
         UploadId::from_bytes([n; 16])
     }
 
-    use crate::validation::AgentBudget;
     use crate::types::ResourceStoreConfig;
+    use crate::validation::AgentBudget;
 
     // ─── Inline fast path ─────────────────────────────────────────────────────
 

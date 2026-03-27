@@ -58,24 +58,23 @@
 //!
 //! An SSIM score of 0.996 passes layout; 0.993 fails.
 
-pub mod error;
-pub mod ssim;
-pub mod phash;
-pub mod golden;
 pub mod diff;
+pub mod error;
+pub mod golden;
 pub mod layer2;
 pub mod layer4;
+pub mod phash;
+pub mod ssim;
 
+pub use diff::{RegionFailureDetail, SsimFailureRecord, encode_heatmap_png, generate_heatmap};
 pub use error::ValidationError;
+pub use golden::{BACKEND_HARDWARE, BACKEND_SOFTWARE, GoldenImage, GoldenStore, find_golden_dir};
 pub use layer2::{
-    Layer2Validator, TestType, ComparisonOutcome,
-    SSIM_THRESHOLD_LAYOUT, SSIM_THRESHOLD_MEDIA,
+    ComparisonOutcome, Layer2Validator, SSIM_THRESHOLD_LAYOUT, SSIM_THRESHOLD_MEDIA, TestType,
 };
-pub use ssim::{compute_ssim, SsimResult, RegionSsim};
-pub use phash::{compute_phash, pre_screen, PHash, PreScreenResult};
-pub use golden::{GoldenStore, GoldenImage, find_golden_dir, BACKEND_SOFTWARE, BACKEND_HARDWARE};
-pub use diff::{generate_heatmap, encode_heatmap_png, SsimFailureRecord, RegionFailureDetail};
 pub use layer4::{
-    ArtifactBuilder, ArtifactManifest, ArtifactOptions, SceneArtifactInput, SceneDescription,
-    SceneMetrics, SceneStatus, BenchmarkArtifactInput, generate_explanation_md, llm_summary_json,
+    ArtifactBuilder, ArtifactManifest, ArtifactOptions, BenchmarkArtifactInput, SceneArtifactInput,
+    SceneDescription, SceneMetrics, SceneStatus, generate_explanation_md, llm_summary_json,
 };
+pub use phash::{PHash, PreScreenResult, compute_phash, pre_screen};
+pub use ssim::{RegionSsim, SsimResult, compute_ssim};

@@ -4,56 +4,47 @@
 //! and related requirements.  The trait contract is defined here; the concrete
 //! implementation lives in `state_machine.rs`.
 
-pub mod types;
-pub mod state_machine;
-pub mod ttl;
-pub mod suspension;
-pub mod priority;
-pub mod capability;
-pub mod degradation;
-pub mod orphan;
-pub mod cleanup;
 pub mod budget;
+pub mod capability;
+pub mod cleanup;
+pub mod degradation;
 pub mod enforcement;
+pub mod orphan;
+pub mod priority;
+pub mod state_machine;
+pub mod suspension;
+pub mod ttl;
+pub mod types;
 
-pub use types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
 pub use state_machine::LeaseImpl;
+pub use types::{
+    DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity,
+    RevokeReason as AuditRevokeReason,
+};
 // LeaseState is defined in crate::types and re-exported here so that the
 // lease module and all its sub-modules share one canonical definition.
 pub use crate::types::LeaseState;
-pub use ttl::{TtlState, TtlCheck, AutoRenewalArm, DisarmReason, AUTO_RENEW_THRESHOLD};
-pub use suspension::{
-    SuspensionManager, SuspendedEntry, SafeModeResult, SafeModeResumeResult,
-    LeaseResumeData, SuspensionTimeoutEntry,
-    DEFAULT_MAX_SUSPENSION_MS, SAFE_MODE_SUSPEND_DEADLINE_MS, SAFE_MODE_RESUME_DEADLINE_MS,
-    assert_state_preserved, is_suspendable, is_resumable,
-};
-pub use orphan::{
-    DEFAULT_GRACE_PERIOD_MS as ORPHAN_GRACE_PERIOD_MS,
-    GRACE_PRECISION_MS,
-    GracePeriodTimer,
-    OrphanedLeaseSnapshot,
-    TileVisualHint,
-    ZonePublishResult,
-    check_zone_publish_allowed,
-};
-pub use capability::{
-    CapabilityRevocationError,
-    revoke_capability_from_lease,
-};
-pub use cleanup::{
-    POST_REVOCATION_FREE_DELAY_MS,
-    RevocationKind,
-    PostRevocationCleanupSpec,
-    ZonePublicationSweep,
-    CleanupResult,
-};
 pub use budget::{
-    BudgetDelta, BudgetDimension, BudgetHardViolation, BudgetUsage,
-    anti_collusion_texture_bytes, check_budget_hard, check_budget_soft,
-    is_budget_soft_warning,
+    BudgetDelta, BudgetDimension, BudgetHardViolation, BudgetUsage, anti_collusion_texture_bytes,
+    check_budget_hard, check_budget_soft, is_budget_soft_warning,
+};
+pub use capability::{CapabilityRevocationError, revoke_capability_from_lease};
+pub use cleanup::{
+    CleanupResult, POST_REVOCATION_FREE_DELAY_MS, PostRevocationCleanupSpec, RevocationKind,
+    ZonePublicationSweep,
 };
 pub use enforcement::{CriticalBypassTrigger, EnforcementAction, EnforcementLadder};
+pub use orphan::{
+    DEFAULT_GRACE_PERIOD_MS as ORPHAN_GRACE_PERIOD_MS, GRACE_PRECISION_MS, GracePeriodTimer,
+    OrphanedLeaseSnapshot, TileVisualHint, ZonePublishResult, check_zone_publish_allowed,
+};
+pub use suspension::{
+    DEFAULT_MAX_SUSPENSION_MS, LeaseResumeData, SAFE_MODE_RESUME_DEADLINE_MS,
+    SAFE_MODE_SUSPEND_DEADLINE_MS, SafeModeResult, SafeModeResumeResult, SuspendedEntry,
+    SuspensionManager, SuspensionTimeoutEntry, assert_state_preserved, is_resumable,
+    is_suspendable,
+};
+pub use ttl::{AUTO_RENEW_THRESHOLD, AutoRenewalArm, DisarmReason, TtlCheck, TtlState};
 
 use crate::clock::Clock;
 
@@ -280,7 +271,9 @@ pub mod tests {
     pub fn test_denied_is_terminal<S: LeaseStateMachine<TestClock>>() {
         let clock = TestClock::new(0);
         let mut lease = S::new_requested(60_000, RenewalPolicy::Manual, clock);
-        lease.deny(DenyReason::CapabilitiesExceeded).expect("deny from REQUESTED should succeed");
+        lease
+            .deny(DenyReason::CapabilitiesExceeded)
+            .expect("deny from REQUESTED should succeed");
         assert_eq!(lease.state(), LeaseState::Denied);
         assert!(lease.is_terminal());
     }
@@ -416,7 +409,10 @@ pub mod tests {
         // Either: revoke is called by infrastructure, or `update_budget_usage` triggers it.
         // Here we model it as the caller detecting the timeout and calling revoke.
         let result = lease.revoke(RevokeReason::SuspensionTimeout);
-        assert!(result.is_ok(), "revoke due to suspension timeout should succeed");
+        assert!(
+            result.is_ok(),
+            "revoke due to suspension timeout should succeed"
+        );
         assert_eq!(lease.state(), LeaseState::Revoked);
     }
 
@@ -426,7 +422,9 @@ pub mod tests {
     pub fn test_budget_normal_tier_below_80_percent<S: LeaseStateMachine<TestClock>>() {
         let clock = TestClock::new(0);
         let mut lease: S = make_active(clock);
-        lease.update_budget_usage(0.79).expect("usage under 80% accepted");
+        lease
+            .update_budget_usage(0.79)
+            .expect("usage under 80% accepted");
         assert_eq!(lease.budget_tier(), BudgetTier::Normal);
     }
 
@@ -434,7 +432,9 @@ pub mod tests {
     pub fn test_budget_warning_at_80_percent<S: LeaseStateMachine<TestClock>>() {
         let clock = TestClock::new(0);
         let mut lease: S = make_active(clock);
-        lease.update_budget_usage(0.80).expect("usage at 80% accepted (soft limit)");
+        lease
+            .update_budget_usage(0.80)
+            .expect("usage at 80% accepted (soft limit)");
         assert_eq!(lease.budget_tier(), BudgetTier::Warning);
     }
 
@@ -442,7 +442,9 @@ pub mod tests {
     pub fn test_budget_throttle_after_5s_warning<S: LeaseStateMachine<TestClock>>() {
         let clock = TestClock::new(0);
         let mut lease: S = make_active(clock.clone());
-        lease.update_budget_usage(0.85).expect("85% accepted initially");
+        lease
+            .update_budget_usage(0.85)
+            .expect("85% accepted initially");
         assert_eq!(lease.budget_tier(), BudgetTier::Warning);
         clock.advance(5_001); // warning unresolved for >5s
         // Re-check: implementation should transition to Throttle when polled.
@@ -456,10 +458,16 @@ pub mod tests {
         let mut lease: S = make_active(clock);
         let result = lease.update_budget_usage(1.0);
         // Hard limit: must return BudgetHardLimitExceeded and set Revocation tier.
-        assert_eq!(result, Err(TransitionError::BudgetHardLimitExceeded),
-            "100% usage should return BudgetHardLimitExceeded");
-        assert_eq!(lease.budget_tier(), BudgetTier::Revocation,
-            "tier must be Revocation after hard limit");
+        assert_eq!(
+            result,
+            Err(TransitionError::BudgetHardLimitExceeded),
+            "100% usage should return BudgetHardLimitExceeded"
+        );
+        assert_eq!(
+            lease.budget_tier(),
+            BudgetTier::Revocation,
+            "tier must be Revocation after hard limit"
+        );
     }
 
     // ── 5. ONE_SHOT specifics ────────────────────────────────────────────────
@@ -488,7 +496,9 @@ pub mod tests {
         let mut lease: S = S::new_requested(1_000, RenewalPolicy::OneShot, clock.clone());
         lease.activate().unwrap();
         clock.advance(1_001);
-        lease.expire().expect("should be able to expire ONE_SHOT after TTL");
+        lease
+            .expire()
+            .expect("should be able to expire ONE_SHOT after TTL");
         assert_eq!(lease.state(), LeaseState::Expired);
     }
 
@@ -500,7 +510,9 @@ pub mod tests {
         let mut lease: S = make_active(clock.clone());
         lease.orphan().unwrap();
         clock.advance(29_950); // just before the 30_000ms grace period
-        lease.reconnect().expect("reconnect at 29_950ms should succeed");
+        lease
+            .reconnect()
+            .expect("reconnect at 29_950ms should succeed");
         assert_eq!(lease.state(), LeaseState::Active);
     }
 
@@ -629,7 +641,7 @@ pub mod tests {
         assert!(lease.can_transition_to(Active));
         assert!(lease.can_transition_to(Denied));
         assert!(!lease.can_transition_to(Suspended)); // REQUESTED cannot go to SUSPENDED
-        assert!(!lease.can_transition_to(Revoked));   // REQUESTED cannot go to REVOKED
+        assert!(!lease.can_transition_to(Revoked)); // REQUESTED cannot go to REVOKED
     }
 
     /// WHEN lease is terminal THEN can_transition_to() always returns false.
@@ -647,7 +659,11 @@ pub mod tests {
             LeaseState::Released,
             LeaseState::Denied,
         ] {
-            assert!(!lease.can_transition_to(target), "terminal lease should not transition to {:?}", target);
+            assert!(
+                !lease.can_transition_to(target),
+                "terminal lease should not transition to {:?}",
+                target
+            );
         }
     }
 
@@ -667,7 +683,10 @@ pub mod tests {
         lease.suspend().unwrap();
         clock.advance(5_000);
         let dur = lease.suspension_duration_ms();
-        assert!(dur >= 4_900 && dur <= 5_100, "expected ≈5000ms, got {dur}ms");
+        assert!(
+            dur >= 4_900 && dur <= 5_100,
+            "expected ≈5000ms, got {dur}ms"
+        );
     }
 
     /// WHEN indefinite lease (ttl_ms=0) THEN ttl_remaining_ms returns None.
@@ -684,7 +703,9 @@ pub mod tests {
     fn impl_active_to_revoked_viewer_dismissed() {
         let clock = TestClock::new(0);
         let mut lease: Impl = make_active(clock);
-        lease.revoke(RevokeReason::ViewerDismissed).expect("revoke from ACTIVE");
+        lease
+            .revoke(RevokeReason::ViewerDismissed)
+            .expect("revoke from ACTIVE");
         assert_eq!(lease.state(), LeaseState::Revoked);
         assert!(lease.is_terminal());
     }
@@ -695,7 +716,9 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut lease: Impl = make_active(clock);
         lease.suspend().unwrap();
-        lease.revoke(RevokeReason::SuspensionTimeout).expect("revoke suspended");
+        lease
+            .revoke(RevokeReason::SuspensionTimeout)
+            .expect("revoke suspended");
         assert_eq!(lease.state(), LeaseState::Revoked);
     }
 
@@ -711,14 +734,23 @@ pub mod tests {
         let events = lease.drain_events();
         assert_eq!(events.len(), 1, "exactly one event expected");
         match &events[0].kind {
-            LeaseEventKind::Granted { identity, expires_at_wall_us } => {
+            LeaseEventKind::Granted {
+                identity,
+                expires_at_wall_us,
+            } => {
                 assert_eq!(identity.ttl_ms, 60_000);
-                assert!(expires_at_wall_us.is_some(), "finite TTL should produce expires_at");
+                assert!(
+                    expires_at_wall_us.is_some(),
+                    "finite TTL should produce expires_at"
+                );
             }
             other => panic!("expected Granted, got {other:?}"),
         }
         // Draining again must return empty — events are consumed.
-        assert!(lease.drain_events().is_empty(), "second drain must be empty");
+        assert!(
+            lease.drain_events().is_empty(),
+            "second drain must be empty"
+        );
     }
 
     /// WHEN activate() succeeds with ttl_ms=0 THEN Granted event has no expiry.
@@ -731,8 +763,13 @@ pub mod tests {
         let events = lease.drain_events();
         assert_eq!(events.len(), 1);
         match &events[0].kind {
-            LeaseEventKind::Granted { expires_at_wall_us, .. } => {
-                assert!(expires_at_wall_us.is_none(), "indefinite lease must not have expires_at");
+            LeaseEventKind::Granted {
+                expires_at_wall_us, ..
+            } => {
+                assert!(
+                    expires_at_wall_us.is_none(),
+                    "indefinite lease must not have expires_at"
+                );
             }
             other => panic!("expected Granted, got {other:?}"),
         }
@@ -768,10 +805,14 @@ pub mod tests {
         let events = lease.drain_events();
         assert_eq!(events.len(), 1);
         match &events[0].kind {
-            LeaseEventKind::Suspended { ttl_remaining_ms, .. } => {
+            LeaseEventKind::Suspended {
+                ttl_remaining_ms, ..
+            } => {
                 // ttl started at 60_000, 2_000ms elapsed → ~58_000 remaining
-                assert!(*ttl_remaining_ms > 57_000 && *ttl_remaining_ms <= 60_000,
-                    "ttl_remaining_ms={ttl_remaining_ms}");
+                assert!(
+                    *ttl_remaining_ms > 57_000 && *ttl_remaining_ms <= 60_000,
+                    "ttl_remaining_ms={ttl_remaining_ms}"
+                );
             }
             other => panic!("expected Suspended, got {other:?}"),
         }
@@ -791,7 +832,10 @@ pub mod tests {
         let events = lease.drain_events();
         assert_eq!(events.len(), 1);
         match &events[0].kind {
-            LeaseEventKind::Resumed { suspension_duration_us, .. } => {
+            LeaseEventKind::Resumed {
+                suspension_duration_us,
+                ..
+            } => {
                 // 5_000ms → 5_000_000us
                 assert!(
                     *suspension_duration_us >= 4_900_000 && *suspension_duration_us <= 5_100_000,
@@ -813,10 +857,14 @@ pub mod tests {
         let events = lease.drain_events();
         assert_eq!(events.len(), 1);
         match &events[0].kind {
-            LeaseEventKind::Orphaned { grace_expires_at_wall_us } => {
+            LeaseEventKind::Orphaned {
+                grace_expires_at_wall_us,
+            } => {
                 // now=10_000ms, grace=30_000ms → expires at 40_000ms → 40_000_000us
-                assert_eq!(*grace_expires_at_wall_us, 40_000_000,
-                    "grace_expires_at_wall_us should be (now + grace) * 1000");
+                assert_eq!(
+                    *grace_expires_at_wall_us, 40_000_000,
+                    "grace_expires_at_wall_us should be (now + grace) * 1000"
+                );
             }
             other => panic!("expected Orphaned, got {other:?}"),
         }
@@ -837,7 +885,8 @@ pub mod tests {
         assert_eq!(events.len(), 1);
         assert!(
             matches!(events[0].kind, LeaseEventKind::Reconnected),
-            "expected Reconnected, got {:?}", events[0].kind
+            "expected Reconnected, got {:?}",
+            events[0].kind
         );
     }
 
@@ -853,7 +902,8 @@ pub mod tests {
         assert_eq!(events.len(), 1);
         assert!(
             matches!(events[0].kind, LeaseEventKind::Expired),
-            "expected Expired, got {:?}", events[0].kind
+            "expected Expired, got {:?}",
+            events[0].kind
         );
     }
 
@@ -887,7 +937,8 @@ pub mod tests {
         assert_eq!(events.len(), 1);
         assert!(
             matches!(events[0].kind, LeaseEventKind::Released),
-            "expected Released, got {:?}", events[0].kind
+            "expected Released, got {:?}",
+            events[0].kind
         );
     }
 
@@ -913,8 +964,8 @@ pub mod tests {
     /// WHEN set_lease_id() is called before activate() THEN the Granted event carries the id.
     #[test]
     fn impl_audit_event_carries_assigned_lease_id() {
-        use crate::types::SceneId;
         use crate::lease::types::LeaseEventKind;
+        use crate::types::SceneId;
         let clock = TestClock::new(0);
         let mut lease = Impl::new_requested(60_000, RenewalPolicy::Manual, clock);
         let id = SceneId::new();
@@ -922,7 +973,10 @@ pub mod tests {
         lease.activate().unwrap();
         let events = lease.drain_events();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].lease_id, id, "event must carry the assigned lease id");
+        assert_eq!(
+            events[0].lease_id, id,
+            "event must carry the assigned lease id"
+        );
         match &events[0].kind {
             LeaseEventKind::Granted { identity, .. } => {
                 assert_eq!(identity.lease_id, id);

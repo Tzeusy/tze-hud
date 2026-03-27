@@ -152,7 +152,8 @@ impl TestClockMs {
 
     /// Advance the virtual clock by `delta_ms` milliseconds.
     pub fn advance(&self, delta_ms: u64) {
-        self.ms.fetch_add(delta_ms, std::sync::atomic::Ordering::Relaxed);
+        self.ms
+            .fetch_add(delta_ms, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -371,7 +372,14 @@ mod tests {
         }
     }
 
-    fn setup(clock: TestClockMs) -> (RefcountLayer, GcRunner<TestClockMs>, DedupIndex, GcCandidateTable) {
+    fn setup(
+        clock: TestClockMs,
+    ) -> (
+        RefcountLayer,
+        GcRunner<TestClockMs>,
+        DedupIndex,
+        GcCandidateTable,
+    ) {
         let dedup = DedupIndex::new();
         let candidates = GcCandidateTable::new();
         let refcount_layer = RefcountLayer::new_with_candidates(dedup.clone(), candidates.clone());
@@ -402,7 +410,10 @@ mod tests {
         clock.advance(30_000); // 30s — still within 60s grace
 
         let result = gc.run_cycle();
-        assert_eq!(result.evicted, 0, "resource must not be evicted within grace period");
+        assert_eq!(
+            result.evicted, 0,
+            "resource must not be evicted within grace period"
+        );
         assert!(dedup.contains(&id), "resource must still be in store");
     }
 
@@ -420,8 +431,14 @@ mod tests {
         clock.advance(61_000); // > 60s grace period
 
         let result = gc.run_cycle();
-        assert!(result.evicted >= 1, "resource must be evicted after grace period");
-        assert!(!dedup.contains(&id), "evicted resource must not be in store");
+        assert!(
+            result.evicted >= 1,
+            "resource must be evicted after grace period"
+        );
+        assert!(
+            !dedup.contains(&id),
+            "evicted resource must not be in store"
+        );
     }
 
     // Acceptance: GC defers work when budget exhausted [spec line 213-214].
@@ -440,9 +457,7 @@ mod tests {
         let mut gc = GcRunner::new(dedup.clone(), candidates.clone(), config, clock.clone());
 
         // Insert several resources.
-        let ids: Vec<ResourceId> = (0..5u8)
-            .map(|i| ResourceId::from_content(&[i]))
-            .collect();
+        let ids: Vec<ResourceId> = (0..5u8).map(|i| ResourceId::from_content(&[i])).collect();
 
         for &id in &ids {
             insert_resource(&dedup, id);
@@ -481,7 +496,10 @@ mod tests {
         clock.advance(61_000); // now past original grace, but refcount = 1
 
         let result = gc.run_cycle();
-        assert_eq!(result.evicted, 0, "resurrected resource must not be evicted");
+        assert_eq!(
+            result.evicted, 0,
+            "resurrected resource must not be evicted"
+        );
         assert!(dedup.contains(&id));
     }
 
@@ -508,7 +526,10 @@ mod tests {
 
         // Immediate second call: interval not yet elapsed (5 s >> test runtime).
         let result = gc.maybe_run();
-        assert!(result.is_none(), "second call within interval should not run");
+        assert!(
+            result.is_none(),
+            "second call within interval should not run"
+        );
 
         // Cannot advance real time without sleeping; the interval check is
         // confirmed sufficient by the second-call assertion above.  Verifying
@@ -520,9 +541,9 @@ mod tests {
     #[test]
     fn gc_config_clamping() {
         let config = GcConfig {
-            grace_period_ms: 0,     // min 1000
-            gc_interval_ms: 1,      // min 5000
-            cycle_budget_ms: 0,     // min 1
+            grace_period_ms: 0, // min 1000
+            gc_interval_ms: 1,  // min 5000
+            cycle_budget_ms: 0, // min 1
         }
         .validated();
 

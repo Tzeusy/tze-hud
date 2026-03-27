@@ -7,7 +7,9 @@ use tze_hud_scene::*;
 
 /// Encode a `SceneId` as a `SceneIdProto` (16 bytes, little-endian).
 pub fn scene_id_to_proto(id: SceneId) -> proto::SceneIdProto {
-    proto::SceneIdProto { bytes: id.to_bytes_le().to_vec() }
+    proto::SceneIdProto {
+        bytes: id.to_bytes_le().to_vec(),
+    }
 }
 
 /// Decode a `SceneIdProto` back to a `SceneId`.
@@ -19,7 +21,9 @@ pub fn proto_to_scene_id(p: &proto::SceneIdProto) -> Option<SceneId> {
 
 /// Encode a `ResourceId` as a `ResourceIdProto` (32 raw bytes, never hex).
 pub fn resource_id_to_proto(id: ResourceId) -> proto::ResourceIdProto {
-    proto::ResourceIdProto { bytes: id.as_bytes().to_vec() }
+    proto::ResourceIdProto {
+        bytes: id.as_bytes().to_vec(),
+    }
 }
 
 /// Decode a `ResourceIdProto` back to a `ResourceId`.
@@ -58,18 +62,38 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
 
     let data = match &n.data {
         Some(proto::node_proto::Data::SolidColor(sc)) => {
-            let color = sc.color.as_ref().map(proto_rgba_to_scene).unwrap_or(Rgba::WHITE);
-            let bounds = sc.bounds.as_ref().map(proto_rect_to_scene).unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            let color = sc
+                .color
+                .as_ref()
+                .map(proto_rgba_to_scene)
+                .unwrap_or(Rgba::WHITE);
+            let bounds = sc
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
             NodeData::SolidColor(SolidColorNode { color, bounds })
         }
         Some(proto::node_proto::Data::TextMarkdown(tm)) => {
-            let color = tm.color.as_ref().map(proto_rgba_to_scene).unwrap_or(Rgba::WHITE);
+            let color = tm
+                .color
+                .as_ref()
+                .map(proto_rgba_to_scene)
+                .unwrap_or(Rgba::WHITE);
             let bg = tm.background.as_ref().map(proto_rgba_to_scene);
-            let bounds = tm.bounds.as_ref().map(proto_rect_to_scene).unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            let bounds = tm
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
             NodeData::TextMarkdown(TextMarkdownNode {
                 content: tm.content.clone(),
                 bounds,
-                font_size_px: if tm.font_size_px > 0.0 { tm.font_size_px } else { 16.0 },
+                font_size_px: if tm.font_size_px > 0.0 {
+                    tm.font_size_px
+                } else {
+                    16.0
+                },
                 font_family: FontFamily::SystemSansSerif,
                 color,
                 background: bg,
@@ -78,7 +102,11 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
             })
         }
         Some(proto::node_proto::Data::HitRegion(hr)) => {
-            let bounds = hr.bounds.as_ref().map(proto_rect_to_scene).unwrap_or(Rect::new(0.0, 0.0, 100.0, 50.0));
+            let bounds = hr
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 50.0));
             NodeData::HitRegion(HitRegionNode {
                 bounds,
                 interaction_id: hr.interaction_id.clone(),
@@ -88,9 +116,16 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
             })
         }
         Some(proto::node_proto::Data::StaticImage(si)) => {
-            let bounds = si.bounds.as_ref().map(proto_rect_to_scene).unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
-            let fit_mode = match proto::ImageFitModeProto::try_from(si.fit_mode).unwrap_or(proto::ImageFitModeProto::ImageFitModeUnspecified) {
-                proto::ImageFitModeProto::ImageFitModeContain | proto::ImageFitModeProto::ImageFitModeUnspecified => ImageFitMode::Contain,
+            let bounds = si
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            let fit_mode = match proto::ImageFitModeProto::try_from(si.fit_mode)
+                .unwrap_or(proto::ImageFitModeProto::ImageFitModeUnspecified)
+            {
+                proto::ImageFitModeProto::ImageFitModeContain
+                | proto::ImageFitModeProto::ImageFitModeUnspecified => ImageFitMode::Contain,
                 proto::ImageFitModeProto::ImageFitModeCover => ImageFitMode::Cover,
                 proto::ImageFitModeProto::ImageFitModeFill => ImageFitMode::Fill,
                 proto::ImageFitModeProto::ImageFitModeScaleDown => ImageFitMode::ScaleDown,
@@ -167,7 +202,9 @@ pub fn scene_zone_content_to_proto(c: &ZoneContent) -> proto::ZoneContent {
             return proto::ZoneContent { payload: None };
         }
     };
-    proto::ZoneContent { payload: Some(payload) }
+    proto::ZoneContent {
+        payload: Some(payload),
+    }
 }
 
 /// Convert a scene ZoneRegistrySnapshot to a protobuf ZoneRegistrySnapshotProto.
@@ -239,15 +276,23 @@ pub fn zone_definition_to_proto(z: &ZoneDefinition) -> proto::ZoneDefinitionProt
 pub fn geometry_policy_to_proto(gp: &GeometryPolicy) -> proto::GeometryPolicyProto {
     use proto::geometry_policy_proto::Policy;
     let policy = match gp {
-        GeometryPolicy::Relative { x_pct, y_pct, width_pct, height_pct } => {
-            Policy::Relative(proto::RelativeGeometryPolicy {
-                x_pct: *x_pct,
-                y_pct: *y_pct,
-                width_pct: *width_pct,
-                height_pct: *height_pct,
-            })
-        }
-        GeometryPolicy::EdgeAnchored { edge, height_pct, width_pct, margin_px } => {
+        GeometryPolicy::Relative {
+            x_pct,
+            y_pct,
+            width_pct,
+            height_pct,
+        } => Policy::Relative(proto::RelativeGeometryPolicy {
+            x_pct: *x_pct,
+            y_pct: *y_pct,
+            width_pct: *width_pct,
+            height_pct: *height_pct,
+        }),
+        GeometryPolicy::EdgeAnchored {
+            edge,
+            height_pct,
+            width_pct,
+            margin_px,
+        } => {
             let edge_proto = match edge {
                 DisplayEdge::Top => proto::DisplayEdge::Top,
                 DisplayEdge::Bottom => proto::DisplayEdge::Bottom,
@@ -262,19 +307,29 @@ pub fn geometry_policy_to_proto(gp: &GeometryPolicy) -> proto::GeometryPolicyPro
             })
         }
     };
-    proto::GeometryPolicyProto { policy: Some(policy) }
+    proto::GeometryPolicyProto {
+        policy: Some(policy),
+    }
 }
 
 /// Convert a scene RenderingPolicy to a protobuf RenderingPolicyProto.
 pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicyProto {
     proto::RenderingPolicyProto {
         font_size_px: rp.font_size_px.unwrap_or(0.0),
-        backdrop: rp.backdrop.map(|c| proto::Rgba { r: c.r, g: c.g, b: c.b, a: c.a }),
-        text_align: rp.text_align.map(|ta| match ta {
-            TextAlign::Start => proto::TextAlignProto::Start as i32,
-            TextAlign::Center => proto::TextAlignProto::Center as i32,
-            TextAlign::End => proto::TextAlignProto::End as i32,
-        }).unwrap_or(proto::TextAlignProto::Unspecified as i32),
+        backdrop: rp.backdrop.map(|c| proto::Rgba {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        }),
+        text_align: rp
+            .text_align
+            .map(|ta| match ta {
+                TextAlign::Start => proto::TextAlignProto::Start as i32,
+                TextAlign::Center => proto::TextAlignProto::Center as i32,
+                TextAlign::End => proto::TextAlignProto::End as i32,
+            })
+            .unwrap_or(proto::TextAlignProto::Unspecified as i32),
         margin_px: rp.margin_px.unwrap_or(0.0),
     }
 }
@@ -282,23 +337,59 @@ pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicy
 /// Convert a scene Node to a protobuf NodeProto.
 pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
     let data = match &n.data {
-        NodeData::SolidColor(sc) => Some(proto::node_proto::Data::SolidColor(proto::SolidColorNodeProto {
-            color: Some(proto::Rgba { r: sc.color.r, g: sc.color.g, b: sc.color.b, a: sc.color.a }),
-            bounds: Some(proto::Rect { x: sc.bounds.x, y: sc.bounds.y, width: sc.bounds.width, height: sc.bounds.height }),
-        })),
-        NodeData::TextMarkdown(tm) => Some(proto::node_proto::Data::TextMarkdown(proto::TextMarkdownNodeProto {
-            content: tm.content.clone(),
-            bounds: Some(proto::Rect { x: tm.bounds.x, y: tm.bounds.y, width: tm.bounds.width, height: tm.bounds.height }),
-            font_size_px: tm.font_size_px,
-            color: Some(proto::Rgba { r: tm.color.r, g: tm.color.g, b: tm.color.b, a: tm.color.a }),
-            background: tm.background.map(|c| proto::Rgba { r: c.r, g: c.g, b: c.b, a: c.a }),
-        })),
-        NodeData::HitRegion(hr) => Some(proto::node_proto::Data::HitRegion(proto::HitRegionNodeProto {
-            bounds: Some(proto::Rect { x: hr.bounds.x, y: hr.bounds.y, width: hr.bounds.width, height: hr.bounds.height }),
-            interaction_id: hr.interaction_id.clone(),
-            accepts_focus: hr.accepts_focus,
-            accepts_pointer: hr.accepts_pointer,
-        })),
+        NodeData::SolidColor(sc) => Some(proto::node_proto::Data::SolidColor(
+            proto::SolidColorNodeProto {
+                color: Some(proto::Rgba {
+                    r: sc.color.r,
+                    g: sc.color.g,
+                    b: sc.color.b,
+                    a: sc.color.a,
+                }),
+                bounds: Some(proto::Rect {
+                    x: sc.bounds.x,
+                    y: sc.bounds.y,
+                    width: sc.bounds.width,
+                    height: sc.bounds.height,
+                }),
+            },
+        )),
+        NodeData::TextMarkdown(tm) => Some(proto::node_proto::Data::TextMarkdown(
+            proto::TextMarkdownNodeProto {
+                content: tm.content.clone(),
+                bounds: Some(proto::Rect {
+                    x: tm.bounds.x,
+                    y: tm.bounds.y,
+                    width: tm.bounds.width,
+                    height: tm.bounds.height,
+                }),
+                font_size_px: tm.font_size_px,
+                color: Some(proto::Rgba {
+                    r: tm.color.r,
+                    g: tm.color.g,
+                    b: tm.color.b,
+                    a: tm.color.a,
+                }),
+                background: tm.background.map(|c| proto::Rgba {
+                    r: c.r,
+                    g: c.g,
+                    b: c.b,
+                    a: c.a,
+                }),
+            },
+        )),
+        NodeData::HitRegion(hr) => Some(proto::node_proto::Data::HitRegion(
+            proto::HitRegionNodeProto {
+                bounds: Some(proto::Rect {
+                    x: hr.bounds.x,
+                    y: hr.bounds.y,
+                    width: hr.bounds.width,
+                    height: hr.bounds.height,
+                }),
+                interaction_id: hr.interaction_id.clone(),
+                accepts_focus: hr.accepts_focus,
+                accepts_pointer: hr.accepts_pointer,
+            },
+        )),
         NodeData::StaticImage(si) => {
             let fit_mode = match si.fit_mode {
                 ImageFitMode::Contain => proto::ImageFitModeProto::ImageFitModeContain as i32,
@@ -306,15 +397,22 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
                 ImageFitMode::Fill => proto::ImageFitModeProto::ImageFitModeFill as i32,
                 ImageFitMode::ScaleDown => proto::ImageFitModeProto::ImageFitModeScaleDown as i32,
             };
-            Some(proto::node_proto::Data::StaticImage(proto::StaticImageNodeProto {
-                // RS-4: wire format is 32 raw bytes (not hex).
-                resource_id: si.resource_id.as_bytes().to_vec(),
-                width: si.width,
-                height: si.height,
-                decoded_bytes: si.decoded_bytes as u64,
-                fit_mode,
-                bounds: Some(proto::Rect { x: si.bounds.x, y: si.bounds.y, width: si.bounds.width, height: si.bounds.height }),
-            }))
+            Some(proto::node_proto::Data::StaticImage(
+                proto::StaticImageNodeProto {
+                    // RS-4: wire format is 32 raw bytes (not hex).
+                    resource_id: si.resource_id.as_bytes().to_vec(),
+                    width: si.width,
+                    height: si.height,
+                    decoded_bytes: si.decoded_bytes as u64,
+                    fit_mode,
+                    bounds: Some(proto::Rect {
+                        x: si.bounds.x,
+                        y: si.bounds.y,
+                        width: si.bounds.width,
+                        height: si.bounds.height,
+                    }),
+                },
+            ))
         }
     };
     proto::NodeProto {
@@ -360,7 +458,9 @@ mod tests {
 
     #[test]
     fn scene_id_proto_rejects_wrong_length() {
-        let bad = crate::proto::SceneIdProto { bytes: vec![0u8; 15] };
+        let bad = crate::proto::SceneIdProto {
+            bytes: vec![0u8; 15],
+        };
         assert!(proto_to_scene_id(&bad).is_none());
     }
 
@@ -384,7 +484,9 @@ mod tests {
 
     #[test]
     fn resource_id_proto_rejects_wrong_length() {
-        let bad = crate::proto::ResourceIdProto { bytes: vec![0u8; 31] };
+        let bad = crate::proto::ResourceIdProto {
+            bytes: vec![0u8; 31],
+        };
         assert!(proto_to_resource_id(&bad).is_none());
     }
 
@@ -417,15 +519,19 @@ mod tests {
             // decoded_bytes is runtime-owned metadata; proto_node_to_scene zeroes it out
             // (client-supplied values are not trusted — the runtime populates this
             // from the resource store after mutation).
-            assert_eq!(si.decoded_bytes, 0,
-                "decoded_bytes must be zeroed on ingestion (runtime sets this, not the client)");
+            assert_eq!(
+                si.decoded_bytes, 0,
+                "decoded_bytes must be zeroed on ingestion (runtime sets this, not the client)"
+            );
             assert_eq!(si.fit_mode, ImageFitMode::Contain);
             assert_eq!(si.bounds.x, 10.0);
             assert_eq!(si.bounds.y, 20.0);
             // resource_id must survive proto roundtrip as 32 raw bytes.
             let original_id = ResourceId::of(b"4x4 test image resource");
-            assert_eq!(si.resource_id, original_id,
-                "resource_id must be preserved across proto roundtrip");
+            assert_eq!(
+                si.resource_id, original_id,
+                "resource_id must be preserved across proto roundtrip"
+            );
         } else {
             panic!("expected StaticImage variant after proto roundtrip");
         }
@@ -472,16 +578,24 @@ mod tests {
 
         // The wire must carry raw 32 bytes (not hex).
         if let Some(crate::proto::node_proto::Data::StaticImage(ref p)) = proto.data {
-            assert_eq!(p.resource_id.len(), 32,
-                "wire format must be 32 raw bytes (RS-4: not hex)");
-            assert_eq!(&p.resource_id[..], resource_id.as_bytes(),
-                "wire bytes must match the raw BLAKE3 digest");
+            assert_eq!(
+                p.resource_id.len(),
+                32,
+                "wire format must be 32 raw bytes (RS-4: not hex)"
+            );
+            assert_eq!(
+                &p.resource_id[..],
+                resource_id.as_bytes(),
+                "wire bytes must match the raw BLAKE3 digest"
+            );
         }
 
         let restored = proto_node_to_scene(&proto).unwrap();
         if let NodeData::StaticImage(si) = &restored.data {
-            assert_eq!(si.resource_id, resource_id,
-                "ResourceId must survive proto roundtrip");
+            assert_eq!(
+                si.resource_id, resource_id,
+                "ResourceId must survive proto roundtrip"
+            );
         } else {
             panic!("wrong variant");
         }

@@ -32,8 +32,8 @@ use tze_hud_scene::{
     test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants},
     types::{
         ContentionPolicy, DisplayEdge, GeometryPolicy, LayerAttachment, NotificationPayload,
-        RenderingPolicy, ResourceId, Rgba, SceneId, StatusBarPayload,
-        ZoneContent, ZoneDefinition, ZoneMediaType, ZONE_TILE_Z_MIN,
+        RenderingPolicy, ResourceId, Rgba, SceneId, StatusBarPayload, ZONE_TILE_Z_MIN, ZoneContent,
+        ZoneDefinition, ZoneMediaType,
     },
 };
 
@@ -84,7 +84,9 @@ fn zone_publish_subtitle_builds() {
 #[test]
 fn zone_publish_subtitle_has_subtitle_zone() {
     let registry = TestSceneRegistry::default();
-    let (graph, spec) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+    let (graph, spec) = registry
+        .build("zone_publish_subtitle", ClockMs::FIXED)
+        .unwrap();
     assert!(spec.has_zones, "spec must declare has_zones=true");
     assert!(
         graph.zone_registry.get_by_name("subtitle").is_some(),
@@ -95,14 +97,18 @@ fn zone_publish_subtitle_has_subtitle_zone() {
 #[test]
 fn zone_publish_subtitle_passes_layer0_invariants() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_publish_subtitle", ClockMs::FIXED)
+        .unwrap();
     assert_no_violations(&graph, "zone_publish_subtitle");
 }
 
 #[test]
 fn zone_publish_subtitle_layer_attachment_is_content() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_publish_subtitle", ClockMs::FIXED)
+        .unwrap();
     let zone = graph.zone_registry.get_by_name("subtitle").unwrap();
     assert_eq!(
         zone.layer_attachment,
@@ -123,7 +129,9 @@ fn zone_reject_wrong_type_builds() {
 #[test]
 fn zone_reject_wrong_type_passes_layer0_invariants() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_reject_wrong_type", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_reject_wrong_type", ClockMs::FIXED)
+        .unwrap();
     assert_no_violations(&graph, "zone_reject_wrong_type");
 }
 
@@ -131,7 +139,9 @@ fn zone_reject_wrong_type_passes_layer0_invariants() {
 fn zone_reject_wrong_type_rejects_mismatched_media_type() {
     // Zone accepts only StreamText; publishing KeyValuePairs must be rejected.
     let registry = TestSceneRegistry::default();
-    let (mut graph, _spec) = registry.build("zone_reject_wrong_type", ClockMs::FIXED).unwrap();
+    let (mut graph, _spec) = registry
+        .build("zone_reject_wrong_type", ClockMs::FIXED)
+        .unwrap();
 
     let wrong_content = ZoneContent::StatusBar(StatusBarPayload {
         entries: {
@@ -151,7 +161,9 @@ fn zone_reject_wrong_type_rejects_mismatched_media_type() {
 #[test]
 fn zone_reject_wrong_type_accepts_correct_media_type() {
     let registry = TestSceneRegistry::default();
-    let (mut graph, _spec) = registry.build("zone_reject_wrong_type", ClockMs::FIXED).unwrap();
+    let (mut graph, _spec) = registry
+        .build("zone_reject_wrong_type", ClockMs::FIXED)
+        .unwrap();
     let result = graph.publish_to_zone(
         "typed_zone",
         ZoneContent::StreamText("valid content".to_string()),
@@ -175,7 +187,9 @@ fn zone_conflict_two_publishers_builds() {
 #[test]
 fn zone_conflict_two_publishers_passes_layer0_invariants() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_conflict_two_publishers", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_conflict_two_publishers", ClockMs::FIXED)
+        .unwrap();
     assert_no_violations(&graph, "zone_conflict_two_publishers");
 }
 
@@ -186,16 +200,33 @@ fn zone_conflict_latest_wins_policy() {
     scene.register_zone(make_subtitle_zone());
 
     scene
-        .publish_to_zone("subtitle", ZoneContent::StreamText("first".to_string()), "pub_a", None, None, None)
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("first".to_string()),
+            "pub_a",
+            None,
+            None,
+            None,
+        )
         .unwrap();
     scene
-        .publish_to_zone("subtitle", ZoneContent::StreamText("second".to_string()), "pub_b", None, None, None)
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("second".to_string()),
+            "pub_b",
+            None,
+            None,
+            None,
+        )
         .unwrap();
 
     let pubs = scene.zone_registry.active_for_zone("subtitle");
     assert_eq!(pubs.len(), 1, "LatestWins: only 1 publication survives");
     assert_eq!(pubs[0].publisher_namespace, "pub_b");
-    assert_eq!(pubs[0].content, ZoneContent::StreamText("second".to_string()));
+    assert_eq!(
+        pubs[0].content,
+        ZoneContent::StreamText("second".to_string())
+    );
 }
 
 // ─── Scene: zone_orchestrate_then_publish ────────────────────────────────────
@@ -210,7 +241,9 @@ fn zone_orchestrate_then_publish_builds() {
 #[test]
 fn zone_orchestrate_then_publish_has_three_zones() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_orchestrate_then_publish", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_orchestrate_then_publish", ClockMs::FIXED)
+        .unwrap();
     for name in &["alert_banner", "notification_area", "status_bar"] {
         assert!(
             graph.zone_registry.get_by_name(name).is_some(),
@@ -223,7 +256,9 @@ fn zone_orchestrate_then_publish_has_three_zones() {
 #[test]
 fn zone_orchestrate_then_publish_passes_layer0_invariants() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_orchestrate_then_publish", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_orchestrate_then_publish", ClockMs::FIXED)
+        .unwrap();
     assert_no_violations(&graph, "zone_orchestrate_then_publish");
 }
 
@@ -239,7 +274,9 @@ fn zone_geometry_adapts_profile_builds() {
 #[test]
 fn zone_geometry_adapts_profile_has_relative_zones() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_geometry_adapts_profile", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_geometry_adapts_profile", ClockMs::FIXED)
+        .unwrap();
     let mut found_relative = false;
     for name in &["pip", "ambient-background"] {
         if let Some(zone) = graph.zone_registry.get_by_name(name) {
@@ -260,7 +297,9 @@ fn zone_geometry_adapts_profile_has_relative_zones() {
 #[test]
 fn zone_geometry_adapts_profile_passes_layer0_invariants() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_geometry_adapts_profile", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_geometry_adapts_profile", ClockMs::FIXED)
+        .unwrap();
     assert_no_violations(&graph, "zone_geometry_adapts_profile");
 }
 
@@ -276,7 +315,9 @@ fn zone_disconnect_cleanup_builds() {
 #[test]
 fn zone_disconnect_cleanup_passes_layer0_invariants() {
     let registry = TestSceneRegistry::default();
-    let (graph, _spec) = registry.build("zone_disconnect_cleanup", ClockMs::FIXED).unwrap();
+    let (graph, _spec) = registry
+        .build("zone_disconnect_cleanup", ClockMs::FIXED)
+        .unwrap();
     assert_no_violations(&graph, "zone_disconnect_cleanup");
 }
 
@@ -314,21 +355,46 @@ fn contention_stack_evicts_oldest_at_max_depth() {
     };
 
     // Push 3 to fill the stack
-    scene.publish_to_zone("notif", notif("msg1"), "a1", None, None, None).unwrap();
-    scene.publish_to_zone("notif", notif("msg2"), "a2", None, None, None).unwrap();
-    scene.publish_to_zone("notif", notif("msg3"), "a3", None, None, None).unwrap();
+    scene
+        .publish_to_zone("notif", notif("msg1"), "a1", None, None, None)
+        .unwrap();
+    scene
+        .publish_to_zone("notif", notif("msg2"), "a2", None, None, None)
+        .unwrap();
+    scene
+        .publish_to_zone("notif", notif("msg3"), "a3", None, None, None)
+        .unwrap();
     assert_eq!(scene.zone_registry.active_for_zone("notif").len(), 3);
 
     // 4th push must evict oldest (msg1)
-    scene.publish_to_zone("notif", notif("msg4"), "a4", None, None, None).unwrap();
+    scene
+        .publish_to_zone("notif", notif("msg4"), "a4", None, None, None)
+        .unwrap();
     let pubs = scene.zone_registry.active_for_zone("notif");
-    assert_eq!(pubs.len(), 3, "Stack max_depth=3 must evict oldest on overflow");
+    assert_eq!(
+        pubs.len(),
+        3,
+        "Stack max_depth=3 must evict oldest on overflow"
+    );
 
-    let texts: Vec<_> = pubs.iter().map(|r| {
-        if let ZoneContent::Notification(n) = &r.content { n.text.clone() } else { "?".into() }
-    }).collect();
-    assert!(!texts.contains(&"msg1".to_string()), "oldest msg1 must be evicted");
-    assert!(texts.contains(&"msg4".to_string()), "newest msg4 must survive");
+    let texts: Vec<_> = pubs
+        .iter()
+        .map(|r| {
+            if let ZoneContent::Notification(n) = &r.content {
+                n.text.clone()
+            } else {
+                "?".into()
+            }
+        })
+        .collect();
+    assert!(
+        !texts.contains(&"msg1".to_string()),
+        "oldest msg1 must be evicted"
+    );
+    assert!(
+        texts.contains(&"msg4".to_string()),
+        "newest msg4 must survive"
+    );
 }
 
 #[test]
@@ -360,17 +426,58 @@ fn contention_merge_by_key_same_key_replaces() {
         ZoneContent::StatusBar(StatusBarPayload { entries })
     };
 
-    scene.publish_to_zone("status", kv("clock", "12:00"), "a1", Some("clock".to_string()), None, None).unwrap();
-    scene.publish_to_zone("status", kv("battery", "80%"), "a2", Some("battery".to_string()), None, None).unwrap();
-    assert_eq!(scene.zone_registry.active_for_zone("status").len(), 2, "different keys should coexist");
+    scene
+        .publish_to_zone(
+            "status",
+            kv("clock", "12:00"),
+            "a1",
+            Some("clock".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+    scene
+        .publish_to_zone(
+            "status",
+            kv("battery", "80%"),
+            "a2",
+            Some("battery".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        scene.zone_registry.active_for_zone("status").len(),
+        2,
+        "different keys should coexist"
+    );
 
     // Update same key "clock"
-    scene.publish_to_zone("status", kv("clock", "12:01"), "a1", Some("clock".to_string()), None, None).unwrap();
+    scene
+        .publish_to_zone(
+            "status",
+            kv("clock", "12:01"),
+            "a1",
+            Some("clock".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
     let pubs = scene.zone_registry.active_for_zone("status");
-    assert_eq!(pubs.len(), 2, "updating existing key must not create a new entry");
-    let clock = pubs.iter().find(|r| r.merge_key.as_deref() == Some("clock")).unwrap();
+    assert_eq!(
+        pubs.len(),
+        2,
+        "updating existing key must not create a new entry"
+    );
+    let clock = pubs
+        .iter()
+        .find(|r| r.merge_key.as_deref() == Some("clock"))
+        .unwrap();
     if let ZoneContent::StatusBar(sb) = &clock.content {
-        assert_eq!(sb.entries["clock"], "12:01", "clock must be updated to 12:01");
+        assert_eq!(
+            sb.entries["clock"], "12:01",
+            "clock must be updated to 12:01"
+        );
     } else {
         panic!("expected StatusBar content");
     }
@@ -399,19 +506,43 @@ fn contention_replace_evicts_current() {
         ephemeral: false,
     });
 
-    scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::WHITE), "a1", None, None, None).unwrap();
-    scene.publish_to_zone("pip", ZoneContent::SolidColor(Rgba::BLACK), "a2", None, None, None).unwrap();
+    scene
+        .publish_to_zone(
+            "pip",
+            ZoneContent::SolidColor(Rgba::WHITE),
+            "a1",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    scene
+        .publish_to_zone(
+            "pip",
+            ZoneContent::SolidColor(Rgba::BLACK),
+            "a2",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     let pubs = scene.zone_registry.active_for_zone("pip");
     assert_eq!(pubs.len(), 1, "Replace: only 1 occupant allowed");
-    assert_eq!(pubs[0].publisher_namespace, "a2", "Replace: new publish evicts current");
+    assert_eq!(
+        pubs[0].publisher_namespace, "a2",
+        "Replace: new publish evicts current"
+    );
 }
 
 // ─── Layer attachment routing ─────────────────────────────────────────────────
 
 #[test]
 fn zone_tile_z_min_constant_is_correct() {
-    assert_eq!(ZONE_TILE_Z_MIN, 0x8000_0000u32, "ZONE_TILE_Z_MIN must be 0x8000_0000");
+    assert_eq!(
+        ZONE_TILE_Z_MIN, 0x8000_0000u32,
+        "ZONE_TILE_Z_MIN must be 0x8000_0000"
+    );
 }
 
 #[test]
@@ -445,10 +576,21 @@ fn default_zone_registry_contains_all_six_v1_zones() {
     use tze_hud_scene::types::ZoneRegistry;
     let registry = ZoneRegistry::with_defaults();
     let zones = registry.all_zones();
-    assert_eq!(zones.len(), 6, "V1 default registry must contain exactly 6 zones");
+    assert_eq!(
+        zones.len(),
+        6,
+        "V1 default registry must contain exactly 6 zones"
+    );
 
     let names: Vec<_> = zones.iter().map(|z| z.name.as_str()).collect();
-    for expected in &["subtitle", "notification-area", "status-bar", "pip", "ambient-background", "alert-banner"] {
+    for expected in &[
+        "subtitle",
+        "notification-area",
+        "status-bar",
+        "pip",
+        "ambient-background",
+        "alert-banner",
+    ] {
         assert!(
             names.contains(expected),
             "default registry missing zone '{}'",
@@ -463,7 +605,9 @@ fn default_zones_have_correct_layer_attachments() {
     let registry = ZoneRegistry::with_defaults();
 
     let check = |name: &str, expected: LayerAttachment| {
-        let zone = registry.get_by_name(name).unwrap_or_else(|| panic!("zone '{}' not found", name));
+        let zone = registry
+            .get_by_name(name)
+            .unwrap_or_else(|| panic!("zone '{}' not found", name));
         assert_eq!(
             zone.layer_attachment, expected,
             "zone '{}' must have layer attachment {:?}",
@@ -487,24 +631,44 @@ fn all_five_v1_media_types_accepted_by_appropriate_zones() {
     let registry = ZoneRegistry::with_defaults();
 
     // StreamText: subtitle
-    assert!(!registry.zones_accepting(ZoneMediaType::StreamText).is_empty(),
-        "StreamText must be accepted by at least one default zone");
+    assert!(
+        !registry
+            .zones_accepting(ZoneMediaType::StreamText)
+            .is_empty(),
+        "StreamText must be accepted by at least one default zone"
+    );
 
     // ShortTextWithIcon: notification-area, alert-banner
-    assert!(!registry.zones_accepting(ZoneMediaType::ShortTextWithIcon).is_empty(),
-        "ShortTextWithIcon must be accepted by at least one default zone");
+    assert!(
+        !registry
+            .zones_accepting(ZoneMediaType::ShortTextWithIcon)
+            .is_empty(),
+        "ShortTextWithIcon must be accepted by at least one default zone"
+    );
 
     // KeyValuePairs: status-bar
-    assert!(!registry.zones_accepting(ZoneMediaType::KeyValuePairs).is_empty(),
-        "KeyValuePairs must be accepted by at least one default zone");
+    assert!(
+        !registry
+            .zones_accepting(ZoneMediaType::KeyValuePairs)
+            .is_empty(),
+        "KeyValuePairs must be accepted by at least one default zone"
+    );
 
     // StaticImage: pip, ambient-background
-    assert!(!registry.zones_accepting(ZoneMediaType::StaticImage).is_empty(),
-        "StaticImage must be accepted by at least one default zone");
+    assert!(
+        !registry
+            .zones_accepting(ZoneMediaType::StaticImage)
+            .is_empty(),
+        "StaticImage must be accepted by at least one default zone"
+    );
 
     // SolidColor: pip, ambient-background
-    assert!(!registry.zones_accepting(ZoneMediaType::SolidColor).is_empty(),
-        "SolidColor must be accepted by at least one default zone");
+    assert!(
+        !registry
+            .zones_accepting(ZoneMediaType::SolidColor)
+            .is_empty(),
+        "SolidColor must be accepted by at least one default zone"
+    );
 }
 
 #[test]
@@ -540,7 +704,10 @@ fn static_image_content_publishes_successfully() {
         None,
         None,
     );
-    assert!(result.is_ok(), "StaticImage content must publish to a zone accepting StaticImage");
+    assert!(
+        result.is_ok(),
+        "StaticImage content must publish to a zone accepting StaticImage"
+    );
 }
 
 #[test]
@@ -579,7 +746,10 @@ fn video_surface_ref_schema_defined_but_not_rendered() {
         None,
         None,
     );
-    assert!(result.is_ok(), "VideoSurfaceRef schema must be accepted for zones that declare it");
+    assert!(
+        result.is_ok(),
+        "VideoSurfaceRef schema must be accepted for zones that declare it"
+    );
 }
 
 // ─── ZonePublishToken validation ──────────────────────────────────────────────
@@ -639,8 +809,26 @@ fn clear_zone_for_publisher_only_removes_own_publications() {
         ephemeral: false,
     });
 
-    scene.publish_to_zone("shared", ZoneContent::StreamText("from a1".to_string()), "a1", None, None, None).unwrap();
-    scene.publish_to_zone("shared", ZoneContent::StreamText("from a2".to_string()), "a2", None, None, None).unwrap();
+    scene
+        .publish_to_zone(
+            "shared",
+            ZoneContent::StreamText("from a1".to_string()),
+            "a1",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    scene
+        .publish_to_zone(
+            "shared",
+            ZoneContent::StreamText("from a2".to_string()),
+            "a2",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     assert_eq!(scene.zone_registry.active_for_zone("shared").len(), 2);
 
     // Clear only a1's publications
@@ -648,7 +836,10 @@ fn clear_zone_for_publisher_only_removes_own_publications() {
 
     let pubs = scene.zone_registry.active_for_zone("shared");
     assert_eq!(pubs.len(), 1, "only a1's publication should be removed");
-    assert_eq!(pubs[0].publisher_namespace, "a2", "a2's publication must survive");
+    assert_eq!(
+        pubs[0].publisher_namespace, "a2",
+        "a2's publication must survive"
+    );
 }
 
 #[test]
@@ -666,14 +857,16 @@ fn publish_with_expiry_stores_expiry_timestamp() {
     scene.register_zone(make_subtitle_zone());
 
     let expiry_us = 1_735_689_600_000_000u64; // 1 Jan 2025 00:00:00 UTC in microseconds
-    scene.publish_to_zone(
-        "subtitle",
-        ZoneContent::StreamText("expiring content".to_string()),
-        "agent",
-        None,
-        Some(expiry_us),
-        None,
-    ).unwrap();
+    scene
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("expiring content".to_string()),
+            "agent",
+            None,
+            Some(expiry_us),
+            None,
+        )
+        .unwrap();
 
     let pubs = scene.zone_registry.active_for_zone("subtitle");
     assert_eq!(pubs.len(), 1);
@@ -689,17 +882,22 @@ fn publish_without_expiry_stores_none() {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     scene.register_zone(make_subtitle_zone());
 
-    scene.publish_to_zone(
-        "subtitle",
-        ZoneContent::StreamText("permanent content".to_string()),
-        "agent",
-        None,
-        None,
-        None,
-    ).unwrap();
+    scene
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("permanent content".to_string()),
+            "agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     let pubs = scene.zone_registry.active_for_zone("subtitle");
-    assert_eq!(pubs[0].expires_at_wall_us, None, "no expiry should store None");
+    assert_eq!(
+        pubs[0].expires_at_wall_us, None,
+        "no expiry should store None"
+    );
 }
 
 // ─── Zone occupancy query API (v1: no effective_geometry) ────────────────────
@@ -718,17 +916,19 @@ fn zone_occupancy_query_returns_correct_state() {
     assert!(occupancy.active_publications.is_empty());
 
     // Simulate a publish
-    registry.active_publishes.entry("subtitle".to_string()).or_default().push(
-        tze_hud_scene::types::ZonePublishRecord {
+    registry
+        .active_publishes
+        .entry("subtitle".to_string())
+        .or_default()
+        .push(tze_hud_scene::types::ZonePublishRecord {
             zone_name: "subtitle".to_string(),
             publisher_namespace: "agent".to_string(),
             content: ZoneContent::StreamText("hello".to_string()),
-            published_at_wall_us: 1_000_000,  // microseconds
+            published_at_wall_us: 1_000_000, // microseconds
             merge_key: None,
             expires_at_wall_us: None,
             content_classification: None,
-        },
-    );
+        });
 
     let occupancy = registry.get_occupancy("subtitle", tab_id).unwrap();
     assert_eq!(occupancy.occupant_count, 1);
@@ -742,7 +942,10 @@ fn zone_occupancy_returns_none_for_unknown_zone() {
     use tze_hud_scene::types::ZoneRegistry;
     let registry = ZoneRegistry::new();
     let result = registry.get_occupancy("nonexistent", SceneId::new());
-    assert!(result.is_none(), "occupancy query for unknown zone must return None");
+    assert!(
+        result.is_none(),
+        "occupancy query for unknown zone must return None"
+    );
 }
 
 // ─── ZoneInstance type ────────────────────────────────────────────────────────
@@ -770,14 +973,16 @@ fn publish_with_content_classification_stored() {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     scene.register_zone(make_subtitle_zone());
 
-    scene.publish_to_zone(
-        "subtitle",
-        ZoneContent::StreamText("sensitive content".to_string()),
-        "agent",
-        None,
-        None,
-        Some("pii".to_string()),
-    ).unwrap();
+    scene
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("sensitive content".to_string()),
+            "agent",
+            None,
+            None,
+            Some("pii".to_string()),
+        )
+        .unwrap();
 
     let pubs = scene.zone_registry.active_for_zone("subtitle");
     assert_eq!(pubs[0].content_classification.as_deref(), Some("pii"));
@@ -789,9 +994,9 @@ fn publish_with_content_classification_stored() {
 mod proptests {
     use super::*;
     use proptest::prelude::*;
-    use tze_hud_scene::types::{ZoneContent, ZoneDefinition, ZoneMediaType, ContentionPolicy};
-    use tze_hud_scene::graph::SceneGraph;
     use std::collections::HashMap;
+    use tze_hud_scene::graph::SceneGraph;
+    use tze_hud_scene::types::{ContentionPolicy, ZoneContent, ZoneDefinition, ZoneMediaType};
 
     /// Arbitrary StreamText content for proptest
     fn arb_stream_text() -> impl Strategy<Value = ZoneContent> {
@@ -800,8 +1005,7 @@ mod proptests {
 
     /// Publisher namespaces
     fn arb_namespace() -> impl Strategy<Value = String> {
-        prop::sample::select(vec!["a1", "a2", "a3", "a4"])
-            .prop_map(|s| s.to_string())
+        prop::sample::select(vec!["a1", "a2", "a3", "a4"]).prop_map(|s| s.to_string())
     }
 
     proptest! {

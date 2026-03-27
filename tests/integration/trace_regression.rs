@@ -30,15 +30,13 @@
 //! | JSON round-trip | `trace_json_round_trip_preserves_all_events` |
 //! | Multi-event trace ordering | `multi_event_trace_replays_in_seq_order` |
 
+use tze_hud_runtime::channels::{InputEvent, InputEventKind};
 use tze_hud_runtime::trace_capture::{TraceRecorder, build_regression_trace};
+use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch, SceneMutation};
 use tze_hud_scene::replay::{TraceReplayer, assert_trace_is_deterministic};
-use tze_hud_scene::trace::{
-    SceneTrace, TraceEventKind, TracedAgentEvent, TracedZonePublish,
-};
+use tze_hud_scene::trace::{SceneTrace, TraceEventKind, TracedAgentEvent, TracedZonePublish};
 use tze_hud_scene::types::{Capability, SceneId};
-use tze_hud_scene::graph::SceneGraph;
-use tze_hud_runtime::channels::{InputEvent, InputEventKind};
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -123,7 +121,7 @@ fn build_regression_trace_from_mutations() {
     let batches = vec![
         create_tab_batch("fuzz", "First", 0),
         create_tab_batch("fuzz", "Conflict", 0), // dup display_order — rejected
-        create_tab_batch("fuzz", "Third", 1),     // should succeed
+        create_tab_batch("fuzz", "Third", 1),    // should succeed
     ];
 
     let trace = build_regression_trace(&batches, "fuzz-dup-display-order");
@@ -235,7 +233,10 @@ fn multi_event_trace_replays_in_seq_order() {
         events: vec![
             TraceEvent {
                 seq: 1, // out of order
-                timestamp: TraceTimestamp { wall_us: 200, mono_us: 200 },
+                timestamp: TraceTimestamp {
+                    wall_us: 200,
+                    mono_us: 200,
+                },
                 kind: TraceEventKind::MutationBatch {
                     batch: b1,
                     applied: true,
@@ -244,7 +245,10 @@ fn multi_event_trace_replays_in_seq_order() {
             },
             TraceEvent {
                 seq: 0,
-                timestamp: TraceTimestamp { wall_us: 100, mono_us: 100 },
+                timestamp: TraceTimestamp {
+                    wall_us: 100,
+                    mono_us: 100,
+                },
                 kind: TraceEventKind::MutationBatch {
                     batch: b0,
                     applied: true,

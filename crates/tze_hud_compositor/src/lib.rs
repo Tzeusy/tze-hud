@@ -21,11 +21,11 @@
 //! call `select_gpu_adapter` to enforce the platform constraint.
 
 pub mod adapter;
+pub mod pipeline;
 pub mod renderer;
 pub mod surface;
-pub mod pipeline;
 
-pub use adapter::{select_gpu_adapter, AdapterSelectionError, PlatformBackends};
+pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
+pub use pipeline::ChromeDrawCmd;
 pub use renderer::{Compositor, CompositorError};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
-pub use pipeline::ChromeDrawCmd;

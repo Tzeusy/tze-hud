@@ -50,8 +50,11 @@ pub fn hit_test(scene: &SceneGraph, display_x: f32, display_y: f32) -> HitTestRe
     content_tiles.sort_unstable_by(|a, b| b.0.cmp(&a.0));
 
     // Chrome tiles are checked before content tiles (spec line 264)
-    let ordered: Vec<(u32, SceneId)> =
-        chrome_tiles.iter().chain(content_tiles.iter()).copied().collect();
+    let ordered: Vec<(u32, SceneId)> = chrome_tiles
+        .iter()
+        .chain(content_tiles.iter())
+        .copied()
+        .collect();
 
     for (_, tile_id) in &ordered {
         let tile = match scene.tiles.get(tile_id) {
@@ -123,8 +126,8 @@ fn hit_test_node_reverse(
 mod tests {
     use super::*;
     use tze_hud_scene::{
-        Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneGraph, SceneId,
-        SolidColorNode, Rgba,
+        Capability, HitRegionNode, InputMode, Node, NodeData, Rect, Rgba, SceneGraph, SceneId,
+        SolidColorNode,
     };
 
     fn make_scene_with_hit_regions(n_tiles: usize) -> (SceneGraph, Vec<SceneId>, Vec<SceneId>) {
@@ -186,7 +189,10 @@ mod tests {
         let result = hit_test(&scene, 50.0, 50.0);
         assert_eq!(
             result,
-            HitTestResult::NodeHit { tile_id: tile_ids[0], node_id: node_ids[0] },
+            HitTestResult::NodeHit {
+                tile_id: tile_ids[0],
+                node_id: node_ids[0]
+            },
             "first tile (0,0) must be hit at (50,50)"
         );
     }
@@ -195,7 +201,11 @@ mod tests {
     fn hit_test_misses_outside_all_tiles() {
         let (scene, _, _) = make_scene_with_hit_regions(3);
         let result = hit_test(&scene, 1900.0, 900.0);
-        assert_eq!(result, HitTestResult::Passthrough, "point outside all tiles must passthrough");
+        assert_eq!(
+            result,
+            HitTestResult::Passthrough,
+            "point outside all tiles must passthrough"
+        );
     }
 
     #[test]
@@ -204,7 +214,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                1,
+            )
             .unwrap();
         // Set a non-HitRegion root
         scene
@@ -222,7 +238,11 @@ mod tests {
             .unwrap();
 
         let result = hit_test(&scene, 50.0, 50.0);
-        assert_eq!(result, HitTestResult::TileHit { tile_id }, "solid color tile returns TileHit");
+        assert_eq!(
+            result,
+            HitTestResult::TileHit { tile_id },
+            "solid color tile returns TileHit"
+        );
     }
 
     // ── Chrome-first hit ordering ─────────────────────────────────────────────
@@ -233,13 +253,18 @@ mod tests {
         // Chrome layer always wins when overlapping content.
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let content_lease =
-            scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let content_lease = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let chrome_lease = scene.grant_lease("chrome.ui", 60_000, vec![Capability::CreateTile]);
 
         // Content tile at z=1
         let content_tile = scene
-            .create_tile(tab_id, "agent", content_lease, Rect::new(0.0, 0.0, 200.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                content_lease,
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                1,
+            )
             .unwrap();
         let content_node_id = SceneId::new();
         scene
@@ -290,7 +315,10 @@ mod tests {
         let result = hit_test(&scene, 50.0, 50.0);
         assert_eq!(
             result,
-            HitTestResult::NodeHit { tile_id: chrome_tile, node_id: chrome_node_id },
+            HitTestResult::NodeHit {
+                tile_id: chrome_tile,
+                node_id: chrome_node_id
+            },
             "chrome tile must win even when content tile has equal or higher z"
         );
     }
@@ -301,13 +329,18 @@ mod tests {
     fn passthrough_tile_does_not_block_content() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        let content_lease =
-            scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
+        let content_lease = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let overlay_lease = scene.grant_lease("overlay", 60_000, vec![Capability::CreateTile]);
 
         // Content tile (z=1)
         let content_tile = scene
-            .create_tile(tab_id, "agent", content_lease, Rect::new(0.0, 0.0, 200.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                content_lease,
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                1,
+            )
             .unwrap();
         let content_node_id = SceneId::new();
         scene
@@ -356,7 +389,10 @@ mod tests {
         let result = hit_test(&scene, 50.0, 50.0);
         assert_eq!(
             result,
-            HitTestResult::NodeHit { tile_id: content_tile, node_id: content_node_id },
+            HitTestResult::NodeHit {
+                tile_id: content_tile,
+                node_id: content_node_id
+            },
             "passthrough overlay must not block content tile"
         );
     }
@@ -408,7 +444,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
         // Create parent node with two overlapping HitRegion children
@@ -460,17 +502,22 @@ mod tests {
         );
         scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(parent_id);
         // Register local state for the hit region children
-        scene
-            .hit_region_states
-            .insert(child1_id, tze_hud_scene::HitRegionLocalState::new(child1_id));
-        scene
-            .hit_region_states
-            .insert(child2_id, tze_hud_scene::HitRegionLocalState::new(child2_id));
+        scene.hit_region_states.insert(
+            child1_id,
+            tze_hud_scene::HitRegionLocalState::new(child1_id),
+        );
+        scene.hit_region_states.insert(
+            child2_id,
+            tze_hud_scene::HitRegionLocalState::new(child2_id),
+        );
 
         let result = hit_test(&scene, 50.0, 50.0);
         assert_eq!(
             result,
-            HitTestResult::NodeHit { tile_id, node_id: child2_id },
+            HitTestResult::NodeHit {
+                tile_id,
+                node_id: child2_id
+            },
             "last child must win when children overlap"
         );
     }

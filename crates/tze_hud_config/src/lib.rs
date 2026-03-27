@@ -51,24 +51,23 @@ pub mod raw;
 pub mod reload;
 pub mod resolver;
 pub mod schema;
-pub mod zones;
 #[cfg(test)]
 mod tests;
+pub mod zones;
 
 pub use agents::{
-    AuthEnvWarning,
-    check_agent_auth_env_vars,
-    check_agent_auth_env_vars_with_lookup,
-    dynamic_agents_allowed,
-    validate_agents,
+    AuthEnvWarning, check_agent_auth_env_vars, check_agent_auth_env_vars_with_lookup,
+    dynamic_agents_allowed, validate_agents,
 };
 pub use loader::TzeHudConfig;
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{
-    HeadlessSignal, AutoDetectResult, auto_detect_profile, resolve_headless_dimensions,
+    AutoDetectResult, HeadlessSignal, auto_detect_profile, resolve_headless_dimensions,
     resolve_profile, validate_display_profile,
 };
-pub use reload::{FieldClassification, HotReloadableConfig, SighupHandler, reload_config, section_classification};
+pub use reload::{
+    FieldClassification, HotReloadableConfig, SighupHandler, reload_config, section_classification,
+};
 pub use resolver::resolve_config_path;
 pub use schema::print_schema;
 pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};

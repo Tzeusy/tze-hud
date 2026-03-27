@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
 use tze_hud_scene::SceneId;
 use tze_hud_scene::graph::SceneGraph;

@@ -92,12 +92,7 @@ impl SsimResult {
 /// # Panics
 /// Panics if `src` and `ref_img` have different lengths, or if the length
 /// does not equal `width * height * 4`.
-pub fn compute_ssim(
-    src: &[u8],
-    ref_img: &[u8],
-    width: u32,
-    height: u32,
-) -> SsimResult {
+pub fn compute_ssim(src: &[u8], ref_img: &[u8], width: u32, height: u32) -> SsimResult {
     let expected_len = (width * height * 4) as usize;
     assert_eq!(src.len(), expected_len, "src buffer size mismatch");
     assert_eq!(ref_img.len(), expected_len, "ref_img buffer size mismatch");
@@ -147,10 +142,7 @@ pub fn compute_ssim(
         let y0 = yi * STRIDE;
         for xi in 0..x_steps {
             let x0 = xi * STRIDE;
-            let score = window_ssim(
-                &src_gray, &ref_gray, w,
-                x0, y0, WINDOW, WINDOW,
-            );
+            let score = window_ssim(&src_gray, &ref_gray, w, x0, y0, WINDOW, WINDOW);
             scores.push(score);
 
             // Attribute this window to its nearest region cell.
@@ -200,7 +192,13 @@ pub fn compute_ssim(
         }
     }
 
-    SsimResult { mean, windows: scores, regions, width, height }
+    SsimResult {
+        mean,
+        windows: scores,
+        regions,
+        width,
+        height,
+    }
 }
 
 /// Convert RGBA8 buffer to grayscale f64 using BT.709 luma coefficients.
@@ -218,8 +216,13 @@ fn rgba_to_gray(rgba: &[u8], w: usize, h: usize) -> Vec<f64> {
 
 /// SSIM over a single WINDOW×WINDOW patch at (x0, y0) in a row-major float image.
 fn window_ssim(
-    a: &[f64], b: &[f64], stride: usize,
-    x0: usize, y0: usize, ww: usize, wh: usize,
+    a: &[f64],
+    b: &[f64],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    ww: usize,
+    wh: usize,
 ) -> f64 {
     let n = (ww * wh) as f64;
     let mut sum_a = 0.0f64;
@@ -312,8 +315,14 @@ mod tests {
         let img = solid_rgba(w, h, 200, 100, 50);
         let result = compute_ssim(&img, &img, w, h);
         // Identical → SSIM = 1.0, definitely passes 0.995
-        assert!(result.passes(0.995), "identical images must pass layout threshold");
-        assert!(result.passes(0.990), "identical images must pass media threshold");
+        assert!(
+            result.passes(0.995),
+            "identical images must pass layout threshold"
+        );
+        assert!(
+            result.passes(0.990),
+            "identical images must pass media threshold"
+        );
     }
 
     /// Verify threshold behaviour with known-low SSIM.
@@ -325,7 +334,10 @@ mod tests {
         let white = solid_rgba(w, h, 255, 255, 255);
         let result = compute_ssim(&black, &white, w, h);
         // Known to be very low for black vs white
-        assert!(!result.passes(0.993), "black vs white must fail threshold 0.993");
+        assert!(
+            !result.passes(0.993),
+            "black vs white must fail threshold 0.993"
+        );
     }
 
     /// Per-region breakdown must produce 9 regions for images ≥ WINDOW.

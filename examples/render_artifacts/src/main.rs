@@ -36,11 +36,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tze_hud_scene::test_scenes::{ClockMs, TestSceneRegistry};
+use tze_hud_validation::golden::{GoldenStore, find_golden_dir};
 use tze_hud_validation::layer4::{
-    ArtifactBuilder, ArtifactOptions, BenchmarkArtifactInput, SceneArtifactInput,
-    SceneDescription, SceneMetrics, SceneStatus, llm_summary_json,
+    ArtifactBuilder, ArtifactOptions, BenchmarkArtifactInput, SceneArtifactInput, SceneDescription,
+    SceneMetrics, SceneStatus, llm_summary_json,
 };
-use tze_hud_validation::golden::{find_golden_dir, GoldenStore};
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -126,7 +126,13 @@ fn parse_args() -> Args {
         i += 1;
     }
 
-    Args { output, branch, telemetry_dir, benchmark_json, print_summary }
+    Args {
+        output,
+        branch,
+        telemetry_dir,
+        benchmark_json,
+        print_summary,
+    }
 }
 
 fn print_usage() {
@@ -210,8 +216,7 @@ fn main() {
     eprintln!("  run dir     : {}", builder.run_dir().display());
 
     // Discover the golden store (best-effort; missing goldens → SKIP status).
-    let golden_store = find_golden_dir()
-        .map(|dir| GoldenStore::new(dir));
+    let golden_store = find_golden_dir().map(|dir| GoldenStore::new(dir));
 
     // Walk every registered test scene.
     let registry = TestSceneRegistry::new();
@@ -263,23 +268,25 @@ fn main() {
             SceneStatus::Skip
         };
 
-        let metrics = telemetry_json.as_ref().map_or_else(SceneMetrics::default, |j| {
-            // Best-effort parse frame count from telemetry.
-            serde_json::from_slice::<serde_json::Value>(j)
-                .ok()
-                .and_then(|v| {
-                    let frames = v["total_frames"].as_u64();
-                    let p99 = v["frame_time"]["p99"].as_u64();
-                    Some(SceneMetrics {
-                        ssim_score: None,
-                        frames_rendered: frames,
-                        frame_time_p99_us: p99,
-                        lease_violations: 0,
-                        budget_overruns: 0,
+        let metrics = telemetry_json
+            .as_ref()
+            .map_or_else(SceneMetrics::default, |j| {
+                // Best-effort parse frame count from telemetry.
+                serde_json::from_slice::<serde_json::Value>(j)
+                    .ok()
+                    .and_then(|v| {
+                        let frames = v["total_frames"].as_u64();
+                        let p99 = v["frame_time"]["p99"].as_u64();
+                        Some(SceneMetrics {
+                            ssim_score: None,
+                            frames_rendered: frames,
+                            frame_time_p99_us: p99,
+                            lease_violations: 0,
+                            budget_overruns: 0,
+                        })
                     })
-                })
-                .unwrap_or_default()
-        });
+                    .unwrap_or_default()
+            });
 
         let input = SceneArtifactInput {
             description: desc,
@@ -343,20 +350,17 @@ fn load_benchmark_artifacts(
     builder: &mut ArtifactBuilder,
     path: &PathBuf,
 ) -> Result<usize, String> {
-    let json_bytes =
-        std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let json_bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
 
-    let bench: BenchmarkOutput = serde_json::from_slice(&json_bytes)
-        .map_err(|e| format!("parse benchmark JSON: {e}"))?;
+    let bench: BenchmarkOutput =
+        serde_json::from_slice(&json_bytes).map_err(|e| format!("parse benchmark JSON: {e}"))?;
 
     let mut count = 0;
     for session in &bench.sessions {
-        let telemetry_json =
-            serde_json::to_vec_pretty(&session.summary)
-                .map_err(|e| format!("re-serialise session: {e}"))?;
-        let histogram_json =
-            serde_json::to_vec_pretty(&session.summary)
-                .map_err(|e| format!("histogram placeholder: {e}"))?;
+        let telemetry_json = serde_json::to_vec_pretty(&session.summary)
+            .map_err(|e| format!("re-serialise session: {e}"))?;
+        let histogram_json = serde_json::to_vec_pretty(&session.summary)
+            .map_err(|e| format!("histogram placeholder: {e}"))?;
 
         let input = BenchmarkArtifactInput {
             name: session.name.clone(),
@@ -404,8 +408,14 @@ mod tests {
 
         // Verify the exact expected output files are present in the run directory.
         let run_dir = tmp.join(&manifest.run_id);
-        assert!(run_dir.join("manifest.json").exists(), "manifest.json must exist in run dir");
-        assert!(run_dir.join("index.html").exists(), "index.html must exist in run dir");
+        assert!(
+            run_dir.join("manifest.json").exists(),
+            "manifest.json must exist in run dir"
+        );
+        assert!(
+            run_dir.join("index.html").exists(),
+            "index.html must exist in run dir"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

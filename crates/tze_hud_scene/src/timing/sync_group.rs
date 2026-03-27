@@ -216,7 +216,10 @@ mod tests {
         let result = check_sync_group_ownership("agent.a", "agent.b", "agent.a");
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("agent.b"), "error should name the foreign tile namespace");
+        assert!(
+            msg.contains("agent.b"),
+            "error should name the foreign tile namespace"
+        );
     }
 
     #[test]
@@ -224,7 +227,10 @@ mod tests {
         let result = check_sync_group_ownership("agent.a", "agent.a", "agent.b");
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("agent.b"), "error should name the foreign group namespace");
+        assert!(
+            msg.contains("agent.b"),
+            "error should name the foreign group namespace"
+        );
     }
 
     // ── SyncGroupEvent ────────────────────────────────────────────────────────

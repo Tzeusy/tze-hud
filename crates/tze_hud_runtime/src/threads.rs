@@ -35,8 +35,8 @@
 //! 7. Release resources (reference counts reach zero)
 //! 8. Exit process (0 = clean, non-zero = error)
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::runtime::Runtime;
@@ -311,10 +311,7 @@ impl NetworkRuntime {
 ///
 /// The closure `f` should drain telemetry records and emit them (e.g., to
 /// stdout as JSON). It receives the shutdown token so it can flush on exit.
-pub fn spawn_telemetry_thread<F>(
-    shutdown: ShutdownToken,
-    f: F,
-) -> std::thread::JoinHandle<()>
+pub fn spawn_telemetry_thread<F>(shutdown: ShutdownToken, f: F) -> std::thread::JoinHandle<()>
 where
     F: FnOnce(ShutdownToken) + Send + 'static,
 {
@@ -516,12 +513,12 @@ mod tests {
         let exit_code = graceful_shutdown(
             ShutdownReason::Clean,
             &config,
-            || {},                               // stop_accepting
-            async {},                            // drain_mutations
-            || {},                               // revoke_all_leases
-            async {},                            // flush_telemetry
-            || {},                               // terminate_sessions
-            || {},                               // gpu_drain
+            || {},    // stop_accepting
+            async {}, // drain_mutations
+            || {},    // revoke_all_leases
+            async {}, // flush_telemetry
+            || {},    // terminate_sessions
+            || {},    // gpu_drain
         )
         .await;
         assert_eq!(exit_code, 0);

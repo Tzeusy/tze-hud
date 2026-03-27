@@ -344,11 +344,9 @@ mod tests {
         let proc = KeyboardProcessor::new();
 
         let dispatch = proc
-            .process_key_down(
-                &make_key_down("KeyA", "a"),
-                &focus,
-                |_| Some("agent-ns".to_string()),
-            )
+            .process_key_down(&make_key_down("KeyA", "a"), &focus, |_| {
+                Some("agent-ns".to_string())
+            })
             .expect("expected KeyboardDispatch for focused node");
 
         assert_eq!(dispatch.namespace, "agent-ns");
@@ -356,7 +354,12 @@ mod tests {
         assert_eq!(dispatch.node_id, Some(node_id));
 
         match dispatch.kind {
-            KeyboardDispatchKind::KeyDown { key_code, key, repeat, .. } => {
+            KeyboardDispatchKind::KeyDown {
+                key_code,
+                key,
+                repeat,
+                ..
+            } => {
                 assert_eq!(key_code, "KeyA");
                 assert_eq!(key, "a");
                 assert!(!repeat);
@@ -374,11 +377,7 @@ mod tests {
         let proc = KeyboardProcessor::new();
 
         let dispatch = proc
-            .process_character(
-                &make_char("a"),
-                &focus,
-                |_| Some("agent-ns".to_string()),
-            )
+            .process_character(&make_char("a"), &focus, |_| Some("agent-ns".to_string()))
             .expect("expected CharacterDispatch for focused node");
 
         assert_eq!(dispatch.node_id, Some(node_id));
@@ -401,7 +400,10 @@ mod tests {
         // Unicode character beyond ASCII
         let dispatch = proc
             .process_character(
-                &RawCharacterEvent { character: "é".to_string(), timestamp_mono_us: MonoUs(100) },
+                &RawCharacterEvent {
+                    character: "é".to_string(),
+                    timestamp_mono_us: MonoUs(100),
+                },
                 &focus,
                 |_| Some("ns".to_string()),
             )
@@ -448,7 +450,11 @@ mod tests {
             })
             .expect("initial dispatch to node");
 
-        assert_eq!(dispatch.node_id, Some(node_id), "initial dispatch targets node");
+        assert_eq!(
+            dispatch.node_id,
+            Some(node_id),
+            "initial dispatch targets node"
+        );
 
         // Node did not consume — bubble to tile.
         let bubbled = proc
@@ -482,9 +488,12 @@ mod tests {
     fn no_dispatch_when_focus_is_none() {
         let focus = FocusOwner::None;
         let proc = KeyboardProcessor::new();
-        assert!(proc
-            .process_key_down(&make_key_down("KeyA", "a"), &focus, |_| Some("ns".to_string()))
-            .is_none());
+        assert!(
+            proc.process_key_down(&make_key_down("KeyA", "a"), &focus, |_| Some(
+                "ns".to_string()
+            ))
+            .is_none()
+        );
     }
 
     /// No dispatch when focus is on a chrome element.
@@ -493,9 +502,12 @@ mod tests {
         let chrome_id = SceneId::new();
         let focus = FocusOwner::ChromeElement(chrome_id);
         let proc = KeyboardProcessor::new();
-        assert!(proc
-            .process_key_down(&make_key_down("KeyA", "a"), &focus, |_| Some("ns".to_string()))
-            .is_none());
+        assert!(
+            proc.process_key_down(&make_key_down("KeyA", "a"), &focus, |_| Some(
+                "ns".to_string()
+            ))
+            .is_none()
+        );
     }
 
     /// Tile-level focus routes to tile (node_id = None).
@@ -598,7 +610,9 @@ mod tests {
             .unwrap();
 
         match dispatch.kind {
-            KeyboardDispatchKind::KeyDown { timestamp_mono_us, .. } => {
+            KeyboardDispatchKind::KeyDown {
+                timestamp_mono_us, ..
+            } => {
                 assert_eq!(timestamp_mono_us, MonoUs(99_999));
             }
             _ => panic!(),

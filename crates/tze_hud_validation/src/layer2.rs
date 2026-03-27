@@ -25,10 +25,10 @@
 //!
 //! Acceptance criterion: SSIM 0.996 passes layout, 0.993 fails.
 
-use crate::diff::{generate_heatmap, SsimFailureRecord};
+use crate::diff::{SsimFailureRecord, generate_heatmap};
 use crate::error::ValidationError;
-use crate::golden::{find_golden_dir, GoldenStore};
-use crate::phash::{pre_screen, PreScreenResult};
+use crate::golden::{GoldenStore, find_golden_dir};
+use crate::phash::{PreScreenResult, pre_screen};
 use crate::ssim::compute_ssim;
 use std::path::PathBuf;
 
@@ -87,7 +87,9 @@ pub struct Layer2Validator {
 impl Layer2Validator {
     /// Create a validator pointing at a specific golden directory.
     pub fn new(golden_dir: impl AsRef<std::path::Path>) -> Self {
-        Self { store: GoldenStore::new(golden_dir) }
+        Self {
+            store: GoldenStore::new(golden_dir),
+        }
     }
 
     /// Create a validator that auto-discovers the workspace golden directory.
@@ -224,7 +226,8 @@ impl Layer2Validator {
         width: u32,
         height: u32,
     ) -> Result<PathBuf, ValidationError> {
-        self.store.update(scene_name, backend, pixels, width, height)
+        self.store
+            .update(scene_name, backend, pixels, width, height)
     }
 }
 
@@ -246,9 +249,8 @@ mod tests {
     }
 
     fn temp_validator_named(name: &str) -> (std::path::PathBuf, Layer2Validator) {
-        let dir = std::env::temp_dir()
-            .join(format!("tze_hud_layer2_{}_{}",
-                name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("tze_hud_layer2_{}_{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let v = Layer2Validator::new(&dir);
@@ -260,8 +262,18 @@ mod tests {
     fn compare_missing_golden_returns_error() {
         let (dir, v) = temp_validator_named("missing");
         let pixels = solid_rgba(64, 64, 100, 100, 100);
-        let result = v.compare("no_such_scene", "software", TestType::Layout, &pixels, 64, 64);
-        assert!(matches!(result, Err(ValidationError::GoldenNotFound { .. })));
+        let result = v.compare(
+            "no_such_scene",
+            "software",
+            TestType::Layout,
+            &pixels,
+            64,
+            64,
+        );
+        assert!(matches!(
+            result,
+            Err(ValidationError::GoldenNotFound { .. })
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -271,9 +283,11 @@ mod tests {
         let (dir, v) = temp_validator_named("identical");
         let pixels = solid_rgba(64, 64, 200, 100, 50);
         // Write golden.
-        v.update_golden("test_scene", "software", &pixels, 64, 64).unwrap();
+        v.update_golden("test_scene", "software", &pixels, 64, 64)
+            .unwrap();
         // Compare identical.
-        let outcome = v.compare("test_scene", "software", TestType::Layout, &pixels, 64, 64)
+        let outcome = v
+            .compare("test_scene", "software", TestType::Layout, &pixels, 64, 64)
             .expect("identical images must pass");
         assert!(outcome.passed);
         let _ = fs::remove_dir_all(&dir);
@@ -284,10 +298,21 @@ mod tests {
     fn dimension_mismatch_returns_error() {
         let (dir, v) = temp_validator_named("dimmismatch");
         let golden = solid_rgba(64, 64, 100, 100, 100);
-        v.update_golden("dim_scene", "software", &golden, 64, 64).unwrap();
+        v.update_golden("dim_scene", "software", &golden, 64, 64)
+            .unwrap();
         let rendered = solid_rgba(128, 64, 100, 100, 100);
-        let result = v.compare("dim_scene", "software", TestType::Layout, &rendered, 128, 64);
-        assert!(matches!(result, Err(ValidationError::DimensionMismatch { .. })));
+        let result = v.compare(
+            "dim_scene",
+            "software",
+            TestType::Layout,
+            &rendered,
+            128,
+            64,
+        );
+        assert!(matches!(
+            result,
+            Err(ValidationError::DimensionMismatch { .. })
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -299,12 +324,27 @@ mod tests {
         let (dir, v) = temp_validator_named("different");
         let golden = solid_rgba(64, 64, 0, 0, 0);
         let rendered = solid_rgba(64, 64, 255, 255, 255);
-        v.update_golden("diff_scene", "software", &golden, 64, 64).unwrap();
-        let outcome = v.compare("diff_scene", "software", TestType::Layout, &rendered, 64, 64)
+        v.update_golden("diff_scene", "software", &golden, 64, 64)
+            .unwrap();
+        let outcome = v
+            .compare(
+                "diff_scene",
+                "software",
+                TestType::Layout,
+                &rendered,
+                64,
+                64,
+            )
             .expect("compare should return Ok even on regression");
         assert!(!outcome.passed, "black vs white must fail layout threshold");
-        assert!(!outcome.heatmap_pixels.is_empty(), "failure outcome must include heatmap pixels");
-        assert!(!outcome.record.regions.is_empty(), "failure outcome must include per-region scores");
+        assert!(
+            !outcome.heatmap_pixels.is_empty(),
+            "failure outcome must include heatmap pixels"
+        );
+        assert!(
+            !outcome.record.regions.is_empty(),
+            "failure outcome must include per-region scores"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -364,7 +404,15 @@ mod tests {
     /// TestType threshold constants match spec values.
     #[test]
     fn test_type_threshold_constants() {
-        assert_eq!(TestType::Layout.threshold(), 0.995, "layout threshold must be 0.995");
-        assert_eq!(TestType::MediaComposition.threshold(), 0.990, "media threshold must be 0.990");
+        assert_eq!(
+            TestType::Layout.threshold(),
+            0.995,
+            "layout threshold must be 0.995"
+        );
+        assert_eq!(
+            TestType::MediaComposition.threshold(),
+            0.990,
+            "media threshold must be 0.990"
+        );
     }
 }

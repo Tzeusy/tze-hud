@@ -95,15 +95,17 @@ pub struct HitRegion {
 
 impl HitRegion {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Returns `true` if the point (px, py) is inside this region.
     pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x
-            && px < self.x + self.width
-            && py >= self.y
-            && py < self.y + self.height
+        px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
     }
 }
 
@@ -243,10 +245,10 @@ mod tests {
     #[test]
     fn hit_region_does_not_contain_exterior_point() {
         let r = HitRegion::new(10.0, 20.0, 100.0, 50.0);
-        assert!(!r.contains(5.0, 40.0));   // left of region
+        assert!(!r.contains(5.0, 40.0)); // left of region
         assert!(!r.contains(115.0, 40.0)); // right of region
-        assert!(!r.contains(60.0, 15.0));  // above region
-        assert!(!r.contains(60.0, 75.0));  // below region
+        assert!(!r.contains(60.0, 15.0)); // above region
+        assert!(!r.contains(60.0, 75.0)); // below region
     }
 
     #[test]

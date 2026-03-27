@@ -67,13 +67,31 @@ pub fn rect_vertices(
 
     [
         // Triangle 1
-        RectVertex { position: [left, top], color },
-        RectVertex { position: [right, top], color },
-        RectVertex { position: [left, bottom], color },
+        RectVertex {
+            position: [left, top],
+            color,
+        },
+        RectVertex {
+            position: [right, top],
+            color,
+        },
+        RectVertex {
+            position: [left, bottom],
+            color,
+        },
         // Triangle 2
-        RectVertex { position: [right, top], color },
-        RectVertex { position: [right, bottom], color },
-        RectVertex { position: [left, bottom], color },
+        RectVertex {
+            position: [right, top],
+            color,
+        },
+        RectVertex {
+            position: [right, bottom],
+            color,
+        },
+        RectVertex {
+            position: [left, bottom],
+            color,
+        },
     ]
 }
 

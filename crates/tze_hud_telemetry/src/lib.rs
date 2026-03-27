@@ -5,18 +5,16 @@
 //! Satisfies DR-V3: Structured telemetry.
 //! Satisfies DR-V8: Soak and leak test resource monitoring.
 
-pub mod record;
 pub mod collector;
+pub mod record;
 pub mod resource_monitor;
 pub mod validation;
 
-pub use record::{
-    FrameTelemetry, SessionSummary, LatencyBucket,
-    BudgetTier, BudgetViolationKind, BudgetViolationEvent, FrameTimeShedEvent,
-    DegradationEvent, DegradationDirection,
-    CalibrationStatus,
-};
 pub use collector::{FrameRecorder, TelemetryCollector};
+pub use record::{
+    BudgetTier, BudgetViolationEvent, BudgetViolationKind, CalibrationStatus, DegradationDirection,
+    DegradationEvent, FrameTelemetry, FrameTimeShedEvent, LatencyBucket, SessionSummary,
+};
 pub use resource_monitor::{
     AgentFootprint, GrowthRatios, ResourceMonitor, ResourceSnapshot, SPEC_GROWTH_TOLERANCE,
 };

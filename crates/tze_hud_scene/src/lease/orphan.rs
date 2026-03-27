@@ -91,7 +91,11 @@ pub struct GracePeriodTimer {
 impl GracePeriodTimer {
     /// Create a new `GracePeriodTimer`.
     pub fn new(lease_id: SceneId, orphaned_at_ms: u64, grace_ms: u64) -> Self {
-        Self { lease_id, orphaned_at_ms, grace_ms }
+        Self {
+            lease_id,
+            orphaned_at_ms,
+            grace_ms,
+        }
     }
 
     /// Milliseconds elapsed since orphaning.
@@ -177,9 +181,7 @@ pub enum ZonePublishResult {
 ///   publishes rejected)
 /// - SUSPENDED → `RejectedSafeModeActive`
 /// - terminal states → `RejectedLeaseTerminal`
-pub fn check_zone_publish_allowed(
-    lease_state: crate::lease::LeaseState,
-) -> ZonePublishResult {
+pub fn check_zone_publish_allowed(lease_state: crate::lease::LeaseState) -> ZonePublishResult {
     use crate::lease::LeaseState;
     match lease_state {
         LeaseState::Active => ZonePublishResult::Accepted,
@@ -304,11 +306,17 @@ mod tests {
     #[test]
     fn zone_publish_rejected_when_terminal() {
         use crate::lease::LeaseState;
-        for state in [LeaseState::Revoked, LeaseState::Expired, LeaseState::Released, LeaseState::Denied] {
+        for state in [
+            LeaseState::Revoked,
+            LeaseState::Expired,
+            LeaseState::Released,
+            LeaseState::Denied,
+        ] {
             assert_eq!(
                 check_zone_publish_allowed(state),
                 ZonePublishResult::RejectedLeaseTerminal,
-                "expected RejectedLeaseTerminal for {:?}", state
+                "expected RejectedLeaseTerminal for {:?}",
+                state
             );
         }
     }

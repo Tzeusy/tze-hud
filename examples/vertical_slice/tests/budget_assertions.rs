@@ -34,8 +34,7 @@ use tze_hud_input::{PointerEvent, PointerEventKind};
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::calibration::{
-    current_calibration_with_gpu, gpu_scaled_budget, set_gpu_factors,
-    texture_upload_scaled_budget,
+    current_calibration_with_gpu, gpu_scaled_budget, set_gpu_factors, texture_upload_scaled_budget,
 };
 use tze_hud_scene::diff::SceneDiff;
 use tze_hud_scene::graph::SceneGraph;
@@ -263,7 +262,13 @@ async fn test_frame_time_p99_within_budget() {
         let tab = scene.create_tab("Main", 0).unwrap();
         let lease = scene.grant_lease("test-agent", 60_000, vec![]);
         scene
-            .create_tile(tab, "test-agent", lease, Rect::new(10.0, 10.0, 200.0, 100.0), 1)
+            .create_tile(
+                tab,
+                "test-agent",
+                lease,
+                Rect::new(10.0, 10.0, 200.0, 100.0),
+                1,
+            )
             .unwrap();
     }
 
@@ -316,7 +321,7 @@ async fn test_frame_time_p99_within_budget() {
 /// via the CPU scene-graph calibration factor (`test_budget`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_input_to_local_ack_p99_within_budget() {
-    use tze_hud_scene::calibration::{test_budget, budgets::INPUT_ACK_BUDGET_US};
+    use tze_hud_scene::calibration::{budgets::INPUT_ACK_BUDGET_US, test_budget};
     let budget_us = test_budget(INPUT_ACK_BUDGET_US);
     const EVENT_COUNT: usize = 30;
 
@@ -336,7 +341,13 @@ async fn test_input_to_local_ack_p99_within_budget() {
         let tab = scene.create_tab("Main", 0).unwrap();
         let lease = scene.grant_lease("test-agent", 60_000, vec![]);
         let tile = scene
-            .create_tile(tab, "test-agent", lease, Rect::new(100.0, 100.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab,
+                "test-agent",
+                lease,
+                Rect::new(100.0, 100.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
         scene
             .set_tile_root(
@@ -373,8 +384,16 @@ async fn test_input_to_local_ack_p99_within_budget() {
             );
             (result.local_ack_us, result.hit_test_us)
         };
-        runtime.telemetry.summary_mut().input_to_local_ack.record(local_ack_us);
-        runtime.telemetry.summary_mut().hit_test_latency.record(hit_test_us);
+        runtime
+            .telemetry
+            .summary_mut()
+            .input_to_local_ack
+            .record(local_ack_us);
+        runtime
+            .telemetry
+            .summary_mut()
+            .hit_test_latency
+            .record(hit_test_us);
     }
 
     let summary = runtime.telemetry.summary();
@@ -487,7 +506,13 @@ async fn test_input_to_next_present_p99_within_budget() {
         let tab = scene.create_tab("Main", 0).unwrap();
         let lease = scene.grant_lease("test-agent", 60_000, vec![]);
         scene
-            .create_tile(tab, "test-agent", lease, Rect::new(10.0, 10.0, 200.0, 100.0), 1)
+            .create_tile(
+                tab,
+                "test-agent",
+                lease,
+                Rect::new(10.0, 10.0, 200.0, 100.0),
+                1,
+            )
             .unwrap();
     }
 
@@ -528,7 +553,7 @@ async fn test_input_to_next_present_p99_within_budget() {
 /// scene-graph calibration factor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_hit_test_p99_within_budget() {
-    use tze_hud_scene::calibration::{test_budget, budgets::HIT_TEST_BUDGET_US};
+    use tze_hud_scene::calibration::{budgets::HIT_TEST_BUDGET_US, test_budget};
     let budget_us = test_budget(HIT_TEST_BUDGET_US);
     const EVENT_COUNT: usize = 50;
 
@@ -547,7 +572,13 @@ async fn test_hit_test_p99_within_budget() {
         let tab = scene.create_tab("Main", 0).unwrap();
         let lease = scene.grant_lease("test-agent", 60_000, vec![]);
         let tile = scene
-            .create_tile(tab, "test-agent", lease, Rect::new(50.0, 50.0, 400.0, 400.0), 1)
+            .create_tile(
+                tab,
+                "test-agent",
+                lease,
+                Rect::new(50.0, 50.0, 400.0, 400.0),
+                1,
+            )
             .unwrap();
         scene
             .set_tile_root(
@@ -584,7 +615,11 @@ async fn test_hit_test_p99_within_budget() {
             );
             result.hit_test_us
         };
-        runtime.telemetry.summary_mut().hit_test_latency.record(hit_test_us);
+        runtime
+            .telemetry
+            .summary_mut()
+            .hit_test_latency
+            .record(hit_test_us);
     }
 
     let summary = runtime.telemetry.summary();
@@ -613,8 +648,8 @@ async fn test_hit_test_p99_within_budget() {
 ///      lines 137-157 (Requirement: Hardware-Normalized Calibration Harness)
 #[test]
 fn test_transaction_validation_p99_within_budget() {
-    use tze_hud_scene::calibration::test_budget;
     use tze_hud_scene::calibration::budgets::TRANSACTION_VALIDATION_BUDGET_US;
+    use tze_hud_scene::calibration::test_budget;
 
     // CPU-calibrated budget for this machine. On reference hardware this is
     // 200µs; on slow CI with high load it scales proportionally.
@@ -669,7 +704,7 @@ fn test_transaction_validation_p99_within_budget() {
 /// is scaled by the CPU scene-graph calibration factor.
 #[test]
 fn test_scene_diff_p99_within_budget() {
-    use tze_hud_scene::calibration::{test_budget, budgets::SCENE_DIFF_BUDGET_US};
+    use tze_hud_scene::calibration::{budgets::SCENE_DIFF_BUDGET_US, test_budget};
     let budget_us = test_budget(SCENE_DIFF_BUDGET_US);
     const DIFF_COUNT: usize = 50;
 
@@ -756,7 +791,12 @@ async fn test_texture_upload_p99_within_budget() {
     // Ensure there is an active tab for tile creation.
     {
         let state = runtime.shared_state().lock().await;
-        state.scene.lock().await.create_tab("upload-test", 0).unwrap();
+        state
+            .scene
+            .lock()
+            .await
+            .create_tab("upload-test", 0)
+            .unwrap();
     }
 
     // Create one lease up-front and reuse it for all rounds to avoid lease
@@ -992,7 +1032,13 @@ async fn test_layer1_pixel_readback_z_order() {
 
         // Tile A at z=1 (blue)
         let tile_a = scene
-            .create_tile(tab, "agent", lease, Rect::new(100.0, 100.0, 300.0, 200.0), 1)
+            .create_tile(
+                tab,
+                "agent",
+                lease,
+                Rect::new(100.0, 100.0, 300.0, 200.0),
+                1,
+            )
             .unwrap();
         scene
             .set_tile_root(
@@ -1010,7 +1056,13 @@ async fn test_layer1_pixel_readback_z_order() {
 
         // Tile B at z=2 (red) — overlaps the center of Tile A
         let tile_b = scene
-            .create_tile(tab, "agent", lease, Rect::new(150.0, 150.0, 100.0, 100.0), 2)
+            .create_tile(
+                tab,
+                "agent",
+                lease,
+                Rect::new(150.0, 150.0, 100.0, 100.0),
+                2,
+            )
             .unwrap();
         scene
             .set_tile_root(
@@ -1115,10 +1167,16 @@ const BG_TOLERANCE: u8 = 8;
 async fn test_scene_empty_scene_pixels() {
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
-    let (scene, _spec) = registry.build("empty_scene", ClockMs::FIXED).expect("build failed");
+    let (scene, _spec) = registry
+        .build("empty_scene", ClockMs::FIXED)
+        .expect("build failed");
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
-    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert_eq!(
+        pixels.len(),
+        (SCENE_W * SCENE_H * 4) as usize,
+        "pixel buffer size"
+    );
 
     // Sample every 50th pixel — all should be the background clear color (no tiles).
     for i in (0..SCENE_W * SCENE_H).step_by(50) {
@@ -1148,17 +1206,24 @@ async fn test_scene_empty_scene_pixels() {
 async fn test_scene_single_tile_solid_pixels() {
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
-    let (scene, _spec) = registry.build("single_tile_solid", ClockMs::FIXED).expect("build failed");
+    let (scene, _spec) = registry
+        .build("single_tile_solid", ClockMs::FIXED)
+        .expect("build failed");
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
-    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert_eq!(
+        pixels.len(),
+        (SCENE_W * SCENE_H * 4) as usize,
+        "pixel buffer size"
+    );
 
     // Tile background (0.08, 0.08, 0.15) linear → sRGB ≈ (75, 75, 106)
     // We use a wide tolerance because the tile color is close to the background.
     // The center of the tile (400, 300) should definitely not be pure-BG.
     let tile_center = HeadlessSurface::pixel_at(&pixels, SCENE_W, 400, 300);
     assert_ne!(
-        tile_center, [0u8, 0, 0, 0],
+        tile_center,
+        [0u8, 0, 0, 0],
         "tile center must not be all-zero — compositor must render something"
     );
     // The tile background is darker than the compositor clear blue (89 on channel 2).
@@ -1171,7 +1236,10 @@ async fn test_scene_single_tile_solid_pixels() {
         let b_diff = (p[2] as i16 - BG_SRGB[2] as i16).unsigned_abs();
         r_diff > 10 || g_diff > 10 || b_diff > 10
     });
-    assert!(non_bg, "single_tile_solid: tile pixels must differ from background");
+    assert!(
+        non_bg,
+        "single_tile_solid: tile pixels must differ from background"
+    );
 }
 
 // ─── three_tiles_no_overlap ───────────────────────────────────────────────────
@@ -1182,10 +1250,16 @@ async fn test_scene_single_tile_solid_pixels() {
 async fn test_scene_three_tiles_no_overlap_pixels() {
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
-    let (scene, _spec) = registry.build("three_tiles_no_overlap", ClockMs::FIXED).expect("build failed");
+    let (scene, _spec) = registry
+        .build("three_tiles_no_overlap", ClockMs::FIXED)
+        .expect("build failed");
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
-    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert_eq!(
+        pixels.len(),
+        (SCENE_W * SCENE_H * 4) as usize,
+        "pixel buffer size"
+    );
     assert_eq!(pixels.len() % 4, 0, "pixel buffer must be RGBA8 aligned");
 }
 
@@ -1197,10 +1271,16 @@ async fn test_scene_three_tiles_no_overlap_pixels() {
 async fn test_scene_max_tiles_stress_pixels() {
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
-    let (scene, _spec) = registry.build("max_tiles_stress", ClockMs::FIXED).expect("build failed");
+    let (scene, _spec) = registry
+        .build("max_tiles_stress", ClockMs::FIXED)
+        .expect("build failed");
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
-    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert_eq!(
+        pixels.len(),
+        (SCENE_W * SCENE_H * 4) as usize,
+        "pixel buffer size"
+    );
     assert!(
         pixels.iter().any(|&b| b > 0),
         "max_tiles_stress: frame must not be all-zero"
@@ -1220,10 +1300,16 @@ async fn test_scene_max_tiles_stress_pixels() {
 async fn test_scene_overlapping_tiles_zorder_pixels() {
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
-    let (scene, _spec) = registry.build("overlapping_tiles_zorder", ClockMs::FIXED).expect("build failed");
+    let (scene, _spec) = registry
+        .build("overlapping_tiles_zorder", ClockMs::FIXED)
+        .expect("build failed");
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
-    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert_eq!(
+        pixels.len(),
+        (SCENE_W * SCENE_H * 4) as usize,
+        "pixel buffer size"
+    );
 
     // At the overlap region (400, 250), the z=3 tile (blue 0.2, 0.2, 0.8) should dominate.
     // sRGB ≈ (124, 124, 226).  Tolerance ±10 for software GPU variance.
@@ -1243,10 +1329,16 @@ async fn test_scene_overlapping_tiles_zorder_pixels() {
 async fn test_scene_overlay_transparency_pixels() {
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
-    let (scene, _spec) = registry.build("overlay_transparency", ClockMs::FIXED).expect("build failed");
+    let (scene, _spec) = registry
+        .build("overlay_transparency", ClockMs::FIXED)
+        .expect("build failed");
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
-    assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize, "pixel buffer size");
+    assert_eq!(
+        pixels.len(),
+        (SCENE_W * SCENE_H * 4) as usize,
+        "pixel buffer size"
+    );
     assert!(
         pixels.iter().any(|&b| b > 10),
         "overlay_transparency: frame must not be near-zero"
@@ -1273,8 +1365,7 @@ macro_rules! scene_render_test {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn $test_name() {
             let mut runtime = make_scene_runtime().await;
-            let registry =
-                TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
+            let registry = TestSceneRegistry::with_display(SCENE_W as f32, SCENE_H as f32);
             let (scene, _spec) = registry
                 .build($scene_name, ClockMs::FIXED)
                 .expect(concat!("build failed for ", $scene_name));
@@ -1300,16 +1391,52 @@ scene_render_test!(test_scene_mobile_degraded_pixels, "mobile_degraded");
 scene_render_test!(test_scene_sync_group_media_pixels, "sync_group_media");
 scene_render_test!(test_scene_input_highlight_pixels, "input_highlight");
 scene_render_test!(test_scene_coalesced_dashboard_pixels, "coalesced_dashboard");
-scene_render_test!(test_scene_three_agents_contention_pixels, "three_agents_contention");
-scene_render_test!(test_scene_overlay_passthrough_regions_pixels, "overlay_passthrough_regions");
-scene_render_test!(test_scene_disconnect_reclaim_multiagent_pixels, "disconnect_reclaim_multiagent");
-scene_render_test!(test_scene_privacy_redaction_mode_pixels, "privacy_redaction_mode");
-scene_render_test!(test_scene_chatty_dashboard_touch_pixels, "chatty_dashboard_touch");
-scene_render_test!(test_scene_zone_publish_subtitle_pixels, "zone_publish_subtitle");
-scene_render_test!(test_scene_zone_reject_wrong_type_pixels, "zone_reject_wrong_type");
-scene_render_test!(test_scene_zone_conflict_two_publishers_pixels, "zone_conflict_two_publishers");
-scene_render_test!(test_scene_zone_orchestrate_then_publish_pixels, "zone_orchestrate_then_publish");
-scene_render_test!(test_scene_zone_geometry_adapts_profile_pixels, "zone_geometry_adapts_profile");
-scene_render_test!(test_scene_zone_disconnect_cleanup_pixels, "zone_disconnect_cleanup");
+scene_render_test!(
+    test_scene_three_agents_contention_pixels,
+    "three_agents_contention"
+);
+scene_render_test!(
+    test_scene_overlay_passthrough_regions_pixels,
+    "overlay_passthrough_regions"
+);
+scene_render_test!(
+    test_scene_disconnect_reclaim_multiagent_pixels,
+    "disconnect_reclaim_multiagent"
+);
+scene_render_test!(
+    test_scene_privacy_redaction_mode_pixels,
+    "privacy_redaction_mode"
+);
+scene_render_test!(
+    test_scene_chatty_dashboard_touch_pixels,
+    "chatty_dashboard_touch"
+);
+scene_render_test!(
+    test_scene_zone_publish_subtitle_pixels,
+    "zone_publish_subtitle"
+);
+scene_render_test!(
+    test_scene_zone_reject_wrong_type_pixels,
+    "zone_reject_wrong_type"
+);
+scene_render_test!(
+    test_scene_zone_conflict_two_publishers_pixels,
+    "zone_conflict_two_publishers"
+);
+scene_render_test!(
+    test_scene_zone_orchestrate_then_publish_pixels,
+    "zone_orchestrate_then_publish"
+);
+scene_render_test!(
+    test_scene_zone_geometry_adapts_profile_pixels,
+    "zone_geometry_adapts_profile"
+);
+scene_render_test!(
+    test_scene_zone_disconnect_cleanup_pixels,
+    "zone_disconnect_cleanup"
+);
 scene_render_test!(test_scene_policy_matrix_basic_pixels, "policy_matrix_basic");
-scene_render_test!(test_scene_policy_arbitration_collision_pixels, "policy_arbitration_collision");
+scene_render_test!(
+    test_scene_policy_arbitration_collision_pixels,
+    "policy_arbitration_collision"
+);

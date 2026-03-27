@@ -7,6 +7,4 @@
 //! See `tze_hud_scene::events::emission` for the full implementation and
 //! spec references.
 
-pub use tze_hud_scene::events::emission::{
-    AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND,
-};
+pub use tze_hud_scene::events::emission::{AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND};

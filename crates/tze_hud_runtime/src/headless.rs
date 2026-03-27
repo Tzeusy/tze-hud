@@ -41,21 +41,21 @@
 //! Tests that don't exercise the session layer use this to skip server startup.
 
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
-use crate::runtime_context::{FallbackPolicy, RuntimeContext};
 use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
+use crate::runtime_context::{FallbackPolicy, RuntimeContext};
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
 use tze_hud_compositor::{Compositor, HeadlessSurface};
 use tze_hud_config::TzeHudConfig;
-use tze_hud_scene::config::ConfigLoader;
 use tze_hud_input::InputProcessor;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
+use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_telemetry::{TelemetryCollector, FrameTelemetry};
-use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::Mutex;
+use tze_hud_telemetry::{FrameTelemetry, TelemetryCollector};
 
 /// Configuration for the headless runtime.
 pub struct HeadlessConfig {
@@ -121,7 +121,9 @@ impl HeadlessConfig {
     /// that supplied a config string intended to run with restricted capabilities;
     /// silently upgrading to unrestricted on parse failure would be a security
     /// regression.
-    pub fn build_runtime_context(&self) -> Result<(RuntimeContext, bool), Box<dyn std::error::Error>> {
+    pub fn build_runtime_context(
+        &self,
+    ) -> Result<(RuntimeContext, bool), Box<dyn std::error::Error>> {
         match &self.config_toml {
             None => {
                 #[cfg(any(test, feature = "dev-mode"))]
@@ -140,48 +142,46 @@ impl HeadlessConfig {
                     );
                 }
             }
-            Some(toml) => {
-                match TzeHudConfig::parse(toml) {
-                    Err(e) => {
+            Some(toml) => match TzeHudConfig::parse(toml) {
+                Err(e) => {
+                    tracing::warn!(
+                        parse_error = %e.message,
+                        line = e.line,
+                        column = e.column,
+                        "HeadlessConfig: TOML parse error; using headless-default RuntimeContext (guest fallback)"
+                    );
+                    Ok((RuntimeContext::headless_default(), false))
+                }
+                Ok(mut loader) => {
+                    loader.normalize();
+                    let errors = loader.validate();
+                    if !errors.is_empty() {
                         tracing::warn!(
-                            parse_error = %e.message,
-                            line = e.line,
-                            column = e.column,
-                            "HeadlessConfig: TOML parse error; using headless-default RuntimeContext (guest fallback)"
+                            error_count = errors.len(),
+                            "HeadlessConfig: config validation errors; using headless-default RuntimeContext (guest fallback)"
                         );
-                        Ok((RuntimeContext::headless_default(), false))
+                        return Ok((RuntimeContext::headless_default(), false));
                     }
-                    Ok(mut loader) => {
-                        loader.normalize();
-                        let errors = loader.validate();
-                        if !errors.is_empty() {
+                    match loader.freeze() {
+                        Ok(resolved) => {
+                            tracing::info!(
+                                profile = %resolved.profile.name,
+                                agent_count = resolved.agent_capabilities.len(),
+                                "HeadlessConfig: loaded RuntimeContext from config"
+                            );
+                            let ctx = RuntimeContext::from_config(resolved, FallbackPolicy::Guest);
+                            Ok((ctx, false))
+                        }
+                        Err(errors) => {
                             tracing::warn!(
                                 error_count = errors.len(),
-                                "HeadlessConfig: config validation errors; using headless-default RuntimeContext (guest fallback)"
+                                "HeadlessConfig: config freeze errors; using headless-default RuntimeContext (guest fallback)"
                             );
-                            return Ok((RuntimeContext::headless_default(), false));
-                        }
-                        match loader.freeze() {
-                            Ok(resolved) => {
-                                tracing::info!(
-                                    profile = %resolved.profile.name,
-                                    agent_count = resolved.agent_capabilities.len(),
-                                    "HeadlessConfig: loaded RuntimeContext from config"
-                                );
-                                let ctx = RuntimeContext::from_config(resolved, FallbackPolicy::Guest);
-                                Ok((ctx, false))
-                            }
-                            Err(errors) => {
-                                tracing::warn!(
-                                    error_count = errors.len(),
-                                    "HeadlessConfig: config freeze errors; using headless-default RuntimeContext (guest fallback)"
-                                );
-                                Ok((RuntimeContext::headless_default(), false))
-                            }
+                            Ok((RuntimeContext::headless_default(), false))
                         }
                     }
                 }
-            }
+            },
         }
     }
 }
@@ -235,7 +235,10 @@ impl HeadlessRuntime {
         let compositor = Compositor::new_headless(config.width, config.height).await?;
         let surface = HeadlessSurface::new(&compositor.device, config.width, config.height);
 
-        let scene = Arc::new(Mutex::new(SceneGraph::new(config.width as f32, config.height as f32)));
+        let scene = Arc::new(Mutex::new(SceneGraph::new(
+            config.width as f32,
+            config.height as f32,
+        )));
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&config.psk);
         let state = Arc::new(Mutex::new(SharedState {
             scene,
@@ -353,17 +356,22 @@ impl HeadlessRuntime {
         // input/agent response occurred this frame") consistent across runtimes.
         let had_scene_commit = compositor_telemetry.mutations_applied > 0;
         telemetry.input_to_local_ack_us = 0; // populated by input_processor callers
-        telemetry.input_to_scene_commit_us =
-            if had_scene_commit { input_to_scene_commit_us } else { 0 };
-        telemetry.input_to_next_present_us =
-            if had_scene_commit { input_to_next_present_us } else { 0 };
+        telemetry.input_to_scene_commit_us = if had_scene_commit {
+            input_to_scene_commit_us
+        } else {
+            0
+        };
+        telemetry.input_to_next_present_us = if had_scene_commit {
+            input_to_next_present_us
+        } else {
+            0
+        };
         telemetry.tile_count = tiles_visible;
         telemetry.node_count = compositor_telemetry.node_count;
         telemetry.active_leases = compositor_telemetry.active_leases;
         telemetry.mutations_applied = compositor_telemetry.mutations_applied;
         telemetry.hit_region_updates = compositor_telemetry.hit_region_updates;
-        telemetry.telemetry_overflow_count =
-            self.pipeline.telemetry_overflow_count();
+        telemetry.telemetry_overflow_count = self.pipeline.telemetry_overflow_count();
         telemetry.sync_legacy_aliases();
 
         // Stage 8: Telemetry Emit — non-blocking record into collector.
@@ -598,7 +606,10 @@ mod tests {
         assert!(telemetry.frame_time_us > 0);
 
         // Server task is still running (not panicked)
-        assert!(!_server.is_finished(), "gRPC server task should still be running");
+        assert!(
+            !_server.is_finished(),
+            "gRPC server task should still be running"
+        );
         _server.abort();
     }
 
@@ -617,10 +628,14 @@ mod tests {
             psk: "test".to_string(),
             config_toml: None,
         };
-        let (ctx, fallback) = config.build_runtime_context()
+        let (ctx, fallback) = config
+            .build_runtime_context()
             .expect("build_runtime_context with None should succeed under cfg(test)");
         assert_eq!(ctx.profile.name, "headless");
-        assert!(fallback, "config_toml = None should set fallback_unrestricted = true");
+        assert!(
+            fallback,
+            "config_toml = None should set fallback_unrestricted = true"
+        );
     }
 
     /// Verify that a valid TOML config produces a proper RuntimeContext with
@@ -653,39 +668,59 @@ capabilities = ["read_telemetry", "read_scene_topology"]
             config_toml: Some(toml.to_string()),
         };
 
-        let (ctx, fallback) = config.build_runtime_context()
+        let (ctx, fallback) = config
+            .build_runtime_context()
             .expect("build_runtime_context should succeed with valid TOML");
         assert_eq!(ctx.profile.name, "headless");
-        assert!(!fallback, "valid config should set fallback_unrestricted = false");
+        assert!(
+            !fallback,
+            "valid config should set fallback_unrestricted = false"
+        );
 
         // weather-agent gets its configured capabilities
         let policy = ctx.capability_policy_for("weather-agent");
-        assert!(!policy.is_unrestricted(), "registered agent should not be unrestricted");
         assert!(
-            policy.evaluate_capability_request(&["create_tiles".to_string()]).is_ok(),
+            !policy.is_unrestricted(),
+            "registered agent should not be unrestricted"
+        );
+        assert!(
+            policy
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_ok(),
             "weather-agent should be granted create_tiles"
         );
         assert!(
-            policy.evaluate_capability_request(&["read_telemetry".to_string()]).is_err(),
+            policy
+                .evaluate_capability_request(&["read_telemetry".to_string()])
+                .is_err(),
             "weather-agent should be denied read_telemetry (not in its list)"
         );
 
         // monitor-agent gets its configured capabilities
         let monitor_policy = ctx.capability_policy_for("monitor-agent");
         assert!(
-            monitor_policy.evaluate_capability_request(&["read_telemetry".to_string()]).is_ok(),
+            monitor_policy
+                .evaluate_capability_request(&["read_telemetry".to_string()])
+                .is_ok(),
             "monitor-agent should be granted read_telemetry"
         );
         assert!(
-            monitor_policy.evaluate_capability_request(&["create_tiles".to_string()]).is_err(),
+            monitor_policy
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_err(),
             "monitor-agent should be denied create_tiles"
         );
 
         // unknown agent gets guest policy (no capabilities) since fallback = Guest
         let guest_policy = ctx.capability_policy_for("unknown-agent");
-        assert!(!guest_policy.is_unrestricted(), "unknown agent should get guest policy");
         assert!(
-            guest_policy.evaluate_capability_request(&["create_tiles".to_string()]).is_err(),
+            !guest_policy.is_unrestricted(),
+            "unknown agent should get guest policy"
+        );
+        assert!(
+            guest_policy
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_err(),
             "unknown agent should be denied all capabilities"
         );
     }
@@ -704,9 +739,13 @@ capabilities = ["read_telemetry", "read_scene_topology"]
             psk: "test".to_string(),
             config_toml: Some("this is not valid TOML %%%".to_string()),
         };
-        let (ctx, fallback) = config.build_runtime_context()
-            .expect("build_runtime_context should return Ok (guest fallback) even for malformed TOML");
+        let (ctx, fallback) = config.build_runtime_context().expect(
+            "build_runtime_context should return Ok (guest fallback) even for malformed TOML",
+        );
         assert_eq!(ctx.profile.name, "headless");
-        assert!(!fallback, "malformed TOML should fall back to guest policy (fallback_unrestricted = false), not dev mode");
+        assert!(
+            !fallback,
+            "malformed TOML should fall back to guest policy (fallback_unrestricted = false), not dev mode"
+        );
     }
 }

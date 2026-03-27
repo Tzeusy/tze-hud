@@ -9,8 +9,8 @@
 //! All of these types derive `schemars::JsonSchema` so that the `--print-schema`
 //! feature can generate a full JSON Schema from them.
 
-use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ─── Helper: AnyValue for `includes` field ────────────────────────────────────

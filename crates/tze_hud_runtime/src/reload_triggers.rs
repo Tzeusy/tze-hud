@@ -44,7 +44,7 @@ use tonic::{Request, Response, Status};
 
 use crate::runtime_context::SharedRuntimeContext;
 use tze_hud_protocol::proto::session::{
-    runtime_service_server::RuntimeService, ReloadConfigRequest, ReloadConfigResponse,
+    ReloadConfigRequest, ReloadConfigResponse, runtime_service_server::RuntimeService,
 };
 
 // ─── RuntimeServiceImpl ───────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ pub fn spawn_sighup_listener(
     #[cfg(unix)]
     {
         tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+            use tokio::signal::unix::{SignalKind, signal};
 
             let mut sighup = match signal(SignalKind::hangup()) {
                 Ok(s) => s,
@@ -231,7 +231,9 @@ pub fn spawn_sighup_listener(
     {
         let _ = config_path;
         let _ = ctx;
-        tracing::info!("SIGHUP listener: not supported on this platform (Windows); use ReloadConfig gRPC");
+        tracing::info!(
+            "SIGHUP listener: not supported on this platform (Windows); use ReloadConfig gRPC"
+        );
         tokio::spawn(async {})
     }
 }
@@ -301,11 +303,17 @@ default_classification = "top_secret_invalid_value"
         let req = Request::new(ReloadConfigRequest {
             config_toml: valid_toml(),
         });
-        let resp = svc.reload_config(req).await.expect("RPC must not return Err");
+        let resp = svc
+            .reload_config(req)
+            .await
+            .expect("RPC must not return Err");
         let body = resp.into_inner();
 
         assert!(body.success, "valid TOML must produce success=true");
-        assert!(body.validation_errors.is_empty(), "no errors expected on success");
+        assert!(
+            body.validation_errors.is_empty(),
+            "no errors expected on success"
+        );
         assert!(body.reloaded_at_wall_us > 0, "timestamp must be set");
 
         // After reload: new privacy value is visible.
@@ -344,11 +352,17 @@ default_classification = "top_secret_invalid_value"
         let req = Request::new(ReloadConfigRequest {
             config_toml: invalid_toml(),
         });
-        let resp = svc.reload_config(req).await.expect("RPC must not return Err");
+        let resp = svc
+            .reload_config(req)
+            .await
+            .expect("RPC must not return Err");
         let body = resp.into_inner();
 
         assert!(!body.success, "invalid TOML must return success=false");
-        assert!(!body.validation_errors.is_empty(), "errors must be returned");
+        assert!(
+            !body.validation_errors.is_empty(),
+            "errors must be returned"
+        );
 
         // Running config must be unchanged.
         assert_eq!(
@@ -370,11 +384,17 @@ default_classification = "top_secret_invalid_value"
         let req = Request::new(ReloadConfigRequest {
             config_toml: validation_error_toml(),
         });
-        let resp = svc.reload_config(req).await.expect("RPC must not return Err");
+        let resp = svc
+            .reload_config(req)
+            .await
+            .expect("RPC must not return Err");
         let body = resp.into_inner();
 
         assert!(!body.success, "validation error must produce success=false");
-        assert!(!body.validation_errors.is_empty(), "errors must be returned");
+        assert!(
+            !body.validation_errors.is_empty(),
+            "errors must be returned"
+        );
 
         // Running config is still default.
         assert!(
@@ -410,7 +430,10 @@ default_classification = "top_secret_invalid_value"
         let handle = spawn_sighup_listener(ctx, "/tmp/tze_hud_no_such_config_test.toml");
         // Give the task a moment to start.
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        assert!(!handle.is_finished(), "listener task should still be running");
+        assert!(
+            !handle.is_finished(),
+            "listener task should still be running"
+        );
         handle.abort();
         let _ = handle.await;
     }
@@ -425,7 +448,10 @@ default_classification = "top_secret_invalid_value"
         use std::io::Write;
 
         let ctx = Arc::new(RuntimeContext::headless_default());
-        assert!(ctx.hot_config().privacy.redaction_style.is_none(), "initial defaults");
+        assert!(
+            ctx.hot_config().privacy.redaction_style.is_none(),
+            "initial defaults"
+        );
 
         // Write a valid config file to a temp path.
         let tmp = std::env::temp_dir().join("tze_hud_sighup_test_config.toml");

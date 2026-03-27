@@ -6,19 +6,18 @@
 //! Test count target: ≥8 covering legal transitions, illegal transitions, and
 //! the handshake timeout / resume paths.
 
-use tze_hud_protocol::session_server::{SessionConfig, SessionState, TrafficClass, classify_server_payload};
-use tze_hud_protocol::proto::session::{
-    SessionEstablished, SessionError, SessionResumeResult,
-    SessionSuspended, SessionResumed, RuntimeError,
-    MutationResult, LeaseResponse, LeaseStateChange,
-    CapabilityNotice, SubscriptionChangeResult, ZonePublishResult,
-    InputFocusResponse, InputCaptureResponse,
-    BackpressureSignal, SceneSnapshot, SceneDelta, Heartbeat,
-    EmitSceneEventResult, DegradationNotice,
-};
 use tze_hud_protocol::proto::EventBatch;
 use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
-use tze_hud_protocol::token::{TokenStore, DEFAULT_GRACE_PERIOD_MS};
+use tze_hud_protocol::proto::session::{
+    BackpressureSignal, CapabilityNotice, DegradationNotice, EmitSceneEventResult, Heartbeat,
+    InputCaptureResponse, InputFocusResponse, LeaseResponse, LeaseStateChange, MutationResult,
+    RuntimeError, SceneDelta, SceneSnapshot, SessionError, SessionEstablished, SessionResumeResult,
+    SessionResumed, SessionSuspended, SubscriptionChangeResult, ZonePublishResult,
+};
+use tze_hud_protocol::session_server::{
+    SessionConfig, SessionState, TrafficClass, classify_server_payload,
+};
+use tze_hud_protocol::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
 
 // ─── Legal Transitions ───────────────────────────────────────────────────────
 
@@ -45,7 +44,10 @@ fn handshaking_to_active_on_established() {
     let mut state = SessionState::Handshaking;
     state = SessionState::Active;
     assert_eq!(state, SessionState::Active);
-    assert!(state.allows_mutations(), "Active state must allow mutations");
+    assert!(
+        state.allows_mutations(),
+        "Active state must allow mutations"
+    );
 }
 
 /// WHEN session is Active and SessionClose sent THEN transitions to Disconnecting.
@@ -54,7 +56,10 @@ fn active_to_disconnecting_on_session_close() {
     let mut state = SessionState::Active;
     state = SessionState::Disconnecting;
     assert_eq!(state, SessionState::Disconnecting);
-    assert!(!state.allows_mutations(), "Disconnecting state must not allow mutations");
+    assert!(
+        !state.allows_mutations(),
+        "Disconnecting state must not allow mutations"
+    );
 }
 
 /// WHEN session is Disconnecting and stream terminates THEN transitions to Closed.
@@ -105,21 +110,30 @@ fn resuming_to_closed_on_expired_token() {
 #[test]
 fn closed_state_does_not_allow_mutations() {
     let state = SessionState::Closed;
-    assert!(!state.allows_mutations(), "Closed state must not allow mutations");
+    assert!(
+        !state.allows_mutations(),
+        "Closed state must not allow mutations"
+    );
 }
 
 /// WHEN state is Handshaking THEN allows_mutations() returns false.
 #[test]
 fn handshaking_state_does_not_allow_mutations() {
     let state = SessionState::Handshaking;
-    assert!(!state.allows_mutations(), "Handshaking state must not allow mutations");
+    assert!(
+        !state.allows_mutations(),
+        "Handshaking state must not allow mutations"
+    );
 }
 
 /// WHEN state is Resuming THEN allows_mutations() returns false.
 #[test]
 fn resuming_state_does_not_allow_mutations() {
     let state = SessionState::Resuming;
-    assert!(!state.allows_mutations(), "Resuming state must not allow mutations");
+    assert!(
+        !state.allows_mutations(),
+        "Resuming state must not allow mutations"
+    );
 }
 
 /// WHEN state is Disconnecting THEN it is not the same as Active.
@@ -153,20 +167,30 @@ fn all_states_have_labels() {
 fn session_config_defaults_match_spec() {
     let cfg = SessionConfig::default();
     // spec: handshake_timeout = 5000ms
-    assert_eq!(cfg.handshake_timeout_ms, 5000,
-        "handshake timeout must be 5000ms per session-protocol/spec.md lines 123-134");
+    assert_eq!(
+        cfg.handshake_timeout_ms, 5000,
+        "handshake timeout must be 5000ms per session-protocol/spec.md lines 123-134"
+    );
     // spec: heartbeat_interval = 5000ms
-    assert_eq!(cfg.heartbeat_interval_ms, 5000,
-        "heartbeat interval must be 5000ms");
+    assert_eq!(
+        cfg.heartbeat_interval_ms, 5000,
+        "heartbeat interval must be 5000ms"
+    );
     // spec: missed_threshold = 3 → orphan after 3×5000 = 15000ms
-    assert_eq!(cfg.heartbeat_missed_threshold, 3,
-        "missed threshold must be 3");
+    assert_eq!(
+        cfg.heartbeat_missed_threshold, 3,
+        "missed threshold must be 3"
+    );
     // spec: reconnect grace period = 30000ms
-    assert_eq!(cfg.reconnect_grace_period_ms, 30_000,
-        "grace period must be 30000ms");
+    assert_eq!(
+        cfg.reconnect_grace_period_ms, 30_000,
+        "grace period must be 30000ms"
+    );
     // spec: max_sequence_gap = 100
-    assert_eq!(cfg.max_sequence_gap, 100,
-        "max sequence gap must be 100 per spec lines 212-223");
+    assert_eq!(
+        cfg.max_sequence_gap, 100,
+        "max sequence gap must be 100 per spec lines 212-223"
+    );
 }
 
 /// Orphan timeout = heartbeat_interval_ms * heartbeat_missed_threshold = 15000ms.
@@ -174,9 +198,11 @@ fn session_config_defaults_match_spec() {
 fn orphan_detection_timeout_is_three_times_interval() {
     let cfg = SessionConfig::default();
     let orphan_timeout_ms = cfg.heartbeat_interval_ms * cfg.heartbeat_missed_threshold;
-    assert_eq!(orphan_timeout_ms, 15_000,
+    assert_eq!(
+        orphan_timeout_ms, 15_000,
         "orphan detection must be 3x heartbeat_interval = 15000ms \
-         (lease-governance/spec.md lines 132-155)");
+         (lease-governance/spec.md lines 132-155)"
+    );
 }
 
 // ─── Token Store (resume within / after grace period) ────────────────────────
@@ -201,7 +227,11 @@ fn resume_token_valid_within_grace_period() {
 
     // Within grace period: 10 seconds later — consume should succeed
     let result = store.consume(&token, "agent-1", now_ms + 10_000);
-    assert!(result.is_ok(), "token should be valid within grace period: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "token should be valid within grace period: {:?}",
+        result.err()
+    );
 }
 
 /// WHEN session token stored and queried after grace period THEN expired.
@@ -224,7 +254,10 @@ fn resume_token_invalid_after_grace_period() {
 
     // After grace period: 31 seconds later
     let result = store.consume(&token, "agent-2", now_ms + 31_000);
-    assert!(result.is_err(), "token should be expired after grace period");
+    assert!(
+        result.is_err(),
+        "token should be expired after grace period"
+    );
 }
 
 /// WHEN resume token used by wrong agent THEN rejected.
@@ -246,7 +279,10 @@ fn resume_token_bound_to_agent_id() {
 
     // Wrong agent_id — should fail with TokenNotFound (token stays in store)
     let result = store.consume(&token, "agent-2", now_ms + 1_000);
-    assert!(result.is_err(), "token must be bound to agent_id; different agent must be rejected");
+    assert!(
+        result.is_err(),
+        "token must be bound to agent_id; different agent must be rejected"
+    );
 }
 
 /// WHEN resume token is consumed THEN it cannot be reused (single-use semantics).
@@ -272,7 +308,10 @@ fn resume_token_is_single_use() {
 
     // Second use: must fail (token consumed)
     let second = store.consume(&token, "agent-3", now_ms + 2_000);
-    assert!(second.is_err(), "second use of token must fail (single-use)");
+    assert!(
+        second.is_err(),
+        "second use of token must fail (single-use)"
+    );
 }
 
 // ─── Traffic class classification ────────────────────────────────────────────
@@ -317,7 +356,7 @@ fn scene_state_payloads_are_state_stream() {
         ServerPayload::SceneDelta(SceneDelta::default()),
         ServerPayload::EventBatch(EventBatch::default()),
         ServerPayload::RuntimeTelemetry(
-            tze_hud_protocol::proto::session::RuntimeTelemetryFrame::default()
+            tze_hud_protocol::proto::session::RuntimeTelemetryFrame::default(),
         ),
     ];
     for payload in &state_stream_payloads {
@@ -332,7 +371,9 @@ fn scene_state_payloads_are_state_stream() {
 /// WHEN Heartbeat payload THEN classified as Ephemeral.
 #[test]
 fn heartbeat_is_ephemeral() {
-    let payload = ServerPayload::Heartbeat(Heartbeat { timestamp_mono_us: 12345 });
+    let payload = ServerPayload::Heartbeat(Heartbeat {
+        timestamp_mono_us: 12345,
+    });
     assert_eq!(
         classify_server_payload(&payload),
         TrafficClass::Ephemeral,

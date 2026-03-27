@@ -17,8 +17,8 @@
 //! given `ResourceId` is immutable for the lifetime of the store
 //! (spec lines 20-24).
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use dashmap::DashMap;
 
@@ -53,11 +53,7 @@ pub struct ResourceRecord {
 }
 
 impl ResourceRecord {
-    pub fn new(
-        resource_id: ResourceId,
-        resource_type: ResourceType,
-        meta: &DecodedMeta,
-    ) -> Self {
+    pub fn new(resource_id: ResourceId, resource_type: ResourceType, meta: &DecodedMeta) -> Self {
         Self {
             resource_id,
             resource_type,
@@ -85,24 +81,22 @@ impl ResourceRecord {
     /// and the decrement is clamped at 0.
     #[inline]
     pub fn dec_refcount(&self) -> u32 {
-        let prev = self.refcount.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-            if v == 0 {
-                // Underflow: clamp; caller should inspect the return value.
-                None
-            } else {
-                Some(v - 1)
-            }
-        });
+        let prev = self
+            .refcount
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                if v == 0 {
+                    // Underflow: clamp; caller should inspect the return value.
+                    None
+                } else {
+                    Some(v - 1)
+                }
+            });
 
         match prev {
             Ok(old) => old - 1,
             Err(_) => {
                 // Refcount underflow.
-                debug_assert!(
-                    false,
-                    "refcount underflow on resource {}",
-                    self.resource_id
-                );
+                debug_assert!(false, "refcount underflow on resource {}", self.resource_id);
                 tracing::error!(
                     resource_id = %self.resource_id,
                     "refcount underflow detected — this is a bug"
@@ -221,9 +215,7 @@ impl DedupIndex {
     /// This frees the decoded in-memory representation once the last `Arc` to
     /// the `ResourceRecord` is dropped.
     pub fn remove(&self, resource_id: &ResourceId) -> Option<Arc<ResourceRecord>> {
-        self.inner
-            .remove(resource_id)
-            .map(|(_, record)| record)
+        self.inner.remove(resource_id).map(|(_, record)| record)
     }
 }
 

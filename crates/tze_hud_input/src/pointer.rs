@@ -28,7 +28,12 @@ pub struct Modifiers {
 
 impl Modifiers {
     /// No modifier keys held.
-    pub const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false, meta: false };
+    pub const NONE: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+    };
 }
 
 // ─── Pointer button ──────────────────────────────────────────────────────────
@@ -227,7 +232,12 @@ mod tests {
             local_y: 20.0,
             display_x: 110.0,
             display_y: 120.0,
-            modifiers: Modifiers { shift: true, ctrl: false, alt: false, meta: false },
+            modifiers: Modifiers {
+                shift: true,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            },
             timestamp_mono_us: MonoUs(1_234_567),
         };
         let json = serde_json::to_string(&f).unwrap();

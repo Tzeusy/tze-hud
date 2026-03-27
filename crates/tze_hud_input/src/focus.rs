@@ -22,7 +22,7 @@
 //! - Lines 400-402: Focus Ring Visual Indication
 
 use std::collections::HashMap;
-use tze_hud_scene::{SceneGraph, SceneId, InputMode, NodeData};
+use tze_hud_scene::{InputMode, NodeData, SceneGraph, SceneId};
 
 use crate::focus_tree::{FocusOwner, FocusTree};
 
@@ -231,7 +231,10 @@ impl FocusManager {
                 if let Some(node) = scene.nodes.get(&nid) {
                     if let NodeData::HitRegion(hr) = &node.data {
                         if hr.accepts_focus {
-                            FocusOwner::Node { tile_id, node_id: nid }
+                            FocusOwner::Node {
+                                tile_id,
+                                node_id: nid,
+                            }
                         } else {
                             // accepts_focus=false — fall back to tile-level.
                             FocusOwner::Tile(tile_id)
@@ -246,7 +249,13 @@ impl FocusManager {
             None => FocusOwner::Tile(tile_id),
         };
 
-        self.apply_transition(tab_id, new_owner, FocusSource::Click, FocusLostReason::ClickElsewhere, scene)
+        self.apply_transition(
+            tab_id,
+            new_owner,
+            FocusSource::Click,
+            FocusLostReason::ClickElsewhere,
+            scene,
+        )
     }
 
     // ─── Programmatic focus request (spec lines 42-44) ──────────────────
@@ -290,8 +299,7 @@ impl FocusManager {
             }
             // Verify the node is reachable from this tile's root tree.
             let tile = scene.tiles.get(&req.tile_id).unwrap(); // validated above
-            let reachable = collect_focusable_nodes(tile.root_node, &scene.nodes)
-                .contains(&nid)
+            let reachable = collect_focusable_nodes(tile.root_node, &scene.nodes).contains(&nid)
                 || {
                     // collect_focusable_nodes only returns accepts_focus nodes;
                     // do a full DFS to check reachability regardless of accepts_focus.
@@ -318,7 +326,10 @@ impl FocusManager {
 
         // Granted — apply transition.
         let new_owner = match req.node_id {
-            Some(nid) => FocusOwner::Node { tile_id: req.tile_id, node_id: nid },
+            Some(nid) => FocusOwner::Node {
+                tile_id: req.tile_id,
+                node_id: nid,
+            },
             None => FocusOwner::Tile(req.tile_id),
         };
         let transition = self.apply_transition(
@@ -339,29 +350,16 @@ impl FocusManager {
     /// depth-first left-to-right tree order. Passthrough tiles skipped.
     /// Non-passthrough tiles with no focusable nodes receive tile-level focus.
     /// Wraps at end.
-    pub fn navigate_next(
-        &mut self,
-        tab_id: SceneId,
-        scene: &SceneGraph,
-    ) -> FocusTransition {
+    pub fn navigate_next(&mut self, tab_id: SceneId, scene: &SceneGraph) -> FocusTransition {
         self.navigate(tab_id, scene, false)
     }
 
     /// Move focus to the previous focusable element (NAVIGATE_PREV).
-    pub fn navigate_prev(
-        &mut self,
-        tab_id: SceneId,
-        scene: &SceneGraph,
-    ) -> FocusTransition {
+    pub fn navigate_prev(&mut self, tab_id: SceneId, scene: &SceneGraph) -> FocusTransition {
         self.navigate(tab_id, scene, true)
     }
 
-    fn navigate(
-        &mut self,
-        tab_id: SceneId,
-        scene: &SceneGraph,
-        reverse: bool,
-    ) -> FocusTransition {
+    fn navigate(&mut self, tab_id: SceneId, scene: &SceneGraph, reverse: bool) -> FocusTransition {
         let cycle = build_focus_cycle(tab_id, scene);
         if cycle.is_empty() {
             return FocusTransition::default();
@@ -492,7 +490,11 @@ impl FocusManager {
 
         if lost_event.is_some() {
             let ring_update = Some(self.compute_ring_update(tab_id, scene));
-            return FocusTransition { lost: lost_event, gained: None, ring_update };
+            return FocusTransition {
+                lost: lost_event,
+                gained: None,
+                ring_update,
+            };
         }
         FocusTransition::default()
     }
@@ -636,7 +638,11 @@ impl FocusManager {
         // Focus ring update.
         let ring_update = Some(compute_ring(tab_id, &new_owner, scene));
 
-        FocusTransition { lost, gained, ring_update }
+        FocusTransition {
+            lost,
+            gained,
+            ring_update,
+        }
     }
 
     /// Compute focus ring update for the given tab (used for tab switch / restore).
@@ -680,9 +686,16 @@ impl CycleStep {
 
     fn matches(&self, owner: &FocusOwner) -> bool {
         match (self, owner) {
-            (CycleStep::Node { tile_id: t1, node_id: n1 }, FocusOwner::Node { tile_id: t2, node_id: n2 }) => {
-                t1 == t2 && n1 == n2
-            }
+            (
+                CycleStep::Node {
+                    tile_id: t1,
+                    node_id: n1,
+                },
+                FocusOwner::Node {
+                    tile_id: t2,
+                    node_id: n2,
+                },
+            ) => t1 == t2 && n1 == n2,
             (CycleStep::TileLevel(a), FocusOwner::Tile(b)) => a == b,
             _ => false,
         }
@@ -712,7 +725,10 @@ fn build_focus_cycle(tab_id: SceneId, scene: &SceneGraph) -> Vec<CycleStep> {
             cycle.push(CycleStep::TileLevel(tile.id));
         } else {
             for node_id in focusable_nodes {
-                cycle.push(CycleStep::Node { tile_id: tile.id, node_id });
+                cycle.push(CycleStep::Node {
+                    tile_id: tile.id,
+                    node_id,
+                });
             }
         }
     }
@@ -774,7 +790,9 @@ fn node_reachable_from(
         Some(n) => n,
         None => return false,
     };
-    node.children.iter().any(|&child| node_reachable_from(Some(child), target, nodes, visited))
+    node.children
+        .iter()
+        .any(|&child| node_reachable_from(Some(child), target, nodes, visited))
 }
 
 /// Advance to the next/previous step in the cycle.
@@ -813,12 +831,23 @@ fn build_lost_event(
     match old {
         FocusOwner::Tile(tid) => {
             let ns = scene.tiles.get(tid).map(|t| t.namespace.clone())?;
-            Some((FocusLostEvent { tile_id: *tid, node_id: None, reason }, ns))
+            Some((
+                FocusLostEvent {
+                    tile_id: *tid,
+                    node_id: None,
+                    reason,
+                },
+                ns,
+            ))
         }
         FocusOwner::Node { tile_id, node_id } => {
             let ns = scene.tiles.get(tile_id).map(|t| t.namespace.clone())?;
             Some((
-                FocusLostEvent { tile_id: *tile_id, node_id: Some(*node_id), reason },
+                FocusLostEvent {
+                    tile_id: *tile_id,
+                    node_id: Some(*node_id),
+                    reason,
+                },
                 ns,
             ))
         }
@@ -835,12 +864,23 @@ fn build_gained_event(
     match new {
         FocusOwner::Tile(tid) => {
             let ns = scene.tiles.get(tid).map(|t| t.namespace.clone())?;
-            Some((FocusGainedEvent { tile_id: *tid, node_id: None, source }, ns))
+            Some((
+                FocusGainedEvent {
+                    tile_id: *tid,
+                    node_id: None,
+                    source,
+                },
+                ns,
+            ))
         }
         FocusOwner::Node { tile_id, node_id } => {
             let ns = scene.tiles.get(tile_id).map(|t| t.namespace.clone())?;
             Some((
-                FocusGainedEvent { tile_id: *tile_id, node_id: Some(*node_id), source },
+                FocusGainedEvent {
+                    tile_id: *tile_id,
+                    node_id: Some(*node_id),
+                    source,
+                },
                 ns,
             ))
         }
@@ -867,14 +907,12 @@ fn compute_ring(tab_id: SceneId, owner: &FocusOwner, scene: &SceneGraph) -> Focu
                 })
             })
         }
-        FocusOwner::Tile(tid) => {
-            scene.tiles.get(tid).map(|tile| FocusRingBounds {
-                x: tile.bounds.x,
-                y: tile.bounds.y,
-                width: tile.bounds.width,
-                height: tile.bounds.height,
-            })
-        }
+        FocusOwner::Tile(tid) => scene.tiles.get(tid).map(|tile| FocusRingBounds {
+            x: tile.bounds.x,
+            y: tile.bounds.y,
+            width: tile.bounds.width,
+            height: tile.bounds.height,
+        }),
         // No ring for None or ChromeElement (chrome handles its own highlight).
         _ => None,
     };
@@ -886,9 +924,7 @@ fn compute_ring(tab_id: SceneId, owner: &FocusOwner, scene: &SceneGraph) -> Focu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tze_hud_scene::{
-        Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId,
-    };
+    use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId};
 
     // ── Scene setup helpers ──────────────────────────────────────────────
 
@@ -937,7 +973,11 @@ mod tests {
     fn test_single_focus_owner_per_tab() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
 
         let lease_id2 = scene.grant_lease("agent-b", 60_000, vec![Capability::CreateTile]);
@@ -951,7 +991,11 @@ mod tests {
             )
             .unwrap();
         let node_id2 = add_hit_region(
-            &mut scene, tile_id2, Rect::new(0.0, 0.0, 100.0, 50.0), "btn2", true,
+            &mut scene,
+            tile_id2,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn2",
+            true,
         );
 
         let mut fm = FocusManager::new();
@@ -967,7 +1011,13 @@ mod tests {
         fm.on_click(tab_id, tile_id2, Some(node_id2), &scene);
         // Now focus must be tile2/node2 only.
         let owner2 = fm.trees[&tab_id].current().clone();
-        assert_eq!(owner2, FocusOwner::Node { tile_id: tile_id2, node_id: node_id2 });
+        assert_eq!(
+            owner2,
+            FocusOwner::Node {
+                tile_id: tile_id2,
+                node_id: node_id2
+            }
+        );
         // Ensure old is no longer focused in local state.
         assert_ne!(owner2, FocusOwner::Node { tile_id, node_id });
     }
@@ -978,7 +1028,11 @@ mod tests {
     fn test_click_on_focusable_node_transfers_focus() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
         let mut fm = FocusManager::new();
         fm.add_tab(tab_id);
@@ -1003,7 +1057,11 @@ mod tests {
         scene.tiles.get_mut(&tile_id).unwrap().input_mode = InputMode::Passthrough;
 
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
         let mut fm = FocusManager::new();
         fm.add_tab(tab_id);
@@ -1012,7 +1070,10 @@ mod tests {
         let t = fm.on_click(tab_id, tile_id, Some(node_id), &scene);
         let new_owner = fm.trees[&tab_id].current().clone();
 
-        assert_eq!(prev_owner, new_owner, "focus must not change for passthrough tile");
+        assert_eq!(
+            prev_owner, new_owner,
+            "focus must not change for passthrough tile"
+        );
         assert!(t.gained.is_none());
         assert!(t.lost.is_none());
     }
@@ -1023,7 +1084,11 @@ mod tests {
     fn test_programmatic_focus_granted_when_no_holder() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
         let mut fm = FocusManager::new();
         fm.add_tab(tab_id);
@@ -1046,16 +1111,30 @@ mod tests {
     fn test_programmatic_focus_denied_when_another_holds_and_no_steal() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
 
         // Create a second tile owned by agent-b.
         let lease_id2 = scene.grant_lease("agent-b", 60_000, vec![Capability::CreateTile]);
         let tile_id2 = scene
-            .create_tile(tab_id, "agent-b", lease_id2, Rect::new(300.0, 300.0, 100.0, 100.0), 2)
+            .create_tile(
+                tab_id,
+                "agent-b",
+                lease_id2,
+                Rect::new(300.0, 300.0, 100.0, 100.0),
+                2,
+            )
             .unwrap();
         let node_id2 = add_hit_region(
-            &mut scene, tile_id2, Rect::new(0.0, 0.0, 100.0, 50.0), "btn2", true,
+            &mut scene,
+            tile_id2,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn2",
+            true,
         );
 
         let mut fm = FocusManager::new();
@@ -1079,7 +1158,11 @@ mod tests {
     fn test_programmatic_focus_invalid_wrong_namespace() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
         let mut fm = FocusManager::new();
         fm.add_tab(tab_id);
@@ -1101,16 +1184,30 @@ mod tests {
     fn test_focus_fallback_on_tile_destruction() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
 
         // Create a second tile.
         let lease_id2 = scene.grant_lease("agent-b", 60_000, vec![Capability::CreateTile]);
         let tile_id2 = scene
-            .create_tile(tab_id, "agent-b", lease_id2, Rect::new(300.0, 300.0, 100.0, 100.0), 2)
+            .create_tile(
+                tab_id,
+                "agent-b",
+                lease_id2,
+                Rect::new(300.0, 300.0, 100.0, 100.0),
+                2,
+            )
             .unwrap();
         let node_id2 = add_hit_region(
-            &mut scene, tile_id2, Rect::new(0.0, 0.0, 100.0, 50.0), "btn2", true,
+            &mut scene,
+            tile_id2,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn2",
+            true,
         );
 
         let mut fm = FocusManager::new();
@@ -1126,7 +1223,13 @@ mod tests {
 
         // Focus should fall back to tile2/node2.
         let owner = fm.trees[&tab_id].current().clone();
-        assert_eq!(owner, FocusOwner::Node { tile_id: tile_id2, node_id: node_id2 });
+        assert_eq!(
+            owner,
+            FocusOwner::Node {
+                tile_id: tile_id2,
+                node_id: node_id2
+            }
+        );
         // Lost event dispatched to agent-a.
         assert!(t.lost.is_some());
         let (ev, ns) = t.lost.unwrap();
@@ -1138,7 +1241,11 @@ mod tests {
     fn test_focus_falls_to_none_when_no_history() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
 
         let mut fm = FocusManager::new();
@@ -1157,12 +1264,22 @@ mod tests {
     fn test_agent_cannot_see_other_agents_focus() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
 
         let lease_id2 = scene.grant_lease("agent-b", 60_000, vec![Capability::CreateTile]);
         let _tile_id2 = scene
-            .create_tile(tab_id, "agent-b", lease_id2, Rect::new(300.0, 300.0, 100.0, 100.0), 2)
+            .create_tile(
+                tab_id,
+                "agent-b",
+                lease_id2,
+                Rect::new(300.0, 300.0, 100.0, 100.0),
+                2,
+            )
             .unwrap();
 
         let mut fm = FocusManager::new();
@@ -1192,9 +1309,15 @@ mod tests {
         let lease_b = scene.grant_lease("b", 60_000, vec![Capability::CreateTile]);
         let lease_c = scene.grant_lease("c", 60_000, vec![Capability::CreateTile]);
 
-        let t1 = scene.create_tile(tab_id, "a", lease_a, Rect::new(0.0, 0.0, 100.0, 100.0), 1).unwrap();
-        let t3 = scene.create_tile(tab_id, "b", lease_b, Rect::new(0.0, 0.0, 100.0, 100.0), 3).unwrap();
-        let t8 = scene.create_tile(tab_id, "c", lease_c, Rect::new(0.0, 0.0, 100.0, 100.0), 8).unwrap();
+        let t1 = scene
+            .create_tile(tab_id, "a", lease_a, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+        let t3 = scene
+            .create_tile(tab_id, "b", lease_b, Rect::new(0.0, 0.0, 100.0, 100.0), 3)
+            .unwrap();
+        let t8 = scene
+            .create_tile(tab_id, "c", lease_c, Rect::new(0.0, 0.0, 100.0, 100.0), 8)
+            .unwrap();
 
         // t1: N1, N2.
         let n1 = SceneId::new();
@@ -1227,29 +1350,35 @@ mod tests {
 
         // t3: N3.
         let n3 = SceneId::new();
-        scene.nodes.insert(n3, Node {
-            id: n3,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-                interaction_id: "n3".into(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        });
+        scene.nodes.insert(
+            n3,
+            Node {
+                id: n3,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
+                    interaction_id: "n3".into(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        );
         scene.tiles.get_mut(&t3).unwrap().root_node = Some(n3);
 
         // t8: no focusable nodes (has a SolidColor node).
         let nc = SceneId::new();
-        scene.nodes.insert(nc, Node {
-            id: nc,
-            children: vec![],
-            data: NodeData::SolidColor(tze_hud_scene::SolidColorNode {
-                color: tze_hud_scene::Rgba::new(1.0, 0.0, 0.0, 1.0),
-                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-            }),
-        });
+        scene.nodes.insert(
+            nc,
+            Node {
+                id: nc,
+                children: vec![],
+                data: NodeData::SolidColor(tze_hud_scene::SolidColorNode {
+                    color: tze_hud_scene::Rgba::new(1.0, 0.0, 0.0, 1.0),
+                    bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                }),
+            },
+        );
         scene.tiles.get_mut(&t8).unwrap().root_node = Some(nc);
 
         let mut fm = FocusManager::new();
@@ -1257,13 +1386,22 @@ mod tests {
 
         // Set initial focus to N2 (per scenario in spec line 84).
         fm.on_click(tab_id, t1, Some(n2), &scene);
-        assert_eq!(fm.trees[&tab_id].current().clone(), FocusOwner::Node { tile_id: t1, node_id: n2 });
+        assert_eq!(
+            fm.trees[&tab_id].current().clone(),
+            FocusOwner::Node {
+                tile_id: t1,
+                node_id: n2
+            }
+        );
 
         // Tab → N3.
         fm.navigate_next(tab_id, &scene);
         assert_eq!(
             fm.trees[&tab_id].current().clone(),
-            FocusOwner::Node { tile_id: t3, node_id: n3 }
+            FocusOwner::Node {
+                tile_id: t3,
+                node_id: n3
+            }
         );
 
         // Tab → T8 (tile-level focus, no focusable nodes).
@@ -1274,7 +1412,10 @@ mod tests {
         fm.navigate_next(tab_id, &scene);
         assert_eq!(
             fm.trees[&tab_id].current().clone(),
-            FocusOwner::Node { tile_id: t1, node_id: n1 }
+            FocusOwner::Node {
+                tile_id: t1,
+                node_id: n1
+            }
         );
     }
 
@@ -1286,8 +1427,12 @@ mod tests {
         let lease_a = scene.grant_lease("a", 60_000, vec![Capability::CreateTile]);
         let lease_b = scene.grant_lease("b", 60_000, vec![Capability::CreateTile]);
 
-        let t1 = scene.create_tile(tab_id, "a", lease_a, Rect::new(0.0, 0.0, 100.0, 100.0), 1).unwrap();
-        let t2_pt = scene.create_tile(tab_id, "b", lease_b, Rect::new(0.0, 0.0, 100.0, 100.0), 2).unwrap();
+        let t1 = scene
+            .create_tile(tab_id, "a", lease_a, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .unwrap();
+        let t2_pt = scene
+            .create_tile(tab_id, "b", lease_b, Rect::new(0.0, 0.0, 100.0, 100.0), 2)
+            .unwrap();
 
         // t2 is passthrough.
         scene.tiles.get_mut(&t2_pt).unwrap().input_mode = InputMode::Passthrough;
@@ -1304,12 +1449,24 @@ mod tests {
         // Cycle from None — should land on n1 (only non-passthrough step).
         fm.navigate_next(tab_id, &scene);
         let owner = fm.trees[&tab_id].current().clone();
-        assert_eq!(owner, FocusOwner::Node { tile_id: t1, node_id: n1 });
+        assert_eq!(
+            owner,
+            FocusOwner::Node {
+                tile_id: t1,
+                node_id: n1
+            }
+        );
 
         // Cycle again — no other non-passthrough steps, wraps to n1 again.
         fm.navigate_next(tab_id, &scene);
         let owner2 = fm.trees[&tab_id].current().clone();
-        assert_eq!(owner2, FocusOwner::Node { tile_id: t1, node_id: n1 });
+        assert_eq!(
+            owner2,
+            FocusOwner::Node {
+                tile_id: t1,
+                node_id: n1
+            }
+        );
     }
 
     fn add_hit_region_direct(
@@ -1319,17 +1476,20 @@ mod tests {
         accepts_focus: bool,
     ) -> SceneId {
         let id = SceneId::new();
-        scene.nodes.insert(id, Node {
+        scene.nodes.insert(
             id,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-                interaction_id: interaction_id.into(),
-                accepts_focus,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        });
+            Node {
+                id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
+                    interaction_id: interaction_id.into(),
+                    accepts_focus,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        );
         scene.tiles.get_mut(&tile_id).unwrap().root_node = Some(id);
         id
     }
@@ -1339,10 +1499,18 @@ mod tests {
     #[test]
     fn test_focus_events_dispatched_on_tab_key() {
         let (mut scene, tab_id, tile_id) = setup_scene();
-        let _n1 = add_hit_region(&mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "n1", true);
+        let _n1 = add_hit_region(
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "n1",
+            true,
+        );
 
         let lease_b = scene.grant_lease("b", 60_000, vec![Capability::CreateTile]);
-        let t2 = scene.create_tile(tab_id, "b", lease_b, Rect::new(200.0, 0.0, 100.0, 100.0), 2).unwrap();
+        let t2 = scene
+            .create_tile(tab_id, "b", lease_b, Rect::new(200.0, 0.0, 100.0, 100.0), 2)
+            .unwrap();
         let n2 = add_hit_region(&mut scene, t2, Rect::new(0.0, 0.0, 50.0, 50.0), "n2", true);
 
         let mut fm = FocusManager::new();
@@ -1395,7 +1563,11 @@ mod tests {
     fn test_tab_switch_preserves_focus_without_events() {
         let (mut scene, tab_id, tile_id) = setup_scene();
         let node_id = add_hit_region(
-            &mut scene, tile_id, Rect::new(0.0, 0.0, 100.0, 50.0), "btn", true,
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+            "btn",
+            true,
         );
         let tab_b = scene.create_tab("B", 1).unwrap();
 
@@ -1423,7 +1595,13 @@ mod tests {
         use std::collections::HashSet;
 
         let (mut scene, tab_id, tile_id) = setup_scene();
-        let n1 = add_hit_region(&mut scene, tile_id, Rect::new(0.0, 0.0, 50.0, 50.0), "n1", true);
+        let n1 = add_hit_region(
+            &mut scene,
+            tile_id,
+            Rect::new(0.0, 0.0, 50.0, 50.0),
+            "n1",
+            true,
+        );
 
         let lease_b = scene.grant_lease("b", 60_000, vec![Capability::CreateTile]);
         let t2 = scene
@@ -1441,9 +1619,7 @@ mod tests {
         fm.add_tab(tab_id);
 
         // Apply 30 random-ish transitions.
-        let targets: Vec<(SceneId, SceneId)> = vec![
-            (tile_id, n1), (t2, n2), (t3, n3),
-        ];
+        let targets: Vec<(SceneId, SceneId)> = vec![(tile_id, n1), (t2, n2), (t3, n3)];
         for i in 0..30 {
             let (tile, node) = targets[i % targets.len()];
             fm.on_click(tab_id, tile, Some(node), &scene);

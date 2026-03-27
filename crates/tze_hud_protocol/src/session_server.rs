@@ -23,30 +23,30 @@
 //! - Resuming → Closed (expired/invalid token)
 
 use crate::auth::{
-    authenticate_session_init, negotiate_version, validate_canonical_capabilities,
-    CapabilityPolicy, AuthResult,
+    AuthResult, CapabilityPolicy, authenticate_session_init, negotiate_version,
+    validate_canonical_capabilities,
 };
-use std::collections::HashMap;
 use crate::convert;
 use crate::dedup::{CachedResult, DedupWindow};
 use crate::lease::{
-    LeaseCorrelationCache, CachedLeaseResponse, effective_priority,
-    DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+    CachedLeaseResponse, DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY, LeaseCorrelationCache,
+    effective_priority,
 };
-use crate::proto::session::hud_session_server::HudSession;
-use crate::proto::session::*;
 use crate::proto::session::client_message::Payload as ClientPayload;
+use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::server_message::Payload as ServerPayload;
-use crate::session::{SharedState, SESSION_EVENT_CHANNEL_CAPACITY};
-use crate::token::{TokenStore, DEFAULT_GRACE_PERIOD_MS};
+use crate::proto::session::*;
+use crate::session::{SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
 use crate::subscriptions;
+use crate::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::*;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
+use tze_hud_scene::types::*;
 
 // ─── Session Configuration ───────────────────────────────────────────────────
 
@@ -324,11 +324,7 @@ impl SessionFreezeQueue {
     }
 
     /// Enqueue a mutation batch per traffic-class-aware overflow rules.
-    fn enqueue(
-        &mut self,
-        batch: MutationBatch,
-        namespace: &str,
-    ) -> FreezeEnqueueResult {
+    fn enqueue(&mut self, batch: MutationBatch, namespace: &str) -> FreezeEnqueueResult {
         let traffic_class = classify_inbound_batch(&batch);
         // Derive coalesce key for StateStream: "namespace/lease_id_hex".
         // Using the first 8 bytes (64 bits) as a compact key.
@@ -350,9 +346,15 @@ impl SessionFreezeQueue {
                 if self.is_full() {
                     return FreezeEnqueueResult::BackpressureRequired;
                 }
-                self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                self.queue.push_back(FrozenMutation {
+                    batch,
+                    traffic_class,
+                    coalesce_key,
+                });
                 let warn = self.crosses_pressure_threshold_after_add(before_len);
-                FreezeEnqueueResult::Queued { pressure_warning: warn }
+                FreezeEnqueueResult::Queued {
+                    pressure_warning: warn,
+                }
             }
 
             InboundTrafficClass::StateStream => {
@@ -380,7 +382,11 @@ impl SessionFreezeQueue {
                         .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
                     {
                         let evicted = self.queue.remove(idx).unwrap();
-                        self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                        self.queue.push_back(FrozenMutation {
+                            batch,
+                            traffic_class,
+                            coalesce_key,
+                        });
                         return FreezeEnqueueResult::Evicted {
                             evicted_batch_id: evicted.batch.batch_id,
                         };
@@ -390,9 +396,15 @@ impl SessionFreezeQueue {
                     }
                 }
 
-                self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                self.queue.push_back(FrozenMutation {
+                    batch,
+                    traffic_class,
+                    coalesce_key,
+                });
                 let warn = self.crosses_pressure_threshold_after_add(before_len);
-                FreezeEnqueueResult::Queued { pressure_warning: warn }
+                FreezeEnqueueResult::Queued {
+                    pressure_warning: warn,
+                }
             }
 
             InboundTrafficClass::Ephemeral => {
@@ -404,7 +416,11 @@ impl SessionFreezeQueue {
                         .position(|e| e.traffic_class != InboundTrafficClass::Transactional)
                     {
                         let evicted = self.queue.remove(idx).unwrap();
-                        self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                        self.queue.push_back(FrozenMutation {
+                            batch,
+                            traffic_class,
+                            coalesce_key,
+                        });
                         return FreezeEnqueueResult::Evicted {
                             evicted_batch_id: evicted.batch.batch_id,
                         };
@@ -413,9 +429,15 @@ impl SessionFreezeQueue {
                     }
                 }
 
-                self.queue.push_back(FrozenMutation { batch, traffic_class, coalesce_key });
+                self.queue.push_back(FrozenMutation {
+                    batch,
+                    traffic_class,
+                    coalesce_key,
+                });
                 let warn = self.crosses_pressure_threshold_after_add(before_len);
-                FreezeEnqueueResult::Queued { pressure_warning: warn }
+                FreezeEnqueueResult::Queued {
+                    pressure_warning: warn,
+                }
             }
         }
     }
@@ -475,7 +497,8 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 5000;
 const HEARTBEAT_MISSED_THRESHOLD: u64 = 3;
 
 /// Default heartbeat timeout: threshold * interval.
-const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_MISSED_THRESHOLD;
+const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 =
+    DEFAULT_HEARTBEAT_INTERVAL_MS * HEARTBEAT_MISSED_THRESHOLD;
 
 /// Default maximum sequence gap before SEQUENCE_GAP_EXCEEDED (RFC 0005 §2.3).
 const DEFAULT_MAX_SEQUENCE_GAP: u64 = 100;
@@ -771,7 +794,8 @@ impl HudSessionImpl {
     /// for backwards compatibility. Prefer `new_with_config` for production.
     pub fn new(scene: SceneGraph, psk: &str) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        let (capability_revocation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (capability_revocation_tx, _) =
+            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SharedState {
                 scene: Arc::new(Mutex::new(scene)),
@@ -795,7 +819,8 @@ impl HudSessionImpl {
     /// for backwards compatibility. Prefer `from_shared_state_with_config` for production.
     pub fn from_shared_state(state: Arc<Mutex<SharedState>>, psk: &str) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        let (capability_revocation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (capability_revocation_tx, _) =
+            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
@@ -822,7 +847,8 @@ impl HudSessionImpl {
         fallback_unrestricted: bool,
     ) -> Self {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
-        let (capability_revocation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (capability_revocation_tx, _) =
+            tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
@@ -992,10 +1018,26 @@ impl HudSession for HudSessionImpl {
             // Process handshake
             let mut session = match first_msg.payload {
                 Some(ClientPayload::SessionInit(init)) => {
-                    handle_session_init(&state, &psk, &tx, &init, &agent_capabilities, fallback_unrestricted).await
+                    handle_session_init(
+                        &state,
+                        &psk,
+                        &tx,
+                        &init,
+                        &agent_capabilities,
+                        fallback_unrestricted,
+                    )
+                    .await
                 }
                 Some(ClientPayload::SessionResume(resume)) => {
-                    handle_session_resume(&state, &psk, &tx, &resume, &agent_capabilities, fallback_unrestricted).await
+                    handle_session_resume(
+                        &state,
+                        &psk,
+                        &tx,
+                        &resume,
+                        &agent_capabilities,
+                        fallback_unrestricted,
+                    )
+                    .await
                 }
                 _ => {
                     let _ = tx
@@ -1304,38 +1346,33 @@ async fn handle_session_init(
     // ── Step 1: Version negotiation (RFC 0005 §4.1) ──────────────────────────
     // Do this before authentication so agents can learn about version
     // incompatibility even if they send a wrong key.
-    let negotiated_version = match negotiate_version(
-        init.min_protocol_version,
-        init.max_protocol_version,
-    ) {
-        Ok(v) => v,
-        Err(msg) => {
-            let _ = tx
-                .send(Ok(ServerMessage {
-                    sequence: 1,
-                    timestamp_wall_us: now_wall_us(),
-                    payload: Some(ServerPayload::SessionError(SessionError {
-                        code: "UNSUPPORTED_PROTOCOL_VERSION".to_string(),
-                        message: msg,
-                        hint: format!(
-                            "{{\"runtime_min\": {}, \"runtime_max\": {}}}",
-                            crate::auth::RUNTIME_MIN_VERSION,
-                            crate::auth::RUNTIME_MAX_VERSION
-                        ),
-                    })),
-                }))
-                .await;
-            return None;
-        }
-    };
+    let negotiated_version =
+        match negotiate_version(init.min_protocol_version, init.max_protocol_version) {
+            Ok(v) => v,
+            Err(msg) => {
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: 1,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::SessionError(SessionError {
+                            code: "UNSUPPORTED_PROTOCOL_VERSION".to_string(),
+                            message: msg,
+                            hint: format!(
+                                "{{\"runtime_min\": {}, \"runtime_max\": {}}}",
+                                crate::auth::RUNTIME_MIN_VERSION,
+                                crate::auth::RUNTIME_MAX_VERSION
+                            ),
+                        })),
+                    }))
+                    .await;
+                return None;
+            }
+        };
 
     // ── Step 2: Authentication (RFC 0005 §1.4) ───────────────────────────────
     // Authentication is evaluated synchronously before SessionEstablished is sent.
-    let auth_result = authenticate_session_init(
-        init.auth_credential.as_ref(),
-        &init.pre_shared_key,
-        psk,
-    );
+    let auth_result =
+        authenticate_session_init(init.auth_credential.as_ref(), &init.pre_shared_key, psk);
 
     match auth_result {
         AuthResult::Accepted => {}
@@ -1424,10 +1461,8 @@ async fn handle_session_init(
     } else {
         granted_capabilities.clone()
     };
-    let sub_result = subscriptions::filter_subscriptions(
-        &init.initial_subscriptions,
-        &granted_capabilities,
-    );
+    let sub_result =
+        subscriptions::filter_subscriptions(&init.initial_subscriptions, &granted_capabilities);
 
     let session_id = uuid::Uuid::now_v7().to_string();
     let namespace = init.agent_id.clone();
@@ -1436,11 +1471,9 @@ async fn handle_session_init(
     // Register session in the session registry
     {
         let mut st = state.lock().await;
-        let _ = st.sessions.authenticate(
-            &init.agent_id,
-            psk,
-            &granted_capabilities,
-        );
+        let _ = st
+            .sessions
+            .authenticate(&init.agent_id, psk, &granted_capabilities);
     }
 
     let session_open_at = now_wall_us();
@@ -1464,7 +1497,9 @@ async fn handle_session_init(
         freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         session_open_at_wall_us: session_open_at,
         dedup_window: DedupWindow::new(1000, 60),
-        lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
+        lease_correlation_cache: LeaseCorrelationCache::new(
+            DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+        ),
     };
 
     // ── Step 5: Clock skew estimation (RFC 0003 §1.3) ────────────────────────
@@ -1524,11 +1559,8 @@ async fn handle_session_resume(
     fallback_unrestricted: bool,
 ) -> Option<StreamSession> {
     // Re-authentication is required on resume (RFC 0005 §6.2).
-    let auth_result = authenticate_session_init(
-        resume.auth_credential.as_ref(),
-        &resume.pre_shared_key,
-        psk,
-    );
+    let auth_result =
+        authenticate_session_init(resume.auth_credential.as_ref(), &resume.pre_shared_key, psk);
     match auth_result {
         AuthResult::Accepted => {}
         AuthResult::Failed(reason) | AuthResult::Unimplemented(reason) => {
@@ -1551,7 +1583,8 @@ async fn handle_session_resume(
     let current_ms = now_ms();
     let resume_result = {
         let mut st = state.lock().await;
-        st.token_store.consume(&resume.resume_token, &resume.agent_id, current_ms)
+        st.token_store
+            .consume(&resume.resume_token, &resume.agent_id, current_ms)
     };
 
     let prior_entry = match resume_result {
@@ -1583,11 +1616,9 @@ async fn handle_session_resume(
     // operations (e.g. lease grant, broadcast) can find it.
     {
         let mut st = state.lock().await;
-        let _ = st.sessions.authenticate(
-            &resume.agent_id,
-            psk,
-            &prior_entry.capabilities,
-        );
+        let _ = st
+            .sessions
+            .authenticate(&resume.agent_id, psk, &prior_entry.capabilities);
     }
 
     // Reconstruct policy_caps for the resumed session using the same config-driven
@@ -1626,7 +1657,9 @@ async fn handle_session_resume(
         freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
         session_open_at_wall_us: session_open_at,
         dedup_window: DedupWindow::new(1000, 60),
-        lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
+        lease_correlation_cache: LeaseCorrelationCache::new(
+            DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+        ),
     };
 
     let compositor_ts = now_wall_us();
@@ -1855,7 +1888,9 @@ async fn handle_mutation_batch(
                                     accepted: true,
                                     created_ids: Vec::new(),
                                     error_code: "MUTATION_QUEUE_PRESSURE".to_string(),
-                                    error_message: "Mutation queue is under pressure (>= 80% capacity).".to_string(),
+                                    error_message:
+                                        "Mutation queue is under pressure (>= 80% capacity)."
+                                            .to_string(),
                                 })),
                             }))
                             .await;
@@ -1907,7 +1942,9 @@ async fn handle_mutation_batch(
                                 accepted: false,
                                 created_ids: Vec::new(),
                                 error_code: "MUTATION_DROPPED".to_string(),
-                                error_message: "Mutation evicted from queue due to capacity pressure.".to_string(),
+                                error_message:
+                                    "Mutation evicted from queue due to capacity pressure."
+                                        .to_string(),
                             })),
                         }))
                         .await;
@@ -1940,7 +1977,8 @@ async fn handle_mutation_batch(
                                 accepted: false,
                                 created_ids: Vec::new(),
                                 error_code: "MUTATION_QUEUE_PRESSURE".to_string(),
-                                error_message: "Mutation queue full; backpressure applied.".to_string(),
+                                error_message: "Mutation queue full; backpressure applied."
+                                    .to_string(),
                             })),
                         }))
                         .await;
@@ -1957,7 +1995,8 @@ async fn handle_mutation_batch(
                                 accepted: false,
                                 created_ids: Vec::new(),
                                 error_code: "MUTATION_DROPPED".to_string(),
-                                error_message: "Ephemeral mutation dropped; queue at capacity.".to_string(),
+                                error_message: "Ephemeral mutation dropped; queue at capacity."
+                                    .to_string(),
                             })),
                         }))
                         .await;
@@ -2002,9 +2041,7 @@ async fn handle_mutation_batch(
             let error_code_enum = match error_code {
                 "TIMESTAMP_TOO_OLD" => ErrorCode::TimestampTooOld as i32,
                 "TIMESTAMP_TOO_FUTURE" => ErrorCode::TimestampTooFuture as i32,
-                "TIMESTAMP_EXPIRY_BEFORE_PRESENT" => {
-                    ErrorCode::TimestampExpiryBeforePresent as i32
-                }
+                "TIMESTAMP_EXPIRY_BEFORE_PRESENT" => ErrorCode::TimestampExpiryBeforePresent as i32,
                 _ => ErrorCode::InvalidArgument as i32,
             };
             // context points at the specific field that caused the rejection.
@@ -2042,7 +2079,9 @@ async fn handle_mutation_batch(
                 error_message: "Invalid lease_id bytes".to_string(),
             };
             if !batch.batch_id.is_empty() {
-                session.dedup_window.insert(batch.batch_id.clone(), cached.clone());
+                session
+                    .dedup_window
+                    .insert(batch.batch_id.clone(), cached.clone());
             }
             let seq = session.next_server_seq();
             // Drop lock before awaiting send to avoid holding mutex across await point.
@@ -2077,7 +2116,9 @@ async fn handle_mutation_batch(
                 error_message: "No active tab".to_string(),
             };
             if !batch.batch_id.is_empty() {
-                session.dedup_window.insert(batch.batch_id.clone(), cached.clone());
+                session
+                    .dedup_window
+                    .insert(batch.batch_id.clone(), cached.clone());
             }
             let seq = session.next_server_seq();
             // Drop lock before awaiting send to avoid holding mutex across await point.
@@ -2123,8 +2164,7 @@ async fn handle_mutation_batch(
                     if let Some(ref node_proto) = str_.node
                         && let Some(node) = convert::proto_node_to_scene(node_proto)
                     {
-                        scene_mutations
-                            .push(SceneMutation::SetTileRoot { tile_id, node });
+                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
                     }
                 }
             }
@@ -2389,20 +2429,20 @@ async fn apply_queued_batch_to_scene(
 /// layer (e.g., informational capabilities not enforced by the scene graph).
 fn canonical_name_to_capability(name: &str) -> Option<Capability> {
     match name {
-        "create_tiles"            => Some(Capability::CreateTiles),
-        "modify_own_tiles"        => Some(Capability::ModifyOwnTiles),
-        "manage_tabs"             => Some(Capability::ManageTabs),
-        "manage_sync_groups"      => Some(Capability::ManageSyncGroups),
-        "upload_resource"         => Some(Capability::UploadResource),
-        "read_scene_topology"     => Some(Capability::ReadSceneTopology),
-        "subscribe_scene_events"  => Some(Capability::SubscribeSceneEvents),
-        "overlay_privileges"      => Some(Capability::OverlayPrivileges),
-        "access_input_events"     => Some(Capability::AccessInputEvents),
-        "high_priority_z_order"   => Some(Capability::HighPriorityZOrder),
-        "exceed_default_budgets"  => Some(Capability::ExceedDefaultBudgets),
-        "read_telemetry"          => Some(Capability::ReadTelemetry),
-        "resident_mcp"            => Some(Capability::ResidentMcp),
-        "lease:priority:1"        => Some(Capability::LeasePriority1),
+        "create_tiles" => Some(Capability::CreateTiles),
+        "modify_own_tiles" => Some(Capability::ModifyOwnTiles),
+        "manage_tabs" => Some(Capability::ManageTabs),
+        "manage_sync_groups" => Some(Capability::ManageSyncGroups),
+        "upload_resource" => Some(Capability::UploadResource),
+        "read_scene_topology" => Some(Capability::ReadSceneTopology),
+        "subscribe_scene_events" => Some(Capability::SubscribeSceneEvents),
+        "overlay_privileges" => Some(Capability::OverlayPrivileges),
+        "access_input_events" => Some(Capability::AccessInputEvents),
+        "high_priority_z_order" => Some(Capability::HighPriorityZOrder),
+        "exceed_default_budgets" => Some(Capability::ExceedDefaultBudgets),
+        "read_telemetry" => Some(Capability::ReadTelemetry),
+        "resident_mcp" => Some(Capability::ResidentMcp),
+        "lease:priority:1" => Some(Capability::LeasePriority1),
         _ if name.starts_with("publish_zone:") => {
             let zone = name.strip_prefix("publish_zone:").unwrap_or("*");
             Some(Capability::PublishZone(zone.to_string()))
@@ -2427,7 +2467,11 @@ async fn handle_lease_request(
     // Retransmit dedup (RFC 0005 §5.3): if we have already processed this
     // client sequence, replay the cached response.
     if client_sequence > 0 {
-        if let Some(cached) = session.lease_correlation_cache.get(client_sequence).cloned() {
+        if let Some(cached) = session
+            .lease_correlation_cache
+            .get(client_sequence)
+            .cloned()
+        {
             let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2464,15 +2508,18 @@ async fn handle_lease_request(
         // Cache the denial so retransmits replay a stable response without
         // duplicating the RuntimeError advisory (RFC 0005 §5.3 dedup contract).
         if client_sequence > 0 {
-            session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                granted: false,
-                lease_id: Vec::new(),
-                granted_ttl_ms: 0,
-                granted_priority: 0,
-                granted_capabilities: Vec::new(),
-                deny_reason: deny_reason.clone(),
-                deny_code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
-            });
+            session.lease_correlation_cache.insert(
+                client_sequence,
+                CachedLeaseResponse {
+                    granted: false,
+                    lease_id: Vec::new(),
+                    granted_ttl_ms: 0,
+                    granted_priority: 0,
+                    granted_capabilities: Vec::new(),
+                    deny_reason: deny_reason.clone(),
+                    deny_code: "CONFIG_UNKNOWN_CAPABILITY".to_string(),
+                },
+            );
         }
         let seq = session.next_server_seq();
         let _ = tx
@@ -2530,21 +2577,29 @@ async fn handle_lease_request(
     // `effective_priority` returns u32 (wire type); priority values are 0-4 so the
     // conversion to u8 is always lossless.
     let priority_u8 = granted_priority as u8;
-    let lease_id = st.scene.lock().await.grant_lease_with_priority(&session.namespace, ttl, priority_u8, capabilities);
+    let lease_id = st.scene.lock().await.grant_lease_with_priority(
+        &session.namespace,
+        ttl,
+        priority_u8,
+        capabilities,
+    );
     session.lease_ids.push(lease_id);
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
     // Cache the response for retransmit handling (RFC 0005 §5.3).
     if client_sequence > 0 {
-        session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-            granted: true,
-            lease_id: lease_id_bytes.clone(),
-            granted_ttl_ms: ttl,
-            granted_priority,
-            granted_capabilities: granted_capabilities.clone(),
-            deny_reason: String::new(),
-            deny_code: String::new(),
-        });
+        session.lease_correlation_cache.insert(
+            client_sequence,
+            CachedLeaseResponse {
+                granted: true,
+                lease_id: lease_id_bytes.clone(),
+                granted_ttl_ms: ttl,
+                granted_priority,
+                granted_capabilities: granted_capabilities.clone(),
+                deny_reason: String::new(),
+                deny_code: String::new(),
+            },
+        );
     }
 
     // Send LeaseResponse (transactional: never dropped, RFC 0005 §3.1).
@@ -2593,7 +2648,11 @@ async fn handle_lease_renew(
 ) {
     // Retransmit dedup (RFC 0005 §5.3).
     if client_sequence > 0 {
-        if let Some(cached) = session.lease_correlation_cache.get(client_sequence).cloned() {
+        if let Some(cached) = session
+            .lease_correlation_cache
+            .get(client_sequence)
+            .cloned()
+        {
             let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2621,15 +2680,18 @@ async fn handle_lease_renew(
             let deny_reason = "Invalid lease_id bytes".to_string();
             let deny_code = "INVALID_ARGUMENT".to_string();
             if client_sequence > 0 {
-                session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    granted: false,
-                    lease_id: Vec::new(),
-                    granted_ttl_ms: 0,
-                    granted_priority: 0,
-                    granted_capabilities: Vec::new(),
-                    deny_reason: deny_reason.clone(),
-                    deny_code: deny_code.clone(),
-                });
+                session.lease_correlation_cache.insert(
+                    client_sequence,
+                    CachedLeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: deny_reason.clone(),
+                        deny_code: deny_code.clone(),
+                    },
+                );
             }
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2659,7 +2721,11 @@ async fn handle_lease_renew(
         let mut scene = st.scene.lock().await;
         let result = scene.renew_lease(lease_id, ttl);
         // Read the stored priority while we hold the scene lock.
-        let stored_priority = scene.leases.get(&lease_id).map(|l| l.priority as u32).unwrap_or(2);
+        let stored_priority = scene
+            .leases
+            .get(&lease_id)
+            .map(|l| l.priority as u32)
+            .unwrap_or(2);
         result.map(|()| stored_priority)
     };
 
@@ -2680,15 +2746,18 @@ async fn handle_lease_renew(
             };
             // Cache exactly what we send, so retransmit replays the same response.
             if client_sequence > 0 {
-                session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    granted: lease_response.granted,
-                    lease_id: lease_response.lease_id.clone(),
-                    granted_ttl_ms: lease_response.granted_ttl_ms,
-                    granted_priority: lease_response.granted_priority,
-                    granted_capabilities: lease_response.granted_capabilities.clone(),
-                    deny_reason: lease_response.deny_reason.clone(),
-                    deny_code: lease_response.deny_code.clone(),
-                });
+                session.lease_correlation_cache.insert(
+                    client_sequence,
+                    CachedLeaseResponse {
+                        granted: lease_response.granted,
+                        lease_id: lease_response.lease_id.clone(),
+                        granted_ttl_ms: lease_response.granted_ttl_ms,
+                        granted_priority: lease_response.granted_priority,
+                        granted_capabilities: lease_response.granted_capabilities.clone(),
+                        deny_reason: lease_response.deny_reason.clone(),
+                        deny_code: lease_response.deny_code.clone(),
+                    },
+                );
             }
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2721,15 +2790,18 @@ async fn handle_lease_renew(
             let deny_reason = e.to_string();
             let deny_code = "LEASE_NOT_FOUND".to_string();
             if client_sequence > 0 {
-                session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    granted: false,
-                    lease_id: Vec::new(),
-                    granted_ttl_ms: 0,
-                    granted_priority: 0,
-                    granted_capabilities: Vec::new(),
-                    deny_reason: deny_reason.clone(),
-                    deny_code: deny_code.clone(),
-                });
+                session.lease_correlation_cache.insert(
+                    client_sequence,
+                    CachedLeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: deny_reason.clone(),
+                        deny_code: deny_code.clone(),
+                    },
+                );
             }
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2760,7 +2832,11 @@ async fn handle_lease_release(
     // original send).  Emitting a new LeaseStateChange on retransmit would
     // produce duplicate state-change notifications.
     if client_sequence > 0 {
-        if let Some(cached) = session.lease_correlation_cache.get(client_sequence).cloned() {
+        if let Some(cached) = session
+            .lease_correlation_cache
+            .get(client_sequence)
+            .cloned()
+        {
             let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2788,15 +2864,18 @@ async fn handle_lease_release(
             let deny_reason = "Invalid lease_id bytes".to_string();
             let deny_code = "INVALID_ARGUMENT".to_string();
             if client_sequence > 0 {
-                session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    granted: false,
-                    lease_id: Vec::new(),
-                    granted_ttl_ms: 0,
-                    granted_priority: 0,
-                    granted_capabilities: Vec::new(),
-                    deny_reason: deny_reason.clone(),
-                    deny_code: deny_code.clone(),
-                });
+                session.lease_correlation_cache.insert(
+                    client_sequence,
+                    CachedLeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: deny_reason.clone(),
+                        deny_code: deny_code.clone(),
+                    },
+                );
             }
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2832,15 +2911,18 @@ async fn handle_lease_release(
             };
             // Cache the LeaseResponse so retransmits replay it.
             if client_sequence > 0 {
-                session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    granted: release_response.granted,
-                    lease_id: release_response.lease_id.clone(),
-                    granted_ttl_ms: release_response.granted_ttl_ms,
-                    granted_priority: release_response.granted_priority,
-                    granted_capabilities: release_response.granted_capabilities.clone(),
-                    deny_reason: release_response.deny_reason.clone(),
-                    deny_code: release_response.deny_code.clone(),
-                });
+                session.lease_correlation_cache.insert(
+                    client_sequence,
+                    CachedLeaseResponse {
+                        granted: release_response.granted,
+                        lease_id: release_response.lease_id.clone(),
+                        granted_ttl_ms: release_response.granted_ttl_ms,
+                        granted_priority: release_response.granted_priority,
+                        granted_capabilities: release_response.granted_capabilities.clone(),
+                        deny_reason: release_response.deny_reason.clone(),
+                        deny_code: release_response.deny_code.clone(),
+                    },
+                );
             }
             let seq = session.next_server_seq();
             let _ = tx
@@ -2873,15 +2955,18 @@ async fn handle_lease_release(
             let deny_reason = e.to_string();
             let deny_code = "LEASE_NOT_FOUND".to_string();
             if client_sequence > 0 {
-                session.lease_correlation_cache.insert(client_sequence, CachedLeaseResponse {
-                    granted: false,
-                    lease_id: Vec::new(),
-                    granted_ttl_ms: 0,
-                    granted_priority: 0,
-                    granted_capabilities: Vec::new(),
-                    deny_reason: deny_reason.clone(),
-                    deny_code: deny_code.clone(),
-                });
+                session.lease_correlation_cache.insert(
+                    client_sequence,
+                    CachedLeaseResponse {
+                        granted: false,
+                        lease_id: Vec::new(),
+                        granted_ttl_ms: 0,
+                        granted_priority: 0,
+                        granted_capabilities: Vec::new(),
+                        deny_reason: deny_reason.clone(),
+                        deny_code: deny_code.clone(),
+                    },
+                );
             }
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -2899,7 +2984,6 @@ async fn handle_lease_release(
     }
 }
 
-
 async fn handle_subscription_change(
     session: &mut StreamSession,
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
@@ -2909,7 +2993,8 @@ async fn handle_subscription_change(
     // `subscribe` contains category-only adds (use default prefix).
     // `subscribe_filter` contains category + optional finer-grained prefix (RFC 0010 §7.2).
     // Use a HashSet to deduplicate in O(n) rather than O(n²).
-    let mut seen: std::collections::HashSet<&str> = change.subscribe.iter().map(String::as_str).collect();
+    let mut seen: std::collections::HashSet<&str> =
+        change.subscribe.iter().map(String::as_str).collect();
     let mut add: Vec<String> = change.subscribe.clone();
     for entry in &change.subscribe_filter {
         if seen.insert(entry.category.as_str()) {
@@ -2953,7 +3038,9 @@ async fn handle_subscription_change(
                 // Empty prefix for an active subscription resets to default behavior.
                 session.subscription_filters.remove(entry.category.as_str());
             } else {
-                session.subscription_filters.insert(entry.category.clone(), entry.filter_prefix.clone());
+                session
+                    .subscription_filters
+                    .insert(entry.category.clone(), entry.filter_prefix.clone());
             }
         }
     }
@@ -2971,10 +3058,12 @@ async fn handle_subscription_change(
         .send(Ok(ServerMessage {
             sequence: seq,
             timestamp_wall_us: now_wall_us(),
-            payload: Some(ServerPayload::SubscriptionChangeResult(SubscriptionChangeResult {
-                active_subscriptions: result.active,
-                denied_subscriptions: result.denied,
-            })),
+            payload: Some(ServerPayload::SubscriptionChangeResult(
+                SubscriptionChangeResult {
+                    active_subscriptions: result.active,
+                    denied_subscriptions: result.denied,
+                },
+            )),
         }))
         .await;
 }
@@ -3108,7 +3197,10 @@ async fn handle_capability_revocation(
     // Apply the revocation to the scene graph.
     let result = {
         let mut st = state.lock().await;
-        st.scene.lock().await.revoke_capability(event.lease_id, &cap)
+        st.scene
+            .lock()
+            .await
+            .revoke_capability(event.lease_id, &cap)
     };
 
     match result {
@@ -3226,9 +3318,7 @@ async fn handle_zone_publish(
             let mutation = tze_hud_scene::mutation::SceneMutation::PublishToZone {
                 zone_name: publish.zone_name.clone(),
                 content,
-                publish_token: tze_hud_scene::types::ZonePublishToken {
-                    token: Vec::new(),
-                },
+                publish_token: tze_hud_scene::types::ZonePublishToken { token: Vec::new() },
                 merge_key,
                 // expires_at_wall_us and content_classification are not yet present in
                 // the ZonePublish proto message (post-v1 wire extensions).
@@ -3270,7 +3360,10 @@ async fn handle_zone_publish(
                         format!("Capability missing: {capability}"),
                     ),
                     Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
-                    None => ("ZONE_PUBLISH_FAILED".to_string(), "Zone publish failed".to_string()),
+                    None => (
+                        "ZONE_PUBLISH_FAILED".to_string(),
+                        "Zone publish failed".to_string(),
+                    ),
                 };
                 // On failure, preserve the zone's ephemeral flag for consistent fire-and-forget
                 // semantics (RFC 0005 §8.6): ephemeral zones never send ZonePublishResult,
@@ -3278,7 +3371,12 @@ async fn handle_zone_publish(
                 (false, code, msg, zone_is_ephemeral)
             }
         } else {
-            (false, "INVALID_CONTENT".to_string(), "Missing or invalid zone content".to_string(), zone_is_ephemeral)
+            (
+                false,
+                "INVALID_CONTENT".to_string(),
+                "Missing or invalid zone content".to_string(),
+                zone_is_ephemeral,
+            )
         }
     };
 
@@ -3360,13 +3458,17 @@ async fn handle_input_capture_release(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     rel: InputCaptureRelease,
 ) {
-    use crate::proto::{CaptureReleasedEvent, EventBatch, InputEnvelope};
-    use crate::proto::input_envelope::Event as InputEvent;
     use crate::proto::CaptureReleasedReason;
+    use crate::proto::input_envelope::Event as InputEvent;
+    use crate::proto::{CaptureReleasedEvent, EventBatch, InputEnvelope};
 
     // Only deliver the CaptureReleasedEvent if the agent is subscribed to FOCUS_EVENTS.
     // CaptureReleasedEvent is a focus variant (RFC 0005 §7.1).
-    if !session.subscriptions.iter().any(|s| s == subscriptions::category::FOCUS_EVENTS) {
+    if !session
+        .subscriptions
+        .iter()
+        .any(|s| s == subscriptions::category::FOCUS_EVENTS)
+    {
         // Agent not subscribed to FOCUS_EVENTS; do not deliver CaptureReleasedEvent.
         // The release is still processed (capture is released from the runtime side).
         return;
@@ -3491,7 +3593,7 @@ fn validate_emission(
     session: &mut StreamSession,
     emit: &EmitSceneEvent,
 ) -> Result<String, (String, String)> {
-    use tze_hud_scene::events::naming::{validate_bare_name, build_agent_event_type, NamingError};
+    use tze_hud_scene::events::naming::{NamingError, build_agent_event_type, validate_bare_name};
 
     // ── Step 1: Validate bare name (format + reserved prefix) ────────────
     if let Err(naming_err) = validate_bare_name(&emit.bare_name) {
@@ -3587,8 +3689,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let handle = tokio::spawn(async move {
-            let incoming =
-                tokio_stream::wrappers::TcpListenerStream::new(listener);
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
             tonic::transport::Server::builder()
                 .add_service(HudSessionServer::new(service))
                 .serve_with_incoming(incoming)
@@ -3599,10 +3700,9 @@ mod tests {
         // Give server time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let client =
-            HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
-                .await
-                .unwrap();
+        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
 
         (client, handle)
     }
@@ -3672,23 +3772,44 @@ mod tests {
             Some(ServerPayload::SessionEstablished(established)) => {
                 assert!(!established.session_id.is_empty());
                 assert_eq!(established.namespace, "test-agent");
-                assert!(established.granted_capabilities.contains(&"create_tiles".to_string()));
-                assert!(established.granted_capabilities.contains(&"access_input_events".to_string()));
-                assert!(established.granted_capabilities.contains(&"read_scene_topology".to_string()));
+                assert!(
+                    established
+                        .granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
+                assert!(
+                    established
+                        .granted_capabilities
+                        .contains(&"access_input_events".to_string())
+                );
+                assert!(
+                    established
+                        .granted_capabilities
+                        .contains(&"read_scene_topology".to_string())
+                );
                 assert!(!established.resume_token.is_empty());
-                assert_eq!(established.heartbeat_interval_ms, DEFAULT_HEARTBEAT_INTERVAL_MS);
+                assert_eq!(
+                    established.heartbeat_interval_ms,
+                    DEFAULT_HEARTBEAT_INTERVAL_MS
+                );
                 // SCENE_TOPOLOGY is granted because agent has read_scene_topology capability
                 assert!(
-                    established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    established
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "SCENE_TOPOLOGY should be active (agent has read_scene_topology)"
                 );
                 // Mandatory subscriptions always present
                 assert!(
-                    established.active_subscriptions.contains(&"DEGRADATION_NOTICES".to_string()),
+                    established
+                        .active_subscriptions
+                        .contains(&"DEGRADATION_NOTICES".to_string()),
                     "DEGRADATION_NOTICES must always be active"
                 );
                 assert!(
-                    established.active_subscriptions.contains(&"LEASE_CHANGES".to_string()),
+                    established
+                        .active_subscriptions
+                        .contains(&"LEASE_CHANGES".to_string()),
                     "LEASE_CHANGES must always be active"
                 );
                 // denied_subscriptions must be empty (all requested categories granted)
@@ -3755,8 +3876,7 @@ mod tests {
     #[tokio::test]
     async fn test_mutation_over_stream() {
         let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "mutator", "test-key").await;
+        let (tx, _init_messages, mut stream) = handshake(&mut client, "mutator", "test-key").await;
 
         // First, request a lease
         tx.send(ClientMessage {
@@ -3791,21 +3911,19 @@ mod tests {
                 batch_id: batch_id.clone(),
                 lease_id: lease_id.clone(),
                 mutations: vec![crate::proto::MutationProto {
-                    mutation: Some(
-                        crate::proto::mutation_proto::Mutation::CreateTile(
-                            crate::proto::CreateTileMutation {
-                                tab_id: vec![],  // empty = server infers active tab
-                                bounds: Some(crate::proto::Rect {
-                                    x: 0.0,
-                                    y: 0.0,
-                                    width: 200.0,
-                                    height: 150.0,
-                                    ..Default::default()
-                                }),
-                                z_order: 1,
-                            },
-                        ),
-                    ),
+                    mutation: Some(crate::proto::mutation_proto::Mutation::CreateTile(
+                        crate::proto::CreateTileMutation {
+                            tab_id: vec![], // empty = server infers active tab
+                            bounds: Some(crate::proto::Rect {
+                                x: 0.0,
+                                y: 0.0,
+                                width: 200.0,
+                                height: 150.0,
+                                ..Default::default()
+                            }),
+                            z_order: 1,
+                        },
+                    )),
                 }],
                 timing: None,
             })),
@@ -3884,7 +4002,10 @@ mod tests {
                         crate::proto::CreateTileMutation {
                             tab_id: vec![],
                             bounds: Some(crate::proto::Rect {
-                                x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+                                x: 0.0,
+                                y: 0.0,
+                                width: 100.0,
+                                height: 100.0,
                                 ..Default::default()
                             }),
                             z_order: 0,
@@ -3929,7 +4050,11 @@ mod tests {
         // Create an active tab so mutations can reach the scene-apply path.
         {
             let st = shared_state.lock().await;
-            st.scene.lock().await.create_tab("test-tab", 0).expect("create_tab");
+            st.scene
+                .lock()
+                .await
+                .create_tab("test-tab", 0)
+                .expect("create_tab");
         }
 
         // Acquire a lease.
@@ -3956,7 +4081,10 @@ mod tests {
         // matching bytes_to_scene_id in session_server.rs.
         {
             let st = shared_state.lock().await;
-            let arr: [u8; 16] = lease_id_bytes.as_slice().try_into().expect("16-byte lease_id");
+            let arr: [u8; 16] = lease_id_bytes
+                .as_slice()
+                .try_into()
+                .expect("16-byte lease_id");
             let lease_id = tze_hud_scene::SceneId::from_uuid(uuid::Uuid::from_bytes(arr));
             let _ = st.scene.lock().await.revoke_lease(lease_id);
         }
@@ -3974,7 +4102,10 @@ mod tests {
                         crate::proto::CreateTileMutation {
                             tab_id: vec![],
                             bounds: Some(crate::proto::Rect {
-                                x: 0.0, y: 0.0, width: 100.0, height: 100.0,
+                                x: 0.0,
+                                y: 0.0,
+                                width: 100.0,
+                                height: 100.0,
                                 ..Default::default()
                             }),
                             z_order: 0,
@@ -4009,8 +4140,7 @@ mod tests {
     #[tokio::test]
     async fn test_lease_over_stream() {
         let (mut client, _server) = setup_test().await;
-        let (tx, _init_messages, mut stream) =
-            handshake(&mut client, "leasor", "test-key").await;
+        let (tx, _init_messages, mut stream) = handshake(&mut client, "leasor", "test-key").await;
 
         // Request a lease
         tx.send(ClientMessage {
@@ -4018,7 +4148,10 @@ mod tests {
             timestamp_wall_us: now_wall_us(),
             payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
                 ttl_ms: 30_000,
-                capabilities: vec!["create_tiles".to_string(), "access_input_events".to_string()],
+                capabilities: vec![
+                    "create_tiles".to_string(),
+                    "access_input_events".to_string(),
+                ],
                 lease_priority: 2,
             })),
         })
@@ -4032,7 +4165,10 @@ mod tests {
                 assert!(!resp.lease_id.is_empty());
                 assert_eq!(resp.lease_id.len(), 16);
                 assert_eq!(resp.granted_ttl_ms, 30_000);
-                assert!(resp.granted_capabilities.contains(&"create_tiles".to_string()));
+                assert!(
+                    resp.granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
         }
@@ -4069,8 +4205,7 @@ mod tests {
         let (mut client, _server) = setup_test().await;
 
         // Start initial session to get a resume token
-        let (tx, init_messages, _stream) =
-            handshake(&mut client, "resumable", "test-key").await;
+        let (tx, init_messages, _stream) = handshake(&mut client, "resumable", "test-key").await;
         drop(tx); // Close the first stream
         drop(_stream);
 
@@ -4079,7 +4214,9 @@ mod tests {
 
         // Now resume with the token
         let resume_token = match &init_messages[0].payload {
-            Some(ServerPayload::SessionEstablished(established)) => established.resume_token.clone(),
+            Some(ServerPayload::SessionEstablished(established)) => {
+                established.resume_token.clone()
+            }
             _ => panic!("Expected SessionEstablished"),
         };
 
@@ -4110,7 +4247,10 @@ mod tests {
                 assert!(result.accepted, "expected resume to be accepted");
                 assert!(!result.new_session_token.is_empty());
                 // version = major * 1000 + minor; runtime max = v1.1 = 1001
-                assert_eq!(result.negotiated_protocol_version, crate::auth::RUNTIME_MAX_VERSION);
+                assert_eq!(
+                    result.negotiated_protocol_version,
+                    crate::auth::RUNTIME_MAX_VERSION
+                );
             }
             other => panic!("Expected SessionResumeResult on resume, got: {other:?}"),
         }
@@ -4159,7 +4299,10 @@ mod tests {
                 // will be rejected; we just verify the sequence correlation and
                 // that error_code is populated on rejection.
                 if !result.accepted {
-                    assert!(!result.error_code.is_empty(), "rejected result must carry an error_code");
+                    assert!(
+                        !result.error_code.is_empty(),
+                        "rejected result must carry an error_code"
+                    );
                 }
             }
             other => panic!("Expected ZonePublishResult, got: {other:?}"),
@@ -4221,21 +4364,29 @@ mod tests {
             Some(ServerPayload::SubscriptionChangeResult(result)) => {
                 // Initial SCENE_TOPOLOGY subscription should still be active
                 assert!(
-                    result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    result
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "initial SCENE_TOPOLOGY subscription should still be active"
                 );
                 // Newly added INPUT_EVENTS should be active (agent has access_input_events)
                 assert!(
-                    result.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    result
+                        .active_subscriptions
+                        .contains(&"INPUT_EVENTS".to_string()),
                     "newly added INPUT_EVENTS subscription should be active"
                 );
                 // Mandatory subscriptions always present
                 assert!(
-                    result.active_subscriptions.contains(&"DEGRADATION_NOTICES".to_string()),
+                    result
+                        .active_subscriptions
+                        .contains(&"DEGRADATION_NOTICES".to_string()),
                     "DEGRADATION_NOTICES must always be active"
                 );
                 assert!(
-                    result.active_subscriptions.contains(&"LEASE_CHANGES".to_string()),
+                    result
+                        .active_subscriptions
+                        .contains(&"LEASE_CHANGES".to_string()),
                     "LEASE_CHANGES must always be active"
                 );
                 // No denied subscriptions (all requested categories have required capability)
@@ -4295,12 +4446,10 @@ mod tests {
             payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
                 subscribe: Vec::new(),
                 unsubscribe: Vec::new(),
-                subscribe_filter: vec![
-                    crate::proto::session::SubscriptionEntry {
-                        category: "SCENE_TOPOLOGY".to_string(),
-                        filter_prefix: "scene.zone.".to_string(),
-                    },
-                ],
+                subscribe_filter: vec![crate::proto::session::SubscriptionEntry {
+                    category: "SCENE_TOPOLOGY".to_string(),
+                    filter_prefix: "scene.zone.".to_string(),
+                }],
             })),
         })
         .await
@@ -4311,7 +4460,9 @@ mod tests {
             Some(ServerPayload::SubscriptionChangeResult(result)) => {
                 // SCENE_TOPOLOGY must be in the active set (subscribe_filter is processed as an add)
                 assert!(
-                    result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    result
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "SCENE_TOPOLOGY must be active after subscribe_filter"
                 );
                 // No denials (agent has read_scene_topology capability)
@@ -4342,7 +4493,9 @@ mod tests {
             Some(ServerPayload::SubscriptionChangeResult(result2)) => {
                 // SCENE_TOPOLOGY must still be active
                 assert!(
-                    result2.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    result2
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "SCENE_TOPOLOGY must remain active after plain subscribe"
                 );
                 // No denials
@@ -4361,12 +4514,10 @@ mod tests {
             payload: Some(ClientPayload::SubscriptionChange(SubscriptionChange {
                 subscribe: Vec::new(),
                 unsubscribe: Vec::new(),
-                subscribe_filter: vec![
-                    crate::proto::session::SubscriptionEntry {
-                        category: "SCENE_TOPOLOGY".to_string(),
-                        filter_prefix: String::new(), // empty = reset to default
-                    },
-                ],
+                subscribe_filter: vec![crate::proto::session::SubscriptionEntry {
+                    category: "SCENE_TOPOLOGY".to_string(),
+                    filter_prefix: String::new(), // empty = reset to default
+                }],
             })),
         })
         .await
@@ -4376,7 +4527,9 @@ mod tests {
         match &msg3.payload {
             Some(ServerPayload::SubscriptionChangeResult(result3)) => {
                 assert!(
-                    result3.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    result3
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "SCENE_TOPOLOGY must remain active after empty-prefix subscribe_filter"
                 );
                 assert!(
@@ -4384,7 +4537,9 @@ mod tests {
                     "empty-prefix subscribe_filter for active category must not produce denials"
                 );
             }
-            other => panic!("Expected SubscriptionChangeResult for empty-prefix reset, got: {other:?}"),
+            other => {
+                panic!("Expected SubscriptionChangeResult for empty-prefix reset, got: {other:?}")
+            }
         }
 
         drop(tx);
@@ -4430,17 +4585,23 @@ mod tests {
             Some(ServerPayload::SessionEstablished(established)) => {
                 // INPUT_EVENTS should be in denied_subscriptions
                 assert!(
-                    established.denied_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    established
+                        .denied_subscriptions
+                        .contains(&"INPUT_EVENTS".to_string()),
                     "INPUT_EVENTS must be denied without access_input_events capability"
                 );
                 // INPUT_EVENTS should NOT be in active_subscriptions
                 assert!(
-                    !established.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    !established
+                        .active_subscriptions
+                        .contains(&"INPUT_EVENTS".to_string()),
                     "INPUT_EVENTS must not be active without access_input_events capability"
                 );
                 // SCENE_TOPOLOGY is granted (agent has read_scene_topology)
                 assert!(
-                    established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    established
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "SCENE_TOPOLOGY should be active with read_scene_topology capability"
                 );
             }
@@ -4894,7 +5055,12 @@ mod tests {
             };
             let r = q.enqueue(batch, "ns");
             assert!(
-                matches!(r, FreezeEnqueueResult::Queued { pressure_warning: false }),
+                matches!(
+                    r,
+                    FreezeEnqueueResult::Queued {
+                        pressure_warning: false
+                    }
+                ),
                 "Expected no pressure warning at {i}/7"
             );
         }
@@ -4907,7 +5073,12 @@ mod tests {
         };
         let r = q.enqueue(batch, "ns");
         assert!(
-            matches!(r, FreezeEnqueueResult::Queued { pressure_warning: true }),
+            matches!(
+                r,
+                FreezeEnqueueResult::Queued {
+                    pressure_warning: true
+                }
+            ),
             "Expected pressure_warning=true at 80%"
         );
     }
@@ -4916,7 +5087,7 @@ mod tests {
     #[test]
     fn test_session_freeze_queue_transactional_never_evicted() {
         use crate::proto::mutation_proto::Mutation;
-        use crate::proto::{MutationProto, CreateTileMutation};
+        use crate::proto::{CreateTileMutation, MutationProto};
 
         let mut q = SessionFreezeQueue::new(2);
         // Fill with non-empty (StateStream) batches
@@ -4936,7 +5107,7 @@ mod tests {
             lease_id: vec![0u8; 16],
             mutations: vec![MutationProto {
                 mutation: Some(Mutation::CreateTile(CreateTileMutation {
-                    tab_id: vec![],  // empty = server infers active tab
+                    tab_id: vec![], // empty = server infers active tab
                     bounds: None,
                     z_order: 0,
                     ..Default::default()
@@ -4962,9 +5133,16 @@ mod tests {
         let (_tx, messages, _stream) = handshake(&mut client, "state-test-agent", "test-key").await;
 
         // If handshake succeeded, we must have SessionEstablished followed by SceneSnapshot
-        assert_eq!(messages.len(), 2, "Expected SessionEstablished + SceneSnapshot");
+        assert_eq!(
+            messages.len(),
+            2,
+            "Expected SessionEstablished + SceneSnapshot"
+        );
         assert!(
-            matches!(messages[0].payload, Some(ServerPayload::SessionEstablished(_))),
+            matches!(
+                messages[0].payload,
+                Some(ServerPayload::SessionEstablished(_))
+            ),
             "First message must be SessionEstablished"
         );
         assert!(
@@ -5047,11 +5225,7 @@ mod tests {
             if tokio::time::Instant::now() > deadline {
                 break;
             }
-            match tokio::time::timeout(
-                tokio::time::Duration::from_millis(100),
-                stream.next(),
-            )
-            .await
+            match tokio::time::timeout(tokio::time::Duration::from_millis(100), stream.next()).await
             {
                 Ok(None) | Err(_) => {
                     got_stream_end = true;
@@ -5101,17 +5275,41 @@ mod tests {
     #[test]
     fn test_session_config_defaults() {
         let config = SessionConfig::default();
-        assert_eq!(config.handshake_timeout_ms, 5000, "handshake_timeout_ms default");
-        assert_eq!(config.heartbeat_interval_ms, 5000, "heartbeat_interval_ms default");
-        assert_eq!(config.heartbeat_missed_threshold, 3, "heartbeat_missed_threshold default");
-        assert_eq!(config.reconnect_grace_period_ms, 30_000, "reconnect_grace_period_ms default");
-        assert_eq!(config.retransmit_timeout_ms, 5000, "retransmit_timeout_ms default");
+        assert_eq!(
+            config.handshake_timeout_ms, 5000,
+            "handshake_timeout_ms default"
+        );
+        assert_eq!(
+            config.heartbeat_interval_ms, 5000,
+            "heartbeat_interval_ms default"
+        );
+        assert_eq!(
+            config.heartbeat_missed_threshold, 3,
+            "heartbeat_missed_threshold default"
+        );
+        assert_eq!(
+            config.reconnect_grace_period_ms, 30_000,
+            "reconnect_grace_period_ms default"
+        );
+        assert_eq!(
+            config.retransmit_timeout_ms, 5000,
+            "retransmit_timeout_ms default"
+        );
         assert_eq!(config.dedup_window_size, 1000, "dedup_window_size default");
         assert_eq!(config.dedup_window_ttl_s, 60, "dedup_window_ttl_s default");
         assert_eq!(config.max_sequence_gap, 100, "max_sequence_gap default");
-        assert_eq!(config.ephemeral_buffer_max, 16, "ephemeral_buffer_max default");
-        assert_eq!(config.max_concurrent_resident_sessions, 16, "max_concurrent_resident_sessions default");
-        assert_eq!(config.max_concurrent_guest_sessions, 64, "max_concurrent_guest_sessions default");
+        assert_eq!(
+            config.ephemeral_buffer_max, 16,
+            "ephemeral_buffer_max default"
+        );
+        assert_eq!(
+            config.max_concurrent_resident_sessions, 16,
+            "max_concurrent_resident_sessions default"
+        );
+        assert_eq!(
+            config.max_concurrent_guest_sessions, 64,
+            "max_concurrent_guest_sessions default"
+        );
     }
 
     // ─── Traffic class classification tests (RFC 0005 §3.1, §3.2) ───────────
@@ -5123,7 +5321,9 @@ mod tests {
 
         // Transactional messages
         assert_eq!(
-            classify_server_payload(&ServerPayload::SessionEstablished(SessionEstablished::default())),
+            classify_server_payload(&ServerPayload::SessionEstablished(
+                SessionEstablished::default()
+            )),
             TrafficClass::Transactional,
         );
         assert_eq!(
@@ -5202,7 +5402,10 @@ mod tests {
 
         // First retained message should be sequence 5 (oldest 4 were dropped: 1,2,3,4)
         if let Some(Ok(msg)) = queue.queue.front() {
-            assert_eq!(msg.sequence, 5, "Oldest 4 should have been evicted (1-4 dropped, 5 is oldest retained)");
+            assert_eq!(
+                msg.sequence, 5,
+                "Oldest 4 should have been evicted (1-4 dropped, 5 is oldest retained)"
+            );
         }
 
         // Last retained message should be sequence 20
@@ -5226,7 +5429,11 @@ mod tests {
             }));
         }
 
-        assert_eq!(queue.queue.len(), 16, "All 16 messages retained (at capacity)");
+        assert_eq!(
+            queue.queue.len(),
+            16,
+            "All 16 messages retained (at capacity)"
+        );
         if let Some(Ok(msg)) = queue.queue.front() {
             assert_eq!(msg.sequence, 1, "No eviction: first message is sequence 1");
         }
@@ -5257,7 +5464,9 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: now_wall_us(),
             dedup_window: DedupWindow::new(1000, 60),
-            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
+            lease_correlation_cache: LeaseCorrelationCache::new(
+                DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+            ),
         };
 
         // seq=2 (gap=1): OK
@@ -5510,7 +5719,10 @@ mod tests {
                     err.code
                 );
                 // Hint should include runtime's supported range
-                assert!(!err.hint.is_empty(), "Hint should contain runtime version range");
+                assert!(
+                    !err.hint.is_empty(),
+                    "Hint should contain runtime version range"
+                );
             }
             other => panic!("Expected SessionError(UNSUPPORTED_PROTOCOL_VERSION), got: {other:?}"),
         }
@@ -5585,7 +5797,7 @@ mod tests {
                 // Legacy names — must be rejected
                 requested_capabilities: vec![
                     "create_tile".to_string(),   // legacy: should be create_tiles
-                    "receive_input".to_string(),  // legacy: should be access_input_events
+                    "receive_input".to_string(), // legacy: should be access_input_events
                 ],
                 initial_subscriptions: Vec::new(),
                 resume_token: Vec::new(),
@@ -5605,7 +5817,8 @@ mod tests {
             Some(ServerPayload::SessionError(err)) => {
                 assert_eq!(
                     err.code, "CONFIG_UNKNOWN_CAPABILITY",
-                    "Expected CONFIG_UNKNOWN_CAPABILITY, got: {:?}", err.code
+                    "Expected CONFIG_UNKNOWN_CAPABILITY, got: {:?}",
+                    err.code
                 );
                 // Hint should contain JSON with canonical replacements
                 assert!(
@@ -5615,11 +5828,13 @@ mod tests {
                 // Both legacy names must be reported (spec: collect all, not fail-fast)
                 assert!(
                     err.hint.contains("create_tiles") || err.hint.contains("create_tile"),
-                    "Hint must reference create_tiles: {:?}", err.hint
+                    "Hint must reference create_tiles: {:?}",
+                    err.hint
                 );
                 assert!(
                     err.hint.contains("access_input_events"),
-                    "Hint must reference access_input_events: {:?}", err.hint
+                    "Hint must reference access_input_events: {:?}",
+                    err.hint
                 );
             }
             other => panic!("Expected SessionError(CONFIG_UNKNOWN_CAPABILITY), got: {other:?}"),
@@ -5643,7 +5858,7 @@ mod tests {
                 agent_display_name: "old-vocab-agent".to_string(),
                 pre_shared_key: "test-key".to_string(),
                 requested_capabilities: vec![
-                    "read_scene".to_string(),          // pre-Round-14: should be read_scene_topology
+                    "read_scene".to_string(), // pre-Round-14: should be read_scene_topology
                     "zone_publish:subtitle".to_string(), // pre-Round-14: should be publish_zone:subtitle
                 ],
                 initial_subscriptions: Vec::new(),
@@ -5663,8 +5878,14 @@ mod tests {
         match &msg.payload {
             Some(ServerPayload::SessionError(err)) => {
                 assert_eq!(err.code, "CONFIG_UNKNOWN_CAPABILITY");
-                assert!(err.hint.contains("read_scene_topology"), "Hint must reference read_scene_topology");
-                assert!(err.hint.contains("publish_zone:subtitle"), "Hint must reference publish_zone:subtitle");
+                assert!(
+                    err.hint.contains("read_scene_topology"),
+                    "Hint must reference read_scene_topology"
+                );
+                assert!(
+                    err.hint.contains("publish_zone:subtitle"),
+                    "Hint must reference publish_zone:subtitle"
+                );
             }
             other => panic!("Expected SessionError(CONFIG_UNKNOWN_CAPABILITY), got: {other:?}"),
         }
@@ -5675,7 +5896,8 @@ mod tests {
     #[tokio::test]
     async fn test_lease_request_with_legacy_capability_rejected() {
         let (mut client, _server) = setup_test().await;
-        let (tx, _messages, mut response_stream) = handshake(&mut client, "cap-test-agent", "test-key").await;
+        let (tx, _messages, mut response_stream) =
+            handshake(&mut client, "cap-test-agent", "test-key").await;
 
         // Request a lease with a legacy (non-canonical) capability name
         tx.send(ClientMessage {
@@ -5694,10 +5916,14 @@ mod tests {
         let msg = next_non_state_change(&mut response_stream).await;
         match &msg.payload {
             Some(ServerPayload::LeaseResponse(resp)) => {
-                assert!(!resp.granted, "Lease must be denied for non-canonical capability");
+                assert!(
+                    !resp.granted,
+                    "Lease must be denied for non-canonical capability"
+                );
                 assert_eq!(
                     resp.deny_code, "CONFIG_UNKNOWN_CAPABILITY",
-                    "deny_code must be CONFIG_UNKNOWN_CAPABILITY, got: {:?}", resp.deny_code
+                    "deny_code must be CONFIG_UNKNOWN_CAPABILITY, got: {:?}",
+                    resp.deny_code
                 );
             }
             other => panic!("Expected LeaseResponse(denied), got: {other:?}"),
@@ -5746,7 +5972,9 @@ mod tests {
             Some(ServerPayload::SessionEstablished(established)) => {
                 // Agent with access_input_events capability should have INPUT_EVENTS active
                 assert!(
-                    established.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    established
+                        .active_subscriptions
+                        .contains(&"INPUT_EVENTS".to_string()),
                     "Agent with access_input_events should have INPUT_EVENTS in active_subscriptions; \
                      active={:?}, denied={:?}",
                     established.active_subscriptions,
@@ -5790,7 +6018,10 @@ mod tests {
                     "Expected read_telemetry to be granted; got: {:?}",
                     notice.granted
                 );
-                assert!(notice.revoked.is_empty(), "No capabilities should be revoked");
+                assert!(
+                    notice.revoked.is_empty(),
+                    "No capabilities should be revoked"
+                );
                 assert!(
                     notice.effective_at_server_seq > 0,
                     "effective_at_server_seq must be non-zero"
@@ -5835,9 +6066,7 @@ mod tests {
                     "PSK unrestricted agent should get overlay_privileges granted"
                 );
             }
-            other => panic!(
-                "Expected CapabilityNotice for unrestricted PSK agent, got: {other:?}"
-            ),
+            other => panic!("Expected CapabilityNotice for unrestricted PSK agent, got: {other:?}"),
         }
     }
 
@@ -5873,7 +6102,9 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: 0,
             dedup_window: DedupWindow::new(1000, 60),
-            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
+            lease_correlation_cache: LeaseCorrelationCache::new(
+                DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+            ),
         };
 
         handle_capability_request(
@@ -5934,7 +6165,9 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: 0,
             dedup_window: DedupWindow::new(1000, 60),
-            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
+            lease_correlation_cache: LeaseCorrelationCache::new(
+                DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+            ),
         };
 
         // Request both an authorized and an unauthorized capability
@@ -5966,13 +6199,15 @@ mod tests {
                 );
                 // read_telemetry should NOT have been granted
                 assert!(
-                    !session.capabilities.contains(&"overlay_privileges".to_string()),
+                    !session
+                        .capabilities
+                        .contains(&"overlay_privileges".to_string()),
                     "overlay_privileges must not have been added to session capabilities"
                 );
             }
-            other => panic!(
-                "Expected RuntimeError(PERMISSION_DENIED) for partial grant, got: {other:?}"
-            ),
+            other => {
+                panic!("Expected RuntimeError(PERMISSION_DENIED) for partial grant, got: {other:?}")
+            }
         }
     }
 
@@ -6002,7 +6237,9 @@ mod tests {
             freeze_queue: SessionFreezeQueue::new(FREEZE_QUEUE_CAPACITY),
             session_open_at_wall_us: 0,
             dedup_window: DedupWindow::new(1000, 60),
-            lease_correlation_cache: LeaseCorrelationCache::new(DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY),
+            lease_correlation_cache: LeaseCorrelationCache::new(
+                DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+            ),
         };
 
         handle_capability_request(
@@ -6023,7 +6260,10 @@ mod tests {
                 // message: human-readable
                 assert!(!err.message.is_empty(), "message must be set");
                 // error_code_enum: typed enum (non-zero for known codes)
-                assert!(err.error_code_enum != 0, "error_code_enum must be non-zero for known codes");
+                assert!(
+                    err.error_code_enum != 0,
+                    "error_code_enum must be non-zero for known codes"
+                );
                 // hint: machine-readable JSON
                 if !err.hint.is_empty() {
                     assert!(
@@ -6051,8 +6291,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let handle = tokio::spawn(async move {
-            let incoming =
-                tokio_stream::wrappers::TcpListenerStream::new(listener);
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
             tonic::transport::Server::builder()
                 .add_service(HudSessionServer::new(service))
                 .serve_with_incoming(incoming)
@@ -6062,14 +6301,12 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let client =
-            HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
-                .await
-                .unwrap();
+        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
 
         (client, handle, shared_state)
     }
-
 
     // ─── Reconnection and resume tests (RFC 0005 §6.1–6.6, rig-3dou) ────────
 
@@ -6100,7 +6337,8 @@ mod tests {
     #[tokio::test]
     async fn test_reconnect_within_grace_accepted() {
         let (mut client, _server) = setup_test().await;
-        let resume_token = handshake_and_disconnect(&mut client, "resume-ok-agent", "test-key").await;
+        let resume_token =
+            handshake_and_disconnect(&mut client, "resume-ok-agent", "test-key").await;
 
         let (resume_tx, resume_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
         let resume_stream = tokio_stream::wrappers::ReceiverStream::new(resume_rx);
@@ -6126,12 +6364,18 @@ mod tests {
         match &msg1.payload {
             Some(ServerPayload::SessionResumeResult(result)) => {
                 assert!(result.accepted, "expected resume to be accepted");
-                assert!(!result.new_session_token.is_empty(), "new token must be issued");
+                assert!(
+                    !result.new_session_token.is_empty(),
+                    "new token must be issued"
+                );
                 assert_ne!(
                     result.new_session_token, resume_token,
                     "new token must differ from old token"
                 );
-                assert_eq!(result.negotiated_protocol_version, crate::auth::RUNTIME_MAX_VERSION);
+                assert_eq!(
+                    result.negotiated_protocol_version,
+                    crate::auth::RUNTIME_MAX_VERSION
+                );
             }
             other => panic!("Expected SessionResumeResult, got: {other:?}"),
         }
@@ -6150,7 +6394,8 @@ mod tests {
     #[tokio::test]
     async fn test_resume_token_single_use() {
         let (mut client, _server) = setup_test().await;
-        let resume_token = handshake_and_disconnect(&mut client, "single-use-agent", "test-key").await;
+        let resume_token =
+            handshake_and_disconnect(&mut client, "single-use-agent", "test-key").await;
 
         // First resume: should succeed and consume the token.
         let (tx1, rx1) = tokio::sync::mpsc::channel::<ClientMessage>(64);
@@ -6218,7 +6463,8 @@ mod tests {
     #[tokio::test]
     async fn test_resume_auth_required() {
         let (mut client, _server) = setup_test().await;
-        let resume_token = handshake_and_disconnect(&mut client, "auth-check-agent", "test-key").await;
+        let resume_token =
+            handshake_and_disconnect(&mut client, "auth-check-agent", "test-key").await;
 
         let (resume_tx, resume_rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
         let resume_stream = tokio_stream::wrappers::ReceiverStream::new(resume_rx);
@@ -6243,7 +6489,11 @@ mod tests {
         let msg = response_stream.next().await.unwrap().unwrap();
         match &msg.payload {
             Some(ServerPayload::SessionError(err)) => {
-                assert_eq!(err.code, "AUTH_FAILED", "expected AUTH_FAILED, got: {}", err.code);
+                assert_eq!(
+                    err.code, "AUTH_FAILED",
+                    "expected AUTH_FAILED, got: {}",
+                    err.code
+                );
             }
             other => panic!("Expected SessionError(AUTH_FAILED), got: {other:?}"),
         }
@@ -6285,7 +6535,10 @@ mod tests {
                     "unknown token must produce SESSION_GRACE_EXPIRED, got: {}",
                     err.code
                 );
-                assert!(!err.hint.is_empty(), "hint should direct client to SessionInit");
+                assert!(
+                    !err.hint.is_empty(),
+                    "hint should direct client to SessionInit"
+                );
             }
             other => panic!("Expected SessionError(SESSION_GRACE_EXPIRED), got: {other:?}"),
         }
@@ -6314,7 +6567,10 @@ mod tests {
                     "read_scene_topology".to_string(),
                     "access_input_events".to_string(),
                 ],
-                initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string(), "INPUT_EVENTS".to_string()],
+                initial_subscriptions: vec![
+                    "SCENE_TOPOLOGY".to_string(),
+                    "INPUT_EVENTS".to_string(),
+                ],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_wall_us(),
                 min_protocol_version: 1000,
@@ -6361,16 +6617,22 @@ mod tests {
                 assert!(result.accepted);
                 // Capabilities must be restored.
                 assert!(
-                    result.granted_capabilities.contains(&"create_tiles".to_string()),
+                    result
+                        .granted_capabilities
+                        .contains(&"create_tiles".to_string()),
                     "create_tiles capability must be restored on resume"
                 );
                 // Subscriptions must be restored.
                 assert!(
-                    result.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    result
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "SCENE_TOPOLOGY subscription must be present in resume result"
                 );
                 assert!(
-                    result.active_subscriptions.contains(&"INPUT_EVENTS".to_string()),
+                    result
+                        .active_subscriptions
+                        .contains(&"INPUT_EVENTS".to_string()),
                     "INPUT_EVENTS subscription must be present in resume result"
                 );
             }
@@ -6413,10 +6675,9 @@ mod tests {
         });
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let mut client =
-            HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
-                .await
-                .unwrap();
+        let mut client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
 
         let (tx, _init_messages, mut stream) =
             handshake(&mut client, "degrad-agent", "test-key").await;
@@ -6455,7 +6716,10 @@ mod tests {
                     "Expected COALESCING_MORE"
                 );
                 assert_eq!(dn.reason, "high load");
-                assert!(dn.affected_capabilities.contains(&"state_stream".to_string()));
+                assert!(
+                    dn.affected_capabilities
+                        .contains(&"state_stream".to_string())
+                );
             }
             other => panic!("Expected DegradationNotice, got: {other:?}"),
         }
@@ -6746,9 +7010,9 @@ mod tests {
                     ErrorCode::TimestampExpiryBeforePresent as i32
                 );
             }
-            other => panic!(
-                "Expected RuntimeError(TIMESTAMP_EXPIRY_BEFORE_PRESENT), got: {other:?}"
-            ),
+            other => {
+                panic!("Expected RuntimeError(TIMESTAMP_EXPIRY_BEFORE_PRESENT), got: {other:?}")
+            }
         }
 
         drop(tx);
@@ -6762,7 +7026,8 @@ mod tests {
     #[tokio::test]
     async fn test_ephemeral_zone_no_publish_result() {
         use tze_hud_scene::types::{
-            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition, ZoneMediaType,
+            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition,
+            ZoneMediaType,
         };
         let scene = SceneGraph::new(800.0, 600.0);
         let service = HudSessionImpl::new(scene, "test-key");
@@ -6770,25 +7035,29 @@ mod tests {
         // Register an ephemeral zone in the scene
         {
             let st = service.state.lock().await;
-            st.scene.lock().await.zone_registry.register(ZoneDefinition {
-                id: tze_hud_scene::SceneId::new(),
-                name: "live-caption".to_string(),
-                description: "Ephemeral caption zone".to_string(),
-                geometry_policy: GeometryPolicy::Relative {
-                    x_pct: 0.1,
-                    y_pct: 0.8,
-                    width_pct: 0.8,
-                    height_pct: 0.1,
-                },
-                accepted_media_types: vec![ZoneMediaType::StreamText],
-                rendering_policy: RenderingPolicy::default(),
-                contention_policy: ContentionPolicy::LatestWins,
-                max_publishers: 1,
-                transport_constraint: None,
-                auto_clear_ms: None,
-                ephemeral: true, // <-- ephemeral zone
-                layer_attachment: LayerAttachment::Content,
-            });
+            st.scene
+                .lock()
+                .await
+                .zone_registry
+                .register(ZoneDefinition {
+                    id: tze_hud_scene::SceneId::new(),
+                    name: "live-caption".to_string(),
+                    description: "Ephemeral caption zone".to_string(),
+                    geometry_policy: GeometryPolicy::Relative {
+                        x_pct: 0.1,
+                        y_pct: 0.8,
+                        width_pct: 0.8,
+                        height_pct: 0.1,
+                    },
+                    accepted_media_types: vec![ZoneMediaType::StreamText],
+                    rendering_policy: RenderingPolicy::default(),
+                    contention_policy: ContentionPolicy::LatestWins,
+                    max_publishers: 1,
+                    transport_constraint: None,
+                    auto_clear_ms: None,
+                    ephemeral: true, // <-- ephemeral zone
+                    layer_attachment: LayerAttachment::Content,
+                });
         }
 
         let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
@@ -6796,18 +7065,19 @@ mod tests {
         let handle = tokio::spawn(async move {
             let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
             tonic::transport::Server::builder()
-                .add_service(crate::proto::session::hud_session_server::HudSessionServer::new(service))
+                .add_service(
+                    crate::proto::session::hud_session_server::HudSessionServer::new(service),
+                )
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();
         });
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let mut client =
-            crate::proto::session::hud_session_client::HudSessionClient::connect(
-                format!("http://[::1]:{}", addr.port()),
-            )
-            .await
-            .unwrap();
+        let mut client = crate::proto::session::hud_session_client::HudSessionClient::connect(
+            format!("http://[::1]:{}", addr.port()),
+        )
+        .await
+        .unwrap();
 
         let (tx, _init_messages, mut stream) =
             handshake(&mut client, "ephemeral-publisher", "test-key").await;
@@ -6863,7 +7133,8 @@ mod tests {
     #[tokio::test]
     async fn test_durable_zone_publish_result() {
         use tze_hud_scene::types::{
-            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition, ZoneMediaType,
+            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition,
+            ZoneMediaType,
         };
         let scene = SceneGraph::new(800.0, 600.0);
         let service = HudSessionImpl::new(scene, "test-key");
@@ -6871,25 +7142,29 @@ mod tests {
         // Register a durable zone
         {
             let st = service.state.lock().await;
-            st.scene.lock().await.zone_registry.register(ZoneDefinition {
-                id: tze_hud_scene::SceneId::new(),
-                name: "status-text".to_string(),
-                description: "Durable status text zone".to_string(),
-                geometry_policy: GeometryPolicy::Relative {
-                    x_pct: 0.0,
-                    y_pct: 0.0,
-                    width_pct: 1.0,
-                    height_pct: 0.05,
-                },
-                accepted_media_types: vec![ZoneMediaType::StreamText],
-                rendering_policy: RenderingPolicy::default(),
-                contention_policy: ContentionPolicy::LatestWins,
-                max_publishers: 4,
-                transport_constraint: None,
-                auto_clear_ms: None,
-                ephemeral: false, // <-- durable zone
-                layer_attachment: LayerAttachment::Content,
-            });
+            st.scene
+                .lock()
+                .await
+                .zone_registry
+                .register(ZoneDefinition {
+                    id: tze_hud_scene::SceneId::new(),
+                    name: "status-text".to_string(),
+                    description: "Durable status text zone".to_string(),
+                    geometry_policy: GeometryPolicy::Relative {
+                        x_pct: 0.0,
+                        y_pct: 0.0,
+                        width_pct: 1.0,
+                        height_pct: 0.05,
+                    },
+                    accepted_media_types: vec![ZoneMediaType::StreamText],
+                    rendering_policy: RenderingPolicy::default(),
+                    contention_policy: ContentionPolicy::LatestWins,
+                    max_publishers: 4,
+                    transport_constraint: None,
+                    auto_clear_ms: None,
+                    ephemeral: false, // <-- durable zone
+                    layer_attachment: LayerAttachment::Content,
+                });
         }
 
         let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
@@ -6897,18 +7172,19 @@ mod tests {
         let handle = tokio::spawn(async move {
             let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
             tonic::transport::Server::builder()
-                .add_service(crate::proto::session::hud_session_server::HudSessionServer::new(service))
+                .add_service(
+                    crate::proto::session::hud_session_server::HudSessionServer::new(service),
+                )
                 .serve_with_incoming(incoming)
                 .await
                 .unwrap();
         });
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        let mut client =
-            crate::proto::session::hud_session_client::HudSessionClient::connect(
-                format!("http://[::1]:{}", addr.port()),
-            )
-            .await
-            .unwrap();
+        let mut client = crate::proto::session::hud_session_client::HudSessionClient::connect(
+            format!("http://[::1]:{}", addr.port()),
+        )
+        .await
+        .unwrap();
 
         let (tx, _init_messages, mut stream) =
             handshake(&mut client, "durable-publisher", "test-key").await;
@@ -7024,13 +7300,8 @@ mod tests {
                 agent_id: "capture-release-agent".to_string(),
                 agent_display_name: "capture-release-agent".to_string(),
                 pre_shared_key: "test-key".to_string(),
-                requested_capabilities: vec![
-                    "access_input_events".to_string(),
-                ],
-                initial_subscriptions: vec![
-                    "INPUT_EVENTS".to_string(),
-                    "FOCUS_EVENTS".to_string(),
-                ],
+                requested_capabilities: vec!["access_input_events".to_string()],
+                initial_subscriptions: vec!["INPUT_EVENTS".to_string(), "FOCUS_EVENTS".to_string()],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_wall_us(),
                 ..Default::default()
@@ -7066,7 +7337,10 @@ mod tests {
                 assert_eq!(batch.events.len(), 1, "should have exactly one event");
                 match &batch.events[0].event {
                     Some(crate::proto::input_envelope::Event::CaptureReleased(ev)) => {
-                        assert_eq!(ev.tile_id, tile_id_bytes, "tile_id must match release request");
+                        assert_eq!(
+                            ev.tile_id, tile_id_bytes,
+                            "tile_id must match release request"
+                        );
                         assert_eq!(
                             ev.reason,
                             crate::proto::CaptureReleasedReason::AgentReleased as i32,
@@ -7115,7 +7389,10 @@ mod tests {
         let msg = stream.next().await.unwrap().unwrap();
         match &msg.payload {
             Some(ServerPayload::Heartbeat(hb)) => {
-                assert_eq!(hb.timestamp_mono_us, 88888, "expected heartbeat echo after SetImePosition");
+                assert_eq!(
+                    hb.timestamp_mono_us, 88888,
+                    "expected heartbeat echo after SetImePosition"
+                );
             }
             other => panic!("Expected Heartbeat (no IME response), got: {other:?}"),
         }
@@ -7155,7 +7432,10 @@ mod tests {
                 assert_eq!(resp.lease_id.len(), 16, "lease_id must be 16-byte UUIDv7");
                 assert_eq!(resp.granted_ttl_ms, 30_000);
                 assert_eq!(resp.granted_priority, 2);
-                assert!(resp.granted_capabilities.contains(&"create_tiles".to_string()));
+                assert!(
+                    resp.granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
                 resp.lease_id.clone()
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
@@ -7165,7 +7445,10 @@ mod tests {
         let change_msg = stream.next().await.unwrap().unwrap();
         match &change_msg.payload {
             Some(ServerPayload::LeaseStateChange(change)) => {
-                assert_eq!(change.lease_id, lease_id, "LeaseStateChange must reference same lease");
+                assert_eq!(
+                    change.lease_id, lease_id,
+                    "LeaseStateChange must reference same lease"
+                );
                 assert_eq!(change.previous_state, "REQUESTED");
                 assert_eq!(change.new_state, "ACTIVE");
                 assert!(change.timestamp_wall_us > 0);
@@ -7201,7 +7484,11 @@ mod tests {
         match &resp_msg.payload {
             Some(ServerPayload::LeaseResponse(resp)) => {
                 assert!(resp.granted);
-                assert_eq!(resp.lease_id.len(), 16, "lease_id in LeaseResponse must be 16 bytes (SceneId UUIDv7)");
+                assert_eq!(
+                    resp.lease_id.len(),
+                    16,
+                    "lease_id in LeaseResponse must be 16 bytes (SceneId UUIDv7)"
+                );
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
         }
@@ -7210,7 +7497,11 @@ mod tests {
         let change_msg = stream.next().await.unwrap().unwrap();
         match &change_msg.payload {
             Some(ServerPayload::LeaseStateChange(change)) => {
-                assert_eq!(change.lease_id.len(), 16, "lease_id in LeaseStateChange must be 16 bytes");
+                assert_eq!(
+                    change.lease_id.len(),
+                    16,
+                    "lease_id in LeaseStateChange must be 16 bytes"
+                );
             }
             other => panic!("Expected LeaseStateChange, got: {other:?}"),
         }
@@ -7395,7 +7686,10 @@ mod tests {
         let release_resp = stream.next().await.unwrap().unwrap();
         match &release_resp.payload {
             Some(ServerPayload::LeaseResponse(r)) => {
-                assert!(r.granted, "LeaseRelease success must return LeaseResponse(granted=true)");
+                assert!(
+                    r.granted,
+                    "LeaseRelease success must return LeaseResponse(granted=true)"
+                );
                 assert_eq!(r.lease_id, lease_id, "lease_id must match in LeaseResponse");
             }
             other => panic!("Expected LeaseResponse(granted) for release, got: {other:?}"),
@@ -7531,7 +7825,11 @@ mod tests {
 
         // All lease IDs must be unique — use a HashSet for correct deduplication.
         let set: std::collections::HashSet<Vec<u8>> = lease_ids.iter().cloned().collect();
-        assert_eq!(set.len(), 3, "All three agents must receive unique lease IDs");
+        assert_eq!(
+            set.len(),
+            3,
+            "All three agents must receive unique lease IDs"
+        );
 
         drop(client1);
     }
@@ -7566,7 +7864,10 @@ mod tests {
         match &resp.payload {
             Some(ServerPayload::LeaseResponse(r)) => {
                 assert!(r.granted);
-                assert_eq!(r.granted_ttl_ms, 100, "Short-TTL lease should be granted as requested");
+                assert_eq!(
+                    r.granted_ttl_ms, 100,
+                    "Short-TTL lease should be granted as requested"
+                );
                 assert_eq!(r.lease_id.len(), 16, "lease_id must be 16-byte SceneId");
             }
             other => panic!("Expected LeaseResponse for short-TTL lease, got: {other:?}"),
@@ -7617,7 +7918,9 @@ mod tests {
                 assert!(!resp.granted, "Renew on unknown lease must be denied");
                 assert!(!resp.deny_code.is_empty(), "deny_code must be populated");
             }
-            other => panic!("Expected LeaseResponse(denied) for unknown lease renew, got: {other:?}"),
+            other => {
+                panic!("Expected LeaseResponse(denied) for unknown lease renew, got: {other:?}")
+            }
         }
     }
 
@@ -7646,7 +7949,9 @@ mod tests {
                 assert!(!resp.granted, "Release on unknown lease must be denied");
                 assert!(!resp.deny_code.is_empty(), "deny_code must be populated");
             }
-            other => panic!("Expected LeaseResponse(denied) for unknown lease release, got: {other:?}"),
+            other => {
+                panic!("Expected LeaseResponse(denied) for unknown lease release, got: {other:?}")
+            }
         }
     }
 
@@ -7709,8 +8014,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
 
         let handle = tokio::spawn(async move {
-            let incoming =
-                tokio_stream::wrappers::TcpListenerStream::new(listener);
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
             tonic::transport::Server::builder()
                 .add_service(HudSessionServer::new(service))
                 .serve_with_incoming(incoming)
@@ -7720,10 +8024,9 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let client =
-            HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
-                .await
-                .unwrap();
+        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
 
         (client, handle, shared_state, revocation_tx)
     }
@@ -7767,7 +8070,7 @@ mod tests {
 
         // Drain SessionEstablished + SceneSnapshot
         let _established = response_stream.next().await.unwrap().unwrap();
-        let _snapshot   = response_stream.next().await.unwrap().unwrap();
+        let _snapshot = response_stream.next().await.unwrap().unwrap();
 
         // Request a lease with publish_zone:subtitle + create_tiles
         tx.send(ClientMessage {
@@ -7801,7 +8104,9 @@ mod tests {
         // Parse lease_id back to SceneId.
         // scene_id_to_bytes() uses as_uuid().as_bytes() (big-endian UUID bytes),
         // so we must decode with from_uuid(Uuid::from_bytes()) to match.
-        let lease_arr: [u8; 16] = lease_id_bytes.as_slice().try_into()
+        let lease_arr: [u8; 16] = lease_id_bytes
+            .as_slice()
+            .try_into()
             .expect("lease_id must be 16 bytes");
         let lease_scene_id = tze_hud_scene::SceneId::from_uuid(uuid::Uuid::from_bytes(lease_arr));
 
@@ -7812,8 +8117,7 @@ mod tests {
     /// THEN the agent receives CapabilityNotice(revoked=[cap_name]).
     #[tokio::test]
     async fn test_revoke_capability_sends_capability_notice() {
-        let (mut client, _server, _state, revocation_tx) =
-            setup_test_with_revocation_tx().await;
+        let (mut client, _server, _state, revocation_tx) = setup_test_with_revocation_tx().await;
 
         let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
             handshake_with_publish_zone_lease(&mut client).await;
@@ -7829,7 +8133,9 @@ mod tests {
         match msg.payload {
             Some(ServerPayload::CapabilityNotice(notice)) => {
                 assert!(
-                    notice.revoked.contains(&"publish_zone:subtitle".to_string()),
+                    notice
+                        .revoked
+                        .contains(&"publish_zone:subtitle".to_string()),
                     "CapabilityNotice.revoked must contain publish_zone:subtitle"
                 );
                 assert!(
@@ -7845,8 +8151,7 @@ mod tests {
     /// THEN the agent receives LeaseStateChange with previous_state=ACTIVE, new_state=ACTIVE.
     #[tokio::test]
     async fn test_revoke_capability_sends_lease_state_change() {
-        let (mut client, _server, _state, revocation_tx) =
-            setup_test_with_revocation_tx().await;
+        let (mut client, _server, _state, revocation_tx) = setup_test_with_revocation_tx().await;
 
         let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
             handshake_with_publish_zone_lease(&mut client).await;
@@ -7865,7 +8170,10 @@ mod tests {
         match msg.payload {
             Some(ServerPayload::LeaseStateChange(sc)) => {
                 assert_eq!(sc.previous_state, "ACTIVE", "Lease must stay ACTIVE");
-                assert_eq!(sc.new_state, "ACTIVE", "Lease must stay ACTIVE after capability revocation");
+                assert_eq!(
+                    sc.new_state, "ACTIVE",
+                    "Lease must stay ACTIVE after capability revocation"
+                );
                 assert!(
                     sc.reason.contains("CAPABILITY_REVOKED"),
                     "LeaseStateChange reason must contain CAPABILITY_REVOKED"
@@ -7879,8 +8187,7 @@ mod tests {
     /// in the scene graph and the capability is absent from the live scope.
     #[tokio::test]
     async fn test_revoke_capability_narrows_scene_graph_scope() {
-        let (mut client, _server, state, revocation_tx) =
-            setup_test_with_revocation_tx().await;
+        let (mut client, _server, state, revocation_tx) = setup_test_with_revocation_tx().await;
 
         let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
             handshake_with_publish_zone_lease(&mut client).await;
@@ -7889,7 +8196,8 @@ mod tests {
         {
             let st = state.lock().await;
             let scene = st.scene.lock().await;
-            let caps = scene.lease_capabilities(&lease_scene_id)
+            let caps = scene
+                .lease_capabilities(&lease_scene_id)
                 .expect("lease must exist");
             assert!(
                 caps.iter().any(|c| matches!(c, tze_hud_scene::types::Capability::PublishZone(z) if z == "subtitle")),
@@ -7905,13 +8213,14 @@ mod tests {
 
         // Drain protocol messages
         let _notice = stream.next().await.unwrap().unwrap();
-        let _sc     = stream.next().await.unwrap().unwrap();
+        let _sc = stream.next().await.unwrap().unwrap();
 
         // After revocation: the capability must be absent from the live scope
         {
             let st = state.lock().await;
             let scene = st.scene.lock().await;
-            let caps = scene.lease_capabilities(&lease_scene_id)
+            let caps = scene
+                .lease_capabilities(&lease_scene_id)
                 .expect("lease must still exist after capability revocation");
             assert!(
                 !caps.iter().any(|c| matches!(c, tze_hud_scene::types::Capability::PublishZone(z) if z == "subtitle")),
@@ -7923,8 +8232,7 @@ mod tests {
     /// WHEN a capability is revoked, THEN the lease remains in ACTIVE state.
     #[tokio::test]
     async fn test_revoke_capability_preserves_lease_active_state() {
-        let (mut client, _server, state, revocation_tx) =
-            setup_test_with_revocation_tx().await;
+        let (mut client, _server, state, revocation_tx) = setup_test_with_revocation_tx().await;
 
         let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
             handshake_with_publish_zone_lease(&mut client).await;
@@ -7935,12 +8243,14 @@ mod tests {
             capability_name: "create_tiles".to_string(),
         });
         let _notice = stream.next().await.unwrap().unwrap();
-        let _sc     = stream.next().await.unwrap().unwrap();
+        let _sc = stream.next().await.unwrap().unwrap();
 
         // Lease must still be ACTIVE in the scene graph
         let st = state.lock().await;
         let scene = st.scene.lock().await;
-        let lease = scene.leases.get(&lease_scene_id)
+        let lease = scene
+            .leases
+            .get(&lease_scene_id)
             .expect("lease must still exist");
         assert_eq!(
             lease.state,
@@ -7953,8 +8263,7 @@ mod tests {
     /// THEN the agent receives RuntimeError(INVALID_ARGUMENT) and the lease is unchanged.
     #[tokio::test]
     async fn test_revoke_unknown_capability_returns_error() {
-        let (mut client, _server, state, revocation_tx) =
-            setup_test_with_revocation_tx().await;
+        let (mut client, _server, state, revocation_tx) = setup_test_with_revocation_tx().await;
 
         let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
             handshake_with_publish_zone_lease(&mut client).await;
@@ -7977,17 +8286,21 @@ mod tests {
         // Lease scope unchanged (still has both original capabilities)
         let st = state.lock().await;
         let scene = st.scene.lock().await;
-        let caps = scene.lease_capabilities(&lease_scene_id)
+        let caps = scene
+            .lease_capabilities(&lease_scene_id)
             .expect("lease must exist");
-        assert_eq!(caps.len(), 2, "Lease scope must be unchanged after failed revocation");
+        assert_eq!(
+            caps.len(),
+            2,
+            "Lease scope must be unchanged after failed revocation"
+        );
     }
 
     /// WHEN a capability that is not in the lease scope is revoked (noop),
     /// THEN the agent receives RuntimeError(CAPABILITY_NOT_PRESENT).
     #[tokio::test]
     async fn test_revoke_absent_capability_returns_not_present() {
-        let (mut client, _server, _state, revocation_tx) =
-            setup_test_with_revocation_tx().await;
+        let (mut client, _server, _state, revocation_tx) = setup_test_with_revocation_tx().await;
 
         let (_tx, mut stream, _lease_id_bytes, lease_scene_id) =
             handshake_with_publish_zone_lease(&mut client).await;

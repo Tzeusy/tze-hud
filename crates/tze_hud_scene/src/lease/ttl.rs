@@ -16,8 +16,8 @@
 //! All timestamps use milliseconds from the injected [`Clock::now_millis()`].
 //! Precision: ±100 ms per spec §TTL Accounting Precision.
 
-use crate::clock::Clock;
 use super::RenewalPolicy;
+use crate::clock::Clock;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -677,7 +677,10 @@ mod tests {
         clock.advance(3_000);
         // total_suspension_ms should be ≈3_000 (ongoing)
         let total = ttl.total_suspension_ms();
-        assert!(total >= 2_900 && total <= 3_100, "expected ≈3_000ms, got {total}");
+        assert!(
+            total >= 2_900 && total <= 3_100,
+            "expected ≈3_000ms, got {total}"
+        );
     }
 
     // ── Idempotent on_suspend ─────────────────────────────────────────────────

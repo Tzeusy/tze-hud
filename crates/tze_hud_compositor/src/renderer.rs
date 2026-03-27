@@ -22,7 +22,7 @@
 //! This separation is the architectural foundation for future render-skip redaction
 //! (capture-safe architecture): the content and chrome passes are structurally independent.
 
-use crate::pipeline::{rect_vertices, ChromeDrawCmd, RectVertex};
+use crate::pipeline::{ChromeDrawCmd, RectVertex, rect_vertices};
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
@@ -70,12 +70,15 @@ impl Compositor {
             .ok_or(CompositorError::NoAdapter)?;
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("tze_hud_compositor"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                memory_hints: wgpu::MemoryHints::default(),
-            }, None)
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("tze_hud_compositor"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            )
             .await
             .map_err(|e| CompositorError::DeviceCreation(e.to_string()))?;
 
@@ -250,7 +253,7 @@ impl Compositor {
         format: wgpu::TextureFormat,
         label_prefix: &str,
     ) -> wgpu::RenderPipeline {
-        use crate::pipeline::{RectVertex, RECT_SHADER};
+        use crate::pipeline::{RECT_SHADER, RectVertex};
 
         let shader_label = format!("{label_prefix}rect_shader");
         let layout_label = format!("{label_prefix}rect_pipeline_layout");
@@ -383,11 +386,13 @@ impl Compositor {
         let vertex_buffer = if vertices.is_empty() {
             None
         } else {
-            let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vertex_buffer"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vertex_buffer"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
             Some(buffer)
         };
 
@@ -510,11 +515,13 @@ impl Compositor {
         let vertex_buffer = if vertices.is_empty() {
             None
         } else {
-            let buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("vertex_buffer"),
-                contents: bytemuck::cast_slice(&vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vertex_buffer"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
             Some(buffer)
         };
 
@@ -619,7 +626,15 @@ impl Compositor {
 
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
-            let verts = rect_vertices(tile.bounds.x, tile.bounds.y, tile.bounds.width, tile.bounds.height, sw, sh, bg_color);
+            let verts = rect_vertices(
+                tile.bounds.x,
+                tile.bounds.y,
+                tile.bounds.width,
+                tile.bounds.height,
+                sw,
+                sh,
+                bg_color,
+            );
             content_vertices.extend_from_slice(&verts);
             if let Some(root_id) = tile.root_node {
                 self.render_node(root_id, tile, scene, &mut content_vertices, sw, sh);
@@ -631,11 +646,13 @@ impl Compositor {
         let content_buffer = if content_vertices.is_empty() {
             None
         } else {
-            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("content_vertex_buffer"),
-                contents: bytemuck::cast_slice(&content_vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            let buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("content_vertex_buffer"),
+                    contents: bytemuck::cast_slice(&content_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
             Some(buf)
         };
 
@@ -649,17 +666,21 @@ impl Compositor {
         let chrome_buffer = if chrome_vertices.is_empty() {
             None
         } else {
-            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chrome_vertex_buffer"),
-                contents: bytemuck::cast_slice(&chrome_vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+            let buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("chrome_vertex_buffer"),
+                    contents: bytemuck::cast_slice(&chrome_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
             Some(buf)
         };
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frame_encoder_with_chrome"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame_encoder_with_chrome"),
+            });
 
         // Content render pass — clears the surface and draws agent tiles.
         {
@@ -919,7 +940,13 @@ mod tests {
         let tab_id = scene.create_tab("test", 0).unwrap();
         let lease_id = scene.grant_lease("test", 60_000, vec![]);
         let tile_id = scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                1,
+            )
             .unwrap();
         scene.set_tile_root(tile_id, node).unwrap();
         scene
@@ -927,7 +954,9 @@ mod tests {
 
     /// Create a headless compositor and surface pair for testing.
     async fn make_compositor_and_surface(w: u32, h: u32) -> (Compositor, HeadlessSurface) {
-        let compositor = Compositor::new_headless(w, h).await.expect("headless compositor");
+        let compositor = Compositor::new_headless(w, h)
+            .await
+            .expect("headless compositor");
         let surface = HeadlessSurface::new(&compositor.device, w, h);
         (compositor, surface)
     }
@@ -965,7 +994,10 @@ mod tests {
         let any_warm_pixel = pixels
             .chunks(4)
             .any(|p| p[0] > 150 && p[1] > 140 && p[2] > 130);
-        assert!(any_warm_pixel, "expected warm-gray placeholder pixels from StaticImageNode");
+        assert!(
+            any_warm_pixel,
+            "expected warm-gray placeholder pixels from StaticImageNode"
+        );
     }
 
     #[tokio::test]
@@ -979,34 +1011,56 @@ mod tests {
 
         // Left tile: red solid color
         let left_tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                1,
+            )
             .unwrap();
-        scene.set_tile_root(left_tile_id, Node {
-            id: SceneId::new(),
-            children: vec![],
-            data: NodeData::SolidColor(SolidColorNode {
-                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
-                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                left_tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+                        bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                    }),
+                },
+            )
+            .unwrap();
 
         // Right tile: static image
         // RS-4: StaticImageNode uses resource_id + decoded_bytes; no raw blob embedded.
         let right_tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(256.0, 0.0, 256.0, 256.0), 2)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(256.0, 0.0, 256.0, 256.0),
+                2,
+            )
             .unwrap();
-        scene.set_tile_root(right_tile_id, Node {
-            id: SceneId::new(),
-            children: vec![],
-            data: NodeData::StaticImage(StaticImageNode {
-                resource_id: ResourceId::of(b"8x8 green placeholder"),
-                width: 8,
-                height: 8,
-                decoded_bytes: 8 * 8 * 4,
-                fit_mode: ImageFitMode::Cover,
-                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                right_tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::StaticImage(StaticImageNode {
+                        resource_id: ResourceId::of(b"8x8 green placeholder"),
+                        width: 8,
+                        height: 8,
+                        decoded_bytes: 8 * 8 * 4,
+                        fit_mode: ImageFitMode::Cover,
+                        bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                    }),
+                },
+            )
+            .unwrap();
 
         compositor.render_frame_headless(&scene, &surface);
 
@@ -1038,16 +1092,27 @@ mod tests {
         let tab_id = scene.create_tab("test", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), max_agent_z)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                max_agent_z,
+            )
             .unwrap();
-        scene.set_tile_root(tile_id, Node {
-            id: SceneId::new(),
-            children: vec![],
-            data: NodeData::SolidColor(SolidColorNode {
-                color: Rgba::new(1.0, 0.0, 0.0, 1.0), // bright red
-                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        color: Rgba::new(1.0, 0.0, 0.0, 1.0), // bright red
+                        bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                    }),
+                },
+            )
+            .unwrap();
 
         // Chrome draw command: bright green rectangle covering the full surface.
         // In NDC space, this will overwrite all tile content.
@@ -1055,7 +1120,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             width: 256.0,
-            height: 40.0, // tab bar height
+            height: 40.0,                // tab bar height
             color: [0.0, 1.0, 0.0, 1.0], // pure green — distinctive chrome marker
         }];
 
@@ -1096,17 +1161,28 @@ mod tests {
         let tab_id = scene.create_tab("test", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 256.0, 256.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                1,
+            )
             .unwrap();
-        scene.set_tile_root(tile_id, Node {
-            id: SceneId::new(),
-            children: vec![],
-            data: NodeData::SolidColor(SolidColorNode {
-                // Blue tile — fills entire surface in content pass.
-                color: Rgba::new(0.0, 0.0, 1.0, 1.0),
-                bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::SolidColor(SolidColorNode {
+                        // Blue tile — fills entire surface in content pass.
+                        color: Rgba::new(0.0, 0.0, 1.0, 1.0),
+                        bounds: Rect::new(0.0, 0.0, 256.0, 256.0),
+                    }),
+                },
+            )
+            .unwrap();
 
         // Chrome: red stripe only in top half (rows 0..128).
         let chrome_cmds = vec![crate::pipeline::ChromeDrawCmd {
@@ -1126,11 +1202,13 @@ mod tests {
         let top_px = &pixels[0..4];
         assert!(
             top_px[0] > 150,
-            "top pixel should be red (chrome): {:?}", top_px
+            "top pixel should be red (chrome): {:?}",
+            top_px
         );
         assert!(
             top_px[2] < 50,
-            "top pixel blue (tile) must be suppressed by chrome: {:?}", top_px
+            "top pixel blue (tile) must be suppressed by chrome: {:?}",
+            top_px
         );
 
         // Bottom row: content (blue) should persist — chrome didn't cover it.
@@ -1139,11 +1217,13 @@ mod tests {
         let bottom_px = &pixels[bottom_row_offset..bottom_row_offset + 4];
         assert!(
             bottom_px[2] > 150,
-            "bottom pixel should be blue (tile content, no chrome): {:?}", bottom_px
+            "bottom pixel should be blue (tile content, no chrome): {:?}",
+            bottom_px
         );
         assert!(
             bottom_px[0] < 50,
-            "bottom pixel red should be absent (no chrome): {:?}", bottom_px
+            "bottom pixel red should be absent (no chrome): {:?}",
+            bottom_px
         );
     }
 
@@ -1177,7 +1257,8 @@ mod tests {
         let scene = SceneGraph::new(256.0, 256.0);
 
         // render_frame takes &dyn CompositorSurface — no special headless branch.
-        let telemetry = compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
+        let telemetry =
+            compositor.render_frame(&scene, &surface as &dyn crate::surface::CompositorSurface);
         assert!(telemetry.frame_time_us > 0, "frame time must be non-zero");
         assert_eq!(telemetry.tile_count, 0, "empty scene has no tiles");
     }
@@ -1195,9 +1276,13 @@ mod tests {
 
         // Safety: single-threaded within the mutex guard; no other test
         // touches HEADLESS_FORCE_SOFTWARE while _guard is held.
-        unsafe { std::env::set_var("HEADLESS_FORCE_SOFTWARE", "1"); }
+        unsafe {
+            std::env::set_var("HEADLESS_FORCE_SOFTWARE", "1");
+        }
         let result = Compositor::new_headless(64, 64).await;
-        unsafe { std::env::remove_var("HEADLESS_FORCE_SOFTWARE"); }
+        unsafe {
+            std::env::remove_var("HEADLESS_FORCE_SOFTWARE");
+        }
         drop(_guard);
 
         // Either Ok (software GPU found) or Err(NoAdapter) (no software GPU

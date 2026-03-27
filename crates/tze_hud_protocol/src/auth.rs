@@ -20,9 +20,7 @@
 //! (proto messages exist) but their implementations are v1-reserved; they
 //! are rejected with `AUTH_FAILED` until a future release enables them.
 
-use crate::proto::session::{
-    auth_credential::Credential, AuthCredential,
-};
+use crate::proto::session::{AuthCredential, auth_credential::Credential};
 
 // Constant-time byte-level equality to resist timing side-channels.
 // `subtle` is not in scope for v1; we use a manual xor-fold that is
@@ -50,16 +48,16 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
 /// allowed regardless of capabilities (DEGRADATION_NOTICES, LEASE_CHANGES).
 pub fn required_capability_for_subscription(category: &str) -> Option<&'static str> {
     match category {
-        "SCENE_TOPOLOGY"       => Some("read_scene_topology"),
-        "INPUT_EVENTS"         => Some("access_input_events"),
-        "FOCUS_EVENTS"         => Some("access_input_events"),
-        "ZONE_EVENTS"          => Some("publish_zone"),  // publish_zone:<zone> in full spec
-        "TELEMETRY_FRAMES"     => Some("read_telemetry"),
-        "ATTENTION_EVENTS"     => Some("read_scene_topology"),
-        "AGENT_EVENTS"         => Some("subscribe_scene_events"),
+        "SCENE_TOPOLOGY" => Some("read_scene_topology"),
+        "INPUT_EVENTS" => Some("access_input_events"),
+        "FOCUS_EVENTS" => Some("access_input_events"),
+        "ZONE_EVENTS" => Some("publish_zone"), // publish_zone:<zone> in full spec
+        "TELEMETRY_FRAMES" => Some("read_telemetry"),
+        "ATTENTION_EVENTS" => Some("read_scene_topology"),
+        "AGENT_EVENTS" => Some("subscribe_scene_events"),
         // Always subscribed; capability not required:
-        "DEGRADATION_NOTICES"  => None,
-        "LEASE_CHANGES"        => None,
+        "DEGRADATION_NOTICES" => None,
+        "LEASE_CHANGES" => None,
         _ => None, // Unknown categories: allow by default (forward compat)
     }
 }
@@ -155,16 +153,21 @@ pub const RUNTIME_MAX_VERSION: u32 = 1001; // v1.1
 ///
 /// If the agent sends `min=0, max=0` (unset), we treat it as `min=1000, max=1000`
 /// (v1.0 only, backward compatible).
-pub fn negotiate_version(
-    agent_min: u32,
-    agent_max: u32,
-) -> Result<u32, String> {
+pub fn negotiate_version(agent_min: u32, agent_max: u32) -> Result<u32, String> {
     // Treat 0 (unset) as v1.0 for backward compatibility.
-    let a_min = if agent_min == 0 { RUNTIME_MIN_VERSION } else { agent_min };
-    let a_max = if agent_max == 0 { RUNTIME_MIN_VERSION } else { agent_max };
+    let a_min = if agent_min == 0 {
+        RUNTIME_MIN_VERSION
+    } else {
+        agent_min
+    };
+    let a_max = if agent_max == 0 {
+        RUNTIME_MIN_VERSION
+    } else {
+        agent_max
+    };
 
     // Find the highest version in the intersection of [a_min, a_max] and [RUNTIME_MIN, RUNTIME_MAX].
-    let low  = a_min.max(RUNTIME_MIN_VERSION);
+    let low = a_min.max(RUNTIME_MIN_VERSION);
     let high = a_max.min(RUNTIME_MAX_VERSION);
 
     if low > high {
@@ -210,12 +213,16 @@ impl CapabilityPolicy {
     pub fn unrestricted() -> Self {
         // Sentinel: `"*"` in `allowed` indicates an allow-all policy.
         // `is_unrestricted()` and `permits()` both rely on this `"*"` marker.
-        Self { allowed: vec!["*".to_string()] }
+        Self {
+            allowed: vec!["*".to_string()],
+        }
     }
 
     /// Guest policy — no capabilities granted.
     pub fn guest() -> Self {
-        Self { allowed: Vec::new() }
+        Self {
+            allowed: Vec::new(),
+        }
     }
 
     /// Returns `true` if this policy is unrestricted (permits any capability).
@@ -257,10 +264,7 @@ impl CapabilityPolicy {
     /// Unlike `evaluate_capability_request`, this does NOT deny the entire
     /// batch on partial failure; it partitions the set. Used only at handshake
     /// where individual grants/denials are reported separately.
-    pub fn partition_capabilities(
-        &self,
-        requested: &[String],
-    ) -> (Vec<String>, Vec<String>) {
+    pub fn partition_capabilities(&self, requested: &[String]) -> (Vec<String>, Vec<String>) {
         let mut granted = Vec::new();
         let mut denied = Vec::new();
         for cap in requested {
@@ -415,7 +419,8 @@ fn canonical_hint(cap: &str) -> String {
     }
     // Legacy single-object names (create_tile → create_tiles, etc.).
     if cap == "create_tile" {
-        return r#"did you mean "create_tiles"? (legacy name; use plural canonical form)"#.to_string();
+        return r#"did you mean "create_tiles"? (legacy name; use plural canonical form)"#
+            .to_string();
     }
     if cap == "update_tile" || cap == "delete_tile" {
         return r#"did you mean "modify_own_tiles"? (legacy name; use canonical form)"#.to_string();
@@ -424,7 +429,8 @@ fn canonical_hint(cap: &str) -> String {
         return r#"did you mean "modify_own_tiles"? (legacy node-level name; use canonical tile-level form)"#.to_string();
     }
     // Generic fallback.
-    "unknown capability; see configuration/spec.md §Capability Vocabulary for the canonical v1 list".to_string()
+    "unknown capability; see configuration/spec.md §Capability Vocabulary for the canonical v1 list"
+        .to_string()
 }
 
 // ─── Subscription filtering ───────────────────────────────────────────────────
@@ -448,7 +454,9 @@ pub fn filter_subscriptions(
                 active.push(sub.clone());
             }
             Some(required) => {
-                let has_cap = granted_capabilities.iter().any(|c| c == "*" || c == required);
+                let has_cap = granted_capabilities
+                    .iter()
+                    .any(|c| c == "*" || c == required);
                 if has_cap {
                     active.push(sub.clone());
                 } else {
@@ -467,8 +475,7 @@ pub fn filter_subscriptions(
 mod tests {
     use super::*;
     use crate::proto::session::{
-        auth_credential::Credential,
-        AuthCredential, PreSharedKeyCredential, LocalSocketCredential,
+        AuthCredential, LocalSocketCredential, PreSharedKeyCredential, auth_credential::Credential,
     };
 
     fn psk_credential(key: &str) -> AuthCredential {
@@ -493,7 +500,10 @@ mod tests {
     #[test]
     fn test_psk_credential_success() {
         let cred = psk_credential("secret");
-        assert_eq!(evaluate_auth_credential(&cred, "secret"), AuthResult::Accepted);
+        assert_eq!(
+            evaluate_auth_credential(&cred, "secret"),
+            AuthResult::Accepted
+        );
     }
 
     #[test]
@@ -508,7 +518,10 @@ mod tests {
     #[test]
     fn test_local_socket_credential_accepted() {
         let cred = local_socket_credential();
-        assert_eq!(evaluate_auth_credential(&cred, "secret"), AuthResult::Accepted);
+        assert_eq!(
+            evaluate_auth_credential(&cred, "secret"),
+            AuthResult::Accepted
+        );
     }
 
     #[test]
@@ -647,18 +660,14 @@ mod tests {
     #[test]
     fn test_capability_request_all_authorized() {
         let policy = CapabilityPolicy::unrestricted();
-        let result = policy.evaluate_capability_request(&[
-            "read_telemetry".to_string(),
-        ]);
+        let result = policy.evaluate_capability_request(&["read_telemetry".to_string()]);
         assert_eq!(result, Ok(vec!["read_telemetry".to_string()]));
     }
 
     #[test]
     fn test_capability_request_unauthorized_denied() {
         let policy = CapabilityPolicy::guest();
-        let result = policy.evaluate_capability_request(&[
-            "overlay_privileges".to_string(),
-        ]);
+        let result = policy.evaluate_capability_request(&["overlay_privileges".to_string()]);
         assert!(result.is_err());
     }
 
@@ -725,7 +734,10 @@ mod tests {
     fn test_subscription_always_allowed() {
         // DEGRADATION_NOTICES and LEASE_CHANGES need no capability
         let (active, denied) = filter_subscriptions(
-            &["DEGRADATION_NOTICES".to_string(), "LEASE_CHANGES".to_string()],
+            &[
+                "DEGRADATION_NOTICES".to_string(),
+                "LEASE_CHANGES".to_string(),
+            ],
             &[/* no capabilities */],
         );
         assert_eq!(active.len(), 2);
@@ -750,8 +762,8 @@ mod tests {
     fn test_subscription_mixed_capabilities() {
         let (active, denied) = filter_subscriptions(
             &[
-                "SCENE_TOPOLOGY".to_string(),   // requires read_scene_topology
-                "INPUT_EVENTS".to_string(),      // requires access_input_events
+                "SCENE_TOPOLOGY".to_string(),      // requires read_scene_topology
+                "INPUT_EVENTS".to_string(),        // requires access_input_events
                 "DEGRADATION_NOTICES".to_string(), // always allowed
             ],
             &["read_scene_topology".to_string()], // only has read_scene_topology
@@ -887,7 +899,10 @@ mod tests {
         let err = validate_canonical_capabilities(&caps).unwrap_err();
         assert_eq!(err.len(), 1);
         assert_eq!(err[0].unknown, "emit_scene_event:system.shutdown");
-        assert!(err[0].hint.contains("reserved"), "hint must mention reserved prefix");
+        assert!(
+            err[0].hint.contains("reserved"),
+            "hint must mention reserved prefix"
+        );
     }
 
     /// emit_scene_event with scene. prefix is rejected (CONFIG_RESERVED_EVENT_PREFIX path).
@@ -896,7 +911,10 @@ mod tests {
         let caps = vec!["emit_scene_event:scene.refresh".to_string()];
         let err = validate_canonical_capabilities(&caps).unwrap_err();
         assert_eq!(err[0].unknown, "emit_scene_event:scene.refresh");
-        assert!(err[0].hint.contains("reserved"), "hint must mention reserved prefix");
+        assert!(
+            err[0].hint.contains("reserved"),
+            "hint must mention reserved prefix"
+        );
     }
 
     /// emit_scene_event with empty event name is rejected.

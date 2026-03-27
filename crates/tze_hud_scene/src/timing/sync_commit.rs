@@ -90,7 +90,10 @@ pub fn evaluate_commit(
         }
 
         SyncCommitPolicy::AllOrDefer => {
-            let any_pending = group.members.iter().any(|id| tiles_with_pending.contains(id));
+            let any_pending = group
+                .members
+                .iter()
+                .any(|id| tiles_with_pending.contains(id));
 
             if !any_pending {
                 // Idle frame: no member has a pending mutation.
@@ -99,7 +102,10 @@ pub fn evaluate_commit(
                 return CommitDecision::Commit { tiles: vec![] };
             }
 
-            let all_ready = group.members.iter().all(|id| tiles_with_pending.contains(id));
+            let all_ready = group
+                .members
+                .iter()
+                .all(|id| tiles_with_pending.contains(id));
 
             if all_ready {
                 // All members are present-and-ready — commit atomically.
@@ -274,7 +280,10 @@ mod tests {
 
         // apply_decision should NOT increment deferral_count
         apply_decision(&mut group, &decision);
-        assert_eq!(group.deferral_count, 0, "idle frame must not increment deferral_count");
+        assert_eq!(
+            group.deferral_count, 0,
+            "idle frame must not increment deferral_count"
+        );
     }
 
     // ── AllOrDefer: incomplete (some pending) ────────────────────────────────
@@ -330,7 +339,10 @@ mod tests {
             other => panic!("expected ForceCommit, got {:?}", other),
         }
         apply_decision(&mut group, &d3);
-        assert_eq!(group.deferral_count, 0, "force-commit resets deferral_count");
+        assert_eq!(
+            group.deferral_count, 0,
+            "force-commit resets deferral_count"
+        );
     }
 
     // ── AllOrDefer: post-force-commit recovery ───────────────────────────────
@@ -351,7 +363,10 @@ mod tests {
         let d2 = evaluate_commit(&group, &pending);
         assert!(matches!(d2, CommitDecision::ForceCommit { .. }));
         apply_decision(&mut group, &d2);
-        assert_eq!(group.deferral_count, 0, "should be reset after force-commit");
+        assert_eq!(
+            group.deferral_count, 0,
+            "should be reset after force-commit"
+        );
 
         // Next frame with all members ready — should commit normally
         pending.insert(t2);

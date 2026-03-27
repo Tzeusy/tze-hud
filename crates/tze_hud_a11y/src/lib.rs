@@ -34,7 +34,7 @@ pub mod uia;
 pub mod nsaccessibility;
 
 use serde::{Deserialize, Serialize};
-use tze_hud_scene::{SceneId, SceneGraph};
+use tze_hud_scene::{SceneGraph, SceneId};
 
 // ─── Shared stub helper ───────────────────────────────────────────────────────
 

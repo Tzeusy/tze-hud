@@ -137,7 +137,10 @@ impl TokenStore {
             Err(e) => Err(e),
             Ok(()) => {
                 // SAFETY: entry was found and validated above; remove returns Some.
-                let entry = self.entries.remove(token).expect("entry must exist after validation");
+                let entry = self
+                    .entries
+                    .remove(token)
+                    .expect("entry must exist after validation");
                 Ok(entry)
             }
         }
@@ -185,9 +188,7 @@ impl ResumeError {
             Self::TokenNotFound => {
                 "Resume token not found; grace period may have expired or runtime restarted"
             }
-            Self::GraceExpired => {
-                "Resume token expired; reconnect grace period has elapsed"
-            }
+            Self::GraceExpired => "Resume token expired; reconnect grace period has elapsed",
         }
     }
 
@@ -207,7 +208,13 @@ mod tests {
         uuid::Uuid::now_v7().as_bytes().to_vec()
     }
 
-    fn insert_entry(store: &mut TokenStore, token: &[u8], agent_id: &str, grace_ms: u64, now_ms: u64) {
+    fn insert_entry(
+        store: &mut TokenStore,
+        token: &[u8],
+        agent_id: &str,
+        grace_ms: u64,
+        now_ms: u64,
+    ) {
         store.insert(
             token.to_vec(),
             agent_id.to_string(),
@@ -247,7 +254,11 @@ mod tests {
         assert!(first.is_ok(), "first consume should succeed");
 
         let second = store.consume(&token, "agent-a", now + 2_000);
-        assert_eq!(second, Err(ResumeError::TokenNotFound), "second consume should fail");
+        assert_eq!(
+            second,
+            Err(ResumeError::TokenNotFound),
+            "second consume should fail"
+        );
     }
 
     /// Token rejected after grace period expires.
@@ -306,7 +317,10 @@ mod tests {
 
         // The legitimate owner must still be able to consume the token.
         let good = store.consume(&token, "agent-a", now + 2_000);
-        assert!(good.is_ok(), "legitimate owner should still be able to resume: {good:?}");
+        assert!(
+            good.is_ok(),
+            "legitimate owner should still be able to resume: {good:?}"
+        );
     }
 
     /// Expired entries are removed by evict_expired.
@@ -328,10 +342,17 @@ mod tests {
         // Advance time by 10 seconds
         store.evict_expired(now + 10_000);
 
-        assert_eq!(store.len(), 1, "expired entry for agent-a should be evicted");
+        assert_eq!(
+            store.len(),
+            1,
+            "expired entry for agent-a should be evicted"
+        );
 
         let result = store.consume(&token_b, "agent-b", now + 10_000);
-        assert!(result.is_ok(), "valid token should still be consumable after eviction");
+        assert!(
+            result.is_ok(),
+            "valid token should still be consumable after eviction"
+        );
     }
 
     /// Exactly-at-expiry is treated as expired (strict less-than).

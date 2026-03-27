@@ -20,7 +20,7 @@
 
 #![cfg(target_os = "macos")]
 
-use tze_hud_scene::{SceneId, SceneGraph};
+use tze_hud_scene::{SceneGraph, SceneId};
 
 use crate::{AccessibilityTree, LivePoliteness, WarnOnce};
 
@@ -38,7 +38,9 @@ pub struct NsAccessibility {
 impl NsAccessibility {
     /// Create a new NSAccessibility bridge stub.
     pub fn new() -> Self {
-        Self { warner: WarnOnce::new() }
+        Self {
+            warner: WarnOnce::new(),
+        }
     }
 }
 

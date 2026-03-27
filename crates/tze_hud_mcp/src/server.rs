@@ -47,8 +47,8 @@
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
-use tze_hud_scene::graph::SceneGraph;
 use tracing::{debug, error, warn};
+use tze_hud_scene::graph::SceneGraph;
 
 use crate::{
     error::{JsonRpcError, McpError},
@@ -244,10 +244,7 @@ impl McpServer {
 
         // Validate JSON-RPC version
         if request.jsonrpc != "2.0" {
-            let resp = McpResponse::err(
-                request.id.clone(),
-                JsonRpcError::invalid_request(),
-            );
+            let resp = McpResponse::err(request.id.clone(), JsonRpcError::invalid_request());
             return serde_json::to_string(&resp).unwrap_or_default();
         }
 
@@ -363,38 +360,52 @@ impl McpServer {
         match method {
             "create_tab" => {
                 let r = tools::handle_create_tab(params, &mut scene)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
             }
             "create_tile" => {
                 let r = tools::handle_create_tile(params, &mut scene)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
             }
             "set_content" => {
                 let r = tools::handle_set_content(params, &mut scene)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
             }
             "dismiss" => {
                 let r = tools::handle_dismiss(params, &mut scene)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
             }
             "publish_to_zone" => {
                 let r = tools::handle_publish_to_zone(params, &mut scene)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
             }
             "list_zones" => {
                 let r = tools::handle_list_zones(params, &scene)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
             }
             "list_scene" => {
                 let r = tools::handle_list_scene(params, &scene)?;
-                Ok(serde_json::to_value(r)
-                    .map_err(|e| crate::McpError::Internal(e.to_string()))?)
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
             }
             unknown => Err(crate::McpError::MethodNotFound(unknown.to_string())),
         }
@@ -492,7 +503,14 @@ impl McpServer {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy, LayerAttachment}, SceneId};
+    use tze_hud_scene::{
+        SceneId,
+        graph::SceneGraph,
+        types::{
+            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition,
+            ZoneMediaType,
+        },
+    };
 
     /// PSK used across all tests.  Tests set this via `MCP_TEST_PSK` env var or
     /// fall back to this compile-time constant.  Either way, auth is always
@@ -501,8 +519,7 @@ mod tests {
 
     /// Build a test server with the test PSK configured.
     fn test_server(scene: SceneGraph) -> McpServer {
-        let psk = std::env::var("MCP_TEST_PSK")
-            .unwrap_or_else(|_| TEST_PSK.to_string());
+        let psk = std::env::var("MCP_TEST_PSK").unwrap_or_else(|_| TEST_PSK.to_string());
         McpServer::new(scene).with_config(McpConfig::with_psk(psk))
     }
 
@@ -519,15 +536,13 @@ mod tests {
 
     /// Authenticated guest context (no resident_mcp capability).
     fn guest() -> CallerContext {
-        let psk = std::env::var("MCP_TEST_PSK")
-            .unwrap_or_else(|_| TEST_PSK.to_string());
+        let psk = std::env::var("MCP_TEST_PSK").unwrap_or_else(|_| TEST_PSK.to_string());
         CallerContext::with_bearer(psk)
     }
 
     /// Authenticated resident context (has resident_mcp capability).
     fn resident() -> CallerContext {
-        let psk = std::env::var("MCP_TEST_PSK")
-            .unwrap_or_else(|_| TEST_PSK.to_string());
+        let psk = std::env::var("MCP_TEST_PSK").unwrap_or_else(|_| TEST_PSK.to_string());
         CallerContext::with_bearer(psk).with_resident_mcp()
     }
 
@@ -545,7 +560,10 @@ mod tests {
     async fn test_wrong_jsonrpc_version_returns_invalid_request() {
         let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
-            .dispatch(r#"{"jsonrpc":"1.0","method":"list_zones","id":1}"#, &guest())
+            .dispatch(
+                r#"{"jsonrpc":"1.0","method":"list_zones","id":1}"#,
+                &guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         assert_eq!(resp["error"]["code"], -32600);
@@ -555,7 +573,10 @@ mod tests {
     async fn test_unknown_method_returns_method_not_found() {
         let (server, _) = server_with_tab().await;
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"does_not_exist","id":1}"#, &guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"does_not_exist","id":1}"#,
+                &guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         // JSON-RPC 2.0: unknown method must return -32601 Method not found
@@ -566,7 +587,10 @@ mod tests {
     async fn test_request_id_echoed_in_response() {
         let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":42}"#, &guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":42}"#,
+                &guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         assert_eq!(resp["id"], 42);
@@ -601,7 +625,11 @@ mod tests {
             )
             .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
+        assert!(
+            resp["error"].is_null(),
+            "unexpected error: {}",
+            resp["error"]
+        );
         assert!(!resp["result"]["tile_id"].as_str().unwrap().is_empty());
     }
 
@@ -629,7 +657,11 @@ mod tests {
         });
         let raw = server.dispatch(&content_req.to_string(), &resident()).await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
+        assert!(
+            resp["error"].is_null(),
+            "unexpected error: {}",
+            resp["error"]
+        );
         assert_eq!(resp["result"]["content_len"], 11);
     }
 
@@ -648,7 +680,12 @@ mod tests {
                     id: SceneId::new(),
                     name: "status".to_string(),
                     description: "Status zone".to_string(),
-                    geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.05 },
+                    geometry_policy: GeometryPolicy::Relative {
+                        x_pct: 0.0,
+                        y_pct: 0.0,
+                        width_pct: 1.0,
+                        height_pct: 0.05,
+                    },
                     accepted_media_types: vec![ZoneMediaType::StreamText],
                     rendering_policy: RenderingPolicy::default(),
                     contention_policy: ContentionPolicy::LatestWins,
@@ -670,7 +707,11 @@ mod tests {
         });
         let raw = server.dispatch(&req.to_string(), &guest()).await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "unexpected error: {}", resp["error"]);
+        assert!(
+            resp["error"].is_null(),
+            "unexpected error: {}",
+            resp["error"]
+        );
         assert_eq!(resp["result"]["zone_name"], "status");
     }
 
@@ -680,7 +721,10 @@ mod tests {
     async fn test_dispatch_list_zones_empty() {
         let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":4}"#, &guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":4}"#,
+                &guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         assert!(resp["error"].is_null());
@@ -699,7 +743,12 @@ mod tests {
                     id: SceneId::new(),
                     name: "hud".to_string(),
                     description: "HUD zone".to_string(),
-                    geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.05 },
+                    geometry_policy: GeometryPolicy::Relative {
+                        x_pct: 0.0,
+                        y_pct: 0.0,
+                        width_pct: 1.0,
+                        height_pct: 0.05,
+                    },
                     accepted_media_types: vec![ZoneMediaType::StreamText],
                     rendering_policy: RenderingPolicy::default(),
                     contention_policy: ContentionPolicy::LatestWins,
@@ -713,7 +762,10 @@ mod tests {
         }
 
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":{},"id":5}"#, &guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":{},"id":5}"#,
+                &guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         assert!(resp["error"].is_null());
@@ -737,7 +789,10 @@ mod tests {
         assert_eq!(resp["error"]["code"], -32603);
         assert_eq!(resp["error"]["data"]["error_code"], "CAPABILITY_REQUIRED");
         assert_eq!(resp["error"]["data"]["context"], "tool=create_tile");
-        assert_eq!(resp["error"]["data"]["hint"]["required_capability"], "resident_mcp");
+        assert_eq!(
+            resp["error"]["data"]["hint"]["required_capability"],
+            "resident_mcp"
+        );
     }
 
     #[tokio::test]
@@ -799,28 +854,43 @@ mod tests {
         let resp = parse_response(&raw);
         let hint = &resp["error"]["data"]["hint"];
         assert_eq!(hint["required_capability"], "resident_mcp");
-        assert_eq!(hint["resolution"], "obtain resident_mcp capability via session handshake");
+        assert_eq!(
+            hint["resolution"],
+            "obtain resident_mcp capability via session handshake"
+        );
     }
 
     #[tokio::test]
     async fn test_guest_can_call_list_zones() {
         let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":20}"#, &guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":20}"#,
+                &guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         // Should succeed with no error — authenticated guest can use guest tools
-        assert!(resp["error"].is_null(), "authenticated guest should be able to call list_zones");
+        assert!(
+            resp["error"].is_null(),
+            "authenticated guest should be able to call list_zones"
+        );
     }
 
     #[tokio::test]
     async fn test_guest_can_call_list_scene() {
         let server = test_server(SceneGraph::new(1920.0, 1080.0));
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_scene","params":null,"id":21}"#, &guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_scene","params":null,"id":21}"#,
+                &guest(),
+            )
             .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "authenticated guest should be able to call list_scene");
+        assert!(
+            resp["error"].is_null(),
+            "authenticated guest should be able to call list_scene"
+        );
     }
 
     #[tokio::test]
@@ -833,7 +903,10 @@ mod tests {
             )
             .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "authenticated resident should be able to call create_tab");
+        assert!(
+            resp["error"].is_null(),
+            "authenticated resident should be able to call create_tab"
+        );
     }
 
     // ── Per-call authentication (spec §8.4) ──────────────────────────────────
@@ -844,10 +917,16 @@ mod tests {
             .with_config(McpConfig::with_psk("secret-key"));
         let ctx = CallerContext::with_bearer("secret-key");
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":30}"#, &ctx)
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":30}"#,
+                &ctx,
+            )
             .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "valid bearer token should authenticate");
+        assert!(
+            resp["error"].is_null(),
+            "valid bearer token should authenticate"
+        );
     }
 
     #[tokio::test]
@@ -860,9 +939,14 @@ mod tests {
             "params": {"_auth": "secret-key"},
             "id": 31
         });
-        let raw = server.dispatch(&req.to_string(), &CallerContext::guest()).await;
+        let raw = server
+            .dispatch(&req.to_string(), &CallerContext::guest())
+            .await;
         let resp = parse_response(&raw);
-        assert!(resp["error"].is_null(), "valid _auth param should authenticate");
+        assert!(
+            resp["error"].is_null(),
+            "valid _auth param should authenticate"
+        );
     }
 
     #[tokio::test]
@@ -871,10 +955,16 @@ mod tests {
             .with_config(McpConfig::with_psk("secret-key"));
         let ctx = CallerContext::with_bearer("wrong-key");
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":32}"#, &ctx)
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":32}"#,
+                &ctx,
+            )
             .await;
         let resp = parse_response(&raw);
-        assert_eq!(resp["error"]["code"], -32004, "wrong key should be rejected");
+        assert_eq!(
+            resp["error"]["code"], -32004,
+            "wrong key should be rejected"
+        );
     }
 
     #[tokio::test]
@@ -882,36 +972,53 @@ mod tests {
         let server = McpServer::new(SceneGraph::new(1920.0, 1080.0))
             .with_config(McpConfig::with_psk("secret-key"));
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":33}"#, &CallerContext::guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":33}"#,
+                &CallerContext::guest(),
+            )
             .await;
         let resp = parse_response(&raw);
-        assert_eq!(resp["error"]["code"], -32004, "missing key should be rejected");
+        assert_eq!(
+            resp["error"]["code"], -32004,
+            "missing key should be rejected"
+        );
     }
 
     #[tokio::test]
     async fn test_each_call_authenticated_independently() {
         // Spec §8.4: two consecutive calls, each must carry auth independently.
         let server = Arc::new(
-            McpServer::new(SceneGraph::new(1920.0, 1080.0))
-                .with_config(McpConfig::with_psk("k")),
+            McpServer::new(SceneGraph::new(1920.0, 1080.0)).with_config(McpConfig::with_psk("k")),
         );
         let good = CallerContext::with_bearer("k");
         let bad = CallerContext::guest();
 
         let r1 = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":40}"#, &good)
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":40}"#,
+                &good,
+            )
             .await;
         let r2 = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":41}"#, &bad)
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":41}"#,
+                &bad,
+            )
             .await;
 
         let resp1 = parse_response(&r1);
         let resp2 = parse_response(&r2);
 
         // First call: success (authenticated)
-        assert!(resp1["error"].is_null(), "first call with valid key should succeed");
+        assert!(
+            resp1["error"].is_null(),
+            "first call with valid key should succeed"
+        );
         // Second call: rejected (no key — per-call auth, no persistent session)
-        assert_eq!(resp2["error"]["code"], -32004, "second call without key should fail");
+        assert_eq!(
+            resp2["error"]["code"], -32004,
+            "second call without key should fail"
+        );
     }
 
     #[tokio::test]
@@ -922,7 +1029,10 @@ mod tests {
         let server = McpServer::new(SceneGraph::new(1920.0, 1080.0));
         // Even with no PSK configured, calls must be rejected
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":50}"#, &CallerContext::guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":50}"#,
+                &CallerContext::guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         assert_eq!(
@@ -938,7 +1048,10 @@ mod tests {
         let server = test_server(SceneGraph::new(1920.0, 1080.0));
         // CallerContext::guest() has no bearer token — unauthenticated
         let raw = server
-            .dispatch(r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":51}"#, &CallerContext::guest())
+            .dispatch(
+                r#"{"jsonrpc":"2.0","method":"list_zones","params":null,"id":51}"#,
+                &CallerContext::guest(),
+            )
             .await;
         let resp = parse_response(&raw);
         assert_eq!(

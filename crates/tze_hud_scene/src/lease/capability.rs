@@ -158,10 +158,16 @@ impl std::fmt::Display for CapabilityRevocationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CapabilityRevocationError::LeaseTerminal => {
-                write!(f, "LEASE_TERMINAL: capability revocation requires a non-terminal lease")
+                write!(
+                    f,
+                    "LEASE_TERMINAL: capability revocation requires a non-terminal lease"
+                )
             }
             CapabilityRevocationError::CapabilityNotPresent => {
-                write!(f, "CAPABILITY_NOT_PRESENT: capability is not in the lease scope")
+                write!(
+                    f,
+                    "CAPABILITY_NOT_PRESENT: capability is not in the lease scope"
+                )
             }
         }
     }
@@ -410,12 +416,13 @@ mod tests {
     /// capability is still removed — the lease is not terminal.
     #[test]
     fn revoke_capability_works_on_suspended_lease() {
-        let mut lease = make_lease(
-            LeaseState::Suspended,
-            vec![Capability::ManageTabs],
-        );
+        let mut lease = make_lease(LeaseState::Suspended, vec![Capability::ManageTabs]);
         let result = revoke_capability_from_lease(&mut lease, &Capability::ManageTabs);
-        assert!(result.is_ok(), "suspended lease is not terminal: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "suspended lease is not terminal: {:?}",
+            result
+        );
         assert!(lease.capabilities.is_empty());
     }
 
@@ -423,12 +430,8 @@ mod tests {
     /// error is returned.
     #[test]
     fn revoke_capability_from_revoked_lease_returns_terminal_error() {
-        let mut lease = make_lease(
-            LeaseState::Revoked,
-            vec![Capability::CreateTiles],
-        );
-        let err = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles)
-            .unwrap_err();
+        let mut lease = make_lease(LeaseState::Revoked, vec![Capability::CreateTiles]);
+        let err = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles).unwrap_err();
         assert_eq!(err, CapabilityRevocationError::LeaseTerminal);
         // Capability must remain unchanged (no side-effect on error).
         assert!(lease.capabilities.contains(&Capability::CreateTiles));
@@ -438,8 +441,7 @@ mod tests {
     #[test]
     fn revoke_capability_from_expired_lease_returns_terminal_error() {
         let mut lease = make_lease(LeaseState::Expired, vec![Capability::CreateTiles]);
-        let err = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles)
-            .unwrap_err();
+        let err = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles).unwrap_err();
         assert_eq!(err, CapabilityRevocationError::LeaseTerminal);
     }
 
@@ -448,8 +450,8 @@ mod tests {
     #[test]
     fn revoke_capability_not_present_returns_error() {
         let mut lease = make_lease(LeaseState::Active, vec![Capability::CreateTiles]);
-        let err = revoke_capability_from_lease(&mut lease, &Capability::ModifyOwnTiles)
-            .unwrap_err();
+        let err =
+            revoke_capability_from_lease(&mut lease, &Capability::ModifyOwnTiles).unwrap_err();
         assert_eq!(err, CapabilityRevocationError::CapabilityNotPresent);
         // Scope must remain unchanged.
         assert_eq!(lease.capabilities, vec![Capability::CreateTiles]);
@@ -460,12 +462,23 @@ mod tests {
     fn revoke_all_capabilities_leaves_empty_scope() {
         let mut lease = make_lease(
             LeaseState::Active,
-            vec![Capability::CreateTiles, Capability::ModifyOwnTiles, Capability::ManageTabs],
+            vec![
+                Capability::CreateTiles,
+                Capability::ModifyOwnTiles,
+                Capability::ManageTabs,
+            ],
         );
-        for cap in &[Capability::CreateTiles, Capability::ModifyOwnTiles, Capability::ManageTabs] {
+        for cap in &[
+            Capability::CreateTiles,
+            Capability::ModifyOwnTiles,
+            Capability::ManageTabs,
+        ] {
             revoke_capability_from_lease(&mut lease, cap).expect("should succeed");
         }
-        assert!(lease.capabilities.is_empty(), "scope should be empty after all revocations");
+        assert!(
+            lease.capabilities.is_empty(),
+            "scope should be empty after all revocations"
+        );
         assert_eq!(lease.state, LeaseState::Active, "lease must remain Active");
     }
 

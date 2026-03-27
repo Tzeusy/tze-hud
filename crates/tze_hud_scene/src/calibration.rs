@@ -201,7 +201,11 @@ fn run_scene_workload() -> f64 {
     let lease_id = scene.grant_lease(
         "calibration",
         300_000,
-        vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+        vec![
+            Capability::CreateTile,
+            Capability::CreateNode,
+            Capability::UpdateTile,
+        ],
     );
     // Override the budget to allow many tiles
     if let Some(lease) = scene.leases.get_mut(&lease_id) {
@@ -246,7 +250,9 @@ fn run_scene_workload() -> f64 {
                 }),
             }
         };
-        scene.set_tile_root(tile_id, node).expect("set_tile_root during calibration");
+        scene
+            .set_tile_root(tile_id, node)
+            .expect("set_tile_root during calibration");
         tile_ids.push(tile_id);
         total_ops += 2; // create_tile + set_tile_root
     }
@@ -280,12 +286,7 @@ fn run_scene_workload() -> f64 {
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
-                    color: Rgba::new(
-                        batch_idx as f32 / CALIBRATION_BATCHES as f32,
-                        0.5,
-                        0.5,
-                        1.0,
-                    ),
+                    color: Rgba::new(batch_idx as f32 / CALIBRATION_BATCHES as f32, 0.5, 0.5, 1.0),
                     bounds: Rect::new(0.0, 0.0, 180.0, 170.0),
                 }),
             };
@@ -480,7 +481,10 @@ pub fn current_calibration() -> &'static CalibrationResult {
 /// should treat as "uncalibrated" per the validation-framework spec.
 pub fn current_calibration_with_gpu() -> CalibrationResult {
     let base = current_calibration().clone();
-    let (gpu_fill, tex_upload) = GPU_FACTORS.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let (gpu_fill, tex_upload) = GPU_FACTORS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     CalibrationResult {
         gpu_fill_factor: gpu_fill,
         texture_upload_factor: tex_upload,
@@ -688,7 +692,7 @@ mod tests {
             speed_factor: 1.0,
             scene_ops_per_sec: 550_000.0,
             hash_throughput_mbps: 800.0,
-            gpu_fill_factor: Some(10.0),     // 10× slower GPU (like llvmpipe)
+            gpu_fill_factor: Some(10.0), // 10× slower GPU (like llvmpipe)
             texture_upload_factor: Some(5.0), // 5× slower upload
             timestamp: 0,
             calibration_duration_us: 0,
@@ -696,7 +700,10 @@ mod tests {
         // Frame budget 16.6ms × 10 = 166ms
         assert_eq!(gpu_scaled_budget(16_600, &calibrated), Some(166_000));
         // Texture upload budget 1ms × 5 = 5ms
-        assert_eq!(texture_upload_scaled_budget(1_000, &calibrated), Some(5_000));
+        assert_eq!(
+            texture_upload_scaled_budget(1_000, &calibrated),
+            Some(5_000)
+        );
     }
 
     #[test]
@@ -708,8 +715,14 @@ mod tests {
         assert!(cal.texture_upload_factor.is_some());
         let fill = cal.gpu_fill_factor.unwrap();
         let upload = cal.texture_upload_factor.unwrap();
-        assert!((fill - 8.0).abs() < f64::EPSILON, "gpu_fill_factor mismatch: {fill}");
-        assert!((upload - 4.0).abs() < f64::EPSILON, "texture_upload_factor mismatch: {upload}");
+        assert!(
+            (fill - 8.0).abs() < f64::EPSILON,
+            "gpu_fill_factor mismatch: {fill}"
+        );
+        assert!(
+            (upload - 4.0).abs() < f64::EPSILON,
+            "texture_upload_factor mismatch: {upload}"
+        );
     }
 
     #[test]
@@ -761,8 +774,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&result).expect("serialize");
-        let deserialized: CalibrationResult =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: CalibrationResult = serde_json::from_str(&json).expect("deserialize");
 
         assert!((deserialized.speed_factor - 1.5).abs() < f64::EPSILON);
         assert_eq!(deserialized.timestamp, 1_700_000_000);

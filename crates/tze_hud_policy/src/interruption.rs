@@ -54,7 +54,10 @@ impl InterruptionClass {
     /// - `High` bypasses only when it meets the `pass_through_class` threshold —
     ///   that check is performed by the attention evaluator, not here.
     pub fn unconditionally_bypasses_quiet_hours(self) -> bool {
-        matches!(self, InterruptionClass::Critical | InterruptionClass::Silent)
+        matches!(
+            self,
+            InterruptionClass::Critical | InterruptionClass::Silent
+        )
     }
 
     /// Returns `true` if this class is counted against the attention budget.

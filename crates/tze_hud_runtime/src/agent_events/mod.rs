@@ -22,7 +22,7 @@ pub mod rate_limiter;
 
 use std::time::Instant;
 
-use tze_hud_scene::events::naming::{validate_bare_name, build_agent_event_type};
+use tze_hud_scene::events::naming::{build_agent_event_type, validate_bare_name};
 
 pub use rate_limiter::{AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND};
 
@@ -82,9 +82,7 @@ impl EmissionError {
             EmissionError::CapabilityMissing { required } => {
                 format!("missing capability: {required}")
             }
-            EmissionError::RateLimitExceeded => {
-                "agent event rate limit exceeded".to_string()
-            }
+            EmissionError::RateLimitExceeded => "agent event rate limit exceeded".to_string(),
             EmissionError::PayloadTooLarge { actual, limit } => {
                 format!("payload {actual} bytes exceeds {limit}-byte limit")
             }
@@ -191,12 +189,7 @@ impl AgentEventHandler {
     ///
     /// `now` should be `Instant::now()` in production code; it is a parameter
     /// to allow deterministic unit testing.
-    pub fn handle(
-        &mut self,
-        bare_name: &str,
-        payload: Vec<u8>,
-        now: Instant,
-    ) -> EmissionResult {
+    pub fn handle(&mut self, bare_name: &str, payload: Vec<u8>, now: Instant) -> EmissionResult {
         // ── Step 1 & 2: Validate bare name (checks format AND reserved prefixes) ──
         validate_bare_name(bare_name).map_err(|e| {
             use tze_hud_scene::events::naming::NamingError;
@@ -227,7 +220,9 @@ impl AgentEventHandler {
         }
 
         // ── Step 5: Rate limit ──────────────────────────────────────────────────
-        self.rate_limiter.check_and_record(now).map_err(|()| EmissionError::RateLimitExceeded)?;
+        self.rate_limiter
+            .check_and_record(now)
+            .map_err(|()| EmissionError::RateLimitExceeded)?;
 
         // ── Accepted: build fully-prefixed event type ───────────────────────────
         let delivered_event_type = build_agent_event_type(&self.namespace, bare_name);
@@ -289,12 +284,14 @@ mod tests {
     /// with event_type "agent.alarm_agent.fire.detected" (spec line 118).
     #[test]
     fn successful_emission_produces_correct_event_type() {
-        let mut handler =
-            AgentEventHandler::new("alarm_agent", caps(&["fire.detected"]));
+        let mut handler = AgentEventHandler::new("alarm_agent", caps(&["fire.detected"]));
         let result = handler.handle("fire.detected", b"{}".to_vec(), Instant::now());
         assert!(result.is_ok(), "emission should be accepted: {result:?}");
         let outcome = result.unwrap();
-        assert_eq!(outcome.delivered_event_type, "agent.alarm_agent.fire.detected");
+        assert_eq!(
+            outcome.delivered_event_type,
+            "agent.alarm_agent.fire.detected"
+        );
         assert_eq!(outcome.bare_name, "fire.detected");
     }
 
@@ -302,12 +299,14 @@ mod tests {
 
     #[test]
     fn namespace_prefixing_doorbell() {
-        let mut handler =
-            AgentEventHandler::new("doorbell_agent", caps(&["doorbell.ring"]));
+        let mut handler = AgentEventHandler::new("doorbell_agent", caps(&["doorbell.ring"]));
         let outcome = handler
             .handle("doorbell.ring", b"{}".to_vec(), Instant::now())
             .unwrap();
-        assert_eq!(outcome.delivered_event_type, "agent.doorbell_agent.doorbell.ring");
+        assert_eq!(
+            outcome.delivered_event_type,
+            "agent.doorbell_agent.doorbell.ring"
+        );
     }
 
     // ── Spec scenario: Payload size limit (spec lines 120-122) ───────────────
@@ -316,8 +315,7 @@ mod tests {
     /// runtime MUST reject the emission (spec line 122).
     #[test]
     fn payload_over_4kb_rejected() {
-        let mut handler =
-            AgentEventHandler::new("big_agent", caps(&["sensor.data"]));
+        let mut handler = AgentEventHandler::new("big_agent", caps(&["sensor.data"]));
         let oversized = vec![0u8; MAX_PAYLOAD_BYTES + 1];
         let result = handler.handle("sensor.data", oversized, Instant::now());
         assert!(result.is_err());
@@ -335,10 +333,13 @@ mod tests {
     /// Exactly 4096 bytes is accepted.
     #[test]
     fn payload_exactly_4kb_accepted() {
-        let mut handler =
-            AgentEventHandler::new("sensor_agent", caps(&["sensor.data"]));
+        let mut handler = AgentEventHandler::new("sensor_agent", caps(&["sensor.data"]));
         let exactly_4k = vec![0u8; MAX_PAYLOAD_BYTES];
-        assert!(handler.handle("sensor.data", exactly_4k, Instant::now()).is_ok());
+        assert!(
+            handler
+                .handle("sensor.data", exactly_4k, Instant::now())
+                .is_ok()
+        );
     }
 
     // ── Spec scenario: Rate limit enforcement (spec lines 131-133) ───────────
@@ -349,8 +350,7 @@ mod tests {
     #[test]
     fn eleventh_event_in_window_rejected() {
         let base = Instant::now();
-        let mut handler =
-            AgentEventHandler::new("chatty", caps(&["sensor.ping"]));
+        let mut handler = AgentEventHandler::new("chatty", caps(&["sensor.ping"]));
 
         for i in 0..10 {
             let t = ms_after(base, i * 50);
@@ -364,7 +364,10 @@ mod tests {
         let t11 = ms_after(base, 550);
         let result = handler.handle("sensor.ping", b"{}".to_vec(), t11);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().error_code(), "AGENT_EVENT_RATE_EXCEEDED");
+        assert_eq!(
+            result.unwrap_err().error_code(),
+            "AGENT_EVENT_RATE_EXCEEDED"
+        );
     }
 
     // ── Reserved prefix rejection ─────────────────────────────────────────────
@@ -373,23 +376,31 @@ mod tests {
     /// AGENT_EVENT_RESERVED_PREFIX (spec line 46).
     #[test]
     fn system_prefix_rejected() {
-        let mut handler = AgentEventHandler::new("bad_agent", vec![
-            "emit_scene_event:system.fake".to_string(),
-        ]);
+        let mut handler = AgentEventHandler::new(
+            "bad_agent",
+            vec!["emit_scene_event:system.fake".to_string()],
+        );
         let result = handler.handle("system.fake", b"{}".to_vec(), Instant::now());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().error_code(), "AGENT_EVENT_RESERVED_PREFIX");
+        assert_eq!(
+            result.unwrap_err().error_code(),
+            "AGENT_EVENT_RESERVED_PREFIX"
+        );
     }
 
     /// WHEN an agent emits with bare name "scene.impersonate" THEN rejected.
     #[test]
     fn scene_prefix_rejected() {
-        let mut handler = AgentEventHandler::new("bad_agent", vec![
-            "emit_scene_event:scene.impersonate".to_string(),
-        ]);
+        let mut handler = AgentEventHandler::new(
+            "bad_agent",
+            vec!["emit_scene_event:scene.impersonate".to_string()],
+        );
         let result = handler.handle("scene.impersonate", b"{}".to_vec(), Instant::now());
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().error_code(), "AGENT_EVENT_RESERVED_PREFIX");
+        assert_eq!(
+            result.unwrap_err().error_code(),
+            "AGENT_EVENT_RESERVED_PREFIX"
+        );
     }
 
     // ── Bare name validation ──────────────────────────────────────────────────
@@ -397,9 +408,8 @@ mod tests {
     /// Uppercase bare names rejected.
     #[test]
     fn uppercase_bare_name_rejected() {
-        let mut handler = AgentEventHandler::new("agent", vec![
-            "emit_scene_event:Doorbell.Ring".to_string(),
-        ]);
+        let mut handler =
+            AgentEventHandler::new("agent", vec!["emit_scene_event:Doorbell.Ring".to_string()]);
         let result = handler.handle("Doorbell.Ring", b"{}".to_vec(), Instant::now());
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().error_code(), "AGENT_EVENT_INVALID_NAME");
@@ -418,11 +428,12 @@ mod tests {
     /// Valid multi-segment bare name with underscore accepted.
     #[test]
     fn valid_bare_name_with_underscore() {
-        let mut handler =
-            AgentEventHandler::new("agent", caps(&["weather.update_summary"]));
-        assert!(handler
-            .handle("weather.update_summary", b"{}".to_vec(), Instant::now())
-            .is_ok());
+        let mut handler = AgentEventHandler::new("agent", caps(&["weather.update_summary"]));
+        assert!(
+            handler
+                .handle("weather.update_summary", b"{}".to_vec(), Instant::now())
+                .is_ok()
+        );
     }
 
     // ── Error code/message helpers ────────────────────────────────────────────
@@ -434,20 +445,32 @@ mod tests {
             "AGENT_EVENT_RATE_EXCEEDED"
         );
         assert_eq!(
-            EmissionError::PayloadTooLarge { actual: 5000, limit: 4096 }.error_code(),
+            EmissionError::PayloadTooLarge {
+                actual: 5000,
+                limit: 4096
+            }
+            .error_code(),
             "AGENT_EVENT_PAYLOAD_TOO_LARGE"
         );
         assert_eq!(
-            EmissionError::CapabilityMissing { required: "emit_scene_event:x.y".to_string() }
-                .error_code(),
+            EmissionError::CapabilityMissing {
+                required: "emit_scene_event:x.y".to_string()
+            }
+            .error_code(),
             "AGENT_EVENT_CAPABILITY_MISSING"
         );
         assert_eq!(
-            EmissionError::InvalidName { detail: "bad".to_string() }.error_code(),
+            EmissionError::InvalidName {
+                detail: "bad".to_string()
+            }
+            .error_code(),
             "AGENT_EVENT_INVALID_NAME"
         );
         assert_eq!(
-            EmissionError::ReservedPrefix { prefix: "system.".to_string() }.error_code(),
+            EmissionError::ReservedPrefix {
+                prefix: "system.".to_string()
+            }
+            .error_code(),
             "AGENT_EVENT_RESERVED_PREFIX"
         );
     }

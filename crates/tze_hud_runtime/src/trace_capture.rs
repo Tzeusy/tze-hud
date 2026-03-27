@@ -52,8 +52,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::MutationBatch;
 use tze_hud_scene::trace::{
-    SceneTrace, TraceEvent, TraceEventKind, TraceHeader, TraceTimestamp,
-    TracedAgentEvent, TracedInputEvent, TracedZonePublish,
+    SceneTrace, TraceEvent, TraceEventKind, TraceHeader, TraceTimestamp, TracedAgentEvent,
+    TracedInputEvent, TracedZonePublish,
 };
 use tze_hud_scene::types::SceneId;
 
@@ -235,7 +235,11 @@ impl TraceRecorder {
             *guard = s + 1;
             s
         };
-        let event = TraceEvent { seq, timestamp, kind };
+        let event = TraceEvent {
+            seq,
+            timestamp,
+            kind,
+        };
         self.inner
             .events
             .lock()
@@ -300,16 +304,17 @@ fn convert_input_event(kind: &InputEventKind) -> TracedInputEvent {
 /// The scene graph starts empty (1920x1080 display area, no tabs, no tiles).
 /// Each batch is applied in order; the `applied` status and `resulting_version`
 /// are recorded faithfully (rejections are recorded as `applied=false`).
-pub fn build_regression_trace(
-    batches: &[MutationBatch],
-    label: impl Into<String>,
-) -> SceneTrace {
+pub fn build_regression_trace(batches: &[MutationBatch], label: impl Into<String>) -> SceneTrace {
     let mut scene = SceneGraph::new(1920.0, 1080.0);
     let recorder = TraceRecorder::start(&scene, label);
 
     for batch in batches {
         let result = scene.apply_batch(batch);
-        let resulting_version = if result.applied { Some(scene.version) } else { None };
+        let resulting_version = if result.applied {
+            Some(scene.version)
+        } else {
+            None
+        };
         recorder.record_mutation_batch(batch, result.applied, resulting_version);
     }
 
@@ -322,8 +327,8 @@ pub fn build_regression_trace(
 mod tests {
     use super::*;
     use tze_hud_scene::mutation::{BatchTimingHints, MutationBatch, SceneMutation};
-    use tze_hud_scene::timing::domains::WallUs;
     use tze_hud_scene::replay::{TraceReplayer, assert_trace_is_deterministic};
+    use tze_hud_scene::timing::domains::WallUs;
     use tze_hud_scene::trace::TraceEventKind;
 
     fn empty_batch(namespace: &str) -> MutationBatch {
@@ -443,7 +448,11 @@ mod tests {
         // Record another event after finish.
         recorder.record_frame_boundary(1);
         let trace2 = recorder.finish();
-        assert_eq!(trace2.events.len(), 2, "second finish should include both events");
+        assert_eq!(
+            trace2.events.len(),
+            2,
+            "second finish should include both events"
+        );
     }
 
     #[test]
@@ -505,7 +514,10 @@ mod tests {
             assert!(*applied, "first batch should be accepted");
         }
         if let TraceEventKind::MutationBatch { applied, .. } = &trace.events[1].kind {
-            assert!(!*applied, "second batch should be rejected (dup display_order)");
+            assert!(
+                !*applied,
+                "second batch should be rejected (dup display_order)"
+            );
         }
 
         // Replay must still be deterministic (rejections are deterministic too).
@@ -519,9 +531,20 @@ mod tests {
             InputEventKind::KeyPress { key: 65 },
             InputEventKind::KeyRelease { key: 65 },
             InputEventKind::PointerMove { x: 1.0, y: 2.0 },
-            InputEventKind::PointerPress { x: 1.0, y: 2.0, button: 0 },
-            InputEventKind::PointerRelease { x: 1.0, y: 2.0, button: 1 },
-            InputEventKind::Resize { width: 800, height: 600 },
+            InputEventKind::PointerPress {
+                x: 1.0,
+                y: 2.0,
+                button: 0,
+            },
+            InputEventKind::PointerRelease {
+                x: 1.0,
+                y: 2.0,
+                button: 1,
+            },
+            InputEventKind::Resize {
+                width: 800,
+                height: 600,
+            },
             InputEventKind::CloseRequested,
         ];
 
@@ -555,7 +578,10 @@ mod tests {
 
         let trace = recorder.finish();
         assert_eq!(trace.events.len(), 1);
-        assert!(matches!(trace.events[0].kind, TraceEventKind::ZonePublish { .. }));
+        assert!(matches!(
+            trace.events[0].kind,
+            TraceEventKind::ZonePublish { .. }
+        ));
     }
 
     #[test]

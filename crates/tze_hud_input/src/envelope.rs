@@ -377,34 +377,55 @@ mod tests {
     use super::*;
     use tze_hud_scene::{MonoUs, SceneId};
 
-    fn null_id() -> SceneId { SceneId::null() }
+    fn null_id() -> SceneId {
+        SceneId::null()
+    }
 
     #[test]
     fn test_transactional_classification() {
         let down = InputEnvelope::PointerDown(PointerDownData {
-            tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: MonoUs::NOT_SET, device_id: String::new(),
-            local_x: 0.0, local_y: 0.0, display_x: 0.0, display_y: 0.0, button: 0,
+            tile_id: null_id(),
+            node_id: null_id(),
+            interaction_id: String::new(),
+            timestamp_mono_us: MonoUs::NOT_SET,
+            device_id: String::new(),
+            local_x: 0.0,
+            local_y: 0.0,
+            display_x: 0.0,
+            display_y: 0.0,
+            button: 0,
         });
         assert!(down.is_transactional());
 
         let mv = InputEnvelope::PointerMove(PointerMoveData {
-            tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: MonoUs::NOT_SET, device_id: String::new(),
-            local_x: 0.0, local_y: 0.0, display_x: 0.0, display_y: 0.0,
+            tile_id: null_id(),
+            node_id: null_id(),
+            interaction_id: String::new(),
+            timestamp_mono_us: MonoUs::NOT_SET,
+            device_id: String::new(),
+            local_x: 0.0,
+            local_y: 0.0,
+            display_x: 0.0,
+            display_y: 0.0,
         });
         assert!(!mv.is_transactional());
 
         let scroll = InputEnvelope::ScrollOffsetChanged(ScrollOffsetChangedData {
-            tile_id: null_id(), timestamp_mono_us: MonoUs::NOT_SET,
-            offset_x: 0.0, offset_y: 0.0,
+            tile_id: null_id(),
+            timestamp_mono_us: MonoUs::NOT_SET,
+            offset_x: 0.0,
+            offset_y: 0.0,
         });
         assert!(!scroll.is_transactional());
 
         let cmd = InputEnvelope::CommandInput(CommandInputData {
-            tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: MonoUs::NOT_SET, device_id: String::new(),
-            action: CommandAction::Activate, source: CommandSource::Keyboard,
+            tile_id: null_id(),
+            node_id: null_id(),
+            interaction_id: String::new(),
+            timestamp_mono_us: MonoUs::NOT_SET,
+            device_id: String::new(),
+            action: CommandAction::Activate,
+            source: CommandSource::Keyboard,
         });
         assert!(cmd.is_transactional());
     }
@@ -412,9 +433,15 @@ mod tests {
     #[test]
     fn test_timestamp_extraction() {
         let mv = InputEnvelope::PointerMove(PointerMoveData {
-            tile_id: null_id(), node_id: null_id(), interaction_id: String::new(),
-            timestamp_mono_us: MonoUs(42_000), device_id: String::new(),
-            local_x: 0.0, local_y: 0.0, display_x: 0.0, display_y: 0.0,
+            tile_id: null_id(),
+            node_id: null_id(),
+            interaction_id: String::new(),
+            timestamp_mono_us: MonoUs(42_000),
+            device_id: String::new(),
+            local_x: 0.0,
+            local_y: 0.0,
+            display_x: 0.0,
+            display_y: 0.0,
         });
         assert_eq!(mv.timestamp_mono_us(), MonoUs(42_000));
     }

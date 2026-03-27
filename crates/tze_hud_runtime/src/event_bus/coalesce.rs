@@ -37,9 +37,7 @@ pub enum CoalesceKey {
 /// Returns the coalesce key to use.
 pub fn coalesce_key_for(event_type: &str, entity_id: Option<&str>) -> CoalesceKey {
     // Lease and degradation events: never drop (spec line 229-231)
-    if event_type.starts_with("system.lease_")
-        || event_type.starts_with("system.degradation_")
-    {
+    if event_type.starts_with("system.lease_") || event_type.starts_with("system.degradation_") {
         return CoalesceKey::Never;
     }
 
@@ -53,7 +51,9 @@ pub fn coalesce_key_for(event_type: &str, entity_id: Option<&str>) -> CoalesceKe
             }
         }
         // ActiveTabChanged: singleton (only last state matters)
-        "scene.tab.active_changed" => CoalesceKey::Singleton("scene.tab.active_changed".to_string()),
+        "scene.tab.active_changed" => {
+            CoalesceKey::Singleton("scene.tab.active_changed".to_string())
+        }
         // ZoneOccupancyChanged: coalesce per zone name
         "scene.zone.occupancy_changed" => {
             if let Some(name) = entity_id {
@@ -366,7 +366,10 @@ mod tests {
     #[test]
     fn test_active_tab_changed_singleton() {
         let key = coalesce_key_for("scene.tab.active_changed", None);
-        assert_eq!(key, CoalesceKey::Singleton("scene.tab.active_changed".to_string()));
+        assert_eq!(
+            key,
+            CoalesceKey::Singleton("scene.tab.active_changed".to_string())
+        );
     }
 
     #[test]

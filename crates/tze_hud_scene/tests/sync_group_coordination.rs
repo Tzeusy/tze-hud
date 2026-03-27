@@ -15,8 +15,7 @@
 use tze_hud_scene::{
     CommitDecision, DEFAULT_SYNC_DRIFT_BUDGET_US, FrameSyncDriftRecord, ORPHAN_GRACE_PERIOD_US,
     OrphanReason, SyncDriftHighAlert, SyncGroupArrival, SyncGroupCommitDecision, SyncGroupEvent,
-    SyncGroupOrphanState, TileArrival, ValidationError,
-    evaluate_frame_drift,
+    SyncGroupOrphanState, TileArrival, ValidationError, evaluate_frame_drift,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants},
     timing::{DurationUs, WallUs},
@@ -156,11 +155,17 @@ fn all_or_defer_commits_when_all_members_ready() {
     }
 
     let pending: std::collections::BTreeSet<SceneId> = tiles.iter().copied().collect();
-    let decision = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+    let decision = scene
+        .evaluate_sync_group_commit(group_id, &pending)
+        .unwrap();
 
     match decision {
         SyncGroupCommitDecision::Commit { tiles: committed } => {
-            assert_eq!(committed.len(), 3, "all 3 members must be committed atomically");
+            assert_eq!(
+                committed.len(),
+                3,
+                "all 3 members must be committed atomically"
+            );
         }
         other => panic!("expected Commit, got {:?}", other),
     }
@@ -183,7 +188,9 @@ fn all_or_defer_defers_when_only_some_members_ready() {
     let mut pending = std::collections::BTreeSet::new();
     pending.insert(tiles[0]);
 
-    let decision = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+    let decision = scene
+        .evaluate_sync_group_commit(group_id, &pending)
+        .unwrap();
     assert_eq!(decision, SyncGroupCommitDecision::Defer);
     assert_eq!(scene.sync_groups[&group_id].deferral_count, 1);
 }
@@ -206,12 +213,17 @@ fn available_members_applies_ready_subset_absent_unchanged() {
     pending.insert(tiles[0]);
     pending.insert(tiles[2]);
 
-    let decision = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+    let decision = scene
+        .evaluate_sync_group_commit(group_id, &pending)
+        .unwrap();
     match decision {
         SyncGroupCommitDecision::Commit { tiles: committed } => {
             assert!(committed.contains(&tiles[0]), "tile[0] should be committed");
             assert!(committed.contains(&tiles[2]), "tile[2] should be committed");
-            assert!(!committed.contains(&tiles[1]), "tile[1] should NOT be committed (absent)");
+            assert!(
+                !committed.contains(&tiles[1]),
+                "tile[1] should NOT be committed (absent)"
+            );
         }
         other => panic!("expected Commit, got {:?}", other),
     }
@@ -237,21 +249,39 @@ fn all_or_defer_force_commits_after_max_defer_frames() {
 
     // 3 deferrals
     for expected_count in 1..=3 {
-        let d = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
-        assert_eq!(d, SyncGroupCommitDecision::Defer, "frame {}", expected_count);
+        let d = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
+        assert_eq!(
+            d,
+            SyncGroupCommitDecision::Defer,
+            "frame {}",
+            expected_count
+        );
         assert_eq!(scene.sync_groups[&group_id].deferral_count, expected_count);
     }
 
     // 4th evaluation: force-commit fires
-    let d4 = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+    let d4 = scene
+        .evaluate_sync_group_commit(group_id, &pending)
+        .unwrap();
     match d4 {
         SyncGroupCommitDecision::ForceCommit { tiles: committed } => {
-            assert!(committed.contains(&tiles[0]), "ready tile must be committed");
-            assert!(!committed.contains(&tiles[1]), "absent tile must NOT be committed");
+            assert!(
+                committed.contains(&tiles[0]),
+                "ready tile must be committed"
+            );
+            assert!(
+                !committed.contains(&tiles[1]),
+                "absent tile must NOT be committed"
+            );
         }
         other => panic!("expected ForceCommit, got {:?}", other),
     }
-    assert_eq!(scene.sync_groups[&group_id].deferral_count, 0, "reset after force-commit");
+    assert_eq!(
+        scene.sync_groups[&group_id].deferral_count, 0,
+        "reset after force-commit"
+    );
 }
 
 /// WHEN an AllOrDefer group has no pending mutations for any member,
@@ -271,7 +301,9 @@ fn all_or_defer_idle_does_not_increment_deferral_count() {
 
     // Run 5 idle frames
     for _ in 0..5 {
-        let _ = scene.evaluate_sync_group_commit(group_id, &pending).unwrap();
+        let _ = scene
+            .evaluate_sync_group_commit(group_id, &pending)
+            .unwrap();
     }
 
     assert_eq!(
@@ -297,11 +329,15 @@ fn all_or_defer_resumes_from_zero_after_force_commit() {
     partial_pending.insert(tiles[0]);
 
     // One deferral
-    let d1 = scene.evaluate_sync_group_commit(group_id, &partial_pending).unwrap();
+    let d1 = scene
+        .evaluate_sync_group_commit(group_id, &partial_pending)
+        .unwrap();
     assert_eq!(d1, SyncGroupCommitDecision::Defer);
 
     // Force-commit fires
-    let d2 = scene.evaluate_sync_group_commit(group_id, &partial_pending).unwrap();
+    let d2 = scene
+        .evaluate_sync_group_commit(group_id, &partial_pending)
+        .unwrap();
     assert!(
         matches!(d2, SyncGroupCommitDecision::ForceCommit { .. }),
         "should force-commit after max_deferrals=1"
@@ -312,7 +348,9 @@ fn all_or_defer_resumes_from_zero_after_force_commit() {
     let mut full_pending = std::collections::BTreeSet::new();
     full_pending.insert(tiles[0]);
     full_pending.insert(tiles[1]);
-    let d3 = scene.evaluate_sync_group_commit(group_id, &full_pending).unwrap();
+    let d3 = scene
+        .evaluate_sync_group_commit(group_id, &full_pending)
+        .unwrap();
     assert!(
         matches!(d3, SyncGroupCommitDecision::Commit { .. }),
         "should commit normally after recovery"
@@ -385,7 +423,10 @@ fn sync_group_member_limit_is_64() {
     // 65th must fail
     let result = scene.join_sync_group(tiles[64], group_id);
     assert!(
-        matches!(result, Err(ValidationError::SyncGroupMemberLimitExceeded { .. })),
+        matches!(
+            result,
+            Err(ValidationError::SyncGroupMemberLimitExceeded { .. })
+        ),
         "65th tile must be rejected"
     );
 }
@@ -401,7 +442,13 @@ fn ownership_check_rejects_cross_namespace_join() {
     // agent-a creates a tile
     let lease_a = scene.grant_lease("agent-a", 60_000, vec![Capability::CreateTile]);
     let tile_a = scene
-        .create_tile(tab_id, "agent-a", lease_a, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .create_tile(
+            tab_id,
+            "agent-a",
+            lease_a,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
         .unwrap();
 
     // agent-b creates a group
@@ -413,7 +460,10 @@ fn ownership_check_rejects_cross_namespace_join() {
     // agent-b tries to add agent-a's tile — must fail
     let result = scene.join_sync_group_checked(tile_a, group_id, "agent-b");
     assert!(
-        matches!(result, Err(ValidationError::SyncGroupOwnershipViolation { .. })),
+        matches!(
+            result,
+            Err(ValidationError::SyncGroupOwnershipViolation { .. })
+        ),
         "agent-b must not add agent-a's tile"
     );
 }
@@ -443,15 +493,23 @@ fn sync_drift_within_budget_not_exceeded() {
     let group = SyncGroupArrival {
         group_id: gid,
         tile_arrivals: vec![
-            TileArrival { tile_id: t1, arrival_wall_us: WallUs(1_000_000) },
-            TileArrival { tile_id: t2, arrival_wall_us: WallUs(1_000_499) }, // 499µs spread
+            TileArrival {
+                tile_id: t1,
+                arrival_wall_us: WallUs(1_000_000),
+            },
+            TileArrival {
+                tile_id: t2,
+                arrival_wall_us: WallUs(1_000_499),
+            }, // 499µs spread
         ],
     };
 
     let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
     assert_eq!(record.sync_group_max_drift_us, DurationUs(499));
-    assert!(!record.sync_drift_budget_exceeded,
-        "499µs < 500µs must not exceed budget");
+    assert!(
+        !record.sync_drift_budget_exceeded,
+        "499µs < 500µs must not exceed budget"
+    );
     assert!(alerts.is_empty(), "no alert when within budget");
 }
 
@@ -468,20 +526,32 @@ fn sync_drift_800us_exceeds_budget_and_marks_slow_tile_stale() {
     let group = SyncGroupArrival {
         group_id: gid,
         tile_arrivals: vec![
-            TileArrival { tile_id: t1, arrival_wall_us: WallUs(2_000_000) },      // fast
-            TileArrival { tile_id: t2, arrival_wall_us: WallUs(2_000_800) },      // slow (+800µs)
+            TileArrival {
+                tile_id: t1,
+                arrival_wall_us: WallUs(2_000_000),
+            }, // fast
+            TileArrival {
+                tile_id: t2,
+                arrival_wall_us: WallUs(2_000_800),
+            }, // slow (+800µs)
         ],
     };
 
     let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
 
     assert_eq!(record.sync_group_max_drift_us, DurationUs(800));
-    assert!(record.sync_drift_budget_exceeded,
-        "800µs > 500µs must exceed budget");
-    assert!(record.stale_tiles.contains(&t2),
-        "slow tile (t2) must have staleness indicator activated");
-    assert!(!record.stale_tiles.contains(&t1),
-        "fast tile (t1) must NOT be stale");
+    assert!(
+        record.sync_drift_budget_exceeded,
+        "800µs > 500µs must exceed budget"
+    );
+    assert!(
+        record.stale_tiles.contains(&t2),
+        "slow tile (t2) must have staleness indicator activated"
+    );
+    assert!(
+        !record.stale_tiles.contains(&t1),
+        "fast tile (t1) must NOT be stale"
+    );
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0].group_id, gid);
     assert_eq!(alerts[0].observed_drift_us, DurationUs(800));
@@ -511,8 +581,10 @@ fn orphan_state_created_with_5s_grace_period() {
         WallUs(now.0 + ORPHAN_GRACE_PERIOD_US.0),
         "grace period deadline must be 5s after disconnect"
     );
-    assert_eq!(ORPHAN_GRACE_PERIOD_US.0, 5_000_000,
-        "grace period must be 5 seconds");
+    assert_eq!(
+        ORPHAN_GRACE_PERIOD_US.0, 5_000_000,
+        "grace period must be 5 seconds"
+    );
 }
 
 /// WHEN the owner reconnects within 5 seconds of disconnect,
@@ -568,13 +640,20 @@ fn orphan_grace_expired_after_5s() {
 /// Spec: timing-model/spec.md lines 163–165.
 #[test]
 fn force_commit_decision_carries_event() {
-    use tze_hud_scene::{apply_decision, evaluate_commit};
     use tze_hud_scene::types::{SyncGroup, SyncGroupId};
+    use tze_hud_scene::{apply_decision, evaluate_commit};
 
     let id: SyncGroupId = SceneId::new();
     let t1 = SceneId::new();
     let t2 = SceneId::new();
-    let mut group = SyncGroup::new(id, None, "agent".to_string(), SyncCommitPolicy::AllOrDefer, 1, 0);
+    let mut group = SyncGroup::new(
+        id,
+        None,
+        "agent".to_string(),
+        SyncCommitPolicy::AllOrDefer,
+        1,
+        0,
+    );
     group.members.insert(t1);
     group.members.insert(t2);
 
@@ -623,7 +702,11 @@ fn sync_group_media_group_has_all_or_defer_policy() {
     let registry = TestSceneRegistry::new();
     let (graph, _spec) = registry.build("sync_group_media", ClockMs::FIXED).unwrap();
 
-    assert_eq!(graph.sync_groups.len(), 1, "should have exactly one sync group");
+    assert_eq!(
+        graph.sync_groups.len(),
+        1,
+        "should have exactly one sync group"
+    );
     let group = graph.sync_groups.values().next().unwrap();
     assert_eq!(group.commit_policy, SyncCommitPolicy::AllOrDefer);
     assert_eq!(group.members.len(), 2, "both tiles must be enrolled");

@@ -20,9 +20,9 @@
 //! `session_open_wall_us` are rejected.
 
 use crate::timing::{
+    WallUs,
     errors::{TimingError, TimingWarning},
     hints::{DeliveryPolicy, MessageClass, TimingHints},
-    WallUs,
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -182,8 +182,8 @@ pub fn is_in_scope_for_frame(present_at: WallUs, vsync_wall_us: WallUs) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::timing::hints::{DeliveryPolicy, MessageClass, Schedule, TimingHints};
     use crate::timing::DurationUs;
+    use crate::timing::hints::{DeliveryPolicy, MessageClass, Schedule, TimingHints};
 
     fn ctx_at(now_us: u64) -> TimestampValidationInput {
         TimestampValidationInput {
@@ -298,8 +298,9 @@ mod tests {
     fn timestamp_too_future_rejected() {
         let mut hints = TimingHints::new();
         let now = 1_000_000_000_u64;
-        hints.schedule =
-            Some(Schedule::PresentAt(WallUs(now + DEFAULT_MAX_FUTURE_SCHEDULE_US + 1)));
+        hints.schedule = Some(Schedule::PresentAt(WallUs(
+            now + DEFAULT_MAX_FUTURE_SCHEDULE_US + 1,
+        )));
         let ctx = ctx_at(now);
         let err = validate_timing_hints(&hints, &ctx).unwrap_err();
         assert_eq!(err, TimingError::TimestampTooFuture);
@@ -310,8 +311,9 @@ mod tests {
     fn timestamp_at_max_future_accepted() {
         let mut hints = TimingHints::new();
         let now = 1_000_000_000_u64;
-        hints.schedule =
-            Some(Schedule::PresentAt(WallUs(now + DEFAULT_MAX_FUTURE_SCHEDULE_US)));
+        hints.schedule = Some(Schedule::PresentAt(WallUs(
+            now + DEFAULT_MAX_FUTURE_SCHEDULE_US,
+        )));
         let ctx = ctx_at(now);
         assert!(validate_timing_hints(&hints, &ctx).is_ok());
     }

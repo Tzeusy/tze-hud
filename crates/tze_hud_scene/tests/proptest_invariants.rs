@@ -30,11 +30,11 @@
 
 use proptest::prelude::*;
 use tze_hud_scene::{
+    MAX_BATCH_SIZE,
     graph::SceneGraph,
     invariants::check_all,
     mutation::{MutationBatch, SceneMutation},
     types::{Capability, Rect, SceneId},
-    MAX_BATCH_SIZE,
 };
 
 // ─── PropTest configuration ───────────────────────────────────────────────────
@@ -57,9 +57,13 @@ fn proptest_config() -> proptest::test_runner::Config {
 
 /// Generate a valid tile bounds entirely within a 1920×1080 display.
 fn arb_tile_bounds() -> impl Strategy<Value = Rect> {
-    (0.0f32..1800.0, 0.0f32..980.0, 10.0f32..120.0, 10.0f32..100.0).prop_map(|(x, y, w, h)| {
-        Rect::new(x, y, w, h)
-    })
+    (
+        0.0f32..1800.0,
+        0.0f32..980.0,
+        10.0f32..120.0,
+        10.0f32..100.0,
+    )
+        .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
 }
 
 /// Generate a valid opacity in [0.0, 1.0].
@@ -101,7 +105,11 @@ struct ValidSceneParams {
 
 fn arb_valid_scene_params() -> impl Strategy<Value = ValidSceneParams> {
     (1usize..=4, 1usize..=6, arb_opacity()).prop_map(|(tab_count, tiles_per_tab, opacity)| {
-        ValidSceneParams { tab_count, tiles_per_tab, opacity }
+        ValidSceneParams {
+            tab_count,
+            tiles_per_tab,
+            opacity,
+        }
     })
 }
 

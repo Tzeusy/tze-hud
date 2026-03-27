@@ -235,16 +235,16 @@ impl SceneTrace {
 
     /// Returns an iterator over mutation batch events in the trace, in order.
     pub fn mutation_events(&self) -> impl Iterator<Item = &TraceEvent> {
-        self.events.iter().filter(|e| {
-            matches!(e.kind, TraceEventKind::MutationBatch { .. })
-        })
+        self.events
+            .iter()
+            .filter(|e| matches!(e.kind, TraceEventKind::MutationBatch { .. }))
     }
 
     /// Returns an iterator over input events in the trace, in order.
     pub fn input_events(&self) -> impl Iterator<Item = &TraceEvent> {
-        self.events.iter().filter(|e| {
-            matches!(e.kind, TraceEventKind::InputEvent { .. })
-        })
+        self.events
+            .iter()
+            .filter(|e| matches!(e.kind, TraceEventKind::InputEvent { .. }))
     }
 }
 
@@ -259,16 +259,10 @@ pub enum ReplayStepOutcome {
     ///
     /// This indicates a non-determinism bug: the same inputs produced a
     /// different output on the second run.
-    Diverged {
-        seq: u64,
-        description: String,
-    },
+    Diverged { seq: u64, description: String },
     /// Event could not be replayed (e.g., a MutationBatch with a lease_id
     /// that does not exist in the replayed scene graph, unrelated to the bug).
-    Skipped {
-        seq: u64,
-        reason: String,
-    },
+    Skipped { seq: u64, reason: String },
 }
 
 /// The result of replaying an entire trace.
@@ -358,7 +352,9 @@ mod tests {
         trace.events.push(TraceEvent {
             seq: 2,
             timestamp: make_timestamp(300),
-            kind: TraceEventKind::ClockTick { now_us: 1_735_689_600_000_300 },
+            kind: TraceEventKind::ClockTick {
+                now_us: 1_735_689_600_000_300,
+            },
         });
 
         let json = trace.to_json().expect("serialize trace");
@@ -423,8 +419,15 @@ mod tests {
         let events = vec![
             TracedInputEvent::KeyPress { key: 65 },
             TracedInputEvent::PointerMove { x: 1.5, y: 2.5 },
-            TracedInputEvent::PointerPress { x: 10.0, y: 20.0, button: 0 },
-            TracedInputEvent::Resize { width: 1920, height: 1080 },
+            TracedInputEvent::PointerPress {
+                x: 10.0,
+                y: 20.0,
+                button: 0,
+            },
+            TracedInputEvent::Resize {
+                width: 1920,
+                height: 1080,
+            },
             TracedInputEvent::CloseRequested,
         ];
         for ev in &events {

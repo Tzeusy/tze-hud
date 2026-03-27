@@ -25,7 +25,7 @@
 //! single source of truth for `redaction_style`. `ChromeConfig` MUST NOT contain
 //! `redaction_style`. The chrome layer renders the visual but does not decide what to redact.
 
-use crate::types::{PrivacyContext, RedactionReason, VisibilityClassification, ViewerClass};
+use crate::types::{PrivacyContext, RedactionReason, ViewerClass, VisibilityClassification};
 
 // ─── Zone ceiling rule ────────────────────────────────────────────────────────
 
@@ -49,7 +49,11 @@ pub fn apply_zone_ceiling(
 ) -> VisibilityClassification {
     // Higher enum value = more restrictive. The zone ceiling is the floor:
     // effective = max(agent_declared, zone_default) in restriction order.
-    if zone_default > agent_declared { zone_default } else { agent_declared }
+    if zone_default > agent_declared {
+        zone_default
+    } else {
+        agent_declared
+    }
 }
 
 // ─── Privacy evaluation ───────────────────────────────────────────────────────
@@ -145,8 +149,10 @@ mod privacy_tests {
     /// THEN effective classification is household (spec lines 113-115)
     #[test]
     fn test_zone_ceiling_enforced_public_vs_household() {
-        let effective =
-            apply_zone_ceiling(VisibilityClassification::Public, VisibilityClassification::Household);
+        let effective = apply_zone_ceiling(
+            VisibilityClassification::Public,
+            VisibilityClassification::Household,
+        );
         assert_eq!(effective, VisibilityClassification::Household);
     }
 
@@ -248,7 +254,10 @@ mod privacy_tests {
         };
         let decision = evaluate_privacy(&ctx, VisibilityClassification::Household);
         // KnownGuest cannot see Household content
-        assert!(matches!(decision, PrivacyDecision::Redact(RedactionReason::MultiViewerRestriction)));
+        assert!(matches!(
+            decision,
+            PrivacyDecision::Redact(RedactionReason::MultiViewerRestriction)
+        ));
     }
 
     #[test]
@@ -273,7 +282,10 @@ mod privacy_tests {
 
     #[test]
     fn test_most_restrictive_viewer_single() {
-        assert_eq!(most_restrictive_viewer(&[ViewerClass::HouseholdMember]), ViewerClass::HouseholdMember);
+        assert_eq!(
+            most_restrictive_viewer(&[ViewerClass::HouseholdMember]),
+            ViewerClass::HouseholdMember
+        );
     }
 
     #[test]

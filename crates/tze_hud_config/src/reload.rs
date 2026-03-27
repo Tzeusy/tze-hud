@@ -241,19 +241,43 @@ name = "Main"
 
     #[test]
     fn test_frozen_sections_classified_correctly() {
-        assert_eq!(section_classification("runtime"), FieldClassification::Frozen);
+        assert_eq!(
+            section_classification("runtime"),
+            FieldClassification::Frozen
+        );
         assert_eq!(section_classification("tabs"), FieldClassification::Frozen);
-        assert_eq!(section_classification("agents.registered"), FieldClassification::Frozen);
-        assert_eq!(section_classification("display_profile"), FieldClassification::Frozen);
-        assert_eq!(section_classification("includes"), FieldClassification::Frozen);
+        assert_eq!(
+            section_classification("agents.registered"),
+            FieldClassification::Frozen
+        );
+        assert_eq!(
+            section_classification("display_profile"),
+            FieldClassification::Frozen
+        );
+        assert_eq!(
+            section_classification("includes"),
+            FieldClassification::Frozen
+        );
     }
 
     #[test]
     fn test_hot_reloadable_sections_classified_correctly() {
-        assert_eq!(section_classification("privacy"), FieldClassification::HotReloadable);
-        assert_eq!(section_classification("degradation"), FieldClassification::HotReloadable);
-        assert_eq!(section_classification("chrome"), FieldClassification::HotReloadable);
-        assert_eq!(section_classification("agents.dynamic_policy"), FieldClassification::HotReloadable);
+        assert_eq!(
+            section_classification("privacy"),
+            FieldClassification::HotReloadable
+        );
+        assert_eq!(
+            section_classification("degradation"),
+            FieldClassification::HotReloadable
+        );
+        assert_eq!(
+            section_classification("chrome"),
+            FieldClassification::HotReloadable
+        );
+        assert_eq!(
+            section_classification("agents.dynamic_policy"),
+            FieldClassification::HotReloadable
+        );
     }
 
     // ── reload_config ─────────────────────────────────────────────────────────
@@ -271,7 +295,11 @@ name = "Main"
 redaction_style = "blank"
 "#;
         let result = reload_config(toml);
-        assert!(result.is_ok(), "valid config should reload successfully, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "valid config should reload successfully, got: {:?}",
+            result
+        );
         let hot = result.unwrap();
         // Privacy redaction_style should be reflected.
         assert_eq!(hot.privacy.redaction_style, Some("blank".into()));
@@ -302,11 +330,17 @@ name = "Tab1"
 default_classification = "top_secret"
 "#;
         let result = reload_config(bad_config);
-        assert!(result.is_err(), "validation error should be returned on reload");
+        assert!(
+            result.is_err(),
+            "validation error should be returned on reload"
+        );
         let errors = result.unwrap_err();
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
-            "should return CONFIG_UNKNOWN_CLASSIFICATION, got: {:?}", errors
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
+            "should return CONFIG_UNKNOWN_CLASSIFICATION, got: {:?}",
+            errors
         );
     }
 
@@ -358,7 +392,8 @@ redaction_style = "blank"
         assert!(!errors.is_empty());
         assert!(
             matches!(errors[0].code, ConfigErrorCode::Other(_)),
-            "expected IO error code, got: {:?}", errors[0].code
+            "expected IO error code, got: {:?}",
+            errors[0].code
         );
     }
 

@@ -173,7 +173,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_zone_type_ref("news_ticker", "tabs[0].zones.news_ticker", &[], &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
             "unknown zone type 'news_ticker' should produce CONFIG_UNKNOWN_ZONE_TYPE"
         );
     }
@@ -187,7 +189,10 @@ mod tests {
             &["news_ticker"],
             &mut errors,
         );
-        assert!(errors.is_empty(), "custom zone type should be accepted when defined in [zones]");
+        assert!(
+            errors.is_empty(),
+            "custom zone type should be accepted when defined in [zones]"
+        );
     }
 
     #[test]
@@ -196,7 +201,10 @@ mod tests {
         // without a custom [zones.subtitle] entry → built-in subtitle zone type used.
         let mut errors = Vec::new();
         validate_zone_type_ref("subtitle", "tabs[0].zones.subtitle", &[], &mut errors);
-        assert!(errors.is_empty(), "built-in subtitle zone type should be accepted without custom definition");
+        assert!(
+            errors.is_empty(),
+            "built-in subtitle zone type should be accepted without custom definition"
+        );
     }
 
     #[test]
@@ -217,14 +225,18 @@ mod tests {
                 zt
             );
         }
-        assert_eq!(BUILTIN_ZONE_TYPES.len(), expected.len(), "BUILTIN_ZONE_TYPES count mismatch");
+        assert_eq!(
+            BUILTIN_ZONE_TYPES.len(),
+            expected.len(),
+            "BUILTIN_ZONE_TYPES count mismatch"
+        );
     }
 }
 
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-    use crate::raw::{RawConfig, RawTab, RawZones, RawZoneType};
+    use crate::raw::{RawConfig, RawTab, RawZoneType, RawZones};
     use std::collections::HashMap;
 
     fn make_config_with_tab_zones(zone_names: Vec<String>) -> RawConfig {
@@ -267,10 +279,7 @@ mod unit_tests {
 
     #[test]
     fn custom_zone_type_defined_in_zones_section_accepted() {
-        let raw = make_config_with_custom_zone(
-            vec!["news_ticker".into()],
-            vec!["news_ticker"],
-        );
+        let raw = make_config_with_custom_zone(vec!["news_ticker".into()], vec!["news_ticker"]);
         let mut errors = Vec::new();
         validate_tab_zone_references(&raw, &mut errors);
         assert!(
@@ -286,7 +295,9 @@ mod unit_tests {
         let mut errors = Vec::new();
         validate_tab_zone_references(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
             "unknown zone type should produce CONFIG_UNKNOWN_ZONE_TYPE, got: {:?}",
             errors
         );
@@ -297,7 +308,10 @@ mod unit_tests {
         let raw = make_config_with_tab_zones(vec![]);
         let mut errors = Vec::new();
         validate_tab_zone_references(&raw, &mut errors);
-        assert!(errors.is_empty(), "tab with no zones should produce no errors");
+        assert!(
+            errors.is_empty(),
+            "tab with no zones should produce no errors"
+        );
     }
 
     #[test]

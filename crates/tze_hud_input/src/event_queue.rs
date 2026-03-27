@@ -112,7 +112,7 @@ impl Default for AgentEventQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{InputEnvelope, PointerMoveData, PointerDownData};
+    use crate::envelope::{InputEnvelope, PointerDownData, PointerMoveData};
     use tze_hud_scene::{MonoUs, SceneId};
 
     fn make_move(ts: u64) -> InputEnvelope {
@@ -163,7 +163,10 @@ mod tests {
 
         // Another non-transactional should be dropped
         let accepted = q.enqueue(make_move(3));
-        assert!(!accepted, "non-transactional must be dropped under backpressure");
+        assert!(
+            !accepted,
+            "non-transactional must be dropped under backpressure"
+        );
         assert_eq!(q.len(), 2);
     }
 

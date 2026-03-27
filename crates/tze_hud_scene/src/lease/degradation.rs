@@ -25,7 +25,7 @@
 //! - **Entry**: `frame_time_p95 > 14ms` over a 10-frame window → advance one level.
 //! - **Recovery**: `frame_time_p95 < 12ms` over a 30-frame window → recover one level.
 
-use crate::lease::priority::{shed_count_for_level4, shedding_order, TileSheddingEntry};
+use crate::lease::priority::{TileSheddingEntry, shed_count_for_level4, shedding_order};
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -137,7 +137,9 @@ impl FrameTimeWindow {
         sorted.sort_unstable_by(f64::total_cmp);
         // Nearest-rank: index = ceil(0.95 * n) - 1
         let n = sorted.len();
-        let idx = ((0.95 * n as f64).ceil() as usize).saturating_sub(1).min(n - 1);
+        let idx = ((0.95 * n as f64).ceil() as usize)
+            .saturating_sub(1)
+            .min(n - 1);
         Some(sorted[idx])
     }
 
@@ -350,7 +352,10 @@ mod tests {
 
     #[test]
     fn level_advance_from_nominal() {
-        assert_eq!(DegradationLevel::Nominal.advance(), Some(DegradationLevel::Minor));
+        assert_eq!(
+            DegradationLevel::Nominal.advance(),
+            Some(DegradationLevel::Minor)
+        );
     }
 
     #[test]
@@ -360,7 +365,10 @@ mod tests {
 
     #[test]
     fn level_recover_from_minor() {
-        assert_eq!(DegradationLevel::Minor.recover(), Some(DegradationLevel::Nominal));
+        assert_eq!(
+            DegradationLevel::Minor.recover(),
+            Some(DegradationLevel::Nominal)
+        );
     }
 
     #[test]
@@ -474,7 +482,10 @@ mod tests {
         assert!(tracker.is_shed(shed[0]), "shed tile should be flagged");
 
         // The shed tile must be the least important (priority=3, z=0 = index 3).
-        assert_eq!(shed[0], 3, "least-important tile (priority=3, z=0) should shed first");
+        assert_eq!(
+            shed[0], 3,
+            "least-important tile (priority=3, z=0) should shed first"
+        );
 
         // Other tiles not shed.
         assert!(!tracker.is_shed(0), "high-priority tile must not be shed");
@@ -564,7 +575,11 @@ mod tests {
         assert_eq!(tracker.level(), DegradationLevel::ShedTiles);
         // ceil(3/4) = 1 shed.
         assert_eq!(tracker.shed_tiles().len(), 1);
-        assert_eq!(tracker.shed_tiles()[0], 2, "low_prio tile (index 2) sheds first");
+        assert_eq!(
+            tracker.shed_tiles()[0],
+            2,
+            "low_prio tile (index 2) sheds first"
+        );
         assert!(!tracker.is_shed(0), "high_prio tile must not be shed");
     }
 }

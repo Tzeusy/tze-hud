@@ -32,11 +32,7 @@
 ///
 /// No heap allocation, no locking.
 #[inline]
-pub fn is_suppressed(
-    event_type: &str,
-    source_namespace: &str,
-    recipient_namespace: &str,
-) -> bool {
+pub fn is_suppressed(event_type: &str, source_namespace: &str, recipient_namespace: &str) -> bool {
     // Empty source namespace means the event originated from the runtime
     // itself (no agent cause). Never suppressed.
     if source_namespace.is_empty() {
@@ -68,21 +64,13 @@ mod tests {
     #[test]
     fn test_self_event_suppressed() {
         // Agent A creates a tile — Agent A should NOT receive TileCreated
-        assert!(is_suppressed(
-            "scene.tile.created",
-            "agent_a",
-            "agent_a"
-        ));
+        assert!(is_suppressed("scene.tile.created", "agent_a", "agent_a"));
     }
 
     #[test]
     fn test_other_agent_not_suppressed() {
         // Agent A creates a tile — Agent B SHOULD receive TileCreated
-        assert!(!is_suppressed(
-            "scene.tile.created",
-            "agent_a",
-            "agent_b"
-        ));
+        assert!(!is_suppressed("scene.tile.created", "agent_a", "agent_b"));
     }
 
     // ── Lease event exemption ────────────────────────────────────────────────
@@ -91,29 +79,17 @@ mod tests {
     fn test_lease_revoked_not_suppressed_for_self() {
         // Agent A's budget violation triggers lease revocation for Agent A —
         // Agent A MUST still receive LeaseRevokedEvent (spec line 265).
-        assert!(!is_suppressed(
-            "system.lease_revoked",
-            "agent_a",
-            "agent_a"
-        ));
+        assert!(!is_suppressed("system.lease_revoked", "agent_a", "agent_a"));
     }
 
     #[test]
     fn test_lease_granted_not_suppressed_for_self() {
-        assert!(!is_suppressed(
-            "system.lease_granted",
-            "agent_a",
-            "agent_a"
-        ));
+        assert!(!is_suppressed("system.lease_granted", "agent_a", "agent_a"));
     }
 
     #[test]
     fn test_lease_expired_not_suppressed_for_self() {
-        assert!(!is_suppressed(
-            "system.lease_expired",
-            "agent_a",
-            "agent_a"
-        ));
+        assert!(!is_suppressed("system.lease_expired", "agent_a", "agent_a"));
     }
 
     // ── Degradation event exemption ──────────────────────────────────────────

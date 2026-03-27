@@ -63,7 +63,9 @@ impl GcCandidateTable {
     /// Register `id` as a GC candidate starting at `now_ms`.
     pub fn enter(&self, id: ResourceId, now_ms: u64) {
         let mut guard = self.inner.lock().expect("GcCandidateTable lock");
-        guard.entry(id).or_insert(GcCandidate { zero_since_ms: now_ms });
+        guard.entry(id).or_insert(GcCandidate {
+            zero_since_ms: now_ms,
+        });
     }
 
     /// Remove `id` from the candidate table (resurrection or eviction).
@@ -78,10 +80,7 @@ impl GcCandidateTable {
     /// work loop.
     pub fn snapshot(&self) -> Vec<(ResourceId, GcCandidate)> {
         let guard = self.inner.lock().expect("GcCandidateTable lock");
-        guard
-            .iter()
-            .map(|(id, c)| (*id, c.clone()))
-            .collect()
+        guard.iter().map(|(id, c)| (*id, c.clone())).collect()
     }
 
     /// Number of resources currently in candidacy.
@@ -334,8 +333,14 @@ mod tests {
         layer.inc_ref(id).unwrap(); // agent B
         let new = layer.dec_ref(id, 0).unwrap(); // agent A deletes
         assert_eq!(new, 1, "agent B still holds a reference");
-        assert!(!layer.candidates().snapshot().iter().any(|(rid, _)| *rid == id),
-            "resource must not be GC candidate while refcount > 0");
+        assert!(
+            !layer
+                .candidates()
+                .snapshot()
+                .iter()
+                .any(|(rid, _)| *rid == id),
+            "resource must not be GC candidate while refcount > 0"
+        );
     }
 
     // Acceptance: refcount 0 → enters GC candidacy [spec line 192-194].

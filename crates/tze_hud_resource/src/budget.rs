@@ -72,11 +72,19 @@ pub enum BudgetViolation {
 impl std::fmt::Display for BudgetViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BudgetViolation::PerTileTextureBytes { tile_id, used_bytes, limit_bytes } => write!(
+            BudgetViolation::PerTileTextureBytes {
+                tile_id,
+                used_bytes,
+                limit_bytes,
+            } => write!(
                 f,
                 "per-tile budget exceeded for tile {tile_id}: {used_bytes} bytes > {limit_bytes} limit"
             ),
-            BudgetViolation::AgentTotalTextureBytes { agent_ns, used_bytes, limit_bytes } => write!(
+            BudgetViolation::AgentTotalTextureBytes {
+                agent_ns,
+                used_bytes,
+                limit_bytes,
+            } => write!(
                 f,
                 "agent total budget exceeded for {agent_ns}: {used_bytes} bytes > {limit_bytes} limit"
             ),
@@ -347,8 +355,16 @@ mod tests {
         registry.on_node_ref_added("agent_a", resource, decoded);
         registry.on_node_ref_added("agent_b", resource, decoded);
 
-        assert_eq!(registry.agent_used_bytes("agent_a"), decoded, "A charged 4 MiB");
-        assert_eq!(registry.agent_used_bytes("agent_b"), decoded, "B charged 4 MiB");
+        assert_eq!(
+            registry.agent_used_bytes("agent_a"),
+            decoded,
+            "A charged 4 MiB"
+        );
+        assert_eq!(
+            registry.agent_used_bytes("agent_b"),
+            decoded,
+            "B charged 4 MiB"
+        );
     }
 
     // Acceptance: decoded size charged, not compressed [spec line 161-162].
@@ -424,7 +440,10 @@ mod tests {
 
         // Adding 3 MiB more would exceed 10 MiB.
         let result = registry.check_agent_limit("agent_a", 3 * 1024 * 1024, limit);
-        assert!(matches!(result, Err(BudgetViolation::AgentTotalTextureBytes { .. })));
+        assert!(matches!(
+            result,
+            Err(BudgetViolation::AgentTotalTextureBytes { .. })
+        ));
     }
 
     // Acceptance: per-tile budget check — batch adding too much rejected.
@@ -438,7 +457,10 @@ mod tests {
         checker.add_ref(id(0x11), 4 * 1024 * 1024);
 
         let result = checker.validate();
-        assert!(matches!(result, Err(BudgetViolation::PerTileTextureBytes { .. })));
+        assert!(matches!(
+            result,
+            Err(BudgetViolation::PerTileTextureBytes { .. })
+        ));
     }
 
     // Acceptance: per-tile budget check — batch within limit accepted.

@@ -26,7 +26,9 @@
 //! `Backends::all()` so CI environments with software renderers (llvmpipe,
 //! SwiftShader, WARP) still function.
 
-use wgpu::{Adapter, Backends, Instance, InstanceDescriptor, PowerPreference, RequestAdapterOptions};
+use wgpu::{
+    Adapter, Backends, Instance, InstanceDescriptor, PowerPreference, RequestAdapterOptions,
+};
 
 // ─── Platform backends ────────────────────────────────────────────────────────
 
@@ -207,8 +209,14 @@ mod tests {
         // Spec line 195: "structured error message"
         assert!(msg.contains("Vulkan (Linux)"), "backends in error: {msg}");
         assert!(msg.contains("linux"), "platform in error: {msg}");
-        assert!(msg.contains("HighPerformance"), "power_preference in error: {msg}");
-        assert!(msg.contains("no suitable GPU adapter"), "key phrase in error: {msg}");
+        assert!(
+            msg.contains("HighPerformance"),
+            "power_preference in error: {msg}"
+        );
+        assert!(
+            msg.contains("no suitable GPU adapter"),
+            "key phrase in error: {msg}"
+        );
     }
 
     /// Headless smoke test: adapter selection with Backends::all() (no surface).

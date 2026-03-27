@@ -27,7 +27,7 @@ use std::collections::BinaryHeap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::timing::{errors::TimingError, WallUs};
+use crate::timing::{WallUs, errors::TimingError};
 
 // ─── PendingEntry ─────────────────────────────────────────────────────────────
 
@@ -287,7 +287,10 @@ mod tests {
         .unwrap();
         // Frame at vsync = V → NOT drained
         let ready = q.drain_ready(vsync);
-        assert!(ready.is_empty(), "mutation MUST NOT apply before present_at");
+        assert!(
+            ready.is_empty(),
+            "mutation MUST NOT apply before present_at"
+        );
         // Frame at vsync = V + 1ms → now drained
         let ready = q.drain_ready(present_at);
         assert_eq!(ready.len(), 1);

@@ -101,16 +101,14 @@ use tze_hud_scene::types::ZoneContent;
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
-    frame_ready_channel, FrameReadyRx, FrameReadyTx, InputEvent, InputEventKind,
-    INPUT_EVENT_CAPACITY,
+    FrameReadyRx, FrameReadyTx, INPUT_EVENT_CAPACITY, InputEvent, InputEventKind,
+    frame_ready_channel,
 };
-use crate::mcp::{start_mcp_http_server, McpServerConfig};
+use crate::mcp::{McpServerConfig, start_mcp_http_server};
 use crate::pipeline::FramePipeline;
 use crate::reload_triggers::RuntimeServiceImpl;
 use crate::runtime_context::{RuntimeContext, SharedRuntimeContext};
-use crate::threads::{
-    spawn_compositor_thread, CompositorReady, NetworkRuntime, ShutdownToken,
-};
+use crate::threads::{CompositorReady, NetworkRuntime, ShutdownToken, spawn_compositor_thread};
 use crate::window::{HitRegion, WindowConfig, WindowMode};
 use crate::window::{resolve_window_mode, should_capture_pointer_event};
 
@@ -296,9 +294,7 @@ impl ApplicationHandler for WinitApp {
                     .with_decorations(false)
             }
             WindowMode::Overlay => {
-                tracing::info!(
-                    "window mode: overlay/HUD — transparent borderless always-on-top"
-                );
+                tracing::info!("window mode: overlay/HUD — transparent borderless always-on-top");
                 WindowAttributes::default()
                     .with_title(cfg.title.clone())
                     .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
@@ -349,13 +345,9 @@ impl ApplicationHandler for WinitApp {
             .expect("failed to build startup tokio runtime");
 
         let (compositor, window_surface) = rt.block_on(async {
-            Compositor::new_windowed(
-                window_clone,
-                cfg.window.width,
-                cfg.window.height,
-            )
-            .await
-            .expect("Compositor::new_windowed failed")
+            Compositor::new_windowed(window_clone, cfg.window.width, cfg.window.height)
+                .await
+                .expect("Compositor::new_windowed failed")
         });
 
         let window_surface = Arc::new(window_surface);
@@ -372,13 +364,14 @@ impl ApplicationHandler for WinitApp {
         let compositor_scene = {
             let st = self.state.shared_state.try_lock().expect(
                 "windowed runtime: shared_state lock contended at compositor setup — \
-                 this should not happen during single-threaded initialisation"
+                 this should not happen during single-threaded initialisation",
             );
             Arc::clone(&st.scene)
         };
         // Share the ArcSwap handle (not the FramePipeline itself) with the compositor thread.
         let hit_test_snapshot = self.state.pipeline.hit_test_snapshot.clone();
-        let frame_ready_tx = self.state
+        let frame_ready_tx = self
+            .state
             .frame_ready_tx
             .take()
             .expect("frame_ready_tx already taken");
@@ -398,12 +391,14 @@ impl ApplicationHandler for WinitApp {
                 let mut compositor = compositor;
                 let mut telemetry = telemetry_collector;
 
-                let frame_interval = std::time::Duration::from_micros(
-                    1_000_000 / cfg.target_fps.max(1) as u64,
-                );
+                let frame_interval =
+                    std::time::Duration::from_micros(1_000_000 / cfg.target_fps.max(1) as u64);
                 let mut shutdown_rx = shutdown_tok.subscribe();
 
-                tracing::info!("compositor thread: starting frame loop at {}fps", cfg.target_fps);
+                tracing::info!(
+                    "compositor thread: starting frame loop at {}fps",
+                    cfg.target_fps
+                );
 
                 loop {
                     // Check for shutdown.
@@ -441,7 +436,11 @@ impl ApplicationHandler for WinitApp {
                         .pending_resize_height
                         .load(std::sync::atomic::Ordering::Acquire);
                     if pending_w > 0 && pending_h > 0 {
-                        surface_for_compositor.reconfigure(pending_w, pending_h, &compositor.device);
+                        surface_for_compositor.reconfigure(
+                            pending_w,
+                            pending_h,
+                            &compositor.device,
+                        );
                         // Reset pending resize (store 0 to signal "handled").
                         surface_for_compositor
                             .pending_resize_width
@@ -467,10 +466,8 @@ impl ApplicationHandler for WinitApp {
                         hit_test_snapshot.store(Arc::new(new_snap));
 
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
-                        let compositor_telemetry = compositor.render_frame(
-                            &scene,
-                            surface_for_compositor.as_ref(),
-                        );
+                        let compositor_telemetry =
+                            compositor.render_frame(&scene, surface_for_compositor.as_ref());
                         drop(scene); // Release lock before signalling main thread.
 
                         // ── Signal main thread to present ─────────────────
@@ -511,11 +508,7 @@ impl ApplicationHandler for WinitApp {
             .expect("startup runtime 2");
         let compositor_ok = tmp_rt
             .block_on(async {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    ready_rx,
-                )
-                .await
+                tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await
             })
             .ok()
             .and_then(|r| r.ok())
@@ -542,7 +535,9 @@ impl ApplicationHandler for WinitApp {
             // ── Close ──────────────────────────────────────────────────────
             WindowEvent::CloseRequested => {
                 tracing::info!("main thread: window close requested");
-                self.state.shutdown.trigger(crate::threads::ShutdownReason::Clean);
+                self.state
+                    .shutdown
+                    .trigger(crate::threads::ShutdownReason::Clean);
                 event_loop.exit();
             }
 
@@ -565,14 +560,12 @@ impl ApplicationHandler for WinitApp {
                     //
                     // Write height first so the compositor never sees a
                     // partially-updated pair (width updated, height stale).
-                    surface.pending_resize_height.store(
-                        physical_size.height,
-                        std::sync::atomic::Ordering::Release,
-                    );
-                    surface.pending_resize_width.store(
-                        physical_size.width,
-                        std::sync::atomic::Ordering::Release,
-                    );
+                    surface
+                        .pending_resize_height
+                        .store(physical_size.height, std::sync::atomic::Ordering::Release);
+                    surface
+                        .pending_resize_width
+                        .store(physical_size.width, std::sync::atomic::Ordering::Release);
                 }
             }
 
@@ -652,12 +645,8 @@ impl WinitApp {
         // We toggle on every CursorMoved so the hittest tracks the cursor as it
         // moves in/out of regions continuously.
         if self.state.effective_mode == WindowMode::Overlay {
-            let should_capture = should_capture_pointer_event(
-                WindowMode::Overlay,
-                x,
-                y,
-                &self.state.hit_regions,
-            );
+            let should_capture =
+                should_capture_pointer_event(WindowMode::Overlay, x, y, &self.state.hit_regions);
             if let Some(window) = &self.state.window {
                 if let Err(e) = window.set_cursor_hittest(should_capture) {
                     tracing::trace!(
@@ -694,7 +683,10 @@ impl WinitApp {
         // both the SharedState lock and the scene lock.
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
-                let _result = self.state.input_processor.process(&pointer_event, &mut *scene);
+                let _result = self
+                    .state
+                    .input_processor
+                    .process(&pointer_event, &mut *scene);
             }
             // Local feedback patch (_result.local_patch) would be sent to the
             // compositor via a local-patch channel in the full pipeline. For the
@@ -762,7 +754,9 @@ impl WinitApp {
 
         // Join the compositor thread before destroying the surface.
         if let Some(handle) = self.state.compositor_handle.take() {
-            self.state.shutdown.trigger(crate::threads::ShutdownReason::Clean);
+            self.state
+                .shutdown
+                .trigger(crate::threads::ShutdownReason::Clean);
             let _ = handle.join();
         }
 
@@ -1031,7 +1025,9 @@ impl WindowedRuntime {
         // WindowEvent::CloseRequested already triggers it in the normal path,
         // but other exit paths (OS SIGTERM, explicit exit_loop) may not.
         if !app.state.shutdown.is_triggered() {
-            app.state.shutdown.trigger(crate::threads::ShutdownReason::Clean);
+            app.state
+                .shutdown
+                .trigger(crate::threads::ShutdownReason::Clean);
         }
 
         // Abort all spawned network task handles (gRPC, MCP) so they do not
@@ -1066,7 +1062,9 @@ impl WindowedRuntime {
         // because it polls the `ShutdownToken`; gRPC tasks were already aborted.
         if let Some(network_rt) = app.state.network_rt.take() {
             tracing::info!("shutting down network runtime (gRPC, MCP tasks)...");
-            network_rt.rt.shutdown_timeout(std::time::Duration::from_millis(500));
+            network_rt
+                .rt
+                .shutdown_timeout(std::time::Duration::from_millis(500));
             tracing::info!("network runtime shutdown complete");
         }
 
@@ -1194,20 +1192,22 @@ fn start_network_services(
     shared_state: Arc<Mutex<SharedState>>,
     runtime_context: SharedRuntimeContext,
     fallback_unrestricted: bool,
-) -> Result<(Option<NetworkRuntime>, Vec<tokio::task::JoinHandle<()>>), Box<dyn std::error::Error>> {
+) -> Result<(Option<NetworkRuntime>, Vec<tokio::task::JoinHandle<()>>), Box<dyn std::error::Error>>
+{
     if grpc_port == 0 {
-        tracing::info!("windowed runtime: gRPC server disabled (grpc_port = 0); running compositor-only");
+        tracing::info!(
+            "windowed runtime: gRPC server disabled (grpc_port = 0); running compositor-only"
+        );
         return Ok((None, Vec::new()));
     }
 
     // Build the multi-thread Tokio runtime for network tasks.
-    let network_rt = NetworkRuntime::new().map_err(|e| {
-        format!("windowed runtime: failed to build network Tokio runtime: {e}")
-    })?;
+    let network_rt = NetworkRuntime::new()
+        .map_err(|e| format!("windowed runtime: failed to build network Tokio runtime: {e}"))?;
 
-    let addr: std::net::SocketAddr = format!("[::1]:{grpc_port}").parse().map_err(|e| {
-        format!("windowed runtime: invalid gRPC address (port {grpc_port}): {e}")
-    })?;
+    let addr: std::net::SocketAddr = format!("[::1]:{grpc_port}")
+        .parse()
+        .map_err(|e| format!("windowed runtime: invalid gRPC address (port {grpc_port}): {e}"))?;
 
     // Wire config-driven capability registry into the session service.
     let agent_caps = runtime_context.snapshot_agent_capabilities();
@@ -1434,7 +1434,10 @@ mod tests {
     #[test]
     fn overlay_no_hit_regions_passes_through_all_events() {
         let capture = should_capture_pointer_event(WindowMode::Overlay, 500.0, 500.0, &[]);
-        assert!(!capture, "overlay with no hit-regions must pass all events through");
+        assert!(
+            !capture,
+            "overlay with no hit-regions must pass all events through"
+        );
     }
 
     /// In overlay mode, cursor inside a hit-region is captured.
@@ -1458,12 +1461,27 @@ mod tests {
     #[test]
     fn overlay_multiple_hit_regions_union_semantics() {
         let regions = vec![
-            HitRegion::new(0.0, 0.0, 100.0, 100.0),    // top-left
+            HitRegion::new(0.0, 0.0, 100.0, 100.0),     // top-left
             HitRegion::new(500.0, 500.0, 100.0, 100.0), // bottom-right
         ];
-        assert!(should_capture_pointer_event(WindowMode::Overlay, 50.0, 50.0, &regions));
-        assert!(should_capture_pointer_event(WindowMode::Overlay, 550.0, 550.0, &regions));
-        assert!(!should_capture_pointer_event(WindowMode::Overlay, 300.0, 300.0, &regions));
+        assert!(should_capture_pointer_event(
+            WindowMode::Overlay,
+            50.0,
+            50.0,
+            &regions
+        ));
+        assert!(should_capture_pointer_event(
+            WindowMode::Overlay,
+            550.0,
+            550.0,
+            &regions
+        ));
+        assert!(!should_capture_pointer_event(
+            WindowMode::Overlay,
+            300.0,
+            300.0,
+            &regions
+        ));
     }
 
     // ── WindowedConfig display properties ────────────────────────────────
@@ -1471,7 +1489,10 @@ mod tests {
     #[test]
     fn windowed_config_title_is_non_empty_by_default() {
         let cfg = WindowedConfig::default();
-        assert!(!cfg.window.title.is_empty(), "default title must be non-empty");
+        assert!(
+            !cfg.window.title.is_empty(),
+            "default title must be non-empty"
+        );
     }
 
     #[test]
@@ -1490,7 +1511,7 @@ mod tests {
     use tokio::sync::Mutex as TokioMutex;
 
     fn make_shared_state() -> Arc<TokioMutex<SharedState>> {
-        use tze_hud_protocol::session::{SessionRegistry, RuntimeDegradationLevel};
+        use tze_hud_protocol::session::{RuntimeDegradationLevel, SessionRegistry};
         use tze_hud_protocol::token::TokenStore;
         use tze_hud_scene::graph::SceneGraph;
         let scene = Arc::new(TokioMutex::new(SceneGraph::new(1920.0, 1080.0)));
@@ -1530,9 +1551,8 @@ mod tests {
         let shared_state = make_shared_state();
         let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
         // Use a high ephemeral port unlikely to conflict.
-        let (rt, handles) =
-            start_network_services(59781, "test-psk", shared_state, ctx, true)
-                .expect("start_network_services should not error for a valid port");
+        let (rt, handles) = start_network_services(59781, "test-psk", shared_state, ctx, true)
+            .expect("start_network_services should not error for a valid port");
         assert!(
             rt.is_some(),
             "non-zero grpc_port must create a NetworkRuntime"
@@ -1656,7 +1676,9 @@ capabilities = ["create_tiles", "modify_own_tiles"]
         // Unregistered agent must get guest (denied) policy.
         let policy = ctx.capability_policy_for("unknown-agent");
         assert!(
-            policy.evaluate_capability_request(&["create_tiles".to_string()]).is_err(),
+            policy
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_err(),
             "unregistered agent must be denied under config-driven Guest fallback"
         );
     }

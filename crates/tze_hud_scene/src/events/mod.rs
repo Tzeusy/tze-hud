@@ -34,11 +34,7 @@ pub mod taxonomy;
 
 // Re-export the most commonly used types at the module root.
 pub use emission::{AgentEventRateLimiter, DEFAULT_MAX_EVENTS_PER_SECOND, MAX_PAYLOAD_BYTES};
-pub use envelope::{
-    EventPayload, EventSource, InterruptionClass, SceneEvent, SceneEventBuilder,
-};
+pub use envelope::{EventPayload, EventSource, InterruptionClass, SceneEvent, SceneEventBuilder};
 pub use interruption::{apply_agent_class, apply_zone_ceiling, classify_agent_event};
-pub use naming::{
-    build_agent_event_type, validate_bare_name, validate_event_type, NamingError,
-};
+pub use naming::{NamingError, build_agent_event_type, validate_bare_name, validate_event_type};
 pub use taxonomy::{EventCategory, SubscriptionCategory};

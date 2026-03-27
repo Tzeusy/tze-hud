@@ -50,48 +50,51 @@ fn spec_all_or_nothing_batch_rejection() {
     let tab_id = scene.create_tab("Main", 0).unwrap();
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
-    let batch = make_batch("agent", vec![
-        // mutation 0: valid
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-            z_order: 1,
-        },
-        // mutation 1: valid
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(110.0, 0.0, 100.0, 100.0),
-            z_order: 2,
-        },
-        // mutation 2 (index=2): INVALID — zero bounds
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(0.0, 0.0, 0.0, 0.0), // invalid
-            z_order: 3,
-        },
-        // mutation 3: valid, but never reached
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(220.0, 0.0, 100.0, 100.0),
-            z_order: 4,
-        },
-        // mutation 4: valid, but never reached
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(330.0, 0.0, 100.0, 100.0),
-            z_order: 5,
-        },
-    ]);
+    let batch = make_batch(
+        "agent",
+        vec![
+            // mutation 0: valid
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                z_order: 1,
+            },
+            // mutation 1: valid
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(110.0, 0.0, 100.0, 100.0),
+                z_order: 2,
+            },
+            // mutation 2 (index=2): INVALID — zero bounds
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 0.0, 0.0), // invalid
+                z_order: 3,
+            },
+            // mutation 3: valid, but never reached
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(220.0, 0.0, 100.0, 100.0),
+                z_order: 4,
+            },
+            // mutation 4: valid, but never reached
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(330.0, 0.0, 100.0, 100.0),
+                z_order: 5,
+            },
+        ],
+    );
 
     let result = scene.apply_batch(&batch);
 
@@ -101,7 +104,11 @@ fn spec_all_or_nothing_batch_rejection() {
 
     // Error must be at mutation_index=2
     let rej = result.rejection.expect("rejection must be present");
-    assert_eq!(rej.errors[0].mutation_index, Some(2), "error at mutation_index=2");
+    assert_eq!(
+        rej.errors[0].mutation_index,
+        Some(2),
+        "error at mutation_index=2"
+    );
     assert_eq!(rej.errors[0].mutation_type, "CreateTile");
 
     // Layer 0 invariants still hold
@@ -175,17 +182,23 @@ fn spec_lease_check_before_budget_check() {
     scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
 
     // Also set a very tight budget that would reject purely on budget
-    scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 0;
+    scene
+        .leases
+        .get_mut(&lease_id)
+        .unwrap()
+        .resource_budget
+        .max_tiles = 0;
 
-    let batch = make_batch("agent", vec![
-        SceneMutation::CreateTile {
+    let batch = make_batch(
+        "agent",
+        vec![SceneMutation::CreateTile {
             tab_id,
             namespace: "agent".into(),
             lease_id,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             z_order: 1,
-        },
-    ]);
+        }],
+    );
 
     let result = scene.apply_batch(&batch);
     assert!(!result.applied);
@@ -215,7 +228,13 @@ fn spec_post_mutation_cycle_detected() {
 
     // Create a tile
     let tile_id = scene
-        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 200.0, 200.0),
+            1,
+        )
         .unwrap();
 
     // Create a node that references itself as a child (creates a cycle)
@@ -229,9 +248,13 @@ fn spec_post_mutation_cycle_detected() {
         }),
     };
 
-    let batch = make_batch("agent", vec![
-        SceneMutation::SetTileRoot { tile_id, node: cyclic_node },
-    ]);
+    let batch = make_batch(
+        "agent",
+        vec![SceneMutation::SetTileRoot {
+            tile_id,
+            node: cyclic_node,
+        }],
+    );
 
     let result = scene.apply_batch(&batch);
 
@@ -244,7 +267,10 @@ fn spec_post_mutation_cycle_detected() {
     );
 
     // Verify the tile has no root node set (rollback)
-    assert_eq!(scene.tiles[&tile_id].root_node, None, "rollback must clear root_node");
+    assert_eq!(
+        scene.tiles[&tile_id].root_node, None,
+        "rollback must clear root_node"
+    );
 }
 
 /// WHEN two non-passthrough tiles on the same tab share z_order with overlapping
@@ -257,28 +283,30 @@ fn spec_exclusive_z_order_conflict() {
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
     // First tile at z_order=5, bounds [0,0,200,200]
-    let b1 = make_batch("agent", vec![
-        SceneMutation::CreateTile {
+    let b1 = make_batch(
+        "agent",
+        vec![SceneMutation::CreateTile {
             tab_id,
             namespace: "agent".into(),
             lease_id,
             bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
             z_order: 5,
-        },
-    ]);
+        }],
+    );
     let r1 = scene.apply_batch(&b1);
     assert!(r1.applied, "first tile must be accepted");
 
     // Second tile at same z_order=5 with overlapping bounds [100,100,200,200]
-    let b2 = make_batch("agent", vec![
-        SceneMutation::CreateTile {
+    let b2 = make_batch(
+        "agent",
+        vec![SceneMutation::CreateTile {
             tab_id,
             namespace: "agent".into(),
             lease_id,
             bounds: Rect::new(100.0, 100.0, 200.0, 200.0), // overlaps
-            z_order: 5, // same z_order
-        },
-    ]);
+            z_order: 5,                                    // same z_order
+        }],
+    );
     let r2 = scene.apply_batch(&b2);
 
     assert!(!r2.applied, "z-order conflict must be rejected");
@@ -302,7 +330,13 @@ fn spec_passthrough_tiles_exempt_from_z_order_conflict() {
 
     // Create a non-passthrough tile at z_order=3
     let tile_id = scene
-        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 400.0, 300.0), 3)
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            3,
+        )
         .unwrap();
 
     // Set tile to Passthrough
@@ -310,17 +344,21 @@ fn spec_passthrough_tiles_exempt_from_z_order_conflict() {
 
     // Create a second tile at same z_order=3 with overlapping bounds
     // This should be ALLOWED since the first tile is passthrough
-    let b2 = make_batch("agent", vec![
-        SceneMutation::CreateTile {
+    let b2 = make_batch(
+        "agent",
+        vec![SceneMutation::CreateTile {
             tab_id,
             namespace: "agent".into(),
             lease_id,
             bounds: Rect::new(50.0, 50.0, 300.0, 200.0),
             z_order: 3,
-        },
-    ]);
+        }],
+    );
     let r2 = scene.apply_batch(&b2);
-    assert!(r2.applied, "passthrough tiles must not trigger z-order conflict");
+    assert!(
+        r2.applied,
+        "passthrough tiles must not trigger z-order conflict"
+    );
 }
 
 // ─── RFC 0001 §3.5 — Concurrency / sequence numbers ─────────────────────────
@@ -336,19 +374,22 @@ fn spec_sequential_batch_ordering() {
     let mut prev_seq = 0u64;
 
     for z in 1..=5u32 {
-        let batch = make_batch("agent.a", vec![
-            SceneMutation::CreateTile {
+        let batch = make_batch(
+            "agent.a",
+            vec![SceneMutation::CreateTile {
                 tab_id,
                 namespace: "agent.a".into(),
                 lease_id,
                 bounds: Rect::new(z as f32 * 10.0, 0.0, 50.0, 50.0),
                 z_order: z,
-            },
-        ]);
+            }],
+        );
         let result = scene.apply_batch(&batch);
         assert!(result.applied, "batch {z} must be accepted");
 
-        let seq = result.sequence_number.expect("sequence_number must be set on success");
+        let seq = result
+            .sequence_number
+            .expect("sequence_number must be set on success");
         assert!(
             seq > prev_seq,
             "sequence {seq} not strictly greater than {prev_seq}"
@@ -365,29 +406,31 @@ fn spec_rejected_batch_does_not_increment_sequence() {
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
     // Apply one valid batch
-    let b1 = make_batch("agent", vec![
-        SceneMutation::CreateTile {
+    let b1 = make_batch(
+        "agent",
+        vec![SceneMutation::CreateTile {
             tab_id,
             namespace: "agent".into(),
             lease_id,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             z_order: 1,
-        },
-    ]);
+        }],
+    );
     let r1 = scene.apply_batch(&b1);
     assert!(r1.applied);
     let seq_after_b1 = r1.sequence_number.unwrap();
 
     // Apply an invalid batch (bounds = 0)
-    let b2 = make_batch("agent", vec![
-        SceneMutation::CreateTile {
+    let b2 = make_batch(
+        "agent",
+        vec![SceneMutation::CreateTile {
             tab_id,
             namespace: "agent".into(),
             lease_id,
             bounds: Rect::new(0.0, 0.0, 0.0, 0.0), // invalid
             z_order: 2,
-        },
-    ]);
+        }],
+    );
     let r2 = scene.apply_batch(&b2);
     assert!(!r2.applied);
     assert!(
@@ -396,15 +439,16 @@ fn spec_rejected_batch_does_not_increment_sequence() {
     );
 
     // Apply another valid batch — its seq must be seq_after_b1 + 1
-    let b3 = make_batch("agent", vec![
-        SceneMutation::CreateTile {
+    let b3 = make_batch(
+        "agent",
+        vec![SceneMutation::CreateTile {
             tab_id,
             namespace: "agent".into(),
             lease_id,
             bounds: Rect::new(110.0, 0.0, 100.0, 100.0),
             z_order: 2,
-        },
-    ]);
+        }],
+    );
     let r3 = scene.apply_batch(&b3);
     assert!(r3.applied);
     let seq_after_b3 = r3.sequence_number.unwrap();
@@ -427,22 +471,25 @@ fn spec_structured_validation_error_on_bounds_failure() {
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
     // First mutation is valid; second fails on bounds
-    let batch = make_batch("agent", vec![
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-            z_order: 1,
-        },
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(0.0, 0.0, -1.0, 50.0), // invalid: negative width
-            z_order: 2,
-        },
-    ]);
+    let batch = make_batch(
+        "agent",
+        vec![
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                z_order: 1,
+            },
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, -1.0, 50.0), // invalid: negative width
+                z_order: 2,
+            },
+        ],
+    );
 
     let result = scene.apply_batch(&batch);
     assert!(!result.applied);
@@ -460,7 +507,10 @@ fn spec_structured_validation_error_on_bounds_failure() {
     assert!(err.context.is_object(), "context must be a JSON object");
     let ctx = err.context.as_object().unwrap();
     assert!(ctx.contains_key("field"), "context must contain 'field'");
-    assert!(ctx.contains_key("constraint"), "context must contain 'constraint'");
+    assert!(
+        ctx.contains_key("constraint"),
+        "context must contain 'constraint'"
+    );
 }
 
 /// BatchRejected carries batch_id matching the submitted batch.
@@ -474,15 +524,13 @@ fn spec_batch_rejected_carries_batch_id() {
     let batch = MutationBatch {
         batch_id,
         agent_namespace: "agent".into(),
-        mutations: vec![
-            SceneMutation::CreateTile {
-                tab_id,
-                namespace: "agent".into(),
-                lease_id,
-                bounds: Rect::new(0.0, 0.0, 0.0, 0.0), // invalid
-                z_order: 1,
-            },
-        ],
+        mutations: vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: "agent".into(),
+            lease_id,
+            bounds: Rect::new(0.0, 0.0, 0.0, 0.0), // invalid
+            z_order: 1,
+        }],
         timing_hints: None,
         lease_id: None,
     };
@@ -491,7 +539,10 @@ fn spec_batch_rejected_carries_batch_id() {
     assert!(!result.applied);
 
     let rej = result.rejection.unwrap();
-    assert_eq!(rej.batch_id, batch_id, "BatchRejected must carry the original batch_id");
+    assert_eq!(
+        rej.batch_id, batch_id,
+        "BatchRejected must carry the original batch_id"
+    );
 }
 
 // ─── Partial-failure rollback — Layer 0 invariant ────────────────────────────
@@ -505,50 +556,56 @@ fn layer0_partial_failure_rollback() {
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
     // Apply 2 valid tiles before the test batch
-    let setup_batch = make_batch("agent", vec![
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
-            z_order: 10,
-        },
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(60.0, 0.0, 50.0, 50.0),
-            z_order: 11,
-        },
-    ]);
+    let setup_batch = make_batch(
+        "agent",
+        vec![
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, 50.0, 50.0),
+                z_order: 10,
+            },
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(60.0, 0.0, 50.0, 50.0),
+                z_order: 11,
+            },
+        ],
+    );
     assert!(scene.apply_batch(&setup_batch).applied);
     assert_eq!(scene.tile_count(), 2, "setup: 2 tiles");
 
     // Mixed batch: 2 valid + 1 invalid (mutation K=2)
-    let failing_batch = make_batch("agent", vec![
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(120.0, 0.0, 50.0, 50.0),
-            z_order: 12,
-        },
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(180.0, 0.0, 50.0, 50.0),
-            z_order: 13,
-        },
-        // mutation K=2: invalid
-        SceneMutation::CreateTile {
-            tab_id,
-            namespace: "agent".into(),
-            lease_id,
-            bounds: Rect::new(0.0, 0.0, -99.0, 50.0), // invalid
-            z_order: 14,
-        },
-    ]);
+    let failing_batch = make_batch(
+        "agent",
+        vec![
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(120.0, 0.0, 50.0, 50.0),
+                z_order: 12,
+            },
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(180.0, 0.0, 50.0, 50.0),
+                z_order: 13,
+            },
+            // mutation K=2: invalid
+            SceneMutation::CreateTile {
+                tab_id,
+                namespace: "agent".into(),
+                lease_id,
+                bounds: Rect::new(0.0, 0.0, -99.0, 50.0), // invalid
+                z_order: 14,
+            },
+        ],
+    );
 
     let result = scene.apply_batch(&failing_batch);
     assert!(!result.applied, "batch must be rejected");
@@ -562,7 +619,10 @@ fn layer0_partial_failure_rollback() {
 
     // Layer 0 invariants must hold after rollback
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after rollback: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after rollback: {violations:?}"
+    );
 }
 
 // ─── Test scene integration — Epic 0 Test Gates ──────────────────────────────
@@ -579,7 +639,10 @@ fn scene_three_agents_contention() {
     assert_eq!(spec.name, "three_agents_contention");
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations in three_agents_contention: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations in three_agents_contention: {violations:?}"
+    );
 }
 
 /// `max_tiles_stress`: budget validation under maximum tile pressure.
@@ -593,7 +656,10 @@ fn scene_max_tiles_stress() {
     assert_eq!(spec.name, "max_tiles_stress");
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations in max_tiles_stress: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations in max_tiles_stress: {violations:?}"
+    );
 }
 
 /// `overlapping_tiles_zorder`: z-order conflict detection.
@@ -607,7 +673,10 @@ fn scene_overlapping_tiles_zorder() {
     assert_eq!(spec.name, "overlapping_tiles_zorder");
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations in overlapping_tiles_zorder: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations in overlapping_tiles_zorder: {violations:?}"
+    );
 }
 
 // ─── Proptest: batch atomicity property ──────────────────────────────────────
@@ -632,12 +701,7 @@ mod proptest_batch_atomicity {
             tab_id,
             namespace: "prop.agent".into(),
             lease_id,
-            bounds: Rect::new(
-                (z_order as f32 % 10.0) * 5.0,
-                0.0,
-                50.0,
-                50.0,
-            ),
+            bounds: Rect::new((z_order as f32 % 10.0) * 5.0, 0.0, 50.0, 50.0),
             z_order,
         }
     }
@@ -807,7 +871,12 @@ fn stage1_batch_lease_id_expired_is_rejected_before_budget() {
 
     // Force into Expired state and also shrink budget to 0 — Stage 1 must fire first.
     scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
-    scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 0;
+    scene
+        .leases
+        .get_mut(&lease_id)
+        .unwrap()
+        .resource_budget
+        .max_tiles = 0;
 
     let batch = MutationBatch {
         batch_id: SceneId::new(),
@@ -820,7 +889,10 @@ fn stage1_batch_lease_id_expired_is_rejected_before_budget() {
 
     let result = scene.apply_batch(&batch);
 
-    assert!(!result.applied, "batch with expired batch.lease_id must be rejected");
+    assert!(
+        !result.applied,
+        "batch with expired batch.lease_id must be rejected"
+    );
     let code = result.rejection.unwrap().primary_code().unwrap();
     assert!(
         matches!(
@@ -843,7 +915,13 @@ fn stage1_delete_tile_with_expired_lease_rejected() {
 
     // Create a tile on an active lease.
     let tile_id = scene
-        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
         .unwrap();
 
     // Now expire the lease — mutation against this tile must fail Stage 1.
@@ -852,7 +930,10 @@ fn stage1_delete_tile_with_expired_lease_rejected() {
     let batch = make_batch("agent", vec![SceneMutation::DeleteTile { tile_id }]);
     let result = scene.apply_batch(&batch);
 
-    assert!(!result.applied, "DeleteTile with expired lease must be rejected");
+    assert!(
+        !result.applied,
+        "DeleteTile with expired lease must be rejected"
+    );
     let code = result.rejection.unwrap().primary_code().unwrap();
     assert!(
         matches!(
@@ -874,18 +955,30 @@ fn stage1_update_tile_bounds_with_expired_lease_rejected() {
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
     let tile_id = scene
-        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
         .unwrap();
 
     scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
 
-    let batch = make_batch("agent", vec![SceneMutation::UpdateTileBounds {
-        tile_id,
-        bounds: Rect::new(10.0, 10.0, 200.0, 200.0),
-    }]);
+    let batch = make_batch(
+        "agent",
+        vec![SceneMutation::UpdateTileBounds {
+            tile_id,
+            bounds: Rect::new(10.0, 10.0, 200.0, 200.0),
+        }],
+    );
     let result = scene.apply_batch(&batch);
 
-    assert!(!result.applied, "UpdateTileBounds with expired lease must be rejected");
+    assert!(
+        !result.applied,
+        "UpdateTileBounds with expired lease must be rejected"
+    );
     let code = result.rejection.unwrap().primary_code().unwrap();
     assert!(
         matches!(
@@ -905,7 +998,13 @@ fn stage1_set_tile_root_with_expired_lease_rejected() {
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
     let tile_id = scene
-        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
         .unwrap();
 
     scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
@@ -922,7 +1021,10 @@ fn stage1_set_tile_root_with_expired_lease_rejected() {
     let batch = make_batch("agent", vec![SceneMutation::SetTileRoot { tile_id, node }]);
     let result = scene.apply_batch(&batch);
 
-    assert!(!result.applied, "SetTileRoot with expired lease must be rejected");
+    assert!(
+        !result.applied,
+        "SetTileRoot with expired lease must be rejected"
+    );
     let code = result.rejection.unwrap().primary_code().unwrap();
     assert!(
         matches!(
@@ -942,7 +1044,13 @@ fn stage1_add_node_with_expired_lease_rejected() {
     let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
     let tile_id = scene
-        .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+        .create_tile(
+            tab_id,
+            "agent",
+            lease_id,
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            1,
+        )
         .unwrap();
 
     scene.leases.get_mut(&lease_id).unwrap().state = LeaseState::Expired;
@@ -956,14 +1064,20 @@ fn stage1_add_node_with_expired_lease_rejected() {
         }),
     };
 
-    let batch = make_batch("agent", vec![SceneMutation::AddNode {
-        tile_id,
-        parent_id: None,
-        node,
-    }]);
+    let batch = make_batch(
+        "agent",
+        vec![SceneMutation::AddNode {
+            tile_id,
+            parent_id: None,
+            node,
+        }],
+    );
     let result = scene.apply_batch(&batch);
 
-    assert!(!result.applied, "AddNode with expired lease must be rejected");
+    assert!(
+        !result.applied,
+        "AddNode with expired lease must be rejected"
+    );
     let code = result.rejection.unwrap().primary_code().unwrap();
     assert!(
         matches!(
@@ -994,7 +1108,10 @@ fn stage1_empty_batch_with_nonexistent_batch_lease_id_rejected() {
 
     let result = scene.apply_batch(&batch);
 
-    assert!(!result.applied, "batch with nonexistent batch.lease_id must be rejected");
+    assert!(
+        !result.applied,
+        "batch with nonexistent batch.lease_id must be rejected"
+    );
     let code = result.rejection.unwrap().primary_code().unwrap();
     assert_eq!(
         code,

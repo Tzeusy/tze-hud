@@ -34,22 +34,19 @@
 //! - validation-framework/spec.md — Requirement: Five Validation Layers (line 5-8)
 //! - validation-framework/spec.md — Requirement: Test Scene Registry (line 160-172): all 25 scenes
 
+use tze_hud_protocol::auth::{RUNTIME_MAX_VERSION, RUNTIME_MIN_VERSION};
+use tze_hud_protocol::proto;
+use tze_hud_protocol::proto::session as session_proto;
 #[allow(deprecated)]
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
-use tze_hud_protocol::proto::session as session_proto;
-use tze_hud_protocol::proto as proto;
-use tze_hud_protocol::auth::{RUNTIME_MIN_VERSION, RUNTIME_MAX_VERSION};
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants};
 use tze_hud_scene::types::*;
-use tze_hud_telemetry::{
-    FrameTelemetry, SessionSummary,
-    ValidationReport, HardwareFactors,
-};
+use tze_hud_telemetry::{FrameTelemetry, HardwareFactors, SessionSummary, ValidationReport};
 use tze_hud_validation::layer4::{
-    ArtifactBuilder, ArtifactOptions, SceneArtifactInput, SceneDescription,
-    SceneMetrics, SceneStatus,
+    ArtifactBuilder, ArtifactOptions, SceneArtifactInput, SceneDescription, SceneMetrics,
+    SceneStatus,
 };
 
 use serde::{Deserialize, Serialize};
@@ -228,8 +225,7 @@ async fn connect_agent(
     lease_priority: u32,
     capabilities: Vec<String>,
 ) -> Result<AgentSession, Box<dyn std::error::Error>> {
-    let mut client =
-        HudSessionClient::connect(format!("http://[::1]:{}", GRPC_PORT)).await?;
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{}", GRPC_PORT)).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -269,18 +265,14 @@ async fn connect_agent(
             est.namespace.clone()
         }
         other => {
-            return Err(format!(
-                "agent {agent_id}: Expected SessionEstablished, got: {other:?}"
-            )
-            .into())
+            return Err(
+                format!("agent {agent_id}: Expected SessionEstablished, got: {other:?}").into(),
+            );
         }
     };
 
     // Read SceneSnapshot
-    let _msg = response_stream
-        .next()
-        .await
-        .ok_or("no scene snapshot")??;
+    let _msg = response_stream.next().await.ok_or("no scene snapshot")??;
 
     // Request lease
     tx.send(session_proto::ClientMessage {
@@ -297,19 +289,16 @@ async fn connect_agent(
     .await?;
 
     // Read LeaseResponse
-    let msg = response_stream
-        .next()
-        .await
-        .ok_or("no lease response")??;
+    let msg = response_stream.next().await.ok_or("no lease response")??;
     let lease_id_bytes = match &msg.payload {
         Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
             resp.lease_id.clone()
         }
         other => {
-            return Err(
-                format!("agent {agent_id}: Expected LeaseResponse(granted), got: {other:?}")
-                    .into(),
+            return Err(format!(
+                "agent {agent_id}: Expected LeaseResponse(granted), got: {other:?}"
             )
+            .into());
         }
     };
 
@@ -341,20 +330,18 @@ async fn create_tile_via_grpc(
                     batch_id,
                     lease_id: session.lease_id_bytes.clone(),
                     mutations: vec![proto::MutationProto {
-                        mutation: Some(
-                            proto::mutation_proto::Mutation::CreateTile(
-                                proto::CreateTileMutation {
-                                    tab_id: vec![],
-                                    bounds: Some(proto::Rect {
-                                        x: bounds[0],
-                                        y: bounds[1],
-                                        width: bounds[2],
-                                        height: bounds[3],
-                                    }),
-                                    z_order,
-                                },
-                            ),
-                        ),
+                        mutation: Some(proto::mutation_proto::Mutation::CreateTile(
+                            proto::CreateTileMutation {
+                                tab_id: vec![],
+                                bounds: Some(proto::Rect {
+                                    x: bounds[0],
+                                    y: bounds[1],
+                                    width: bounds[2],
+                                    height: bounds[3],
+                                }),
+                                z_order,
+                            },
+                        )),
                     }],
                     timing: None,
                 },
@@ -363,29 +350,20 @@ async fn create_tile_via_grpc(
         .await?;
 
     // Read MutationResult
-    let msg = session
-        .rx
-        .next()
-        .await
-        .ok_or("no mutation result")??;
+    let msg = session.rx.next().await.ok_or("no mutation result")??;
     match &msg.payload {
-        Some(session_proto::server_message::Payload::MutationResult(result))
-            if result.accepted =>
-        {
-            let tile_id = result
-                .created_ids
-                .first()
-                .cloned()
-                .ok_or_else(|| "Server accepted mutation but returned no created ID".to_string())?;
+        Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
+            let tile_id =
+                result.created_ids.first().cloned().ok_or_else(|| {
+                    "Server accepted mutation but returned no created ID".to_string()
+                })?;
             Ok(tile_id)
         }
-        Some(session_proto::server_message::Payload::MutationResult(result)) => {
-            Err(format!(
-                "CreateTile rejected: {} — {}",
-                result.error_code, result.error_message
-            )
-            .into())
-        }
+        Some(session_proto::server_message::Payload::MutationResult(result)) => Err(format!(
+            "CreateTile rejected: {} — {}",
+            result.error_code, result.error_message
+        )
+        .into()),
         other => Err(format!("Expected MutationResult, got: {other:?}").into()),
     }
 }
@@ -407,9 +385,7 @@ async fn publish_stream_text_to_zone_via_grpc(
                 session_proto::ZonePublish {
                     zone_name: zone_name.to_string(),
                     content: Some(proto::ZoneContent {
-                        payload: Some(proto::zone_content::Payload::StreamText(
-                            text.to_string(),
-                        )),
+                        payload: Some(proto::zone_content::Payload::StreamText(text.to_string())),
                     }),
                     ttl_us: 0,
                     merge_key: String::new(),
@@ -419,24 +395,18 @@ async fn publish_stream_text_to_zone_via_grpc(
         .await?;
 
     // Read ZonePublishResult
-    let msg = session
-        .rx
-        .next()
-        .await
-        .ok_or("no zone publish result")??;
+    let msg = session.rx.next().await.ok_or("no zone publish result")??;
     match &msg.payload {
         Some(session_proto::server_message::Payload::ZonePublishResult(result))
             if result.accepted =>
         {
             Ok(())
         }
-        Some(session_proto::server_message::Payload::ZonePublishResult(result)) => {
-            Err(format!(
-                "ZonePublish to '{}' rejected: {} — {}",
-                zone_name, result.error_code, result.error_message
-            )
-            .into())
-        }
+        Some(session_proto::server_message::Payload::ZonePublishResult(result)) => Err(format!(
+            "ZonePublish to '{}' rejected: {} — {}",
+            zone_name, result.error_code, result.error_message
+        )
+        .into()),
         other => Err(format!("Expected ZonePublishResult, got: {other:?}").into()),
     }
 }
@@ -571,9 +541,7 @@ fn collect_thesis3_evidence(
 /// Thesis 4: Performance is real (p99 latencies measured).
 ///
 /// Evidence: ValidationReport from Layer 3 budget assertions.
-fn collect_thesis4_evidence(
-    report: &ValidationReport,
-) -> ThesisPointEvidence {
+fn collect_thesis4_evidence(report: &ValidationReport) -> ThesisPointEvidence {
     // Performance is "demonstrated" if:
     // - Calibrated: all assertions pass
     // - Uncalibrated: no failures (uncalibrated is acceptable per spec)
@@ -585,10 +553,7 @@ fn collect_thesis4_evidence(
         passed,
         evidence_summary: format!(
             "Layer 3 validation: {} passed, {} failed, {} uncalibrated. Verdict: {}.",
-            report.pass_count,
-            report.fail_count,
-            report.uncalibrated_count,
-            report.verdict,
+            report.pass_count, report.fail_count, report.uncalibrated_count, report.verdict,
         ),
         details: serde_json::to_value(report).unwrap_or(serde_json::json!(null)),
         spec_refs: vec![
@@ -679,7 +644,11 @@ fn collect_thesis6_evidence(
         evidence_summary: format!(
             "Zone publish to '{}' via single call: {}. Content rendered in zone: {}.",
             zone_name,
-            if zone_publish_success { "accepted" } else { "rejected" },
+            if zone_publish_success {
+                "accepted"
+            } else {
+                "rejected"
+            },
             content_rendered,
         ),
         details: serde_json::json!({
@@ -712,9 +681,7 @@ fn collect_thesis7_evidence(
         evidence_summary: format!(
             "Headless runtime started: {}. {} frames rendered without display server. \
              gRPC server operational: {}. No display server or physical GPU required.",
-            runtime_started,
-            frames_rendered,
-            grpc_operational,
+            runtime_started, frames_rendered, grpc_operational,
         ),
         details: serde_json::json!({
             "headless_runtime_started": runtime_started,
@@ -889,7 +856,10 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
 
     // Emit scene coverage artifact
     let scene_coverage_json = serde_json::to_string_pretty(&scene_coverage)?;
-    println!("ARTIFACT:v1_scene_registry_coverage {}", scene_coverage_json);
+    println!(
+        "ARTIFACT:v1_scene_registry_coverage {}",
+        scene_coverage_json
+    );
 
     // ─── Phase 1: Start headless runtime (Thesis 7) ─────────────────────────
 
@@ -922,10 +892,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     // ─── Phase 2: Connect 3 agents (Thesis 2: auth, Thesis 3: coexistence) ─
 
     eprintln!("--- Phase 2: Multi-agent connection (Thesis 2, 3) ---");
-    let standard_caps = vec![
-        "create_tiles".to_string(),
-        "modify_own_tiles".to_string(),
-    ];
+    let standard_caps = vec!["create_tiles".to_string(), "modify_own_tiles".to_string()];
 
     let (mut agent_a, mut agent_b, mut agent_c) = tokio::try_join!(
         connect_agent("thesis-agent-alpha", 1, standard_caps.clone()),
@@ -1048,8 +1015,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     summary.total_frames = frame_telemetry.len() as u64;
     summary.elapsed_us = render_elapsed.as_micros() as u64;
     summary.fps = if render_elapsed.as_micros() > 0 {
-        frame_telemetry.len() as f64
-            / (render_elapsed.as_micros() as f64 / 1_000_000.0)
+        frame_telemetry.len() as f64 / (render_elapsed.as_micros() as f64 / 1_000_000.0)
     } else {
         0.0
     };
@@ -1128,13 +1094,23 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         let state = runtime.shared_state().lock().await;
         let scene = state.scene.lock().await;
         let count = scene.leases.len() as u32;
-        let agent_ns_has_lease = |ns: &str| {
-            scene.leases.values().any(|l| l.namespace == ns)
-        };
+        let agent_ns_has_lease = |ns: &str| scene.leases.values().any(|l| l.namespace == ns);
         let status = vec![
-            ("thesis-agent-alpha".to_string(), true, agent_ns_has_lease(&agent_a.namespace)),
-            ("thesis-agent-beta".to_string(),  true, agent_ns_has_lease(&agent_b.namespace)),
-            ("thesis-agent-gamma".to_string(), true, agent_ns_has_lease(&agent_c.namespace)),
+            (
+                "thesis-agent-alpha".to_string(),
+                true,
+                agent_ns_has_lease(&agent_a.namespace),
+            ),
+            (
+                "thesis-agent-beta".to_string(),
+                true,
+                agent_ns_has_lease(&agent_b.namespace),
+            ),
+            (
+                "thesis-agent-gamma".to_string(),
+                true,
+                agent_ns_has_lease(&agent_c.namespace),
+            ),
         ];
         (count, status)
     };
@@ -1172,11 +1148,11 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         // Layer 3: operational iff ValidationReport::run completed without panic (it did).
         // Layer 4: operational iff generate_layer4_artifacts succeeded.
         collect_thesis5_evidence(
-            true,                           // Layer 0: run_all_scenes_layer0() completed
-            !frame_telemetry.is_empty(),    // Layer 1: at least one frame rendered headlessly
-            true,                           // Layer 2: delegated to E12.3 (crate available)
-            true,                           // Layer 3: ValidationReport::run completed
-            layer4_operational,             // Layer 4: developer visibility artifacts
+            true,                        // Layer 0: run_all_scenes_layer0() completed
+            !frame_telemetry.is_empty(), // Layer 1: at least one frame rendered headlessly
+            true,                        // Layer 2: delegated to E12.3 (crate available)
+            true,                        // Layer 3: ValidationReport::run completed
+            layer4_operational,          // Layer 4: developer visibility artifacts
             &scene_coverage,
         ),
         // Thesis 6: Zones work as LLM-first surface
@@ -1209,10 +1185,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     // ─── Phase 10: Final assertions ─────────────────────────────────────────
 
     let proof_elapsed = proof_start.elapsed();
-    eprintln!(
-        "=== V1 Thesis Proof: Complete ({:?}) ===",
-        proof_elapsed
-    );
+    eprintln!("=== V1 Thesis Proof: Complete ({:?}) ===", proof_elapsed);
     eprintln!(
         "    Overall: {}/{} thesis points demonstrated",
         passed_count, 7
@@ -1244,8 +1217,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
 
     // All 25 scenes must be in the registry
     assert_eq!(
-        report.scene_coverage.total_scenes,
-        25,
+        report.scene_coverage.total_scenes, 25,
         "Test scene registry must contain exactly 25 scenes"
     );
 

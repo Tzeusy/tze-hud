@@ -77,27 +77,28 @@ pub fn validate_agents(
 
             for f in &budget_fields {
                 if let Some(agent_val) = f.agent_value
-                    && agent_val > f.profile_ceiling {
-                        errors.push(ConfigError {
-                            code: ConfigErrorCode::AgentBudgetExceedsProfile,
-                            field_path: f.field_path.clone(),
-                            expected: format!(
-                                "{} <= profile ceiling {}",
-                                f.field_name, f.profile_ceiling
-                            ),
-                            got: format!("{}", agent_val),
-                            hint: format!(
-                                "agent {:?} sets {}={} which exceeds the active profile ceiling of {}; \
+                    && agent_val > f.profile_ceiling
+                {
+                    errors.push(ConfigError {
+                        code: ConfigErrorCode::AgentBudgetExceedsProfile,
+                        field_path: f.field_path.clone(),
+                        expected: format!(
+                            "{} <= profile ceiling {}",
+                            f.field_name, f.profile_ceiling
+                        ),
+                        got: format!("{}", agent_val),
+                        hint: format!(
+                            "agent {:?} sets {}={} which exceeds the active profile ceiling of {}; \
                                  reduce the agent's {} to at most {}",
-                                agent_name,
-                                f.field_name,
-                                agent_val,
-                                f.profile_ceiling,
-                                f.field_name,
-                                f.profile_ceiling
-                            ),
-                        });
-                    }
+                            agent_name,
+                            f.field_name,
+                            agent_val,
+                            f.profile_ceiling,
+                            f.field_name,
+                            f.profile_ceiling
+                        ),
+                    });
+                }
             }
         }
     }
@@ -162,9 +163,7 @@ where
 /// This is a convenience wrapper around `check_agent_auth_env_vars_with_lookup`
 /// that uses `std::env::var` for the environment lookup.
 pub fn check_agent_auth_env_vars(agents: &RawAgents) -> Vec<AuthEnvWarning> {
-    check_agent_auth_env_vars_with_lookup(agents, |var_name| {
-        std::env::var(var_name).ok()
-    })
+    check_agent_auth_env_vars_with_lookup(agents, |var_name| std::env::var(var_name).ok())
 }
 
 /// A warning about an unset auth PSK env var.
@@ -231,7 +230,10 @@ mod tests {
         };
         let mut errors = Vec::new();
         validate_agents(&agents, &full_display_profile(), &mut errors);
-        assert!(errors.is_empty(), "max_tiles=4 within profile ceiling should be accepted");
+        assert!(
+            errors.is_empty(),
+            "max_tiles=4 within profile ceiling should be accepted"
+        );
     }
 
     #[test]
@@ -253,7 +255,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_agents(&agents, &full_display_profile(), &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)),
             "max_tiles=2048 exceeding profile ceiling 1024 should produce CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE"
         );
         let err = errors
@@ -263,17 +267,20 @@ mod tests {
         // Error must identify the agent.
         assert!(
             err.hint.contains("agent_b"),
-            "error should identify agent name, got hint: {:?}", err.hint
+            "error should identify agent name, got hint: {:?}",
+            err.hint
         );
         // Error must identify the field.
         assert!(
             err.field_path.contains("max_tiles"),
-            "error should identify max_tiles field, got field_path: {:?}", err.field_path
+            "error should identify max_tiles field, got field_path: {:?}",
+            err.field_path
         );
         // Error must identify the ceiling.
         assert!(
             err.expected.contains("1024"),
-            "error should identify profile ceiling 1024, got expected: {:?}", err.expected
+            "error should identify profile ceiling 1024, got expected: {:?}",
+            err.expected
         );
     }
 
@@ -298,7 +305,8 @@ mod tests {
                 matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
                     && e.field_path.contains("max_texture_mb")
             }),
-            "max_texture_mb=4096 exceeding ceiling 2048 should produce error, got: {:?}", errors
+            "max_texture_mb=4096 exceeding ceiling 2048 should produce error, got: {:?}",
+            errors
         );
     }
 
@@ -307,7 +315,10 @@ mod tests {
         let agents = RawAgents::default();
         let mut errors = Vec::new();
         validate_agents(&agents, &full_display_profile(), &mut errors);
-        assert!(errors.is_empty(), "absent agents section should not produce errors");
+        assert!(
+            errors.is_empty(),
+            "absent agents section should not produce errors"
+        );
     }
 
     // ── Dynamic agent policy ──────────────────────────────────────────────────
@@ -379,7 +390,8 @@ mod tests {
         let warnings = check_agent_auth_env_vars_with_lookup(&agents, mock_lookup);
         assert!(
             warnings.is_empty(),
-            "set env var should produce no auth warnings, got: {:?}", warnings
+            "set env var should produce no auth warnings, got: {:?}",
+            warnings
         );
     }
 

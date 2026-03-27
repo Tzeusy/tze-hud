@@ -33,8 +33,7 @@
 use std::collections::HashMap;
 
 use tze_hud_scene::config::{
-    ConfigError, ConfigErrorCode, ConfigLoader, ParseError, ResolvedConfig,
-    is_canonical_capability,
+    ConfigError, ConfigErrorCode, ConfigLoader, ParseError, ResolvedConfig, is_canonical_capability,
 };
 
 use crate::agents;
@@ -88,15 +87,21 @@ impl ConfigLoader for TzeHudConfig {
     where
         Self: Sized,
     {
-        toml::from_str::<RawConfig>(toml_src).map(|raw| TzeHudConfig { raw }).map_err(|e| {
-            // toml 0.8 errors have a span that includes line/column.
-            let message = e.to_string();
+        toml::from_str::<RawConfig>(toml_src)
+            .map(|raw| TzeHudConfig { raw })
+            .map_err(|e| {
+                // toml 0.8 errors have a span that includes line/column.
+                let message = e.to_string();
 
-            // Extract line/column from the error message.
-            // Format: "... at line N column M"
-            let (line, column) = parse_toml_location(&message);
-            ParseError { message, line, column }
-        })
+                // Extract line/column from the error message.
+                // Format: "... at line N column M"
+                let (line, column) = parse_toml_location(&message);
+                ParseError {
+                    message,
+                    line,
+                    column,
+                }
+            })
     }
 
     // ── normalize ─────────────────────────────────────────────────────────────
@@ -189,8 +194,9 @@ impl ConfigLoader for TzeHudConfig {
         // ── (8) Scene event naming convention (tab_switch_on_event) ──────────
         for (i, tab) in self.raw.tabs.iter().enumerate() {
             if let Some(event) = &tab.tab_switch_on_event
-                && !is_valid_event_name(event) {
-                    errors.push(ConfigError {
+                && !is_valid_event_name(event)
+            {
+                errors.push(ConfigError {
                         code: ConfigErrorCode::InvalidEventName,
                         field_path: format!("tabs[{i}].tab_switch_on_event"),
                         expected: "empty string or <source>.<action> matching ^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$".into(),
@@ -200,7 +206,7 @@ impl ConfigLoader for TzeHudConfig {
                             event
                         ),
                     });
-                }
+            }
         }
 
         // ── (9) Privacy section ───────────────────────────────────────────────
@@ -222,9 +228,7 @@ impl ConfigLoader for TzeHudConfig {
             // separately; we pass synthetic GPU values to avoid display
             // dependency during pure validation.
             if let Ok(resolved_profile) = profile::resolve_profile(
-                &self.raw,
-                /*gpu_vram_mb=*/ 8192,
-                /*refresh_hz=*/ 60,
+                &self.raw, /*gpu_vram_mb=*/ 8192, /*refresh_hz=*/ 60,
             ) {
                 agents::validate_agents(raw_agents, &resolved_profile, &mut errors);
             }
@@ -234,42 +238,41 @@ impl ConfigLoader for TzeHudConfig {
 
         // ── (12) Capability vocabulary ────────────────────────────────────────
         if let Some(agents) = &self.raw.agents
-            && let Some(registered) = &agents.registered {
-                for (agent_name, agent) in registered {
-                    if let Some(caps) = &agent.capabilities {
-                        for cap in caps {
-                            if !is_canonical_capability(cap) {
-                                // Distinguish reserved event prefix from unknown.
-                                let code = if has_reserved_event_prefix(cap) {
-                                    ConfigErrorCode::ReservedEventPrefix
-                                } else {
-                                    ConfigErrorCode::UnknownCapability
-                                };
-                                let hint = if code == ConfigErrorCode::ReservedEventPrefix {
-                                    let suffix = &cap["emit_scene_event:".len()..];
-                                    format!(
-                                        "event prefix {:?} is reserved; \
+            && let Some(registered) = &agents.registered
+        {
+            for (agent_name, agent) in registered {
+                if let Some(caps) = &agent.capabilities {
+                    for cap in caps {
+                        if !is_canonical_capability(cap) {
+                            // Distinguish reserved event prefix from unknown.
+                            let code = if has_reserved_event_prefix(cap) {
+                                ConfigErrorCode::ReservedEventPrefix
+                            } else {
+                                ConfigErrorCode::UnknownCapability
+                            };
+                            let hint = if code == ConfigErrorCode::ReservedEventPrefix {
+                                let suffix = &cap["emit_scene_event:".len()..];
+                                format!(
+                                    "event prefix {:?} is reserved; \
                                          system.* and scene.* prefixes are runtime-internal \
                                          and cannot be granted to agents",
-                                        suffix.split('.').next().unwrap_or(suffix)
-                                    )
-                                } else {
-                                    capability_hint(cap)
-                                };
-                                errors.push(ConfigError {
-                                    code,
-                                    field_path: format!(
-                                        "agents.registered.{agent_name}.capabilities"
-                                    ),
-                                    expected: "canonical v1 capability name".into(),
-                                    got: cap.clone(),
-                                    hint,
-                                });
-                            }
+                                    suffix.split('.').next().unwrap_or(suffix)
+                                )
+                            } else {
+                                capability_hint(cap)
+                            };
+                            errors.push(ConfigError {
+                                code,
+                                field_path: format!("agents.registered.{agent_name}.capabilities"),
+                                expected: "canonical v1 capability name".into(),
+                                got: cap.clone(),
+                                hint,
+                            });
                         }
                     }
                 }
             }
+        }
 
         // ── (10) Per-agent budget ceiling validation ───────────────────────────
         validate_agents(&self.raw, &mut errors);
@@ -299,9 +302,7 @@ impl ConfigLoader for TzeHudConfig {
         // before calling `freeze()`, and use the resulting `DisplayProfile` instead of the one
         // embedded in `ResolvedConfig` when `profile = "auto"`.
         let profile = profile::resolve_profile(
-            &self.raw,
-            /*gpu_vram_mb=*/ 8192,
-            /*refresh_hz=*/ 60,
+            &self.raw, /*gpu_vram_mb=*/ 8192, /*refresh_hz=*/ 60,
         )?;
 
         let tab_names = self
@@ -313,14 +314,13 @@ impl ConfigLoader for TzeHudConfig {
 
         let mut agent_capabilities: HashMap<String, Vec<String>> = HashMap::new();
         if let Some(agents) = &self.raw.agents
-            && let Some(registered) = &agents.registered {
-                for (name, agent) in registered {
-                    agent_capabilities.insert(
-                        name.clone(),
-                        agent.capabilities.clone().unwrap_or_default(),
-                    );
-                }
+            && let Some(registered) = &agents.registered
+        {
+            for (name, agent) in registered {
+                agent_capabilities
+                    .insert(name.clone(), agent.capabilities.clone().unwrap_or_default());
             }
+        }
 
         let source_path = None; // Set by caller after file load.
 
@@ -393,7 +393,8 @@ fn validate_profile(profile: &str, errors: &mut Vec<ConfigError>) {
                 field_path: "runtime.profile".into(),
                 expected: "\"full-display\", \"headless\", \"auto\", or \"custom\"".into(),
                 got: "\"mobile\"".into(),
-                hint: "mobile profile is schema-reserved; use \"full-display\" or \"headless\"".into(),
+                hint: "mobile profile is schema-reserved; use \"full-display\" or \"headless\""
+                    .into(),
             });
         }
         other => {
@@ -553,17 +554,18 @@ fn validate_fps_range(
     errors: &mut Vec<ConfigError>,
 ) {
     if let (Some(target), Some(min)) = (target_fps, min_fps)
-        && target < min {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::InvalidFpsRange,
-                field_path: "display_profile".into(),
-                expected: format!("target_fps ({target}) >= min_fps ({min})"),
-                got: format!("target_fps={target}, min_fps={min}"),
-                hint: format!(
-                    "target_fps must be >= min_fps; set target_fps >= {min} or lower min_fps"
-                ),
-            });
-        }
+        && target < min
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::InvalidFpsRange,
+            field_path: "display_profile".into(),
+            expected: format!("target_fps ({target}) >= min_fps ({min})"),
+            got: format!("target_fps={target}, min_fps={min}"),
+            hint: format!(
+                "target_fps must be >= min_fps; set target_fps >= {min} or lower min_fps"
+            ),
+        });
+    }
 }
 
 /// Validate degradation threshold ordering.
@@ -572,7 +574,10 @@ fn validate_degradation_order(deg: &RawDegradation, errors: &mut Vec<ConfigError
     // coalesce_frame_ms <= simplify_rendering_frame_ms <= shed_tiles_frame_ms <= audio_only_frame_ms
     let frame_thresholds: &[(&str, Option<f64>)] = &[
         ("coalesce_frame_ms", deg.coalesce_frame_ms),
-        ("simplify_rendering_frame_ms", deg.simplify_rendering_frame_ms),
+        (
+            "simplify_rendering_frame_ms",
+            deg.simplify_rendering_frame_ms,
+        ),
         ("shed_tiles_frame_ms", deg.shed_tiles_frame_ms),
         ("audio_only_frame_ms", deg.audio_only_frame_ms),
     ];
@@ -656,7 +661,10 @@ fn validate_agents(raw: &RawConfig, errors: &mut Vec<ConfigError>) {
                 errors.push(ConfigError {
                     code: ConfigErrorCode::AgentBudgetExceedsProfile,
                     field_path: format!("agents.registered.{agent_name}.max_update_hz"),
-                    expected: format!("<= {} (active profile max_agent_update_hz ceiling)", ceiling.max_agent_update_hz),
+                    expected: format!(
+                        "<= {} (active profile max_agent_update_hz ceiling)",
+                        ceiling.max_agent_update_hz
+                    ),
                     got: format!("{agent_max_update_hz}"),
                     hint: format!(
                         "agent {agent_name:?} max_update_hz={agent_max_update_hz} exceeds \
@@ -676,20 +684,19 @@ fn check_monotone_non_decreasing(fields: &[(&str, Option<f64>)], errors: &mut Ve
     for (name, val_opt) in fields {
         if let Some(val) = *val_opt {
             if let Some((prev_name, prev_val)) = prev
-                && val < prev_val {
-                    errors.push(ConfigError {
-                        code: ConfigErrorCode::DegradationThresholdOrder,
-                        field_path: format!("degradation.{name}"),
-                        expected: format!(
-                            "{name} ({val}) >= {prev_name} ({prev_val})"
-                        ),
-                        got: format!("{name}={val}, {prev_name}={prev_val}"),
-                        hint: format!(
-                            "degradation thresholds must be non-decreasing; \
+                && val < prev_val
+            {
+                errors.push(ConfigError {
+                    code: ConfigErrorCode::DegradationThresholdOrder,
+                    field_path: format!("degradation.{name}"),
+                    expected: format!("{name} ({val}) >= {prev_name} ({prev_val})"),
+                    got: format!("{name}={val}, {prev_name}={prev_val}"),
+                    hint: format!(
+                        "degradation thresholds must be non-decreasing; \
                              {name} ({val}) is less than preceding {prev_name} ({prev_val})"
-                        ),
-                    });
-                }
+                    ),
+                });
+            }
             prev = Some((name, val));
         }
     }
@@ -736,7 +743,10 @@ mod unit_tests {
 
     #[test]
     fn test_event_name_invalid_patterns() {
-        assert!(!is_valid_event_name("Doorbell-Ring"), "uppercase not allowed");
+        assert!(
+            !is_valid_event_name("Doorbell-Ring"),
+            "uppercase not allowed"
+        );
         assert!(!is_valid_event_name("doorbell"), "no dot");
         assert!(!is_valid_event_name(".ring"), "empty source");
         assert!(!is_valid_event_name("doorbell."), "empty action");
@@ -751,7 +761,10 @@ mod unit_tests {
         let mut errors = Vec::new();
         validate_profile("mobile", &mut errors);
         assert_eq!(errors.len(), 1);
-        assert!(matches!(errors[0].code, ConfigErrorCode::MobileProfileNotExercised));
+        assert!(matches!(
+            errors[0].code,
+            ConfigErrorCode::MobileProfileNotExercised
+        ));
     }
 
     #[test]
@@ -767,7 +780,11 @@ mod unit_tests {
         for p in &["full-display", "headless", "auto", "custom"] {
             let mut errors = Vec::new();
             validate_profile(p, &mut errors);
-            assert!(errors.is_empty(), "profile {:?} should not produce errors", p);
+            assert!(
+                errors.is_empty(),
+                "profile {:?} should not produce errors",
+                p
+            );
         }
     }
 
@@ -778,7 +795,11 @@ mod unit_tests {
         let raw = RawConfig::default();
         let mut errors = Vec::new();
         validate_tabs(&raw, &mut errors);
-        assert!(errors.iter().any(|e| matches!(e.code, ConfigErrorCode::NoTabs)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::NoTabs))
+        );
     }
 
     #[test]
@@ -795,7 +816,9 @@ mod unit_tests {
         let mut errors = Vec::new();
         validate_tabs(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::DuplicateTabName)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::DuplicateTabName)),
             "duplicate tab name should produce error"
         );
     }
@@ -816,7 +839,9 @@ mod unit_tests {
         let mut errors = Vec::new();
         validate_tabs(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::MultipleDefaultTabs)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::MultipleDefaultTabs)),
             "multiple default_tab=true should produce error"
         );
     }
@@ -833,7 +858,9 @@ mod unit_tests {
         let mut errors = Vec::new();
         validate_reserved_fractions(0, &layout, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidReservedFraction)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::InvalidReservedFraction)),
             "top + bottom = 1.0 should be invalid"
         );
     }
@@ -848,7 +875,10 @@ mod unit_tests {
         };
         let mut errors = Vec::new();
         validate_reserved_fractions(0, &layout, &mut errors);
-        assert!(errors.is_empty(), "valid fractions should not produce errors");
+        assert!(
+            errors.is_empty(),
+            "valid fractions should not produce errors"
+        );
     }
 
     // ── FPS range ─────────────────────────────────────────────────────────────
@@ -857,7 +887,11 @@ mod unit_tests {
     fn test_fps_range_target_below_min_invalid() {
         let mut errors = Vec::new();
         validate_fps_range(Some(15), Some(30), &mut errors);
-        assert!(errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidFpsRange)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::InvalidFpsRange))
+        );
     }
 
     #[test]
@@ -886,7 +920,9 @@ mod unit_tests {
         let mut errors = Vec::new();
         validate_degradation_order(&deg, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::DegradationThresholdOrder)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::DegradationThresholdOrder)),
             "out-of-order thresholds should produce error"
         );
     }
@@ -903,6 +939,9 @@ mod unit_tests {
         };
         let mut errors = Vec::new();
         validate_degradation_order(&deg, &mut errors);
-        assert!(errors.is_empty(), "in-order thresholds should not produce errors");
+        assert!(
+            errors.is_empty(),
+            "in-order thresholds should not produce errors"
+        );
     }
 }

@@ -205,8 +205,7 @@ mod tests {
 
     #[test]
     fn agent_event_routes_to_agent_events() {
-        let cat =
-            SubscriptionCategory::for_event_type("agent.doorbell_agent.doorbell.ring");
+        let cat = SubscriptionCategory::for_event_type("agent.doorbell_agent.doorbell.ring");
         assert_eq!(cat, Some(SubscriptionCategory::AgentEvents));
     }
 

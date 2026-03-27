@@ -27,8 +27,8 @@
 
 use crate::override_queue::OverrideCommand;
 use crate::types::{
-    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome,
-    AttentionContext, BlockReason, InterruptionClass, QueueReason, SecurityContext,
+    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, AttentionContext,
+    BlockReason, InterruptionClass, QueueReason, SecurityContext,
 };
 use tze_hud_scene::SceneId;
 
@@ -359,14 +359,17 @@ impl From<EventOutcome> for ArbitrationOutcome {
     fn from(o: EventOutcome) -> ArbitrationOutcome {
         match o {
             EventOutcome::Accept => ArbitrationOutcome::Commit,
-            EventOutcome::Discarded { .. } => ArbitrationOutcome::Shed { degradation_level: 0 },
-            EventOutcome::Queued { queue_reason, earliest_present_us } => {
-                ArbitrationOutcome::Queue {
-                    queue_reason,
-                    earliest_present_us,
-                    redacted: false,
-                }
-            }
+            EventOutcome::Discarded { .. } => ArbitrationOutcome::Shed {
+                degradation_level: 0,
+            },
+            EventOutcome::Queued {
+                queue_reason,
+                earliest_present_us,
+            } => ArbitrationOutcome::Queue {
+                queue_reason,
+                earliest_present_us,
+                redacted: false,
+            },
             EventOutcome::Rejected(err) => ArbitrationOutcome::Reject(err),
             EventOutcome::Blocked { block_reason } => ArbitrationOutcome::Blocked { block_reason },
         }
@@ -708,15 +711,19 @@ mod tests {
 
     #[test]
     fn test_discarded_converts_to_shed() {
-        let outcome: ArbitrationOutcome =
-            EventOutcome::Discarded { reason: DiscardReason::SafeModePreempted }.into();
+        let outcome: ArbitrationOutcome = EventOutcome::Discarded {
+            reason: DiscardReason::SafeModePreempted,
+        }
+        .into();
         assert!(matches!(outcome, ArbitrationOutcome::Shed { .. }));
     }
 
     #[test]
     fn test_blocked_converts_to_blocked() {
-        let outcome: ArbitrationOutcome =
-            EventOutcome::Blocked { block_reason: BlockReason::Freeze }.into();
+        let outcome: ArbitrationOutcome = EventOutcome::Blocked {
+            block_reason: BlockReason::Freeze,
+        }
+        .into();
         assert!(matches!(outcome, ArbitrationOutcome::Blocked { .. }));
     }
 }

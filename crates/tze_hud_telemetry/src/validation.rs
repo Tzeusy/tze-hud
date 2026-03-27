@@ -70,7 +70,11 @@ pub struct HardwareFactors {
 impl HardwareFactors {
     /// Create a fully uncalibrated set (all None).
     pub fn uncalibrated() -> Self {
-        Self { cpu: None, gpu: None, upload: None }
+        Self {
+            cpu: None,
+            gpu: None,
+            upload: None,
+        }
     }
 
     /// Create a calibrated set with known factors.
@@ -84,7 +88,11 @@ impl HardwareFactors {
 
     /// Create a CPU-only calibrated set (GPU/upload uncalibrated).
     pub fn cpu_only(cpu: f64) -> Self {
-        Self { cpu: Some(cpu), gpu: None, upload: None }
+        Self {
+            cpu: Some(cpu),
+            gpu: None,
+            upload: None,
+        }
     }
 
     /// Returns true if all three dimensions are calibrated.
@@ -162,9 +170,7 @@ pub enum AssertionOutcome {
         raw_value: u64,
     },
     /// No samples recorded for this metric — cannot assert.
-    NoSamples {
-        metric: String,
-    },
+    NoSamples { metric: String },
 }
 
 impl AssertionOutcome {
@@ -224,7 +230,11 @@ impl BudgetAssertion {
         // meaningless — report the data absence, not the calibration state.
         let p99 = match bucket.p99() {
             Some(v) => v,
-            None => return AssertionOutcome::NoSamples { metric: self.metric.clone() },
+            None => {
+                return AssertionOutcome::NoSamples {
+                    metric: self.metric.clone(),
+                };
+            }
         };
 
         let factor = match self.dimension.factor_from(factors) {
@@ -232,19 +242,14 @@ impl BudgetAssertion {
             None => {
                 return AssertionOutcome::Uncalibrated {
                     metric: self.metric.clone(),
-                    reason: format!(
-                        "{:?} factor not available",
-                        self.dimension
-                    ),
+                    reason: format!("{:?} factor not available", self.dimension),
                     raw_value: p99,
                 };
             }
         };
 
         // Use ceil to avoid truncation making the enforced budget stricter than intended.
-        let effective_budget = (self.base_budget_us as f64 * factor)
-            .ceil()
-            .max(1.0) as u64;
+        let effective_budget = (self.base_budget_us as f64 * factor).ceil().max(1.0) as u64;
 
         if p99 <= effective_budget {
             AssertionOutcome::Pass {
@@ -332,8 +337,16 @@ impl ValidationReport {
         let assertions_to_run = vec![
             BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu),
             BudgetAssertion::new("input_to_local_ack_p99", 4_000, CalibrationDimension::Cpu),
-            BudgetAssertion::new("input_to_scene_commit_p99", 50_000, CalibrationDimension::Cpu),
-            BudgetAssertion::new("input_to_next_present_p99", 33_000, CalibrationDimension::Gpu),
+            BudgetAssertion::new(
+                "input_to_scene_commit_p99",
+                50_000,
+                CalibrationDimension::Cpu,
+            ),
+            BudgetAssertion::new(
+                "input_to_next_present_p99",
+                33_000,
+                CalibrationDimension::Gpu,
+            ),
         ];
 
         let mut outcomes: Vec<AssertionOutcome> = assertions_to_run
@@ -457,8 +470,7 @@ mod tests {
 
     #[test]
     fn assertion_pass_within_budget() {
-        let assertion =
-            BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
+        let assertion = BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
         let factors = HardwareFactors::new(1.0, 1.0, 1.0);
         // 100 samples of 12ms — well within 16.6ms budget
         let bucket = make_bucket("frame_time", &vec![12_000u64; 100]);
@@ -468,14 +480,16 @@ mod tests {
 
     #[test]
     fn assertion_fail_exceeds_budget() {
-        let assertion =
-            BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
+        let assertion = BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
         let factors = HardwareFactors::new(1.0, 1.0, 1.0);
         // 100 samples of 20ms — over the 16.6ms budget
         let bucket = make_bucket("frame_time", &vec![20_000u64; 100]);
         let outcome = assertion.check(&bucket, &factors);
         assert!(outcome.is_fail(), "expected fail, got {:?}", outcome);
-        if let AssertionOutcome::Fail { observed, budget, .. } = &outcome {
+        if let AssertionOutcome::Fail {
+            observed, budget, ..
+        } = &outcome
+        {
             assert_eq!(*observed, 20_000);
             assert_eq!(*budget, 16_600);
         }
@@ -483,23 +497,31 @@ mod tests {
 
     #[test]
     fn assertion_uncalibrated_when_dimension_missing() {
-        let assertion =
-            BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
+        let assertion = BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
         // GPU factor missing → uncalibrated
         let factors = HardwareFactors::cpu_only(1.0);
         let bucket = make_bucket("frame_time", &vec![20_000u64; 100]);
         let outcome = assertion.check(&bucket, &factors);
-        assert!(outcome.is_uncalibrated(), "expected uncalibrated, got {:?}", outcome);
-        if let AssertionOutcome::Uncalibrated { raw_value, reason, .. } = &outcome {
+        assert!(
+            outcome.is_uncalibrated(),
+            "expected uncalibrated, got {:?}",
+            outcome
+        );
+        if let AssertionOutcome::Uncalibrated {
+            raw_value, reason, ..
+        } = &outcome
+        {
             assert_eq!(*raw_value, 20_000);
-            assert!(reason.contains("Gpu"), "reason should mention Gpu: {reason}");
+            assert!(
+                reason.contains("Gpu"),
+                "reason should mention Gpu: {reason}"
+            );
         }
     }
 
     #[test]
     fn assertion_no_samples_when_bucket_empty() {
-        let assertion =
-            BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
+        let assertion = BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
         let factors = HardwareFactors::new(1.0, 1.0, 1.0);
         let bucket = make_bucket("frame_time", &[]);
         let outcome = assertion.check(&bucket, &factors);
@@ -509,8 +531,7 @@ mod tests {
     #[test]
     fn assertion_scales_budget_with_factor() {
         // On a 2x slower machine, the effective budget doubles
-        let assertion =
-            BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
+        let assertion = BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu);
         let factors = HardwareFactors::new(1.0, 2.0, 1.0);
         // 20ms should fail on reference hardware (factor=1.0)
         // but pass on a 2x slower machine (budget=33.2ms)

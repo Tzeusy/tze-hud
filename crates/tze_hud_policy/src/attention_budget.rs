@@ -349,7 +349,11 @@ mod attention_budget_tests {
         // At t=61: t=0 slot has expired, t=30 slot is within 60s window
         b.advance_to(61);
         // t=0 events (>60s ago) are expired; t=30 events (31s ago) survive
-        assert_eq!(b.count_in_window(), 5, "Events at t=0 must have expired by t=61");
+        assert_eq!(
+            b.count_in_window(),
+            5,
+            "Events at t=0 must have expired by t=61"
+        );
     }
 
     #[test]
@@ -393,7 +397,10 @@ mod attention_budget_tests {
             b.record_event(base + i);
         }
         assert_eq!(b.count_in_window(), 20);
-        assert!(b.is_exhausted(), "20 events at 20/min limit: must be exhausted");
+        assert!(
+            b.is_exhausted(),
+            "20 events at 20/min limit: must be exhausted"
+        );
 
         // Record one more — over limit; still exhausted
         b.record_event(base + 20);
@@ -451,7 +458,11 @@ mod attention_budget_tests {
         let mut b = AttentionBudget::new(20, 60);
         b.record_events(1000, 5);
         b.advance_to(1000);
-        assert_eq!(b.count_in_window(), 5, "advance_to same time must not drop events");
+        assert_eq!(
+            b.count_in_window(),
+            5,
+            "advance_to same time must not drop events"
+        );
     }
 
     #[test]
@@ -459,7 +470,11 @@ mod attention_budget_tests {
         let mut b = AttentionBudget::new(20, 60);
         b.record_events(1000, 5);
         b.advance_to(999); // earlier
-        assert_eq!(b.count_in_window(), 5, "advance_to earlier time must not drop events");
+        assert_eq!(
+            b.count_in_window(),
+            5,
+            "advance_to earlier time must not drop events"
+        );
     }
 
     // ─── AgentBudgetPair ─────────────────────────────────────────────────────

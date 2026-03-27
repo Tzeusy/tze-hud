@@ -165,7 +165,12 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     pub fn contains_point(&self, px: f32, py: f32) -> bool {
@@ -197,9 +202,24 @@ pub struct Rgba {
 }
 
 impl Rgba {
-    pub const WHITE: Rgba = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    pub const BLACK: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const TRANSPARENT: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const WHITE: Rgba = Rgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    pub const BLACK: Rgba = Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const TRANSPARENT: Rgba = Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
 
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
@@ -317,20 +337,14 @@ impl Default for ResourceBudget {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BudgetViolation {
     /// Agent holds more tiles than `max_tiles`.
-    TileCountExceeded {
-        current: u32,
-        limit: u32,
-    },
+    TileCountExceeded { current: u32, limit: u32 },
     /// Texture memory across all tiles exceeds `max_texture_bytes`.
     TextureMemoryExceeded {
         current_bytes: u64,
         limit_bytes: u64,
     },
     /// Scene mutation rate exceeds `max_update_rate_hz`.
-    UpdateRateExceeded {
-        current_hz: f32,
-        limit_hz: f32,
-    },
+    UpdateRateExceeded { current_hz: f32, limit_hz: f32 },
     /// A single tile contains more nodes than `max_nodes_per_tile`.
     NodeCountPerTileExceeded {
         tile_id_hint: String,
@@ -345,9 +359,7 @@ pub enum BudgetViolation {
     },
     /// Session has accumulated too many protocol invariant violations.
     /// This is a critical violation — session is revoked immediately.
-    RepeatedInvariantViolations {
-        count: u32,
-    },
+    RepeatedInvariantViolations { count: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -675,7 +687,10 @@ impl HitResult {
     ///
     /// Returns `None` for all other variants.
     pub fn node_hit_ids(&self) -> Option<(SceneId, SceneId)> {
-        if let HitResult::NodeHit { tile_id, node_id, .. } = self {
+        if let HitResult::NodeHit {
+            tile_id, node_id, ..
+        } = self
+        {
             Some((*tile_id, *node_id))
         } else {
             None
@@ -687,9 +702,7 @@ impl HitResult {
     /// Returns `None` for `Chrome` and `Passthrough`.
     pub fn tile_id(&self) -> Option<SceneId> {
         match self {
-            HitResult::NodeHit { tile_id, .. } | HitResult::TileHit { tile_id } => {
-                Some(*tile_id)
-            }
+            HitResult::NodeHit { tile_id, .. } | HitResult::TileHit { tile_id } => Some(*tile_id),
             _ => None,
         }
     }
@@ -1034,7 +1047,10 @@ impl Lease {
     pub fn is_expired(&self, now_ms: u64) -> bool {
         match self.state {
             // Terminal states are already past expiry semantics.
-            LeaseState::Denied | LeaseState::Revoked | LeaseState::Expired | LeaseState::Released => true,
+            LeaseState::Denied
+            | LeaseState::Revoked
+            | LeaseState::Expired
+            | LeaseState::Released => true,
             // When suspended, TTL clock is paused — not expired.
             LeaseState::Suspended => false,
             // When orphaned/disconnected, TTL continues.
@@ -1042,9 +1058,7 @@ impl Lease {
             LeaseState::Orphaned
             | LeaseState::Disconnected
             | LeaseState::Active
-            | LeaseState::Requested => {
-                self.effective_remaining_ms(now_ms) == 0
-            }
+            | LeaseState::Requested => self.effective_remaining_ms(now_ms) == 0,
         }
     }
 
@@ -1065,9 +1079,7 @@ impl Lease {
         }
         // Legacy capability aliases
         match cap {
-            Capability::CreateTiles => {
-                self.capabilities.contains(&Capability::CreateTile)
-            }
+            Capability::CreateTiles => self.capabilities.contains(&Capability::CreateTile),
             Capability::ModifyOwnTiles => {
                 self.capabilities.contains(&Capability::CreateTile)
                     || self.capabilities.contains(&Capability::UpdateTile)
@@ -1202,8 +1214,7 @@ impl Lease {
     /// Check if the grace period has expired for an orphaned/disconnected lease.
     pub fn check_grace_expired(&self, now_ms: u64) -> bool {
         match (self.state, self.disconnected_at_ms) {
-            (LeaseState::Orphaned, Some(disc_at))
-            | (LeaseState::Disconnected, Some(disc_at)) => {
+            (LeaseState::Orphaned, Some(disc_at)) | (LeaseState::Disconnected, Some(disc_at)) => {
                 now_ms >= disc_at + self.grace_period_ms
             }
             _ => false,
@@ -1213,9 +1224,7 @@ impl Lease {
     /// Check if a suspended lease has exceeded the maximum suspension time.
     pub fn check_suspension_expired(&self, now_ms: u64, max_suspend_ms: u64) -> bool {
         match (self.state, self.suspended_at_ms) {
-            (LeaseState::Suspended, Some(susp_at)) => {
-                now_ms >= susp_at + max_suspend_ms
-            }
+            (LeaseState::Suspended, Some(susp_at)) => now_ms >= susp_at + max_suspend_ms,
             _ => false,
         }
     }
@@ -1821,10 +1830,7 @@ impl ZoneRegistry {
                 width_pct: 1.0,
                 margin_px: 0.0,
             },
-            accepted_media_types: vec![
-                ZoneMediaType::ShortTextWithIcon,
-                ZoneMediaType::StreamText,
-            ],
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon, ZoneMediaType::StreamText],
             rendering_policy: RenderingPolicy::default(),
             contention_policy: ContentionPolicy::Replace,
             max_publishers: 1,
@@ -1884,7 +1890,8 @@ impl ZoneRegistry {
     /// Returns `None` if the zone is not found.
     pub fn get_occupancy(&self, zone_name: &str, tab_id: SceneId) -> Option<ZoneOccupancy> {
         let _zone = self.zones.get(zone_name)?;
-        let pubs = self.active_publishes
+        let pubs = self
+            .active_publishes
             .get(zone_name)
             .map(|v| v.clone())
             .unwrap_or_default();
@@ -1943,8 +1950,15 @@ mod tests {
     #[test]
     fn scene_id_null_is_all_zeros() {
         let null = SceneId::null();
-        assert!(null.is_null(), "SceneId::null() must report is_null() == true");
-        assert_eq!(null.to_bytes_le(), [0u8; 16], "null SceneId must serialize to 16 zero bytes");
+        assert!(
+            null.is_null(),
+            "SceneId::null() must report is_null() == true"
+        );
+        assert_eq!(
+            null.to_bytes_le(),
+            [0u8; 16],
+            "null SceneId must serialize to 16 zero bytes"
+        );
     }
 
     #[test]
@@ -2005,7 +2019,11 @@ mod tests {
 
     #[test]
     fn resource_id_size_is_32_bytes() {
-        assert_eq!(size_of::<ResourceId>(), 32, "ResourceId must be exactly 32 bytes");
+        assert_eq!(
+            size_of::<ResourceId>(),
+            32,
+            "ResourceId must be exactly 32 bytes"
+        );
     }
 
     // ── ResourceId content deduplication ─────────────────────────────────────
@@ -2015,14 +2033,20 @@ mod tests {
         let data = b"hello world";
         let id1 = ResourceId::of(data);
         let id2 = ResourceId::of(data);
-        assert_eq!(id1, id2, "identical content must produce the same ResourceId");
+        assert_eq!(
+            id1, id2,
+            "identical content must produce the same ResourceId"
+        );
     }
 
     #[test]
     fn resource_id_different_content_different_id() {
         let id1 = ResourceId::of(b"foo");
         let id2 = ResourceId::of(b"bar");
-        assert_ne!(id1, id2, "different content must produce different ResourceIds");
+        assert_ne!(
+            id1, id2,
+            "different content must produce different ResourceIds"
+        );
     }
 
     #[test]
@@ -2062,7 +2086,10 @@ mod tests {
         let id = ResourceId::of(b"hex display test");
         let hex = id.to_hex();
         assert_eq!(hex.len(), 64, "hex of 32-byte hash must be 64 chars");
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "must be valid hex");
+        assert!(
+            hex.chars().all(|c| c.is_ascii_hexdigit()),
+            "must be valid hex"
+        );
     }
 
     // ── Layer 0 identity invariant check helper ───────────────────────────────
@@ -2096,7 +2123,11 @@ mod tests {
     #[test]
     fn layer0_identity_invariants_pass() {
         let violations = assert_identity_invariants();
-        assert!(violations.is_empty(), "Layer 0 identity violations: {:?}", violations);
+        assert!(
+            violations.is_empty(),
+            "Layer 0 identity violations: {:?}",
+            violations
+        );
     }
 }
 

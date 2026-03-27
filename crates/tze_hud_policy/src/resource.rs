@@ -32,7 +32,9 @@
 //! This module must remain a pure function. Any change that would require reading mutable
 //! state or writing resource counters belongs in `tze_hud_runtime::budget` instead.
 
-use crate::types::{ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, ResourceContext};
+use crate::types::{
+    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, ResourceContext,
+};
 use tze_hud_scene::SceneId;
 
 // ─── Resource decision ────────────────────────────────────────────────────────
@@ -81,7 +83,9 @@ pub fn evaluate_resource(ctx: &ResourceContext, _mutation_ref: SceneId) -> Resou
 
     // Degradation shedding — transactional mutations are never shed (spec §11.6).
     if ctx.should_shed && !ctx.is_transactional {
-        return ResourceDecision::Shed { degradation_level: ctx.degradation_level };
+        return ResourceDecision::Shed {
+            degradation_level: ctx.degradation_level,
+        };
     }
 
     ResourceDecision::Pass
@@ -137,7 +141,7 @@ mod resource_tests {
         let ctx = ResourceContext {
             should_shed: true,
             degradation_level: 5,
-            is_transactional: true,  // transactional — never shed
+            is_transactional: true, // transactional — never shed
             ..default_ctx()
         };
         let decision = evaluate_resource(&ctx, SceneId::new());
@@ -155,7 +159,12 @@ mod resource_tests {
             ..default_ctx()
         };
         let decision = evaluate_resource(&ctx, SceneId::new());
-        assert_eq!(decision, ResourceDecision::Shed { degradation_level: 3 });
+        assert_eq!(
+            decision,
+            ResourceDecision::Shed {
+                degradation_level: 3
+            }
+        );
     }
 
     #[test]
@@ -167,14 +176,22 @@ mod resource_tests {
             ..default_ctx()
         };
         let decision = evaluate_resource(&ctx, SceneId::new());
-        assert_eq!(decision, ResourceDecision::Shed { degradation_level: 2 });
+        assert_eq!(
+            decision,
+            ResourceDecision::Shed {
+                degradation_level: 2
+            }
+        );
     }
 
     // ─── Budget exceeded → Reject (spec §7.2 line 169) ───────────────────────
 
     #[test]
     fn test_budget_exceeded_is_rejected_not_shed() {
-        let ctx = ResourceContext { budget_exceeded: true, ..default_ctx() };
+        let ctx = ResourceContext {
+            budget_exceeded: true,
+            ..default_ctx()
+        };
         let decision = evaluate_resource(&ctx, SceneId::new());
         assert_eq!(decision, ResourceDecision::BudgetExceeded);
     }
@@ -222,35 +239,43 @@ mod resource_tests {
 
     #[test]
     fn test_resource_pass_produces_no_outcome() {
-        let outcome = resource_decision_to_outcome(ResourceDecision::Pass, "agent_a", SceneId::new());
+        let outcome =
+            resource_decision_to_outcome(ResourceDecision::Pass, "agent_a", SceneId::new());
         assert!(outcome.is_none());
     }
 
     #[test]
     fn test_resource_budgets_paused_produces_no_outcome() {
-        let outcome =
-            resource_decision_to_outcome(ResourceDecision::BudgetsPaused, "agent_a", SceneId::new());
+        let outcome = resource_decision_to_outcome(
+            ResourceDecision::BudgetsPaused,
+            "agent_a",
+            SceneId::new(),
+        );
         assert!(outcome.is_none());
     }
 
     #[test]
     fn test_resource_shed_produces_shed_outcome() {
         let outcome = resource_decision_to_outcome(
-            ResourceDecision::Shed { degradation_level: 4 },
+            ResourceDecision::Shed {
+                degradation_level: 4,
+            },
             "agent_a",
             SceneId::new(),
         );
-        assert!(matches!(outcome, Some(ArbitrationOutcome::Shed { degradation_level: 4 })));
+        assert!(matches!(
+            outcome,
+            Some(ArbitrationOutcome::Shed {
+                degradation_level: 4
+            })
+        ));
     }
 
     #[test]
     fn test_resource_budget_exceeded_produces_reject_outcome() {
         let mutation_ref = SceneId::new();
-        let outcome = resource_decision_to_outcome(
-            ResourceDecision::BudgetExceeded,
-            "agent_a",
-            mutation_ref,
-        );
+        let outcome =
+            resource_decision_to_outcome(ResourceDecision::BudgetExceeded, "agent_a", mutation_ref);
         assert!(
             matches!(
                 &outcome,
@@ -278,6 +303,11 @@ mod resource_tests {
         };
         let decision = evaluate_resource(&ctx, SceneId::new());
         // If we get Shed, it means Level 3 (security) and earlier checks passed.
-        assert_eq!(decision, ResourceDecision::Shed { degradation_level: 2 });
+        assert_eq!(
+            decision,
+            ResourceDecision::Shed {
+                degradation_level: 2
+            }
+        );
     }
 }

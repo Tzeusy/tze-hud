@@ -48,6 +48,10 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
+      - name: Install protobuf compiler (required by tze_hud_protocol build script)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: cargo check (workspace)
         run: cargo check --workspace
 
@@ -73,6 +77,10 @@ jobs:
           toolchain: "1.88"
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install protobuf compiler (required by tze_hud_protocol build script)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: cargo clippy (workspace, deny warnings)
         run: cargo clippy --workspace -- -D warnings
 
@@ -98,7 +106,7 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - name: Install Mesa / llvmpipe (software GPU for headless tests)
+      - name: Install Mesa / llvmpipe + protobuf compiler
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
@@ -106,7 +114,8 @@ jobs:
             mesa-vulkan-drivers \
             mesa-utils \
             libegl-mesa0 \
-            libgl1-mesa-dri
+            libgl1-mesa-dri \
+            protobuf-compiler
       - name: cargo test (workspace, exclude integration)
         run: |
           cargo test \
@@ -131,6 +140,10 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
+      - name: Install protobuf compiler (required by tze_hud_protocol build script)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: cargo test -p integration --test trace_regression
         run: |
           cargo test \
@@ -153,7 +166,7 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - name: Install Mesa / llvmpipe (software GPU)
+      - name: Install Mesa / llvmpipe + protobuf compiler
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
@@ -161,7 +174,8 @@ jobs:
             mesa-vulkan-drivers \
             mesa-utils \
             libegl-mesa0 \
-            libgl1-mesa-dri
+            libgl1-mesa-dri \
+            protobuf-compiler
       - name: cargo test -p integration --test v1_thesis
         run: |
           cargo test \
@@ -192,7 +206,7 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - name: Install Mesa / llvmpipe (software GPU)
+      - name: Install Mesa / llvmpipe + protobuf compiler
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
@@ -200,7 +214,8 @@ jobs:
             mesa-vulkan-drivers \
             mesa-utils \
             libegl-mesa0 \
-            libgl1-mesa-dri
+            libgl1-mesa-dri \
+            protobuf-compiler
       - name: cargo test -p vertical_slice --test production_boot
         run: |
           cargo test \
@@ -251,6 +266,10 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
+      - name: Install protobuf compiler (required by tze_hud_protocol build script)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
       - name: Build workspace release (no dev-mode feature)
         run: |
           cargo build --workspace --release 2>&1 | tee /tmp/release-build.log
@@ -327,7 +346,7 @@ jobs:
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@v2
-      - name: Install Mesa / llvmpipe + Vulkan loader
+      - name: Install Mesa / llvmpipe + Vulkan loader + protobuf compiler
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends \
@@ -336,7 +355,8 @@ jobs:
             mesa-utils \
             libegl-mesa0 \
             libgl1-mesa-dri \
-            vulkan-tools
+            vulkan-tools \
+            protobuf-compiler
       - name: Verify Vulkan adapter available
         run: vulkaninfo --summary 2>&1 | head -30 || true
       - name: cargo test pixel_readback (software GPU)

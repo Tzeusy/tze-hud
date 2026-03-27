@@ -230,8 +230,24 @@ pub mod tests {
         let mut store = S::new(clock);
         let hash = make_hash(0xAA);
         let data = b"hello world".to_vec();
-        let r1 = store.upload_inline("agent_a", hash, ResourceType::ImagePng, data.clone(), &cap_with_upload()).unwrap();
-        let r2 = store.upload_inline("agent_a", hash, ResourceType::ImagePng, data, &cap_with_upload()).unwrap();
+        let r1 = store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                data.clone(),
+                &cap_with_upload(),
+            )
+            .unwrap();
+        let r2 = store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                data,
+                &cap_with_upload(),
+            )
+            .unwrap();
         assert_eq!(r1.resource_id, r2.resource_id);
     }
 
@@ -241,9 +257,28 @@ pub mod tests {
         let mut store = S::new(clock);
         let hash = make_hash(0xBB);
         let data = b"dup test".to_vec();
-        let r1 = store.upload_inline("agent_a", hash, ResourceType::ImagePng, data.clone(), &cap_with_upload()).unwrap();
-        assert!(!r1.was_deduplicated, "first upload should not be deduplicated");
-        let r2 = store.upload_inline("agent_a", hash, ResourceType::ImagePng, data, &cap_with_upload()).unwrap();
+        let r1 = store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                data.clone(),
+                &cap_with_upload(),
+            )
+            .unwrap();
+        assert!(
+            !r1.was_deduplicated,
+            "first upload should not be deduplicated"
+        );
+        let r2 = store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                data,
+                &cap_with_upload(),
+            )
+            .unwrap();
         assert!(r2.was_deduplicated, "second upload should be deduplicated");
     }
 
@@ -270,7 +305,8 @@ pub mod tests {
             ResourceType::FontOtf,
         ] {
             let hash = make_hash(rt as u8);
-            let result = store.upload_inline("agent_a", hash, rt, b"data".to_vec(), &cap_with_upload());
+            let result =
+                store.upload_inline("agent_a", hash, rt, b"data".to_vec(), &cap_with_upload());
             assert!(result.is_ok(), "v1 type {:?} should be accepted", rt);
         }
     }
@@ -282,7 +318,13 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut store = S::new(clock);
         let hash = make_hash(0x01);
-        let result = store.upload_inline("agent_a", hash, ResourceType::ImagePng, b"data".to_vec(), &[]);
+        let result = store.upload_inline(
+            "agent_a",
+            hash,
+            ResourceType::ImagePng,
+            b"data".to_vec(),
+            &[],
+        );
         assert_eq!(result, Err(StoreError::CapabilityDenied));
     }
 
@@ -294,7 +336,9 @@ pub mod tests {
         let mut store = S::new(clock);
         let wrong_hash = make_hash(0xFF); // will not match actual bytes
         let caps = cap_with_upload();
-        let token = store.upload_start("agent_a", wrong_hash, ResourceType::ImagePng, 5, &caps).unwrap();
+        let token = store
+            .upload_start("agent_a", wrong_hash, ResourceType::ImagePng, 5, &caps)
+            .unwrap();
         store.upload_chunk(token, 0, b"hello".to_vec()).unwrap();
         let result = store.upload_complete(token);
         assert_eq!(result, Err(StoreError::HashMismatch));
@@ -316,7 +360,8 @@ pub mod tests {
         }
         assert_eq!(store.in_flight_uploads("agent_a"), 4);
         // 5th should be rejected.
-        let result = store.upload_start("agent_a", make_hash(99), ResourceType::ImagePng, 100, &caps);
+        let result =
+            store.upload_start("agent_a", make_hash(99), ResourceType::ImagePng, 100, &caps);
         assert_eq!(result, Err(StoreError::TooManyUploads));
     }
 
@@ -327,7 +372,15 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut store = S::new(clock);
         let hash = make_hash(0x10);
-        store.upload_inline("agent_a", hash, ResourceType::ImagePng, b"img".to_vec(), &cap_with_upload()).unwrap();
+        store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                b"img".to_vec(),
+                &cap_with_upload(),
+            )
+            .unwrap();
         // Initially refcount = 0 (just uploaded).
         assert_eq!(store.refcount(hash), Some(0));
         store.inc_ref(hash).unwrap();
@@ -339,7 +392,15 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut store = S::new(clock);
         let hash = make_hash(0x20);
-        store.upload_inline("agent_a", hash, ResourceType::ImagePng, b"img".to_vec(), &cap_with_upload()).unwrap();
+        store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                b"img".to_vec(),
+                &cap_with_upload(),
+            )
+            .unwrap();
         store.inc_ref(hash).unwrap();
         store.inc_ref(hash).unwrap(); // refcount = 2
         store.dec_ref(hash).unwrap(); // refcount = 1
@@ -351,11 +412,22 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut store = S::new(clock.clone());
         let hash = make_hash(0x30);
-        store.upload_inline("agent_a", hash, ResourceType::ImagePng, b"img".to_vec(), &cap_with_upload()).unwrap();
+        store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                b"img".to_vec(),
+                &cap_with_upload(),
+            )
+            .unwrap();
         store.inc_ref(hash).unwrap();
         store.dec_ref(hash).unwrap(); // back to 0 → GC candidate
         // Resource should still be in store (grace period not elapsed).
-        assert!(store.contains(hash), "resource should still be present within grace period");
+        assert!(
+            store.contains(hash),
+            "resource should still be present within grace period"
+        );
     }
 
     /// WHEN resource refcount reaches 0 and grace period (60s) elapses and GC runs
@@ -364,13 +436,27 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut store = S::new(clock.clone());
         let hash = make_hash(0x40);
-        store.upload_inline("agent_a", hash, ResourceType::ImagePng, b"img".to_vec(), &cap_with_upload()).unwrap();
+        store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                b"img".to_vec(),
+                &cap_with_upload(),
+            )
+            .unwrap();
         store.inc_ref(hash).unwrap();
         store.dec_ref(hash).unwrap(); // refcount = 0
         clock.advance(60_001); // past default 60s grace period
         let result = store.gc();
-        assert!(result.evicted >= 1, "resource should be evicted after grace period");
-        assert!(!store.contains(hash), "evicted resource must be absent from store");
+        assert!(
+            result.evicted >= 1,
+            "resource should be evicted after grace period"
+        );
+        assert!(
+            !store.contains(hash),
+            "evicted resource must be absent from store"
+        );
     }
 
     /// WHEN resource in grace period is referenced again THEN resurrected (refcount 1).
@@ -378,7 +464,15 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut store = S::new(clock.clone());
         let hash = make_hash(0x50);
-        store.upload_inline("agent_a", hash, ResourceType::ImagePng, b"img".to_vec(), &cap_with_upload()).unwrap();
+        store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                b"img".to_vec(),
+                &cap_with_upload(),
+            )
+            .unwrap();
         store.inc_ref(hash).unwrap();
         store.dec_ref(hash).unwrap(); // refcount = 0, GC candidate
         clock.advance(20_000); // within 60s grace period
@@ -400,11 +494,23 @@ pub mod tests {
         let clock = TestClock::new(0);
         let mut store = S::new(clock);
         let hash = make_hash(0x60);
-        store.upload_inline("agent_a", hash, ResourceType::ImagePng, b"img".to_vec(), &cap_with_upload()).unwrap();
+        store
+            .upload_inline(
+                "agent_a",
+                hash,
+                ResourceType::ImagePng,
+                b"img".to_vec(),
+                &cap_with_upload(),
+            )
+            .unwrap();
         store.inc_ref(hash).unwrap(); // agent A
         store.inc_ref(hash).unwrap(); // agent B
         store.dec_ref(hash).unwrap(); // agent A deletes
-        assert_eq!(store.refcount(hash), Some(1), "B still references the resource");
+        assert_eq!(
+            store.refcount(hash),
+            Some(1),
+            "B still references the resource"
+        );
     }
 
     // ── Compile-time generic check ────────────────────────────────────────────
