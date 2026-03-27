@@ -8,6 +8,12 @@
 //! fields (validated via raw bytes), but prost does not preserve them on re-encode.
 //!
 //! Test count target: ≥30 functions.
+//!
+//! NOTE: This file imports deprecated legacy proto types (`InputEvent`,
+//! `TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`, `LeaseEvent`,
+//! `LeaseEventKind`, `SceneEvent`) from `events_legacy.proto` for
+//! backwards-compatibility wire round-trip coverage only. New code MUST NOT
+//! use these types; use `InputEnvelope` / `EventBatch` (RFC 0004) instead.
 
 use prost::Message;
 use tze_hud_protocol::proto::{

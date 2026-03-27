@@ -700,7 +700,7 @@ mutation targets tile T
 
 `CreateTile` also requires the `create_tiles` capability in addition to `modify_own_tiles`.
 
-Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `zone_publish:<zone_name>` capability (RFC 0006 §6.3). The runtime resolves `zone_name` (a zone type name) to the `ZoneInstance` for the agent's active tab; the mutation is rejected with `ZoneNotFound` if no such instance exists in the active tab.
+Zone publish mutations require `ZonePublishToken` embedded in the mutation; the token is validated against the capability registry. The agent must also hold `publish_zone:<zone_name>` capability (RFC 0006 §6.3). The runtime resolves `zone_name` (a zone type name) to the `ZoneInstance` for the agent's active tab; the mutation is rejected with `ZoneNotFound` if no such instance exists in the active tab.
 
 Sync group mutations (`CreateSyncGroup`, `DeleteSyncGroup`) require the `manage_sync_groups` capability. A sync group is a scene-level object not tied to a specific tile, so it is capability-gated rather than lease-gated.
 
@@ -1860,7 +1860,7 @@ Input Point P = (x, y) in tab display space
 ║                    │  Capability Grants     │           ║
 ║                    │  - create_tiles         │           ║
 ║                    │  - modify_own_tiles     │           ║
-║                    │  - zone_publish:subtitle│           ║
+║                    │  - publish_zone:subtitle│           ║
 ║                    └───────────┬────────────┘           ║
 ║                                │ scopes                  ║
 ║              ┌─────────────────▼──────────────────────┐ ║
@@ -1922,7 +1922,7 @@ Hardware reference: single core at 3GHz equivalent (normalized; see validation.m
 
 5. **Tile bounds reference frame:** The spec says tile bounds are in "logical pixels relative to the tab's display area." The compositor must define what "logical pixel" means across display profiles (HiDPI, scaling). The Compositor RFC must define the coordinate space and DPI contract.
 
-6. **Zone publish token wire format:** The `ZonePublishToken` is an opaque bytes field intentionally. The Session/Protocol RFC (RFC 0005) defines how tokens are issued during session auth and their expiry semantics. **Normative expectation for RFC 0001 (Round 4):** A `ZonePublishToken` is issued by the runtime as part of capability grants at session authentication time (RFC 0006 §6.3 grants `zone_publish:<zone_name>`, where `zone_name` is a zone type name, which causes the runtime to issue a token for publications to instances of that zone type). The token is bound to the session: it is invalidated when the session ends or when the `zone_publish:<zone_name>` capability is revoked mid-session. Tokens are not transferable between sessions. RFC 0005 must define the token issuance protocol; this RFC provides the contract: the token embeds a session-scoped, zone-type-scoped authorization proof that the runtime can verify without a round-trip. The exact encoding (HMAC, JWT, or opaque blob) is an RFC 0005 implementation decision.
+6. **Zone publish token wire format:** The `ZonePublishToken` is an opaque bytes field intentionally. The Session/Protocol RFC (RFC 0005) defines how tokens are issued during session auth and their expiry semantics. **Normative expectation for RFC 0001 (Round 4):** A `ZonePublishToken` is issued by the runtime as part of capability grants at session authentication time (RFC 0006 §6.3 grants `publish_zone:<zone_name>`, where `zone_name` is a zone type name, which causes the runtime to issue a token for publications to instances of that zone type). The token is bound to the session: it is invalidated when the session ends or when the `publish_zone:<zone_name>` capability is revoked mid-session. Tokens are not transferable between sessions. RFC 0005 must define the token issuance protocol; this RFC provides the contract: the token embeds a session-scoped, zone-type-scoped authorization proof that the runtime can verify without a round-trip. The exact encoding (HMAC, JWT, or opaque blob) is an RFC 0005 implementation decision.
 
 ---
 
@@ -2133,7 +2133,7 @@ Several cross-RFC consistency issues were found and fixed in this round:
 
 1. **`PublishToZoneMutation` lacked `content_classification` field (MUST-FIX → Fixed):** presence.md §"Zone anatomy" explicitly lists "privacy classification" as a first-class field in zone publications. RFC 0009 §2.3 (privacy gate) references `VisibilityClassification` as the per-publication privacy input, but RFC 0001's `PublishToZoneMutation` had no such field — agents had no wire mechanism to declare content classification. Added `ContentClassification` enum and `content_classification` field (field 6) to `PublishToZoneMutation`. See §2.5 and §7.1.
 
-2. **Capability name inconsistency — non-canonical identifiers in §3.3 diagram and §9.4 (MUST-FIX → Fixed):** RFC 0001 used `CREATE_TILE`, `WRITE_SCENE`, `zone:publish:subtitle` (colon-separated) in its code and diagrams. RFC 0006 §6.3 defines the authoritative `snake_case` scheme: `create_tiles`, `modify_own_tiles`, `zone_publish:<zone_name>`. These identifiers must be consistent for config validation, audit logging, and capability grant enforcement to work correctly. Updated §3.3 lease check, §9.4 diagram. Added normative note clarifying the naming convention.
+2. **Capability name inconsistency — non-canonical identifiers in §3.3 diagram and §9.4 (MUST-FIX → Fixed):** RFC 0001 used `CREATE_TILE`, `WRITE_SCENE`, `zone:publish:subtitle` (colon-separated) in its code and diagrams. RFC 0006 §6.3 (as amended by RFC 0005 Round 14) defines the authoritative `snake_case` scheme: `create_tiles`, `modify_own_tiles`, `publish_zone:<zone_name>`. These identifiers must be consistent for config validation, audit logging, and capability grant enforcement to work correctly. Updated §3.3 lease check, §9.4 diagram. Added normative note clarifying the naming convention.
 
 3. **`ResourceBudget` two-struct confusion (SHOULD-FIX → Fixed):** RFC 0001 defines `ResourceBudget` with 3 per-tile fields; RFC 0008 §4/§10 defines a separate `ResourceBudget` with 7 lease-level fields (different field names). These serve genuinely different purposes but the identical struct name across different proto packages creates implementor confusion. Added explicit doc-comment to the Rust struct and proto `message ResourceBudget` in §7.1 explaining the two-budget design, their packages (`tze_hud.scene.v1` vs `tze.lease.v1`), and their relationship.
 
@@ -2249,7 +2249,7 @@ All cross-RFC inconsistencies found in rounds 1–3 have been resolved. No new c
 - `ValidationErrorCode` covers all error conditions that RFC 0005 §5.x (error response model) expects to surface
 - `LatencyClass` and `UpdatePolicy` canonical pairings in §2.3 are consistent with RFC 0002 (Runtime Kernel) frame pipeline stages
 - `SyncGroupConfig` in `CreateSyncGroupMutation` defers to RFC 0003 §7.1 — cross-reference is explicit
-- Capability names in §3.3 and §9.4 use canonical `snake_case` (RFC 0006 §6.3): `create_tiles`, `modify_own_tiles`, `manage_tabs`, `zone_publish:<name>`
+- Capability names in §3.3 and §9.4 use canonical `snake_case` (RFC 0006 §6.3, as amended by RFC 0005 Round 14): `create_tiles`, `modify_own_tiles`, `manage_tabs`, `publish_zone:<name>`
 - `manage_sync_groups` capability (new in R4) should be added to RFC 0006 §6.3 canonical capability table — noted as a discovered item for RFC 0006
 
 ---

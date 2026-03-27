@@ -9,6 +9,11 @@
 //! Based on session-protocol/spec.md lines 227-234 and timing-model/spec.md lines 10-21.
 //!
 //! Test count: ≥1 reflective test + per-message spot checks.
+//!
+//! NOTE: This file imports deprecated legacy proto types (`TileCreatedEvent`,
+//! `TileDeletedEvent`, `TileUpdatedEvent`, `LeaseEvent`) from `events_legacy.proto`
+//! for backwards-compatibility clock-domain naming coverage only. New code MUST
+//! NOT use these types; use `InputEnvelope` / `EventBatch` (RFC 0004) instead.
 
 use tze_hud_protocol::proto::session::{
     ClientMessage, ServerMessage, SessionInit, SessionEstablished,

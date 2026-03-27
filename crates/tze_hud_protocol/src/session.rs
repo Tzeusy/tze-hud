@@ -1,4 +1,9 @@
 //! Agent session management — authentication, capabilities, session state.
+//!
+//! NOTE: This module uses `proto::SceneEvent` (from `events_legacy.proto`) in
+//! channel types for backwards-compatibility. New event dispatch code should
+//! migrate to `InputEnvelope` / `EventBatch` (RFC 0004). The `SceneEvent`
+//! usage here is retained for compatibility until that migration completes.
 
 use std::collections::HashMap;
 use tokio::sync::mpsc;

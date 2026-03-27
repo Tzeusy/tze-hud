@@ -45,10 +45,10 @@ This round focused on cross-RFC coherence. Since round 2, RFC 0008 (Lease Govern
 - `WRITE_SCENE` in §3.3 lease check
 - `CREATE_TILE`, `WRITE_SCENE`, `zone:publish:subtitle` (colon-separated) in §9.4 diagram
 
-RFC 0006 §6.3 defines the authoritative capability naming scheme as `snake_case` with colon-separated sub-scopes for zone grants:
+RFC 0006 §6.3 (as amended by RFC 0005 Round 14) defines the authoritative capability naming scheme as `snake_case` with colon-separated sub-scopes for zone grants:
 - `create_tiles` (not `CREATE_TILE`)
 - `modify_own_tiles` (not `WRITE_SCENE`)
-- `zone_publish:<zone_name>` (not `zone:publish:<zone_name>`)
+- `publish_zone:<zone_name>` (not `zone:publish:<zone_name>` or `zone_publish:<zone_name>`)
 
 RFC 0008 §1.2 capability table also uses `CREATE_TILE` and `WRITE_SCENE` in examples, but RFC 0008 §11 identifies this as a clarification target, not a naming authority.
 
@@ -58,9 +58,9 @@ RFC 0009 introduced a third variant using `kebab-case` (`zone-publish:`, `create
 
 **Fix applied:**
 - RFC 0001 §3.3: replaced `WRITE_SCENE` with `modify_own_tiles`; added normative note establishing RFC 0006 §6.3 as the canonical naming authority
-- RFC 0001 §9.4 diagram: replaced `CREATE_TILE`, `WRITE_SCENE`, `zone:publish:subtitle` with `create_tiles`, `modify_own_tiles`, `zone_publish:subtitle`
+- RFC 0001 §9.4 diagram: replaced `CREATE_TILE`, `WRITE_SCENE`, `zone:publish:subtitle` with `create_tiles`, `modify_own_tiles`, `publish_zone:subtitle`
 - RFC 0009 §2.2 capability check matrix: replaced all kebab-case names with canonical `snake_case` names; added convention note
-- RFC 0009 §7.3 audit log examples: replaced `zone-publish:notification` with `zone_publish:notification`
+- RFC 0009 §7.3 audit log examples: replaced `zone-publish:notification` with `publish_zone:notification`
 
 ---
 
