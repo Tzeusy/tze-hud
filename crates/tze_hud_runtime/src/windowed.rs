@@ -92,6 +92,7 @@ use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::graph::SceneGraph;
+use tze_hud_scene::types::ZoneContent;
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -752,22 +753,17 @@ impl WinitApp {
             let _ = self.state.frame_ready_rx.borrow_and_update();
 
             if let Some(surface) = &self.state.window_surface {
-                // Take the SurfaceTexture that the compositor stored in
-                // acquire_frame(). This is the exact texture rendered into —
-                // NOT a second acquire from the swapchain.
-                match surface.take_pending_texture() {
-                    Some(texture) => {
-                        texture.present();
-                    }
-                    None => {
-                        // FrameReady signal fired but no texture is pending —
-                        // this can happen if acquire_frame() failed on the
-                        // compositor thread (error already logged there).
-                        tracing::debug!(
-                            "main thread: FrameReady received but no pending texture; \
-                             compositor likely skipped frame due to surface error"
-                        );
-                    }
+                // Present under the same mutex that guards pending swapchain
+                // ownership so acquire/present cannot interleave into a
+                // double-acquire validation error on some backends.
+                if !surface.present_pending_texture() {
+                    // FrameReady signal fired but no texture is pending —
+                    // this can happen if acquire_frame() failed on the
+                    // compositor thread (error already logged there).
+                    tracing::debug!(
+                        "main thread: FrameReady received but no pending texture; \
+                         compositor likely skipped frame due to surface error"
+                    );
                 }
             }
         }
@@ -816,7 +812,26 @@ impl WindowedRuntime {
         // Build shared state (scene + sessions).
         let width = cfg.window.width as f32;
         let height = cfg.window.height as f32;
-        let scene = SceneGraph::new(width, height);
+        let mut scene = SceneGraph::new(width, height);
+        if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {
+            let samples = [
+                "Subtitle demo: systems online.",
+                "Subtitle demo: compositor stable.",
+                "Subtitle demo: overlay path verified.",
+            ];
+            for line in samples {
+                if let Err(e) = scene.publish_to_zone(
+                    "subtitle",
+                    ZoneContent::StreamText(line.to_string()),
+                    "hudbot-sim",
+                    None,
+                    None,
+                    None,
+                ) {
+                    tracing::warn!(error = %e, "failed to seed subtitle demo line");
+                }
+            }
+        }
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
         let shared_state = Arc::new(Mutex::new(SharedState {
             scene,

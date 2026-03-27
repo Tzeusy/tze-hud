@@ -223,7 +223,7 @@ fn elevate_windows() -> bool {
         let handle = GetCurrentThread();
         SetThreadPriority(handle, THREAD_PRIORITY_TIME_CRITICAL)
     };
-    if result.as_bool() {
+    if result.is_ok() {
         tracing::info!("main thread elevated to THREAD_PRIORITY_TIME_CRITICAL");
         true
     } else {

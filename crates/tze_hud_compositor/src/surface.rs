@@ -162,15 +162,31 @@ impl WindowSurface {
             // Zero-size surface is invalid — skip reconfiguration.
             return;
         }
+        // wgpu requires all acquired SurfaceTexture images to be dropped before
+        // calling Surface::configure(). During resize races the main thread may
+        // not have presented the last pending image yet; clear it here to avoid:
+        // "SurfaceOutput must be dropped before a new Surface is made".
+        {
+            let mut pending = self
+                .pending_texture
+                .lock()
+                .expect("pending_texture lock poisoned");
+            let _ = pending.take();
+        }
+        // Clamp to adapter's max texture dimension to avoid wgpu validation errors
+        // on GPUs with limits below the requested window size.
+        let max_dim = device.limits().max_texture_dimension_2d;
+        let w = new_width.min(max_dim);
+        let h = new_height.min(max_dim);
         let mut cfg = self.config.lock().expect("WindowSurface config lock poisoned");
-        cfg.width = new_width;
-        cfg.height = new_height;
+        cfg.width = w;
+        cfg.height = h;
         self.surface.configure(device, &cfg);
-        self.width.store(new_width, std::sync::atomic::Ordering::Release);
-        self.height.store(new_height, std::sync::atomic::Ordering::Release);
+        self.width.store(w, std::sync::atomic::Ordering::Release);
+        self.height.store(h, std::sync::atomic::Ordering::Release);
         tracing::info!(
-            width = new_width,
-            height = new_height,
+            width = w,
+            height = h,
             "WindowSurface reconfigured after resize"
         );
     }
@@ -187,6 +203,27 @@ impl WindowSurface {
             .lock()
             .expect("pending_texture lock poisoned")
             .take()
+    }
+
+    /// Present the currently pending swapchain image, if any.
+    ///
+    /// This performs `take()+present()` while holding the `pending_texture`
+    /// mutex so the compositor cannot call `get_current_texture()` in the tiny
+    /// window between "take" and "present".
+    ///
+    /// Returns `true` if a texture was presented, `false` if no texture was
+    /// pending.
+    pub fn present_pending_texture(&self) -> bool {
+        let mut pending = self
+            .pending_texture
+            .lock()
+            .expect("pending_texture lock poisoned");
+        if let Some(texture) = pending.take() {
+            texture.present();
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -205,6 +242,24 @@ impl CompositorSurface for WindowSurface {
     /// and an empty frame (black output) is returned so the compositor can skip
     /// the frame gracefully rather than panicking.
     fn acquire_frame(&self) -> CompositorFrame {
+        // Serialize acquire/pending-state handoff through the same mutex used
+        // by the main thread present path. If a texture is still pending, reuse
+        // that same acquired image instead of trying a second acquire.
+        let mut pending = self
+            .pending_texture
+            .lock()
+            .expect("pending_texture lock poisoned");
+
+        if let Some(existing) = pending.as_ref() {
+            let view = existing
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            return CompositorFrame {
+                view,
+                _guard: Box::new(()),
+            };
+        }
+
         match self.surface.get_current_texture() {
             Ok(surface_texture) => {
                 let view = surface_texture
@@ -214,10 +269,7 @@ impl CompositorSurface for WindowSurface {
                 // Do NOT box it inside CompositorFrame._guard — that would drop
                 // it (without calling .present()) when the frame is dropped on
                 // the compositor thread, discarding the rendered frame.
-                *self
-                    .pending_texture
-                    .lock()
-                    .expect("pending_texture lock poisoned") = Some(surface_texture);
+                *pending = Some(surface_texture);
                 CompositorFrame {
                     view,
                     _guard: Box::new(()), // no-op — ownership is in pending_texture
@@ -251,8 +303,7 @@ impl CompositorSurface for WindowSurface {
                     match self.surface.get_current_texture() {
                         Ok(t) => {
                             let v = t.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                            *self.pending_texture.lock().expect("pending_texture lock poisoned") =
-                                Some(t);
+                            *pending = Some(t);
                             v
                         }
                         Err(e2) => {

@@ -183,11 +183,28 @@ impl Compositor {
             surface_caps.present_modes[0]
         };
 
+        // Clamp dimensions to the adapter's maximum supported texture size.
+        // Some GPUs (e.g. certain Intel/Mesa drivers) report a max of 2048,
+        // which is smaller than common display resolutions like 2560x1440.
+        let max_dim = adapter.limits().max_texture_dimension_2d;
+        let clamped_width = width.min(max_dim);
+        let clamped_height = height.min(max_dim);
+        if clamped_width != width || clamped_height != height {
+            tracing::warn!(
+                requested_width = width,
+                requested_height = height,
+                clamped_width,
+                clamped_height,
+                max_texture_dimension_2d = max_dim,
+                "windowed: surface dimensions clamped to adapter limit"
+            );
+        }
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width,
-            height,
+            width: clamped_width,
+            height: clamped_height,
             present_mode,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -197,8 +214,8 @@ impl Compositor {
         tracing::info!(
             format = ?surface_format,
             present_mode = ?present_mode,
-            width,
-            height,
+            width = clamped_width,
+            height = clamped_height,
             "windowed: surface configured"
         );
 
@@ -210,8 +227,8 @@ impl Compositor {
             device,
             queue,
             pipeline,
-            width,
-            height,
+            width: clamped_width,
+            height: clamped_height,
             frame_number: 0,
         };
 

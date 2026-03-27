@@ -86,11 +86,32 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== tze_hud windowed runtime ===");
     println!("Close the window to exit.");
 
+    let mode = match std::env::var("TZE_HUD_WINDOW_MODE")
+        .unwrap_or_else(|_| "fullscreen".to_string())
+        .to_lowercase()
+        .as_str()
+    {
+        "overlay" => WindowMode::Overlay,
+        _ => WindowMode::Fullscreen,
+    };
+
+    let width = std::env::var("TZE_HUD_WINDOW_WIDTH")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(800);
+
+    let height = std::env::var("TZE_HUD_WINDOW_HEIGHT")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(600);
+
+    println!("Window mode: {mode}, size: {}x{}", width, height);
+
     let config = WindowedConfig {
         window: WindowConfig {
-            mode: WindowMode::Fullscreen,
-            width: 800,
-            height: 600,
+            mode,
+            width,
+            height,
             title: "tze_hud — vertical slice".to_string(),
         },
         grpc_port: 0, // Disabled for the standalone windowed demo.
