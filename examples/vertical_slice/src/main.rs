@@ -27,14 +27,27 @@
 //!
 //! **Phase 6** — Graceful Shutdown: SessionClose, cleanup verification
 //!
-//! ## Registered-agent config flow
+//! ## Config flow (production — default)
 //!
-//! The headless demo runs with `config_toml: None` (dev mode — all capabilities
-//! granted to any agent). In production, pass a TOML config string via
-//! `HeadlessConfig { config_toml: Some(AGENT_CONFIG_TOML), .. }`. The agent
-//! must appear in `[agents.registered]` with its allowed capability set; unknown
-//! agents get guest policy (no capabilities). See the comment at the
-//! `HeadlessConfig` construction site below for the exact TOML schema.
+//! The headless path loads `config/production.toml` (embedded at compile time).
+//! This enforces capability governance: only the registered agent
+//! (`vertical-slice-agent`) may connect, with the capability set declared in
+//! that file.  Unknown agents receive guest policy (no capabilities).
+//!
+//! The production config is the **default documented path** — it requires no
+//! feature flags at build time.
+//!
+//! Config schema: `configuration/spec.md` §Capability Vocabulary (lines 149-164).
+//! The agent must appear in `[agents.registered]`; unknown agents get guest
+//! policy (no capabilities).
+//!
+//! ## Dev mode (opt-in, test/dev only)
+//!
+//! Pass `--dev` to bypass config governance: all capabilities are granted to any
+//! agent (`fallback_unrestricted = true`).  This also requires the `dev-mode`
+//! Cargo feature; production builds without it will refuse `--dev` with an error.
+//!
+//! **NEVER use `--dev` in production deployments.**
 //!
 //! ## Spec references
 //!
@@ -42,10 +55,13 @@
 //! - `configuration/spec.md` §Requirement: Capability Vocabulary (lines 149-164)
 //! - `validation-framework/spec.md`: "Tests SHALL read like usage examples" (line 398)
 //!
-//! Run headless (dev mode — unrestricted caps):
-//!   cargo run -p vertical_slice --features dev-mode -- --headless
+//! Run headless (production config — default, no feature flags):
+//!   cargo run -p vertical_slice -- --headless
 //!
-//! Run windowed:
+//! Run headless (dev mode — unrestricted caps, TEST/DEV ONLY):
+//!   cargo run -p vertical_slice --features dev-mode -- --headless --dev
+//!
+//! Run windowed (production config via env vars or defaults):
 //!   cargo run -p vertical_slice
 
 #[allow(deprecated)]
@@ -59,16 +75,24 @@ use tze_hud_runtime::window::{WindowConfig, WindowMode};
 use tze_hud_scene::types::*;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 
+/// Embedded production config — parsed at runtime so capability governance is
+/// always active by default.  The file lives at `config/production.toml`
+/// relative to this source file and is baked into the binary at compile time.
+const PRODUCTION_CONFIG: &str = include_str!("../config/production.toml");
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let headless = args.iter().any(|a| a == "--headless");
+    // `--dev` activates dev mode: all capabilities granted to any agent.
+    // Requires the `dev-mode` Cargo feature.  TEST/DEV ONLY — never use in production.
+    let dev_mode = args.iter().any(|a| a == "--dev");
 
     if headless {
         // Run headless inside a Tokio runtime.
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        rt.block_on(run_headless())
+        rt.block_on(run_headless(dev_mode))
     } else {
         run_windowed()
     }
@@ -78,6 +102,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///
 /// Creates a `WindowedRuntime` and runs the winit event loop on the main thread.
 /// This call blocks until the window is closed.
+///
+/// For production deployments, configure agent capabilities via the runtime's
+/// config TOML (see `WindowedConfig` docs and `config/production.toml` for the
+/// headless equivalent schema).  The windowed runtime does not embed a default
+/// config in this example; extend `WindowedConfig` with a `config_toml` field
+/// to enforce capability governance in windowed mode.
 ///
 /// Per spec §Main Thread Responsibilities (line 33): "The main thread MUST run
 /// the winit event loop." Winit requires the event loop to run on the main thread,
@@ -137,48 +167,52 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== tze_hud vertical slice (full contract path) ===\n");
+/// Run the headless runtime.
+///
+/// # Production path (default, `dev_mode = false`)
+///
+/// Loads `config/production.toml` (embedded at compile time via `include_str!`).
+/// Only the registered agent (`vertical-slice-agent`) may connect, with the
+/// capability set declared in that file.  No Cargo feature flags are required.
+///
+///   cargo run -p vertical_slice -- --headless
+///
+/// # Dev mode (opt-in, `dev_mode = true`, TEST/DEV ONLY)
+///
+/// Bypasses config governance: all capabilities granted to any agent
+/// (`fallback_unrestricted = true`).  Requires the `dev-mode` Cargo feature.
+/// Pass `--dev` on the command line to activate.
+///
+///   cargo run -p vertical_slice --features dev-mode -- --headless --dev
+///
+/// **NEVER use dev mode in production deployments.**
+async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if dev_mode {
+        println!("=== tze_hud vertical slice (DEV MODE — unrestricted caps, TEST/DEV ONLY) ===\n");
+        println!("WARNING: --dev bypasses capability governance. Do NOT use in production.\n");
+    } else {
+        println!("=== tze_hud vertical slice (full contract path, production config) ===\n");
+    }
 
     // ─── Initialize runtime ────────────────────────────────────────────────
     //
-    // `config_toml: None` activates dev mode: all capabilities are granted to
-    // any agent (fallback_unrestricted = true).  This path requires the
-    // `dev-mode` feature to be enabled at compile time; production builds
-    // without this feature will return an error from `HeadlessRuntime::new`.
+    // Production path (default): load config/production.toml, which enforces
+    // capability governance via [agents.registered.vertical-slice-agent].
     //
-    // Run with: cargo run -p vertical_slice --features dev-mode -- --headless
-    //
-    // For a registered-agent flow (production), supply a TOML config string
-    // via `HeadlessConfig { config_toml: Some(config_toml.to_string()), .. }`.
-    // The agent must appear in `[agents.registered]` with its allowed
-    // capability set; unlisted agents receive guest policy (no capabilities).
-    //
-    // Example production config:
-    //
-    //   let config_toml = r#"
-    //   [runtime]
-    //   profile = "headless"
-    //
-    //   [[tabs]]
-    //   name = "Main"
-    //   default_tab = true
-    //
-    //   [agents.registered.vertical-slice-agent]
-    //   capabilities = [
-    //       "create_tiles",
-    //       "modify_own_tiles",
-    //       "access_input_events",
-    //       "read_scene_topology",
-    //   ]
-    //   "#;
-    //   HeadlessConfig { config_toml: Some(config_toml.to_string()), .. }
+    // Dev mode (--dev, TEST/DEV ONLY): config_toml = None activates unrestricted
+    // capability grants.  Requires --features dev-mode at build time.
+    let config_toml = if dev_mode {
+        None // dev-mode: requires --features dev-mode at build time
+    } else {
+        Some(PRODUCTION_CONFIG.to_string())
+    };
+
     let config = HeadlessConfig {
         width: 800,
         height: 600,
         grpc_port: 50051,
         psk: "vertical-slice-key".to_string(),
-        config_toml: None, // dev-mode: requires --features dev-mode at build time
+        config_toml,
     };
 
     let mut runtime = HeadlessRuntime::new(config).await?;
@@ -251,9 +285,10 @@ async fn run_headless() -> Result<(), Box<dyn std::error::Error>> {
     // Read SessionEstablished — capability negotiation result.
     //
     // The runtime intersects the agent's requested capabilities with what its
-    // authorization policy allows. In dev mode (config_toml = None), all
-    // canonical capabilities are granted. With a registered-agent config, only
-    // the agent's configured capability set is granted; anything else is denied.
+    // authorization policy allows.  With the production config (default),
+    // only the registered agent's declared capabilities are granted; anything
+    // else is denied.  In dev mode (--dev, TEST/DEV ONLY), all canonical
+    // capabilities are granted to any agent (fallback_unrestricted = true).
     //
     // `granted_capabilities` lists what was actually granted — agents MUST
     // only exercise capabilities present in this list (spec §Capability Gating).
@@ -1123,12 +1158,28 @@ mod tests {
         let free_port = listener.local_addr().unwrap().port();
         drop(listener);
 
+        // Use an explicit config that registers "test-agent" with create_tiles.
+        // This mirrors the production path: capability governance is always active.
+        // (config_toml: None requires the dev-mode feature or cfg(test) in the
+        // runtime crate itself — not available when the runtime is a dependency.)
+        let toml = r#"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+
+[agents.registered.test-agent]
+capabilities = ["create_tiles"]
+"#;
+
         let config = HeadlessConfig {
             width: 320,
             height: 240,
             grpc_port: free_port,
             psk: "test-key".to_string(),
-            config_toml: None,
+            config_toml: Some(toml.to_string()),
         };
         let runtime = HeadlessRuntime::new(config).await.unwrap();
         let _server = runtime.start_grpc_server().await.unwrap();
