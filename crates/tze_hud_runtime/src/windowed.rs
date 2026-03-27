@@ -366,7 +366,6 @@ impl ApplicationHandler for WinitApp {
 
         // ── Wire compositor thread ─────────────────────────────────────────
         let shared_state = self.state.shared_state.clone();
-        let input_ring = self.state.input_ring.clone();
         // Share the ArcSwap handle (not the FramePipeline itself) with the compositor thread.
         let hit_test_snapshot = self.state.pipeline.hit_test_snapshot.clone();
         let frame_ready_tx = self.state
