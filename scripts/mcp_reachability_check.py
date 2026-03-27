@@ -85,6 +85,18 @@ def check(url: str, token: str, timeout: int) -> dict[str, Any]:
 
     try:
         data = _probe(url, token, timeout)
+    except urllib.error.HTTPError as exc:
+        # HTTPError is a subclass of URLError; check it first.
+        # HTTP-level auth failure (401, 403) means the server is reachable but the PSK is wrong.
+        if exc.code in (401, 403):
+            result["reachable"] = True
+            result["error"] = "auth_error"
+            result["authenticated"] = False
+            result["detail"] = f"HTTP {exc.code}: {exc.reason}"
+        else:
+            result["error"] = "connection_error"
+            result["detail"] = f"HTTP {exc.code}: {exc.reason}"
+        return result
     except urllib.error.URLError as exc:
         result["error"] = "connection_error"
         result["detail"] = str(exc)
