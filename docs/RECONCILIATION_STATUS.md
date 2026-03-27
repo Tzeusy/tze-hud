@@ -2,44 +2,49 @@
 
 This document is the entry point for understanding the current spec-to-code coverage baseline.
 
-## Current Baseline: Gen-3 (2026-03-26)
+## Current Baseline: Gen-4 (2026-03-27)
 
-**Document:** [reconciliation-gen3.md](reconciliation-gen3.md)
-**Issue:** hud-nsyt.5
-**Date:** 2026-03-26
+**Document:** [reconciliation-gen4.md](reconciliation-gen4.md)
+**Issue:** hud-leji
+**Date:** 2026-03-27
 
 ### Summary
 
-Gen-3 is the authoritative reconciliation snapshot as of 2026-03-26. It covers:
+Gen-4 is the authoritative reconciliation snapshot as of 2026-03-27. It is the **v1-MVP
+final closure** snapshot, covering all 7 deliverables of the hud-kibj ship-readiness epic.
 
-- All P1 divergence closures from the hud-nsyt epic (hud-nsyt.1, .2, .3)
-- 243 commits and 60+ feature PRs merged since Gen-2 (2026-03-22)
-
-**Coverage at Gen-3 close:**
+**Coverage at Gen-4 close:**
 
 | Status    | Count | Percentage |
 |-----------|-------|------------|
-| FULL      | 52    | 81%        |
-| PARTIAL   | 5     | 8%         |
-| RFC-ONLY  | 6     | 9%         |
+| FULL      | 54    | 93%        |
+| PARTIAL   | 0     | 0%         |
+| RFC-ONLY  | 4     | 7%         |
 | ABSENT    | 0     | 0%         |
 
-Key closures since Gen-2:
-- All three RFC-ONLY window modes (W1, W2, W3) are now FULL
-- Entire failure-handling section (F1–F4) is now FULL
-- Configuration governance section introduced with two FULL rows
-- V4 ABSENT item closed
+Key closures since Gen-3:
+- All 3 PARTIAL items resolved (Sec2 capability revocation, V1 Layer 1 colour assertions, T1 per-frame correctness fields)
+- Production config committed and exercised by CI
+- Closure-grade CI workflow (9 quality gates on push/PR to main)
+- Canonical vocabulary enforced with CI lint script
+- Governance authority boundaries documented
+- MCP zone conformance test coverage complete
+- Historical reconciliation docs labeled
 
 `cargo check --workspace` passes with zero errors.
+
+RFC-ONLY items (I2, Pl1, Pl2, Pl3) are explicitly deferred to v1.1 with justification
+in reconciliation-gen4.md §4. None block the v1 thesis.
 
 ---
 
 ## Historical Documents
 
-These snapshots are preserved for reference but have been superseded by Gen-3:
+These snapshots are preserved for reference but have been superseded by Gen-4:
 
 | Document | Date | Coverage |
 |----------|------|---------|
+| [reconciliation-gen3.md](reconciliation-gen3.md) | 2026-03-26 | 51 FULL (88%), 3 PARTIAL (5%), 4 RFC-ONLY (7%), 0 ABSENT (0%) |
 | [reconciliation-gen1.md](reconciliation-gen1.md) | 2026-03-22 | Gen-1 baseline |
 | [reconciliation-gen2.md](reconciliation-gen2.md) | 2026-03-22 | 32 FULL (57%), 13 PARTIAL (23%), 9 RFC-ONLY (16%), 1 ABSENT (2%) |
 | [reconciliation-nsyt-gen1.md](reconciliation-nsyt-gen1.md) | 2026-03-26 | hud-nsyt epic vs. sibling bead deliverables audit |
