@@ -156,6 +156,34 @@ impl AgentSession {
         self.sequence += 1;
         self.sequence
     }
+
+    /// Receive the next server message that is NOT a `LeaseStateChange`.
+    ///
+    /// `LeaseStateChange` notifications are server-initiated and can arrive at
+    /// any time — including between a client request and the server's
+    /// `MutationResult`/`ZonePublishResult`/`LeaseResponse` reply.  Draining
+    /// these here prevents the race condition where the test sees a
+    /// `LeaseStateChange` where it expected a transactional response.
+    async fn next_non_state_change(
+        &mut self,
+    ) -> Option<Result<session_proto::ServerMessage, tonic::Status>> {
+        loop {
+            let item = self.rx.next().await?;
+            match &item {
+                Ok(msg) => {
+                    if let Some(session_proto::server_message::Payload::LeaseStateChange(_)) =
+                        &msg.payload
+                    {
+                        // Discard and loop — this is a server-push notification,
+                        // not the transactional reply we are waiting for.
+                        continue;
+                    }
+                    return Some(item);
+                }
+                Err(_) => return Some(item),
+            }
+        }
+    }
 }
 
 /// Connect an agent, complete the handshake, and acquire a lease.
@@ -233,14 +261,24 @@ async fn connect_agent(
     })
     .await?;
 
-    // Read LeaseResponse
-    let msg = response_stream
-        .next()
+    // Wrap the stream in a temporary AgentSession so we can use next_non_state_change.
+    // (LeaseStateChange can arrive between the LeaseRequest and its LeaseResponse.)
+    let mut partial_session = AgentSession {
+        namespace: namespace.clone(),
+        lease_id_bytes: vec![],
+        tx: tx.clone(),
+        rx: response_stream,
+        sequence: 2,
+    };
+
+    // Read LeaseResponse — skip any interleaved LeaseStateChange messages.
+    let msg = partial_session
+        .next_non_state_change()
         .await
         .ok_or("no lease response")??;
-    let lease_id_bytes = match &msg.payload {
+    let (lease_id_bytes, response_stream) = match &msg.payload {
         Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
-            resp.lease_id.clone()
+            (resp.lease_id.clone(), partial_session.rx)
         }
         other => {
             return Err(
@@ -298,10 +336,9 @@ async fn create_tile_via_grpc(
         })
         .await?;
 
-    // Read MutationResult
+    // Read MutationResult — skip any interleaved LeaseStateChange messages.
     let msg = session
-        .rx
-        .next()
+        .next_non_state_change()
         .await
         .ok_or("no mutation result")??;
     match &msg.payload {
@@ -389,10 +426,9 @@ async fn publish_zone_content_via_grpc(
         })
         .await?;
 
-    // Read ZonePublishResult
+    // Read ZonePublishResult — skip any interleaved LeaseStateChange messages.
     let msg = session
-        .rx
-        .next()
+        .next_non_state_change()
         .await
         .ok_or("no zone publish result")??;
     match &msg.payload {
