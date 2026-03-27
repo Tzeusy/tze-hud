@@ -24,7 +24,7 @@ Collect these before executing:
 - `win_host` (default: `tzehouse-windows.parrot-hen.ts.net`)
 - `ssh_key_path` (default in local environment: `~/.ssh/ecdsa_home`)
 - `task_name` (default: `TzeHudInteractive`)
-- `mcp_http_url` (default: `http://tzehouse-windows.parrot-hen.ts.net:8765`)
+- `mcp_http_url` (default: `http://tzehouse-windows.parrot-hen.ts.net:9090`)
 - `mcp_psk_env` (default: `MCP_TEST_PSK`)
 - `messages`: array of zone publishes
 
@@ -105,7 +105,7 @@ Then report:
 
 Require live MCP HTTP reachability before publish.
 
-- Default URL: `http://tzehouse-windows.parrot-hen.ts.net:8765`
+- Default URL: `http://tzehouse-windows.parrot-hen.ts.net:9090`
 - If MCP HTTP is unreachable, stop and report launch/runtime mismatch.
 - Do not treat startup subtitle simulation as a substitute for MCP publish validation.
 
