@@ -23,8 +23,8 @@ The **canonical runtime application binary** (`tze_hud_app`) is the production-r
 - Production-ready lifecycle (clean startup, shutdown)
 
 **Build targets**:
-- Linux cross-compile to Windows: `target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
-- Windows native: `target/x86_64-pc-windows-msvc/release/tze_hud_app.exe`
+- Linux cross-compile to Windows: `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
+- Windows native: `target/x86_64-pc-windows-msvc/release/tze_hud.exe`
 - Linux native: `target/x86_64-unknown-linux-gnu/release/tze_hud_app`
 
 **Use cases**:
@@ -83,30 +83,30 @@ The **canonical runtime application binary** (`tze_hud_app`) is the production-r
 ### All Platforms (Debug)
 
 ```bash
-cargo build --bin tze_hud_app
-# Output: target/debug/tze_hud_app (or .exe on Windows)
+cargo build --bin tze_hud
+# Output: target/debug/tze_hud (or .exe on Windows)
 ```
 
 ### All Platforms (Release)
 
 ```bash
-cargo build --bin tze_hud_app --release
-# Output: target/release/tze_hud_app (or .exe on Windows)
+cargo build --bin tze_hud --release
+# Output: target/release/tze_hud (or .exe on Windows)
 ```
 
 ### Linux Only (Release)
 
 ```bash
-cargo build --bin tze_hud_app --release --target x86_64-unknown-linux-gnu
-# Output: target/x86_64-unknown-linux-gnu/release/tze_hud_app
+cargo build --bin tze_hud --release --target x86_64-unknown-linux-gnu
+# Output: target/x86_64-unknown-linux-gnu/release/tze_hud
 ```
 
 ### Windows Native (Release)
 
 ```powershell
 # Windows PowerShell (Developer VS 2022)
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-msvc
-# Output: target\x86_64-pc-windows-msvc\release\tze_hud_app.exe
+cargo build --bin tze_hud --release --target x86_64-pc-windows-msvc
+# Output: target\x86_64-pc-windows-msvc\release\tze_hud.exe
 ```
 
 ### Linux Cross-Compile to Windows (Recommended for Automation)
@@ -117,8 +117,8 @@ rustup target add x86_64-pc-windows-gnu
 sudo apt install -y mingw-w64
 
 # Build
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu
-# Output: target/x86_64-pc-windows-gnu/release/tze_hud_app.exe
+cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
+# Output: target/x86_64-pc-windows-gnu/release/tze_hud.exe
 ```
 
 ## Configuration
@@ -128,7 +128,7 @@ The canonical app requires a TOML configuration file passed via CLI:
 ```bash
 ./tze_hud_app --config /path/to/config.toml
 # or on Windows:
-.\tze_hud_app.exe --config C:\path\to\config.toml
+.\tze_hud.exe --config C:\path\to\config.toml
 ```
 
 ### Configuration Schema
@@ -226,7 +226,7 @@ For automation purposes, the canonical app produces stable, deterministic artifa
 - **Base name**: `tze_hud_app` (always the same)
 - **Extension**: `.exe` on Windows, no extension on Unix-like
 - **Full name examples**:
-  - Windows: `tze_hud_app.exe`
+  - Windows: `tze_hud.exe`
   - Linux: `tze_hud_app`
 
 ### Build Output Paths
@@ -235,15 +235,15 @@ For automation purposes, the canonical app produces stable, deterministic artifa
 |--------|---------|------|
 | Linux (native) | debug | `target/debug/tze_hud_app` |
 | Linux (native) | release | `target/release/tze_hud_app` |
-| Windows (cross) | debug | `target/x86_64-pc-windows-gnu/debug/tze_hud_app.exe` |
-| Windows (cross) | release | `target/x86_64-pc-windows-gnu/release/tze_hud_app.exe` |
-| Windows (native) | debug | `target/x86_64-pc-windows-msvc/debug/tze_hud_app.exe` |
-| Windows (native) | release | `target/x86_64-pc-windows-msvc/release/tze_hud_app.exe` |
+| Windows (cross) | debug | `target/x86_64-pc-windows-gnu/debug/tze_hud.exe` |
+| Windows (cross) | release | `target/x86_64-pc-windows-gnu/release/tze_hud.exe` |
+| Windows (native) | debug | `target/x86_64-pc-windows-msvc/debug/tze_hud.exe` |
+| Windows (native) | release | `target/x86_64-pc-windows-msvc/release/tze_hud.exe` |
 
 ### Deployment Path (Windows)
 
 - **Remote directory**: `C:\tze_hud\` (created by automation script)
-- **Remote artifact**: `C:\tze_hud\tze_hud_app.exe`
+- **Remote artifact**: `C:\tze_hud\tze_hud.exe`
 - **Remote config**: `C:\tze_hud\config.toml`
 - **Remote logs**:
   - `C:\tze_hud\logs\hud.stdout.log`
@@ -258,7 +258,7 @@ For automation purposes, the canonical app produces stable, deterministic artifa
 
 ```bash
 ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
-  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud_app.exe \
+  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe \
   --launch-mode auto \
   --tail
 ```

@@ -17,11 +17,11 @@ This is distinct from demo binaries (`vertical_slice`, `benchmark`, `render_arti
 - **Crate**: Part of non-demo workspace members
 - **Binary name**: `tze_hud_app`
 - **Windows artifact path** (cross-compiled from Linux):
-  - `target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
+  - `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - **Windows native build**:
-  - `target/x86_64-pc-windows-msvc/release/tze_hud_app.exe`
+  - `target/x86_64-pc-windows-msvc/release/tze_hud.exe`
 - **Remote deployment path** (default):
-  - `C:\tze_hud\tze_hud_app.exe`
+  - `C:\tze_hud\tze_hud.exe`
 
 ## Building the Windows Artifact
 
@@ -38,13 +38,13 @@ rustup target add x86_64-pc-windows-gnu
 sudo apt install -y mingw-w64
 
 # Build canonical app for Windows
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu
+cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 
 # Verify artifact exists
-ls -lh target/x86_64-pc-windows-gnu/release/tze_hud_app.exe
+ls -lh target/x86_64-pc-windows-gnu/release/tze_hud.exe
 
 # Record checksum for integrity verification
-sha256sum target/x86_64-pc-windows-gnu/release/tze_hud_app.exe
+sha256sum target/x86_64-pc-windows-gnu/release/tze_hud.exe
 ```
 
 ### Native Windows Build (Optional)
@@ -53,8 +53,8 @@ If building directly on Windows:
 
 ```powershell
 # PowerShell (Developer VS 2022)
-cargo build --bin tze_hud_app --release
-# Output: target\x86_64-pc-windows-msvc\release\tze_hud_app.exe
+cargo build --bin tze_hud --release
+# Output: target\x86_64-pc-windows-msvc\release\tze_hud.exe
 ```
 
 ## Configuration
@@ -163,13 +163,13 @@ WIN_USER=hudbot \
 SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
 ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
   --win-host tzehouse-windows.parrot-hen.ts.net \
-  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud_app.exe \
+  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe \
   --launch-mode auto \
   --tail
 
 # Expected output:
 # Deploy complete.
-# Remote exe: C:\tze_hud\tze_hud_app.exe
+# Remote exe: C:\tze_hud\tze_hud.exe
 # Remote stdout log: C:\tze_hud\logs\hud.stdout.log
 # Remote stderr log: C:\tze_hud\logs\hud.stderr.log
 # [Tailing launcher log...]
@@ -287,11 +287,11 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 
 ### Deployment Issues
 
-**Problem:** `Local exe not found: target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
+**Problem:** `Local exe not found: target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 
 ```bash
 # Rebuild
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu
+cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 ```
 
 **Problem:** Remote directory creation fails

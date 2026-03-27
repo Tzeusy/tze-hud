@@ -14,7 +14,7 @@ This README is command-first and focused on four workflows:
 ### Canonical Runtime App Binary
 - **Purpose**: Production-ready runtime executable for cross-machine deployment and MCP publishing operations.
 - **Binary name** (TBD): `tze_hud_app` (canonical application binary, part of a non-demo binary target in Cargo workspace)
-- **Windows artifact**: `target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
+- **Windows artifact**: `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - **Configuration**: Supports TOML configuration file with windowed display settings and network endpoint configuration.
 - **Network support**: Includes full `NetworkRuntime` with MCP HTTP listener lifecycle in windowed mode.
 - **Use case**: Remote deployment, cross-machine validation, automated publish workflows.
@@ -49,7 +49,7 @@ cargo build --workspace
 cargo build --workspace --release
 
 # Build canonical runtime app binary only
-cargo build --bin tze_hud_app --release
+cargo build --bin tze_hud --release
 ```
 
 ### Linux to Windows Cross-Compile (for deployment automation)
@@ -62,10 +62,10 @@ rustup target add x86_64-pc-windows-gnu
 sudo apt install -y mingw-w64
 
 # Build canonical app for Windows target
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu
+cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 
 # Output artifact path:
-# target/x86_64-pc-windows-gnu/release/tze_hud_app.exe
+# target/x86_64-pc-windows-gnu/release/tze_hud.exe
 ```
 
 ### Windows (PowerShell) - Native Build
@@ -85,14 +85,14 @@ cargo build --workspace
 cargo build --workspace --release
 
 # Build canonical runtime app binary only
-cargo build --bin tze_hud_app --release
+cargo build --bin tze_hud --release
 ```
 
 If `cl.exe` is not found, run the build in **Developer PowerShell for VS 2022**.
 
 **Output artifact path (Windows):**
 ```
-target\x86_64-pc-windows-msvc\release\tze_hud_app.exe
+target\x86_64-pc-windows-msvc\release\tze_hud.exe
 ```
 
 ## 1.1) Configuration for Canonical Runtime App
@@ -134,10 +134,10 @@ mcp_http_bind = "127.0.0.1:8765"
 
 ```bash
 # Windowed with network services enabled
-./tze_hud_app --config config.toml
+./tze_hud --config config.toml
 
 # Or on Windows with prebuilt binary
-.\tze_hud_app.exe --config config.toml
+.\tze_hud.exe --config config.toml
 ```
 
 For Windows deployment automation, see [Cross-Machine Deployment](#cross-machine-deployment) below.
@@ -158,8 +158,8 @@ The canonical `tze_hud_app` binary is designed for automated cross-machine deplo
 
 ```bash
 # From repo root
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu
-WINDOWS_EXE="target/x86_64-pc-windows-gnu/release/tze_hud_app.exe"
+cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
+WINDOWS_EXE="target/x86_64-pc-windows-gnu/release/tze_hud.exe"
 echo "Artifact ready: $WINDOWS_EXE"
 ```
 
@@ -178,9 +178,9 @@ See [Cross-Machine Validation via user-test](#cross-machine-validation-via-user-
 
 For automation purposes, the canonical app binary produces:
 
-- **Artifact name**: `tze_hud_app.exe` (stable, deterministic)
-- **Linux build output**: `target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
-- **Windows remote path**: `C:\tze_hud\tze_hud_app.exe` (default deployment location)
+- **Artifact name**: `tze_hud.exe` (stable, deterministic)
+- **Linux build output**: `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
+- **Windows remote path**: `C:\tze_hud\tze_hud.exe` (default deployment location)
 - **Checksum**: Use `sha256sum` on Linux before/after deployment for integrity verification
 
 ## 2) Linux + TigerVNC, then connect from Windows
@@ -349,8 +349,8 @@ Must return `hudbot`. Do not proceed without successful key auth.
 **Step 2: Build canonical app for Windows**
 
 ```bash
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu
-FULL_APP_EXE="target/x86_64-pc-windows-gnu/release/tze_hud_app.exe"
+cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
+FULL_APP_EXE="target/x86_64-pc-windows-gnu/release/tze_hud.exe"
 ```
 
 **Step 3: Deploy and launch with MCP reachability gate**
@@ -367,7 +367,7 @@ SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
 ```
 
 **Expected output:**
-- Remote exe path: `C:\tze_hud\tze_hud_app.exe`
+- Remote exe path: `C:\tze_hud\tze_hud.exe`
 - Launcher logs tail (remote)
 
 **Step 4: Verify MCP endpoint reachability (MCP Reachability Gate)**
@@ -440,12 +440,12 @@ ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \
 
 ```bash
 ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \
-  "powershell -Command \"Get-Process tze_hud_app -ErrorAction SilentlyContinue | Stop-Process -Force\""
+  "powershell -Command \"Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force\""
 ```
 
 **Verify artifact was copied:**
 
 ```bash
 ssh -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net \
-  "powershell -Command \"Get-Item 'C:\\tze_hud\\tze_hud_app.exe' | Select-Object FullName, Length, LastWriteTime\""
+  "powershell -Command \"Get-Item 'C:\\tze_hud\\tze_hud.exe' | Select-Object FullName, Length, LastWriteTime\""
 ```

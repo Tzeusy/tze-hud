@@ -7,10 +7,10 @@ This document provides operators and automation engineers with a checklist for u
 ### Build Artifact
 
 - [ ] Canonical app binary built for Windows target
-  - Command: `cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu`
-  - Expected artifact: `target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
-  - Verify file exists: `ls -lh target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
-  - Record checksum: `sha256sum target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
+  - Command: `cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu`
+  - Expected artifact: `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
+  - Verify file exists: `ls -lh target/x86_64-pc-windows-gnu/release/tze_hud.exe`
+  - Record checksum: `sha256sum target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 
 ### SSH Connectivity
 
@@ -62,14 +62,14 @@ This document provides operators and automation engineers with a checklist for u
   SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes' \
   ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
     --win-host tzehouse-windows.parrot-hen.ts.net \
-    --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud_app.exe \
+    --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe \
     --launch-mode auto \
     --tail
   ```
 
 - [ ] Verify output messages
   - "Deploy complete."
-  - "Remote exe: C:\tze_hud\tze_hud_app.exe"
+  - "Remote exe: C:\tze_hud\tze_hud.exe"
   - No error messages in tail output
 
 - [ ] Note remote log paths
@@ -150,7 +150,7 @@ This document provides operators and automation engineers with a checklist for u
   - Zone publish results (success/failure, zone names, timestamps)
 
 - [ ] Cleanup (if needed)
-  - Stop runtime: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "powershell -Command 'Get-Process tze_hud_app -ErrorAction SilentlyContinue | Stop-Process -Force'"`
+  - Stop runtime: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force'"`
   - Or preserve for additional testing
 
 ## Troubleshooting Guide
@@ -183,11 +183,11 @@ ssh -vv -i ~/.ssh/ecdsa_home hudbot@tzehouse-windows.parrot-hen.ts.net whoami
 # Re-run with debug output
 bash -x ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
   --win-host tzehouse-windows.parrot-hen.ts.net \
-  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud_app.exe
+  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe
 ```
 
 **Solutions**:
-- Verify artifact exists: `ls -lh target/x86_64-pc-windows-gnu/release/tze_hud_app.exe`
+- Verify artifact exists: `ls -lh target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - Verify SSH connectivity (see above)
 - Check Windows disk space: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "powershell -Command 'Get-Volume C | Select SizeRemaining, Size'"`
 
@@ -199,7 +199,7 @@ bash -x ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
 ```bash
 # Check if process is running
 ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
-  "powershell -Command 'Get-Process tze_hud_app -ErrorAction SilentlyContinue | Select ProcessName, Id'"
+  "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Select ProcessName, Id'"
 
 # Check if port 8765 is listening
 ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
@@ -259,7 +259,7 @@ python3 ./.claude/skills/user-test/scripts/publish_zone_batch.py \
 
 ```bash
 # Build canonical app
-cargo build --bin tze_hud_app --release --target x86_64-pc-windows-gnu
+cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 
 # Verify SSH connectivity
 ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
@@ -267,7 +267,7 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
 
 # Deploy and launch
 ./.claude/skills/user-test/scripts/deploy_windows_hud.sh \
-  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud_app.exe \
+  --full-app-exe target/x86_64-pc-windows-gnu/release/tze_hud.exe \
   --launch-mode auto --tail
 
 # Test MCP endpoint
@@ -288,11 +288,11 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net "type C:\\tze_hud\\logs\\hud.stdou
 
 # Stop process
 ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
-  "powershell -Command 'Get-Process tze_hud_app | Stop-Process -Force'"
+  "powershell -Command 'Get-Process tze_hud | Stop-Process -Force'"
 
 # Check if process running
 ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
-  "powershell -Command 'Get-Process tze_hud_app -ErrorAction SilentlyContinue'"
+  "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue'"
 ```
 
 ## Documentation References
