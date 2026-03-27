@@ -145,6 +145,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
             title: "tze_hud — vertical slice".to_string(),
         },
         grpc_port: 0, // Disabled for the standalone windowed demo.
+        mcp_port: 0,  // Disabled for the standalone windowed demo.
         psk: "vertical-slice-key".to_string(),
         target_fps: 60,
     };

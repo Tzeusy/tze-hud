@@ -232,7 +232,16 @@ impl TestSceneRegistry {
             vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
         );
 
-        let tile_bounds = Rect::new(100.0, 100.0, 800.0, 400.0);
+        // Tile starts at 10% inset from each edge, occupying 80% of display width and
+        // 67% of display height — scales to any display size without exceeding bounds.
+        let tile_w = self.display_width * 0.8;
+        let tile_h = self.display_height * 0.67;
+        let tile_bounds = Rect::new(
+            self.display_width * 0.1,
+            self.display_height * 0.1,
+            tile_w,
+            tile_h,
+        );
         let tile_id = graph
             .create_tile(tab_id, "agent.single", lease_id, tile_bounds, 1)
             .expect("create_tile failed");
@@ -242,7 +251,7 @@ impl TestSceneRegistry {
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
                 content: "# Hello from tze_hud\n\nThis is a single-tile test scene.".to_string(),
-                bounds: Rect::new(0.0, 0.0, 800.0, 400.0),
+                bounds: Rect::new(0.0, 0.0, tile_w, tile_h),
                 font_size_px: 18.0,
                 font_family: FontFamily::SystemSansSerif,
                 color: Rgba::WHITE,
@@ -283,8 +292,16 @@ impl TestSceneRegistry {
             ],
         );
 
+        // Layout: left half | right half | status bar at bottom
+        // All coordinates are relative to display dimensions so the scene
+        // works at any resolution (e.g. 800×600 in pixel-readback tests).
+        let half_w = (self.display_width / 2.0) - 15.0;
+        let content_h = self.display_height * 0.8;
+        let status_h = (self.display_height * 0.1).max(20.0);
+        let status_y = self.display_height - status_h;
+
         // Tile 1 — text content, left half of screen
-        let text_tile_bounds = Rect::new(10.0, 10.0, 900.0, 500.0);
+        let text_tile_bounds = Rect::new(10.0, 10.0, half_w, content_h);
         let text_tile_id = graph
             .create_tile(tab_id, "agent.two", lease_id, text_tile_bounds, 1)
             .expect("create_tile failed");
@@ -294,7 +311,7 @@ impl TestSceneRegistry {
             children: vec![],
             data: NodeData::TextMarkdown(TextMarkdownNode {
                 content: "## two_tiles scene\n\nText tile on the left.".to_string(),
-                bounds: Rect::new(0.0, 0.0, 900.0, 500.0),
+                bounds: Rect::new(0.0, 0.0, half_w, content_h),
                 font_size_px: 16.0,
                 font_family: FontFamily::SystemSansSerif,
                 color: Rgba::WHITE,
@@ -306,16 +323,22 @@ impl TestSceneRegistry {
         graph.set_tile_root(text_tile_id, text_node).expect("set_tile_root failed");
 
         // Tile 2 — hit region tile, right half of screen
-        let hit_tile_bounds = Rect::new(930.0, 10.0, 900.0, 500.0);
+        let hit_x = self.display_width / 2.0 + 5.0;
+        let hit_tile_bounds = Rect::new(hit_x, 10.0, half_w, content_h);
         let hit_tile_id = graph
             .create_tile(tab_id, "agent.two", lease_id, hit_tile_bounds, 2)
             .expect("create_tile failed");
 
+        // Hit region inset within the tile
+        let hr_x = (half_w * 0.3).min(hit_tile_bounds.width - 10.0);
+        let hr_y = (content_h * 0.3).min(hit_tile_bounds.height - 10.0);
+        let hr_w = (half_w * 0.4).min(hit_tile_bounds.width - hr_x);
+        let hr_h = (content_h * 0.15).min(hit_tile_bounds.height - hr_y);
         let hit_node = Node {
             id: SceneId::new(),
             children: vec![],
             data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(300.0, 200.0, 300.0, 100.0),
+                bounds: Rect::new(hr_x, hr_y, hr_w, hr_h),
                 interaction_id: "btn-primary".to_string(),
                 accepts_focus: true,
                 accepts_pointer: true,
@@ -325,7 +348,7 @@ impl TestSceneRegistry {
         graph.set_tile_root(hit_tile_id, hit_node).expect("set_tile_root failed");
 
         // Tile 3 — solid color status bar at the bottom, no overlap with tiles 1 or 2
-        let status_tile_bounds = Rect::new(0.0, 600.0, self.display_width, 80.0);
+        let status_tile_bounds = Rect::new(0.0, status_y, self.display_width, status_h);
         let status_tile_id = graph
             .create_tile(tab_id, "agent.two", lease_id, status_tile_bounds, 3)
             .expect("create_tile failed");
@@ -335,7 +358,7 @@ impl TestSceneRegistry {
             children: vec![],
             data: NodeData::SolidColor(SolidColorNode {
                 color: Rgba::new(0.05, 0.05, 0.1, 1.0),
-                bounds: Rect::new(0.0, 0.0, self.display_width, 80.0),
+                bounds: Rect::new(0.0, 0.0, self.display_width, status_h),
             }),
         };
         graph.set_tile_root(status_tile_id, status_node).expect("set_tile_root failed");
@@ -458,10 +481,34 @@ impl TestSceneRegistry {
             vec![Capability::CreateTile, Capability::CreateNode],
         );
 
-        // Three tiles with overlapping bounds; z-orders 1, 2, 3 (bottom to top)
-        let base = Rect::new(100.0, 100.0, 600.0, 400.0);
-        let mid = Rect::new(200.0, 150.0, 600.0, 400.0);
-        let top = Rect::new(300.0, 200.0, 600.0, 400.0);
+        // Three overlapping tiles placed so that at (display_w/2, display_h*0.42)
+        // all three overlap and z=3 (blue) wins. Tiles are display-relative so
+        // they fit within any reasonable resolution (including 800×600).
+        //
+        // tile_w = 50% of display; tile_h = 67% of display.
+        // Offsets: base starts at 10%×16%, mid at 20%×25%, top at 30%×33%.
+        // At 800×600: base=(80,97,400,400), mid=(160,150,400,400), top=(240,200,400,400).
+        // Overlap centre ≈ (400,300) — all three tiles cover that point.
+        let tile_w = self.display_width * 0.5;
+        let tile_h = self.display_height * 0.67;
+        let base = Rect::new(
+            self.display_width * 0.10,
+            self.display_height * 0.16,
+            tile_w,
+            tile_h,
+        );
+        let mid = Rect::new(
+            self.display_width * 0.20,
+            self.display_height * 0.25,
+            tile_w,
+            tile_h,
+        );
+        let top = Rect::new(
+            self.display_width * 0.30,
+            self.display_height * 0.33,
+            tile_w,
+            tile_h,
+        );
 
         for (bounds, z, color) in [
             (base, 1u32, Rgba::new(0.8, 0.2, 0.2, 1.0)),
@@ -600,9 +647,17 @@ impl TestSceneRegistry {
             vec![Capability::CreateTile, Capability::CreateNode],
         );
 
-        // Tab A: 1 tile
+        // Tab A: 1 tile — 5% inset, 90% wide, 67% tall (display-relative)
+        let tab_a_tile_w = self.display_width * 0.90;
+        let tab_a_tile_h = self.display_height * 0.67;
+        let tab_a_tile_bounds = Rect::new(
+            self.display_width * 0.05,
+            self.display_height * 0.05,
+            tab_a_tile_w,
+            tab_a_tile_h,
+        );
         let tile_a = graph
-            .create_tile(tab_a, "agent.tabA", lease_a, Rect::new(50.0, 50.0, 800.0, 400.0), 1)
+            .create_tile(tab_a, "agent.tabA", lease_a, tab_a_tile_bounds, 1)
             .expect("create_tile failed");
         graph
             .set_tile_root(
@@ -612,7 +667,7 @@ impl TestSceneRegistry {
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "Tab A content".to_string(),
-                        bounds: Rect::new(0.0, 0.0, 800.0, 400.0),
+                        bounds: Rect::new(0.0, 0.0, tab_a_tile_w, tab_a_tile_h),
                         font_size_px: 18.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,
@@ -624,16 +679,20 @@ impl TestSceneRegistry {
             )
             .expect("set_tile_root failed");
 
-        // Tab B: 2 tiles using the same z_orders as Tab A — valid because z_order is per-tab
+        // Tab B: 2 tiles using the same z_orders as Tab A — valid because z_order is per-tab.
+        // Tiles are side-by-side, each occupying ~44% of display width (with 5% gaps).
+        let tab_b_tile_w = (self.display_width - self.display_width * 0.15) / 2.0;
+        let tab_b_tile_h = self.display_height * 0.5;
+        let tab_b_tile_y = self.display_height * 0.1;
         for (i, (z, label)) in [(1u32, "Tab B tile 1"), (2u32, "Tab B tile 2")].iter().enumerate()
         {
-            let x = 50.0 + i as f32 * 480.0;
+            let x = self.display_width * 0.05 + i as f32 * (tab_b_tile_w + self.display_width * 0.05);
             let tile = graph
                 .create_tile(
                     tab_b,
                     "agent.tabB",
                     lease_b,
-                    Rect::new(x, 100.0, 440.0, 300.0),
+                    Rect::new(x, tab_b_tile_y, tab_b_tile_w, tab_b_tile_h),
                     *z,
                 )
                 .expect("create_tile failed");
@@ -645,7 +704,7 @@ impl TestSceneRegistry {
                         children: vec![],
                         data: NodeData::TextMarkdown(TextMarkdownNode {
                             content: label.to_string(),
-                            bounds: Rect::new(0.0, 0.0, 440.0, 300.0),
+                            bounds: Rect::new(0.0, 0.0, tab_b_tile_w, tab_b_tile_h),
                             font_size_px: 16.0,
                             font_family: FontFamily::SystemSansSerif,
                             color: Rgba::WHITE,
@@ -833,13 +892,19 @@ impl TestSceneRegistry {
             )
             .expect("create_sync_group failed");
 
-        // Tile A — left panel, present_at = clock
+        // Tile A — left panel (45% wide), present_at = clock
+        // Tile B — right panel (45% wide), present_at = clock + 100ms
+        // Both tiles are display-relative so they fit within any reasonable resolution.
+        let pad = 20.0_f32.min(self.display_width * 0.025);
+        let sync_tile_w = (self.display_width - pad * 3.0) / 2.0;
+        let sync_tile_h = self.display_height - pad * 2.0;
+
         let tile_a = graph
             .create_tile(
                 tab_id,
                 "agent.sync",
                 lease_id,
-                Rect::new(20.0, 20.0, 880.0, 600.0),
+                Rect::new(pad, pad, sync_tile_w, sync_tile_h),
                 1,
             )
             .expect("create_tile failed");
@@ -851,7 +916,7 @@ impl TestSceneRegistry {
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.2, 0.4, 0.7, 1.0),
-                        bounds: Rect::new(0.0, 0.0, 880.0, 600.0),
+                        bounds: Rect::new(0.0, 0.0, sync_tile_w, sync_tile_h),
                     }),
                 },
             )
@@ -859,12 +924,13 @@ impl TestSceneRegistry {
         graph.tiles.get_mut(&tile_a).expect("tile_a missing").present_at = Some(clock.0);
 
         // Tile B — right panel, staggered present_at (100ms later)
+        let tile_b_x = pad * 2.0 + sync_tile_w;
         let tile_b = graph
             .create_tile(
                 tab_id,
                 "agent.sync",
                 lease_id,
-                Rect::new(920.0, 20.0, 980.0, 600.0),
+                Rect::new(tile_b_x, pad, sync_tile_w, sync_tile_h),
                 2,
             )
             .expect("create_tile failed");
@@ -876,7 +942,7 @@ impl TestSceneRegistry {
                     children: vec![],
                     data: NodeData::SolidColor(SolidColorNode {
                         color: Rgba::new(0.7, 0.4, 0.2, 1.0),
-                        bounds: Rect::new(0.0, 0.0, 980.0, 600.0),
+                        bounds: Rect::new(0.0, 0.0, sync_tile_w, sync_tile_h),
                     }),
                 },
             )
@@ -1116,11 +1182,31 @@ impl TestSceneRegistry {
             })
             .collect();
 
-        // Each agent places a tile that partially overlaps the others
+        // Each agent places a tile that partially overlaps the others.
+        // Tiles are display-relative and stay within bounds at any resolution.
+        // tile_w = 55% of display; tile_h = 55% of display.
+        // Offsets: 10%×16%, 20%×25%, 30%×33% — all right/bottom edges within display.
+        let contention_tile_w = self.display_width * 0.55;
+        let contention_tile_h = self.display_height * 0.55;
         let positions = [
-            Rect::new(100.0, 100.0, 700.0, 500.0),
-            Rect::new(300.0, 200.0, 700.0, 500.0),
-            Rect::new(500.0, 300.0, 700.0, 500.0),
+            Rect::new(
+                self.display_width * 0.10,
+                self.display_height * 0.16,
+                contention_tile_w,
+                contention_tile_h,
+            ),
+            Rect::new(
+                self.display_width * 0.20,
+                self.display_height * 0.25,
+                contention_tile_w,
+                contention_tile_h,
+            ),
+            Rect::new(
+                self.display_width * 0.30,
+                self.display_height * 0.33,
+                contention_tile_w,
+                contention_tile_h,
+            ),
         ];
         let colors = [
             Rgba::new(0.8, 0.2, 0.2, 1.0),
@@ -1337,8 +1423,15 @@ impl TestSceneRegistry {
             vec![Capability::CreateTile, Capability::UpdateTile],
         );
 
+        // Layout: left third (agent.one × 2 tiles) | middle third (agent.two) | right third (agent.three)
+        // All coordinates are display-relative so the scene works at any resolution.
+        let third_w = (self.display_width - 30.0) / 3.0;
+        let pad = 10.0_f32;
+        let top_h = self.display_height * 0.77;
+        let bot_h = self.display_height - top_h - pad * 3.0;
+
         // Agent One: two tiles on the left third of the screen
-        let one_bounds_a = Rect::new(10.0, 10.0, 600.0, 500.0);
+        let one_bounds_a = Rect::new(pad, pad, third_w, top_h);
         let tile_one_a = graph
             .create_tile(tab_id, "agent.one", lease_one, one_bounds_a, 1)
             .expect("create_tile agent.one tile_a failed");
@@ -1356,7 +1449,7 @@ impl TestSceneRegistry {
             )
             .expect("set_tile_root agent.one tile_a failed");
 
-        let one_bounds_b = Rect::new(10.0, 520.0, 600.0, 200.0);
+        let one_bounds_b = Rect::new(pad, top_h + pad * 2.0, third_w, bot_h);
         let tile_one_b = graph
             .create_tile(tab_id, "agent.one", lease_one, one_bounds_b, 2)
             .expect("create_tile agent.one tile_b failed");
@@ -1381,7 +1474,9 @@ impl TestSceneRegistry {
             .expect("set_tile_root agent.one tile_b failed");
 
         // Agent Two: one tile in the middle third
-        let two_bounds = Rect::new(660.0, 10.0, 580.0, 700.0);
+        let two_x = pad * 2.0 + third_w;
+        let two_h = self.display_height - pad * 2.0;
+        let two_bounds = Rect::new(two_x, pad, third_w, two_h);
         let tile_two = graph
             .create_tile(tab_id, "agent.two", lease_two, two_bounds, 3)
             .expect("create_tile agent.two failed");
@@ -1400,7 +1495,9 @@ impl TestSceneRegistry {
             .expect("set_tile_root agent.two failed");
 
         // Agent Three: one tile on the right third
-        let three_bounds = Rect::new(1290.0, 10.0, 580.0, 700.0);
+        let three_x = pad * 3.0 + third_w * 2.0;
+        let three_w = self.display_width - three_x - pad;
+        let three_bounds = Rect::new(three_x, pad, three_w, two_h);
         let tile_three = graph
             .create_tile(tab_id, "agent.three", lease_three, three_bounds, 4)
             .expect("create_tile agent.three failed");
@@ -1455,13 +1552,17 @@ impl TestSceneRegistry {
             vec![Capability::CreateTile, Capability::CreateNode],
         );
 
+        // Two tiles side-by-side (left: public, right: sensitive).
+        // Widths are display-relative (each ~49.5%) to fit at any resolution.
+        let half_w = self.display_width / 2.0 - 1.0;
+
         // Public tile — safe to display to any viewer class
         let public_tile = graph
             .create_tile(
                 tab_id,
                 "agent.privacy",
                 lease_id,
-                Rect::new(0.0, 0.0, 960.0, self.display_height),
+                Rect::new(0.0, 0.0, half_w, self.display_height),
                 1,
             )
             .expect("create_tile failed");
@@ -1473,7 +1574,7 @@ impl TestSceneRegistry {
                     children: vec![],
                     data: NodeData::TextMarkdown(TextMarkdownNode {
                         content: "**PUBLIC CONTENT**\n\nVisible to all viewer classes.".to_string(),
-                        bounds: Rect::new(0.0, 0.0, 960.0, self.display_height),
+                        bounds: Rect::new(0.0, 0.0, half_w, self.display_height),
                         font_size_px: 16.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::WHITE,
@@ -1487,12 +1588,14 @@ impl TestSceneRegistry {
 
         // Sensitive tile — must be redacted for untrusted viewers
         // (VisibilityClassification=SENSITIVE triggers Level 2 Privacy Evaluation)
+        let sensitive_x = half_w + 1.0;
+        let sensitive_w = self.display_width - sensitive_x;
         let sensitive_tile = graph
             .create_tile(
                 tab_id,
                 "agent.privacy",
                 lease_id,
-                Rect::new(980.0, 0.0, 940.0, self.display_height),
+                Rect::new(sensitive_x, 0.0, sensitive_w, self.display_height),
                 2,
             )
             .expect("create_tile failed");
@@ -1506,7 +1609,7 @@ impl TestSceneRegistry {
                         content: "**[SENSITIVE]**\n\nMust be redacted for UNTRUSTED viewers. \
                                   Visible only to TRUSTED ViewerClass."
                             .to_string(),
-                        bounds: Rect::new(0.0, 0.0, 940.0, self.display_height),
+                        bounds: Rect::new(0.0, 0.0, sensitive_w, self.display_height),
                         font_size_px: 16.0,
                         font_family: FontFamily::SystemSansSerif,
                         color: Rgba::new(1.0, 0.8, 0.0, 1.0),
@@ -4212,5 +4315,51 @@ mod tests {
         let violations = check_hit_region_state_consistency(&graph);
         assert!(!violations.is_empty(), "expected missing_hit_region_state violation");
         assert_eq!(violations[0].code, "missing_hit_region_state");
+    }
+
+    // ── 800×600 display regression tests (pixel readback resolution) ──────────
+    //
+    // These tests guard against BoundsOutOfRange panics when scenes are built
+    // at the 800×600 resolution used by the pixel readback tests in
+    // `examples/vertical_slice/tests/budget_assertions.rs` and
+    // `crates/tze_hud_runtime/tests/pixel_readback.rs`.
+    //
+    // Previously several scene builders used hardcoded 1920×1080 coordinates
+    // that exceeded the 800×600 display bounds.
+
+    #[test]
+    fn all_scenes_build_at_800x600() {
+        let registry = TestSceneRegistry::with_display(800.0, 600.0);
+        for name in TestSceneRegistry::scene_names() {
+            let result = registry.build(name, ClockMs::FIXED);
+            assert!(
+                result.is_some(),
+                "scene '{}' must build at 800×600 display",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn all_scenes_tiles_within_bounds_at_800x600() {
+        let registry = TestSceneRegistry::with_display(800.0, 600.0);
+        for name in TestSceneRegistry::scene_names() {
+            let (graph, _spec) = registry
+                .build(name, ClockMs::FIXED)
+                .unwrap_or_else(|| panic!("scene '{}' must build", name));
+            let out_of_bounds: Vec<_> = graph
+                .tiles
+                .values()
+                .filter(|t| !t.bounds.is_within(&graph.display_area))
+                .map(|t| format!("{:?}", t.bounds))
+                .collect();
+            assert!(
+                out_of_bounds.is_empty(),
+                "scene '{}' at 800×600: {} tile(s) outside display area: {:?}",
+                name,
+                out_of_bounds.len(),
+                out_of_bounds
+            );
+        }
     }
 }
