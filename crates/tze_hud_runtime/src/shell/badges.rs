@@ -368,7 +368,12 @@ mod tests {
     use super::*;
 
     fn tile(x: f32, y: f32, w: f32, h: f32) -> Rect {
-        Rect { x, y, width: w, height: h }
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     fn scene_id() -> SceneId {
@@ -387,13 +392,19 @@ mod tests {
 
     #[test]
     fn tile_badge_state_disconnected_has_badge() {
-        let s = TileBadgeState { disconnected: true, budget_warning: false };
+        let s = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
         assert!(s.has_any_badge());
     }
 
     #[test]
     fn tile_badge_state_budget_warning_has_badge() {
-        let s = TileBadgeState { disconnected: false, budget_warning: true };
+        let s = TileBadgeState {
+            disconnected: false,
+            budget_warning: true,
+        };
         assert!(s.has_any_badge());
     }
 
@@ -404,31 +415,52 @@ mod tests {
         let bounds = tile(0.0, 0.0, 200.0, 150.0);
         let state = TileBadgeState::default();
         let cmds = build_badge_cmds(bounds, &state);
-        assert!(cmds.is_empty(), "expected no commands when no badges active");
+        assert!(
+            cmds.is_empty(),
+            "expected no commands when no badges active"
+        );
     }
 
     #[test]
     fn no_cmds_for_zero_width_tile() {
         let bounds = tile(0.0, 0.0, 0.0, 150.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: true };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: true,
+        };
         let cmds = build_badge_cmds(bounds, &state);
-        assert!(cmds.is_empty(), "degenerate zero-width tile must produce no commands");
+        assert!(
+            cmds.is_empty(),
+            "degenerate zero-width tile must produce no commands"
+        );
     }
 
     #[test]
     fn no_cmds_for_zero_height_tile() {
         let bounds = tile(0.0, 0.0, 200.0, 0.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: true };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: true,
+        };
         let cmds = build_badge_cmds(bounds, &state);
-        assert!(cmds.is_empty(), "degenerate zero-height tile must produce no commands");
+        assert!(
+            cmds.is_empty(),
+            "degenerate zero-height tile must produce no commands"
+        );
     }
 
     #[test]
     fn no_cmds_for_negative_size_tile() {
         let bounds = tile(100.0, 100.0, -10.0, -10.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: false };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
         let cmds = build_badge_cmds(bounds, &state);
-        assert!(cmds.is_empty(), "negative-size tile must produce no commands");
+        assert!(
+            cmds.is_empty(),
+            "negative-size tile must produce no commands"
+        );
     }
 
     // ── Scenario: Disconnection badge appears (spec line 176) ─────────────
@@ -439,11 +471,17 @@ mod tests {
     #[test]
     fn spec_disconnection_badge_appears_on_disconnect() {
         let bounds = tile(10.0, 20.0, 300.0, 200.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: false };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
         let cmds = build_badge_cmds(bounds, &state);
 
         // Must produce at least a scrim rect covering full tile bounds.
-        assert!(!cmds.is_empty(), "disconnection badge must produce draw commands");
+        assert!(
+            !cmds.is_empty(),
+            "disconnection badge must produce draw commands"
+        );
 
         // The first command must be the content scrim covering the full tile.
         let scrim = &cmds[0];
@@ -451,15 +489,18 @@ mod tests {
         assert_eq!(scrim.y, bounds.y);
         assert_eq!(scrim.width, bounds.width);
         assert_eq!(scrim.height, bounds.height);
-        assert_eq!(scrim.color, DISCONNECTION_CONTENT_SCRIM_COLOR,
-            "first command must be the content scrim");
+        assert_eq!(
+            scrim.color, DISCONNECTION_CONTENT_SCRIM_COLOR,
+            "first command must be the content scrim"
+        );
     }
 
     #[test]
     fn disconnection_badge_scrim_alpha_reflects_opacity() {
         // The scrim alpha must equal 1.0 - DISCONNECTED_CONTENT_OPACITY = 0.30.
         assert!(
-            (DISCONNECTION_CONTENT_SCRIM_COLOR[3] - (1.0 - DISCONNECTED_CONTENT_OPACITY)).abs() < 1e-4,
+            (DISCONNECTION_CONTENT_SCRIM_COLOR[3] - (1.0 - DISCONNECTED_CONTENT_OPACITY)).abs()
+                < 1e-4,
             "scrim alpha must equal 1 - DISCONNECTED_CONTENT_OPACITY"
         );
     }
@@ -468,13 +509,19 @@ mod tests {
     fn disconnection_badge_icon_has_correct_opacity() {
         // All icon/badge colors must use DISCONNECTED_BADGE_OPACITY as alpha.
         assert_eq!(DISCONNECTION_BADGE_BG_COLOR[3], DISCONNECTED_BADGE_OPACITY);
-        assert_eq!(DISCONNECTION_BADGE_ICON_COLOR[3], DISCONNECTED_BADGE_OPACITY);
+        assert_eq!(
+            DISCONNECTION_BADGE_ICON_COLOR[3],
+            DISCONNECTED_BADGE_OPACITY
+        );
     }
 
     #[test]
     fn disconnection_badge_produces_badge_bg_and_icon_rects() {
         let bounds = tile(0.0, 0.0, 300.0, 200.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: false };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
         let cmds = build_badge_cmds(bounds, &state);
 
         // scrim + badge_bg + icon = 3 rects minimum.
@@ -495,7 +542,10 @@ mod tests {
     fn disconnection_badge_stays_within_tile_bounds() {
         // Small tile: badge should be clamped.
         let bounds = tile(0.0, 0.0, 20.0, 20.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: false };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
         let cmds = build_badge_cmds(bounds, &state);
 
         for cmd in &cmds {
@@ -526,11 +576,17 @@ mod tests {
         let bounds = tile(0.0, 0.0, 300.0, 200.0);
 
         // Disconnected → badge present.
-        let disconnected = TileBadgeState { disconnected: true, budget_warning: false };
+        let disconnected = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
         assert!(!build_badge_cmds(bounds, &disconnected).is_empty());
 
         // Reconnected (badge cleared) → no commands.
-        let reconnected = TileBadgeState { disconnected: false, budget_warning: false };
+        let reconnected = TileBadgeState {
+            disconnected: false,
+            budget_warning: false,
+        };
         assert!(
             build_badge_cmds(bounds, &reconnected).is_empty(),
             "disconnection badge must clear when disconnected=false"
@@ -545,11 +601,18 @@ mod tests {
     #[test]
     fn spec_budget_warning_badge_appears_at_80_percent() {
         let bounds = tile(10.0, 20.0, 400.0, 300.0);
-        let state = TileBadgeState { disconnected: false, budget_warning: true };
+        let state = TileBadgeState {
+            disconnected: false,
+            budget_warning: true,
+        };
         let cmds = build_badge_cmds(bounds, &state);
 
         // Must produce exactly 4 border rects.
-        assert_eq!(cmds.len(), 4, "budget warning badge must produce 4 border rects");
+        assert_eq!(
+            cmds.len(),
+            4,
+            "budget warning badge must produce 4 border rects"
+        );
 
         // All rects must use amber color.
         for cmd in &cmds {
@@ -563,30 +626,49 @@ mod tests {
     #[test]
     fn budget_warning_border_width_is_2px() {
         let bounds = tile(0.0, 0.0, 400.0, 300.0);
-        let state = TileBadgeState { disconnected: false, budget_warning: true };
+        let state = TileBadgeState {
+            disconnected: false,
+            budget_warning: true,
+        };
         let cmds = build_badge_cmds(bounds, &state);
 
         // Top edge: full width, 2px height at top.
-        assert_eq!(cmds[0].height, BUDGET_WARNING_BORDER_PX,
-            "top border height must be 2px");
-        assert_eq!(cmds[0].width, bounds.width,
-            "top border must span full tile width");
+        assert_eq!(
+            cmds[0].height, BUDGET_WARNING_BORDER_PX,
+            "top border height must be 2px"
+        );
+        assert_eq!(
+            cmds[0].width, bounds.width,
+            "top border must span full tile width"
+        );
 
         // Bottom edge: full width, 2px height at bottom.
-        assert_eq!(cmds[1].height, BUDGET_WARNING_BORDER_PX,
-            "bottom border height must be 2px");
-        assert_eq!(cmds[1].y, bounds.y + bounds.height - BUDGET_WARNING_BORDER_PX,
-            "bottom border must be at tile bottom");
+        assert_eq!(
+            cmds[1].height, BUDGET_WARNING_BORDER_PX,
+            "bottom border height must be 2px"
+        );
+        assert_eq!(
+            cmds[1].y,
+            bounds.y + bounds.height - BUDGET_WARNING_BORDER_PX,
+            "bottom border must be at tile bottom"
+        );
 
         // Left edge: 2px width.
-        assert_eq!(cmds[2].width, BUDGET_WARNING_BORDER_PX,
-            "left border width must be 2px");
+        assert_eq!(
+            cmds[2].width, BUDGET_WARNING_BORDER_PX,
+            "left border width must be 2px"
+        );
 
         // Right edge: 2px width.
-        assert_eq!(cmds[3].width, BUDGET_WARNING_BORDER_PX,
-            "right border width must be 2px");
-        assert_eq!(cmds[3].x, bounds.x + bounds.width - BUDGET_WARNING_BORDER_PX,
-            "right border must be at tile right edge");
+        assert_eq!(
+            cmds[3].width, BUDGET_WARNING_BORDER_PX,
+            "right border width must be 2px"
+        );
+        assert_eq!(
+            cmds[3].x,
+            bounds.x + bounds.width - BUDGET_WARNING_BORDER_PX,
+            "right border must be at tile right edge"
+        );
     }
 
     #[test]
@@ -606,11 +688,17 @@ mod tests {
         let bounds = tile(0.0, 0.0, 300.0, 200.0);
 
         // Budget warning active.
-        let warning = TileBadgeState { disconnected: false, budget_warning: true };
+        let warning = TileBadgeState {
+            disconnected: false,
+            budget_warning: true,
+        };
         assert!(!build_badge_cmds(bounds, &warning).is_empty());
 
         // Budget drops below threshold — badge cleared.
-        let clear = TileBadgeState { disconnected: false, budget_warning: false };
+        let clear = TileBadgeState {
+            disconnected: false,
+            budget_warning: false,
+        };
         assert!(
             build_badge_cmds(bounds, &clear).is_empty(),
             "budget warning badge must clear when budget_warning=false"
@@ -622,7 +710,10 @@ mod tests {
     #[test]
     fn both_badges_combined_produce_correct_commands() {
         let bounds = tile(0.0, 0.0, 400.0, 300.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: true };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: true,
+        };
         let cmds = build_badge_cmds(bounds, &state);
 
         // Disconnection: scrim (1) + badge_bg (1) + icon (1) = 3.
@@ -638,8 +729,15 @@ mod tests {
         assert_eq!(cmds[0].color, DISCONNECTION_CONTENT_SCRIM_COLOR);
 
         // The 4 border rects for budget warning must all be amber.
-        let amber_cmds: Vec<_> = cmds.iter().filter(|c| c.color == BUDGET_WARNING_AMBER_COLOR).collect();
-        assert_eq!(amber_cmds.len(), 4, "must have exactly 4 amber border rects");
+        let amber_cmds: Vec<_> = cmds
+            .iter()
+            .filter(|c| c.color == BUDGET_WARNING_AMBER_COLOR)
+            .collect();
+        assert_eq!(
+            amber_cmds.len(),
+            4,
+            "must have exactly 4 amber border rects"
+        );
     }
 
     // ── BackpressureSignal ────────────────────────────────────────────────
@@ -679,7 +777,10 @@ mod tests {
         };
 
         if let BackpressureSignal::MutationDropped { batch_id: bid, .. } = signal {
-            assert_eq!(bid, batch_id, "MutationDropped must carry the batch_id of the evicted mutation");
+            assert_eq!(
+                bid, batch_id,
+                "MutationDropped must carry the batch_id of the evicted mutation"
+            );
         } else {
             panic!("expected MutationDropped variant");
         }
@@ -692,14 +793,20 @@ mod tests {
         let frame = BadgeFrame::build(&[]);
         let unknown = scene_id();
         let state = frame.badge_for(&unknown);
-        assert!(!state.has_any_badge(), "unknown tile must return no-badge state");
+        assert!(
+            !state.has_any_badge(),
+            "unknown tile must return no-badge state"
+        );
     }
 
     #[test]
     fn badge_frame_returns_correct_state_for_known_tile() {
         let id = scene_id();
-        let badge = TileBadgeState { disconnected: true, budget_warning: false };
-        let frame = BadgeFrame::build(&[(id.clone(), badge.clone())]);
+        let badge = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
+        let frame = BadgeFrame::build(&[(id, badge.clone())]);
 
         let result = frame.badge_for(&id);
         assert_eq!(result, badge);
@@ -723,26 +830,46 @@ mod tests {
     fn badge_cmds_are_bounded_in_count_disconnected_only() {
         // Disconnection badge produces at most 3 rects (scrim + bg + icon).
         let bounds = tile(0.0, 0.0, 1920.0, 1080.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: false };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: false,
+        };
         let cmds = build_badge_cmds(bounds, &state);
-        assert!(cmds.len() <= 3, "disconnection-only badge must produce ≤3 commands");
+        assert!(
+            cmds.len() <= 3,
+            "disconnection-only badge must produce ≤3 commands"
+        );
     }
 
     #[test]
     fn badge_cmds_are_bounded_in_count_budget_only() {
         // Budget warning badge produces exactly 4 rects (4 border edges).
         let bounds = tile(0.0, 0.0, 1920.0, 1080.0);
-        let state = TileBadgeState { disconnected: false, budget_warning: true };
+        let state = TileBadgeState {
+            disconnected: false,
+            budget_warning: true,
+        };
         let cmds = build_badge_cmds(bounds, &state);
-        assert_eq!(cmds.len(), 4, "budget-warning-only badge must produce exactly 4 commands");
+        assert_eq!(
+            cmds.len(),
+            4,
+            "budget-warning-only badge must produce exactly 4 commands"
+        );
     }
 
     #[test]
     fn badge_cmds_are_bounded_in_count_both_badges() {
         // Both badges: ≤3 + 4 = ≤7 rects.
         let bounds = tile(0.0, 0.0, 1920.0, 1080.0);
-        let state = TileBadgeState { disconnected: true, budget_warning: true };
+        let state = TileBadgeState {
+            disconnected: true,
+            budget_warning: true,
+        };
         let cmds = build_badge_cmds(bounds, &state);
-        assert!(cmds.len() <= 7, "both badges must produce ≤7 commands, got {}", cmds.len());
+        assert!(
+            cmds.len() <= 7,
+            "both badges must produce ≤7 commands, got {}",
+            cmds.len()
+        );
     }
 }

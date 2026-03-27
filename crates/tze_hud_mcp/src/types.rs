@@ -1,7 +1,7 @@
 //! JSON-RPC 2.0 wire types.
 
-use serde::{Deserialize, Serialize};
 use crate::error::JsonRpcError;
+use serde::{Deserialize, Serialize};
 
 /// JSON-RPC 2.0 request object.
 #[derive(Clone, Debug, Deserialize)]

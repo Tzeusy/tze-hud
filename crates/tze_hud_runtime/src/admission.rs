@@ -392,7 +392,7 @@ mod tests {
 
     fn admit_resident(controller: &mut AdmissionController, name: &str) -> AdmissionOutcome {
         controller.admit_resident_default(
-            format!("session-{}", name),
+            format!("session-{name}"),
             name.to_string(),
             SceneId::new(),
         )
@@ -436,8 +436,7 @@ mod tests {
     fn test_resident_limit_rejects_17th_session() {
         let mut c = AdmissionController::with_limits(SessionLimits::new(
             16, // max_resident = 16 (spec default)
-            64,
-            80,
+            64, 80,
         ));
 
         // Admit 16 resident sessions — all should succeed.
@@ -461,7 +460,7 @@ mod tests {
                     "should include a wait hint"
                 );
             }
-            other => panic!("expected ResourceExhausted, got {:?}", other),
+            other => panic!("expected ResourceExhausted, got {other:?}"),
         }
     }
 
@@ -565,7 +564,10 @@ mod tests {
         let snap = HotConnectSnapshot::new("{}".to_string(), 0);
         let now = Instant::now();
         // Snapshot was just captured — should be fresh up to any reasonable max_age.
-        assert!(snap.is_fresh(now, 1000), "snapshot should be fresh immediately");
+        assert!(
+            snap.is_fresh(now, 1000),
+            "snapshot should be fresh immediately"
+        );
     }
 
     #[test]
@@ -672,7 +674,10 @@ mod tests {
         };
         let json = detail.to_json_hint();
         // The hint must not break the JSON structure (no unescaped quotes or backslashes).
-        assert!(!json.contains(r#"wait "5s""#), "unescaped quote should not appear in JSON");
+        assert!(
+            !json.contains(r#"wait "5s""#),
+            "unescaped quote should not appear in JSON"
+        );
         assert!(json.contains(r#"wait \"5s\""#), "quote should be escaped");
     }
 }

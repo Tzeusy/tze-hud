@@ -60,7 +60,8 @@ mod tests {
         let s = format!("{id}");
         assert_eq!(s.len(), 64, "Display output must be 64 chars");
         assert!(
-            s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            s.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "Display output must be lowercase hex only; got: {s}"
         );
     }
@@ -77,12 +78,16 @@ mod tests {
             "Debug output must start with 'ResourceId('; got: {s}"
         );
         // Extract the hex part.
-        let inner = s
-            .trim_start_matches("ResourceId(")
-            .trim_end_matches(')');
-        assert_eq!(inner.len(), 64, "hex portion must be 64 chars; got: {inner}");
+        let inner = s.trim_start_matches("ResourceId(").trim_end_matches(')');
+        assert_eq!(
+            inner.len(),
+            64,
+            "hex portion must be 64 chars; got: {inner}"
+        );
         assert!(
-            inner.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            inner
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "hex portion must be lowercase only; got: {inner}"
         );
     }
@@ -122,8 +127,7 @@ mod tests {
             .collect();
         assert!(
             invalid_chars.is_empty(),
-            "ResourceId hex contains invalid characters: {:?}; full: {s}",
-            invalid_chars
+            "ResourceId hex contains invalid characters: {invalid_chars:?}; full: {s}"
         );
     }
 
@@ -140,7 +144,11 @@ mod tests {
         // Edge case: all-0xff ResourceId should display as 64 'f' characters.
         let id = ResourceId::from_bytes([0xffu8; 32]);
         let s = id.to_hex();
-        assert_eq!(s, "f".repeat(64), "all-0xff ResourceId should be 64 'f' chars");
+        assert_eq!(
+            s,
+            "f".repeat(64),
+            "all-0xff ResourceId should be 64 'f' chars"
+        );
     }
 
     #[test]

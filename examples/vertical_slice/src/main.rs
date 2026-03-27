@@ -64,16 +64,16 @@
 //! Run windowed (production config via env vars or defaults):
 //!   cargo run -p vertical_slice
 
+use tze_hud_protocol::proto::session as session_proto;
 #[allow(deprecated)]
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
-use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
-use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
 use tze_hud_runtime::window::{WindowConfig, WindowMode};
+use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
 
-use tze_hud_scene::types::*;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
+use tze_hud_scene::types::*;
 
 /// Embedded production config — parsed at runtime so capability governance is
 /// always active by default.  The file lives at `config/production.toml`
@@ -135,7 +135,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(600);
 
-    println!("Window mode: {mode}, size: {}x{}", width, height);
+    println!("Window mode: {mode}, size: {width}x{height}");
 
     let config = WindowedConfig {
         window: WindowConfig {
@@ -226,8 +226,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // ─────────────────────────────────────────────────────────────────────────
     println!("=== Phase 1: Session Handshake + Lease Acquisition ===\n");
 
-    let mut session_client =
-        HudSessionClient::connect("http://[::1]:50051").await?;
+    let mut session_client = HudSessionClient::connect("http://[::1]:50051").await?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -258,19 +257,19 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 // CONFIG_UNKNOWN_CAPABILITY error and a hint pointing to the canonical
                 // replacement (see the structured error handling demo below).
                 requested_capabilities: vec![
-                    "create_tiles".to_string(),          // create tiles in leased area
-                    "modify_own_tiles".to_string(),      // mutate tiles owned by this agent
-                    "access_input_events".to_string(),   // receive pointer / keyboard events
-                    "read_scene_topology".to_string(),   // required to subscribe SCENE_TOPOLOGY
+                    "create_tiles".to_string(),            // create tiles in leased area
+                    "modify_own_tiles".to_string(),        // mutate tiles owned by this agent
+                    "access_input_events".to_string(),     // receive pointer / keyboard events
+                    "read_scene_topology".to_string(),     // required to subscribe SCENE_TOPOLOGY
                     "publish_zone:status-bar".to_string(), // required to subscribe ZONE_EVENTS
                 ],
                 // LEASE_CHANGES is mandatory (always active). Listing it in
                 // initial_subscriptions is spec-compliant and demonstrates
                 // that agents should explicitly declare their intent.
                 initial_subscriptions: vec![
-                    "SCENE_TOPOLOGY".to_string(),  // requires read_scene_topology
-                    "LEASE_CHANGES".to_string(),   // mandatory: always active
-                    "ZONE_EVENTS".to_string(),     // requires publish_zone:<zone> capability
+                    "SCENE_TOPOLOGY".to_string(), // requires read_scene_topology
+                    "LEASE_CHANGES".to_string(),  // mandatory: always active
+                    "ZONE_EVENTS".to_string(),    // requires publish_zone:<zone> capability
                 ],
                 resume_token: Vec::new(),
                 agent_timestamp_wall_us: now_us,
@@ -301,25 +300,47 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         Some(session_proto::server_message::Payload::SessionEstablished(established)) => {
             println!("  Session established:");
             println!("    namespace             = {}", established.namespace);
-            println!("    heartbeat_ms          = {}", established.heartbeat_interval_ms);
-            println!("    granted_capabilities  = {:?}", established.granted_capabilities);
-            println!("    active_subscriptions  = {:?}", established.active_subscriptions);
-            println!("    clock_skew            = {}us", established.estimated_skew_us);
+            println!(
+                "    heartbeat_ms          = {}",
+                established.heartbeat_interval_ms
+            );
+            println!(
+                "    granted_capabilities  = {:?}",
+                established.granted_capabilities
+            );
+            println!(
+                "    active_subscriptions  = {:?}",
+                established.active_subscriptions
+            );
+            println!(
+                "    clock_skew            = {}us",
+                established.estimated_skew_us
+            );
 
             // Capability negotiation: verify the expected capabilities were granted.
             // In dev mode all requested caps are granted; with a restricted config
             // only the registered set would be granted and others would be absent.
             let granted = &established.granted_capabilities;
-            assert!(granted.contains(&"create_tiles".to_string()),
-                "create_tiles must be granted");
-            assert!(granted.contains(&"modify_own_tiles".to_string()),
-                "modify_own_tiles must be granted");
-            assert!(granted.contains(&"access_input_events".to_string()),
-                "access_input_events must be granted");
-            assert!(granted.contains(&"read_scene_topology".to_string()),
-                "read_scene_topology must be granted (needed for SCENE_TOPOLOGY subscription)");
-            assert!(granted.contains(&"publish_zone:status-bar".to_string()),
-                "publish_zone:status-bar must be granted (needed for ZONE_EVENTS subscription)");
+            assert!(
+                granted.contains(&"create_tiles".to_string()),
+                "create_tiles must be granted"
+            );
+            assert!(
+                granted.contains(&"modify_own_tiles".to_string()),
+                "modify_own_tiles must be granted"
+            );
+            assert!(
+                granted.contains(&"access_input_events".to_string()),
+                "access_input_events must be granted"
+            );
+            assert!(
+                granted.contains(&"read_scene_topology".to_string()),
+                "read_scene_topology must be granted (needed for SCENE_TOPOLOGY subscription)"
+            );
+            assert!(
+                granted.contains(&"publish_zone:status-bar".to_string()),
+                "publish_zone:status-bar must be granted (needed for ZONE_EVENTS subscription)"
+            );
             println!("  Capability negotiation: all 5 requested capabilities granted.");
 
             // Subscription negotiation:
@@ -327,13 +348,21 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             // - SCENE_TOPOLOGY: active because agent has read_scene_topology
             // - ZONE_EVENTS: active because agent has publish_zone:status-bar
             let subs = &established.active_subscriptions;
-            assert!(subs.contains(&"LEASE_CHANGES".to_string()),
-                "LEASE_CHANGES must be active (mandatory category)");
-            assert!(subs.contains(&"SCENE_TOPOLOGY".to_string()),
-                "SCENE_TOPOLOGY must be active (agent has read_scene_topology)");
-            assert!(subs.contains(&"ZONE_EVENTS".to_string()),
-                "ZONE_EVENTS must be active (agent has publish_zone:status-bar)");
-            println!("  Subscription negotiation: LEASE_CHANGES + SCENE_TOPOLOGY + ZONE_EVENTS active.");
+            assert!(
+                subs.contains(&"LEASE_CHANGES".to_string()),
+                "LEASE_CHANGES must be active (mandatory category)"
+            );
+            assert!(
+                subs.contains(&"SCENE_TOPOLOGY".to_string()),
+                "SCENE_TOPOLOGY must be active (agent has read_scene_topology)"
+            );
+            assert!(
+                subs.contains(&"ZONE_EVENTS".to_string()),
+                "ZONE_EVENTS must be active (agent has publish_zone:status-bar)"
+            );
+            println!(
+                "  Subscription negotiation: LEASE_CHANGES + SCENE_TOPOLOGY + ZONE_EVENTS active."
+            );
 
             established.namespace.clone()
         }
@@ -346,8 +375,12 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     let msg = response_stream.next().await.unwrap()?;
     match &msg.payload {
         Some(session_proto::server_message::Payload::SceneSnapshot(snapshot)) => {
-            println!("  Scene snapshot: sequence={}, json_len={}, checksum={}",
-                snapshot.sequence, snapshot.snapshot_json.len(), &snapshot.blake3_checksum[..8.min(snapshot.blake3_checksum.len())]);
+            println!(
+                "  Scene snapshot: sequence={}, json_len={}, checksum={}",
+                snapshot.sequence,
+                snapshot.snapshot_json.len(),
+                &snapshot.blake3_checksum[..8.min(snapshot.blake3_checksum.len())]
+            );
         }
         other => {
             return Err(format!("Expected SceneSnapshot, got: {other:?}").into());
@@ -383,7 +416,10 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     let msg = response_stream.next().await.unwrap()?;
     let _lease_id_bytes = match &msg.payload {
         Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
-            println!("  Lease granted: ttl={}ms, priority={}", resp.granted_ttl_ms, resp.granted_priority);
+            println!(
+                "  Lease granted: ttl={}ms, priority={}",
+                resp.granted_ttl_ms, resp.granted_priority
+            );
             resp.lease_id.clone()
         }
         Some(session_proto::server_message::Payload::LeaseResponse(resp)) => {
@@ -394,7 +430,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             return Err(format!(
                 "Lease denied: code={}, reason={}",
                 resp.deny_code, resp.deny_reason
-            ).into());
+            )
+            .into());
         }
         other => {
             return Err(format!("Expected LeaseResponse, got: {other:?}").into());
@@ -407,7 +444,9 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     match &msg.payload {
         Some(session_proto::server_message::Payload::LeaseStateChange(_)) => {}
         other => {
-            return Err(format!("Expected LeaseStateChange after lease grant, got: {other:?}").into());
+            return Err(
+                format!("Expected LeaseStateChange after lease grant, got: {other:?}").into(),
+            );
         }
     }
 
@@ -463,18 +502,24 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     {
         use tze_hud_protocol::auth::validate_canonical_capabilities;
         let result = validate_canonical_capabilities(&[
-            "create_tile".to_string(),    // legacy — rejected
-            "receive_input".to_string(),  // legacy — rejected
+            "create_tile".to_string(),   // legacy — rejected
+            "receive_input".to_string(), // legacy — rejected
         ]);
         let unknowns = result.expect_err("legacy names must be rejected");
         println!("  Capability denied (CONFIG_UNKNOWN_CAPABILITY):");
         for u in &unknowns {
             println!("    unknown={:?}  hint={:?}", u.unknown, u.hint);
         }
-        assert!(unknowns.iter().any(|u| u.hint.contains("create_tiles")),
-            "hint must point to create_tiles for legacy create_tile");
-        assert!(unknowns.iter().any(|u| u.hint.contains("access_input_events")),
-            "hint must point to access_input_events for legacy receive_input");
+        assert!(
+            unknowns.iter().any(|u| u.hint.contains("create_tiles")),
+            "hint must point to create_tiles for legacy create_tile"
+        );
+        assert!(
+            unknowns
+                .iter()
+                .any(|u| u.hint.contains("access_input_events")),
+            "hint must point to access_input_events for legacy receive_input"
+        );
         println!("  CONFIG_UNKNOWN_CAPABILITY validated: hints contain canonical replacements.");
     }
 
@@ -493,7 +538,12 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             vec![tze_hud_scene::types::Capability::CreateTiles],
         );
         // Shrink the budget to 2 tiles for demonstration purposes.
-        scene.leases.get_mut(&demo_lease).unwrap().resource_budget.max_tiles = 2;
+        scene
+            .leases
+            .get_mut(&demo_lease)
+            .unwrap()
+            .resource_budget
+            .max_tiles = 2;
 
         // First two tiles succeed via apply_batch (within budget).
         for i in 0..2u32 {
@@ -511,7 +561,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 lease_id: Some(demo_lease),
             };
             let result = scene.apply_batch(&batch);
-            assert!(result.applied, "tile {} within budget should succeed", i);
+            assert!(result.applied, "tile {i} within budget should succeed");
         }
 
         // Third tile exceeds budget — apply_batch returns a structured rejection.
@@ -529,12 +579,21 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             lease_id: Some(demo_lease),
         };
         let result = scene.apply_batch(&over_batch);
-        assert!(!result.applied, "third tile must be rejected (budget exceeded)");
-        let err_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            !result.applied,
+            "third tile must be rejected (budget exceeded)"
+        );
+        let err_msg = result
+            .error
+            .as_ref()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
         println!("  Budget exceeded (MUTATION_REJECTED):");
-        println!("    error: {}", err_msg);
-        assert!(err_msg.contains("tiles") || err_msg.contains("budget"),
-            "error must reference tile budget: {}", err_msg);
+        println!("    error: {err_msg}");
+        assert!(
+            err_msg.contains("tiles") || err_msg.contains("budget"),
+            "error must reference tile budget: {err_msg}"
+        );
 
         // Clean up the demo tab and lease.
         // Use delete_tab (public API) rather than tabs.remove: it removes tiles
@@ -544,7 +603,9 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         println!("  Budget enforcement validated: tile budget rejection confirmed.");
     }
 
-    println!("\n  Phase 1.5 PASSED: structured error handling validated (capability denied + budget exceeded).\n");
+    println!(
+        "\n  Phase 1.5 PASSED: structured error handling validated (capability denied + budget exceeded).\n"
+    );
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 2: Scene Setup — tab, tiles, zone publish
@@ -557,19 +618,23 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         let state = runtime.shared_state().lock().await;
         let mut scene = state.scene.lock().await;
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        println!("  Tab created: id={}", tab_id);
+        println!("  Tab created: id={tab_id}");
 
         // Register the default zones
         scene.zone_registry = ZoneRegistry::with_defaults();
         let zone_count = scene.zone_registry.all_zones().len();
-        println!("  Registered {} default zones (status-bar, notification-area, subtitle)", zone_count);
+        println!(
+            "  Registered {zone_count} default zones (status-bar, notification-area, subtitle)"
+        );
 
         // We already have a lease from Phase 1 -- find it by namespace
-        let lease_id = scene.leases.values()
+        let lease_id = scene
+            .leases
+            .values()
             .find(|l| l.namespace == namespace && l.is_active())
             .map(|l| l.id)
             .expect("should have an active lease from Phase 1");
-        println!("  Using lease: {}", lease_id);
+        println!("  Using lease: {lease_id}");
 
         (tab_id, lease_id)
     };
@@ -578,33 +643,37 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     let _text_tile_id = {
         let state = runtime.shared_state().lock().await;
         let mut scene = state.scene.lock().await;
-        let tile_id = scene.create_tile(
-            tab_id,
-            &namespace,
-            lease_id,
-            Rect::new(50.0, 50.0, 350.0, 250.0),
-            1,
-        ).unwrap();
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                &namespace,
+                lease_id,
+                Rect::new(50.0, 50.0, 350.0, 250.0),
+                1,
+            )
+            .unwrap();
 
-        scene.set_tile_root(
-            tile_id,
-            Node {
-                id: SceneId::new(),
-                children: vec![],
-                data: NodeData::TextMarkdown(TextMarkdownNode {
-                    content: "Hello, tze_hud! Status display tile.".to_string(),
-                    bounds: Rect::new(0.0, 0.0, 350.0, 250.0),
-                    font_size_px: 24.0,
-                    font_family: FontFamily::SystemSansSerif,
-                    color: Rgba::WHITE,
-                    background: Some(Rgba::new(0.1, 0.15, 0.3, 1.0)),
-                    alignment: TextAlign::Start,
-                    overflow: TextOverflow::Clip,
-                }),
-            },
-        ).unwrap();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::TextMarkdown(TextMarkdownNode {
+                        content: "Hello, tze_hud! Status display tile.".to_string(),
+                        bounds: Rect::new(0.0, 0.0, 350.0, 250.0),
+                        font_size_px: 24.0,
+                        font_family: FontFamily::SystemSansSerif,
+                        color: Rgba::WHITE,
+                        background: Some(Rgba::new(0.1, 0.15, 0.3, 1.0)),
+                        alignment: TextAlign::Start,
+                        overflow: TextOverflow::Clip,
+                    }),
+                },
+            )
+            .unwrap();
 
-        println!("  Text tile created: id={}", tile_id);
+        println!("  Text tile created: id={tile_id}");
         tile_id
     };
 
@@ -612,31 +681,35 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     let (_hit_tile_id, _hr_node_id) = {
         let state = runtime.shared_state().lock().await;
         let mut scene = state.scene.lock().await;
-        let tile_id = scene.create_tile(
-            tab_id,
-            &namespace,
-            lease_id,
-            Rect::new(450.0, 50.0, 300.0, 250.0),
-            2,
-        ).unwrap();
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                &namespace,
+                lease_id,
+                Rect::new(450.0, 50.0, 300.0, 250.0),
+                2,
+            )
+            .unwrap();
 
         let node_id = SceneId::new();
-        scene.set_tile_root(
-            tile_id,
-            Node {
-                id: node_id,
-                children: vec![],
-                data: NodeData::HitRegion(HitRegionNode {
-                    bounds: Rect::new(25.0, 25.0, 250.0, 200.0),
-                    interaction_id: "demo-button".to_string(),
-                    accepts_focus: true,
-                    accepts_pointer: true,
-                    ..Default::default()
-                }),
-            },
-        ).unwrap();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(25.0, 25.0, 250.0, 200.0),
+                        interaction_id: "demo-button".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
 
-        println!("  Hit region tile created: id={}, node={}", tile_id, node_id);
+        println!("  Hit region tile created: id={tile_id}, node={node_id}");
         (tile_id, node_id)
     };
 
@@ -664,19 +737,24 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         entries.insert("agent".to_string(), "vertical-slice-agent".to_string());
         entries.insert("status".to_string(), "running".to_string());
 
-        scene.publish_to_zone(
-            "status-bar",
-            ZoneContent::StatusBar(StatusBarPayload { entries }),
-            &namespace,
-            Some("agent-status".to_string()), // merge_key: subsequent publishes with same key replace this one
-            None,                              // no expiry
-            None,                              // no content classification
-        ).unwrap();
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload { entries }),
+                &namespace,
+                Some("agent-status".to_string()), // merge_key: subsequent publishes with same key replace this one
+                None,                             // no expiry
+                None,                             // no content classification
+            )
+            .unwrap();
         println!("  Published to status-bar zone (MergeByKey, key=agent-status)");
 
         // Verify the publish is active — confirms zone routing is working.
         let active = scene.zone_registry.active_for_zone("status-bar");
-        assert!(!active.is_empty(), "status-bar should have active publishes");
+        assert!(
+            !active.is_empty(),
+            "status-bar should have active publishes"
+        );
         println!("  status-bar active publishes: {}", active.len());
     }
 
@@ -684,18 +762,20 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     {
         let state = runtime.shared_state().lock().await;
         let mut scene = state.scene.lock().await;
-        scene.publish_to_zone(
-            "notification-area",
-            ZoneContent::Notification(NotificationPayload {
-                text: "Vertical slice started".to_string(),
-                icon: "info".to_string(),
-                urgency: 1,
-            }),
-            &namespace,
-            None, // no merge key — stacks alongside other notifications
-            None,
-            None,
-        ).unwrap();
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Vertical slice started".to_string(),
+                    icon: "info".to_string(),
+                    urgency: 1,
+                }),
+                &namespace,
+                None, // no merge key — stacks alongside other notifications
+                None,
+                None,
+            )
+            .unwrap();
         println!("  Published notification to notification-area zone");
     }
 
@@ -705,12 +785,14 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         let scene = state.scene.lock().await;
         assert_eq!(scene.tiles.len(), 2, "expected 2 tiles");
         assert_eq!(scene.tabs.len(), 1, "expected 1 tab");
-        let active_leases: usize = scene.leases.values()
-            .filter(|l| l.is_active())
-            .count();
+        let active_leases: usize = scene.leases.values().filter(|l| l.is_active()).count();
         assert!(active_leases >= 1, "expected at least 1 active lease");
-        println!("  Scene verified: {} tabs, {} tiles, {} active leases",
-            scene.tabs.len(), scene.tiles.len(), active_leases);
+        println!(
+            "  Scene verified: {} tabs, {} tiles, {} active leases",
+            scene.tabs.len(),
+            scene.tiles.len(),
+            active_leases
+        );
     }
 
     println!("\n  Phase 2 PASSED: scene populated with tab, tiles, and zone content.\n");
@@ -733,7 +815,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
     assert!(
@@ -741,9 +823,15 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         "hover should hit the tile"
     );
     assert_eq!(hover_result.interaction_id, Some("demo-button".to_string()));
-    assert!(hover_result.dispatch.is_some(), "should dispatch PointerEnter");
+    assert!(
+        hover_result.dispatch.is_some(),
+        "should dispatch PointerEnter"
+    );
     let dispatch = hover_result.dispatch.as_ref().unwrap();
-    assert_eq!(dispatch.kind, tze_hud_input::AgentDispatchKind::PointerEnter);
+    assert_eq!(
+        dispatch.kind,
+        tze_hud_input::AgentDispatchKind::PointerEnter
+    );
     assert_eq!(dispatch.interaction_id, "demo-button");
     println!("  Hover: hit=NodeHit, interaction_id=demo-button, dispatch=PointerEnter");
 
@@ -760,15 +848,19 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
     assert!(move_result.dispatch.is_some());
-    assert_eq!(move_result.dispatch.as_ref().unwrap().kind,
-        tze_hud_input::AgentDispatchKind::PointerMove);
-    println!("  Move: dispatch=PointerMove, local_coords=({:.1},{:.1})",
+    assert_eq!(
+        move_result.dispatch.as_ref().unwrap().kind,
+        tze_hud_input::AgentDispatchKind::PointerMove
+    );
+    println!(
+        "  Move: dispatch=PointerMove, local_coords=({:.1},{:.1})",
         move_result.dispatch.as_ref().unwrap().local_x,
-        move_result.dispatch.as_ref().unwrap().local_y);
+        move_result.dispatch.as_ref().unwrap().local_y
+    );
 
     // Press on hit region
     let press_result = {
@@ -783,14 +875,18 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
     assert!(press_result.dispatch.is_some());
-    assert_eq!(press_result.dispatch.as_ref().unwrap().kind,
-        tze_hud_input::AgentDispatchKind::PointerDown);
-    println!("  Press: local_ack={}us, hit_test={}us, dispatch=PointerDown",
-        press_result.local_ack_us, press_result.hit_test_us);
+    assert_eq!(
+        press_result.dispatch.as_ref().unwrap().kind,
+        tze_hud_input::AgentDispatchKind::PointerDown
+    );
+    println!(
+        "  Press: local_ack={}us, hit_test={}us, dispatch=PointerDown",
+        press_result.local_ack_us, press_result.hit_test_us
+    );
 
     // Verify local ack is within 4ms budget
     assert!(
@@ -798,7 +894,10 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         "local_ack_us={}us exceeds 4ms budget",
         press_result.local_ack_us
     );
-    println!("  Budget check: local_ack={}us < 4000us PASSED", press_result.local_ack_us);
+    println!(
+        "  Budget check: local_ack={}us < 4000us PASSED",
+        press_result.local_ack_us
+    );
 
     // Release (activate)
     let release_result = {
@@ -813,19 +912,35 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
-    assert!(release_result.activated, "press+release on same node should activate");
+    assert!(
+        release_result.activated,
+        "press+release on same node should activate"
+    );
     assert!(release_result.dispatch.is_some());
-    assert_eq!(release_result.dispatch.as_ref().unwrap().kind,
-        tze_hud_input::AgentDispatchKind::Activated);
-    assert_eq!(release_result.dispatch.as_ref().unwrap().interaction_id, "demo-button");
+    assert_eq!(
+        release_result.dispatch.as_ref().unwrap().kind,
+        tze_hud_input::AgentDispatchKind::Activated
+    );
+    assert_eq!(
+        release_result.dispatch.as_ref().unwrap().interaction_id,
+        "demo-button"
+    );
     println!("  Release: activated=true, dispatch=Activated(demo-button)");
 
     // Record latencies
-    runtime.telemetry.summary_mut().input_to_local_ack.record(press_result.local_ack_us);
-    runtime.telemetry.summary_mut().hit_test_latency.record(press_result.hit_test_us);
+    runtime
+        .telemetry
+        .summary_mut()
+        .input_to_local_ack
+        .record(press_result.local_ack_us);
+    runtime
+        .telemetry
+        .summary_mut()
+        .hit_test_latency
+        .record(press_result.hit_test_us);
 
     println!("\n  Phase 3 PASSED: input pipeline exercised, latency budgets met.\n");
 
@@ -841,11 +956,20 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     println!("    tiles          = {}", frame_telemetry.tile_count);
     println!("    nodes          = {}", frame_telemetry.node_count);
     println!("    active_leases  = {}", frame_telemetry.active_leases);
-    println!("    render_encode  = {}us", frame_telemetry.render_encode_us);
+    println!(
+        "    render_encode  = {}us",
+        frame_telemetry.render_encode_us
+    );
     println!("    gpu_submit     = {}us", frame_telemetry.gpu_submit_us);
 
-    assert!(frame_telemetry.tile_count >= 2, "expected at least 2 tiles in frame");
-    assert!(frame_telemetry.node_count >= 2, "expected at least 2 nodes in frame");
+    assert!(
+        frame_telemetry.tile_count >= 2,
+        "expected at least 2 tiles in frame"
+    );
+    assert!(
+        frame_telemetry.node_count >= 2,
+        "expected at least 2 nodes in frame"
+    );
 
     // Pixel readback to verify rendering
     let pixels = runtime.read_pixels();
@@ -873,16 +997,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Session summary:");
     println!("    total_frames = {}", summary.total_frames);
     if let Some(p50) = summary.frame_time.p50() {
-        println!("    frame_time p50 = {}us", p50);
+        println!("    frame_time p50 = {p50}us");
     }
     if let Some(p99) = summary.frame_time.p99() {
-        println!("    frame_time p99 = {}us", p99);
+        println!("    frame_time p99 = {p99}us");
     }
     if let Some(ack) = summary.input_to_local_ack.p99() {
-        println!("    input_to_local_ack p99 = {}us (budget: 4000us)", ack);
+        println!("    input_to_local_ack p99 = {ack}us (budget: 4000us)");
     }
     if let Some(ht) = summary.hit_test_latency.p99() {
-        println!("    hit_test p99 = {}us (budget: 100us)", ht);
+        println!("    hit_test p99 = {ht}us (budget: 100us)");
     }
 
     let json = runtime.telemetry.emit_json()?;
@@ -900,7 +1024,11 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         let state = runtime.shared_state().lock().await;
         let scene = state.scene.lock().await;
         let lease = scene.leases.get(&lease_id).unwrap();
-        assert_eq!(lease.state, LeaseState::Active, "lease should be Active before suspension");
+        assert_eq!(
+            lease.state,
+            LeaseState::Active,
+            "lease should be Active before suspension"
+        );
         println!("  Pre-suspend: lease state={:?}", lease.state);
     }
 
@@ -912,18 +1040,28 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         scene.suspend_all_leases(now);
 
         // Verify all leases are suspended
-        let suspended_count = scene.leases.values()
+        let suspended_count = scene
+            .leases
+            .values()
             .filter(|l| l.state == LeaseState::Suspended)
             .count();
-        println!("  Suspended {} lease(s) (safe mode entry)", suspended_count);
+        println!("  Suspended {suspended_count} lease(s) (safe mode entry)");
         assert!(suspended_count >= 1, "at least 1 lease should be suspended");
 
         let lease = scene.leases.get(&lease_id).unwrap();
         assert_eq!(lease.state, LeaseState::Suspended);
-        assert!(lease.suspended_at_ms.is_some(), "should track suspension time");
-        assert!(lease.ttl_remaining_at_suspend_ms.is_some(), "should track remaining TTL");
-        println!("  Lease state: {:?}, suspended_at={:?}, ttl_remaining={:?}ms",
-            lease.state, lease.suspended_at_ms, lease.ttl_remaining_at_suspend_ms);
+        assert!(
+            lease.suspended_at_ms.is_some(),
+            "should track suspension time"
+        );
+        assert!(
+            lease.ttl_remaining_at_suspend_ms.is_some(),
+            "should track remaining TTL"
+        );
+        println!(
+            "  Lease state: {:?}, suspended_at={:?}, ttl_remaining={:?}ms",
+            lease.state, lease.suspended_at_ms, lease.ttl_remaining_at_suspend_ms
+        );
     }
 
     // Attempt mutations during suspension -- should be rejected
@@ -945,26 +1083,48 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         };
 
         let result = scene.apply_batch(&batch);
-        assert!(!result.applied, "mutations should be rejected during suspension");
-        let error_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        assert!(
+            !result.applied,
+            "mutations should be rejected during suspension"
+        );
+        let error_msg = result
+            .error
+            .as_ref()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
         println!("  Mutation during suspension: rejected=true");
-        println!("    error: {}", error_msg);
-        assert!(error_msg.contains("Suspended"), "error should mention Suspended state");
+        println!("    error: {error_msg}");
+        assert!(
+            error_msg.contains("Suspended"),
+            "error should mention Suspended state"
+        );
     }
 
     // Tiles should still be present (state preserved, only mutations blocked)
     {
         let state = runtime.shared_state().lock().await;
         let scene = state.scene.lock().await;
-        assert_eq!(scene.tiles.len(), 2, "tiles should be preserved during suspension");
-        println!("  Tiles preserved during suspension: count={}", scene.tiles.len());
+        assert_eq!(
+            scene.tiles.len(),
+            2,
+            "tiles should be preserved during suspension"
+        );
+        println!(
+            "  Tiles preserved during suspension: count={}",
+            scene.tiles.len()
+        );
     }
 
     // Render during suspension -- should still produce a frame (display frozen state)
     let suspended_frame = runtime.render_frame().await;
-    println!("  Frame during suspension: tiles={}, nodes={}",
-        suspended_frame.tile_count, suspended_frame.node_count);
-    assert!(suspended_frame.tile_count >= 2, "tiles should still render during suspension");
+    println!(
+        "  Frame during suspension: tiles={}, nodes={}",
+        suspended_frame.tile_count, suspended_frame.node_count
+    );
+    assert!(
+        suspended_frame.tile_count >= 2,
+        "tiles should still render during suspension"
+    );
 
     // Resume all leases (safe mode exit)
     {
@@ -973,15 +1133,23 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         let now = now_ms();
         scene.resume_all_leases(now);
 
-        let active_count = scene.leases.values()
-            .filter(|l| l.is_active())
-            .count();
-        println!("  Resumed {} lease(s) (safe mode exit)", active_count);
-        assert!(active_count >= 1, "at least 1 lease should be active after resume");
+        let active_count = scene.leases.values().filter(|l| l.is_active()).count();
+        println!("  Resumed {active_count} lease(s) (safe mode exit)");
+        assert!(
+            active_count >= 1,
+            "at least 1 lease should be active after resume"
+        );
 
         let lease = scene.leases.get(&lease_id).unwrap();
-        assert_eq!(lease.state, LeaseState::Active, "lease should be Active after resume");
-        assert!(lease.suspended_at_ms.is_none(), "suspension timestamp should be cleared");
+        assert_eq!(
+            lease.state,
+            LeaseState::Active,
+            "lease should be Active after resume"
+        );
+        assert!(
+            lease.suspended_at_ms.is_none(),
+            "suspension timestamp should be cleared"
+        );
         println!("  Lease state after resume: {:?}", lease.state);
     }
 
@@ -1006,7 +1174,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         let result = scene.apply_batch(&batch);
         assert!(result.applied, "mutations should succeed after resume");
         let new_tile = result.created_ids[0];
-        println!("  Post-resume mutation: tile created id={}", new_tile);
+        println!("  Post-resume mutation: tile created id={new_tile}");
 
         // Clean up via DeleteTile mutation
         let delete_batch = SceneMutationBatch {
@@ -1046,10 +1214,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     drop(tx);
 
     // Verify the stream closes gracefully
-    let next = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        response_stream.next(),
-    ).await;
+    let next =
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), response_stream.next()).await;
 
     match next {
         Ok(None) => println!("  Stream closed gracefully (server-side cleanup)"),
@@ -1064,12 +1230,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         println!("  Final scene state:");
         println!("    tabs   = {}", scene.tabs.len());
         println!("    tiles  = {}", scene.tiles.len());
-        println!("    leases = {} total ({} active)",
+        println!(
+            "    leases = {} total ({} active)",
             scene.leases.len(),
-            scene.leases.values().filter(|l| l.is_active()).count());
-        println!("    zones  = {} registered, {} with active publishes",
+            scene.leases.values().filter(|l| l.is_active()).count()
+        );
+        println!(
+            "    zones  = {} registered, {} with active publishes",
             scene.zone_registry.zones.len(),
-            scene.zone_registry.active_publishes.len());
+            scene.zone_registry.active_publishes.len()
+        );
         println!("    version = {}", scene.version);
     }
 
@@ -1095,16 +1265,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
 #[cfg(test)]
 mod tests {
-    use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind, AgentDispatchKind};
-    use tze_hud_scene::graph::SceneGraph;
-    use tze_hud_scene::types::*;
-    use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
-    use tze_hud_telemetry::LatencyBucket;
-    use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
+    use std::time::Instant;
+    use tze_hud_input::{AgentDispatchKind, InputProcessor, PointerEvent, PointerEventKind};
     use tze_hud_protocol::proto::session as session_proto;
+    use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
     use tze_hud_runtime::HeadlessRuntime;
     use tze_hud_runtime::headless::HeadlessConfig;
-    use std::time::Instant;
+    use tze_hud_scene::graph::SceneGraph;
+    use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
+    use tze_hud_scene::types::*;
+    use tze_hud_telemetry::LatencyBucket;
 
     fn now_wall_us() -> u64 {
         std::time::SystemTime::now()
@@ -1150,21 +1320,26 @@ mod tests {
         interaction_id: &str,
         z_order: u32,
     ) -> (SceneId, SceneId) {
-        let tile_id = scene.create_tile(
-            tab_id, "test-agent", lease_id, tile_bounds, z_order,
-        ).unwrap();
+        let tile_id = scene
+            .create_tile(tab_id, "test-agent", lease_id, tile_bounds, z_order)
+            .unwrap();
         let node_id = SceneId::new();
-        scene.set_tile_root(tile_id, Node {
-            id: node_id,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: hr_bounds,
-                interaction_id: interaction_id.to_string(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: hr_bounds,
+                        interaction_id: interaction_id.to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
         (tile_id, node_id)
     }
 
@@ -1206,7 +1381,9 @@ capabilities = ["create_tiles"]
 
         let start = Instant::now();
 
-        let mut client = HudSessionClient::connect(format!("http://[::1]:{free_port}")).await.unwrap();
+        let mut client = HudSessionClient::connect(format!("http://[::1]:{free_port}"))
+            .await
+            .unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(16);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
@@ -1227,7 +1404,9 @@ capabilities = ["create_tiles"]
                     auth_credential: None,
                 },
             )),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let mut response = client.session(stream).await.unwrap().into_inner();
 
@@ -1236,7 +1415,9 @@ capabilities = ["create_tiles"]
         let msg = response.next().await.unwrap().unwrap();
         assert!(matches!(
             msg.payload,
-            Some(session_proto::server_message::Payload::SessionEstablished(_))
+            Some(session_proto::server_message::Payload::SessionEstablished(
+                _
+            ))
         ));
 
         // SceneSnapshot
@@ -1295,7 +1476,9 @@ capabilities = ["create_tiles"]
         let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
 
         let (tile_id, node_id) = add_hit_region_tile(
-            &mut scene, tab_id, lease_id,
+            &mut scene,
+            tab_id,
+            lease_id,
             Rect::new(100.0, 100.0, 300.0, 200.0),
             Rect::new(0.0, 0.0, 300.0, 200.0),
             "button-1",
@@ -1306,7 +1489,13 @@ capabilities = ["create_tiles"]
 
         // Hit inside
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
         assert_eq!(
@@ -1321,7 +1510,13 @@ capabilities = ["create_tiles"]
 
         // Hit outside
         let result = processor.process(
-            &PointerEvent { x: 10.0, y: 10.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 10.0,
+                y: 10.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
         assert!(result.hit.is_none());
@@ -1332,7 +1527,9 @@ capabilities = ["create_tiles"]
         let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
 
         add_hit_region_tile(
-            &mut scene, tab_id, lease_id,
+            &mut scene,
+            tab_id,
+            lease_id,
             Rect::new(100.0, 100.0, 200.0, 200.0),
             Rect::new(0.0, 0.0, 200.0, 200.0),
             "my-button",
@@ -1343,7 +1540,13 @@ capabilities = ["create_tiles"]
 
         // Press on button
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 200.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
@@ -1354,7 +1557,13 @@ capabilities = ["create_tiles"]
 
         // Release on button (activate)
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Up, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 200.0,
+                kind: PointerEventKind::Up,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
@@ -1369,7 +1578,9 @@ capabilities = ["create_tiles"]
         let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
 
         add_hit_region_tile(
-            &mut scene, tab_id, lease_id,
+            &mut scene,
+            tab_id,
+            lease_id,
             Rect::new(100.0, 100.0, 200.0, 200.0),
             Rect::new(0.0, 0.0, 200.0, 200.0),
             "btn",
@@ -1381,13 +1592,20 @@ capabilities = ["create_tiles"]
 
         for _ in 0..30 {
             let result = processor.process(
-                &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+                &PointerEvent {
+                    x: 200.0,
+                    y: 200.0,
+                    kind: PointerEventKind::Down,
+                    device_id: 0,
+                    timestamp: None,
+                },
                 &mut scene,
             );
             bucket.record(result.local_ack_us);
         }
 
-        bucket.assert_p99_under(4_000)
+        bucket
+            .assert_p99_under(4_000)
             .expect("local_ack p99 should be under 4ms");
     }
 
@@ -1398,10 +1616,15 @@ capabilities = ["create_tiles"]
         let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
 
         // Create a tile while active
-        let tile_id = scene.create_tile(
-            tab_id, "test-agent", lease_id,
-            Rect::new(10.0, 10.0, 100.0, 100.0), 1,
-        ).unwrap();
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test-agent",
+                lease_id,
+                Rect::new(10.0, 10.0, 100.0, 100.0),
+                1,
+            )
+            .unwrap();
 
         // Suspend all
         scene.suspend_all_leases(now_ms());
@@ -1441,13 +1664,19 @@ capabilities = ["create_tiles"]
         };
 
         let result = scene.apply_batch(&batch);
-        assert!(!result.applied, "mutations should be rejected during suspension");
+        assert!(
+            !result.applied,
+            "mutations should be rejected during suspension"
+        );
 
-        let error_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        let error_msg = result
+            .error
+            .as_ref()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
         assert!(
             error_msg.contains("Suspended"),
-            "error should mention Suspended state, got: {}",
-            error_msg
+            "error should mention Suspended state, got: {error_msg}"
         );
     }
 
@@ -1502,7 +1731,7 @@ capabilities = ["create_tiles"]
                 lease_id: None,
             };
             let result = scene.apply_batch(&batch);
-            assert!(result.applied, "tile {} should be within budget", i);
+            assert!(result.applied, "tile {i} should be within budget");
         }
 
         // 9th tile should exceed budget
@@ -1522,11 +1751,14 @@ capabilities = ["create_tiles"]
         let result = scene.apply_batch(&batch);
         assert!(!result.applied, "9th tile should exceed budget");
 
-        let error_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        let error_msg = result
+            .error
+            .as_ref()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
         assert!(
             error_msg.contains("tiles") || error_msg.contains("budget"),
-            "error should reference tile budget, got: {}",
-            error_msg
+            "error should reference tile budget, got: {error_msg}"
         );
     }
 
@@ -1542,14 +1774,16 @@ capabilities = ["create_tiles"]
         // Publish to status-bar
         let mut entries = std::collections::HashMap::new();
         entries.insert("key".to_string(), "value".to_string());
-        scene.publish_to_zone(
-            "status-bar",
-            ZoneContent::StatusBar(StatusBarPayload { entries }),
-            "test-agent",
-            Some("test-key".to_string()),
-            None,
-            None,
-        ).unwrap();
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload { entries }),
+                "test-agent",
+                Some("test-key".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
 
         let active = scene.zone_registry.active_for_zone("status-bar");
         assert_eq!(active.len(), 1);
@@ -1558,14 +1792,16 @@ capabilities = ["create_tiles"]
         // Publish again with same merge key -- should replace
         let mut entries2 = std::collections::HashMap::new();
         entries2.insert("key".to_string(), "updated".to_string());
-        scene.publish_to_zone(
-            "status-bar",
-            ZoneContent::StatusBar(StatusBarPayload { entries: entries2 }),
-            "test-agent",
-            Some("test-key".to_string()),
-            None,
-            None,
-        ).unwrap();
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload { entries: entries2 }),
+                "test-agent",
+                Some("test-key".to_string()),
+                None,
+                None,
+            )
+            .unwrap();
 
         let active = scene.zone_registry.active_for_zone("status-bar");
         assert_eq!(active.len(), 1, "MergeByKey should replace, not accumulate");
@@ -1607,18 +1843,33 @@ capabilities = ["create_tiles"]
             "receive_input".to_string(), // legacy: should be access_input_events
         ]);
 
-        let unknowns = result.expect_err("legacy names must be rejected with CONFIG_UNKNOWN_CAPABILITY");
-        assert_eq!(unknowns.len(), 2, "both legacy names must be reported (collect-all, not fail-fast)");
+        let unknowns =
+            result.expect_err("legacy names must be rejected with CONFIG_UNKNOWN_CAPABILITY");
+        assert_eq!(
+            unknowns.len(),
+            2,
+            "both legacy names must be reported (collect-all, not fail-fast)"
+        );
 
-        let create_unknown = unknowns.iter().find(|u| u.unknown == "create_tile")
+        let create_unknown = unknowns
+            .iter()
+            .find(|u| u.unknown == "create_tile")
             .expect("create_tile must appear in unknowns");
-        assert!(create_unknown.hint.contains("create_tiles"),
-            "hint must point to canonical create_tiles: {:?}", create_unknown.hint);
+        assert!(
+            create_unknown.hint.contains("create_tiles"),
+            "hint must point to canonical create_tiles: {:?}",
+            create_unknown.hint
+        );
 
-        let receive_unknown = unknowns.iter().find(|u| u.unknown == "receive_input")
+        let receive_unknown = unknowns
+            .iter()
+            .find(|u| u.unknown == "receive_input")
             .expect("receive_input must appear in unknowns");
-        assert!(receive_unknown.hint.contains("access_input_events"),
-            "hint must point to canonical access_input_events: {:?}", receive_unknown.hint);
+        assert!(
+            receive_unknown.hint.contains("access_input_events"),
+            "hint must point to canonical access_input_events: {:?}",
+            receive_unknown.hint
+        );
     }
 
     /// GIVEN an agent's canonical capability request
@@ -1635,8 +1886,10 @@ capabilities = ["create_tiles"]
             "read_scene_topology".to_string(),
         ]);
 
-        assert!(result.is_ok(),
-            "all canonical v1 capability names must be accepted without error");
+        assert!(
+            result.is_ok(),
+            "all canonical v1 capability names must be accepted without error"
+        );
     }
 
     /// GIVEN an agent has a limited tile budget (max_tiles = 2)
@@ -1651,7 +1904,12 @@ capabilities = ["create_tiles"]
         let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
 
         // Constrain the lease to 2 tiles to make the budget easy to exhaust.
-        scene.leases.get_mut(&lease_id).unwrap().resource_budget.max_tiles = 2;
+        scene
+            .leases
+            .get_mut(&lease_id)
+            .unwrap()
+            .resource_budget
+            .max_tiles = 2;
 
         // First two batches succeed (within budget).
         for i in 0..2u32 {
@@ -1669,7 +1927,7 @@ capabilities = ["create_tiles"]
                 lease_id: Some(lease_id),
             };
             let result = scene.apply_batch(&batch);
-            assert!(result.applied, "tile {} within budget must succeed", i);
+            assert!(result.applied, "tile {i} within budget must succeed");
         }
 
         // Third batch exceeds budget — must return applied=false with a structured error.
@@ -1687,14 +1945,21 @@ capabilities = ["create_tiles"]
             lease_id: Some(lease_id),
         };
         let result = scene.apply_batch(&over_budget);
-        assert!(!result.applied, "third tile must be rejected (budget exceeded)");
+        assert!(
+            !result.applied,
+            "third tile must be rejected (budget exceeded)"
+        );
 
         // Error message must reference the budget constraint so that the caller
         // can surface actionable feedback to the agent.
-        let err_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
+        let err_msg = result
+            .error
+            .as_ref()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
         assert!(
             err_msg.contains("tiles") || err_msg.contains("budget"),
-            "error must reference tile budget: {}", err_msg
+            "error must reference tile budget: {err_msg}"
         );
     }
 
@@ -1740,7 +2005,9 @@ capabilities = ["create_tiles", "modify_own_tiles"]
         let runtime = HeadlessRuntime::new(config).await.unwrap();
         let _server = runtime.start_grpc_server().await.unwrap();
 
-        let mut client = HudSessionClient::connect(format!("http://[::1]:{free_port}")).await.unwrap();
+        let mut client = HudSessionClient::connect(format!("http://[::1]:{free_port}"))
+            .await
+            .unwrap();
         let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(16);
         let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
 
@@ -1773,7 +2040,9 @@ capabilities = ["create_tiles", "modify_own_tiles"]
                     auth_credential: None,
                 },
             )),
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let mut response = client.session(stream).await.unwrap().into_inner();
         use tokio_stream::StreamExt;
@@ -1783,21 +2052,30 @@ capabilities = ["create_tiles", "modify_own_tiles"]
             Some(session_proto::server_message::Payload::SessionEstablished(established)) => {
                 // SCENE_TOPOLOGY must be absent: agent lacks read_scene_topology.
                 assert!(
-                    !established.active_subscriptions.contains(&"SCENE_TOPOLOGY".to_string()),
+                    !established
+                        .active_subscriptions
+                        .contains(&"SCENE_TOPOLOGY".to_string()),
                     "SCENE_TOPOLOGY must be denied without read_scene_topology capability; \
-                     active: {:?}", established.active_subscriptions
+                     active: {:?}",
+                    established.active_subscriptions
                 );
                 // ZONE_EVENTS must be absent: agent lacks any publish_zone:* capability.
                 assert!(
-                    !established.active_subscriptions.contains(&"ZONE_EVENTS".to_string()),
+                    !established
+                        .active_subscriptions
+                        .contains(&"ZONE_EVENTS".to_string()),
                     "ZONE_EVENTS must be denied without publish_zone:* capability; \
-                     active: {:?}", established.active_subscriptions
+                     active: {:?}",
+                    established.active_subscriptions
                 );
                 // LEASE_CHANGES must be active: it is mandatory regardless of capabilities.
                 assert!(
-                    established.active_subscriptions.contains(&"LEASE_CHANGES".to_string()),
+                    established
+                        .active_subscriptions
+                        .contains(&"LEASE_CHANGES".to_string()),
                     "LEASE_CHANGES must always be active (mandatory category); \
-                     active: {:?}", established.active_subscriptions
+                     active: {:?}",
+                    established.active_subscriptions
                 );
             }
             other => panic!("Expected SessionEstablished, got: {other:?}"),

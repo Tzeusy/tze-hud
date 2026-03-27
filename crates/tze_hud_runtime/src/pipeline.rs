@@ -384,7 +384,8 @@ impl FramePipeline {
         let dropped = emit_fn();
         if dropped {
             // Overflow: increment the counter (non-blocking, relaxed ordering)
-            self.telemetry_overflow_count.fetch_add(1, Ordering::Relaxed);
+            self.telemetry_overflow_count
+                .fetch_add(1, Ordering::Relaxed);
         }
         t0.elapsed().as_micros() as u64
     }
@@ -652,7 +653,9 @@ pub struct MutationIntakeStage {
 impl MutationIntakeStage {
     /// Construct with default cleanup delay (100ms).
     pub fn new() -> Self {
-        Self::with_cleanup_delay(Duration::from_millis(DEFAULT_POST_REVOCATION_CLEANUP_DELAY_MS))
+        Self::with_cleanup_delay(Duration::from_millis(
+            DEFAULT_POST_REVOCATION_CLEANUP_DELAY_MS,
+        ))
     }
 
     /// Construct with a custom cleanup delay (clamped to [0ms, 5000ms]).
@@ -682,7 +685,8 @@ impl MutationIntakeStage {
         namespace: String,
         budget: ResourceBudget,
     ) {
-        self.enforcer.register_session(session_id, namespace, budget);
+        self.enforcer
+            .register_session(session_id, namespace, budget);
     }
 
     /// Remove a session from budget tracking (on clean disconnect).
@@ -753,11 +757,7 @@ impl MutationIntakeStage {
     ///
     /// Returns namespaces that were revoked this tick. Callers must tear down
     /// those sessions and may call `schedule_cleanup` for each.
-    pub fn tick(
-        &mut self,
-        now: Instant,
-        sink: &mut dyn BudgetTelemetrySink,
-    ) -> Vec<String> {
+    pub fn tick(&mut self, now: Instant, sink: &mut dyn BudgetTelemetrySink) -> Vec<String> {
         let revoked = self.enforcer.tick(now, sink);
         // Schedule post-revocation cleanup for each newly-revoked session.
         for ns in &revoked {
@@ -775,7 +775,11 @@ impl MutationIntakeStage {
     /// sufficient. This prevents `tick()` from accumulating unbounded duplicate
     /// entries when a revoked session persists in the budget enforcer.
     pub fn schedule_cleanup(&mut self, namespace: String, revoked_at: Instant) {
-        if self.pending_cleanups.iter().any(|c| c.namespace == namespace) {
+        if self
+            .pending_cleanups
+            .iter()
+            .any(|c| c.namespace == namespace)
+        {
             return; // already scheduled; drop the duplicate
         }
         self.pending_cleanups.push_back(PendingCleanup {
@@ -824,7 +828,9 @@ impl MutationIntakeStage {
         now: Instant,
         sink: &mut dyn BudgetTelemetrySink,
     ) -> bool {
-        let revoked = self.enforcer.report_invariant_violation(namespace, now, sink);
+        let revoked = self
+            .enforcer
+            .report_invariant_violation(namespace, now, sink);
         if revoked {
             self.schedule_cleanup(namespace.to_string(), now);
         }
@@ -843,8 +849,8 @@ impl Default for MutationIntakeStage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use crate::budget::{CollectingTelemetrySink, NoopTelemetrySink};
+    use std::sync::Mutex;
     use tze_hud_scene::types::BudgetViolation;
 
     fn tight_budget() -> ResourceBudget {
@@ -879,14 +885,26 @@ mod tests {
         let scene = SceneGraph::new(800.0, 600.0);
 
         let telemetry = pipeline.run_frame(
-            || l.lock().unwrap().push(1), // Stage 1: Input Drain
+            || l.lock().unwrap().push(1),          // Stage 1: Input Drain
             |_snapshot| l.lock().unwrap().push(2), // Stage 2: Local Feedback
-            || { l.lock().unwrap().push(3); 0 }, // Stage 3: Mutation Intake
-            || { l.lock().unwrap().push(4); (0, 0, HitTestSnapshot::from_scene(&empty_scene)) }, // Stage 4
-            || { l.lock().unwrap().push(5); 0 }, // Stage 5: Layout Resolve
-            || l.lock().unwrap().push(6), // Stage 6: Render Encode
-            || l.lock().unwrap().push(7), // Stage 7: GPU Submit
-            || { l.lock().unwrap().push(8); false }, // Stage 8: Telemetry
+            || {
+                l.lock().unwrap().push(3);
+                0
+            }, // Stage 3: Mutation Intake
+            || {
+                l.lock().unwrap().push(4);
+                (0, 0, HitTestSnapshot::from_scene(&empty_scene))
+            }, // Stage 4
+            || {
+                l.lock().unwrap().push(5);
+                0
+            }, // Stage 5: Layout Resolve
+            || l.lock().unwrap().push(6),          // Stage 6: Render Encode
+            || l.lock().unwrap().push(7),          // Stage 7: GPU Submit
+            || {
+                l.lock().unwrap().push(8);
+                false
+            }, // Stage 8: Telemetry
         );
 
         let stages = log.lock().unwrap().clone();
@@ -981,7 +999,11 @@ mod tests {
 
         // After Stage 4 published, the snapshot is visible immediately (ArcSwap)
         let snap = pipeline.hit_test_snapshot.load();
-        assert_eq!(snap.tiles.len(), 1, "snapshot should contain the committed tile");
+        assert_eq!(
+            snap.tiles.len(),
+            1,
+            "snapshot should contain the committed tile"
+        );
         assert_eq!(snap.tiles[0].bounds.x, 10.0);
         assert_eq!(snap.tiles[0].bounds.y, 20.0);
     }
@@ -1006,7 +1028,10 @@ mod tests {
         });
 
         assert!(hit_found, "should hit the tile at (100, 80)");
-        assert!(elapsed_us < STAGE2_BUDGET_US * 100, "stage 2 overhead should be minimal");
+        assert!(
+            elapsed_us < STAGE2_BUDGET_US * 100,
+            "stage 2 overhead should be minimal"
+        );
     }
 
     /// Verify telemetry overflow counter increments when Stage 8 returns true.
@@ -1089,7 +1114,10 @@ mod tests {
 
         assert_eq!(telemetry.input_drain_us, telemetry.stage1_input_drain_us);
         assert_eq!(telemetry.scene_commit_us, telemetry.stage4_scene_commit_us);
-        assert_eq!(telemetry.render_encode_us, telemetry.stage6_render_encode_us);
+        assert_eq!(
+            telemetry.render_encode_us,
+            telemetry.stage6_render_encode_us
+        );
         assert_eq!(telemetry.gpu_submit_us, telemetry.stage7_gpu_submit_us);
     }
 
@@ -1100,10 +1128,22 @@ mod tests {
         let tab = scene.create_tab("Main", 0).unwrap();
         let lease = scene.grant_lease("agent", 60_000, vec![]);
         scene
-            .create_tile(tab, "agent", lease, Rect::new(100.0, 100.0, 300.0, 200.0), 1)
+            .create_tile(
+                tab,
+                "agent",
+                lease,
+                Rect::new(100.0, 100.0, 300.0, 200.0),
+                1,
+            )
             .unwrap();
         scene
-            .create_tile(tab, "agent", lease, Rect::new(200.0, 150.0, 100.0, 100.0), 2)
+            .create_tile(
+                tab,
+                "agent",
+                lease,
+                Rect::new(200.0, 150.0, 100.0, 100.0),
+                2,
+            )
             .unwrap();
 
         let snap = HitTestSnapshot::from_scene(&scene);
@@ -1118,7 +1158,10 @@ mod tests {
         assert_eq!(hit.unwrap().z_order, 2, "should hit the higher-z tile");
 
         // Hit outside all tiles
-        assert!(snap.hit_test(0.0, 0.0).is_none(), "should not hit anything at (0,0)");
+        assert!(
+            snap.hit_test(0.0, 0.0).is_none(),
+            "should not hit anything at (0,0)"
+        );
     }
 
     /// Budget constants should match the spec values.
@@ -1161,8 +1204,7 @@ mod tests {
 
         let mut over_budget = 0;
         for _ in 0..100 {
-            let result =
-                stage.check_and_apply("bench-agent", 0, 0, 0, Instant::now(), &mut sink);
+            let result = stage.check_and_apply("bench-agent", 0, 0, 0, Instant::now(), &mut sink);
             if result.exceeded_latency_budget() {
                 over_budget += 1;
             }
@@ -1175,8 +1217,7 @@ mod tests {
         // Allow up to 1 outlier (scheduler jitter).
         assert!(
             over_budget <= 1,
-            "{} of 100 iterations exceeded 100µs latency budget",
-            over_budget
+            "{over_budget} of 100 iterations exceeded 100µs latency budget"
         );
     }
 
@@ -1203,7 +1244,10 @@ mod tests {
         assert!(matches!(result.outcome, BudgetCheckOutcome::Reject(_)));
 
         let state = stage.enforcer.agent_state("agent-a").unwrap();
-        assert_eq!(state.tile_count, 0, "rejected mutation should not update counters");
+        assert_eq!(
+            state.tile_count, 0,
+            "rejected mutation should not update counters"
+        );
     }
 
     // ─── Post-revocation cleanup scheduling ────────────────────────────────
@@ -1368,7 +1412,11 @@ mod tests {
         // Agent with default budget (max_tiles = 8)
         let mut stage = MutationIntakeStage::new();
         let mut sink = CollectingTelemetrySink::default();
-        stage.register_session(SceneId::new(), "default-agent".to_string(), ResourceBudget::default());
+        stage.register_session(
+            SceneId::new(),
+            "default-agent".to_string(),
+            ResourceBudget::default(),
+        );
 
         // Place agent at exactly 8 tiles (simulating 8 accepted tile creations).
         {
@@ -1475,12 +1523,7 @@ mod tests {
             }],
         };
 
-        let telemetry = pipeline.run_scene_frame(
-            || {},
-            || {},
-            vec![batch],
-            &mut scene,
-        );
+        let telemetry = pipeline.run_scene_frame(|| {}, || {}, vec![batch], &mut scene);
 
         assert_eq!(
             telemetry.invariant_violations_this_frame, 1,

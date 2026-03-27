@@ -10,9 +10,9 @@
 //! - `focus_tree` — per-tab focus tree data structure and history
 //! - `focus`      — focus manager (lifecycle, cycling, events, ring metadata)
 //! - `keyboard`   — keyboard event types and dispatch (KeyDownEvent, KeyUpEvent,
-//!                  CharacterEvent) per RFC 0004 §7.4
+//!   CharacterEvent) per RFC 0004 §7.4
 //! - `command`    — abstract command input model (NAVIGATE_NEXT … SCROLL_DOWN)
-//!                  per RFC 0004 §10
+//!   per RFC 0004 §10
 //! - [`pointer`] — rich pointer event types (PointerDownEvent, ClickEvent, etc.)
 //! - [`events`] — HitTestResult, RouteTarget, SceneLocalPatch, InputEnvelope, EventBatch
 //! - [`hit_test`] — headless-testable hit-test pipeline
@@ -36,79 +36,90 @@
 //!   (when release_on_up=true), or runtime theft (Alt+Tab, lease revocation,
 //!   tab switch).
 
+pub mod batching;
+pub mod coalescing;
 pub mod envelope;
 pub mod event_queue;
-pub mod coalescing;
-pub mod batching;
 
+pub use batching::EventBatchAssembler;
+pub use coalescing::{CoalesceResult, EventCoalescer, FrameCoalescer};
 pub use envelope::{
-    PointerMoveData, PointerEnterData, PointerLeaveData,
-    PointerDownData, PointerUpData, ClickData, PointerCancelData,
-    KeyDownData, KeyUpData, CharacterData,
-    FocusGainedData, FocusLostData,
+    CharacterData,
+    ClickData,
+    CommandInputData,
+    FocusGainedData,
+    FocusLostData,
+    GestureData,
+    ImeCompositionEndData,
     // CaptureReleasedData and CaptureReleasedReason are defined in lib.rs
     // (from the pointer capture module); re-exporting envelope:: versions
     // would create duplicate definitions.
-    ImeCompositionStartData, ImeCompositionUpdateData, ImeCompositionEndData,
-    GestureData, ScrollOffsetChangedData,
-    CommandInputData,
+    ImeCompositionStartData,
+    ImeCompositionUpdateData,
+    KeyDownData,
+    KeyUpData,
+    PointerCancelData,
+    PointerDownData,
+    PointerEnterData,
+    PointerLeaveData,
+    PointerMoveData,
+    PointerUpData,
+    ScrollOffsetChangedData,
 };
 pub use event_queue::{AgentEventQueue, DEFAULT_QUEUE_DEPTH, HARD_CAP_QUEUE_DEPTH};
-pub use coalescing::{CoalesceResult, EventCoalescer, FrameCoalescer};
-pub use batching::EventBatchAssembler;
 
 pub mod capture;
-pub mod pointer;
+pub mod dispatch;
 pub mod events;
 pub mod hit_test;
-pub mod dispatch;
 pub mod local_feedback;
+pub mod pointer;
 pub mod scroll;
 
 // Re-export core dispatch types at the crate root for convenience.
-pub use pointer::{
-    CancelReason, ClickEvent, ContextMenuEvent, DoubleClickEvent, Modifiers, PointerButton,
-    PointerCancelEvent, PointerDownEvent, PointerEnterEvent, PointerFields, PointerLeaveEvent,
-    PointerMoveEvent, PointerUpEvent, RawPointerEvent, RawPointerEventKind,
-};
+pub use dispatch::{DispatchOutcome, DispatchProcessor, build_agent_batch};
 pub use events::{
     EventBatch, HitTestResult, InputEnvelope, LocalStateUpdate, RouteTarget, SceneLocalPatch,
     ScrollOffsetUpdate,
 };
 pub use hit_test::hit_test;
-pub use dispatch::{build_agent_batch, DispatchOutcome, DispatchProcessor};
 pub use local_feedback::{
-    LocalFeedbackStyle, ResolvedFeedbackStyle, RollbackTracker,
-    DEFAULT_HOVER_TINT, DEFAULT_PRESS_DARKEN, DEFAULT_FOCUS_RING_COLOR,
-    DEFAULT_FOCUS_RING_WIDTH_PX, ROLLBACK_ANIMATION_MS,
+    DEFAULT_FOCUS_RING_COLOR, DEFAULT_FOCUS_RING_WIDTH_PX, DEFAULT_HOVER_TINT,
+    DEFAULT_PRESS_DARKEN, LocalFeedbackStyle, ROLLBACK_ANIMATION_MS, ResolvedFeedbackStyle,
+    RollbackTracker,
+};
+pub use pointer::{
+    CancelReason, ClickEvent, ContextMenuEvent, DoubleClickEvent, Modifiers, PointerButton,
+    PointerCancelEvent, PointerDownEvent, PointerEnterEvent, PointerFields, PointerLeaveEvent,
+    PointerMoveEvent, PointerUpEvent, RawPointerEvent, RawPointerEventKind,
 };
 pub use scroll::{
-    ScrollConfig, ScrollEvent, ScrollState, SetScrollOffsetRequest, ScrollOffsetChangedEvent,
+    ScrollConfig, ScrollEvent, ScrollOffsetChangedEvent, ScrollState, SetScrollOffsetRequest,
 };
 
-pub mod focus_tree;
-pub mod focus;
-pub mod keyboard;
 pub mod command;
+pub mod focus;
+pub mod focus_tree;
+pub mod keyboard;
 
-pub use focus_tree::{FocusOwner, FocusTree};
-pub use focus::{
-    FocusManager, FocusGainedEvent, FocusLostEvent, FocusRequest, FocusResult,
-    FocusSource, FocusLostReason, FocusRingUpdate, FocusRingBounds, FocusTransition,
-};
-pub use keyboard::{
-    KeyboardProcessor, KeyboardDispatch, KeyboardDispatchKind,
-    KeyboardModifiers, RawKeyDownEvent, RawKeyUpEvent, RawCharacterEvent,
-};
 pub use command::{
-    CommandProcessor, CommandDispatch, CommandInputEvent,
-    CommandAction, CommandSource, RawCommandEvent,
+    CommandAction, CommandDispatch, CommandInputEvent, CommandProcessor, CommandSource,
+    RawCommandEvent,
+};
+pub use focus::{
+    FocusGainedEvent, FocusLostEvent, FocusLostReason, FocusManager, FocusRequest, FocusResult,
+    FocusRingBounds, FocusRingUpdate, FocusSource, FocusTransition,
+};
+pub use focus_tree::{FocusOwner, FocusTree};
+pub use keyboard::{
+    KeyboardDispatch, KeyboardDispatchKind, KeyboardModifiers, KeyboardProcessor,
+    RawCharacterEvent, RawKeyDownEvent, RawKeyUpEvent,
 };
 
-use tze_hud_scene::{SceneId, NodeData, HitResult};
-use tze_hud_scene::graph::SceneGraph;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
+use tze_hud_scene::graph::SceneGraph;
+use tze_hud_scene::{HitResult, NodeData, SceneId};
 
 /// Raw pointer input event from the OS.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -327,7 +338,10 @@ impl InputProcessor {
     ) -> (InputResult, Option<FocusTransition>) {
         let focus_transition = if event.kind == PointerEventKind::Down {
             let hit = scene.hit_test(event.x, event.y);
-            if let HitResult::NodeHit { tile_id, node_id, .. } = hit {
+            if let HitResult::NodeHit {
+                tile_id, node_id, ..
+            } = hit
+            {
                 let transition = focus_manager.on_click(tab_id, tile_id, Some(node_id), scene);
                 // Update focused local state in hit_region_states based on transition.
                 // Clear the node that lost focus (if any) and set the one that gained.
@@ -394,8 +408,7 @@ impl InputProcessor {
             let (captured_namespace, captured_interaction_id) =
                 resolve_node_meta(scene, cap_tile_id, cap_node_id);
             // Pre-extract interaction_id string before the match may consume it.
-            let cap_interaction_id_str =
-                captured_interaction_id.clone().unwrap_or_default();
+            let cap_interaction_id_str = captured_interaction_id.clone().unwrap_or_default();
 
             let (local_x, local_y) = display_to_local(scene, cap_tile_id, event.x, event.y);
             let hit_test_us = 0; // capture bypasses hit-test
@@ -546,7 +559,11 @@ impl InputProcessor {
 
         // Decompose HitResult into (tile_id, node_id) where applicable.
         let (hit_tile_id, hit_node_id): (Option<SceneId>, Option<SceneId>) = match &hit {
-            HitResult::NodeHit { tile_id, node_id, interaction_id: iid } => {
+            HitResult::NodeHit {
+                tile_id,
+                node_id,
+                interaction_id: iid,
+            } => {
                 interaction_id = Some(iid.clone());
                 (Some(*tile_id), Some(*node_id))
             }
@@ -639,29 +656,37 @@ impl InputProcessor {
                     self.current_press = Some((tile_id, node_id));
 
                     // ── Auto-capture: acquire capture automatically if auto_capture=true ─
-                    let auto_cap = scene.nodes.get(&node_id).map(|n| {
-                        if let NodeData::HitRegion(hr) = &n.data {
-                            hr.auto_capture
-                        } else {
-                            false
-                        }
-                    }).unwrap_or(false);
+                    let auto_cap = scene
+                        .nodes
+                        .get(&node_id)
+                        .map(|n| {
+                            if let NodeData::HitRegion(hr) = &n.data {
+                                hr.auto_capture
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
 
-                    let release_on_up = scene.nodes.get(&node_id).map(|n| {
-                        if let NodeData::HitRegion(hr) = &n.data {
-                            hr.release_on_up
-                        } else {
-                            false
-                        }
-                    }).unwrap_or(false);
+                    let release_on_up = scene
+                        .nodes
+                        .get(&node_id)
+                        .map(|n| {
+                            if let NodeData::HitRegion(hr) = &n.data {
+                                hr.release_on_up
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
 
                     if auto_cap {
                         // Try to acquire capture; succeeds unless another node already
                         // holds capture for this device (which shouldn't happen at Down
                         // if the pre-existing capture was already released or routed above).
-                        let _ = self.capture.acquire(
-                            device_id, tile_id, node_id, release_on_up,
-                        );
+                        let _ = self
+                            .capture
+                            .acquire(device_id, tile_id, node_id, release_on_up);
                     }
 
                     if let Some(namespace) = tile_namespace(scene, tile_id) {
@@ -688,7 +713,8 @@ impl InputProcessor {
                         state.pressed = false;
                     }
                     // Emit local patch for press-off
-                    local_patch.push_state(LocalStateUpdate::new(pressed_node_id).with_pressed(false));
+                    local_patch
+                        .push_state(LocalStateUpdate::new(pressed_node_id).with_pressed(false));
                     // Activation: press and release on the same node
                     if hit_node_id == Some(pressed_node_id) {
                         activated = true;
@@ -800,15 +826,23 @@ impl InputProcessor {
         release_on_up: bool,
     ) -> Option<AgentDispatch> {
         let namespace = tile_namespace(scene, req.tile_id)?;
-        let interaction_id = scene.nodes.get(&req.node_id).and_then(|n| {
-            if let NodeData::HitRegion(hr) = &n.data {
-                Some(hr.interaction_id.clone())
-            } else {
-                None
-            }
-        }).unwrap_or_default();
+        let interaction_id = scene
+            .nodes
+            .get(&req.node_id)
+            .and_then(|n| {
+                if let NodeData::HitRegion(hr) = &n.data {
+                    Some(hr.interaction_id.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
 
-        let kind = if self.capture.acquire(req.device_id, req.tile_id, req.node_id, release_on_up).is_ok() {
+        let kind = if self
+            .capture
+            .acquire(req.device_id, req.tile_id, req.node_id, release_on_up)
+            .is_ok()
+        {
             AgentDispatchKind::CaptureGranted
         } else {
             AgentDispatchKind::CaptureDenied
@@ -842,13 +876,17 @@ impl InputProcessor {
         let state = self.capture.get(req.device_id)?;
         let (tile_id, node_id) = (state.tile_id, state.node_id);
         let namespace = tile_namespace(scene, tile_id)?;
-        let interaction_id = scene.nodes.get(&node_id).and_then(|n| {
-            if let NodeData::HitRegion(hr) = &n.data {
-                Some(hr.interaction_id.clone())
-            } else {
-                None
-            }
-        }).unwrap_or_default();
+        let interaction_id = scene
+            .nodes
+            .get(&node_id)
+            .and_then(|n| {
+                if let NodeData::HitRegion(hr) = &n.data {
+                    Some(hr.interaction_id.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
 
         self.capture.release(req.device_id);
 
@@ -890,13 +928,17 @@ impl InputProcessor {
                 return vec![];
             }
         };
-        let interaction_id = scene.nodes.get(&node_id).and_then(|n| {
-            if let NodeData::HitRegion(hr) = &n.data {
-                Some(hr.interaction_id.clone())
-            } else {
-                None
-            }
-        }).unwrap_or_default();
+        let interaction_id = scene
+            .nodes
+            .get(&node_id)
+            .and_then(|n| {
+                if let NodeData::HitRegion(hr) = &n.data {
+                    Some(hr.interaction_id.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
 
         self.capture.release(device_id);
 
@@ -985,7 +1027,13 @@ mod tests {
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
 
         let tile_id = scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(100.0, 100.0, 400.0, 300.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
             .unwrap();
 
         let hr_node_id = SceneId::new();
@@ -1081,7 +1129,7 @@ mod tests {
 
     #[test]
     fn test_local_ack_under_4ms() {
-        use tze_hud_scene::calibration::{test_budget, budgets};
+        use tze_hud_scene::calibration::{budgets, test_budget};
 
         let (mut scene, _, _) = setup_scene_with_hit_region();
         let mut processor = InputProcessor::new();
@@ -1104,13 +1152,17 @@ mod tests {
         assert!(
             result.local_ack_us < ack_budget,
             "local_ack_us was {}us, calibrated budget is {}us (base: {}us)",
-            result.local_ack_us, ack_budget, budgets::INPUT_ACK_BUDGET_US,
+            result.local_ack_us,
+            ack_budget,
+            budgets::INPUT_ACK_BUDGET_US,
         );
         // hit_test should be within calibrated budget
         assert!(
             result.hit_test_us < hit_budget,
             "hit_test_us was {}us, calibrated budget is {}us (base: {}us)",
-            result.hit_test_us, hit_budget, budgets::HIT_TEST_BUDGET_US,
+            result.hit_test_us,
+            hit_budget,
+            budgets::HIT_TEST_BUDGET_US,
         );
     }
 
@@ -1151,13 +1203,25 @@ mod tests {
 
         // Enter
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Leave
         let result = processor.process(
-            &PointerEvent { x: 10.0, y: 10.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 10.0,
+                y: 10.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
@@ -1175,7 +1239,13 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
@@ -1192,18 +1262,32 @@ mod tests {
 
         // Down
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Up on same node — Activated
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Up, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Up,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         assert!(result.activated);
-        let dispatch = result.dispatch.expect("expected AgentDispatch on activation");
+        let dispatch = result
+            .dispatch
+            .expect("expected AgentDispatch on activation");
         assert_eq!(dispatch.kind, AgentDispatchKind::Activated);
         assert_eq!(dispatch.tile_id, tile_id);
         assert_eq!(dispatch.node_id, hr_node_id);
@@ -1217,18 +1301,32 @@ mod tests {
 
         // Press inside hit region
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Release outside — PointerUp (not Activated)
         let result = processor.process(
-            &PointerEvent { x: 10.0, y: 10.0, kind: PointerEventKind::Up, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 10.0,
+                y: 10.0,
+                kind: PointerEventKind::Up,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         assert!(!result.activated);
-        let dispatch = result.dispatch.expect("expected AgentDispatch on up-outside");
+        let dispatch = result
+            .dispatch
+            .expect("expected AgentDispatch on up-outside");
         assert_eq!(dispatch.kind, AgentDispatchKind::PointerUp);
         assert_eq!(dispatch.tile_id, tile_id);
         assert_eq!(dispatch.node_id, hr_node_id);
@@ -1241,7 +1339,13 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         let result = processor.process(
-            &PointerEvent { x: 5.0, y: 5.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 5.0,
+                y: 5.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
@@ -1256,13 +1360,25 @@ mod tests {
 
         // Enter
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Move within the same hit region — PointerMove
         let result = processor.process(
-            &PointerEvent { x: 210.0, y: 185.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 210.0,
+                y: 185.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
@@ -1282,13 +1398,25 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // SceneLocalPatch must contain a pressed=true update for the hit node
-        assert!(!result.local_patch.is_empty(), "local_patch should not be empty after Down");
-        let pressed_update = result.local_patch.node_updates.iter()
+        assert!(
+            !result.local_patch.is_empty(),
+            "local_patch should not be empty after Down"
+        );
+        let pressed_update = result
+            .local_patch
+            .node_updates
+            .iter()
             .find(|u| u.node_id == hr_node_id && u.pressed.is_some())
             .expect("expected pressed state update for hr_node_id");
         assert_eq!(pressed_update.pressed, Some(true));
@@ -1302,18 +1430,36 @@ mod tests {
 
         // Press first
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Up
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Up, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Up,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
-        assert!(!result.local_patch.is_empty(), "local_patch should not be empty after Up");
-        let state_update = result.local_patch.node_updates.iter()
+        assert!(
+            !result.local_patch.is_empty(),
+            "local_patch should not be empty after Up"
+        );
+        let state_update = result
+            .local_patch
+            .node_updates
+            .iter()
             .find(|u| u.node_id == hr_node_id)
             .expect("expected state update for hr_node_id");
         assert_eq!(state_update.pressed, Some(false));
@@ -1325,12 +1471,24 @@ mod tests {
         let mut processor = InputProcessor::new();
 
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
-        assert!(!result.local_patch.is_empty(), "local_patch should contain hover update");
-        let state_update = result.local_patch.node_updates.iter()
+        assert!(
+            !result.local_patch.is_empty(),
+            "local_patch should contain hover update"
+        );
+        let state_update = result
+            .local_patch
+            .node_updates
+            .iter()
             .find(|u| u.node_id == hr_node_id)
             .expect("expected state update for hr_node_id");
         assert_eq!(state_update.hovered, Some(true));
@@ -1343,18 +1501,36 @@ mod tests {
 
         // Enter
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Leave
         let result = processor.process(
-            &PointerEvent { x: 5.0, y: 5.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 5.0,
+                y: 5.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
-        assert!(!result.local_patch.is_empty(), "local_patch should contain hover-off update");
-        let state_update = result.local_patch.node_updates.iter()
+        assert!(
+            !result.local_patch.is_empty(),
+            "local_patch should contain hover-off update"
+        );
+        let state_update = result
+            .local_patch
+            .node_updates
+            .iter()
             .find(|u| u.node_id == hr_node_id)
             .expect("expected state update for hr_node_id");
         assert_eq!(state_update.hovered, Some(false));
@@ -1367,11 +1543,20 @@ mod tests {
 
         // Move in empty space — no hit, no state change
         let result = processor.process(
-            &PointerEvent { x: 5.0, y: 5.0, kind: PointerEventKind::Move, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 5.0,
+                y: 5.0,
+                kind: PointerEventKind::Move,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
 
-        assert!(result.local_patch.is_empty(), "no state changed, patch should be empty");
+        assert!(
+            result.local_patch.is_empty(),
+            "no state changed, patch should be empty"
+        );
     }
 
     #[test]
@@ -1381,7 +1566,13 @@ mod tests {
 
         // Press to set up pressed state
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
         assert!(scene.hit_region_states[&hr_node_id].pressed);
@@ -1394,7 +1585,9 @@ mod tests {
 
         // Patch contains rollback=true state update
         assert!(!rollback_patch.is_empty());
-        let update = rollback_patch.node_updates.iter()
+        let update = rollback_patch
+            .node_updates
+            .iter()
             .find(|u| u.node_id == hr_node_id)
             .expect("expected rollback state update");
         assert_eq!(update.pressed, Some(false));
@@ -1411,17 +1604,27 @@ mod tests {
 
         // Press — starts pressed
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id: 0, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id: 0,
+                timestamp: None,
+            },
             &mut scene,
         );
         assert!(scene.hit_region_states[&hr_node_id].pressed);
 
         // Agent does NOT respond (silence) — pressed remains true
         // (no apply_agent_rejection called)
-        assert!(scene.hit_region_states[&hr_node_id].pressed,
-            "pressed should remain true on agent silence per spec");
-        assert!(!processor.rollback_tracker().is_rolling_back(hr_node_id),
-            "rollback should NOT be triggered by agent silence");
+        assert!(
+            scene.hit_region_states[&hr_node_id].pressed,
+            "pressed should remain true on agent silence per spec"
+        );
+        assert!(
+            !processor.rollback_tracker().is_rolling_back(hr_node_id),
+            "rollback should NOT be triggered by agent silence"
+        );
     }
 
     // ── Pointer Capture Protocol Tests ─────────────────────────────────
@@ -1437,36 +1640,58 @@ mod tests {
         let lease2 = scene.grant_lease("agent2", 60_000, vec![Capability::CreateTile]);
 
         let t1 = scene
-            .create_tile(tab_id, "agent1", lease1, Rect::new(100.0, 100.0, 300.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent1",
+                lease1,
+                Rect::new(100.0, 100.0, 300.0, 200.0),
+                1,
+            )
             .unwrap();
         let n1 = SceneId::new();
-        scene.set_tile_root(t1, Node {
-            id: n1,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
-                interaction_id: "node-t1".to_string(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                t1,
+                Node {
+                    id: n1,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+                        interaction_id: "node-t1".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
 
         let t2 = scene
-            .create_tile(tab_id, "agent2", lease2, Rect::new(500.0, 100.0, 300.0, 200.0), 2)
+            .create_tile(
+                tab_id,
+                "agent2",
+                lease2,
+                Rect::new(500.0, 100.0, 300.0, 200.0),
+                2,
+            )
             .unwrap();
         let n2 = SceneId::new();
-        scene.set_tile_root(t2, Node {
-            id: n2,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
-                interaction_id: "node-t2".to_string(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                t2,
+                Node {
+                    id: n2,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+                        interaction_id: "node-t2".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
 
         (scene, t1, n1, t2, n2)
     }
@@ -1482,27 +1707,49 @@ mod tests {
 
         // Press on T1 to establish press state
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Down, device_id, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Down,
+                device_id,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Acquire capture for N1/T1 for device 0
-        let req = CaptureRequest { tile_id: t1, node_id: n1, device_id };
+        let req = CaptureRequest {
+            tile_id: t1,
+            node_id: n1,
+            device_id,
+        };
         let response = processor.request_capture(&req, &scene, false).unwrap();
         assert_eq!(response.kind, AgentDispatchKind::CaptureGranted);
         assert!(processor.capture.is_captured(device_id));
 
         // Move pointer to T2's territory (x=600, which is inside T2 bounds at 500-800)
         let result = processor.process(
-            &PointerEvent { x: 600.0, y: 180.0, kind: PointerEventKind::Move, device_id, timestamp: None },
+            &PointerEvent {
+                x: 600.0,
+                y: 180.0,
+                kind: PointerEventKind::Move,
+                device_id,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Event MUST be routed to N1 (T1's owner), not T2
         let dispatch = result.dispatch.expect("should dispatch during capture");
         assert_eq!(dispatch.kind, AgentDispatchKind::PointerMove);
-        assert_eq!(dispatch.tile_id, t1, "captured events must route to capturing tile");
-        assert_eq!(dispatch.node_id, n1, "captured events must route to capturing node");
+        assert_eq!(
+            dispatch.tile_id, t1,
+            "captured events must route to capturing tile"
+        );
+        assert_eq!(
+            dispatch.node_id, n1,
+            "captured events must route to capturing node"
+        );
         assert_eq!(dispatch.namespace, "agent1");
     }
 
@@ -1516,15 +1763,26 @@ mod tests {
         let device_id = 0u32;
 
         // N1 acquires capture
-        let req1 = CaptureRequest { tile_id: t1, node_id: n1, device_id };
+        let req1 = CaptureRequest {
+            tile_id: t1,
+            node_id: n1,
+            device_id,
+        };
         let response1 = processor.request_capture(&req1, &scene, false).unwrap();
         assert_eq!(response1.kind, AgentDispatchKind::CaptureGranted);
 
         // N2 tries to capture the same device
-        let req2 = CaptureRequest { tile_id: t2, node_id: n2, device_id };
+        let req2 = CaptureRequest {
+            tile_id: t2,
+            node_id: n2,
+            device_id,
+        };
         let response2 = processor.request_capture(&req2, &scene, false).unwrap();
-        assert_eq!(response2.kind, AgentDispatchKind::CaptureDenied,
-            "second capture request for same device must be denied");
+        assert_eq!(
+            response2.kind,
+            AgentDispatchKind::CaptureDenied,
+            "second capture request for same device must be denied"
+        );
 
         // N1 still holds capture
         let state = processor.capture.get(device_id).unwrap();
@@ -1541,19 +1799,32 @@ mod tests {
         let device_id = 0u32;
 
         // Acquire capture with release_on_up=true
-        let req = CaptureRequest { tile_id: t1, node_id: n1, device_id };
+        let req = CaptureRequest {
+            tile_id: t1,
+            node_id: n1,
+            device_id,
+        };
         let response = processor.request_capture(&req, &scene, true).unwrap();
         assert_eq!(response.kind, AgentDispatchKind::CaptureGranted);
         assert!(processor.capture.get(device_id).unwrap().release_on_up);
 
         // Send PointerUp — should release capture
         let result = processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Up, device_id, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Up,
+                device_id,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Capture should be released
-        assert!(!processor.capture.is_captured(device_id), "capture must be released on PointerUp");
+        assert!(
+            !processor.capture.is_captured(device_id),
+            "capture must be released on PointerUp"
+        );
 
         // The primary dispatch returned should be PointerUp
         let dispatch = result.dispatch.expect("should dispatch on up");
@@ -1562,11 +1833,17 @@ mod tests {
 
         // The secondary dispatch (extra_dispatches) must contain CaptureReleased(POINTER_UP)
         // per spec line 125: "CaptureReleasedEvent(reason=POINTER_UP) SHALL be dispatched"
-        assert_eq!(result.extra_dispatches.len(), 1,
-            "CaptureReleased must be delivered as extra_dispatch after PointerUp");
+        assert_eq!(
+            result.extra_dispatches.len(),
+            1,
+            "CaptureReleased must be delivered as extra_dispatch after PointerUp"
+        );
         let cap_released = &result.extra_dispatches[0];
         assert_eq!(cap_released.kind, AgentDispatchKind::CaptureReleased);
-        assert_eq!(cap_released.capture_released_reason, Some(CaptureReleasedReason::PointerUp));
+        assert_eq!(
+            cap_released.capture_released_reason,
+            Some(CaptureReleasedReason::PointerUp)
+        );
         assert_eq!(cap_released.tile_id, t1);
     }
 
@@ -1580,23 +1857,38 @@ mod tests {
         let device_id = 0u32;
 
         // Acquire capture
-        let req = CaptureRequest { tile_id: t1, node_id: n1, device_id };
+        let req = CaptureRequest {
+            tile_id: t1,
+            node_id: n1,
+            device_id,
+        };
         processor.request_capture(&req, &scene, false).unwrap();
 
         // Runtime steals capture (Alt+Tab scenario)
-        let dispatches = processor.steal_capture(device_id, CaptureReleasedReason::RuntimeRevoked, &scene);
+        let dispatches =
+            processor.steal_capture(device_id, CaptureReleasedReason::RuntimeRevoked, &scene);
 
-        assert_eq!(dispatches.len(), 2, "theft must produce exactly 2 dispatches");
+        assert_eq!(
+            dispatches.len(),
+            2,
+            "theft must produce exactly 2 dispatches"
+        );
 
         // First: PointerCancelEvent
-        assert_eq!(dispatches[0].kind, AgentDispatchKind::PointerCancel,
-            "first dispatch must be PointerCancelEvent");
+        assert_eq!(
+            dispatches[0].kind,
+            AgentDispatchKind::PointerCancel,
+            "first dispatch must be PointerCancelEvent"
+        );
         assert_eq!(dispatches[0].tile_id, t1);
         assert_eq!(dispatches[0].node_id, n1);
 
         // Second: CaptureReleasedEvent(reason=RUNTIME_REVOKED)
-        assert_eq!(dispatches[1].kind, AgentDispatchKind::CaptureReleased,
-            "second dispatch must be CaptureReleasedEvent");
+        assert_eq!(
+            dispatches[1].kind,
+            AgentDispatchKind::CaptureReleased,
+            "second dispatch must be CaptureReleasedEvent"
+        );
         assert_eq!(
             dispatches[1].capture_released_reason,
             Some(CaptureReleasedReason::RuntimeRevoked),
@@ -1615,22 +1907,33 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease = scene.grant_lease("agent1", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent1", lease, Rect::new(100.0, 100.0, 300.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent1",
+                lease,
+                Rect::new(100.0, 100.0, 300.0, 200.0),
+                1,
+            )
             .unwrap();
         let node_id = SceneId::new();
-        scene.set_tile_root(tile_id, Node {
-            id: node_id,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
-                interaction_id: "auto-cap-button".to_string(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                auto_capture: true,
-                release_on_up: true,
-                ..Default::default()
-            }),
-        }).unwrap();
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: node_id,
+                    children: vec![],
+                    data: NodeData::HitRegion(HitRegionNode {
+                        bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
+                        interaction_id: "auto-cap-button".to_string(),
+                        accepts_focus: true,
+                        accepts_pointer: true,
+                        auto_capture: true,
+                        release_on_up: true,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap();
 
         let mut processor = InputProcessor::new();
         let device_id = 0u32;
@@ -1640,17 +1943,28 @@ mod tests {
 
         // PointerDown on auto_capture=true node
         processor.process(
-            &PointerEvent { x: 200.0, y: 200.0, kind: PointerEventKind::Down, device_id, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 200.0,
+                kind: PointerEventKind::Down,
+                device_id,
+                timestamp: None,
+            },
             &mut scene,
         );
 
         // Capture must be automatically acquired
-        assert!(processor.capture.is_captured(device_id),
-            "auto_capture=true must acquire capture on PointerDown without explicit request");
+        assert!(
+            processor.capture.is_captured(device_id),
+            "auto_capture=true must acquire capture on PointerDown without explicit request"
+        );
         let state = processor.capture.get(device_id).unwrap();
         assert_eq!(state.tile_id, tile_id);
         assert_eq!(state.node_id, node_id);
-        assert!(state.release_on_up, "release_on_up from HitRegionNode must be preserved");
+        assert!(
+            state.release_on_up,
+            "release_on_up from HitRegionNode must be preserved"
+        );
     }
 
     /// WHEN node holds capture and agent sends explicit CaptureReleaseRequest THEN
@@ -1662,16 +1976,24 @@ mod tests {
         let device_id = 0u32;
 
         // Acquire capture
-        let req = CaptureRequest { tile_id: t1, node_id: n1, device_id };
+        let req = CaptureRequest {
+            tile_id: t1,
+            node_id: n1,
+            device_id,
+        };
         processor.request_capture(&req, &scene, false).unwrap();
 
         // Agent releases explicitly
         let release_req = CaptureReleaseRequest { device_id };
-        let dispatch = processor.release_capture(&release_req, &scene)
+        let dispatch = processor
+            .release_capture(&release_req, &scene)
             .expect("release must produce dispatch when capture was active");
 
         assert_eq!(dispatch.kind, AgentDispatchKind::CaptureReleased);
-        assert_eq!(dispatch.capture_released_reason, Some(CaptureReleasedReason::AgentReleased));
+        assert_eq!(
+            dispatch.capture_released_reason,
+            Some(CaptureReleasedReason::AgentReleased)
+        );
         assert_eq!(dispatch.tile_id, t1);
         assert_eq!(dispatch.node_id, n1);
         assert!(!processor.capture.is_captured(device_id));
@@ -1684,7 +2006,10 @@ mod tests {
         let (scene, _t1, _n1, _t2, _n2) = setup_two_tile_scene();
         let mut processor = InputProcessor::new();
         let result = processor.release_capture(&CaptureReleaseRequest { device_id: 0 }, &scene);
-        assert!(result.is_none(), "releasing when no capture must return None");
+        assert!(
+            result.is_none(),
+            "releasing when no capture must return None"
+        );
     }
 
     /// WHEN two different devices are captured by different nodes THEN releasing one
@@ -1701,8 +2026,10 @@ mod tests {
 
         processor.capture.release(0);
         assert!(!processor.capture.is_captured(0));
-        assert!(processor.capture.is_captured(1),
-            "releasing device 0 must not affect device 1");
+        assert!(
+            processor.capture.is_captured(1),
+            "releasing device 0 must not affect device 1"
+        );
     }
 
     /// PointerUp with release_on_up=FALSE keeps capture active.
@@ -1713,16 +2040,28 @@ mod tests {
         let device_id = 0u32;
 
         // Acquire with release_on_up=false
-        let req = CaptureRequest { tile_id: t1, node_id: n1, device_id };
+        let req = CaptureRequest {
+            tile_id: t1,
+            node_id: n1,
+            device_id,
+        };
         processor.request_capture(&req, &scene, false).unwrap();
 
         // Send PointerUp — capture should remain
         processor.process(
-            &PointerEvent { x: 200.0, y: 180.0, kind: PointerEventKind::Up, device_id, timestamp: None },
+            &PointerEvent {
+                x: 200.0,
+                y: 180.0,
+                kind: PointerEventKind::Up,
+                device_id,
+                timestamp: None,
+            },
             &mut scene,
         );
 
-        assert!(processor.capture.is_captured(device_id),
-            "capture must remain when release_on_up=false");
+        assert!(
+            processor.capture.is_captured(device_id),
+            "capture must remain when release_on_up=false"
+        );
     }
 }

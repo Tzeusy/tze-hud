@@ -28,13 +28,13 @@
 //!   metric that exceeds the threshold is a test failure per:
 //!   > "resource utilization at hour N SHALL be within 5% of resource utilization
 //!   > at hour 1 for the same steady-state workload."
-//!   (validation-framework/spec.md line 299)
+//!   > (validation-framework/spec.md line 299)
 //!
 //! - **`assert_post_disconnect_zero`** — asserts that a named agent's resource
 //!   footprint has reached zero. Satisfies:
 //!   > "After an agent disconnects and leases expire, its resource footprint
 //!   > MUST be zero."
-//!   (validation-framework/spec.md line 299)
+//!   > (validation-framework/spec.md line 299)
 //!
 //! - **`growth_trend`** — returns the maximum percentage growth across all
 //!   tracked metrics relative to the first snapshot, useful for logging.
@@ -320,10 +320,7 @@ impl ResourceMonitor {
     /// Returns `Err` if:
     /// - Fewer than 2 snapshots have been recorded (nothing to compare).
     /// - Any metric exceeds the tolerance relative to baseline.
-    pub fn assert_no_monotonic_growth(
-        &self,
-        tolerance: f64,
-    ) -> Result<GrowthRatios, String> {
+    pub fn assert_no_monotonic_growth(&self, tolerance: f64) -> Result<GrowthRatios, String> {
         if self.snapshots.len() < 2 {
             return Err(format!(
                 "not enough snapshots to assess growth: need ≥ 2, got {}",
@@ -519,7 +516,10 @@ mod tests {
         // 20% growth on tiles — exceeds 5% tolerance
         let later = ResourceSnapshot::full(3610.0, 120, 50, 3, 3, 5, 1_000_000);
         let ratios = later.growth_ratios_vs(&baseline);
-        assert!(ratios.tile_count > 0.05, "20% growth should exceed tolerance");
+        assert!(
+            ratios.tile_count > 0.05,
+            "20% growth should exceed tolerance"
+        );
         assert!(ratios.max_growth() > 0.05);
         assert_eq!(ratios.worst_metric(), "tile_count");
     }
@@ -543,8 +543,14 @@ mod tests {
         let result = monitor.assert_no_monotonic_growth(SPEC_GROWTH_TOLERANCE);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("node_count"), "error should name the culprit metric: {msg}");
-        assert!(msg.contains("50.0%"), "error should include growth percentage: {msg}");
+        assert!(
+            msg.contains("node_count"),
+            "error should name the culprit metric: {msg}"
+        );
+        assert!(
+            msg.contains("50.0%"),
+            "error should include growth percentage: {msg}"
+        );
     }
 
     #[test]
@@ -560,9 +566,11 @@ mod tests {
     fn test_assert_post_disconnect_zero_passes_on_zero() {
         let monitor = ResourceMonitor::new();
         let zero = ResourceSnapshot::zero(3601.0);
-        assert!(monitor
-            .assert_post_disconnect_zero("agent-alpha", &zero)
-            .is_ok());
+        assert!(
+            monitor
+                .assert_post_disconnect_zero("agent-alpha", &zero)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -572,8 +580,14 @@ mod tests {
         let result = monitor.assert_post_disconnect_zero("agent-alpha", &nonzero);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("agent-alpha"), "error should name the agent: {msg}");
-        assert!(msg.contains("tiles=2"), "error should list tile count: {msg}");
+        assert!(
+            msg.contains("agent-alpha"),
+            "error should name the agent: {msg}"
+        );
+        assert!(
+            msg.contains("tiles=2"),
+            "error should list tile count: {msg}"
+        );
     }
 
     #[test]

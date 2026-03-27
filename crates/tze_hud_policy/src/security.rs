@@ -47,10 +47,14 @@ pub enum CapabilityNameCheck {
 pub fn check_canonical_capability_name(name: &str) -> CapabilityNameCheck {
     // ── Pre-Round-14 superseded names ─────────────────────────────────────────
     if name == "read_scene" {
-        return CapabilityNameCheck::Superseded { canonical: "read_scene_topology" };
+        return CapabilityNameCheck::Superseded {
+            canonical: "read_scene_topology",
+        };
     }
     if name == "receive_input" {
-        return CapabilityNameCheck::Superseded { canonical: "access_input_events" };
+        return CapabilityNameCheck::Superseded {
+            canonical: "access_input_events",
+        };
     }
     // zone_publish:<zone> → publish_zone:<zone>
     if let Some(zone) = name.strip_prefix("zone_publish:") {
@@ -58,15 +62,21 @@ pub fn check_canonical_capability_name(name: &str) -> CapabilityNameCheck {
         // We return a static hint for the common form; the runtime should
         // construct the full hint string using `name` if the zone is dynamic.
         let _ = zone; // zone used for context; static hint covers the pattern
-        return CapabilityNameCheck::Superseded { canonical: "publish_zone:<zone>" };
+        return CapabilityNameCheck::Superseded {
+            canonical: "publish_zone:<zone>",
+        };
     }
 
     // ── Uppercase / kebab-case rejections ─────────────────────────────────────
     if name.chars().any(|c| c.is_uppercase()) {
-        return CapabilityNameCheck::Invalid { reason: "capability names must be snake_case (no uppercase)" };
+        return CapabilityNameCheck::Invalid {
+            reason: "capability names must be snake_case (no uppercase)",
+        };
     }
     if name.contains('-') {
-        return CapabilityNameCheck::Invalid { reason: "capability names must be snake_case (no hyphens)" };
+        return CapabilityNameCheck::Invalid {
+            reason: "capability names must be snake_case (no hyphens)",
+        };
     }
 
     CapabilityNameCheck::Valid
@@ -226,7 +236,11 @@ pub fn validate_capability_names(names: &[&str]) -> Result<(), Vec<ConfigUnknown
                 } else {
                     canonical.to_string()
                 };
-                Some(ConfigUnknownCapability { used: name.to_string(), hint, is_superseded: true })
+                Some(ConfigUnknownCapability {
+                    used: name.to_string(),
+                    hint,
+                    is_superseded: true,
+                })
             }
             CapabilityNameCheck::Invalid { reason } => Some(ConfigUnknownCapability {
                 used: name.to_string(),
@@ -237,7 +251,11 @@ pub fn validate_capability_names(names: &[&str]) -> Result<(), Vec<ConfigUnknown
         })
         .collect();
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 #[cfg(test)]
@@ -250,8 +268,14 @@ mod security_tests {
     /// THEN they are accepted (spec lines 286-288)
     #[test]
     fn test_canonical_names_are_valid() {
-        assert_eq!(check_canonical_capability_name("create_tiles"), CapabilityNameCheck::Valid);
-        assert_eq!(check_canonical_capability_name("modify_own_tiles"), CapabilityNameCheck::Valid);
+        assert_eq!(
+            check_canonical_capability_name("create_tiles"),
+            CapabilityNameCheck::Valid
+        );
+        assert_eq!(
+            check_canonical_capability_name("modify_own_tiles"),
+            CapabilityNameCheck::Valid
+        );
         assert_eq!(
             check_canonical_capability_name("read_scene_topology"),
             CapabilityNameCheck::Valid
@@ -268,7 +292,10 @@ mod security_tests {
             check_canonical_capability_name("publish_zone:subtitle"),
             CapabilityNameCheck::Valid
         );
-        assert_eq!(check_canonical_capability_name("publish_zone:*"), CapabilityNameCheck::Valid);
+        assert_eq!(
+            check_canonical_capability_name("publish_zone:*"),
+            CapabilityNameCheck::Valid
+        );
     }
 
     /// WHEN capability grant uses read_scene THEN superseded with hint read_scene_topology
@@ -277,7 +304,9 @@ mod security_tests {
         let result = check_canonical_capability_name("read_scene");
         assert_eq!(
             result,
-            CapabilityNameCheck::Superseded { canonical: "read_scene_topology" }
+            CapabilityNameCheck::Superseded {
+                canonical: "read_scene_topology"
+            }
         );
     }
 
@@ -287,7 +316,9 @@ mod security_tests {
         let result = check_canonical_capability_name("receive_input");
         assert_eq!(
             result,
-            CapabilityNameCheck::Superseded { canonical: "access_input_events" }
+            CapabilityNameCheck::Superseded {
+                canonical: "access_input_events"
+            }
         );
     }
 
@@ -297,12 +328,16 @@ mod security_tests {
         let result = check_canonical_capability_name("zone_publish:subtitle");
         assert_eq!(
             result,
-            CapabilityNameCheck::Superseded { canonical: "publish_zone:<zone>" }
+            CapabilityNameCheck::Superseded {
+                canonical: "publish_zone:<zone>"
+            }
         );
         let result2 = check_canonical_capability_name("zone_publish:notification");
         assert_eq!(
             result2,
-            CapabilityNameCheck::Superseded { canonical: "publish_zone:<zone>" }
+            CapabilityNameCheck::Superseded {
+                canonical: "publish_zone:<zone>"
+            }
         );
     }
 
@@ -328,11 +363,8 @@ mod security_tests {
     /// with hint publish_zone:subtitle (spec lines 290-292)
     #[test]
     fn test_validate_capability_names_rejects_superseded() {
-        let result = validate_capability_names(&[
-            "create_tiles",
-            "zone_publish:subtitle",
-            "read_scene",
-        ]);
+        let result =
+            validate_capability_names(&["create_tiles", "zone_publish:subtitle", "read_scene"]);
         let errors = result.unwrap_err();
         assert_eq!(errors.len(), 2);
         let hints: Vec<_> = errors.iter().map(|e| e.hint.as_str()).collect();

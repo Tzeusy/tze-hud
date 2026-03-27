@@ -170,7 +170,9 @@ impl<C: Clock> SuspensionManager<C> {
         }
         // Keep sorted oldest-first for progressive revocation.
         self.suspended.sort_by_key(|e| e.suspended_at_ms);
-        SafeModeResult { suspended_lease_ids }
+        SafeModeResult {
+            suspended_lease_ids,
+        }
     }
 
     // ── Safe-mode exit ────────────────────────────────────────────────────────
@@ -194,7 +196,8 @@ impl<C: Clock> SuspensionManager<C> {
             // Here we only have ttl_remaining; if the caller also has granted_at and ttl_ms
             // they should compute it themselves.  We provide a convenience best-effort value:
             // adjusted = now + ttl_remaining (same net result for remaining TTL).
-            let adjusted_expires_at_ms = entry.ttl_remaining_at_suspend_ms
+            let adjusted_expires_at_ms = entry
+                .ttl_remaining_at_suspend_ms
                 .map(|remaining| now_ms + remaining);
             resumed.push(LeaseResumeData {
                 lease_id: entry.lease_id,
@@ -373,8 +376,11 @@ mod tests {
         assert_eq!(result.resumed.len(), 2);
         assert_eq!(mgr.suspended_count(), 0);
         for r in &result.resumed {
-            assert!(r.suspension_duration_ms >= 1_900 && r.suspension_duration_ms <= 2_100,
-                "expected ≈2_000ms, got {}", r.suspension_duration_ms);
+            assert!(
+                r.suspension_duration_ms >= 1_900 && r.suspension_duration_ms <= 2_100,
+                "expected ≈2_000ms, got {}",
+                r.suspension_duration_ms
+            );
         }
     }
 
@@ -500,7 +506,10 @@ mod tests {
 
         clock.advance(7_000);
         let dur = mgr.suspension_duration_ms(id);
-        assert!(dur >= 6_900 && dur <= 7_100, "expected ≈7_000ms, got {dur}");
+        assert!(
+            (6_900..=7_100).contains(&dur),
+            "expected ≈7_000ms, got {dur}"
+        );
     }
 
     #[test]
@@ -564,10 +573,8 @@ mod tests {
         let lease_b = SceneId::new();
 
         // Enter safe mode with 2 active leases
-        let enter_result = mgr.on_safe_mode_enter(&[
-            (lease_a, Some(60_000)),
-            (lease_b, Some(30_000)),
-        ]);
+        let enter_result =
+            mgr.on_safe_mode_enter(&[(lease_a, Some(60_000)), (lease_b, Some(30_000))]);
         assert_eq!(enter_result.suspended_lease_ids.len(), 2);
         assert!(mgr.has_suspended_leases());
 
@@ -585,7 +592,8 @@ mod tests {
             // suspension_duration_ms ≈ 120_000
             assert!(
                 r.suspension_duration_ms >= 119_900 && r.suspension_duration_ms <= 120_100,
-                "expected ≈120_000ms, got {}", r.suspension_duration_ms
+                "expected ≈120_000ms, got {}",
+                r.suspension_duration_ms
             );
         }
     }

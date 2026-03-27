@@ -107,9 +107,19 @@ pub struct ResolvedFeedbackStyle {
 }
 
 /// System-wide defaults for local feedback (matches spec §Local Feedback Defaults).
-pub const DEFAULT_HOVER_TINT: Rgba = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.1 };
+pub const DEFAULT_HOVER_TINT: Rgba = Rgba {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 0.1,
+};
 pub const DEFAULT_PRESS_DARKEN: f32 = 0.85;
-pub const DEFAULT_FOCUS_RING_COLOR: Rgba = Rgba { r: 0.2, g: 0.5, b: 1.0, a: 1.0 };
+pub const DEFAULT_FOCUS_RING_COLOR: Rgba = Rgba {
+    r: 0.2,
+    g: 0.5,
+    b: 1.0,
+    a: 1.0,
+};
 pub const DEFAULT_FOCUS_RING_WIDTH_PX: f32 = 2.0;
 
 impl ResolvedFeedbackStyle {
@@ -120,7 +130,9 @@ impl ResolvedFeedbackStyle {
             press_tint: style.press_tint,
             press_darken: style.press_darken.unwrap_or(DEFAULT_PRESS_DARKEN),
             focus_ring_color: style.focus_ring_color.unwrap_or(DEFAULT_FOCUS_RING_COLOR),
-            focus_ring_width_px: style.focus_ring_width_px.unwrap_or(DEFAULT_FOCUS_RING_WIDTH_PX),
+            focus_ring_width_px: style
+                .focus_ring_width_px
+                .unwrap_or(DEFAULT_FOCUS_RING_WIDTH_PX),
         }
     }
 
@@ -207,7 +219,9 @@ impl RollbackTracker {
 
     /// Returns true if the given node is currently in a rollback animation.
     pub fn is_rolling_back(&self, node_id: SceneId) -> bool {
-        self.active.iter().any(|a| a.node_id == node_id && a.is_active())
+        self.active
+            .iter()
+            .any(|a| a.node_id == node_id && a.is_active())
     }
 
     /// Remove all completed animations.
@@ -286,7 +300,10 @@ mod tests {
         assert!(anim.is_active());
         // Progress at t=0 should be near 0
         let p = anim.progress();
-        assert!(p >= 0.0 && p <= 0.1, "initial progress should be near 0, got {p}");
+        assert!(
+            (0.0..=0.1).contains(&p),
+            "initial progress should be near 0, got {p}"
+        );
     }
 
     #[test]

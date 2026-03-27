@@ -43,20 +43,16 @@ pub fn generate_heatmap(src: &[u8], ref_img: &[u8], width: u32, height: u32) -> 
 
         let delta = (luma_s - luma_r).abs().round() as u8;
         // Red channel = difference, blue channel = inverse difference.
-        out[i * 4] = delta;                 // R: difference magnitude
-        out[i * 4 + 1] = 0;                 // G: unused
+        out[i * 4] = delta; // R: difference magnitude
+        out[i * 4 + 1] = 0; // G: unused
         out[i * 4 + 2] = 255u8.saturating_sub(delta); // B: inverse
-        out[i * 4 + 3] = 255;               // A: opaque
+        out[i * 4 + 3] = 255; // A: opaque
     }
     out
 }
 
 /// Encode a diff heatmap as a PNG byte vector.
-pub fn encode_heatmap_png(
-    heatmap: &[u8],
-    width: u32,
-    height: u32,
-) -> Result<Vec<u8>, String> {
+pub fn encode_heatmap_png(heatmap: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     use image::{ImageBuffer, Rgba};
     let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(width, height, heatmap.to_vec())
         .ok_or_else(|| "heatmap buffer size mismatch".to_string())?;
@@ -127,18 +123,26 @@ impl SsimFailureRecord {
             (1.0, 1.0)
         } else {
             let min = result.windows.iter().cloned().fold(f64::INFINITY, f64::min);
-            let max = result.windows.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let max = result
+                .windows
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
             (min, max)
         };
 
-        let regions = result.regions.iter().map(|r| RegionFailureDetail {
-            x: r.x,
-            y: r.y,
-            width: r.width,
-            height: r.height,
-            ssim_score: r.score,
-            passed: r.score >= threshold,
-        }).collect();
+        let regions = result
+            .regions
+            .iter()
+            .map(|r| RegionFailureDetail {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+                ssim_score: r.score,
+                passed: r.score >= threshold,
+            })
+            .collect();
 
         Self {
             scene_name: scene_name.to_string(),
@@ -185,8 +189,16 @@ mod tests {
         let img = solid_rgba(16, 16, 200, 100, 50);
         let heatmap = generate_heatmap(&img, &img, 16, 16);
         for i in 0..(16 * 16) as usize {
-            assert_eq!(heatmap[i * 4], 0, "R channel must be 0 for identical pixels");
-            assert_eq!(heatmap[i * 4 + 2], 255, "B channel must be 255 for identical pixels");
+            assert_eq!(
+                heatmap[i * 4],
+                0,
+                "R channel must be 0 for identical pixels"
+            );
+            assert_eq!(
+                heatmap[i * 4 + 2],
+                255,
+                "B channel must be 255 for identical pixels"
+            );
         }
     }
 
@@ -197,8 +209,16 @@ mod tests {
         let white = solid_rgba(8, 8, 255, 255, 255);
         let heatmap = generate_heatmap(&black, &white, 8, 8);
         for i in 0..(8 * 8) as usize {
-            assert_eq!(heatmap[i * 4], 255, "R channel must be 255 for max difference");
-            assert_eq!(heatmap[i * 4 + 2], 0, "B channel must be 0 for max difference");
+            assert_eq!(
+                heatmap[i * 4],
+                255,
+                "R channel must be 255 for max difference"
+            );
+            assert_eq!(
+                heatmap[i * 4 + 2],
+                0,
+                "B channel must be 0 for max difference"
+            );
         }
     }
 
@@ -208,7 +228,11 @@ mod tests {
         let a = solid_rgba(32, 16, 100, 100, 100);
         let b = solid_rgba(32, 16, 200, 200, 200);
         let heatmap = generate_heatmap(&a, &b, 32, 16);
-        assert_eq!(heatmap.len(), 32 * 16 * 4, "heatmap must match input dimensions");
+        assert_eq!(
+            heatmap.len(),
+            32 * 16 * 4,
+            "heatmap must match input dimensions"
+        );
     }
 
     /// encode_heatmap_png produces valid PNG bytes.
@@ -218,7 +242,7 @@ mod tests {
         let white = solid_rgba(16, 16, 255, 255, 255);
         let heatmap = generate_heatmap(&black, &white, 16, 16);
         let png = encode_heatmap_png(&heatmap, 16, 16).expect("PNG encoding must succeed");
-        assert!(png.len() > 0, "PNG must not be empty");
+        assert!(!png.is_empty(), "PNG must not be empty");
         // Verify it starts with PNG magic bytes.
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "must be a valid PNG");
     }
@@ -238,10 +262,19 @@ mod tests {
         );
 
         let json = record.to_json();
-        assert!(json.contains("\"scene_name\""), "JSON must include scene_name");
+        assert!(
+            json.contains("\"scene_name\""),
+            "JSON must include scene_name"
+        );
         assert!(json.contains("\"backend\""), "JSON must include backend");
-        assert!(json.contains("\"threshold\""), "JSON must include threshold");
-        assert!(json.contains("\"actual_ssim\""), "JSON must include actual_ssim");
+        assert!(
+            json.contains("\"threshold\""),
+            "JSON must include threshold"
+        );
+        assert!(
+            json.contains("\"actual_ssim\""),
+            "JSON must include actual_ssim"
+        );
         assert!(json.contains("\"regions\""), "JSON must include regions");
         assert!(json.contains("\"delta\""), "JSON must include delta");
         assert!(json.contains("\"passed\""), "JSON must include passed");
@@ -253,14 +286,12 @@ mod tests {
         let black = solid_rgba(64, 64, 0, 0, 0);
         let white = solid_rgba(64, 64, 255, 255, 255);
         let ssim_result = compute_ssim(&black, &white, 64, 64);
-        let record = SsimFailureRecord::from_ssim_result(
-            "scene",
-            "software",
-            "layout",
-            0.995,
-            &ssim_result,
+        let record =
+            SsimFailureRecord::from_ssim_result("scene", "software", "layout", 0.995, &ssim_result);
+        assert!(
+            !record.passed,
+            "black vs white must produce a failed record"
         );
-        assert!(!record.passed, "black vs white must produce a failed record");
         assert!(record.delta < 0.0, "delta must be negative when failing");
     }
 
@@ -269,13 +300,11 @@ mod tests {
     fn failure_record_passed_test_marked() {
         let img = solid_rgba(64, 64, 128, 64, 200);
         let ssim_result = compute_ssim(&img, &img, 64, 64);
-        let record = SsimFailureRecord::from_ssim_result(
-            "scene",
-            "software",
-            "layout",
-            0.995,
-            &ssim_result,
+        let record =
+            SsimFailureRecord::from_ssim_result("scene", "software", "layout", 0.995, &ssim_result);
+        assert!(
+            record.passed,
+            "identical images must produce a passed record"
         );
-        assert!(record.passed, "identical images must produce a passed record");
     }
 }

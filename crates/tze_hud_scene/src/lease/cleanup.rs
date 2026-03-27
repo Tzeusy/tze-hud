@@ -25,8 +25,8 @@
 //! lease MUST be cleared from the zone registry.  `ZonePublicationSweep` models
 //! this operation.
 
-use crate::types::SceneId;
 use crate::lease::RevokeReason;
+use crate::types::SceneId;
 
 // ─── Post-revocation delay ───────────────────────────────────────────────────
 
@@ -246,7 +246,9 @@ mod tests {
     use super::*;
     use crate::types::SceneId;
 
-    fn dummy_lease() -> SceneId { SceneId::new() }
+    fn dummy_lease() -> SceneId {
+        SceneId::new()
+    }
 
     // ── RevocationKind ──────────────────────────────────────────────────────
 
@@ -267,7 +269,7 @@ mod tests {
         ] {
             assert!(
                 !kind.bypasses_grace_period(),
-                "{:?} should not bypass grace period", kind
+                "{kind:?} should not bypass grace period"
             );
         }
     }
@@ -275,8 +277,14 @@ mod tests {
     /// RevokeReason mapping is correct.
     #[test]
     fn revocation_kind_maps_to_revoke_reason() {
-        assert_eq!(RevocationKind::BudgetPolicy.to_revoke_reason(), RevokeReason::BudgetPolicy);
-        assert_eq!(RevocationKind::ViewerDismissed.to_revoke_reason(), RevokeReason::ViewerDismissed);
+        assert_eq!(
+            RevocationKind::BudgetPolicy.to_revoke_reason(),
+            RevokeReason::BudgetPolicy
+        );
+        assert_eq!(
+            RevocationKind::ViewerDismissed.to_revoke_reason(),
+            RevokeReason::ViewerDismissed
+        );
     }
 
     // ── PostRevocationCleanupSpec ───────────────────────────────────────────
@@ -285,7 +293,10 @@ mod tests {
     #[test]
     fn cleanup_spec_ready_after_100ms() {
         let spec = PostRevocationCleanupSpec::new(
-            dummy_lease(), "agent.foo", RevocationKind::BudgetPolicy, 1_000,
+            dummy_lease(),
+            "agent.foo",
+            RevocationKind::BudgetPolicy,
+            1_000,
         );
         assert!(!spec.is_ready_to_free(1_099), "not ready at 99ms");
         assert!(spec.is_ready_to_free(1_100), "ready at 100ms");
@@ -296,7 +307,10 @@ mod tests {
     #[test]
     fn cleanup_spec_ms_until_ready() {
         let spec = PostRevocationCleanupSpec::new(
-            dummy_lease(), "agent.bar", RevocationKind::BudgetPolicy, 500,
+            dummy_lease(),
+            "agent.bar",
+            RevocationKind::BudgetPolicy,
+            500,
         );
         assert_eq!(spec.ms_until_ready(550), 50);
         assert_eq!(spec.ms_until_ready(600), 0);
@@ -307,7 +321,10 @@ mod tests {
     #[test]
     fn cleanup_spec_budget_policy_bypasses_grace() {
         let spec = PostRevocationCleanupSpec::new(
-            dummy_lease(), "agent.baz", RevocationKind::BudgetPolicy, 0,
+            dummy_lease(),
+            "agent.baz",
+            RevocationKind::BudgetPolicy,
+            0,
         );
         assert!(spec.bypasses_grace_period());
     }
@@ -316,7 +333,10 @@ mod tests {
     #[test]
     fn cleanup_spec_viewer_dismissed_does_not_bypass_grace() {
         let spec = PostRevocationCleanupSpec::new(
-            dummy_lease(), "agent.qux", RevocationKind::ViewerDismissed, 0,
+            dummy_lease(),
+            "agent.qux",
+            RevocationKind::ViewerDismissed,
+            0,
         );
         assert!(!spec.bypasses_grace_period());
     }
@@ -327,9 +347,14 @@ mod tests {
     #[test]
     fn zone_sweep_should_clear_for_terminal_states() {
         use crate::types::LeaseState;
-        for state in [LeaseState::Revoked, LeaseState::Expired, LeaseState::Released, LeaseState::Denied] {
+        for state in [
+            LeaseState::Revoked,
+            LeaseState::Expired,
+            LeaseState::Released,
+            LeaseState::Denied,
+        ] {
             let sweep = ZonePublicationSweep::new(dummy_lease(), "ns", state);
-            assert!(sweep.should_clear(), "{:?} must trigger zone clear", state);
+            assert!(sweep.should_clear(), "{state:?} must trigger zone clear");
         }
     }
 
@@ -337,9 +362,17 @@ mod tests {
     #[test]
     fn zone_sweep_no_clear_for_non_terminal_states() {
         use crate::types::LeaseState;
-        for state in [LeaseState::Active, LeaseState::Suspended, LeaseState::Orphaned, LeaseState::Requested] {
+        for state in [
+            LeaseState::Active,
+            LeaseState::Suspended,
+            LeaseState::Orphaned,
+            LeaseState::Requested,
+        ] {
             let sweep = ZonePublicationSweep::new(dummy_lease(), "ns", state);
-            assert!(!sweep.should_clear(), "{:?} must NOT trigger zone clear", state);
+            assert!(
+                !sweep.should_clear(),
+                "{state:?} must NOT trigger zone clear"
+            );
         }
     }
 

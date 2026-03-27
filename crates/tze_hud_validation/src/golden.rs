@@ -25,9 +25,9 @@
 //! - `"software"` — llvmpipe (Linux) / WARP (Windows)
 //! - `"hardware"` — any hardware-backed GPU
 
-use std::path::{Path, PathBuf};
-use image::{ImageBuffer, Rgba};
 use crate::error::ValidationError;
+use image::{ImageBuffer, Rgba};
+use std::path::{Path, PathBuf};
 
 /// Manages golden reference images on disk.
 pub struct GoldenStore {
@@ -40,14 +40,16 @@ impl GoldenStore {
     ///
     /// The directory must exist and be readable.
     pub fn new(dir: impl AsRef<Path>) -> Self {
-        Self { dir: dir.as_ref().to_path_buf() }
+        Self {
+            dir: dir.as_ref().to_path_buf(),
+        }
     }
 
     /// Canonical path for a golden reference image.
     ///
     /// Format: `{dir}/{scene_name}_{backend}.png`
     pub fn path(&self, scene_name: &str, backend: &str) -> PathBuf {
-        self.dir.join(format!("{}_{}.png", scene_name, backend))
+        self.dir.join(format!("{scene_name}_{backend}.png"))
     }
 
     /// Load a golden reference image as RGBA8 bytes.
@@ -74,7 +76,11 @@ impl GoldenStore {
         let height = img.height();
         let pixels = img.into_raw();
 
-        Ok(GoldenImage { pixels, width, height })
+        Ok(GoldenImage {
+            pixels,
+            width,
+            height,
+        })
     }
 
     /// Write a new golden reference image from RGBA8 bytes.
@@ -100,9 +106,9 @@ impl GoldenStore {
         let path = self.path(scene_name, backend);
         let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(width, height, pixels.to_vec())
             .ok_or_else(|| ValidationError::GoldenIo {
-                path: path.clone(),
-                cause: "pixel buffer size mismatch".to_string(),
-            })?;
+            path: path.clone(),
+            cause: "pixel buffer size mismatch".to_string(),
+        })?;
 
         img.save_with_format(&path, image::ImageFormat::Png)
             .map_err(|e| ValidationError::GoldenIo {
@@ -133,7 +139,11 @@ impl GoldenImage {
             (width * height * 4) as usize,
             "pixel buffer size mismatch"
         );
-        Self { pixels, width, height }
+        Self {
+            pixels,
+            width,
+            height,
+        }
     }
 }
 
@@ -199,17 +209,20 @@ mod tests {
 
         let w = 8u32;
         let h = 8u32;
-        let pixels: Vec<u8> = (0..(w * h * 4))
-            .map(|i| (i % 256) as u8)
-            .collect();
+        let pixels: Vec<u8> = (0..(w * h * 4)).map(|i| (i % 256) as u8).collect();
 
-        store.update("test_scene", "software", &pixels, w, h).unwrap();
+        store
+            .update("test_scene", "software", &pixels, w, h)
+            .unwrap();
 
         let loaded = store.load("test_scene", "software").unwrap();
         assert_eq!(loaded.width, w);
         assert_eq!(loaded.height, h);
         // PNG is lossless for RGBA8 — pixels must round-trip exactly.
-        assert_eq!(loaded.pixels, pixels, "PNG round-trip must preserve pixels exactly");
+        assert_eq!(
+            loaded.pixels, pixels,
+            "PNG round-trip must preserve pixels exactly"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

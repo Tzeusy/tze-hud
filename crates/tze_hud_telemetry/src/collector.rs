@@ -1,8 +1,8 @@
 //! Telemetry collector — gathers per-frame records and produces session summaries.
 
 use crate::record::{FrameTelemetry, SessionSummary};
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use tze_hud_scene::clock::{Clock, SystemClock};
 
 /// Non-blocking telemetry collector.

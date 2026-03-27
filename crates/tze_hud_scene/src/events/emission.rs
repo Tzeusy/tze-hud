@@ -84,6 +84,7 @@ impl AgentEventRateLimiter {
     ///
     /// Callers should pass `Instant::now()` for `now` in production code.
     /// For deterministic testing, pass a synthetic `Instant` value.
+    #[allow(clippy::result_unit_err)] // unit error is intentional: rate-limit is binary (ok/throttled)
     pub fn check_and_record(&mut self, now: Instant) -> Result<(), ()> {
         // Prune events that have left the 1-second window.
         while let Some(&front) = self.timestamps.front() {
@@ -166,7 +167,10 @@ mod tests {
         // Send 10 events within 500ms — all should be accepted.
         for i in 0..10 {
             let t = ms_after(base, i * 50);
-            assert!(limiter.check_and_record(t).is_ok(), "event {i} should be accepted");
+            assert!(
+                limiter.check_and_record(t).is_ok(),
+                "event {i} should be accepted"
+            );
         }
 
         // 11th event within the same window — must be rejected.
@@ -226,7 +230,9 @@ mod tests {
         let mut limiter = AgentEventRateLimiter::with_limit(1);
 
         // First event accepted.
-        limiter.check_and_record(base).expect("first event accepted");
+        limiter
+            .check_and_record(base)
+            .expect("first event accepted");
         // Second event in same window rejected.
         assert!(limiter.check_and_record(ms_after(base, 100)).is_err());
 

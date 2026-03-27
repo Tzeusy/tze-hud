@@ -148,9 +148,7 @@ fn wall_clock_us() -> WallUs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{
-        InputEnvelope, PointerDownData, PointerMoveData, PointerUpData,
-    };
+    use crate::envelope::{InputEnvelope, PointerDownData, PointerMoveData, PointerUpData};
     use tze_hud_scene::{MonoUs, SceneId};
 
     fn null_id() -> SceneId {
@@ -211,7 +209,11 @@ mod tests {
         assembler.push("alpha", make_up(2000));
 
         let batches = assembler.assemble_frame(42);
-        assert_eq!(batches.len(), 1, "should produce exactly one batch for agent alpha");
+        assert_eq!(
+            batches.len(),
+            1,
+            "should produce exactly one batch for agent alpha"
+        );
         let batch = &batches[0];
         assert_eq!(batch.namespace, "alpha");
         assert_eq!(batch.frame_number, 42);
@@ -261,7 +263,10 @@ mod tests {
 
         // Next frame: no new events pushed
         let batches = assembler.assemble_frame(2);
-        assert!(batches.is_empty(), "assembler must be cleared after assemble_frame");
+        assert!(
+            batches.is_empty(),
+            "assembler must be cleared after assemble_frame"
+        );
     }
 
     // ─── Empty frame produces no batches ────────────────────────────────────
@@ -290,10 +295,17 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, InputEnvelope::PointerMove(_)))
             .collect();
-        assert_eq!(moves.len(), 1, "10 PointerMoves for same node should coalesce to 1");
+        assert_eq!(
+            moves.len(),
+            1,
+            "10 PointerMoves for same node should coalesce to 1"
+        );
         // The surviving move should be the last one (x=9, y=9)
         if let InputEnvelope::PointerMove(d) = &moves[0] {
-            assert!((d.local_x - 9.0).abs() < 0.001, "latest position should be retained");
+            assert!(
+                (d.local_x - 9.0).abs() < 0.001,
+                "latest position should be retained"
+            );
         }
     }
 
@@ -301,13 +313,13 @@ mod tests {
 
     #[test]
     fn test_assemble_frame_under_2ms() {
-        use tze_hud_scene::calibration::{test_budget, budgets};
         use std::time::Instant;
+        use tze_hud_scene::calibration::{budgets, test_budget};
 
         let mut assembler = EventBatchAssembler::new();
         // Simulate a dense frame: 50 agents × 8 events each
         for agent_idx in 0..50 {
-            let ns = format!("agent_{}", agent_idx);
+            let ns = format!("agent_{agent_idx}");
             for event_idx in 0..8u64 {
                 let ts = agent_idx as u64 * 1000 + event_idx * 100;
                 assembler.push(&ns, make_down(ts));
@@ -324,8 +336,7 @@ mod tests {
         let dispatch_budget = test_budget(budgets::EVENT_DISPATCH_BUDGET_US);
         assert!(
             elapsed_us < dispatch_budget,
-            "assemble_frame took {}µs, calibrated budget is {}µs",
-            elapsed_us, dispatch_budget,
+            "assemble_frame took {elapsed_us}µs, calibrated budget is {dispatch_budget}µs",
         );
     }
 }

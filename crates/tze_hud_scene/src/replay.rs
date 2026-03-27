@@ -45,9 +45,7 @@
 //! 5. Adds a `#[test]` that calls [`assert_trace_is_deterministic`].
 
 use crate::graph::SceneGraph;
-use crate::trace::{
-    ReplayResult, ReplayStepOutcome, SceneTrace, TraceEventKind,
-};
+use crate::trace::{ReplayResult, ReplayStepOutcome, SceneTrace, TraceEventKind};
 
 // ─── TraceReplayer ────────────────────────────────────────────────────────────
 
@@ -268,11 +266,7 @@ mod tests {
     }
 
     /// Construct a minimal trace with the given initial graph and events.
-    fn make_trace(
-        initial: &SceneGraph,
-        events: Vec<TraceEvent>,
-        label: &str,
-    ) -> SceneTrace {
+    fn make_trace(initial: &SceneGraph, events: Vec<TraceEvent>, label: &str) -> SceneTrace {
         let initial_json = serde_json::to_string(initial).unwrap();
         let header = TraceHeader {
             trace_id: SceneId::new(),
@@ -314,7 +308,11 @@ mod tests {
         let mut sim_graph = serde_json::from_str::<SceneGraph>(&initial_json).unwrap();
         let result = sim_graph.apply_batch(&batch);
         let recorded_applied = result.applied;
-        let recorded_version = if result.applied { Some(sim_graph.version) } else { None };
+        let recorded_version = if result.applied {
+            Some(sim_graph.version)
+        } else {
+            None
+        };
 
         let trace = SceneTrace {
             header: TraceHeader {
@@ -429,7 +427,10 @@ mod tests {
         assert_eq!(result.divergences.len(), 1);
         if let ReplayStepOutcome::Diverged { seq, description } = &result.divergences[0] {
             assert_eq!(*seq, 0);
-            assert!(description.contains("version mismatch"), "description: {description}");
+            assert!(
+                description.contains("version mismatch"),
+                "description: {description}"
+            );
         } else {
             panic!("expected Diverged outcome");
         }

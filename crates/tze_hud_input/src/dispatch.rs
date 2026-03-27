@@ -108,8 +108,7 @@ impl DispatchProcessor {
                 if node_allows_event(scene, node_id, |m| m.context_menu) {
                     if let Some(namespace) = tile_namespace(scene, tile_id) {
                         let interaction_id = interaction_id_for(scene, node_id);
-                        let (local_x, local_y) =
-                            display_to_local(scene, tile_id, raw.x, raw.y);
+                        let (local_x, local_y) = display_to_local(scene, tile_id, raw.x, raw.y);
                         let fields = PointerFields {
                             tile_id,
                             node_id,
@@ -130,7 +129,13 @@ impl DispatchProcessor {
                 }
             }
             let stages_1_2_us = start.elapsed().as_micros() as u64;
-            return DispatchOutcome { hit, local_patch, agent_events, stages_1_2_us, hit_test_us };
+            return DispatchOutcome {
+                hit,
+                local_patch,
+                agent_events,
+                stages_1_2_us,
+                hit_test_us,
+            };
         }
 
         // ── Stage 2: Hover state update ──────────────────────────────────────
@@ -152,10 +157,12 @@ impl DispatchProcessor {
                 if node_allows_event(scene, old_node, |m| m.pointer_leave) {
                     if let Some(namespace) = tile_namespace(scene, old_tile) {
                         let interaction_id = interaction_id_for(scene, old_node);
-                        let (local_x, local_y) =
-                            display_to_local(scene, old_tile, raw.x, raw.y);
+                        let (local_x, local_y) = display_to_local(scene, old_tile, raw.x, raw.y);
                         agent_events.push((
-                            RouteTarget::Agent { namespace, tile_id: old_tile },
+                            RouteTarget::Agent {
+                                namespace,
+                                tile_id: old_tile,
+                            },
                             InputEnvelope::PointerLeave(PointerLeaveEvent {
                                 fields: PointerFields {
                                     tile_id: old_tile,
@@ -178,9 +185,10 @@ impl DispatchProcessor {
             // Pointer entered a new node
             if let Some((new_tile, new_node)) = new_hover {
                 {
-                    let state = scene.hit_region_states.entry(new_node).or_insert_with(|| {
-                        tze_hud_scene::HitRegionLocalState::new(new_node)
-                    });
+                    let state = scene
+                        .hit_region_states
+                        .entry(new_node)
+                        .or_insert_with(|| tze_hud_scene::HitRegionLocalState::new(new_node));
                     state.hovered = true;
                 }
                 local_patch.update_node(new_node, None, Some(true), None);
@@ -188,10 +196,12 @@ impl DispatchProcessor {
                 if node_allows_event(scene, new_node, |m| m.pointer_enter) {
                     if let Some(namespace) = tile_namespace(scene, new_tile) {
                         let interaction_id = interaction_id_for(scene, new_node);
-                        let (local_x, local_y) =
-                            display_to_local(scene, new_tile, raw.x, raw.y);
+                        let (local_x, local_y) = display_to_local(scene, new_tile, raw.x, raw.y);
                         agent_events.push((
-                            RouteTarget::Agent { namespace, tile_id: new_tile },
+                            RouteTarget::Agent {
+                                namespace,
+                                tile_id: new_tile,
+                            },
                             InputEnvelope::PointerEnter(PointerEnterEvent {
                                 fields: PointerFields {
                                     tile_id: new_tile,
@@ -229,8 +239,7 @@ impl DispatchProcessor {
                     if node_allows_event(scene, node_id, |m| m.pointer_down) {
                         if let Some(namespace) = tile_namespace(scene, tile_id) {
                             let interaction_id = interaction_id_for(scene, node_id);
-                            let (local_x, local_y) =
-                                display_to_local(scene, tile_id, raw.x, raw.y);
+                            let (local_x, local_y) = display_to_local(scene, tile_id, raw.x, raw.y);
                             agent_events.push((
                                 RouteTarget::Agent { namespace, tile_id },
                                 InputEnvelope::PointerDown(PointerDownEvent {
@@ -271,7 +280,10 @@ impl DispatchProcessor {
                             let (local_x, local_y) =
                                 display_to_local(scene, pressed_tile, raw.x, raw.y);
                             agent_events.push((
-                                RouteTarget::Agent { namespace: namespace.clone(), tile_id: pressed_tile },
+                                RouteTarget::Agent {
+                                    namespace: namespace.clone(),
+                                    tile_id: pressed_tile,
+                                },
                                 InputEnvelope::PointerUp(PointerUpEvent {
                                     fields: PointerFields {
                                         tile_id: pressed_tile,
@@ -290,19 +302,21 @@ impl DispatchProcessor {
                             ));
 
                             // Click: press + release on same node (spec line 284)
-                            let released_on_same_node = new_hover == Some((pressed_tile, pressed_node));
-                            if released_on_same_node && button == pressed_button
+                            let released_on_same_node =
+                                new_hover == Some((pressed_tile, pressed_node));
+                            if released_on_same_node
+                                && button == pressed_button
                                 && node_allows_event(scene, pressed_node, |m| m.click)
                             {
-                                let is_double_click = self.check_double_click(
-                                    raw.timestamp_mono_us,
-                                    raw.x,
-                                    raw.y,
-                                );
+                                let is_double_click =
+                                    self.check_double_click(raw.timestamp_mono_us, raw.x, raw.y);
 
                                 // Always emit Click
                                 agent_events.push((
-                                    RouteTarget::Agent { namespace: namespace.clone(), tile_id: pressed_tile },
+                                    RouteTarget::Agent {
+                                        namespace: namespace.clone(),
+                                        tile_id: pressed_tile,
+                                    },
                                     InputEnvelope::Click(ClickEvent {
                                         fields: PointerFields {
                                             tile_id: pressed_tile,
@@ -325,22 +339,27 @@ impl DispatchProcessor {
                                     && node_allows_event(scene, pressed_node, |m| m.double_click)
                                 {
                                     agent_events.push((
-                                        RouteTarget::Agent { namespace, tile_id: pressed_tile },
-                                        InputEnvelope::DoubleClick(crate::pointer::DoubleClickEvent {
-                                            fields: PointerFields {
-                                                tile_id: pressed_tile,
-                                                node_id: pressed_node,
-                                                interaction_id,
-                                                device_id: raw.device_id,
-                                                local_x,
-                                                local_y,
-                                                display_x: raw.x,
-                                                display_y: raw.y,
-                                                modifiers: raw.modifiers,
-                                                timestamp_mono_us: raw.timestamp_mono_us,
+                                        RouteTarget::Agent {
+                                            namespace,
+                                            tile_id: pressed_tile,
+                                        },
+                                        InputEnvelope::DoubleClick(
+                                            crate::pointer::DoubleClickEvent {
+                                                fields: PointerFields {
+                                                    tile_id: pressed_tile,
+                                                    node_id: pressed_node,
+                                                    interaction_id,
+                                                    device_id: raw.device_id,
+                                                    local_x,
+                                                    local_y,
+                                                    display_x: raw.x,
+                                                    display_y: raw.y,
+                                                    modifiers: raw.modifiers,
+                                                    timestamp_mono_us: raw.timestamp_mono_us,
+                                                },
+                                                button,
                                             },
-                                            button,
-                                        }),
+                                        ),
                                     ));
                                 }
 
@@ -361,8 +380,7 @@ impl DispatchProcessor {
                     {
                         if let Some(namespace) = tile_namespace(scene, tile_id) {
                             let interaction_id = interaction_id_for(scene, node_id);
-                            let (local_x, local_y) =
-                                display_to_local(scene, tile_id, raw.x, raw.y);
+                            let (local_x, local_y) = display_to_local(scene, tile_id, raw.x, raw.y);
                             agent_events.push((
                                 RouteTarget::Agent { namespace, tile_id },
                                 InputEnvelope::PointerMove(PointerMoveEvent {
@@ -400,7 +418,10 @@ impl DispatchProcessor {
                         let (local_x, local_y) =
                             display_to_local(scene, pressed_tile, raw.x, raw.y);
                         agent_events.push((
-                            RouteTarget::Agent { namespace, tile_id: pressed_tile },
+                            RouteTarget::Agent {
+                                namespace,
+                                tile_id: pressed_tile,
+                            },
                             InputEnvelope::PointerCancel(PointerCancelEvent {
                                 fields: PointerFields {
                                     tile_id: pressed_tile,
@@ -427,14 +448,18 @@ impl DispatchProcessor {
         }
 
         let stages_1_2_us = start.elapsed().as_micros() as u64;
-        DispatchOutcome { hit, local_patch, agent_events, stages_1_2_us, hit_test_us }
+        DispatchOutcome {
+            hit,
+            local_patch,
+            agent_events,
+            stages_1_2_us,
+            hit_test_us,
+        }
     }
 
     /// Check whether the current Up event qualifies as a DoubleClick.
     fn check_double_click(&self, ts: MonoUs, x: f32, y: f32) -> bool {
-        if let (Some(last_ts), Some((last_x, last_y))) =
-            (self.last_click_ts, self.last_click_pos)
-        {
+        if let (Some(last_ts), Some((last_x, last_y))) = (self.last_click_ts, self.last_click_pos) {
             let dt = ts.0.saturating_sub(last_ts.0);
             let dx = x - last_x;
             let dy = y - last_y;
@@ -531,16 +556,20 @@ pub fn build_agent_batch(
 mod tests {
     use super::*;
     use crate::pointer::Modifiers;
-    use tze_hud_scene::{
-        Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId,
-    };
+    use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId};
 
     fn setup_scene() -> (SceneGraph, SceneId, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "test", lease_id, Rect::new(100.0, 100.0, 400.0, 300.0), 1)
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(100.0, 100.0, 400.0, 300.0),
+                1,
+            )
             .unwrap();
         let node_id = SceneId::new();
         scene
@@ -568,9 +597,7 @@ mod tests {
             y,
             kind,
             button: match kind {
-                RawPointerEventKind::Down | RawPointerEventKind::Up => {
-                    Some(PointerButton::Primary)
-                }
+                RawPointerEventKind::Down | RawPointerEventKind::Up => Some(PointerButton::Primary),
                 _ => None,
             },
             device_id: 1,
@@ -596,7 +623,10 @@ mod tests {
                 button: Some(PointerButton::Primary),
                 device_id: 42,
                 timestamp_mono_us: MonoUs(1_234_567),
-                modifiers: Modifiers { shift: true, ..Modifiers::NONE },
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                },
             },
             &mut scene,
         );
@@ -606,21 +636,53 @@ mod tests {
             .iter()
             .filter(|(_, e)| matches!(e, InputEnvelope::PointerDown(_)))
             .collect();
-        assert_eq!(down_events.len(), 1, "exactly one PointerDown must be produced");
+        assert_eq!(
+            down_events.len(),
+            1,
+            "exactly one PointerDown must be produced"
+        );
 
-        let InputEnvelope::PointerDown(down) = &down_events[0].1 else { unreachable!() };
+        let InputEnvelope::PointerDown(down) = &down_events[0].1 else {
+            unreachable!()
+        };
         assert_eq!(down.fields.tile_id, tile_id, "tile_id must match");
         assert_eq!(down.fields.node_id, node_id, "node_id must match");
         assert_eq!(down.fields.device_id, 42, "device_id must match");
-        assert_eq!(down.button, PointerButton::Primary, "button must be PRIMARY");
-        assert_eq!(down.fields.interaction_id, "submit-button", "interaction_id must be forwarded");
+        assert_eq!(
+            down.button,
+            PointerButton::Primary,
+            "button must be PRIMARY"
+        );
+        assert_eq!(
+            down.fields.interaction_id, "submit-button",
+            "interaction_id must be forwarded"
+        );
         // Tile origin is (100,100), event at (200,180) → local = (100, 80)
-        assert!((down.fields.local_x - 100.0).abs() < 0.1, "local_x must be display - tile origin");
-        assert!((down.fields.local_y - 80.0).abs() < 0.1, "local_y must be display - tile origin");
-        assert_eq!(down.fields.display_x, 200.0, "display_x must match raw event");
-        assert_eq!(down.fields.display_y, 180.0, "display_y must match raw event");
-        assert!(down.fields.modifiers.shift, "modifier shift must be forwarded");
-        assert_eq!(down.fields.timestamp_mono_us, MonoUs(1_234_567), "timestamp_mono_us must match");
+        assert!(
+            (down.fields.local_x - 100.0).abs() < 0.1,
+            "local_x must be display - tile origin"
+        );
+        assert!(
+            (down.fields.local_y - 80.0).abs() < 0.1,
+            "local_y must be display - tile origin"
+        );
+        assert_eq!(
+            down.fields.display_x, 200.0,
+            "display_x must match raw event"
+        );
+        assert_eq!(
+            down.fields.display_y, 180.0,
+            "display_y must match raw event"
+        );
+        assert!(
+            down.fields.modifiers.shift,
+            "modifier shift must be forwarded"
+        );
+        assert_eq!(
+            down.fields.timestamp_mono_us,
+            MonoUs(1_234_567),
+            "timestamp_mono_us must match"
+        );
     }
 
     // ── Event routing to lease owner (spec line 321) ──────────────────────────
@@ -633,7 +695,11 @@ mod tests {
         let outcome = proc.process(&raw(RawPointerEventKind::Down, 200.0, 180.0), &mut scene);
 
         for (route, _) in &outcome.agent_events {
-            if let RouteTarget::Agent { namespace, tile_id: rt } = route {
+            if let RouteTarget::Agent {
+                namespace,
+                tile_id: rt,
+            } = route
+            {
                 assert_eq!(namespace, "test", "must route to 'test' namespace");
                 assert_eq!(*rt, tile_id, "route tile_id must match the hit tile");
             }
@@ -663,7 +729,10 @@ mod tests {
             .iter()
             .filter(|(_, e)| matches!(e, InputEnvelope::PointerMove(_)))
             .collect();
-        assert!(move_events.is_empty(), "PointerMove must not be dispatched when event_mask.pointer_move=false");
+        assert!(
+            move_events.is_empty(),
+            "PointerMove must not be dispatched when event_mask.pointer_move=false"
+        );
     }
 
     // ── interaction_id forwarded in ClickEvent (spec line 258) ───────────────
@@ -683,8 +752,13 @@ mod tests {
             .filter(|(_, e)| matches!(e, InputEnvelope::Click(_)))
             .collect();
         assert_eq!(clicks.len(), 1, "exactly one ClickEvent must be produced");
-        let InputEnvelope::Click(click) = &clicks[0].1 else { unreachable!() };
-        assert_eq!(click.fields.interaction_id, "submit-button", "interaction_id must be forwarded");
+        let InputEnvelope::Click(click) = &clicks[0].1 else {
+            unreachable!()
+        };
+        assert_eq!(
+            click.fields.interaction_id, "submit-button",
+            "interaction_id must be forwarded"
+        );
     }
 
     // ── Right-click → ContextMenuEvent, not GestureEvent (spec line 439) ──────
@@ -718,11 +792,18 @@ mod tests {
             .iter()
             .filter(|(_, e)| matches!(e, InputEnvelope::ContextMenu(_)))
             .collect();
-        assert_eq!(ctx_events.len(), 1, "exactly one ContextMenuEvent must be produced");
+        assert_eq!(
+            ctx_events.len(),
+            1,
+            "exactly one ContextMenuEvent must be produced"
+        );
 
         // Must NOT produce any gesture-like events
         assert!(
-            !outcome.agent_events.iter().any(|(_, e)| matches!(e, InputEnvelope::PointerDown(_))),
+            !outcome
+                .agent_events
+                .iter()
+                .any(|(_, e)| matches!(e, InputEnvelope::PointerDown(_))),
             "RightClick must not produce PointerDown"
         );
     }
@@ -791,7 +872,11 @@ mod tests {
             .iter()
             .filter(|(_, e)| matches!(e, InputEnvelope::DoubleClick(_)))
             .collect();
-        assert_eq!(dbl_clicks.len(), 1, "DoubleClickEvent must be produced within 300ms");
+        assert_eq!(
+            dbl_clicks.len(),
+            1,
+            "DoubleClickEvent must be produced within 300ms"
+        );
     }
 
     // ── SceneLocalPatch contains pressed state (spec line 159) ───────────────
@@ -808,11 +893,18 @@ mod tests {
             .node_updates
             .iter()
             .find(|u| u.node_id == node_id && u.pressed == Some(true));
-        assert!(pressed_update.is_some(), "SceneLocalPatch must contain pressed=true on PointerDown");
+        assert!(
+            pressed_update.is_some(),
+            "SceneLocalPatch must contain pressed=true on PointerDown"
+        );
 
         // Verify scene state was updated
         assert!(
-            scene.hit_region_states.get(&node_id).map(|s| s.pressed).unwrap_or(false),
+            scene
+                .hit_region_states
+                .get(&node_id)
+                .map(|s| s.pressed)
+                .unwrap_or(false),
             "HitRegionLocalState.pressed must be true after PointerDown"
         );
     }
@@ -835,9 +927,7 @@ mod tests {
         // We use 1ms (1000µs) as the hard threshold
         assert!(
             stages_us < 1000,
-            "Stages 1+2 took {}µs, must be < 1ms (calibrated: {}µs)",
-            stages_us,
-            combined_budget_us,
+            "Stages 1+2 took {stages_us}µs, must be < 1ms (calibrated: {combined_budget_us}µs)",
         );
     }
 
@@ -862,18 +952,29 @@ mod tests {
 
         let events = vec![
             (
-                RouteTarget::Agent { namespace: "agent-a".to_string(), tile_id },
+                RouteTarget::Agent {
+                    namespace: "agent-a".to_string(),
+                    tile_id,
+                },
                 InputEnvelope::PointerDown(PointerDownEvent {
                     fields: fields(100),
                     button: PointerButton::Primary,
                 }),
             ),
             (
-                RouteTarget::Agent { namespace: "agent-b".to_string(), tile_id },
-                InputEnvelope::PointerMove(PointerMoveEvent { fields: fields(200) }),
+                RouteTarget::Agent {
+                    namespace: "agent-b".to_string(),
+                    tile_id,
+                },
+                InputEnvelope::PointerMove(PointerMoveEvent {
+                    fields: fields(200),
+                }),
             ),
             (
-                RouteTarget::Agent { namespace: "agent-a".to_string(), tile_id },
+                RouteTarget::Agent {
+                    namespace: "agent-a".to_string(),
+                    tile_id,
+                },
                 InputEnvelope::Click(ClickEvent {
                     fields: fields(300),
                     button: PointerButton::Primary,

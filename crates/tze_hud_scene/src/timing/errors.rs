@@ -78,11 +78,9 @@ pub enum TimingWarning {
 impl std::fmt::Display for TimingWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TimingWarning::ClockSkewHigh { estimated_skew_us } => write!(
-                f,
-                "CLOCK_SKEW_HIGH: estimated skew {}µs",
-                estimated_skew_us
-            ),
+            TimingWarning::ClockSkewHigh { estimated_skew_us } => {
+                write!(f, "CLOCK_SKEW_HIGH: estimated skew {estimated_skew_us}µs")
+            }
         }
     }
 }

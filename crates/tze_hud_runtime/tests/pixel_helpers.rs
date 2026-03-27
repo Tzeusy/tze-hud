@@ -84,10 +84,16 @@ pub const SCENE_H: u32 = 1080;
 /// rendered without knowing the exact colour.
 pub fn pixel_differs_from_bg(pixels: &[u8], width: u32, x: u32, y: u32, min_diff: u8) -> bool {
     let idx = ((y * width + x) * 4) as usize;
-    let p = [pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]];
-    BG_SRGB.iter().zip(p.iter()).any(|(&expected, &actual)| {
-        actual.abs_diff(expected) > min_diff
-    })
+    let p = [
+        pixels[idx],
+        pixels[idx + 1],
+        pixels[idx + 2],
+        pixels[idx + 3],
+    ];
+    BG_SRGB
+        .iter()
+        .zip(p.iter())
+        .any(|(&expected, &actual)| actual.abs_diff(expected) > min_diff)
 }
 
 /// Assert that at least one sampled pixel in `[x0..x1) × [y0..y1)` differs
@@ -113,11 +119,18 @@ pub fn assert_region_has_content(
     let xs: Vec<u32> = (x0..x1).step_by(10).collect();
     let ys: Vec<u32> = (y0..y1).step_by(10).collect();
 
-    let all_bg = xs.iter().flat_map(|&x| {
-        ys.iter().map(move |&y| !pixel_differs_from_bg(pixels, width, x, y, min_diff))
-    }).all(|b| b);
+    let all_bg = xs
+        .iter()
+        .flat_map(|&x| {
+            ys.iter()
+                .map(move |&y| !pixel_differs_from_bg(pixels, width, x, y, min_diff))
+        })
+        .all(|b| b);
 
-    assert!(!all_bg, "{label}: expected content but all sampled pixels match background");
+    assert!(
+        !all_bg,
+        "{label}: expected content but all sampled pixels match background"
+    );
 }
 
 /// Assert that every sampled pixel in `[x0..x1) × [y0..y1)` matches `bg`
@@ -138,14 +151,22 @@ pub fn assert_region_is_background(
     for y in (y0..y1).step_by(step) {
         for x in (x0..x1).step_by(step) {
             let idx = ((y * width + x) * 4) as usize;
-            let actual = [pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]];
+            let actual = [
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            ];
             for ch in 0..4 {
                 let diff = actual[ch].abs_diff(BG_SRGB[ch]);
                 assert!(
                     diff <= CI_SOLID_TOLERANCE,
                     "{label}: expected background at ({x},{y}) channel {ch}: \
                      actual={} expected={} diff={} tolerance={}",
-                    actual[ch], BG_SRGB[ch], diff, CI_SOLID_TOLERANCE
+                    actual[ch],
+                    BG_SRGB[ch],
+                    diff,
+                    CI_SOLID_TOLERANCE
                 );
             }
         }

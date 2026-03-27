@@ -29,10 +29,10 @@
 //!   most-recent value.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::{mpsc, watch, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, mpsc, watch};
 use tze_hud_scene::types::SceneId;
 
 // ─── Channel capacities ───────────────────────────────────────────────────────
@@ -372,10 +372,6 @@ pub fn frame_ready_channel() -> (FrameReadyTx, FrameReadyRx) {
 
 // ─── Convenience bundle ───────────────────────────────────────────────────────
 
-/// Placeholder types for the per-channel message payloads.
-/// Real message types come from `tze_hud_scene` and `tze_hud_telemetry`;
-/// the channel module just wires the topology.
-
 /// An OS input event drained from the winit event loop.
 #[derive(Debug, Clone)]
 pub struct InputEvent {
@@ -518,10 +514,7 @@ impl ChannelSet {
     pub fn new() -> Self {
         let overflow = OverflowCounters::new();
 
-        let input_buf = RingBuffer::new(
-            INPUT_EVENT_CAPACITY,
-            Arc::clone(&overflow.input_event),
-        );
+        let input_buf = RingBuffer::new(INPUT_EVENT_CAPACITY, Arc::clone(&overflow.input_event));
         let local_patch_buf = RingBuffer::new(
             SCENE_LOCAL_PATCH_CAPACITY,
             Arc::clone(&overflow.scene_local_patch),
@@ -633,8 +626,7 @@ mod tests {
     #[tokio::test]
     async fn ring_buffer_capacity_assertion_telemetry() {
         let overflow = Arc::new(AtomicU64::new(0));
-        let buf: RingBuffer<TelemetryRecord> =
-            RingBuffer::new(TELEMETRY_RECORD_CAPACITY, overflow);
+        let buf: RingBuffer<TelemetryRecord> = RingBuffer::new(TELEMETRY_RECORD_CAPACITY, overflow);
         assert_eq!(buf.capacity().await, TELEMETRY_RECORD_CAPACITY);
     }
 
@@ -677,7 +669,10 @@ mod tests {
 
     // ── Coalesce-key channel ─────────────────────────────────────────────────
 
-    fn make_state_stream_event(tile_id: SceneId, kind: StateStreamEventKind) -> SceneEventStateStream {
+    fn make_state_stream_event(
+        tile_id: SceneId,
+        kind: StateStreamEventKind,
+    ) -> SceneEventStateStream {
         SceneEventStateStream {
             tile_id,
             event_kind: kind,
@@ -735,10 +730,16 @@ mod tests {
         let tile_a = SceneId::new();
         let tile_b = SceneId::new();
 
-        tx.send(make_state_stream_event(tile_a, StateStreamEventKind::TileUpdate))
-            .await;
-        tx.send(make_state_stream_event(tile_b, StateStreamEventKind::ScenePatch))
-            .await;
+        tx.send(make_state_stream_event(
+            tile_a,
+            StateStreamEventKind::TileUpdate,
+        ))
+        .await;
+        tx.send(make_state_stream_event(
+            tile_b,
+            StateStreamEventKind::ScenePatch,
+        ))
+        .await;
 
         let batch = rx.drain_all().await;
         assert_eq!(batch.len(), 2, "two different keys → two entries");
@@ -751,12 +752,18 @@ mod tests {
 
         let ids: Vec<SceneId> = (0..capacity + 1).map(|_| SceneId::new()).collect();
         for id in &ids[..capacity] {
-            tx.send(make_state_stream_event(*id, StateStreamEventKind::TileUpdate))
-                .await;
+            tx.send(make_state_stream_event(
+                *id,
+                StateStreamEventKind::TileUpdate,
+            ))
+            .await;
         }
         // Adding one more new key at capacity should evict the oldest.
-        tx.send(make_state_stream_event(ids[capacity], StateStreamEventKind::TileUpdate))
-            .await;
+        tx.send(make_state_stream_event(
+            ids[capacity],
+            StateStreamEventKind::TileUpdate,
+        ))
+        .await;
 
         let batch = rx.drain_all().await;
         assert_eq!(
@@ -794,8 +801,14 @@ mod tests {
     async fn channel_set_new_initializes_all_channels() {
         let cs = ChannelSet::new();
         assert_eq!(cs.input_tx.capacity().await, INPUT_EVENT_CAPACITY);
-        assert_eq!(cs.local_patch_tx.capacity().await, SCENE_LOCAL_PATCH_CAPACITY);
-        assert_eq!(cs.ephemeral_tx.capacity().await, SCENE_EVENT_EPHEMERAL_CAPACITY);
+        assert_eq!(
+            cs.local_patch_tx.capacity().await,
+            SCENE_LOCAL_PATCH_CAPACITY
+        );
+        assert_eq!(
+            cs.ephemeral_tx.capacity().await,
+            SCENE_EVENT_EPHEMERAL_CAPACITY
+        );
         assert_eq!(cs.telemetry_tx.capacity().await, TELEMETRY_RECORD_CAPACITY);
     }
 

@@ -31,9 +31,8 @@ use std::path::PathBuf;
 
 use tze_hud_scene::test_scenes::{ClockMs, TestSceneRegistry};
 use tze_hud_validation::{
-    ArtifactBuilder, ArtifactOptions, BenchmarkArtifactInput,
-    SceneArtifactInput, SceneDescription, SceneMetrics, SceneStatus, generate_explanation_md,
-    llm_summary_json,
+    ArtifactBuilder, ArtifactOptions, BenchmarkArtifactInput, SceneArtifactInput, SceneDescription,
+    SceneMetrics, SceneStatus, generate_explanation_md, llm_summary_json,
 };
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -47,7 +46,7 @@ fn temp_dir(suffix: &str) -> PathBuf {
 }
 
 fn minimal_rgba8(w: u32, h: u32) -> Vec<u8> {
-    vec![128u8, 64, 32, 255].repeat((w * h) as usize)
+    [128u8, 64, 32, 255].repeat((w * h) as usize)
 }
 
 fn make_scene_desc(name: &str) -> SceneDescription {
@@ -134,24 +133,51 @@ fn test_pr_ci_artifact_generation_full_set() {
     let manifest = builder.finalise().unwrap();
 
     // index.html MUST exist.
-    assert!(run_dir.join("index.html").exists(), "index.html must be generated");
+    assert!(
+        run_dir.join("index.html").exists(),
+        "index.html must be generated"
+    );
 
     // manifest.json MUST exist.
-    assert!(run_dir.join("manifest.json").exists(), "manifest.json must be generated");
+    assert!(
+        run_dir.join("manifest.json").exists(),
+        "manifest.json must be generated"
+    );
 
     // Per-scene directory MUST contain all four artifact files.
     let scene_dir = run_dir.join("scenes").join("single_tile_solid");
-    assert!(scene_dir.join("rendered.png").exists(), "rendered.png must exist");
-    assert!(scene_dir.join("golden.png").exists(), "golden.png must exist");
+    assert!(
+        scene_dir.join("rendered.png").exists(),
+        "rendered.png must exist"
+    );
+    assert!(
+        scene_dir.join("golden.png").exists(),
+        "golden.png must exist"
+    );
     assert!(scene_dir.join("diff.png").exists(), "diff.png must exist");
-    assert!(scene_dir.join("telemetry.json").exists(), "telemetry.json must exist");
-    assert!(scene_dir.join("explanation.md").exists(), "explanation.md must exist");
+    assert!(
+        scene_dir.join("telemetry.json").exists(),
+        "telemetry.json must exist"
+    );
+    assert!(
+        scene_dir.join("explanation.md").exists(),
+        "explanation.md must exist"
+    );
 
     // Per-benchmark directory MUST exist.
     let bench_dir = run_dir.join("benchmarks").join("max_tiles_stress");
-    assert!(bench_dir.join("telemetry.json").exists(), "benchmark telemetry.json must exist");
-    assert!(bench_dir.join("histogram.json").exists(), "benchmark histogram.json must exist");
-    assert!(bench_dir.join("calibration.json").exists(), "benchmark calibration.json must exist");
+    assert!(
+        bench_dir.join("telemetry.json").exists(),
+        "benchmark telemetry.json must exist"
+    );
+    assert!(
+        bench_dir.join("histogram.json").exists(),
+        "benchmark histogram.json must exist"
+    );
+    assert!(
+        bench_dir.join("calibration.json").exists(),
+        "benchmark calibration.json must exist"
+    );
 
     // Manifest counts must be accurate.
     assert_eq!(manifest.summary.total_scenes, 1);
@@ -206,13 +232,29 @@ fn test_manifest_json_contains_entry_per_scene_with_status_metrics_paths() {
     let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
     let scenes = parsed["scenes"].as_array().expect("scenes must be array");
-    assert_eq!(scenes.len(), scene_names.len(), "JSON scenes array count mismatch");
+    assert_eq!(
+        scenes.len(),
+        scene_names.len(),
+        "JSON scenes array count mismatch"
+    );
 
     for scene_entry in scenes {
-        assert!(scene_entry["name"].is_string(), "each scene must have a name");
-        assert!(scene_entry["status"].is_string(), "each scene must have a status");
-        assert!(scene_entry["metrics"].is_object(), "each scene must have metrics");
-        assert!(scene_entry["paths"].is_object(), "each scene must have paths");
+        assert!(
+            scene_entry["name"].is_string(),
+            "each scene must have a name"
+        );
+        assert!(
+            scene_entry["status"].is_string(),
+            "each scene must have a status"
+        );
+        assert!(
+            scene_entry["metrics"].is_object(),
+            "each scene must have metrics"
+        );
+        assert!(
+            scene_entry["paths"].is_object(),
+            "each scene must have paths"
+        );
         assert!(
             scene_entry["paths"]["explanation_md"].is_string(),
             "explanation_md path required"
@@ -245,10 +287,15 @@ fn test_manifest_schema_version_and_spec_ids() {
     let parsed: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
 
     assert_eq!(parsed["schema_version"], 1);
-    let spec_ids = parsed["spec_ids"].as_array().expect("spec_ids must be array");
+    let spec_ids = parsed["spec_ids"]
+        .as_array()
+        .expect("spec_ids must be array");
     let ids: Vec<&str> = spec_ids.iter().filter_map(|v| v.as_str()).collect();
     assert!(ids.contains(&"layer-4-pr-ci"), "must contain pr-ci spec id");
-    assert!(ids.contains(&"layer-4-manifest"), "must contain manifest spec id");
+    assert!(
+        ids.contains(&"layer-4-manifest"),
+        "must contain manifest spec id"
+    );
 
     let _ = fs::remove_dir_all(&tmp);
 }
@@ -323,10 +370,21 @@ fn test_explanation_md_includes_changes_since_golden() {
         has_zones: false,
     };
     let changes = "z-order of the content tile changed from 2 to 3 due to spec update";
-    let md = generate_explanation_md(&desc, SceneStatus::Fail, &SceneMetrics::default(), Some(changes));
+    let md = generate_explanation_md(
+        &desc,
+        SceneStatus::Fail,
+        &SceneMetrics::default(),
+        Some(changes),
+    );
 
-    assert!(md.contains("Changes since previous golden"), "must have changes section");
-    assert!(md.contains(changes), "must include the actual change description");
+    assert!(
+        md.contains("Changes since previous golden"),
+        "must have changes section"
+    );
+    assert!(
+        md.contains(changes),
+        "must include the actual change description"
+    );
 }
 
 // ─── Spec: All 25 scenes produce artifacts ────────────────────────────────────
@@ -338,7 +396,11 @@ fn test_all_25_scenes_produce_artifact_directories() {
     let _ = fs::remove_dir_all(&tmp);
 
     let scene_names = TestSceneRegistry::scene_names();
-    assert_eq!(scene_names.len(), 25, "registry must contain exactly 25 scenes");
+    assert_eq!(
+        scene_names.len(),
+        25,
+        "registry must contain exactly 25 scenes"
+    );
 
     let mut builder = make_builder(&tmp, "main");
     let run_dir = builder.run_dir().to_path_buf();
@@ -362,7 +424,10 @@ fn test_all_25_scenes_produce_artifact_directories() {
 
     let manifest = builder.finalise().unwrap();
 
-    assert_eq!(manifest.summary.total_scenes, 25, "all 25 scenes in manifest");
+    assert_eq!(
+        manifest.summary.total_scenes, 25,
+        "all 25 scenes in manifest"
+    );
 
     // Each scene must have an explanation.md.
     for &name in scene_names {
@@ -408,18 +473,33 @@ fn test_index_html_is_self_contained_no_external_deps() {
     let html = fs::read_to_string(run_dir.join("index.html")).unwrap();
 
     // Self-contained: no links to external HTTP resources.
-    assert!(!html.contains("href=\"http"), "no external href links allowed");
-    assert!(!html.contains("src=\"http"), "no external script/img src allowed");
+    assert!(
+        !html.contains("href=\"http"),
+        "no external href links allowed"
+    );
+    assert!(
+        !html.contains("src=\"http"),
+        "no external script/img src allowed"
+    );
     assert!(!html.contains("//cdn"), "no CDN references allowed");
-    assert!(!html.contains("//fonts."), "no external font references allowed");
+    assert!(
+        !html.contains("//fonts."),
+        "no external font references allowed"
+    );
 
     // Must contain inline CSS and JS.
     assert!(html.contains("<style>"), "must have inline CSS");
     assert!(html.contains("<script>"), "must have inline JS");
 
     // Must embed the LLM-readable manifest JSON.
-    assert!(html.contains("application/json"), "must embed LLM-readable JSON");
-    assert!(html.contains("artifact-manifest"), "must have manifest script element");
+    assert!(
+        html.contains("application/json"),
+        "must embed LLM-readable JSON"
+    );
+    assert!(
+        html.contains("artifact-manifest"),
+        "must have manifest script element"
+    );
 }
 
 /// index.html must include pass/fail badges.
@@ -435,7 +515,10 @@ fn test_index_html_contains_status_badges() {
         .add_scene(SceneArtifactInput {
             description: make_scene_desc("single_tile_solid"),
             status: SceneStatus::Pass,
-            metrics: SceneMetrics { ssim_score: Some(0.999), ..Default::default() },
+            metrics: SceneMetrics {
+                ssim_score: Some(0.999),
+                ..Default::default()
+            },
             rendered_pixels: None,
             width: 1,
             height: 1,
@@ -450,7 +533,10 @@ fn test_index_html_contains_status_badges() {
         .add_scene(SceneArtifactInput {
             description: make_scene_desc("overlapping_tiles_zorder"),
             status: SceneStatus::Fail,
-            metrics: SceneMetrics { ssim_score: Some(0.991), ..Default::default() },
+            metrics: SceneMetrics {
+                ssim_score: Some(0.991),
+                ..Default::default()
+            },
             rendered_pixels: None,
             width: 1,
             height: 1,
@@ -469,7 +555,10 @@ fn test_index_html_contains_status_badges() {
     assert!(html.contains("1 FAIL"), "must show fail count");
 
     // Filter buttons must exist.
-    assert!(html.contains("filterScenes"), "must have filter JS function");
+    assert!(
+        html.contains("filterScenes"),
+        "must have filter JS function"
+    );
 
     let _ = fs::remove_dir_all(&tmp);
 }
@@ -518,11 +607,17 @@ fn test_llm_structured_failure_output_for_ssim_regression() {
     assert_eq!(ssim_diag.metric_name, "ssim_score");
     assert!((ssim_diag.actual_value - 0.988).abs() < 1e-6);
     assert!((ssim_diag.budget_value - 0.995).abs() < 1e-6);
-    assert!(ssim_diag.regression_pct > 0.0, "regression_pct must be positive");
+    assert!(
+        ssim_diag.regression_pct > 0.0,
+        "regression_pct must be positive"
+    );
 
     // Description must contain actionable text.
     assert!(ssim_diag.description.contains("SSIM"), "must mention SSIM");
-    assert!(ssim_diag.description.contains("diff.png"), "must reference diff.png for diagnosis");
+    assert!(
+        ssim_diag.description.contains("diff.png"),
+        "must reference diff.png for diagnosis"
+    );
 
     let _ = fs::remove_dir_all(&tmp);
 }
@@ -562,13 +657,22 @@ fn test_llm_structured_failure_output_for_frame_time_regression() {
     let diag = &manifest.diagnostics[0];
     assert_eq!(diag.scene_name, "max_tiles_stress");
 
-    let perf = diag.performance.as_ref().expect("performance diagnostic must be present");
+    let perf = diag
+        .performance
+        .as_ref()
+        .expect("performance diagnostic must be present");
     assert_eq!(perf.metric_name, "frame_time_p99");
     assert_eq!(perf.actual_value_us, 25_000);
     assert_eq!(perf.budget_value_us, 16_600);
     assert!(perf.regression_pct > 0.0);
-    assert!(perf.description.contains("p99 frame time"), "must describe the metric");
-    assert!(perf.description.contains("telemetry.json"), "must reference telemetry.json");
+    assert!(
+        perf.description.contains("p99 frame time"),
+        "must describe the metric"
+    );
+    assert!(
+        perf.description.contains("telemetry.json"),
+        "must reference telemetry.json"
+    );
 
     let _ = fs::remove_dir_all(&tmp);
 }
@@ -606,7 +710,10 @@ fn test_llm_summary_json_parseable_all_fields() {
     assert!(parsed["branch"].is_string(), "must have branch");
     assert!(parsed["timestamp"].is_string(), "must have timestamp");
     assert!(parsed["summary"].is_object(), "must have summary");
-    assert!(parsed["all_scenes_status"].is_object(), "must have all_scenes_status");
+    assert!(
+        parsed["all_scenes_status"].is_object(),
+        "must have all_scenes_status"
+    );
 
     // Each scene status must be present.
     assert_eq!(parsed["all_scenes_status"]["empty_scene"], "PASS");
@@ -643,20 +750,22 @@ fn test_benchmark_artifacts_include_calibration_and_hardware() {
             session_telemetry_json: br#"{"total_frames": 300, "fps": 60.1}"#.to_vec(),
             histogram_json: br#"{"frame_time": {"p50": 12000, "p95": 14500, "p99": 16000}}"#
                 .to_vec(),
-            calibration_json: Some(
-                serde_json::to_vec_pretty(&calibration_json).unwrap()
-            ),
-            hardware_info_json: Some(
-                serde_json::to_vec_pretty(&hardware_json).unwrap()
-            ),
+            calibration_json: Some(serde_json::to_vec_pretty(&calibration_json).unwrap()),
+            hardware_info_json: Some(serde_json::to_vec_pretty(&hardware_json).unwrap()),
         })
         .unwrap();
 
     let manifest = builder.finalise().unwrap();
 
     let bench_dir = run_dir.join("benchmarks").join("coalesced_dashboard");
-    assert!(bench_dir.join("calibration.json").exists(), "calibration.json must exist");
-    assert!(bench_dir.join("hardware_info.json").exists(), "hardware_info.json must exist");
+    assert!(
+        bench_dir.join("calibration.json").exists(),
+        "calibration.json must exist"
+    );
+    assert!(
+        bench_dir.join("hardware_info.json").exists(),
+        "hardware_info.json must exist"
+    );
 
     // Verify calibration contents are valid JSON.
     let cal_bytes = fs::read(bench_dir.join("calibration.json")).unwrap();
@@ -705,7 +814,9 @@ fn test_run_directory_timestamp_branch_naming() {
     // Timestamp part: first 15 chars must be digits + dash.
     let timestamp_part = &name[..15];
     assert!(
-        timestamp_part.chars().all(|c| c.is_ascii_digit() || c == '-'),
+        timestamp_part
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-'),
         "timestamp prefix {timestamp_part:?} must be digits and dashes"
     );
 
@@ -723,7 +834,10 @@ fn test_branch_name_with_slash_sanitised() {
     let _ = builder.finalise().unwrap();
 
     let name = run_dir.file_name().unwrap().to_str().unwrap();
-    assert!(!name.contains('/'), "run dir must not contain slashes: got {name}");
+    assert!(
+        !name.contains('/'),
+        "run dir must not contain slashes: got {name}"
+    );
     assert!(
         name.contains("feature-foo-bar"),
         "slash replaced with dash in run dir name: got {name}"

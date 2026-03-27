@@ -31,11 +31,7 @@
 //! conflict during deserialization and return
 //! [`TimingError::RelativeScheduleConflict`] before calling this module.
 
-use crate::timing::{
-    hints::Schedule,
-    domains::ClockOffset,
-    DurationUs, MonoUs, WallUs,
-};
+use crate::timing::{DurationUs, MonoUs, WallUs, domains::ClockOffset, hints::Schedule};
 
 // ─── IntakeContext ────────────────────────────────────────────────────────────
 
@@ -372,7 +368,10 @@ mod tests {
         let ctx = ctx();
         let wall = resolve_schedule(Some(Schedule::AfterUs(DurationUs(500_000))), &ctx);
         // Result is a WallUs — no relative info survives.
-        assert!(wall.is_set(), "resolved value must be an absolute timestamp");
+        assert!(
+            wall.is_set(),
+            "resolved value must be an absolute timestamp"
+        );
     }
 
     /// FramesFromNow resolves to an absolute WallUs.
@@ -464,7 +463,10 @@ mod tests {
 
         // Not drained at current vsync
         let ready = queue.drain_ready(ctx.vsync_wall_us);
-        assert!(ready.is_empty(), "next_frame must NOT apply in current frame");
+        assert!(
+            ready.is_empty(),
+            "next_frame must NOT apply in current frame"
+        );
 
         // Drained at next vsync
         let ready = queue.drain_ready(present_at);

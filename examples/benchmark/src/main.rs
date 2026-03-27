@@ -255,7 +255,10 @@ mod headless_impl {
                         match n_str.parse::<u64>() {
                             Ok(n) => frames = n,
                             Err(_) => {
-                                eprintln!("Error: --frames requires a positive integer, got '{}'", n_str);
+                                eprintln!(
+                                    "Error: --frames requires a positive integer, got '{}'",
+                                    n_str
+                                );
                                 eprintln!("Usage: --frames <number>");
                                 std::process::exit(1);
                             }
@@ -274,7 +277,11 @@ mod headless_impl {
             i += 1;
         }
 
-        Args { emit, frames, cpu_only }
+        Args {
+            emit,
+            frames,
+            cpu_only,
+        }
     }
 
     // ── GPU calibration ───────────────────────────────────────────────────────
@@ -324,7 +331,11 @@ mod headless_impl {
             let lease_id = scene.grant_lease(
                 "gpu_calibration",
                 300_000,
-                vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+                vec![
+                    Capability::CreateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateTile,
+                ],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = (GPU_CALIBRATION_TILES + 5) as u32;
@@ -335,19 +346,10 @@ mod headless_impl {
                 let col = i % cols;
                 let row = i / cols;
                 // Tiles overlap slightly for alpha-blending composition load
-                let bounds = Rect::new(
-                    col as f32 * 350.0,
-                    row as f32 * 250.0,
-                    380.0,
-                    270.0,
-                );
-                if let Ok(tile_id) = scene.create_tile(
-                    tab_id,
-                    "gpu_calibration",
-                    lease_id,
-                    bounds,
-                    (i + 1) as u32,
-                ) {
+                let bounds = Rect::new(col as f32 * 350.0, row as f32 * 250.0, 380.0, 270.0);
+                if let Ok(tile_id) =
+                    scene.create_tile(tab_id, "gpu_calibration", lease_id, bounds, (i + 1) as u32)
+                {
                     let alpha = if i % 2 == 0 { 1.0f32 } else { 0.7f32 };
                     let node = Node {
                         id: SceneId::new(),
@@ -437,7 +439,11 @@ mod headless_impl {
             lease_id = scene.grant_lease(
                 "upload_calibration",
                 300_000,
-                vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+                vec![
+                    Capability::CreateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateTile,
+                ],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = (UPLOAD_TILES_PER_CYCLE + 5) as u32;
@@ -517,8 +523,7 @@ mod headless_impl {
 
         let timed_elapsed_secs = timed_start.elapsed().as_secs_f64();
         let tile_ops_per_sec = total_ops as f64 / timed_elapsed_secs.max(1e-9);
-        let upload_factor =
-            (REFERENCE_UPLOAD_OPS_PER_SEC / tile_ops_per_sec).clamp(0.01, 100.0);
+        let upload_factor = (REFERENCE_UPLOAD_OPS_PER_SEC / tile_ops_per_sec).clamp(0.01, 100.0);
 
         UploadCalibrationResult {
             tile_ops_per_sec,
@@ -533,7 +538,10 @@ mod headless_impl {
     ///
     /// Renders a multi-tile scene for `frame_count` frames and collects telemetry.
     pub async fn run_steady_state_render(frame_count: u64) -> ScenarioResult {
-        info!("Running steady-state render scenario ({} frames)", frame_count);
+        info!(
+            "Running steady-state render scenario ({} frames)",
+            frame_count
+        );
 
         let config = HeadlessConfig {
             width: 1920,
@@ -554,7 +562,11 @@ mod headless_impl {
             let lease_id = scene.grant_lease(
                 "bench",
                 300_000,
-                vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+                vec![
+                    Capability::CreateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateTile,
+                ],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = 15;
@@ -563,8 +575,7 @@ mod headless_impl {
             for i in 0..10usize {
                 let col = i % 5;
                 let row = i / 5;
-                let bounds =
-                    Rect::new(col as f32 * 384.0, row as f32 * 540.0, 380.0, 536.0);
+                let bounds = Rect::new(col as f32 * 384.0, row as f32 * 540.0, 380.0, 536.0);
                 if let Ok(tile_id) =
                     scene.create_tile(tab_id, "bench", lease_id, bounds, (i + 1) as u32)
                 {
@@ -572,12 +583,7 @@ mod headless_impl {
                         id: SceneId::new(),
                         children: vec![],
                         data: NodeData::SolidColor(SolidColorNode {
-                            color: Rgba::new(
-                                i as f32 / 10.0,
-                                0.5,
-                                1.0 - i as f32 / 10.0,
-                                1.0,
-                            ),
+                            color: Rgba::new(i as f32 / 10.0, 0.5, 1.0 - i as f32 / 10.0, 1.0),
                             bounds: Rect::new(0.0, 0.0, 380.0, 536.0),
                         }),
                     };
@@ -600,8 +606,7 @@ mod headless_impl {
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
 
             // input_to_local_ack: Stage 1 + Stage 2 (input drain + local feedback)
-            let local_ack =
-                telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
+            let local_ack = telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
             if local_ack > 0 {
                 summary.input_to_local_ack.record(local_ack);
             }
@@ -612,7 +617,9 @@ mod headless_impl {
                 summary.input_to_scene_commit.record(scene_commit);
             }
             // input_to_next_present: full pipeline latency in headless mode
-            summary.input_to_next_present.record(telemetry.frame_time_us);
+            summary
+                .input_to_next_present
+                .record(telemetry.frame_time_us);
         }
 
         summary.elapsed_us = session_start.elapsed().as_micros() as u64;
@@ -650,7 +657,11 @@ mod headless_impl {
             lease_id = scene.grant_lease(
                 "mutation_bench",
                 300_000,
-                vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateTile],
+                vec![
+                    Capability::CreateTile,
+                    Capability::CreateNode,
+                    Capability::UpdateTile,
+                ],
             );
             if let Some(lease) = scene.leases.get_mut(&lease_id) {
                 lease.resource_budget.max_tiles = 15;
@@ -659,8 +670,7 @@ mod headless_impl {
             for i in 0..10usize {
                 let col = i % 5;
                 let row = i / 5;
-                let bounds =
-                    Rect::new(col as f32 * 384.0, row as f32 * 540.0, 380.0, 536.0);
+                let bounds = Rect::new(col as f32 * 384.0, row as f32 * 540.0, 380.0, 536.0);
                 if let Ok(tile_id) =
                     scene.create_tile(tab_id, "mutation_bench", lease_id, bounds, (i + 1) as u32)
                 {
@@ -719,8 +729,7 @@ mod headless_impl {
             let telemetry = runtime.render_frame().await;
             summary.record_frame(telemetry.frame_time_us, telemetry.tile_count);
 
-            let local_ack =
-                telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
+            let local_ack = telemetry.stage1_input_drain_us + telemetry.stage2_local_feedback_us;
             if local_ack > 0 {
                 summary.input_to_local_ack.record(local_ack);
             }
@@ -729,7 +738,9 @@ mod headless_impl {
             if scene_commit > 0 {
                 summary.input_to_scene_commit.record(scene_commit);
             }
-            summary.input_to_next_present.record(telemetry.frame_time_us);
+            summary
+                .input_to_next_present
+                .record(telemetry.frame_time_us);
         }
 
         summary.elapsed_us = session_start.elapsed().as_micros() as u64;
@@ -764,9 +775,7 @@ mod headless_impl {
         let cpu_result = calibrate_cpu();
         info!(
             "  CPU: speed_factor={:.2}, scene_ops/s={:.0}, hash_mbps={:.1}",
-            cpu_result.speed_factor,
-            cpu_result.scene_ops_per_sec,
-            cpu_result.hash_throughput_mbps,
+            cpu_result.speed_factor, cpu_result.scene_ops_per_sec, cpu_result.hash_throughput_mbps,
         );
 
         let (gpu_result, upload_result) = if args.cpu_only {
@@ -776,11 +785,12 @@ mod headless_impl {
             info!("  Running GPU fill/composition calibration...");
             let gpu = calibrate_gpu().await;
             if gpu.gpu_factor.is_nan() {
-                warn!(
-                    "  GPU calibration failed (no suitable adapter?); using uncalibrated mode"
-                );
+                warn!("  GPU calibration failed (no suitable adapter?); using uncalibrated mode");
             } else {
-                info!("  GPU: fps={:.1}, gpu_factor={:.2}", gpu.fps, gpu.gpu_factor);
+                info!(
+                    "  GPU: fps={:.1}, gpu_factor={:.2}",
+                    gpu.fps, gpu.gpu_factor
+                );
             }
 
             info!("  Running texture-upload calibration...");
@@ -801,10 +811,18 @@ mod headless_impl {
         let factors = HardwareFactors {
             cpu: Some(cpu_result.speed_factor),
             gpu: gpu_result.as_ref().and_then(|g| {
-                if g.gpu_factor.is_nan() { None } else { Some(g.gpu_factor) }
+                if g.gpu_factor.is_nan() {
+                    None
+                } else {
+                    Some(g.gpu_factor)
+                }
             }),
             upload: upload_result.as_ref().and_then(|u| {
-                if u.upload_factor.is_nan() { None } else { Some(u.upload_factor) }
+                if u.upload_factor.is_nan() {
+                    None
+                } else {
+                    Some(u.upload_factor)
+                }
             }),
         };
 
@@ -841,7 +859,12 @@ mod headless_impl {
         info!("  Verdict: {}", validation.verdict);
         for assertion in &validation.assertions {
             match assertion {
-                AssertionOutcome::Pass { metric, observed, budget, .. } => {
+                AssertionOutcome::Pass {
+                    metric,
+                    observed,
+                    budget,
+                    ..
+                } => {
                     info!("  PASS  {}: {}µs ≤ {}µs", metric, observed, budget);
                 }
                 AssertionOutcome::Fail {
@@ -856,7 +879,11 @@ mod headless_impl {
                         metric, observed, budget, overage_pct,
                     );
                 }
-                AssertionOutcome::Uncalibrated { metric, reason, raw_value } => {
+                AssertionOutcome::Uncalibrated {
+                    metric,
+                    reason,
+                    raw_value,
+                } => {
                     warn!("  UNCAL {}: raw={}µs ({})", metric, raw_value, reason);
                 }
                 AssertionOutcome::NoSamples { metric } => {
@@ -877,8 +904,8 @@ mod headless_impl {
             validation,
         };
 
-        let json = serde_json::to_string_pretty(&output)
-            .expect("failed to serialize benchmark output");
+        let json =
+            serde_json::to_string_pretty(&output).expect("failed to serialize benchmark output");
 
         if let Some(path) = &args.emit {
             std::fs::write(path, &json).unwrap_or_else(|e| {

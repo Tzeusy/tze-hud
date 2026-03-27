@@ -254,7 +254,10 @@ mod tests {
     #[test]
     fn message_class_variants_distinct() {
         assert_ne!(MessageClass::Transactional, MessageClass::StateStream);
-        assert_ne!(MessageClass::EphemeralRealtime, MessageClass::ClockedMediaCue);
+        assert_ne!(
+            MessageClass::EphemeralRealtime,
+            MessageClass::ClockedMediaCue
+        );
     }
 
     // ── Schedule oneof ──

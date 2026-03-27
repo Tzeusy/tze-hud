@@ -38,102 +38,102 @@ pub mod redaction;
 pub mod safe_mode;
 
 pub use chrome::{
-    // Core state
-    ChromeState,
-    ChromeTab,
-    TabBarPosition,
-    ViewerClass,
-    ViewerClassTransition,
-    SystemHealth,
+    // Agent exclusion
+    AgentVisibleTopology,
+    AuditPayload,
+    AuditTrigger,
     // Layout
     ChromeLayout,
     // Rendering
     ChromeRenderer,
     // Keyboard
     ChromeShortcut,
-    ShortcutResult,
-    handle_shortcut,
-    // Dismiss / override
-    DismissTileResult,
-    RevokeReason,
-    // Audit
-    ShellAuditEvent,
-    AuditTrigger,
-    AuditPayload,
-    SafeModeEntryReason,
-    ShellAuditSink,
-    NoopAuditSink,
+    // Core state
+    ChromeState,
+    ChromeTab,
     CollectingAuditSink,
-    // Agent exclusion
-    AgentVisibleTopology,
-    strip_chrome_from_topology,
     // Diagnostics
     DiagnosticSnapshot,
+    // Dismiss / override
+    DismissTileResult,
+    NoopAuditSink,
+    RevokeReason,
+    SafeModeEntryReason,
+    // Audit
+    ShellAuditEvent,
+    ShellAuditSink,
+    ShortcutResult,
+    SystemHealth,
+    TabBarPosition,
+    ViewerClass,
+    ViewerClassTransition,
     collect_diagnostic,
+    handle_shortcut,
+    strip_chrome_from_topology,
 };
 pub use safe_mode::{
-    // Core state
-    ShellOverrideState,
     // Results
     LeaseResumeInfo,
+    // Controller
+    SafeModeController,
     SafeModeEntryResult,
     SafeModeExitResult,
     // Input handling
     SafeModeInput,
     SafeModeInputResult,
+    // Core state
+    ShellOverrideState,
     classify_safe_mode_input,
-    // Controller
-    SafeModeController,
 };
 // ChromeDrawCmd lives in tze_hud_compositor to avoid circular dependencies.
 pub use tze_hud_compositor::ChromeDrawCmd;
 
 pub use freeze::{
-    classify_mutation_batch, EnqueueResult, FreezeManager, FreezeQueue, FreezeState,
-    MutationTrafficClass, QueuedMutation, DEFAULT_AUTO_UNFREEZE_MS,
-    DEFAULT_FREEZE_QUEUE_CAPACITY, QUEUE_PRESSURE_FRACTION,
+    DEFAULT_AUTO_UNFREEZE_MS, DEFAULT_FREEZE_QUEUE_CAPACITY, EnqueueResult, FreezeManager,
+    FreezeQueue, FreezeState, MutationTrafficClass, QUEUE_PRESSURE_FRACTION, QueuedMutation,
+    classify_mutation_batch,
 };
 
 pub use redaction::{
     // Content classification (ViewerClass is already re-exported from chrome above)
     ContentClassification,
+    MAX_PATTERN_ACCENT_RECTS,
+    // Rendering constants
+    PATTERN_CELL_PX,
+    REDACTION_BLANK_COLOR,
+    REDACTION_PATTERN_ACCENT,
+    REDACTION_PATTERN_BASE,
+    // Frame-level evaluation
+    RedactionFrame,
     // Redaction style
     RedactionStyle,
-    // Core evaluation
-    is_tile_redacted,
-    hit_regions_enabled,
     // Per-tile state
     TileRedactionState,
     // Placeholder rendering
     build_redaction_cmds,
-    // Frame-level evaluation
-    RedactionFrame,
-    // Rendering constants
-    PATTERN_CELL_PX,
-    MAX_PATTERN_ACCENT_RECTS,
-    REDACTION_BLANK_COLOR,
-    REDACTION_PATTERN_BASE,
-    REDACTION_PATTERN_ACCENT,
+    hit_regions_enabled,
+    // Core evaluation
+    is_tile_redacted,
 };
 
 pub use badges::{
+    BUDGET_WARNING_AMBER_COLOR,
+    BUDGET_WARNING_BORDER_OPACITY,
+    BUDGET_WARNING_BORDER_PX,
+    // Backpressure signals
+    BackpressureSignal,
+    // Frame-level badge snapshot
+    BadgeFrame,
+    DISCONNECTED_BADGE_OPACITY,
+    // Rendering constants
+    DISCONNECTED_CONTENT_OPACITY,
+    DISCONNECTION_BADGE_BG_COLOR,
+    DISCONNECTION_BADGE_ICON_COLOR,
+    DISCONNECTION_BADGE_OFFSET_PX,
+    DISCONNECTION_BADGE_SIZE_PX,
+    DISCONNECTION_CONTENT_SCRIM_COLOR,
     // Per-tile badge state (written by control plane, read by chrome render pass)
     TileBadgeState,
     // Draw command builder
     build_badge_cmds,
-    // Frame-level badge snapshot
-    BadgeFrame,
-    // Backpressure signals
-    BackpressureSignal,
-    // Rendering constants
-    DISCONNECTED_CONTENT_OPACITY,
-    DISCONNECTED_BADGE_OPACITY,
-    BUDGET_WARNING_BORDER_PX,
-    BUDGET_WARNING_BORDER_OPACITY,
-    BUDGET_WARNING_AMBER_COLOR,
-    DISCONNECTION_BADGE_SIZE_PX,
-    DISCONNECTION_BADGE_OFFSET_PX,
-    DISCONNECTION_BADGE_BG_COLOR,
-    DISCONNECTION_BADGE_ICON_COLOR,
-    DISCONNECTION_CONTENT_SCRIM_COLOR,
 };

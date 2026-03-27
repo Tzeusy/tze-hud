@@ -16,62 +16,101 @@
 //! use these types; use `InputEnvelope` / `EventBatch` (RFC 0004) instead.
 
 use prost::Message;
-use tze_hud_protocol::proto::{
-    // types.proto
-    Rect, Rgba, NodeProto, SolidColorNodeProto, TextMarkdownNodeProto,
-    HitRegionNodeProto, StaticImageNodeProto, ImageFitModeProto,
-    CreateTileMutation, SetTileRootMutation, MutationProto,
-    NotificationPayload, StatusBarPayload, ZoneContent, ZonePublishToken,
-    RelativeGeometryPolicy, EdgeAnchoredGeometryPolicy, GeometryPolicyProto,
-    TextAlignProto, RenderingPolicyProto, ContentionPolicyProto,
-    ZoneDefinitionProto, ZonePublishRecordProto, ZoneRegistrySnapshotProto,
-    PublishToZoneMutation, ClearZoneMutation,
-    // events.proto
-    InputEvent, InputEventKind,
-    TileCreatedEvent, TileDeletedEvent, TileUpdatedEvent,
-    LeaseEvent, LeaseEventKind,
-    SceneEvent,
-    PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent,
-    PointerDownEvent, PointerUpEvent, ClickEvent, PointerCancelEvent,
-    KeyDownEvent, KeyUpEvent, CharacterEvent,
-    FocusSource, FocusGainedEvent, FocusLostReason, FocusLostEvent,
-    CaptureReleasedReason, CaptureReleasedEvent,
-    ImeCompositionStartEvent, ImeCompositionUpdateEvent, ImeCompositionEndEvent,
-    GestureEvent, ScrollOffsetChangedEvent,
-    CommandAction, CommandSource, CommandInputEvent,
-    InputEnvelope, EventBatch,
-};
-use tze_hud_protocol::proto::session::{
-    // session.proto
-    ClientMessage, ServerMessage,
-    SessionInit, SessionResume, SessionClose,
-    SessionEstablished, SessionError, SessionResumeResult,
-    SessionSuspended, SessionResumed,
-    ErrorCode, RuntimeError,
-    CapabilityRequest, CapabilityNotice,
-    TimingHints, MutationBatch, MutationResult,
-    LeaseRequest, LeaseRenew, LeaseRelease, LeaseResponse, LeaseStateChange,
-    SubscriptionChange, SubscriptionChangeResult, SubscriptionEntry,
-    ZonePublish, ZonePublishResult,
-    Heartbeat,
-    TelemetryFrame, RuntimeTelemetryFrame,
-    SceneSnapshot, SceneDelta,
-    InputFocusRequest, InputFocusResponse,
-    InputCaptureRequest, InputCaptureResponse, InputCaptureRelease,
-    SetImePosition,
-    BackpressureSignal,
-    EmitSceneEvent, EmitSceneEventResult,
-    PreSharedKeyCredential, LocalSocketCredential, AuthCredential,
-};
-use tze_hud_protocol::proto::session::auth_credential::Credential;
-use tze_hud_protocol::proto::node_proto::Data as NodeData;
-use tze_hud_protocol::proto::mutation_proto::Mutation;
-use tze_hud_protocol::proto::zone_content::Payload as ZonePayload;
-use tze_hud_protocol::proto::scene_event::Event as SceneEventPayload;
 use tze_hud_protocol::proto::input_envelope::Event as InputEnvelopeEvent;
+use tze_hud_protocol::proto::mutation_proto::Mutation;
+use tze_hud_protocol::proto::node_proto::Data as NodeData;
+use tze_hud_protocol::proto::scene_event::Event as SceneEventPayload;
+use tze_hud_protocol::proto::session::auth_credential::Credential;
 use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
-use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
 use tze_hud_protocol::proto::session::scene_delta::Delta;
+use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
+use tze_hud_protocol::proto::session::{
+    AuthCredential,
+    BackpressureSignal,
+    // session.proto
+    ClientMessage,
+    EmitSceneEvent,
+    EmitSceneEventResult,
+    ErrorCode,
+    Heartbeat,
+    LeaseRequest,
+    LeaseResponse,
+    LeaseStateChange,
+    LocalSocketCredential,
+    MutationBatch,
+    PreSharedKeyCredential,
+    RuntimeError,
+    RuntimeTelemetryFrame,
+    SceneDelta,
+    SceneSnapshot,
+    ServerMessage,
+    SessionClose,
+    SessionError,
+    SessionEstablished,
+    SessionInit,
+    SessionResume,
+    SessionResumeResult,
+    SubscriptionChange,
+    SubscriptionEntry,
+    TelemetryFrame,
+    TimingHints,
+};
+use tze_hud_protocol::proto::zone_content::Payload as ZonePayload;
+use tze_hud_protocol::proto::{
+    CaptureReleasedEvent,
+    CaptureReleasedReason,
+    ClearZoneMutation,
+    CommandAction,
+    CommandInputEvent,
+    CommandSource,
+    ContentionPolicyProto,
+    CreateTileMutation,
+    EventBatch,
+    FocusGainedEvent,
+    FocusLostEvent,
+    FocusLostReason,
+    FocusSource,
+    GeometryPolicyProto,
+    GestureEvent,
+    HitRegionNodeProto,
+    ImageFitModeProto,
+    ImeCompositionEndEvent,
+    ImeCompositionStartEvent,
+    ImeCompositionUpdateEvent,
+    InputEnvelope,
+    // events.proto
+    InputEvent,
+    InputEventKind,
+    KeyDownEvent,
+    KeyUpEvent,
+    LeaseEvent,
+    LeaseEventKind,
+    MutationProto,
+    NodeProto,
+    NotificationPayload,
+    PointerDownEvent,
+    PointerMoveEvent,
+    PointerUpEvent,
+    PublishToZoneMutation,
+    // types.proto
+    Rect,
+    RelativeGeometryPolicy,
+    RenderingPolicyProto,
+    Rgba,
+    SceneEvent,
+    ScrollOffsetChangedEvent,
+    SetTileRootMutation,
+    SolidColorNodeProto,
+    StaticImageNodeProto,
+    StatusBarPayload,
+    TextAlignProto,
+    TextMarkdownNodeProto,
+    TileCreatedEvent,
+    TileDeletedEvent,
+    TileUpdatedEvent,
+    ZoneContent,
+    ZoneDefinitionProto,
+};
 
 /// Encode then decode a prost Message and return the decoded value.
 fn round_trip<T: Message + Default>(msg: &T) -> T {
@@ -84,7 +123,12 @@ fn round_trip<T: Message + Default>(msg: &T) -> T {
 
 #[test]
 fn roundtrip_rect() {
-    let orig = Rect { x: 1.5, y: 2.5, width: 100.0, height: 200.0 };
+    let orig = Rect {
+        x: 1.5,
+        y: 2.5,
+        width: 100.0,
+        height: 200.0,
+    };
     let decoded = round_trip(&orig);
     assert_eq!(orig.x, decoded.x);
     assert_eq!(orig.y, decoded.y);
@@ -94,7 +138,12 @@ fn roundtrip_rect() {
 
 #[test]
 fn roundtrip_rect_max_values() {
-    let orig = Rect { x: f32::MAX, y: f32::MIN, width: f32::INFINITY, height: f32::NEG_INFINITY };
+    let orig = Rect {
+        x: f32::MAX,
+        y: f32::MIN,
+        width: f32::INFINITY,
+        height: f32::NEG_INFINITY,
+    };
     let decoded = round_trip(&orig);
     assert_eq!(orig.x, decoded.x);
     assert_eq!(orig.y, decoded.y);
@@ -104,7 +153,12 @@ fn roundtrip_rect_max_values() {
 
 #[test]
 fn roundtrip_rgba() {
-    let orig = Rgba { r: 0.5, g: 0.25, b: 0.75, a: 1.0 };
+    let orig = Rgba {
+        r: 0.5,
+        g: 0.25,
+        b: 0.75,
+        a: 1.0,
+    };
     let decoded = round_trip(&orig);
     assert_eq!(orig.r, decoded.r);
     assert_eq!(orig.g, decoded.g);
@@ -125,8 +179,18 @@ fn roundtrip_node_proto_solid_color() {
     let orig = NodeProto {
         id: b"node-abc".to_vec(),
         data: Some(NodeData::SolidColor(SolidColorNodeProto {
-            color: Some(Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
-            bounds: Some(Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 }),
+            color: Some(Rgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 50.0,
+            }),
         })),
     };
     let decoded = round_trip(&orig);
@@ -145,10 +209,25 @@ fn roundtrip_node_proto_text_markdown() {
         id: b"node-text".to_vec(),
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "**hello world**".to_string(),
-            bounds: Some(Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 }),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 100.0,
+            }),
             font_size_px: 14.0,
-            color: Some(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
-            background: Some(Rgba { r: 1.0, g: 1.0, b: 1.0, a: 0.0 }),
+            color: Some(Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
+            background: Some(Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.0,
+            }),
         })),
     };
     let decoded = round_trip(&orig);
@@ -166,7 +245,12 @@ fn roundtrip_node_proto_hit_region() {
     let orig = NodeProto {
         id: b"hit-1".to_vec(),
         data: Some(NodeData::HitRegion(HitRegionNodeProto {
-            bounds: Some(Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 }),
+            bounds: Some(Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 50.0,
+            }),
             interaction_id: "btn-primary".to_string(),
             accepts_focus: true,
             accepts_pointer: true,
@@ -200,7 +284,12 @@ fn roundtrip_node_proto_static_image_all_fit_modes() {
                 height: 1080,
                 decoded_bytes: 1920 * 1080 * 4,
                 fit_mode: fit as i32,
-                bounds: Some(Rect { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0 }),
+                bounds: Some(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 1920.0,
+                    height: 1080.0,
+                }),
             })),
         };
         let decoded = round_trip(&orig);
@@ -218,7 +307,12 @@ fn roundtrip_node_proto_static_image_all_fit_modes() {
 fn roundtrip_create_tile_mutation() {
     let orig = CreateTileMutation {
         tab_id: b"tab-001".to_vec(),
-        bounds: Some(Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 }),
+        bounds: Some(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        }),
         z_order: 5,
     };
     let decoded = round_trip(&orig);
@@ -232,7 +326,9 @@ fn roundtrip_mutation_proto_all_variants() {
     // CreateTile
     let m1 = MutationProto {
         mutation: Some(Mutation::CreateTile(CreateTileMutation {
-            tab_id: b"t".to_vec(), bounds: None, z_order: 0,
+            tab_id: b"t".to_vec(),
+            bounds: None,
+            z_order: 0,
         })),
     };
     let d1 = round_trip(&m1);
@@ -241,7 +337,8 @@ fn roundtrip_mutation_proto_all_variants() {
     // SetTileRoot
     let m2 = MutationProto {
         mutation: Some(Mutation::SetTileRoot(SetTileRootMutation {
-            tile_id: b"tile-1".to_vec(), node: None,
+            tile_id: b"tile-1".to_vec(),
+            node: None,
         })),
     };
     let d2 = round_trip(&m2);
@@ -264,7 +361,8 @@ fn roundtrip_mutation_proto_all_variants() {
     // ClearZone
     let m4 = MutationProto {
         mutation: Some(Mutation::ClearZone(ClearZoneMutation {
-            zone_name: "notification".to_string(), publish_token: None,
+            zone_name: "notification".to_string(),
+            publish_token: None,
         })),
     };
     let d4 = round_trip(&m4);
@@ -274,7 +372,9 @@ fn roundtrip_mutation_proto_all_variants() {
 #[test]
 fn roundtrip_zone_content_all_variants() {
     // StreamText
-    let z1 = ZoneContent { payload: Some(ZonePayload::StreamText("test".to_string())) };
+    let z1 = ZoneContent {
+        payload: Some(ZonePayload::StreamText("test".to_string())),
+    };
     let d1 = round_trip(&z1);
     assert!(matches!(d1.payload, Some(ZonePayload::StreamText(_))));
 
@@ -306,7 +406,12 @@ fn roundtrip_zone_content_all_variants() {
 
     // SolidColor
     let z4 = ZoneContent {
-        payload: Some(ZonePayload::SolidColor(Rgba { r: 0.1, g: 0.2, b: 0.3, a: 0.4 })),
+        payload: Some(ZonePayload::SolidColor(Rgba {
+            r: 0.1,
+            g: 0.2,
+            b: 0.3,
+            a: 0.4,
+        })),
     };
     let d4 = round_trip(&z4);
     assert!(matches!(d4.payload, Some(ZonePayload::SolidColor(_))));
@@ -319,16 +424,26 @@ fn roundtrip_zone_definition_proto() {
         name: "subtitle".to_string(),
         description: "Subtitle display zone".to_string(),
         geometry_policy: Some(GeometryPolicyProto {
-            policy: Some(tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(
-                RelativeGeometryPolicy {
-                    x_pct: 0.0, y_pct: 0.85, width_pct: 1.0, height_pct: 0.15,
-                },
-            )),
+            policy: Some(
+                tze_hud_protocol::proto::geometry_policy_proto::Policy::Relative(
+                    RelativeGeometryPolicy {
+                        x_pct: 0.0,
+                        y_pct: 0.85,
+                        width_pct: 1.0,
+                        height_pct: 0.15,
+                    },
+                ),
+            ),
         }),
         accepted_media_types: vec!["text/plain".to_string()],
         rendering_policy: Some(RenderingPolicyProto {
             font_size_px: 16.0,
-            backdrop: Some(Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.5 }),
+            backdrop: Some(Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.5,
+            }),
             text_align: TextAlignProto::Center as i32,
             margin_px: 8.0,
         }),
@@ -391,14 +506,20 @@ fn roundtrip_tile_created_event() {
 
 #[test]
 fn roundtrip_tile_deleted_event() {
-    let orig = TileDeletedEvent { tile_id: "tile-002".to_string(), timestamp_wall_us: 1234 };
+    let orig = TileDeletedEvent {
+        tile_id: "tile-002".to_string(),
+        timestamp_wall_us: 1234,
+    };
     let decoded = round_trip(&orig);
     assert_eq!(orig.tile_id, decoded.tile_id);
 }
 
 #[test]
 fn roundtrip_tile_updated_event() {
-    let orig = TileUpdatedEvent { tile_id: "tile-003".to_string(), timestamp_wall_us: 5678 };
+    let orig = TileUpdatedEvent {
+        tile_id: "tile-003".to_string(),
+        timestamp_wall_us: 5678,
+    };
     let decoded = round_trip(&orig);
     assert_eq!(orig.tile_id, decoded.tile_id);
 }
@@ -429,7 +550,9 @@ fn roundtrip_scene_event_all_variants() {
     let s1 = SceneEvent {
         timestamp_wall_us: 100,
         event: Some(SceneEventPayload::TileCreated(TileCreatedEvent {
-            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_wall_us: 100,
+            tile_id: "t1".to_string(),
+            namespace: "ns".to_string(),
+            timestamp_wall_us: 100,
         })),
     };
     let d1 = round_trip(&s1);
@@ -439,28 +562,41 @@ fn roundtrip_scene_event_all_variants() {
     let s2 = SceneEvent {
         timestamp_wall_us: 200,
         event: Some(SceneEventPayload::TileDeleted(TileDeletedEvent {
-            tile_id: "t2".to_string(), timestamp_wall_us: 200,
+            tile_id: "t2".to_string(),
+            timestamp_wall_us: 200,
         })),
     };
-    assert!(matches!(round_trip(&s2).event, Some(SceneEventPayload::TileDeleted(_))));
+    assert!(matches!(
+        round_trip(&s2).event,
+        Some(SceneEventPayload::TileDeleted(_))
+    ));
 
     // tile_updated
     let s3 = SceneEvent {
         timestamp_wall_us: 300,
         event: Some(SceneEventPayload::TileUpdated(TileUpdatedEvent {
-            tile_id: "t3".to_string(), timestamp_wall_us: 300,
+            tile_id: "t3".to_string(),
+            timestamp_wall_us: 300,
         })),
     };
-    assert!(matches!(round_trip(&s3).event, Some(SceneEventPayload::TileUpdated(_))));
+    assert!(matches!(
+        round_trip(&s3).event,
+        Some(SceneEventPayload::TileUpdated(_))
+    ));
 
     // input
     let s4 = SceneEvent {
         timestamp_wall_us: 400,
         event: Some(SceneEventPayload::Input(InputEvent {
-            tile_id: "t4".to_string(), kind: InputEventKind::PointerDown as i32, ..Default::default()
+            tile_id: "t4".to_string(),
+            kind: InputEventKind::PointerDown as i32,
+            ..Default::default()
         })),
     };
-    assert!(matches!(round_trip(&s4).event, Some(SceneEventPayload::Input(_))));
+    assert!(matches!(
+        round_trip(&s4).event,
+        Some(SceneEventPayload::Input(_))
+    ));
 
     // lease
     let s5 = SceneEvent {
@@ -472,7 +608,10 @@ fn roundtrip_scene_event_all_variants() {
             timestamp_wall_us: 500,
         })),
     };
-    assert!(matches!(round_trip(&s5).event, Some(SceneEventPayload::Lease(_))));
+    assert!(matches!(
+        round_trip(&s5).event,
+        Some(SceneEventPayload::Lease(_))
+    ));
 }
 
 #[test]
@@ -613,19 +752,25 @@ fn roundtrip_capture_released_event_all_reasons() {
 #[test]
 fn roundtrip_ime_composition_events() {
     let start = ImeCompositionStartEvent {
-        tile_id: vec![0u8; 16], node_id: vec![], timestamp_mono_us: 1,
+        tile_id: vec![0u8; 16],
+        node_id: vec![],
+        timestamp_mono_us: 1,
     };
     let d_start = round_trip(&start);
     assert_eq!(d_start.timestamp_mono_us, 1);
 
     let update = ImeCompositionUpdateEvent {
-        tile_id: vec![0u8; 16], node_id: vec![], timestamp_mono_us: 2,
+        tile_id: vec![0u8; 16],
+        node_id: vec![],
+        timestamp_mono_us: 2,
         composition_text: "はよ".to_string(),
     };
     assert_eq!(round_trip(&update).composition_text, "はよ");
 
     let end = ImeCompositionEndEvent {
-        tile_id: vec![0u8; 16], node_id: vec![], timestamp_mono_us: 3,
+        tile_id: vec![0u8; 16],
+        node_id: vec![],
+        timestamp_mono_us: 3,
         committed_text: "はよ".to_string(),
     };
     assert_eq!(round_trip(&end).committed_text, "はよ");
@@ -729,7 +874,10 @@ fn roundtrip_session_init_all_fields() {
         agent_id: "weather-agent".to_string(),
         agent_display_name: "Weather Agent".to_string(),
         pre_shared_key: "".to_string(),
-        requested_capabilities: vec!["resident_mcp".to_string(), "read_scene_topology".to_string()],
+        requested_capabilities: vec![
+            "resident_mcp".to_string(),
+            "read_scene_topology".to_string(),
+        ],
         initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
         resume_token: vec![],
         agent_timestamp_wall_us: 1_700_000_000_000_000,
@@ -746,7 +894,10 @@ fn roundtrip_session_init_all_fields() {
     assert_eq!(orig.requested_capabilities, decoded.requested_capabilities);
     assert_eq!(orig.min_protocol_version, decoded.min_protocol_version);
     assert_eq!(orig.max_protocol_version, decoded.max_protocol_version);
-    assert_eq!(orig.agent_timestamp_wall_us, decoded.agent_timestamp_wall_us);
+    assert_eq!(
+        orig.agent_timestamp_wall_us,
+        decoded.agent_timestamp_wall_us
+    );
     match &decoded.auth_credential {
         Some(ac) => match &ac.credential {
             Some(Credential::PreSharedKey(psk)) => assert_eq!(psk.key, "test-key"),
@@ -774,8 +925,10 @@ fn roundtrip_session_init_empty_capabilities() {
 fn roundtrip_session_resume() {
     let orig = SessionResume {
         agent_id: "weather-agent".to_string(),
-        resume_token: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03,
-                           0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B],
+        resume_token: vec![
+            0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+            0x0A, 0x0B,
+        ],
         last_seen_server_sequence: 9999,
         pre_shared_key: String::new(),
         auth_credential: Some(AuthCredential {
@@ -787,7 +940,10 @@ fn roundtrip_session_resume() {
     };
     let decoded = round_trip(&orig);
     assert_eq!(orig.resume_token, decoded.resume_token);
-    assert_eq!(orig.last_seen_server_sequence, decoded.last_seen_server_sequence);
+    assert_eq!(
+        orig.last_seen_server_sequence,
+        decoded.last_seen_server_sequence
+    );
 }
 
 #[test]
@@ -801,7 +957,10 @@ fn roundtrip_session_established() {
         server_sequence: 1,
         compositor_timestamp_wall_us: 1_700_000_000_000_000,
         estimated_skew_us: -500,
-        active_subscriptions: vec!["DEGRADATION_NOTICES".to_string(), "LEASE_CHANGES".to_string()],
+        active_subscriptions: vec![
+            "DEGRADATION_NOTICES".to_string(),
+            "LEASE_CHANGES".to_string(),
+        ],
         denied_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
         negotiated_protocol_version: 1000,
     };
@@ -810,7 +969,10 @@ fn roundtrip_session_established() {
     assert_eq!(orig.server_sequence, decoded.server_sequence);
     assert_eq!(orig.estimated_skew_us, decoded.estimated_skew_us);
     assert_eq!(orig.denied_subscriptions, decoded.denied_subscriptions);
-    assert_eq!(orig.negotiated_protocol_version, decoded.negotiated_protocol_version);
+    assert_eq!(
+        orig.negotiated_protocol_version,
+        decoded.negotiated_protocol_version
+    );
 }
 
 #[test]
@@ -870,7 +1032,7 @@ fn roundtrip_runtime_error_all_codes() {
         ErrorCode::AgentEventReservedPrefix,
     ] {
         let orig = RuntimeError {
-            error_code: format!("{:?}", code),
+            error_code: format!("{code:?}"),
             message: "test error".to_string(),
             context: "field=value".to_string(),
             hint: "{}".to_string(),
@@ -886,15 +1048,18 @@ fn roundtrip_mutation_batch() {
     let orig = MutationBatch {
         batch_id: vec![0u8; 16],
         lease_id: vec![0xAA; 16],
-        mutations: vec![
-            tze_hud_protocol::proto::MutationProto {
-                mutation: Some(Mutation::CreateTile(CreateTileMutation {
-                    tab_id: b"tab-1".to_vec(),
-                    bounds: Some(Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }),
-                    z_order: 1,
-                })),
-            },
-        ],
+        mutations: vec![tze_hud_protocol::proto::MutationProto {
+            mutation: Some(Mutation::CreateTile(CreateTileMutation {
+                tab_id: b"tab-1".to_vec(),
+                bounds: Some(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                }),
+                z_order: 1,
+            })),
+        }],
         timing: Some(TimingHints {
             present_at_wall_us: 1_700_000_000_000_000,
             expires_at_wall_us: 1_700_000_001_000_000,
@@ -957,14 +1122,18 @@ fn roundtrip_lease_state_change() {
 
 #[test]
 fn roundtrip_heartbeat() {
-    let orig = Heartbeat { timestamp_mono_us: u64::MAX };
+    let orig = Heartbeat {
+        timestamp_mono_us: u64::MAX,
+    };
     let decoded = round_trip(&orig);
     assert_eq!(orig.timestamp_mono_us, decoded.timestamp_mono_us);
 }
 
 #[test]
 fn roundtrip_heartbeat_zero() {
-    let orig = Heartbeat { timestamp_mono_us: 0 };
+    let orig = Heartbeat {
+        timestamp_mono_us: 0,
+    };
     let decoded = round_trip(&orig);
     assert_eq!(decoded.timestamp_mono_us, 0);
 }
@@ -988,12 +1157,10 @@ fn roundtrip_subscription_change_with_filter() {
     let orig = SubscriptionChange {
         subscribe: Vec::new(),
         unsubscribe: Vec::new(),
-        subscribe_filter: vec![
-            SubscriptionEntry {
-                category: "SCENE_TOPOLOGY".to_string(),
-                filter_prefix: "scene.zone.".to_string(),
-            },
-        ],
+        subscribe_filter: vec![SubscriptionEntry {
+            category: "SCENE_TOPOLOGY".to_string(),
+            filter_prefix: "scene.zone.".to_string(),
+        }],
     };
     let decoded = round_trip(&orig);
     assert_eq!(decoded.subscribe_filter.len(), 1);
@@ -1023,7 +1190,10 @@ fn roundtrip_emit_scene_event() {
     let decoded = round_trip(&orig);
     assert_eq!(orig.bare_name, decoded.bare_name);
     assert_eq!(orig.payload, decoded.payload);
-    assert_eq!(orig.interruption_class_hint, decoded.interruption_class_hint);
+    assert_eq!(
+        orig.interruption_class_hint,
+        decoded.interruption_class_hint
+    );
 }
 
 #[test]
@@ -1037,7 +1207,10 @@ fn roundtrip_emit_scene_event_result() {
     };
     let decoded = round_trip(&orig);
     assert!(decoded.accepted);
-    assert_eq!(decoded.delivered_event_type, "agent.doorbell_agent.doorbell.ring");
+    assert_eq!(
+        decoded.delivered_event_type,
+        "agent.doorbell_agent.doorbell.ring"
+    );
 }
 
 #[test]
@@ -1055,7 +1228,9 @@ fn roundtrip_client_message_all_payload_variants() {
         ClientMessage {
             sequence: 2,
             timestamp_wall_us: 2_000_000,
-            payload: Some(ClientPayload::Heartbeat(Heartbeat { timestamp_mono_us: 12345 })),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 12345,
+            })),
         },
         ClientMessage {
             sequence: 3,
@@ -1089,25 +1264,31 @@ fn roundtrip_server_message_all_payload_variants() {
         ServerMessage {
             sequence: 1,
             timestamp_wall_us: 1_000_000,
-            payload: Some(ServerPayload::SessionEstablished(SessionEstablished::default())),
+            payload: Some(ServerPayload::SessionEstablished(
+                SessionEstablished::default(),
+            )),
         },
         ServerMessage {
             sequence: 2,
             timestamp_wall_us: 2_000_000,
             payload: Some(ServerPayload::SessionError(SessionError {
-                code: "AUTH_FAILED".to_string(), ..Default::default()
+                code: "AUTH_FAILED".to_string(),
+                ..Default::default()
             })),
         },
         ServerMessage {
             sequence: 3,
             timestamp_wall_us: 3_000_000,
-            payload: Some(ServerPayload::Heartbeat(Heartbeat { timestamp_mono_us: 99 })),
+            payload: Some(ServerPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 99,
+            })),
         },
         ServerMessage {
             sequence: 4,
             timestamp_wall_us: 4_000_000,
             payload: Some(ServerPayload::BackpressureSignal(BackpressureSignal {
-                queue_pressure: 0.9, suggested_action: "coalesce".to_string(),
+                queue_pressure: 0.9,
+                suggested_action: "coalesce".to_string(),
             })),
         },
     ];
@@ -1137,14 +1318,17 @@ fn roundtrip_scene_snapshot() {
 fn roundtrip_scene_delta_variants() {
     let d1 = SceneDelta {
         delta: Some(Delta::TileCreated(TileCreatedEvent {
-            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_wall_us: 0,
+            tile_id: "t1".to_string(),
+            namespace: "ns".to_string(),
+            timestamp_wall_us: 0,
         })),
     };
     assert!(matches!(round_trip(&d1).delta, Some(Delta::TileCreated(_))));
 
     let d2 = SceneDelta {
         delta: Some(Delta::TileDeleted(TileDeletedEvent {
-            tile_id: "t2".to_string(), timestamp_wall_us: 0,
+            tile_id: "t2".to_string(),
+            timestamp_wall_us: 0,
         })),
     };
     assert!(matches!(round_trip(&d2).delta, Some(Delta::TileDeleted(_))));
@@ -1199,7 +1383,9 @@ fn roundtrip_runtime_telemetry_frame() {
 #[test]
 fn roundtrip_decode_with_unknown_fields_succeeds() {
     // Encode a Heartbeat with timestamp_mono_us = 12345
-    let known = Heartbeat { timestamp_mono_us: 12345 };
+    let known = Heartbeat {
+        timestamp_mono_us: 12345,
+    };
     let mut buf = Vec::new();
     known.encode(&mut buf).unwrap();
 
@@ -1209,10 +1395,12 @@ fn roundtrip_decode_with_unknown_fields_succeeds() {
     buf.extend_from_slice(&[0xF8, 0xF0, 0x04, 0x2A]);
 
     // Decode MUST succeed even with unknown fields present
-    let decoded = Heartbeat::decode(buf.as_slice())
-        .expect("decode with unknown fields must not fail");
+    let decoded =
+        Heartbeat::decode(buf.as_slice()).expect("decode with unknown fields must not fail");
 
     // Known fields must be correctly decoded despite the unknown field appended
-    assert_eq!(decoded.timestamp_mono_us, 12345,
-        "known fields must survive decoding alongside unknown fields");
+    assert_eq!(
+        decoded.timestamp_mono_us, 12345,
+        "known fields must survive decoding alongside unknown fields"
+    );
 }

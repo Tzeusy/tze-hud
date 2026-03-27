@@ -11,7 +11,6 @@ use crate::clock::Clock;
 // wire-level type definitions and potential mismatches across subsystems.
 pub use crate::events::InterruptionClass;
 
-
 // ─── Policy Levels ───────────────────────────────────────────────────────────
 
 /// The seven arbitration levels ordered by precedence (0 = highest).
@@ -257,7 +256,10 @@ pub mod tests {
         let decision = evaluator.evaluate(&ctx);
         // Level 1 Safety must produce Reject or Blocked; lower levels must be skipped.
         assert!(
-            matches!(decision.action, ArbitrationAction::Reject | ArbitrationAction::Blocked),
+            matches!(
+                decision.action,
+                ArbitrationAction::Reject | ArbitrationAction::Blocked
+            ),
             "GPU failure should cause reject/blocked at Level 1, got {:?}",
             decision.action
         );
@@ -314,7 +316,10 @@ pub mod tests {
         let decision = evaluator.evaluate(&ctx);
         assert_eq!(decision.action, ArbitrationAction::Reject);
         assert_eq!(decision.applied_level, PolicyLevel::Security);
-        assert!(matches!(decision.reject_code, Some(PolicyRejectCode::NamespaceViolation)));
+        assert!(matches!(
+            decision.reject_code,
+            Some(PolicyRejectCode::NamespaceViolation)
+        ));
     }
 
     /// WHEN scene frozen (Level 0) THEN mutation is Blocked regardless of lower levels.

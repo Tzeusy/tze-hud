@@ -115,11 +115,7 @@ impl ExpirationHeap {
     /// Uses a linear scan and rebuild — acceptable since this is infrequent
     /// compared to `drain_expired`.
     pub fn remove(&mut self, tile_id: SceneId) {
-        let entries: Vec<_> = self
-            .heap
-            .drain()
-            .filter(|e| e.tile_id != tile_id)
-            .collect();
+        let entries: Vec<_> = self.heap.drain().filter(|e| e.tile_id != tile_id).collect();
         self.heap = entries.into();
     }
 
@@ -273,10 +269,7 @@ mod tests {
         let expired = heap.drain_expired(WallUs(3_000));
         // All three tiles must be present in ascending expiry-time order.
         assert_eq!(expired.len(), 3, "all three tiles must expire");
-        assert_eq!(
-            expired[0], t1,
-            "t1 (expires 1000) must be first (earliest)"
-        );
+        assert_eq!(expired[0], t1, "t1 (expires 1000) must be first (earliest)");
         assert_eq!(expired[1], t2, "t2 (expires 2000) must be second");
         assert_eq!(expired[2], t3, "t3 (expires 3000) must be last");
     }
@@ -294,6 +287,10 @@ mod tests {
         // "Frozen" — do not call drain_expired at vsync=1000
         // "Unfreezes" — call drain at vsync=2000
         let expired = heap.drain_expired(WallUs(2_000));
-        assert_eq!(expired, vec![tile_id], "past-due tile must expire on unfreeze");
+        assert_eq!(
+            expired,
+            vec![tile_id],
+            "past-due tile must expire on unfreeze"
+        );
     }
 }

@@ -19,7 +19,7 @@
 
 #![cfg(target_os = "windows")]
 
-use tze_hud_scene::{SceneId, SceneGraph};
+use tze_hud_scene::{SceneGraph, SceneId};
 
 use crate::{AccessibilityTree, LivePoliteness, WarnOnce};
 
@@ -37,7 +37,9 @@ pub struct UiaAccessibility {
 impl UiaAccessibility {
     /// Create a new UIA bridge stub.
     pub fn new() -> Self {
-        Self { warner: WarnOnce::new() }
+        Self {
+            warner: WarnOnce::new(),
+        }
     }
 }
 

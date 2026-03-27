@@ -13,7 +13,7 @@
 //! - `source_lease_id`    — the lease that produced this event; empty for system events
 //! - `source_namespace`   — the agent namespace; empty for runtime events
 //! - `sequence`           — monotonically increasing per-session counter for
-//!                          gap detection on reconnect
+//!   gap detection on reconnect
 //! - `payload`            — typed event-specific data
 
 use serde::{Deserialize, Serialize};
@@ -60,7 +60,11 @@ impl InterruptionClass {
     pub fn ceiling(self, zone_ceiling: InterruptionClass) -> InterruptionClass {
         // Ord is derived in numeric order where Critical=0 < High=1 < ...
         // "More restrictive" means higher urgency cap → take the max.
-        if self > zone_ceiling { self } else { zone_ceiling }
+        if self > zone_ceiling {
+            self
+        } else {
+            zone_ceiling
+        }
     }
 }
 
@@ -132,14 +136,14 @@ pub enum EventPayload {
 
     // Zone events
     /// A zone's occupancy changed (dual-routed to both SceneTopology and ZoneEvents).
-    ZoneOccupancyChanged {
-        zone_id: Uuid,
-        occupant_count: u32,
-    },
+    ZoneOccupancyChanged { zone_id: Uuid, occupant_count: u32 },
 
     // Focus events
     /// Scene focus changed (tile or node level).
-    FocusChanged { tile_id: Uuid, node_id: Option<Uuid> },
+    FocusChanged {
+        tile_id: Uuid,
+        node_id: Option<Uuid>,
+    },
 
     // System events
     /// The system degradation level changed.
@@ -153,7 +157,11 @@ pub enum EventPayload {
     /// A lease was resumed.
     LeaseResumed { lease_id: Uuid },
     /// Attention budget warning (80% threshold reached).
-    AttentionBudgetWarning { agent_namespace: String, used: u32, limit: u32 },
+    AttentionBudgetWarning {
+        agent_namespace: String,
+        used: u32,
+        limit: u32,
+    },
 
     // Agent events
     /// An agent-emitted event with arbitrary encoded payload (≤4 KB).
@@ -336,7 +344,10 @@ mod tests {
     fn system_event_source_is_empty() {
         let src = EventSource::system();
         assert!(src.lease_id.is_nil(), "system event must have nil lease_id");
-        assert!(src.namespace.is_empty(), "system event must have empty namespace");
+        assert!(
+            src.namespace.is_empty(),
+            "system event must have empty namespace"
+        );
         assert!(src.is_system());
     }
 
@@ -400,8 +411,14 @@ mod tests {
         .sequence(5)
         .build(); // source defaults to EventSource::system()
 
-        assert!(event.source.lease_id.is_nil(), "system event must have nil lease_id");
-        assert!(event.source.namespace.is_empty(), "system event must have empty namespace");
+        assert!(
+            event.source.lease_id.is_nil(),
+            "system event must have nil lease_id"
+        );
+        assert!(
+            event.source.namespace.is_empty(),
+            "system event must have empty namespace"
+        );
         assert!(event.is_system_event());
     }
 
@@ -463,7 +480,7 @@ mod tests {
     /// Gap detection helper — simulating spec line 276.
     #[test]
     fn gap_detection_in_sequence_numbers() {
-        let sequences = vec![10u64, 11, 14]; // gap at 12-13
+        let sequences = [10u64, 11, 14]; // gap at 12-13
         let mut gaps = Vec::new();
         for pair in sequences.windows(2) {
             if pair[1] != pair[0] + 1 {

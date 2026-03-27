@@ -33,8 +33,7 @@
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tze_hud_scene::{
-    Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneId,
-    graph::SceneGraph,
+    Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneId, graph::SceneGraph,
 };
 
 // ─── Scene builders ───────────────────────────────────────────────────────────
@@ -217,9 +216,7 @@ fn bench_hit_test(c: &mut Criterion) {
         BenchmarkId::new("50_tiles_worst_case", ""),
         &(scene_50, px, py),
         |b, (scene, x, y)| {
-            b.iter(|| {
-                black_box(scene.hit_test(black_box(*x), black_box(*y)))
-            });
+            b.iter(|| black_box(scene.hit_test(black_box(*x), black_box(*y))));
         },
     );
 
@@ -242,9 +239,7 @@ fn bench_hit_test(c: &mut Criterion) {
         BenchmarkId::new("50_tiles_passthrough", ""),
         &passthrough_scene,
         |b, scene| {
-            b.iter(|| {
-                black_box(scene.hit_test(black_box(960.0), black_box(540.0)))
-            });
+            b.iter(|| black_box(scene.hit_test(black_box(960.0), black_box(540.0))));
         },
     );
 

@@ -27,8 +27,8 @@
 
 use crate::override_queue::OverrideCommand;
 use crate::types::{
-    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome,
-    AttentionContext, BlockReason, InterruptionClass, QueueReason, SecurityContext,
+    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, AttentionContext,
+    BlockReason, InterruptionClass, QueueReason, SecurityContext,
 };
 use tze_hud_scene::SceneId;
 
@@ -330,8 +330,8 @@ fn evaluate_event_level3_security(
                 code: ArbitrationErrorCode::CapabilityDenied,
                 agent_id: ctx.agent_namespace.clone(),
                 mutation_ref: event_ref,
-                message: format!("Missing required capability: '{}'", cap),
-                hint: Some(format!("Required: '{}'", cap)),
+                message: format!("Missing required capability: '{cap}'"),
+                hint: Some(format!("Required: '{cap}'")),
                 level: ArbitrationLevel::Security.index(),
             }));
         }
@@ -359,14 +359,17 @@ impl From<EventOutcome> for ArbitrationOutcome {
     fn from(o: EventOutcome) -> ArbitrationOutcome {
         match o {
             EventOutcome::Accept => ArbitrationOutcome::Commit,
-            EventOutcome::Discarded { .. } => ArbitrationOutcome::Shed { degradation_level: 0 },
-            EventOutcome::Queued { queue_reason, earliest_present_us } => {
-                ArbitrationOutcome::Queue {
-                    queue_reason,
-                    earliest_present_us,
-                    redacted: false,
-                }
-            }
+            EventOutcome::Discarded { .. } => ArbitrationOutcome::Shed {
+                degradation_level: 0,
+            },
+            EventOutcome::Queued {
+                queue_reason,
+                earliest_present_us,
+            } => ArbitrationOutcome::Queue {
+                queue_reason,
+                earliest_present_us,
+                redacted: false,
+            },
             EventOutcome::Rejected(err) => ArbitrationOutcome::Reject(err),
             EventOutcome::Blocked { block_reason } => ArbitrationOutcome::Blocked { block_reason },
         }
@@ -693,8 +696,7 @@ mod tests {
 
         assert!(
             per_call_ms < 16.6,
-            "override response took {:.3}ms, expected < 16.6ms",
-            per_call_ms
+            "override response took {per_call_ms:.3}ms, expected < 16.6ms"
         );
     }
 
@@ -708,15 +710,19 @@ mod tests {
 
     #[test]
     fn test_discarded_converts_to_shed() {
-        let outcome: ArbitrationOutcome =
-            EventOutcome::Discarded { reason: DiscardReason::SafeModePreempted }.into();
+        let outcome: ArbitrationOutcome = EventOutcome::Discarded {
+            reason: DiscardReason::SafeModePreempted,
+        }
+        .into();
         assert!(matches!(outcome, ArbitrationOutcome::Shed { .. }));
     }
 
     #[test]
     fn test_blocked_converts_to_blocked() {
-        let outcome: ArbitrationOutcome =
-            EventOutcome::Blocked { block_reason: BlockReason::Freeze }.into();
+        let outcome: ArbitrationOutcome = EventOutcome::Blocked {
+            block_reason: BlockReason::Freeze,
+        }
+        .into();
         assert!(matches!(outcome, ArbitrationOutcome::Blocked { .. }));
     }
 }

@@ -51,8 +51,10 @@
 
 mod pixel_helpers;
 
-use pixel_helpers::{make_scene_runtime, render_scene_pixels, BG_SRGB, CI_BLEND_TOLERANCE,
-                   CI_SOLID_TOLERANCE, SCENE_H, SCENE_W};
+use pixel_helpers::{
+    BG_SRGB, CI_BLEND_TOLERANCE, CI_SOLID_TOLERANCE, SCENE_H, SCENE_W, make_scene_runtime,
+    render_scene_pixels,
+};
 use tze_hud_compositor::HeadlessSurface;
 use tze_hud_scene::test_scenes::{ClockMs, TestSceneRegistry};
 
@@ -77,7 +79,10 @@ macro_rules! scene_buffer_size_test {
             assert_eq!(
                 pixels.len(),
                 (SCENE_W * SCENE_H * 4) as usize,
-                concat!($scene_name, ": pixel buffer must be SCENE_W × SCENE_H × 4 bytes (RGBA8)")
+                concat!(
+                    $scene_name,
+                    ": pixel buffer must be SCENE_W × SCENE_H × 4 bytes (RGBA8)"
+                )
             );
             assert_eq!(
                 pixels.len() % 4,
@@ -91,7 +96,10 @@ macro_rules! scene_buffer_size_test {
 scene_buffer_size_test!(test_buf_01_empty_scene, "empty_scene");
 scene_buffer_size_test!(test_buf_02_single_tile_solid, "single_tile_solid");
 scene_buffer_size_test!(test_buf_03_three_tiles_no_overlap, "three_tiles_no_overlap");
-scene_buffer_size_test!(test_buf_04_overlapping_tiles_zorder, "overlapping_tiles_zorder");
+scene_buffer_size_test!(
+    test_buf_04_overlapping_tiles_zorder,
+    "overlapping_tiles_zorder"
+);
 scene_buffer_size_test!(test_buf_05_overlay_transparency, "overlay_transparency");
 scene_buffer_size_test!(test_buf_06_tab_switch, "tab_switch");
 scene_buffer_size_test!(test_buf_07_lease_expiry, "lease_expiry");
@@ -100,19 +108,43 @@ scene_buffer_size_test!(test_buf_09_sync_group_media, "sync_group_media");
 scene_buffer_size_test!(test_buf_10_input_highlight, "input_highlight");
 scene_buffer_size_test!(test_buf_11_coalesced_dashboard, "coalesced_dashboard");
 scene_buffer_size_test!(test_buf_12_max_tiles_stress, "max_tiles_stress");
-scene_buffer_size_test!(test_buf_13_three_agents_contention, "three_agents_contention");
-scene_buffer_size_test!(test_buf_14_overlay_passthrough_regions, "overlay_passthrough_regions");
-scene_buffer_size_test!(test_buf_15_disconnect_reclaim_multiagent, "disconnect_reclaim_multiagent");
+scene_buffer_size_test!(
+    test_buf_13_three_agents_contention,
+    "three_agents_contention"
+);
+scene_buffer_size_test!(
+    test_buf_14_overlay_passthrough_regions,
+    "overlay_passthrough_regions"
+);
+scene_buffer_size_test!(
+    test_buf_15_disconnect_reclaim_multiagent,
+    "disconnect_reclaim_multiagent"
+);
 scene_buffer_size_test!(test_buf_16_privacy_redaction_mode, "privacy_redaction_mode");
 scene_buffer_size_test!(test_buf_17_chatty_dashboard_touch, "chatty_dashboard_touch");
 scene_buffer_size_test!(test_buf_18_zone_publish_subtitle, "zone_publish_subtitle");
 scene_buffer_size_test!(test_buf_19_zone_reject_wrong_type, "zone_reject_wrong_type");
-scene_buffer_size_test!(test_buf_20_zone_conflict_two_publishers, "zone_conflict_two_publishers");
-scene_buffer_size_test!(test_buf_21_zone_orchestrate_then_publish, "zone_orchestrate_then_publish");
-scene_buffer_size_test!(test_buf_22_zone_geometry_adapts_profile, "zone_geometry_adapts_profile");
-scene_buffer_size_test!(test_buf_23_zone_disconnect_cleanup, "zone_disconnect_cleanup");
+scene_buffer_size_test!(
+    test_buf_20_zone_conflict_two_publishers,
+    "zone_conflict_two_publishers"
+);
+scene_buffer_size_test!(
+    test_buf_21_zone_orchestrate_then_publish,
+    "zone_orchestrate_then_publish"
+);
+scene_buffer_size_test!(
+    test_buf_22_zone_geometry_adapts_profile,
+    "zone_geometry_adapts_profile"
+);
+scene_buffer_size_test!(
+    test_buf_23_zone_disconnect_cleanup,
+    "zone_disconnect_cleanup"
+);
 scene_buffer_size_test!(test_buf_24_policy_matrix_basic, "policy_matrix_basic");
-scene_buffer_size_test!(test_buf_25_policy_arbitration_collision, "policy_arbitration_collision");
+scene_buffer_size_test!(
+    test_buf_25_policy_arbitration_collision,
+    "policy_arbitration_collision"
+);
 
 // ─── Colour assertions ────────────────────────────────────────────────────────
 //
@@ -141,7 +173,9 @@ async fn test_color_01_empty_scene_all_background() {
 
     let mut runtime = make_scene_runtime().await;
     let registry = TestSceneRegistry::new();
-    let (scene, _spec) = registry.build("empty_scene", ClockMs::FIXED).expect("build failed");
+    let (scene, _spec) = registry
+        .build("empty_scene", ClockMs::FIXED)
+        .expect("build failed");
 
     let pixels = render_scene_pixels(&mut runtime, scene).await;
     assert_eq!(pixels.len(), (SCENE_W * SCENE_H * 4) as usize);
@@ -573,7 +607,10 @@ async fn test_color_11_coalesced_dashboard_tile_rendered() {
 
     // First tile interior at 1920×1080: pad=10, tile_w≈467, center ≈ (243, 183).
     let tile_px = HeadlessSurface::pixel_at(&pixels, SCENE_W, 243, 183);
-    assert_eq!(tile_px[3], 255, "coalesced_dashboard: tile at (243,183) must be opaque");
+    assert_eq!(
+        tile_px[3], 255,
+        "coalesced_dashboard: tile at (243,183) must be opaque"
+    );
 }
 
 // ─── 12. max_tiles_stress ────────────────────────────────────────────────────
@@ -601,7 +638,10 @@ async fn test_color_12_max_tiles_stress_has_content() {
             .zip(p.iter())
             .any(|(&e, &a)| a.abs_diff(e) > CI_SOLID_TOLERANCE)
     });
-    assert!(has_content, "max_tiles_stress: at least one non-background pixel must exist");
+    assert!(
+        has_content,
+        "max_tiles_stress: at least one non-background pixel must exist"
+    );
 }
 
 // ─── 13. three_agents_contention ─────────────────────────────────────────────

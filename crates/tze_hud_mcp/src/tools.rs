@@ -13,16 +13,16 @@
 //! - `list_zones`      → `handle_list_zones`
 //! - `list_scene`      → `handle_list_scene`
 
+use crate::{error::McpError, types::McpResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tze_hud_scene::{
     graph::SceneGraph,
     types::{
-        Capability, FontFamily, Node, NodeData, Rect, Rgba, SceneId, TextAlign,
-        TextMarkdownNode, TextOverflow, ZoneContent,
+        Capability, FontFamily, Node, NodeData, Rect, Rgba, SceneId, TextAlign, TextMarkdownNode,
+        TextOverflow, ZoneContent,
     },
 };
-use crate::{error::McpError, types::McpResult};
 
 // ─── create_tab ─────────────────────────────────────────────────────────────
 
@@ -58,7 +58,9 @@ pub fn handle_create_tab(params: Value, scene: &mut SceneGraph) -> McpResult<Cre
     let p: CreateTabParams = parse_params(params)?;
 
     if p.name.trim().is_empty() {
-        return Err(McpError::InvalidParams("name must be non-empty".to_string()));
+        return Err(McpError::InvalidParams(
+            "name must be non-empty".to_string(),
+        ));
     }
 
     let order = p.display_order.unwrap_or_else(|| {
@@ -143,7 +145,9 @@ pub fn handle_create_tile(params: Value, scene: &mut SceneGraph) -> McpResult<Cr
     let p: CreateTileParams = parse_params(params)?;
 
     if p.namespace.trim().is_empty() {
-        return Err(McpError::InvalidParams("namespace must be non-empty".to_string()));
+        return Err(McpError::InvalidParams(
+            "namespace must be non-empty".to_string(),
+        ));
     }
 
     if p.bounds.width <= 0.0 || p.bounds.height <= 0.0 {
@@ -218,7 +222,12 @@ fn default_font_size() -> f32 {
 }
 
 fn default_color() -> ColorParams {
-    ColorParams { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }
+    ColorParams {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    }
 }
 
 fn default_alpha() -> f32 {
@@ -253,11 +262,15 @@ pub fn handle_set_content(params: Value, scene: &mut SceneGraph) -> McpResult<Se
     let p: SetContentParams = parse_params(params)?;
 
     if p.content.is_empty() {
-        return Err(McpError::InvalidParams("content must be non-empty".to_string()));
+        return Err(McpError::InvalidParams(
+            "content must be non-empty".to_string(),
+        ));
     }
 
     if p.font_size_px <= 0.0 {
-        return Err(McpError::InvalidParams("font_size_px must be > 0".to_string()));
+        return Err(McpError::InvalidParams(
+            "font_size_px must be > 0".to_string(),
+        ));
     }
 
     let tile_id = parse_scene_id(&p.tile_id)?;
@@ -341,9 +354,7 @@ pub fn handle_dismiss(params: Value, scene: &mut SceneGraph) -> McpResult<Dismis
 
     scene.revoke_lease(lease_id)?;
 
-    Ok(DismissResult {
-        tile_id: p.tile_id,
-    })
+    Ok(DismissResult { tile_id: p.tile_id })
 }
 
 // ─── publish_to_zone ─────────────────────────────────────────────────────────
@@ -410,10 +421,14 @@ pub fn handle_publish_to_zone(
     let p: PublishToZoneParams = parse_params(params)?;
 
     if p.zone_name.trim().is_empty() {
-        return Err(McpError::InvalidParams("zone_name must be non-empty".to_string()));
+        return Err(McpError::InvalidParams(
+            "zone_name must be non-empty".to_string(),
+        ));
     }
     if p.content.is_empty() {
-        return Err(McpError::InvalidParams("content must be non-empty".to_string()));
+        return Err(McpError::InvalidParams(
+            "content must be non-empty".to_string(),
+        ));
     }
 
     // Validate zone exists before granting a lease, to fail fast on bad zone names.
@@ -612,7 +627,14 @@ fn parse_scene_id(s: &str) -> McpResult<SceneId> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tze_hud_scene::{graph::SceneGraph, types::{ZoneDefinition, GeometryPolicy, ZoneMediaType, RenderingPolicy, ContentionPolicy, LayerAttachment}, SceneId};
+    use tze_hud_scene::{
+        SceneId,
+        graph::SceneGraph,
+        types::{
+            ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ZoneDefinition,
+            ZoneMediaType,
+        },
+    };
 
     fn scene_with_tab() -> (SceneGraph, SceneId) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -658,8 +680,8 @@ mod tests {
     fn test_create_tab_duplicate_order_fails() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         handle_create_tab(json!({"name": "A", "display_order": 0}), &mut scene).unwrap();
-        let err = handle_create_tab(json!({"name": "B", "display_order": 0}), &mut scene)
-            .unwrap_err();
+        let err =
+            handle_create_tab(json!({"name": "B", "display_order": 0}), &mut scene).unwrap_err();
         assert!(matches!(err, McpError::SceneError(_)));
     }
 
@@ -816,11 +838,8 @@ mod tests {
             &mut scene,
         )
         .unwrap();
-        let err = handle_set_content(
-            json!({"tile_id": tile.tile_id, "content": ""}),
-            &mut scene,
-        )
-        .unwrap_err();
+        let err = handle_set_content(json!({"tile_id": tile.tile_id, "content": ""}), &mut scene)
+            .unwrap_err();
         assert!(matches!(err, McpError::InvalidParams(_)));
     }
 
@@ -839,11 +858,8 @@ mod tests {
     fn test_set_content_nonexistent_tile_fails() {
         let (mut scene, _) = scene_with_tab();
         let fake_id = SceneId::new().to_string();
-        let err = handle_set_content(
-            json!({"tile_id": fake_id, "content": "hello"}),
-            &mut scene,
-        )
-        .unwrap_err();
+        let err = handle_set_content(json!({"tile_id": fake_id, "content": "hello"}), &mut scene)
+            .unwrap_err();
         assert!(matches!(err, McpError::SceneError(_)));
     }
 
@@ -858,7 +874,12 @@ mod tests {
                 id: SceneId::new(),
                 name: zone_name.clone(),
                 description: "Primary overlay zone".to_string(),
-                geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.1 },
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 0.1,
+                },
                 accepted_media_types: vec![ZoneMediaType::StreamText],
                 rendering_policy: RenderingPolicy::default(),
                 contention_policy: ContentionPolicy::LatestWins,
@@ -886,7 +907,9 @@ mod tests {
         assert_eq!(scene.node_count(), 0);
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
         assert_eq!(publishes.len(), 1);
-        assert!(matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "## Status: OK"));
+        assert!(
+            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "## Status: OK")
+        );
     }
 
     #[test]
@@ -933,7 +956,12 @@ mod tests {
                 id: SceneId::new(),
                 name: zone_name.clone(),
                 description: "z".to_string(),
-                geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.1 },
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 0.1,
+                },
                 accepted_media_types: vec![ZoneMediaType::StreamText],
                 rendering_policy: RenderingPolicy::default(),
                 contention_policy: ContentionPolicy::LatestWins,
@@ -948,7 +976,12 @@ mod tests {
             handle_publish_to_zone(json!({"zone_name": zone_name, "content": "hi"}), &mut scene)
                 .unwrap();
         assert_eq!(result.zone_name, zone_name);
-        assert!(scene.zone_registry.active_publishes.contains_key(&zone_name));
+        assert!(
+            scene
+                .zone_registry
+                .active_publishes
+                .contains_key(&zone_name)
+        );
     }
 
     #[test]
@@ -956,16 +989,9 @@ mod tests {
         // scene_with_zone creates a LatestWins zone; a second publish must replace
         // the first (single record in active_publishes after both calls).
         let (mut scene, _, zone) = scene_with_zone();
-        handle_publish_to_zone(
-            json!({"zone_name": zone, "content": "first"}),
-            &mut scene,
-        )
-        .unwrap();
-        handle_publish_to_zone(
-            json!({"zone_name": zone, "content": "second"}),
-            &mut scene,
-        )
-        .unwrap();
+        handle_publish_to_zone(json!({"zone_name": zone, "content": "first"}), &mut scene).unwrap();
+        handle_publish_to_zone(json!({"zone_name": zone, "content": "second"}), &mut scene)
+            .unwrap();
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
         assert_eq!(publishes.len(), 1, "LatestWins must replace old record");
         assert!(
@@ -977,11 +1003,8 @@ mod tests {
     #[test]
     fn test_publish_to_zone_empty_content_fails() {
         let (mut scene, _, zone) = scene_with_zone();
-        let err = handle_publish_to_zone(
-            json!({"zone_name": zone, "content": ""}),
-            &mut scene,
-        )
-        .unwrap_err();
+        let err = handle_publish_to_zone(json!({"zone_name": zone, "content": ""}), &mut scene)
+            .unwrap_err();
         assert!(matches!(err, McpError::InvalidParams(_)));
     }
 
@@ -1032,7 +1055,12 @@ mod tests {
                     id: SceneId::new(),
                     name: name.to_string(),
                     description: "".to_string(),
-                    geometry_policy: GeometryPolicy::Relative { x_pct: 0.0, y_pct: 0.0, width_pct: 1.0, height_pct: 0.1 },
+                    geometry_policy: GeometryPolicy::Relative {
+                        x_pct: 0.0,
+                        y_pct: 0.0,
+                        width_pct: 1.0,
+                        height_pct: 0.1,
+                    },
                     accepted_media_types: vec![ZoneMediaType::StreamText],
                     rendering_policy: RenderingPolicy::default(),
                     contention_policy: ContentionPolicy::LatestWins,
@@ -1099,7 +1127,11 @@ mod tests {
             .unwrap();
         }
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(publishes.len(), 3, "Stack zone must accumulate all records up to max_depth");
+        assert_eq!(
+            publishes.len(),
+            3,
+            "Stack zone must accumulate all records up to max_depth"
+        );
     }
 
     #[test]
@@ -1114,14 +1146,24 @@ mod tests {
             .unwrap();
         }
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(publishes.len(), 3, "Stack must trim oldest when max_depth exceeded");
+        assert_eq!(
+            publishes.len(),
+            3,
+            "Stack must trim oldest when max_depth exceeded"
+        );
         // Oldest (msg-1) should be gone; most recent (msg-4) should be present.
         assert!(
-            publishes.iter().all(|r| r.content != tze_hud_scene::types::ZoneContent::StreamText("msg-1".to_string())),
+            publishes
+                .iter()
+                .all(|r| r.content
+                    != tze_hud_scene::types::ZoneContent::StreamText("msg-1".to_string())),
             "oldest record must be evicted when stack overflows"
         );
         assert!(
-            publishes.iter().any(|r| r.content == tze_hud_scene::types::ZoneContent::StreamText("msg-4".to_string())),
+            publishes
+                .iter()
+                .any(|r| r.content
+                    == tze_hud_scene::types::ZoneContent::StreamText("msg-4".to_string())),
             "newest record must survive stack trim"
         );
     }
@@ -1137,8 +1179,16 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(scene.tile_count(), 0, "Stack zone publishes must not create tiles");
-        assert_eq!(scene.node_count(), 0, "Stack zone publishes must not create nodes");
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "Stack zone publishes must not create tiles"
+        );
+        assert_eq!(
+            scene.node_count(),
+            0,
+            "Stack zone publishes must not create nodes"
+        );
     }
 
     // ── Contention policy: Replace ───────────────────────────────────────────
@@ -1186,7 +1236,11 @@ mod tests {
         )
         .unwrap();
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(publishes.len(), 1, "Replace zone must hold exactly one record");
+        assert_eq!(
+            publishes.len(),
+            1,
+            "Replace zone must hold exactly one record"
+        );
         assert!(
             matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "second-occupant"),
             "Replace must evict first and install second occupant"
@@ -1201,7 +1255,11 @@ mod tests {
             &mut scene,
         )
         .unwrap();
-        assert_eq!(scene.tile_count(), 0, "Replace zone publishes must not create tiles");
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "Replace zone publishes must not create tiles"
+        );
     }
 
     // ── Contention policy: MergeByKey ────────────────────────────────────────
@@ -1271,7 +1329,11 @@ mod tests {
         )
         .unwrap();
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(publishes.len(), 2, "Different merge_keys must coexist in zone");
+        assert_eq!(
+            publishes.len(),
+            2,
+            "Different merge_keys must coexist in zone"
+        );
     }
 
     #[test]
@@ -1293,8 +1355,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(err, McpError::SceneError(_)),
-            "max_keys exceeded must return SceneError, got: {:?}",
-            err
+            "max_keys exceeded must return SceneError, got: {err:?}"
         );
     }
 
@@ -1306,7 +1367,11 @@ mod tests {
             &mut scene,
         )
         .unwrap();
-        assert_eq!(scene.tile_count(), 0, "MergeByKey zone publishes must not create tiles");
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "MergeByKey zone publishes must not create tiles"
+        );
     }
 
     // ── Media-type rejection ─────────────────────────────────────────────────
@@ -1348,8 +1413,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(err, McpError::SceneError(_)),
-            "StreamText publish to ShortTextWithIcon-only zone must return SceneError (media type mismatch), got: {:?}",
-            err
+            "StreamText publish to ShortTextWithIcon-only zone must return SceneError (media type mismatch), got: {err:?}"
         );
     }
 
@@ -1361,7 +1425,10 @@ mod tests {
             json!({"zone_name": zone, "content": "valid stream text"}),
             &mut scene,
         );
-        assert!(result.is_ok(), "StreamText content must be accepted by StreamText zone");
+        assert!(
+            result.is_ok(),
+            "StreamText content must be accepted by StreamText zone"
+        );
     }
 
     // ── Occupancy reporting (list_zones has_content accuracy) ────────────────
@@ -1371,7 +1438,10 @@ mod tests {
         let (scene, _, zone) = scene_with_zone();
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
-        assert!(!entry.has_content, "has_content must be false before any publish");
+        assert!(
+            !entry.has_content,
+            "has_content must be false before any publish"
+        );
     }
 
     #[test]
@@ -1384,7 +1454,10 @@ mod tests {
         .unwrap();
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
-        assert!(entry.has_content, "has_content must be true after successful publish");
+        assert!(
+            entry.has_content,
+            "has_content must be true after successful publish"
+        );
     }
 
     #[test]
@@ -1403,9 +1476,16 @@ mod tests {
         .unwrap();
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
-        assert!(entry.has_content, "has_content must be true after Replace publish");
+        assert!(
+            entry.has_content,
+            "has_content must be true after Replace publish"
+        );
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(publishes.len(), 1, "Replace must maintain exactly one record");
+        assert_eq!(
+            publishes.len(),
+            1,
+            "Replace must maintain exactly one record"
+        );
     }
 
     #[test]
@@ -1420,7 +1500,10 @@ mod tests {
         scene.clear_zone(&zone).unwrap();
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
-        assert!(!entry.has_content, "has_content must be false after zone is cleared");
+        assert!(
+            !entry.has_content,
+            "has_content must be false after zone is cleared"
+        );
     }
 
     #[test]
@@ -1436,7 +1519,10 @@ mod tests {
         }
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
-        assert!(entry.has_content, "has_content must be true when Stack zone has entries");
+        assert!(
+            entry.has_content,
+            "has_content must be true when Stack zone has entries"
+        );
     }
 
     #[test]
@@ -1454,7 +1540,10 @@ mod tests {
         .unwrap();
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
-        assert!(entry.has_content, "has_content must be true when MergeByKey zone has keyed records");
+        assert!(
+            entry.has_content,
+            "has_content must be true when MergeByKey zone has keyed records"
+        );
     }
 
     // ── Expiry/cleanup after lease loss ─────────────────────────────────────
@@ -1472,12 +1561,23 @@ mod tests {
         let ns = "agent-expiry";
         let lease_id = scene.grant_lease(ns, 60_000, vec![Capability::PublishZone(zone.clone())]);
         scene
-            .publish_to_zone(&zone, ZoneContent::StreamText("expiring content".to_string()), ns, None, None, None)
+            .publish_to_zone(
+                &zone,
+                ZoneContent::StreamText("expiring content".to_string()),
+                ns,
+                None,
+                None,
+                None,
+            )
             .unwrap();
 
         // Confirm content is present
         assert!(
-            scene.zone_registry.active_publishes.get(&zone).is_some_and(|v| !v.is_empty()),
+            scene
+                .zone_registry
+                .active_publishes
+                .get(&zone)
+                .is_some_and(|v| !v.is_empty()),
             "zone must have content before lease revoke"
         );
 
@@ -1500,7 +1600,14 @@ mod tests {
         let ns = "agent-expiry-2";
         let lease_id = scene.grant_lease(ns, 60_000, vec![Capability::PublishZone(zone.clone())]);
         scene
-            .publish_to_zone(&zone, ZoneContent::StreamText("content".to_string()), ns, None, None, None)
+            .publish_to_zone(
+                &zone,
+                ZoneContent::StreamText("content".to_string()),
+                ns,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         scene.revoke_lease(lease_id).unwrap();
 
@@ -1528,7 +1635,10 @@ mod tests {
             ns,
             None,
         );
-        assert!(result.is_err(), "publish must be rejected after lease revoke");
+        assert!(
+            result.is_err(),
+            "publish must be rejected after lease revoke"
+        );
     }
 
     // ── Guest vs resident capability gates (additional coverage) ────────────
@@ -1541,7 +1651,10 @@ mod tests {
             json!({"zone_name": zone, "content": "guest-publish"}),
             &mut scene,
         );
-        assert!(result.is_ok(), "publish_to_zone must be callable without resident_mcp capability");
+        assert!(
+            result.is_ok(),
+            "publish_to_zone must be callable without resident_mcp capability"
+        );
     }
 
     #[test]
@@ -1549,7 +1662,10 @@ mod tests {
         // list_zones is a guest tool.
         let (scene, _, _) = scene_with_zone();
         let result = handle_list_zones(json!(null), &scene);
-        assert!(result.is_ok(), "list_zones must be callable without resident_mcp capability");
+        assert!(
+            result.is_ok(),
+            "list_zones must be callable without resident_mcp capability"
+        );
     }
 
     #[test]
@@ -1557,7 +1673,10 @@ mod tests {
         // list_scene is a guest tool.
         let (scene, _, _) = scene_with_zone();
         let result = handle_list_scene(json!(null), &scene);
-        assert!(result.is_ok(), "list_scene must be callable without resident_mcp capability");
+        assert!(
+            result.is_ok(),
+            "list_scene must be callable without resident_mcp capability"
+        );
     }
 
     // ── No shortcut tile-creation path for zone publishing ───────────────────
@@ -1571,8 +1690,16 @@ mod tests {
             &mut scene,
         )
         .unwrap();
-        assert_eq!(scene.tile_count(), 0, "LatestWins publish must not create tiles");
-        assert_eq!(scene.node_count(), 0, "LatestWins publish must not create nodes");
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "LatestWins publish must not create tiles"
+        );
+        assert_eq!(
+            scene.node_count(),
+            0,
+            "LatestWins publish must not create nodes"
+        );
     }
 
     #[test]
@@ -1635,7 +1762,11 @@ mod tests {
                 1,
             )
             .unwrap();
-        assert_eq!(scene.tile_count(), 1, "raw tile must exist after create_tile");
+        assert_eq!(
+            scene.tile_count(),
+            1,
+            "raw tile must exist after create_tile"
+        );
 
         // Now publish to zone — must not add more tiles.
         handle_publish_to_zone(
@@ -1651,7 +1782,11 @@ mod tests {
         );
         // Zone must have a record, but it's distinct from the raw tile.
         assert!(
-            scene.zone_registry.active_publishes.get(&zone_name).is_some_and(|v| !v.is_empty()),
+            scene
+                .zone_registry
+                .active_publishes
+                .get(&zone_name)
+                .is_some_and(|v| !v.is_empty()),
             "zone publish record must be created independently of raw tile"
         );
     }

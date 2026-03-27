@@ -48,17 +48,32 @@ pub struct ScrollConfig {
 impl ScrollConfig {
     /// Convenience constructor for a vertically-scrollable tile.
     pub fn vertical() -> Self {
-        Self { scrollable_x: false, scrollable_y: true, content_width: None, content_height: None }
+        Self {
+            scrollable_x: false,
+            scrollable_y: true,
+            content_width: None,
+            content_height: None,
+        }
     }
 
     /// Convenience constructor for a horizontally-scrollable tile.
     pub fn horizontal() -> Self {
-        Self { scrollable_x: true, scrollable_y: false, content_width: None, content_height: None }
+        Self {
+            scrollable_x: true,
+            scrollable_y: false,
+            content_width: None,
+            content_height: None,
+        }
     }
 
     /// Convenience constructor for a tile that scrolls in both directions.
     pub fn both() -> Self {
-        Self { scrollable_x: true, scrollable_y: true, content_width: None, content_height: None }
+        Self {
+            scrollable_x: true,
+            scrollable_y: true,
+            content_width: None,
+            content_height: None,
+        }
     }
 }
 
@@ -290,7 +305,11 @@ impl ScrollState {
         self.tiles
             .iter_mut()
             .filter_map(|(tile_id, state)| {
-                if state.commit_frame() { Some(*tile_id) } else { None }
+                if state.commit_frame() {
+                    Some(*tile_id)
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -357,7 +376,11 @@ mod tests {
         state.commit_frame();
 
         // User scroll (20.0) wins; agent request (999.0) discarded
-        assert!((state.offset_y - 20.0).abs() < f32::EPSILON, "expected 20.0 got {}", state.offset_y);
+        assert!(
+            (state.offset_y - 20.0).abs() < f32::EPSILON,
+            "expected 20.0 got {}",
+            state.offset_y
+        );
     }
 
     #[test]
@@ -387,7 +410,11 @@ mod tests {
         };
         let mut state = ScrollTileState::new(config);
         state.queue_user_scroll(0.0, 999.0);
-        assert!(state.offset_y <= 200.0, "offset_y {} should be clamped to 200", state.offset_y);
+        assert!(
+            state.offset_y <= 200.0,
+            "offset_y {} should be clamped to 200",
+            state.offset_y
+        );
     }
 
     #[test]
@@ -454,7 +481,10 @@ mod tests {
         scroll.commit_all_frames();
 
         let (_, offset_y) = scroll.offset(tile_id);
-        assert!((offset_y - 25.0).abs() < f32::EPSILON, "user scroll should win, got {offset_y}");
+        assert!(
+            (offset_y - 25.0).abs() < f32::EPSILON,
+            "user scroll should win, got {offset_y}"
+        );
     }
 
     #[test]
@@ -473,8 +503,8 @@ mod tests {
 
     #[test]
     fn test_input_to_local_ack_p99_within_budget_scroll() {
-        use tze_hud_scene::calibration::{test_budget, budgets};
         use std::time::Instant;
+        use tze_hud_scene::calibration::{budgets, test_budget};
 
         let tile_id = SceneId::new();
         let mut scroll = ScrollState::new();

@@ -23,11 +23,11 @@
 
 use proptest::prelude::*;
 use tze_hud_scene::{
-    Capability, HitResult, HitRegionNode, InputMode, Node, NodeData, Rect, Rgba,
-    SceneId, SolidColorNode,
+    Capability, HitRegionNode, HitResult, InputMode, Node, NodeData, Rect, Rgba, SceneId,
+    SolidColorNode,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants},
-    types::{EventMask, CursorStyle},
+    types::{CursorStyle, EventMask},
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -196,12 +196,15 @@ fn chrome_layer_wins_over_content_tile() {
             // Both are valid per spec; assert it's not a content-layer node.
             let _ = element_id;
         }
-        other => panic!("expected Chrome, got {:?}", other),
+        other => panic!("expected Chrome, got {other:?}"),
     }
 
     // Point outside chrome tile — should return NodeHit from content tile.
     let result = scene.hit_test(100.0, 500.0);
-    assert!(result.is_node_hit(), "expected NodeHit outside chrome area, got {:?}", result);
+    assert!(
+        result.is_node_hit(),
+        "expected NodeHit outside chrome area, got {result:?}"
+    );
 }
 
 #[test]
@@ -212,11 +215,20 @@ fn chrome_tile_at_low_z_still_wins() {
         Rect::new(0.0, 0.0, 1920.0, 1080.0),
     );
     // Content tile z=10 (set above). Chrome tile z=1 (lower than content).
-    add_chrome_tile(&mut scene, tab_id, Rect::new(0.0, 0.0, 200.0, 50.0), 1, "low-z-chrome");
+    add_chrome_tile(
+        &mut scene,
+        tab_id,
+        Rect::new(0.0, 0.0, 200.0, 50.0),
+        1,
+        "low-z-chrome",
+    );
 
     // Chrome must still win despite lower z.
     let result = scene.hit_test(100.0, 25.0);
-    assert!(result.is_chrome(), "chrome must win regardless of z, got {:?}", result);
+    assert!(
+        result.is_chrome(),
+        "chrome must win regardless of z, got {result:?}"
+    );
 }
 
 // ─── Passthrough tiles skipped ───────────────────────────────────────────────
@@ -233,7 +245,13 @@ fn passthrough_tile_skipped_reveals_tile_below() {
 
     // Low-z capture tile covering full screen.
     let low_tile = scene
-        .create_tile(tab_id, "agent.test", lease_id, Rect::new(0.0, 0.0, 1920.0, 1080.0), 1)
+        .create_tile(
+            tab_id,
+            "agent.test",
+            lease_id,
+            Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            1,
+        )
         .unwrap();
     let low_node_id = SceneId::new();
     scene
@@ -255,7 +273,13 @@ fn passthrough_tile_skipped_reveals_tile_below() {
 
     // High-z passthrough tile covering the same region.
     let high_tile = scene
-        .create_tile(tab_id, "agent.test", lease_id, Rect::new(0.0, 0.0, 1920.0, 1080.0), 20)
+        .create_tile(
+            tab_id,
+            "agent.test",
+            lease_id,
+            Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            20,
+        )
         .unwrap();
     scene.tiles.get_mut(&high_tile).unwrap().input_mode = InputMode::Passthrough;
 
@@ -296,7 +320,11 @@ fn all_tiles_passthrough_returns_passthrough() {
     }
 
     let result = scene.hit_test(500.0, 500.0);
-    assert_eq!(result, HitResult::Passthrough, "all-passthrough should return Passthrough");
+    assert_eq!(
+        result,
+        HitResult::Passthrough,
+        "all-passthrough should return Passthrough"
+    );
 }
 
 // ─── Z-order: highest wins on overlap ────────────────────────────────────────
@@ -313,10 +341,22 @@ fn highest_z_tile_wins_in_overlap() {
 
     // Two overlapping tiles.
     let low_tile = scene
-        .create_tile(tab_id, "agent.test", lease_id, Rect::new(0.0, 0.0, 600.0, 400.0), 1)
+        .create_tile(
+            tab_id,
+            "agent.test",
+            lease_id,
+            Rect::new(0.0, 0.0, 600.0, 400.0),
+            1,
+        )
         .unwrap();
     let high_tile = scene
-        .create_tile(tab_id, "agent.test", lease_id, Rect::new(300.0, 200.0, 600.0, 400.0), 5)
+        .create_tile(
+            tab_id,
+            "agent.test",
+            lease_id,
+            Rect::new(300.0, 200.0, 600.0, 400.0),
+            5,
+        )
         .unwrap();
 
     // Add a hit region to each tile.
@@ -395,7 +435,13 @@ fn last_sibling_wins_in_reverse_tree_order() {
     );
 
     let tile_id = scene
-        .create_tile(tab_id, "agent.test", lease_id, Rect::new(0.0, 0.0, 400.0, 300.0), 1)
+        .create_tile(
+            tab_id,
+            "agent.test",
+            lease_id,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            1,
+        )
         .unwrap();
 
     let first_child_id = SceneId::new();
@@ -439,8 +485,14 @@ fn last_sibling_wins_in_reverse_tree_order() {
     scene.nodes.insert(last_child_id, last_child);
     // Register hit region state for children manually (set_tile_root only
     // handles the root node; for multi-node trees callers must do this).
-    scene.hit_region_states.insert(first_child_id, tze_hud_scene::HitRegionLocalState::new(first_child_id));
-    scene.hit_region_states.insert(last_child_id, tze_hud_scene::HitRegionLocalState::new(last_child_id));
+    scene.hit_region_states.insert(
+        first_child_id,
+        tze_hud_scene::HitRegionLocalState::new(first_child_id),
+    );
+    scene.hit_region_states.insert(
+        last_child_id,
+        tze_hud_scene::HitRegionLocalState::new(last_child_id),
+    );
 
     scene.set_tile_root(tile_id, root).unwrap();
 
@@ -596,7 +648,10 @@ fn hit_region_node_new_fields_accessible() {
         release_on_up: true,
         cursor_style: CursorStyle::Pointer,
         tooltip: Some("Click to submit".to_string()),
-        event_mask: EventMask { pointer_move: false, ..Default::default() },
+        event_mask: EventMask {
+            pointer_move: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -617,8 +672,7 @@ fn layer0_invariants_input_highlight() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "input_highlight: Layer 0 violations: {:?}",
-            violations
+            "input_highlight: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -630,8 +684,7 @@ fn layer0_invariants_overlay_passthrough_regions() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "overlay_passthrough_regions: Layer 0 violations: {:?}",
-            violations
+            "overlay_passthrough_regions: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -643,8 +696,7 @@ fn layer0_invariants_overlapping_tiles_zorder() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "overlapping_tiles_zorder: Layer 0 violations: {:?}",
-            violations
+            "overlapping_tiles_zorder: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -656,8 +708,7 @@ fn layer0_invariants_chatty_dashboard_touch() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "chatty_dashboard_touch: Layer 0 violations: {:?}",
-            violations
+            "chatty_dashboard_touch: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -669,8 +720,7 @@ fn layer0_invariants_three_agents_contention() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "three_agents_contention: Layer 0 violations: {:?}",
-            violations
+            "three_agents_contention: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -688,7 +738,10 @@ fn input_highlight_hit_test_on_button() {
     // a HitRegionNode (interaction_id="primary-button") filling the whole tile.
     // Point (600, 350) = inside the tile.
     let result = graph.hit_test(600.0, 350.0);
-    assert!(result.is_node_hit(), "expected NodeHit on button area, got {:?}", result);
+    assert!(
+        result.is_node_hit(),
+        "expected NodeHit on button area, got {result:?}"
+    );
     if let HitResult::NodeHit { interaction_id, .. } = &result {
         assert_eq!(interaction_id, "primary-button");
     }
@@ -709,7 +762,10 @@ fn overlay_passthrough_skips_passthrough_tile() {
     // Point in the middle of the display (not in chrome widget area):
     // Should skip the passthrough overlay and hit the content tile.
     let result = graph.hit_test(500.0, 500.0);
-    assert!(result.is_node_hit(), "should hit content area through passthrough, got {:?}", result);
+    assert!(
+        result.is_node_hit(),
+        "should hit content area through passthrough, got {result:?}"
+    );
     if let HitResult::NodeHit { interaction_id, .. } = &result {
         assert_eq!(interaction_id, "content-area", "expected content-area hit");
     }

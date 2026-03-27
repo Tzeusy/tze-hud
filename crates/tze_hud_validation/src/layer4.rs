@@ -132,7 +132,7 @@ pub struct SceneDescription {
 }
 
 /// Structured metrics for a single scene run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SceneMetrics {
     /// SSIM score vs golden (None if no golden was available).
     pub ssim_score: Option<f64>,
@@ -144,18 +144,6 @@ pub struct SceneMetrics {
     pub lease_violations: u32,
     /// Number of budget overruns.
     pub budget_overruns: u32,
-}
-
-impl Default for SceneMetrics {
-    fn default() -> Self {
-        Self {
-            ssim_score: None,
-            frames_rendered: None,
-            frame_time_p99_us: None,
-            lease_violations: 0,
-            budget_overruns: 0,
-        }
-    }
 }
 
 /// All inputs needed to generate a per-scene artifact directory.
@@ -351,7 +339,7 @@ impl ArtifactBuilder {
         let branch = branch.into();
         let timestamp = current_timestamp_str();
         let safe_branch = sanitise_branch_name(&branch);
-        let run_id = format!("{}-{}", timestamp, safe_branch);
+        let run_id = format!("{timestamp}-{safe_branch}");
         let run_dir = output_root.as_ref().join(&run_id);
 
         std::fs::create_dir_all(run_dir.join("scenes"))
@@ -387,8 +375,7 @@ impl ArtifactBuilder {
     pub fn add_scene(&mut self, input: SceneArtifactInput) -> Result<(), String> {
         let safe_name = sanitise_artifact_name(&input.description.name);
         let scene_dir = self.run_dir.join("scenes").join(&safe_name);
-        std::fs::create_dir_all(&scene_dir)
-            .map_err(|e| format!("create scene dir: {e}"))?;
+        std::fs::create_dir_all(&scene_dir).map_err(|e| format!("create scene dir: {e}"))?;
 
         let mut paths = SceneArtifactPaths {
             rendered_png: None,
@@ -425,7 +412,8 @@ impl ArtifactBuilder {
         // Write telemetry.json
         if let Some(ref json_bytes) = input.telemetry_json {
             let rel = format!("scenes/{safe_name}/telemetry.json");
-            self.pending_files.push((PathBuf::from(&rel), json_bytes.clone()));
+            self.pending_files
+                .push((PathBuf::from(&rel), json_bytes.clone()));
             paths.telemetry_json = Some(rel);
         }
 
@@ -458,14 +446,15 @@ impl ArtifactBuilder {
     pub fn add_benchmark(&mut self, input: BenchmarkArtifactInput) -> Result<(), String> {
         let safe_name = sanitise_artifact_name(&input.name);
         let bench_dir = self.run_dir.join("benchmarks").join(&safe_name);
-        std::fs::create_dir_all(&bench_dir)
-            .map_err(|e| format!("create benchmark dir: {e}"))?;
+        std::fs::create_dir_all(&bench_dir).map_err(|e| format!("create benchmark dir: {e}"))?;
 
         let tel_rel = format!("benchmarks/{safe_name}/telemetry.json");
-        self.pending_files.push((PathBuf::from(&tel_rel), input.session_telemetry_json));
+        self.pending_files
+            .push((PathBuf::from(&tel_rel), input.session_telemetry_json));
 
         let hist_rel = format!("benchmarks/{safe_name}/histogram.json");
-        self.pending_files.push((PathBuf::from(&hist_rel), input.histogram_json));
+        self.pending_files
+            .push((PathBuf::from(&hist_rel), input.histogram_json));
 
         let mut paths = BenchmarkArtifactPaths {
             telemetry_json: tel_rel,
@@ -516,9 +505,21 @@ impl ArtifactBuilder {
         // Build manifest.
         let summary = ManifestSummary {
             total_scenes: self.scenes.len(),
-            passed: self.scenes.iter().filter(|s| s.status == SceneStatus::Pass).count(),
-            failed: self.scenes.iter().filter(|s| s.status == SceneStatus::Fail).count(),
-            skipped: self.scenes.iter().filter(|s| s.status == SceneStatus::Skip).count(),
+            passed: self
+                .scenes
+                .iter()
+                .filter(|s| s.status == SceneStatus::Pass)
+                .count(),
+            failed: self
+                .scenes
+                .iter()
+                .filter(|s| s.status == SceneStatus::Fail)
+                .count(),
+            skipped: self
+                .scenes
+                .iter()
+                .filter(|s| s.status == SceneStatus::Skip)
+                .count(),
             total_benchmarks: self.benchmarks.len(),
         };
 
@@ -634,10 +635,7 @@ pub fn generate_explanation_md(
     md.push_str("## Scene structure\n\n");
     md.push_str(&format!(
         "- Tabs: {}\n- Tiles: {}\n- Has hit regions: {}\n- Has zones: {}\n\n",
-        desc.expected_tab_count,
-        desc.expected_tile_count,
-        desc.has_hit_regions,
-        desc.has_zones,
+        desc.expected_tab_count, desc.expected_tile_count, desc.has_hit_regions, desc.has_zones,
     ));
 
     md.push_str("## What to look for\n\n");
@@ -662,7 +660,10 @@ pub fn generate_explanation_md(
             p99 as f64 / 1000.0
         ));
     }
-    md.push_str(&format!("- Lease violations: {}\n", metrics.lease_violations));
+    md.push_str(&format!(
+        "- Lease violations: {}\n",
+        metrics.lease_violations
+    ));
     md.push_str(&format!("- Budget overruns: {}\n", metrics.budget_overruns));
     md.push('\n');
 
@@ -754,7 +755,8 @@ pub fn generate_index_html(manifest: &ArtifactManifest) -> String {
     html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
     html.push_str(&format!(
         "<title>tze_hud validation — {} ({})</title>\n",
-        html_escape(&manifest.branch), html_escape(&manifest.timestamp)
+        html_escape(&manifest.branch),
+        html_escape(&manifest.timestamp)
     ));
     html.push_str("<style>\n");
     html.push_str(INDEX_HTML_CSS);
@@ -768,7 +770,8 @@ pub fn generate_index_html(manifest: &ArtifactManifest) -> String {
     ));
     html.push_str(&format!(
         "<p>Branch: <strong>{}</strong> &nbsp;|&nbsp; Timestamp: <strong>{}</strong></p>\n",
-        html_escape(&manifest.branch), html_escape(&manifest.timestamp)
+        html_escape(&manifest.branch),
+        html_escape(&manifest.timestamp)
     ));
     html.push_str("</div>\n");
 
@@ -1079,7 +1082,7 @@ fn current_timestamp_str() -> String {
     let days = secs / 86_400;
     let (year, month, day) = days_to_date(days);
 
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", year, month, day, hour, minute, second)
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
 /// Return the current UTC timestamp as an ISO-8601 string.
@@ -1095,10 +1098,7 @@ fn timestamp_iso8601() -> String {
     let second = sec_of_day % 60;
     let days = secs / 86_400;
     let (year, month, day) = days_to_date(days);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, minute, second
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Convert days since Unix epoch (1970-01-01) to (year, month, day).
@@ -1307,12 +1307,18 @@ mod tests {
     #[test]
     fn test_generate_explanation_md_contains_required_sections() {
         let desc = test_scene_desc("single_tile_solid");
-        let metrics = SceneMetrics { ssim_score: Some(0.998), ..Default::default() };
+        let metrics = SceneMetrics {
+            ssim_score: Some(0.998),
+            ..Default::default()
+        };
         let md = generate_explanation_md(&desc, SceneStatus::Pass, &metrics, None);
 
         assert!(md.contains("# Scene: single_tile_solid"), "must have title");
         assert!(md.contains("**Status:**"), "must have status");
-        assert!(md.contains("## What this scene tests"), "must have test section");
+        assert!(
+            md.contains("## What this scene tests"),
+            "must have test section"
+        );
         assert!(md.contains("## What to look for"), "must have guidance");
         assert!(md.contains("## Automated results"), "must have results");
         assert!(md.contains("SSIM score: 0.998000"), "must include SSIM");
@@ -1348,7 +1354,10 @@ mod tests {
 
         let manifest = builder.finalise().unwrap();
 
-        assert!(run_dir.join("manifest.json").exists(), "manifest.json must exist");
+        assert!(
+            run_dir.join("manifest.json").exists(),
+            "manifest.json must exist"
+        );
         assert!(run_dir.join("index.html").exists(), "index.html must exist");
         assert_eq!(manifest.branch, "test-branch");
         assert_eq!(manifest.schema_version, 1);
@@ -1359,10 +1368,8 @@ mod tests {
 
     #[test]
     fn test_artifact_builder_adds_scene_writes_files() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tze_hud_layer4_scene_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("tze_hud_layer4_scene_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
 
         let opts = ArtifactOptions {
@@ -1402,11 +1409,23 @@ mod tests {
         let manifest = builder.finalise().unwrap();
 
         let scene_dir = run_dir.join("scenes").join("single_tile_solid");
-        assert!(scene_dir.join("rendered.png").exists(), "rendered.png must exist");
-        assert!(scene_dir.join("golden.png").exists(), "golden.png must exist");
+        assert!(
+            scene_dir.join("rendered.png").exists(),
+            "rendered.png must exist"
+        );
+        assert!(
+            scene_dir.join("golden.png").exists(),
+            "golden.png must exist"
+        );
         assert!(scene_dir.join("diff.png").exists(), "diff.png must exist");
-        assert!(scene_dir.join("telemetry.json").exists(), "telemetry.json must exist");
-        assert!(scene_dir.join("explanation.md").exists(), "explanation.md must exist");
+        assert!(
+            scene_dir.join("telemetry.json").exists(),
+            "telemetry.json must exist"
+        );
+        assert!(
+            scene_dir.join("explanation.md").exists(),
+            "explanation.md must exist"
+        );
 
         assert_eq!(manifest.scenes.len(), 1);
         assert_eq!(manifest.scenes[0].name, "single_tile_solid");
@@ -1419,10 +1438,8 @@ mod tests {
 
     #[test]
     fn test_artifact_builder_adds_benchmark() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tze_hud_layer4_bench_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("tze_hud_layer4_bench_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
 
         let opts = ArtifactOptions {
@@ -1458,19 +1475,14 @@ mod tests {
 
     #[test]
     fn test_manifest_json_is_valid_json_and_contains_spec_ids() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tze_hud_layer4_json_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("tze_hud_layer4_json_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
 
         let opts = ArtifactOptions {
             output_root: tmp.clone(),
             branch: "ci".to_string(),
-            spec_ids: vec![
-                "layer-4-pr-ci".to_string(),
-                "layer-4-manifest".to_string(),
-            ],
+            spec_ids: vec!["layer-4-pr-ci".to_string(), "layer-4-manifest".to_string()],
         };
         let builder = ArtifactBuilder::new(&tmp, "ci", opts).unwrap();
         let run_dir = builder.run_dir().to_path_buf();
@@ -1487,10 +1499,8 @@ mod tests {
 
     #[test]
     fn test_index_html_is_self_contained() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tze_hud_layer4_html_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("tze_hud_layer4_html_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
 
         let opts = ArtifactOptions {
@@ -1508,17 +1518,18 @@ mod tests {
         assert!(!html.contains("src=\"http"), "no external scripts");
         assert!(html.contains("<style>"), "inline CSS required");
         assert!(html.contains("<script>"), "inline JS required");
-        assert!(html.contains("application/json"), "LLM-readable JSON embedded");
+        assert!(
+            html.contains("application/json"),
+            "LLM-readable JSON embedded"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_failure_diagnostics_populated_for_fail_status() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tze_hud_layer4_diag_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("tze_hud_layer4_diag_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
 
         let opts = ArtifactOptions {
@@ -1556,7 +1567,10 @@ mod tests {
         let diag = &manifest.diagnostics[0];
         assert_eq!(diag.scene_name, "overlapping_tiles_zorder");
         assert!(diag.ssim.is_some(), "SSIM diagnostic must be present");
-        assert!(diag.performance.is_some(), "performance diagnostic must be present");
+        assert!(
+            diag.performance.is_some(),
+            "performance diagnostic must be present"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1610,14 +1624,20 @@ mod tests {
     #[test]
     fn test_guidance_fallback_for_unknown_scene() {
         let guidance = scene_visual_guidance("unknown_scene_xyz");
-        assert!(guidance.contains("rendered.png"), "fallback must mention rendered.png");
+        assert!(
+            guidance.contains("rendered.png"),
+            "fallback must mention rendered.png"
+        );
     }
 
     // ── sanitise_artifact_name ────────────────────────────────────────────────
 
     #[test]
     fn test_sanitise_artifact_name_safe_chars_unchanged() {
-        assert_eq!(sanitise_artifact_name("single_tile_solid"), "single_tile_solid");
+        assert_eq!(
+            sanitise_artifact_name("single_tile_solid"),
+            "single_tile_solid"
+        );
         assert_eq!(sanitise_artifact_name("bench-max.tiles"), "bench-max.tiles");
     }
 
@@ -1632,14 +1652,20 @@ mod tests {
         // The remaining string must not be joinable out of the target dir.
         // Since `/` is gone, `Path::join` cannot escape upward.
         let joined = std::path::Path::new("/base").join(&safe);
-        assert!(joined.starts_with("/base"),
-            "joined path must stay under /base, got {}", joined.display());
+        assert!(
+            joined.starts_with("/base"),
+            "joined path must stay under /base, got {}",
+            joined.display()
+        );
     }
 
     #[test]
     fn test_sanitise_artifact_name_leading_dot_prefixed() {
         let safe = sanitise_artifact_name(".hidden");
-        assert!(safe.starts_with('_'), "leading '.' must be prefixed with '_'");
+        assert!(
+            safe.starts_with('_'),
+            "leading '.' must be prefixed with '_'"
+        );
     }
 
     #[test]
@@ -1659,8 +1685,10 @@ mod tests {
 
     #[test]
     fn test_html_escape_entities() {
-        assert_eq!(html_escape("<script>alert('xss')&\"</script>"),
-                   "&lt;script&gt;alert(&#39;xss&#39;)&amp;&quot;&lt;/script&gt;");
+        assert_eq!(
+            html_escape("<script>alert('xss')&\"</script>"),
+            "&lt;script&gt;alert(&#39;xss&#39;)&amp;&quot;&lt;/script&gt;"
+        );
     }
 
     #[test]
@@ -1678,7 +1706,10 @@ mod tests {
     fn test_escape_json_for_script_terminates_safely() {
         let json = r#"{"branch": "feat</script><script>alert(1)"}"#;
         let escaped = escape_json_for_script(json);
-        assert!(!escaped.contains("</script>"), "must not contain raw </script>");
+        assert!(
+            !escaped.contains("</script>"),
+            "must not contain raw </script>"
+        );
         // The replacement is valid JSON (backslash-escaped forward slash).
         assert!(escaped.contains("<\\/script>"), "should use <\\/ escape");
     }
@@ -1693,10 +1724,8 @@ mod tests {
 
     #[test]
     fn test_ssim_diagnostic_not_emitted_when_score_above_threshold() {
-        let tmp = std::env::temp_dir().join(format!(
-            "tze_hud_layer4_ssim_gate_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("tze_hud_layer4_ssim_gate_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
 
         let opts = ArtifactOptions {
@@ -1732,10 +1761,14 @@ mod tests {
 
         assert_eq!(manifest.diagnostics.len(), 1);
         let diag = &manifest.diagnostics[0];
-        assert!(diag.ssim.is_none(),
-            "SSIM diagnostic must NOT be emitted when score is above threshold");
-        assert!(diag.performance.is_some(),
-            "performance diagnostic must still be present");
+        assert!(
+            diag.ssim.is_none(),
+            "SSIM diagnostic must NOT be emitted when score is above threshold"
+        );
+        assert!(
+            diag.performance.is_some(),
+            "performance diagnostic must still be present"
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }

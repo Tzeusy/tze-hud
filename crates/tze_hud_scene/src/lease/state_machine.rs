@@ -11,10 +11,15 @@
 //! and route the events to `lease_changes` subscribers.  Failed transitions
 //! (those returning `Err`) produce **no** event.
 
+use super::types::{
+    DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity,
+    RevokeReason as AuditRevokeReason,
+};
+use super::{
+    BudgetTier, LeaseState, LeaseStateMachine, RenewalPolicy, RevokeReason, TransitionError,
+};
 use crate::clock::Clock;
 use crate::types::SceneId;
-use super::types::{DenyReason, LeaseAuditEvent, LeaseEventKind, LeaseId, LeaseIdentity, RevokeReason as AuditRevokeReason};
-use super::{BudgetTier, LeaseState, RenewalPolicy, RevokeReason, TransitionError, LeaseStateMachine};
 
 // ─── Budget tier time thresholds ─────────────────────────────────────────────
 
@@ -59,7 +64,6 @@ pub struct LeaseImpl<C: Clock> {
     grace_period_ms: u64,
 
     // ── Budget enforcement ──────────────────────────────────────────────────
-
     budget_tier: BudgetTier,
     /// Timestamp when budget first entered Warning tier (ms).
     warning_started_ms: Option<u64>,
@@ -67,7 +71,6 @@ pub struct LeaseImpl<C: Clock> {
     throttle_started_ms: Option<u64>,
 
     // ── Audit event buffer ──────────────────────────────────────────────────
-
     /// Pending audit events produced by successful transitions.
     ///
     /// Drained by callers via `drain_events()`.  Never grows unboundedly because
@@ -232,7 +235,10 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
             resource_budget: crate::types::ResourceBudget::default(),
             lease_priority: 2, // normal
         };
-        self.push_event(LeaseEventKind::Granted { identity, expires_at_wall_us: expires_at });
+        self.push_event(LeaseEventKind::Granted {
+            identity,
+            expires_at_wall_us: expires_at,
+        });
         Ok(())
     }
 
@@ -273,7 +279,8 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         let now_ms = self.now_ms();
 
         // Compute suspension duration before mutating state.
-        let suspension_duration_us = self.suspended_at_ms
+        let suspension_duration_us = self
+            .suspended_at_ms
             .map(|at| now_ms.saturating_sub(at) * 1_000)
             .unwrap_or(0);
 
@@ -328,7 +335,9 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         self.state = LeaseState::Orphaned;
 
         let grace_expires_at_wall_us = (now_ms + self.grace_period_ms) * 1_000;
-        self.push_event(LeaseEventKind::Orphaned { grace_expires_at_wall_us });
+        self.push_event(LeaseEventKind::Orphaned {
+            grace_expires_at_wall_us,
+        });
         Ok(())
     }
 
@@ -392,7 +401,9 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
                     RevokeReason::CapabilityRevoked => AuditRevokeReason::CapabilityRevoked,
                     RevokeReason::Other => AuditRevokeReason::Other,
                 };
-                self.push_event(LeaseEventKind::Revoked { reason: audit_reason });
+                self.push_event(LeaseEventKind::Revoked {
+                    reason: audit_reason,
+                });
                 Ok(())
             }
             _ => Err(TransitionError::InvalidTransition {
@@ -455,20 +466,20 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         if self.state.is_terminal() {
             return false;
         }
-        match (self.state, target) {
-            (Requested, Active) => true,
-            (Requested, Denied) => true,
-            (Active, Suspended) => true,
-            (Active, Orphaned) => true,
-            (Active, Expired) => true,
-            (Active, Revoked) => true,
-            (Active, Released) => true,
-            (Suspended, Active) => true,
-            (Suspended, Revoked) => true,
-            (Orphaned, Active) => true,
-            (Orphaned, Expired) => true,
-            _ => false,
-        }
+        matches!(
+            (self.state, target),
+            (Requested, Active)
+                | (Requested, Denied)
+                | (Active, Suspended)
+                | (Active, Orphaned)
+                | (Active, Expired)
+                | (Active, Revoked)
+                | (Active, Released)
+                | (Suspended, Active)
+                | (Suspended, Revoked)
+                | (Orphaned, Active)
+                | (Orphaned, Expired)
+        )
     }
 
     fn budget_tier(&self) -> BudgetTier {

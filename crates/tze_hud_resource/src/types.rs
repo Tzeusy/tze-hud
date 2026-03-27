@@ -229,10 +229,7 @@ pub enum ResourceError {
     /// Computed BLAKE3 hash does not match `expected_hash`.
     /// Wire code: `RESOURCE_HASH_MISMATCH`.
     #[error("RESOURCE_HASH_MISMATCH: computed hash {computed} ≠ expected {expected}")]
-    HashMismatch {
-        computed: String,
-        expected: String,
-    },
+    HashMismatch { computed: String, expected: String },
 
     /// Raw upload size exceeds `max_resource_bytes`, or decoded texture exceeds
     /// `max_decoded_texture_bytes`, or a texture dimension exceeds 8192 px.

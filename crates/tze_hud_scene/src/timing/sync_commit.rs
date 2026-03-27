@@ -90,7 +90,10 @@ pub fn evaluate_commit(
         }
 
         SyncCommitPolicy::AllOrDefer => {
-            let any_pending = group.members.iter().any(|id| tiles_with_pending.contains(id));
+            let any_pending = group
+                .members
+                .iter()
+                .any(|id| tiles_with_pending.contains(id));
 
             if !any_pending {
                 // Idle frame: no member has a pending mutation.
@@ -99,7 +102,10 @@ pub fn evaluate_commit(
                 return CommitDecision::Commit { tiles: vec![] };
             }
 
-            let all_ready = group.members.iter().all(|id| tiles_with_pending.contains(id));
+            let all_ready = group
+                .members
+                .iter()
+                .all(|id| tiles_with_pending.contains(id));
 
             if all_ready {
                 // All members are present-and-ready — commit atomically.
@@ -190,7 +196,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert_eq!(tiles.len(), 2);
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -209,7 +215,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert_eq!(tiles, vec![t1]);
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -224,7 +230,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert!(tiles.is_empty());
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -247,7 +253,7 @@ mod tests {
                 assert!(tiles.contains(&t1));
                 assert!(tiles.contains(&t2));
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -269,12 +275,15 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert!(tiles.is_empty(), "idle frame should produce empty Commit");
             }
-            other => panic!("expected empty Commit, got {:?}", other),
+            other => panic!("expected empty Commit, got {other:?}"),
         }
 
         // apply_decision should NOT increment deferral_count
         apply_decision(&mut group, &decision);
-        assert_eq!(group.deferral_count, 0, "idle frame must not increment deferral_count");
+        assert_eq!(
+            group.deferral_count, 0,
+            "idle frame must not increment deferral_count"
+        );
     }
 
     // ── AllOrDefer: incomplete (some pending) ────────────────────────────────
@@ -327,10 +336,13 @@ mod tests {
                 assert!(committed_tiles.contains(&t1), "t1 should be committed");
                 assert!(discarded_tiles.contains(&t2), "t2 should be discarded");
             }
-            other => panic!("expected ForceCommit, got {:?}", other),
+            other => panic!("expected ForceCommit, got {other:?}"),
         }
         apply_decision(&mut group, &d3);
-        assert_eq!(group.deferral_count, 0, "force-commit resets deferral_count");
+        assert_eq!(
+            group.deferral_count, 0,
+            "force-commit resets deferral_count"
+        );
     }
 
     // ── AllOrDefer: post-force-commit recovery ───────────────────────────────
@@ -351,7 +363,10 @@ mod tests {
         let d2 = evaluate_commit(&group, &pending);
         assert!(matches!(d2, CommitDecision::ForceCommit { .. }));
         apply_decision(&mut group, &d2);
-        assert_eq!(group.deferral_count, 0, "should be reset after force-commit");
+        assert_eq!(
+            group.deferral_count, 0,
+            "should be reset after force-commit"
+        );
 
         // Next frame with all members ready — should commit normally
         pending.insert(t2);
@@ -360,7 +375,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert_eq!(tiles.len(), 2);
             }
-            other => panic!("expected Commit after recovery, got {:?}", other),
+            other => panic!("expected Commit after recovery, got {other:?}"),
         }
     }
 
@@ -387,7 +402,7 @@ mod tests {
                     "force-commit must emit SyncGroupForceCommitEvent"
                 );
             }
-            other => panic!("expected ForceCommit, got {:?}", other),
+            other => panic!("expected ForceCommit, got {other:?}"),
         }
     }
 

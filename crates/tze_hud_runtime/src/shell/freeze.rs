@@ -327,15 +327,10 @@ pub enum EnqueueResult {
     },
     /// Mutation itself was dropped (Ephemeral; only transactional entries
     /// remain in queue).
-    Dropped {
-        batch_id: Vec<u8>,
-    },
+    Dropped { batch_id: Vec<u8> },
     /// Queue is full and this entry is Transactional (or all slots are
     /// occupied by Transactional entries). Caller MUST apply gRPC backpressure.
-    BackpressureRequired {
-        batch_id: Vec<u8>,
-        pressure: f32,
-    },
+    BackpressureRequired { batch_id: Vec<u8>, pressure: f32 },
 }
 
 // ─── Freeze state machine ─────────────────────────────────────────────────────
@@ -421,7 +416,9 @@ impl FreezeState {
             return false;
         }
         match self.freeze_started_mono {
-            Some(started) => now_mono.saturating_duration_since(started) >= self.auto_unfreeze_timeout,
+            Some(started) => {
+                now_mono.saturating_duration_since(started) >= self.auto_unfreeze_timeout
+            }
             None => false,
         }
     }
@@ -582,21 +579,13 @@ pub fn classify_mutation_batch(mutation_kinds: &[&str]) -> MutationTrafficClass 
     let mut highest = MutationTrafficClass::Ephemeral;
     for kind in mutation_kinds {
         match *kind {
-            "create_tile"
-            | "delete_tile"
-            | "create_tab"
-            | "switch_active_tab"
-            | "create_sync_group"
-            | "delete_sync_group"
-            | "join_sync_group"
+            "create_tile" | "delete_tile" | "create_tab" | "switch_active_tab"
+            | "create_sync_group" | "delete_sync_group" | "join_sync_group"
             | "leave_sync_group" => {
                 // Transactional is the highest class — short-circuit.
                 return MutationTrafficClass::Transactional;
             }
-            "set_tile_root"
-            | "add_node"
-            | "update_tile_bounds"
-            | "publish_to_zone"
+            "set_tile_root" | "add_node" | "update_tile_bounds" | "publish_to_zone"
             | "clear_zone" => {
                 highest = MutationTrafficClass::StateStream;
             }
@@ -712,7 +701,10 @@ mod tests {
         let m3 = make_mutation("b3", MutationTrafficClass::StateStream, None);
         let r = q.enqueue(m3);
         assert!(matches!(r, EnqueueResult::EvictedEntry { .. }));
-        if let EnqueueResult::EvictedEntry { evicted_batch_id, .. } = r {
+        if let EnqueueResult::EvictedEntry {
+            evicted_batch_id, ..
+        } = r
+        {
             assert_eq!(evicted_batch_id, b"b1");
         }
         assert_eq!(q.len(), 2);
@@ -904,10 +896,8 @@ mod tests {
     /// THEN tick() returns the drained queue and deactivates freeze
     #[test]
     fn test_auto_unfreeze_via_tick() {
-        let mut mgr = FreezeManager::with_config(
-            Duration::from_millis(50),
-            DEFAULT_FREEZE_QUEUE_CAPACITY,
-        );
+        let mut mgr =
+            FreezeManager::with_config(Duration::from_millis(50), DEFAULT_FREEZE_QUEUE_CAPACITY);
         let start = Instant::now();
         mgr.activate(false, 0, start);
 
@@ -1019,11 +1009,7 @@ mod tests {
 
         // Fill with StateStream
         for i in 0..3 {
-            let m = make_mutation(
-                &format!("ss{i}"),
-                MutationTrafficClass::StateStream,
-                None,
-            );
+            let m = make_mutation(&format!("ss{i}"), MutationTrafficClass::StateStream, None);
             mgr.try_enqueue(m);
         }
         assert!(mgr.queue.is_full());

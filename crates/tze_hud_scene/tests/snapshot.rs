@@ -13,8 +13,8 @@
 //! - BTreeMap used for all map types (determinism guaranteed at compile time)
 
 use tze_hud_scene::{
-    Capability, Node, NodeData, Rect, ResourceId, SceneId, SceneGraphSnapshot, SceneGraphZoneRegistry,
-    StaticImageNode,
+    Capability, Node, NodeData, Rect, ResourceId, SceneGraphSnapshot, SceneGraphZoneRegistry,
+    SceneId, StaticImageNode,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry},
     types::ImageFitMode,
@@ -35,8 +35,14 @@ fn simple_scene() -> SceneGraph {
     let mut g = SceneGraph::new(1920.0, 1080.0);
     let tab = g.create_tab("Main", 0).unwrap();
     let lease = g.grant_lease("agent.test", 60_000, vec![Capability::CreateTile]);
-    g.create_tile(tab, "agent.test", lease, Rect::new(0.0, 0.0, 400.0, 300.0), 1)
-        .unwrap();
+    g.create_tile(
+        tab,
+        "agent.test",
+        lease,
+        Rect::new(0.0, 0.0, 400.0, 300.0),
+        1,
+    )
+    .unwrap();
     g
 }
 
@@ -53,7 +59,10 @@ fn snapshot_determinism_empty_scene() {
     let json1 = snap1.to_json().unwrap();
     let json2 = snap2.to_json().unwrap();
 
-    assert_eq!(json1, json2, "identical scene snapshots must produce identical JSON bytes");
+    assert_eq!(
+        json1, json2,
+        "identical scene snapshots must produce identical JSON bytes"
+    );
     assert_eq!(
         snap1.checksum, snap2.checksum,
         "identical scene snapshots must produce identical BLAKE3 checksums"
@@ -69,7 +78,10 @@ fn snapshot_determinism_simple_scene() {
     let json1 = snap1.to_json().unwrap();
     let json2 = snap2.to_json().unwrap();
 
-    assert_eq!(json1, json2, "identical scene snapshots must produce identical JSON bytes");
+    assert_eq!(
+        json1, json2,
+        "identical scene snapshots must produce identical JSON bytes"
+    );
     assert_eq!(snap1.checksum, snap2.checksum);
 }
 
@@ -79,7 +91,10 @@ fn snapshot_determinism_simple_scene() {
 fn snapshot_checksum_is_verifiable() {
     let scene = simple_scene();
     let snap = scene.take_snapshot(WALL_US, MONO_US);
-    assert!(snap.verify_checksum(), "freshly computed snapshot must pass checksum verification");
+    assert!(
+        snap.verify_checksum(),
+        "freshly computed snapshot must pass checksum verification"
+    );
 }
 
 #[test]
@@ -125,8 +140,14 @@ fn snapshot_roundtrip_empty_scene() {
     let deserialized = SceneGraphSnapshot::from_json(&json1).unwrap();
     let json2 = deserialized.to_json().unwrap();
 
-    assert_eq!(json1, json2, "round-trip must produce byte-identical output");
-    assert!(deserialized.verify_checksum(), "deserialized snapshot must pass checksum");
+    assert_eq!(
+        json1, json2,
+        "round-trip must produce byte-identical output"
+    );
+    assert!(
+        deserialized.verify_checksum(),
+        "deserialized snapshot must pass checksum"
+    );
 }
 
 #[test]
@@ -138,7 +159,10 @@ fn snapshot_roundtrip_simple_scene() {
     let deserialized = SceneGraphSnapshot::from_json(&json1).unwrap();
     let json2 = deserialized.to_json().unwrap();
 
-    assert_eq!(json1, json2, "round-trip must produce byte-identical output");
+    assert_eq!(
+        json1, json2,
+        "round-trip must produce byte-identical output"
+    );
     assert!(deserialized.verify_checksum());
 }
 
@@ -152,7 +176,8 @@ fn all_25_test_scenes_produce_valid_snapshots() {
     let all_names = TestSceneRegistry::scene_names();
 
     assert_eq!(
-        all_names.len(), 25,
+        all_names.len(),
+        25,
         "expected exactly 25 test scenes, got {}; update this test if scenes were added",
         all_names.len()
     );
@@ -160,7 +185,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
     for name in all_names {
         let (graph, _spec) = registry
             .build(name, ClockMs::FIXED)
-            .unwrap_or_else(|| panic!("scene '{}' not found in registry", name));
+            .unwrap_or_else(|| panic!("scene '{name}' not found in registry"));
 
         // Should not panic
         let snap = graph.take_snapshot(WALL_US, MONO_US);
@@ -168,51 +193,54 @@ fn all_25_test_scenes_produce_valid_snapshots() {
         // Checksum must be populated and valid
         assert!(
             !snap.checksum.is_empty(),
-            "scene '{}': checksum must not be empty",
-            name
+            "scene '{name}': checksum must not be empty"
         );
         assert!(
             snap.verify_checksum(),
-            "scene '{}': checksum verification must pass",
-            name
+            "scene '{name}': checksum verification must pass"
         );
 
         // Sequence must be populated (u64, may be 0 for fresh scenes)
         // (no assertion needed — always valid for u64)
 
         // Timestamps must be the values we passed
-        assert_eq!(snap.snapshot_wall_us, WALL_US, "scene '{}': wall_us mismatch", name);
-        assert_eq!(snap.snapshot_mono_us, MONO_US, "scene '{}': mono_us mismatch", name);
+        assert_eq!(
+            snap.snapshot_wall_us, WALL_US,
+            "scene '{name}': wall_us mismatch"
+        );
+        assert_eq!(
+            snap.snapshot_mono_us, MONO_US,
+            "scene '{name}': mono_us mismatch"
+        );
 
         // All tabs in the snapshot must match the graph's tabs (by ID)
-        let snap_tab_ids: std::collections::BTreeSet<SceneId> = snap
-            .tabs
-            .values()
-            .map(|t| t.id)
-            .collect();
-        let graph_tab_ids: std::collections::BTreeSet<SceneId> = graph.tabs.keys().copied().collect();
+        let snap_tab_ids: std::collections::BTreeSet<SceneId> =
+            snap.tabs.values().map(|t| t.id).collect();
+        let graph_tab_ids: std::collections::BTreeSet<SceneId> =
+            graph.tabs.keys().copied().collect();
         assert_eq!(
             snap_tab_ids, graph_tab_ids,
-            "scene '{}': snapshot tabs must match graph tabs",
-            name
+            "scene '{name}': snapshot tabs must match graph tabs"
         );
 
         // All tiles in the snapshot must match the graph's tiles
-        let snap_tile_ids: std::collections::BTreeSet<SceneId> = snap.tiles.keys().copied().collect();
-        let graph_tile_ids: std::collections::BTreeSet<SceneId> = graph.tiles.keys().copied().collect();
+        let snap_tile_ids: std::collections::BTreeSet<SceneId> =
+            snap.tiles.keys().copied().collect();
+        let graph_tile_ids: std::collections::BTreeSet<SceneId> =
+            graph.tiles.keys().copied().collect();
         assert_eq!(
             snap_tile_ids, graph_tile_ids,
-            "scene '{}': snapshot tiles must match graph tiles",
-            name
+            "scene '{name}': snapshot tiles must match graph tiles"
         );
 
         // All nodes in the snapshot must match the graph's nodes
-        let snap_node_ids: std::collections::BTreeSet<SceneId> = snap.nodes.keys().copied().collect();
-        let graph_node_ids: std::collections::BTreeSet<SceneId> = graph.nodes.keys().copied().collect();
+        let snap_node_ids: std::collections::BTreeSet<SceneId> =
+            snap.nodes.keys().copied().collect();
+        let graph_node_ids: std::collections::BTreeSet<SceneId> =
+            graph.nodes.keys().copied().collect();
         assert_eq!(
             snap_node_ids, graph_node_ids,
-            "scene '{}': snapshot nodes must match graph nodes",
-            name
+            "scene '{name}': snapshot nodes must match graph nodes"
         );
 
         // Round-trip must be byte-identical
@@ -221,8 +249,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
         let json2 = deser.to_json().unwrap();
         assert_eq!(
             json1, json2,
-            "scene '{}': round-trip must produce byte-identical output",
-            name
+            "scene '{name}': round-trip must produce byte-identical output"
         );
 
         // Determinism: two snapshots of the same scene at the same timestamps must be identical
@@ -230,8 +257,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
         let json3 = snap2.to_json().unwrap();
         assert_eq!(
             json1, json3,
-            "scene '{}': two snapshots of the same scene must be byte-identical",
-            name
+            "scene '{name}': two snapshots of the same scene must be byte-identical"
         );
     }
 }
@@ -244,7 +270,9 @@ fn all_25_test_scenes_produce_valid_snapshots() {
 fn snapshot_includes_zone_publications_not_effective_geometry() {
     let registry = TestSceneRegistry::new();
     // zone_publish_subtitle has an active publication
-    let (graph, _) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+    let (graph, _) = registry
+        .build("zone_publish_subtitle", ClockMs::FIXED)
+        .unwrap();
     let snap = graph.take_snapshot(WALL_US, MONO_US);
 
     // If zone_publish_subtitle scene has active publications, they appear in snapshot
@@ -275,9 +303,21 @@ fn snapshot_includes_zone_publications_not_effective_geometry() {
 fn snapshot_references_resource_ids_not_blob_data() {
     let mut g = SceneGraph::new(1920.0, 1080.0);
     let tab = g.create_tab("Main", 0).unwrap();
-    let lease = g.grant_lease("agent.test", 60_000, vec![Capability::CreateTile, Capability::CreateNode]);
+    let lease = g.grant_lease(
+        "agent.test",
+        60_000,
+        vec![Capability::CreateTile, Capability::CreateNode],
+    );
 
-    let tile = g.create_tile(tab, "agent.test", lease, Rect::new(0.0, 0.0, 400.0, 300.0), 1).unwrap();
+    let tile = g
+        .create_tile(
+            tab,
+            "agent.test",
+            lease,
+            Rect::new(0.0, 0.0, 400.0, 300.0),
+            1,
+        )
+        .unwrap();
 
     // Use a fake resource ID computed from fake blob data
     let fake_blob = b"fake image data bytes not stored in scene";
@@ -330,7 +370,8 @@ fn snapshot_references_resource_ids_not_blob_data() {
         }
     });
     assert_eq!(
-        found_rid, Some(resource_id),
+        found_rid,
+        Some(resource_id),
         "ResourceId must survive snapshot round-trip"
     );
 
@@ -363,7 +404,11 @@ fn snapshot_tabs_ordered_by_display_order() {
 
     // Keys in BTreeMap should be sorted 0, 10, 20
     let orders: Vec<u32> = snap.tabs.keys().copied().collect();
-    assert_eq!(orders, vec![0, 10, 20], "tabs must be ordered by display_order");
+    assert_eq!(
+        orders,
+        vec![0, 10, 20],
+        "tabs must be ordered by display_order"
+    );
     assert_eq!(snap.tabs[&0].name, "Tab A");
     assert_eq!(snap.tabs[&10].name, "Tab B");
     assert_eq!(snap.tabs[&20].name, "Tab C");
@@ -380,7 +425,11 @@ fn snapshot_active_tab_propagated() {
     assert_eq!(g.active_tab, Some(tab1));
 
     let snap = g.take_snapshot(WALL_US, MONO_US);
-    assert_eq!(snap.active_tab, Some(tab1), "active_tab must be propagated to snapshot");
+    assert_eq!(
+        snap.active_tab,
+        Some(tab1),
+        "active_tab must be propagated to snapshot"
+    );
 }
 
 #[test]
@@ -396,7 +445,10 @@ fn snapshot_active_tab_none_for_empty_scene() {
 fn snapshot_sequence_number_propagated() {
     let g = empty_scene();
     let snap = g.take_snapshot(WALL_US, MONO_US);
-    assert_eq!(snap.sequence, g.sequence_number, "sequence must match graph.sequence_number");
+    assert_eq!(
+        snap.sequence, g.sequence_number,
+        "sequence must match graph.sequence_number"
+    );
 }
 
 // ── BTreeMap enforces determinism for tiles and nodes ────────────────────────
@@ -409,10 +461,13 @@ fn snapshot_tiles_and_nodes_use_btreemap() {
     let lease = g.grant_lease("agent.test", 60_000, vec![Capability::CreateTile]);
     for i in 0..10 {
         g.create_tile(
-            tab, "agent.test", lease,
+            tab,
+            "agent.test",
+            lease,
             Rect::new(i as f32 * 50.0, 0.0, 40.0, 40.0),
             i as u32,
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     let snap1 = g.take_snapshot(WALL_US, MONO_US);
@@ -421,7 +476,10 @@ fn snapshot_tiles_and_nodes_use_btreemap() {
     // Compare key iteration order between the two snapshots — must be identical
     let keys1: Vec<SceneId> = snap1.tiles.keys().copied().collect();
     let keys2: Vec<SceneId> = snap2.tiles.keys().copied().collect();
-    assert_eq!(keys1, keys2, "tile iteration order must be deterministic across snapshots");
+    assert_eq!(
+        keys1, keys2,
+        "tile iteration order must be deterministic across snapshots"
+    );
 
     // Also verify BTreeMap order is correct (SceneId implements Ord)
     let is_sorted = keys1.windows(2).all(|w| w[0] <= w[1]);
@@ -433,7 +491,9 @@ fn snapshot_tiles_and_nodes_use_btreemap() {
 #[test]
 fn snapshot_zone_instances_is_empty_in_v1() {
     let registry = TestSceneRegistry::new();
-    let (graph, _) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+    let (graph, _) = registry
+        .build("zone_publish_subtitle", ClockMs::FIXED)
+        .unwrap();
     let snap = graph.take_snapshot(WALL_US, MONO_US);
 
     // In v1, zone instances are not tracked separately — they are implicit.
@@ -449,7 +509,9 @@ fn snapshot_zone_instances_is_empty_in_v1() {
 #[test]
 fn snapshot_zone_conflict_deterministic() {
     let registry = TestSceneRegistry::new();
-    let (graph, _) = registry.build("zone_conflict_two_publishers", ClockMs::FIXED).unwrap();
+    let (graph, _) = registry
+        .build("zone_conflict_two_publishers", ClockMs::FIXED)
+        .unwrap();
 
     let snap1 = graph.take_snapshot(WALL_US, MONO_US);
     let snap2 = graph.take_snapshot(WALL_US, MONO_US);
@@ -500,11 +562,7 @@ mod proptest_suite {
             return g;
         }
         let tab = g.create_tab("Tab", 0).unwrap();
-        let lease = g.grant_lease(
-            "agent.proptest",
-            600_000,
-            vec![Capability::CreateTile],
-        );
+        let lease = g.grant_lease("agent.proptest", 600_000, vec![Capability::CreateTile]);
         for i in 0..tile_count {
             let _ = g.create_tile(
                 tab,

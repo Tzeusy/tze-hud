@@ -70,7 +70,7 @@ pub fn capability_hint(unknown: &str) -> String {
     // 1. Check legacy names first — highest confidence hint.
     for (legacy, canonical) in LEGACY_NAMES {
         if unknown == *legacy {
-            return format!("\"{}\" is a legacy name; use \"{}\" instead", legacy, canonical);
+            return format!("\"{legacy}\" is a legacy name; use \"{canonical}\" instead");
         }
     }
 
@@ -83,13 +83,12 @@ pub fn capability_hint(unknown: &str) -> String {
 
     // 3. Find closest canonical flat name.
     if let Some(closest) = closest_canonical(unknown) {
-        return format!("did you mean {:?}?", closest);
+        return format!("did you mean {closest:?}?");
     }
 
     // 4. Generic fallback.
     format!(
-        "\"{}\" is not a canonical v1 capability; see configuration/spec.md §Capability Vocabulary",
-        unknown
+        "\"{unknown}\" is not a canonical v1 capability; see configuration/spec.md §Capability Vocabulary"
     )
 }
 
@@ -98,7 +97,9 @@ pub fn capability_hint(unknown: &str) -> String {
 /// Only meaningful for names that start with `emit_scene_event:`.
 pub fn has_reserved_event_prefix(cap: &str) -> bool {
     if let Some(suffix) = cap.strip_prefix("emit_scene_event:") {
-        return RESERVED_EVENT_PREFIXES.iter().any(|p| suffix.starts_with(p));
+        return RESERVED_EVENT_PREFIXES
+            .iter()
+            .any(|p| suffix.starts_with(p));
     }
     false
 }
@@ -128,7 +129,8 @@ fn closest_canonical(name: &str) -> Option<&'static str> {
         }
     }
 
-    best.filter(|(_, d)| *d <= MAX_EDIT_DISTANCE).map(|(c, _)| c)
+    best.filter(|(_, d)| *d <= MAX_EDIT_DISTANCE)
+        .map(|(c, _)| c)
 }
 
 /// Heuristic check for known parameterized prefixes used with the wrong separator
@@ -138,7 +140,10 @@ fn parameterized_prefix_hint(name: &str) -> Option<String> {
     let norm = name.to_lowercase().replace('-', "_");
 
     // publish_zone variants.
-    if norm.starts_with("publish_zone") || norm.starts_with("publishzone") || norm.starts_with("zone_publish") {
+    if norm.starts_with("publish_zone")
+        || norm.starts_with("publishzone")
+        || norm.starts_with("zone_publish")
+    {
         return Some("use \"publish_zone:<zone>\" or \"publish_zone:*\"".to_string());
     }
 
@@ -172,9 +177,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
         curr[0] = j + 1;
         for (i, ca) in a.iter().enumerate() {
             let cost = if ca == cb { 0 } else { 1 };
-            curr[i + 1] = (prev[i] + cost)
-                .min(prev[i + 1] + 1)
-                .min(curr[i] + 1);
+            curr[i + 1] = (prev[i] + cost).min(prev[i + 1] + 1).min(curr[i] + 1);
         }
         prev = curr;
     }
@@ -218,8 +221,7 @@ mod tests {
         for cap in &caps {
             assert!(
                 is_canonical_capability(cap),
-                "expected {:?} to be canonical",
-                cap
+                "expected {cap:?} to be canonical"
             );
         }
     }
@@ -275,7 +277,9 @@ mod tests {
     fn reserved_system_prefix_rejected() {
         assert!(!is_canonical_capability("emit_scene_event:system.shutdown"));
         assert!(!is_canonical_capability("emit_scene_event:system.reboot"));
-        assert!(has_reserved_event_prefix("emit_scene_event:system.shutdown"));
+        assert!(has_reserved_event_prefix(
+            "emit_scene_event:system.shutdown"
+        ));
     }
 
     /// emit_scene_event:scene.* rejected as reserved.
@@ -301,8 +305,7 @@ mod tests {
         let hint = capability_hint("read_scene");
         assert!(
             hint.contains("read_scene_topology"),
-            "hint should mention canonical replacement, got: {:?}",
-            hint
+            "hint should mention canonical replacement, got: {hint:?}"
         );
     }
 
@@ -313,8 +316,7 @@ mod tests {
         let hint = capability_hint("receive_input");
         assert!(
             hint.contains("access_input_events"),
-            "hint should mention canonical replacement, got: {:?}",
-            hint
+            "hint should mention canonical replacement, got: {hint:?}"
         );
     }
 
@@ -325,8 +327,7 @@ mod tests {
         let hint = capability_hint("zone_publish");
         assert!(
             hint.contains("publish_zone"),
-            "hint should mention publish_zone, got: {:?}",
-            hint
+            "hint should mention publish_zone, got: {hint:?}"
         );
     }
 
@@ -339,8 +340,7 @@ mod tests {
         let hint = capability_hint("createTiles");
         assert!(
             hint.contains("create_tiles"),
-            "hint should suggest create_tiles, got: {:?}",
-            hint
+            "hint should suggest create_tiles, got: {hint:?}"
         );
     }
 
@@ -351,8 +351,7 @@ mod tests {
         let hint = capability_hint("create-tiles");
         assert!(
             hint.contains("create_tiles"),
-            "hint should suggest create_tiles, got: {:?}",
-            hint
+            "hint should suggest create_tiles, got: {hint:?}"
         );
     }
 
@@ -365,8 +364,7 @@ mod tests {
         // The hint must be non-empty and mention the vocabulary reference.
         assert!(
             !hint.is_empty(),
-            "hint should be non-empty for tile_create, got: {:?}",
-            hint
+            "hint should be non-empty for tile_create, got: {hint:?}"
         );
     }
 

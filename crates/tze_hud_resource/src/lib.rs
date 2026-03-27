@@ -79,13 +79,13 @@ pub use dedup::{DedupIndex, ResourceRecord};
 pub use font_cache::{CachedFontHandle, FontCache, FontCacheEntry, FontCacheKey, FontOrigin};
 pub use gc::{GcClock, GcConfig, GcResult, GcRunner, TestClockMs, WallClock};
 pub use refcount::{GcCandidateTable, RefcountError, RefcountLayer};
+pub use sharing::{RefResult, SharingContext, check_reference_policy};
 pub use store::EphemeralStore;
 pub use types::{
-    DecodedMeta, ResourceError, ResourceId, ResourceStoreConfig, ResourceStored, ResourceType,
     CHUNK_SIZE_LIMIT, DEFAULT_MAX_DECODED_TEXTURE_BYTES, DEFAULT_MAX_RESOURCE_BYTES,
-    DEFAULT_MAX_TOTAL_TEXTURE_BYTES, INLINE_SIZE_LIMIT, MAX_CONCURRENT_UPLOADS_PER_AGENT,
-    MAX_TEXTURE_DIMENSION_PX,
+    DEFAULT_MAX_TOTAL_TEXTURE_BYTES, DecodedMeta, INLINE_SIZE_LIMIT,
+    MAX_CONCURRENT_UPLOADS_PER_AGENT, MAX_TEXTURE_DIMENSION_PX, ResourceError, ResourceId,
+    ResourceStoreConfig, ResourceStored, ResourceType,
 };
-pub use sharing::{check_reference_policy, RefResult, SharingContext};
 pub use upload::{ResourceStore, UploadId, UploadStartRequest};
-pub use validation::{AgentBudget, check_capability, check_hash, CAPABILITY_UPLOAD_RESOURCE};
+pub use validation::{AgentBudget, CAPABILITY_UPLOAD_RESOURCE, check_capability, check_hash};

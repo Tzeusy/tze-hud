@@ -60,10 +60,10 @@
 //! - Epic 4 (lease governance): lease TTL, revocation, expiry
 //! - Epic 9 (zone system): zone publish lifecycle
 
+use tze_hud_protocol::proto;
+use tze_hud_protocol::proto::session as session_proto;
 #[allow(deprecated)]
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
-use tze_hud_protocol::proto::session as session_proto;
-use tze_hud_protocol::proto as proto;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 use tze_hud_scene::types::*;
@@ -216,8 +216,7 @@ async fn connect_soak_agent(
     lease_priority: u32,
     lease_ttl_ms: u64,
 ) -> Result<SoakAgentSession, Box<dyn std::error::Error>> {
-    let mut client =
-        HudSessionClient::connect(format!("http://[::1]:{}", SOAK_GRPC_PORT)).await?;
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{SOAK_GRPC_PORT}")).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(128);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -231,7 +230,7 @@ async fn connect_soak_agent(
         payload: Some(session_proto::client_message::Payload::SessionInit(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
-                agent_display_name: format!("{} (soak test)", agent_id),
+                agent_display_name: format!("{agent_id} (soak test)"),
                 pre_shared_key: SOAK_PSK.to_string(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
@@ -260,18 +259,15 @@ async fn connect_soak_agent(
             est.namespace.clone()
         }
         other => {
-            return Err(
-                format!("soak agent {agent_id}: Expected SessionEstablished, got: {other:?}")
-                    .into(),
+            return Err(format!(
+                "soak agent {agent_id}: Expected SessionEstablished, got: {other:?}"
             )
+            .into());
         }
     };
 
     // Read SceneSnapshot
-    let _snapshot_msg = response_stream
-        .next()
-        .await
-        .ok_or("no scene snapshot")??;
+    let _snapshot_msg = response_stream.next().await.ok_or("no scene snapshot")??;
 
     // Request lease
     tx.send(session_proto::ClientMessage {
@@ -280,10 +276,7 @@ async fn connect_soak_agent(
         payload: Some(session_proto::client_message::Payload::LeaseRequest(
             session_proto::LeaseRequest {
                 ttl_ms: lease_ttl_ms,
-                capabilities: vec![
-                    "create_tiles".to_string(),
-                    "modify_own_tiles".to_string(),
-                ],
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
                 lease_priority,
             },
         )),
@@ -296,12 +289,10 @@ async fn connect_soak_agent(
         Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
             resp.lease_id.clone()
         }
-        other => {
-            return Err(format!(
-                "soak agent {agent_id} (soak_agent): Expected LeaseResponse(granted), got: {other:?}"
-            )
-            .into())
-        }
+        other => return Err(format!(
+            "soak agent {agent_id} (soak_agent): Expected LeaseResponse(granted), got: {other:?}"
+        )
+        .into()),
     };
 
     Ok(SoakAgentSession {
@@ -375,9 +366,7 @@ async fn create_tile(
     // Read MutationResult, draining any interleaved LeaseStateChange events
     let msg = next_non_state_change(&mut session.rx).await?;
     match &msg.payload {
-        Some(session_proto::server_message::Payload::MutationResult(result))
-            if result.accepted =>
-        {
+        Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
             let tile_id = result.created_ids.first().cloned().unwrap_or_default();
             Ok(tile_id)
         }
@@ -475,9 +464,7 @@ async fn publish_to_zone(
                 session_proto::ZonePublish {
                     zone_name: zone_name.to_string(),
                     content: Some(proto::ZoneContent {
-                        payload: Some(proto::zone_content::Payload::StreamText(
-                            text.to_string(),
-                        )),
+                        payload: Some(proto::zone_content::Payload::StreamText(text.to_string())),
                     }),
                     ttl_us: 0,
                     merge_key: String::new(),
@@ -487,11 +474,7 @@ async fn publish_to_zone(
         .await?;
 
     // Read ZonePublishResult
-    let msg = session
-        .rx
-        .next()
-        .await
-        .ok_or("no zone publish result")??;
+    let msg = session.rx.next().await.ok_or("no zone publish result")??;
     match &msg.payload {
         Some(session_proto::server_message::Payload::ZonePublishResult(result))
             if result.accepted =>
@@ -512,10 +495,7 @@ async fn publish_to_zone(
 /// This function is the canonical snapshot source: it reads tile_count,
 /// node_count, lease_count, session_count, and zone_entry_count from the
 /// `SharedState` under the state mutex.
-async fn capture_snapshot(
-    runtime: &HeadlessRuntime,
-    elapsed: Duration,
-) -> ResourceSnapshot {
+async fn capture_snapshot(runtime: &HeadlessRuntime, elapsed: Duration) -> ResourceSnapshot {
     let state = runtime.shared_state().lock().await;
     let scene = state.scene.lock().await;
     let tile_count = scene.tile_count();
@@ -817,9 +797,7 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
         psk: SOAK_PSK.to_string(),
         config_toml: None,
     };
-    let runtime_cell = tokio::sync::Mutex::new(
-        HeadlessRuntime::new(runtime_cfg).await?,
-    );
+    let runtime_cell = tokio::sync::Mutex::new(HeadlessRuntime::new(runtime_cfg).await?);
 
     {
         let runtime = runtime_cell.lock().await;
@@ -844,20 +822,8 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
         grpc_port,
     )
     .await?;
-    let mut agent_beta = connect_soak_agent_to(
-        "cleanup-beta",
-        2,
-        5_000,
-        grpc_port,
-    )
-    .await?;
-    let mut agent_gamma = connect_soak_agent_to(
-        "cleanup-gamma",
-        3,
-        5_000,
-        grpc_port,
-    )
-    .await?;
+    let mut agent_beta = connect_soak_agent_to("cleanup-beta", 2, 5_000, grpc_port).await?;
+    let mut agent_gamma = connect_soak_agent_to("cleanup-gamma", 3, 5_000, grpc_port).await?;
 
     let namespaces = [
         agent_alpha.namespace.clone(),
@@ -924,7 +890,14 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
         {
             let mut runtime = runtime_cell.lock().await;
             // Expire leases that have timed out
-            let _expired = runtime.shared_state().lock().await.scene.lock().await.expire_leases();
+            let _expired = runtime
+                .shared_state()
+                .lock()
+                .await
+                .scene
+                .lock()
+                .await
+                .expire_leases();
             runtime.render_frame().await;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -977,14 +950,14 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
         let runtime = runtime_cell.lock().await;
         for ns in &namespaces {
             let fp = capture_agent_footprint(&runtime, ns, cleanup_start.elapsed()).await;
-            fp.assert_zero().map_err(|e| -> Box<dyn std::error::Error> {
-                format!(
-                    "post-disconnect cleanup failed: {}\n\
-                     If the lease TTL has not yet expired, increase CLEANUP_GRACE_MS.",
-                    e
-                )
-                .into()
-            })?;
+            fp.assert_zero()
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!(
+                        "post-disconnect cleanup failed: {e}\n\
+                     If the lease TTL has not yet expired, increase CLEANUP_GRACE_MS."
+                    )
+                    .into()
+                })?;
         }
     }
 
@@ -1022,9 +995,7 @@ async fn test_lease_expiry_frees_resources() -> Result<(), Box<dyn std::error::E
         psk: SOAK_PSK.to_string(),
         config_toml: None,
     };
-    let runtime_cell = tokio::sync::Mutex::new(
-        HeadlessRuntime::new(runtime_cfg).await?,
-    );
+    let runtime_cell = tokio::sync::Mutex::new(HeadlessRuntime::new(runtime_cfg).await?);
 
     {
         let runtime = runtime_cell.lock().await;
@@ -1104,14 +1075,14 @@ async fn test_lease_expiry_frees_resources() -> Result<(), Box<dyn std::error::E
             namespace, fp.tiles, fp.nodes, fp.leases, fp.zone_entries
         );
 
-        fp.assert_zero().map_err(|e| -> Box<dyn std::error::Error> {
-            format!(
-                "lease expiry cleanup failed: {}\n\
-                 Tiles/nodes/leases should reach zero after TTL expiry.",
-                e
-            )
-            .into()
-        })?;
+        fp.assert_zero()
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!(
+                    "lease expiry cleanup failed: {e}\n\
+                 Tiles/nodes/leases should reach zero after TTL expiry."
+                )
+                .into()
+            })?;
     }
 
     eprintln!("[soak] Lease expiry cleanup: zero footprint confirmed");
@@ -1132,8 +1103,7 @@ async fn connect_soak_agent_to(
     lease_ttl_ms: u64,
     grpc_port: u16,
 ) -> Result<SoakAgentSession, Box<dyn std::error::Error>> {
-    let mut client =
-        HudSessionClient::connect(format!("http://[::1]:{}", grpc_port)).await?;
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{grpc_port}")).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(128);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -1146,7 +1116,7 @@ async fn connect_soak_agent_to(
         payload: Some(session_proto::client_message::Payload::SessionInit(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
-                agent_display_name: format!("{} (soak test)", agent_id),
+                agent_display_name: format!("{agent_id} (soak test)"),
                 pre_shared_key: SOAK_PSK.to_string(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
@@ -1174,17 +1144,14 @@ async fn connect_soak_agent_to(
             est.namespace.clone()
         }
         other => {
-            return Err(
-                format!("soak agent {agent_id}: Expected SessionEstablished, got: {other:?}")
-                    .into(),
+            return Err(format!(
+                "soak agent {agent_id}: Expected SessionEstablished, got: {other:?}"
             )
+            .into());
         }
     };
 
-    let _snapshot_msg = response_stream
-        .next()
-        .await
-        .ok_or("no scene snapshot")??;
+    let _snapshot_msg = response_stream.next().await.ok_or("no scene snapshot")??;
 
     tx.send(session_proto::ClientMessage {
         sequence: 2,
@@ -1192,10 +1159,7 @@ async fn connect_soak_agent_to(
         payload: Some(session_proto::client_message::Payload::LeaseRequest(
             session_proto::LeaseRequest {
                 ttl_ms: lease_ttl_ms,
-                capabilities: vec![
-                    "create_tiles".to_string(),
-                    "modify_own_tiles".to_string(),
-                ],
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
                 lease_priority,
             },
         )),
@@ -1203,17 +1167,16 @@ async fn connect_soak_agent_to(
     .await?;
 
     let msg = next_non_state_change(&mut response_stream).await?;
-    let lease_id_bytes = match &msg.payload {
-        Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
-            resp.lease_id.clone()
-        }
-        other => {
-            return Err(format!(
+    let lease_id_bytes =
+        match &msg.payload {
+            Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {
+                resp.lease_id.clone()
+            }
+            other => return Err(format!(
                 "soak agent {agent_id} (to_port): Expected LeaseResponse(granted), got: {other:?}"
             )
-            .into())
-        }
-    };
+            .into()),
+        };
 
     Ok(SoakAgentSession {
         namespace,

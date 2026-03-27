@@ -136,10 +136,7 @@ impl WindowSurface {
     ///
     /// This constructor is called by `Compositor::new_windowed()` after adapter
     /// and device creation, so the surface and device are guaranteed compatible.
-    pub fn new(
-        surface: wgpu::Surface<'static>,
-        config: wgpu::SurfaceConfiguration,
-    ) -> Self {
+    pub fn new(surface: wgpu::Surface<'static>, config: wgpu::SurfaceConfiguration) -> Self {
         let width = config.width;
         let height = config.height;
         Self {
@@ -178,7 +175,10 @@ impl WindowSurface {
         let max_dim = device.limits().max_texture_dimension_2d;
         let w = new_width.min(max_dim);
         let h = new_height.min(max_dim);
-        let mut cfg = self.config.lock().expect("WindowSurface config lock poisoned");
+        let mut cfg = self
+            .config
+            .lock()
+            .expect("WindowSurface config lock poisoned");
         cfg.width = w;
         cfg.height = h;
         self.surface.configure(device, &cfg);
@@ -289,10 +289,7 @@ impl CompositorSurface for WindowSurface {
                 //
                 // A future improvement: surface the error to the frame loop
                 // so the compositor can skip the render pass entirely.
-                let dummy = self
-                    .config
-                    .lock()
-                    .expect("config lock poisoned");
+                let dummy = self.config.lock().expect("config lock poisoned");
                 let dummy_view = {
                     // We can't create a texture without a device here.
                     // Instead, reuse the last pending texture's view if present.
@@ -302,7 +299,9 @@ impl CompositorSurface for WindowSurface {
                     // will log the error and skip the frame on the next cycle.
                     match self.surface.get_current_texture() {
                         Ok(t) => {
-                            let v = t.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                            let v = t
+                                .texture
+                                .create_view(&wgpu::TextureViewDescriptor::default());
                             *pending = Some(t);
                             v
                         }
@@ -548,7 +547,7 @@ mod tests {
     fn test_assert_pixel_color_passes_within_tolerance() {
         let pixels: Vec<u8> = vec![
             100, 200, 50, 255, // pixel (0,0)
-            10, 20, 30, 255,   // pixel (1,0)
+            10, 20, 30, 255, // pixel (1,0)
         ];
         HeadlessSurface::assert_pixel_color(&pixels, 2, 0, 0, [100, 200, 50, 255], 0, "exact")
             .expect("exact match should pass");
@@ -559,11 +558,21 @@ mod tests {
     #[test]
     fn test_assert_pixel_color_fails_outside_tolerance() {
         let pixels: Vec<u8> = vec![100, 200, 50, 255];
-        let result =
-            HeadlessSurface::assert_pixel_color(&pixels, 1, 0, 0, [110, 200, 50, 255], 2, "outside");
+        let result = HeadlessSurface::assert_pixel_color(
+            &pixels,
+            1,
+            0,
+            0,
+            [110, 200, 50, 255],
+            2,
+            "outside",
+        );
         assert!(result.is_err(), "should fail when diff > tolerance");
         let msg = result.unwrap_err();
-        assert!(msg.contains("channel 0"), "error should identify channel: {msg}");
+        assert!(
+            msg.contains("channel 0"),
+            "error should identify channel: {msg}"
+        );
     }
 
     /// `WindowSurface::size()` cannot be tested without a real wgpu surface

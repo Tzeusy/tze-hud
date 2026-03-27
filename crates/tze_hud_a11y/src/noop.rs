@@ -10,7 +10,7 @@
 //! - The host OS has no supported a11y API.
 
 use tracing::trace;
-use tze_hud_scene::{SceneId, SceneGraph};
+use tze_hud_scene::{SceneGraph, SceneId};
 
 use crate::{AccessibilityTree, LivePoliteness};
 
@@ -43,7 +43,10 @@ impl Default for NoopAccessibility {
 impl AccessibilityTree for NoopAccessibility {
     fn update_from_scene(&mut self, _scene: &SceneGraph) {
         self.update_count += 1;
-        trace!(update_count = self.update_count, "noop a11y: update_from_scene");
+        trace!(
+            update_count = self.update_count,
+            "noop a11y: update_from_scene"
+        );
     }
 
     fn announce(&mut self, message: &str, politeness: LivePoliteness) {

@@ -27,8 +27,7 @@
 
 use crate::safety::{GpuFailureContext, SafetySignal, evaluate_safety};
 use crate::types::{
-    ArbitrationLevel, PolicyContext, RedactionReason, VisibilityClassification,
-    ViewerClass,
+    ArbitrationLevel, PolicyContext, RedactionReason, ViewerClass, VisibilityClassification,
 };
 
 // ─── Frame evaluation output ──────────────────────────────────────────────────
@@ -204,14 +203,14 @@ fn compute_frame_redaction_reason(
 /// Level 5 per-frame resource evaluation.
 ///
 /// Returns the per-frame resource signal (Nominal / Paused / DegradationActive).
-fn evaluate_frame_level5_resource(
-    ctx: &crate::types::ResourceContext,
-) -> ResourceFrameSignal {
+fn evaluate_frame_level5_resource(ctx: &crate::types::ResourceContext) -> ResourceFrameSignal {
     if ctx.budgets_paused {
         return ResourceFrameSignal::Paused;
     }
     if ctx.degradation_level > 0 {
-        return ResourceFrameSignal::DegradationActive { level: ctx.degradation_level };
+        return ResourceFrameSignal::DegradationActive {
+            level: ctx.degradation_level,
+        };
     }
     ResourceFrameSignal::Nominal
 }
@@ -222,8 +221,8 @@ mod tests {
     use crate::safety::GpuFailureContext;
     use crate::types::{
         AttentionContext, ContentContext, InterruptionClass, OverrideState, PolicyContext,
-        PrivacyContext, RedactionStyle, ResourceContext, SafetyState, SecurityContext,
-        VisibilityClassification, ViewerClass,
+        PrivacyContext, RedactionStyle, ResourceContext, SafetyState, SecurityContext, ViewerClass,
+        VisibilityClassification,
     };
     use tze_hud_scene::types::ContentionPolicy;
 
@@ -470,8 +469,7 @@ mod tests {
         // enforced by integration benchmarks (criterion). The production requirement
         // is < 200us (spec §9.1).
         eprintln!(
-            "per-frame evaluation average latency: {}us over 100 iterations (spec budget: 200us)",
-            per_call_us
+            "per-frame evaluation average latency: {per_call_us}us over 100 iterations (spec budget: 200us)"
         );
     }
 
@@ -508,8 +506,7 @@ mod tests {
         // Each transition must complete well within 33.2ms (2 frames)
         assert!(
             per_call_ms < 33.2,
-            "privacy transition took {:.2}ms, expected < 33.2ms",
-            per_call_ms
+            "privacy transition took {per_call_ms:.2}ms, expected < 33.2ms"
         );
     }
 }

@@ -7,8 +7,8 @@
 //! This module exposes `print_schema()` which writes the JSON Schema for the
 //! complete configuration document to stdout.
 
-use schemars::schema_for;
 use crate::raw::RawConfig;
+use schemars::schema_for;
 
 /// Print the full JSON Schema for `RawConfig` to stdout.
 ///
@@ -16,8 +16,8 @@ use crate::raw::RawConfig;
 /// this if `--print-schema` was passed.
 pub fn print_schema() {
     let schema = schema_for!(RawConfig);
-    let json = serde_json::to_string_pretty(&schema)
-        .expect("JSON Schema serialisation should not fail");
+    let json =
+        serde_json::to_string_pretty(&schema).expect("JSON Schema serialisation should not fail");
     println!("{json}");
 }
 
@@ -37,8 +37,12 @@ mod tests {
         let v = schema_value();
         assert!(v.is_object(), "schema should be a JSON object");
         let obj = v.as_object().unwrap();
-        assert!(obj.contains_key("$schema") || obj.contains_key("properties") || obj.contains_key("title"),
-            "schema should have at least one recognised JSON Schema key");
+        assert!(
+            obj.contains_key("$schema")
+                || obj.contains_key("properties")
+                || obj.contains_key("title"),
+            "schema should have at least one recognised JSON Schema key"
+        );
     }
 
     /// WHEN print_schema() is called THEN it does not panic.

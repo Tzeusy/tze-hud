@@ -62,53 +62,53 @@
 //! );
 //! ```
 
-pub mod types;
-pub mod stack;
+pub mod attention;
+pub mod attention_budget;
+pub mod content;
+pub mod event;
+pub mod frame;
+pub mod interruption;
 pub mod mutation;
-pub mod security;
+pub mod override_queue;
 pub mod privacy;
 pub mod resource;
-pub mod content;
-pub mod telemetry;
-pub mod override_queue;
 pub mod safety;
-pub mod frame;
-pub mod event;
-pub mod interruption;
-pub mod attention_budget;
-pub mod attention;
+pub mod security;
+pub mod stack;
+pub mod telemetry;
 mod tests;
+pub mod types;
 
 // ─── Public API re-exports ────────────────────────────────────────────────────
 
 pub use types::{
+    ArbitrationError,
+    ArbitrationErrorCode,
     // Arbitration levels and outcomes
     ArbitrationLevel,
     ArbitrationOutcome,
-    ArbitrationError,
-    ArbitrationErrorCode,
+    AttentionContext,
     BlockReason,
-    QueueReason,
-    RedactionReason,
-    // Override types
-    OverrideType,
-    // Privacy
-    VisibilityClassification,
-    ViewerClass,
-    RedactionStyle,
+    ContentContext,
     // Attention
     InterruptionClass,
     // Mutation classification
     MutationKind,
+    OverrideState,
+    // Override types
+    OverrideType,
     // Policy context and sub-contexts
     PolicyContext,
-    OverrideState,
-    SafetyState,
     PrivacyContext,
-    SecurityContext,
-    AttentionContext,
+    QueueReason,
+    RedactionReason,
+    RedactionStyle,
     ResourceContext,
-    ContentContext,
+    SafetyState,
+    SecurityContext,
+    ViewerClass,
+    // Privacy
+    VisibilityClassification,
 };
 
 pub use stack::{ArbitrationStack, PolicyEvaluator};
@@ -116,57 +116,30 @@ pub use stack::{ArbitrationStack, PolicyEvaluator};
 // ─── Per-mutation evaluation pipeline re-exports ──────────────────────────────
 
 pub use mutation::{
-    BatchEvalResult,
-    MutationEvalInput,
-    MutationEvalOutput,
-    evaluate_mutation,
-    evaluate_batch,
+    BatchEvalResult, MutationEvalInput, MutationEvalOutput, evaluate_batch, evaluate_mutation,
 };
 
 pub use security::{
-    CapabilityNameCheck,
-    CapabilitySet,
-    ConfigUnknownCapability,
-    check_canonical_capability_name,
-    superseded_canonical,
-    validate_capability_names,
+    CapabilityNameCheck, CapabilitySet, ConfigUnknownCapability, check_canonical_capability_name,
+    superseded_canonical, validate_capability_names,
 };
 
-pub use privacy::{
-    PrivacyDecision,
-    apply_zone_ceiling,
-    evaluate_privacy,
-    most_restrictive_viewer,
-};
+pub use privacy::{PrivacyDecision, apply_zone_ceiling, evaluate_privacy, most_restrictive_viewer};
 
-pub use resource::{
-    ResourceDecision,
-    evaluate_resource,
-    resource_decision_to_outcome,
-};
+pub use resource::{ResourceDecision, evaluate_resource, resource_decision_to_outcome};
 
-pub use content::{
-    ContentDecision,
-    evaluate_content,
-    content_decision_to_outcome,
-};
+pub use content::{ContentDecision, content_decision_to_outcome, evaluate_content};
 
 pub use telemetry::{
-    ArbitrationEventKind,
-    ArbitrationTelemetryEvent,
-    CapabilityAuditEvent,
-    CapabilityAuditKind,
-    MutationLatencyAccumulator,
-    PolicyTelemetry,
+    ArbitrationEventKind, ArbitrationTelemetryEvent, CapabilityAuditEvent, CapabilityAuditKind,
+    MutationLatencyAccumulator, PolicyTelemetry,
 };
 
 // ─── Per-frame / per-event pipeline re-exports ────────────────────────────────
 
-pub use override_queue::{OverrideCommand, OverrideCommandQueue, OVERRIDE_QUEUE_CAPACITY};
+pub use override_queue::{OVERRIDE_QUEUE_CAPACITY, OverrideCommand, OverrideCommandQueue};
 
-pub use safety::{
-    GpuFailureContext, SafetySignal, SafeModeEntryReason, evaluate_safety,
-};
+pub use safety::{GpuFailureContext, SafeModeEntryReason, SafetySignal, evaluate_safety};
 
 pub use frame::{
     ContentFrameSignal, FrameEvaluation, FramePrivacyContext, ResourceFrameSignal, evaluate_frame,
@@ -181,10 +154,6 @@ pub use event::{
 
 pub use attention::{AttentionDecision, evaluate_attention};
 pub use attention_budget::{
-    AttentionBudget,
-    AgentBudgetPair,
-    DEFAULT_PER_AGENT_LIMIT,
-    DEFAULT_PER_ZONE_LIMIT,
-    DEFAULT_PER_ZONE_STACK_LIMIT,
-    DEFAULT_WINDOW_SECS,
+    AgentBudgetPair, AttentionBudget, DEFAULT_PER_AGENT_LIMIT, DEFAULT_PER_ZONE_LIMIT,
+    DEFAULT_PER_ZONE_STACK_LIMIT, DEFAULT_WINDOW_SECS,
 };

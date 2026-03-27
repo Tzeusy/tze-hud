@@ -265,9 +265,7 @@ impl DegradationController {
         //
         // Spec: trigger fires when p95 > 14ms over the rolling 10-frame window.
         // Evaluated on every frame once at least TRIGGER_WINDOW samples exist.
-        if self.level < DegradationLevel::Emergency
-            && self.frame_times.len() >= TRIGGER_WINDOW
-        {
+        if self.level < DegradationLevel::Emergency && self.frame_times.len() >= TRIGGER_WINDOW {
             let p95_trigger = p95_of_last_n(&self.frame_times, TRIGGER_WINDOW);
             if p95_trigger > TRIGGER_THRESHOLD_US {
                 self.level = self.level.advance();
@@ -293,9 +291,7 @@ impl DegradationController {
         // window (spec line 256). Evaluated on every frame once at least
         // RECOVERY_WINDOW samples exist. For Level 5, full recovery to Normal
         // requires 5 such successive clean windows (~2.5 seconds at 60fps).
-        if self.level > DegradationLevel::Normal
-            && self.frame_times.len() >= RECOVERY_WINDOW
-        {
+        if self.level > DegradationLevel::Normal && self.frame_times.len() >= RECOVERY_WINDOW {
             // A full 30-frame rolling window is available — evaluate it.
             let p95_recovery = p95_of_last_n(&self.frame_times, RECOVERY_WINDOW);
 
@@ -373,7 +369,7 @@ impl DegradationController {
                 // At Level 4, shed the lowest-priority quartile (at least 1).
                 // For v1, we shed 25% consistent with the frame-time guardian.
                 // Integer ceiling: ceil(len * 0.25) == (len + 3) / 4.
-                let shed_count = ((tiles.len() + 3) / 4).max(1);
+                let shed_count = tiles.len().div_ceil(4).max(1);
                 sorted.into_iter().take(shed_count).collect()
             }
             DegradationLevel::Emergency => {
@@ -393,10 +389,7 @@ impl DegradationController {
                     .expect("non-empty slice always has a min");
 
                 // Everything except `keep` is shed.
-                tiles
-                    .iter()
-                    .filter(|t| t.tile_id != keep.tile_id)
-                    .collect()
+                tiles.iter().filter(|t| t.tile_id != keep.tile_id).collect()
             }
         }
     }
@@ -502,22 +495,55 @@ mod tests {
 
     #[test]
     fn test_level_advance_chain() {
-        assert_eq!(DegradationLevel::Normal.advance(), DegradationLevel::Coalesce);
-        assert_eq!(DegradationLevel::Coalesce.advance(), DegradationLevel::ReduceTextureQuality);
-        assert_eq!(DegradationLevel::ReduceTextureQuality.advance(), DegradationLevel::DisableTransparency);
-        assert_eq!(DegradationLevel::DisableTransparency.advance(), DegradationLevel::ShedTiles);
-        assert_eq!(DegradationLevel::ShedTiles.advance(), DegradationLevel::Emergency);
-        assert_eq!(DegradationLevel::Emergency.advance(), DegradationLevel::Emergency);
+        assert_eq!(
+            DegradationLevel::Normal.advance(),
+            DegradationLevel::Coalesce
+        );
+        assert_eq!(
+            DegradationLevel::Coalesce.advance(),
+            DegradationLevel::ReduceTextureQuality
+        );
+        assert_eq!(
+            DegradationLevel::ReduceTextureQuality.advance(),
+            DegradationLevel::DisableTransparency
+        );
+        assert_eq!(
+            DegradationLevel::DisableTransparency.advance(),
+            DegradationLevel::ShedTiles
+        );
+        assert_eq!(
+            DegradationLevel::ShedTiles.advance(),
+            DegradationLevel::Emergency
+        );
+        assert_eq!(
+            DegradationLevel::Emergency.advance(),
+            DegradationLevel::Emergency
+        );
     }
 
     #[test]
     fn test_level_recover_chain() {
         assert_eq!(DegradationLevel::Normal.recover(), DegradationLevel::Normal);
-        assert_eq!(DegradationLevel::Coalesce.recover(), DegradationLevel::Normal);
-        assert_eq!(DegradationLevel::ReduceTextureQuality.recover(), DegradationLevel::Coalesce);
-        assert_eq!(DegradationLevel::DisableTransparency.recover(), DegradationLevel::ReduceTextureQuality);
-        assert_eq!(DegradationLevel::ShedTiles.recover(), DegradationLevel::DisableTransparency);
-        assert_eq!(DegradationLevel::Emergency.recover(), DegradationLevel::ShedTiles);
+        assert_eq!(
+            DegradationLevel::Coalesce.recover(),
+            DegradationLevel::Normal
+        );
+        assert_eq!(
+            DegradationLevel::ReduceTextureQuality.recover(),
+            DegradationLevel::Coalesce
+        );
+        assert_eq!(
+            DegradationLevel::DisableTransparency.recover(),
+            DegradationLevel::ReduceTextureQuality
+        );
+        assert_eq!(
+            DegradationLevel::ShedTiles.recover(),
+            DegradationLevel::DisableTransparency
+        );
+        assert_eq!(
+            DegradationLevel::Emergency.recover(),
+            DegradationLevel::ShedTiles
+        );
     }
 
     // ── Trigger: sustained overbudget → advance ───────────────────────────────
@@ -530,7 +556,7 @@ mod tests {
         assert!(event.is_some(), "Expected a degradation advance event");
         let ev = event.unwrap();
         assert_eq!(ev.previous_level, 0); // Normal
-        assert_eq!(ev.new_level, 1);      // Coalesce
+        assert_eq!(ev.new_level, 1); // Coalesce
         assert_eq!(ev.direction, DegradationDirection::Advance);
         assert_eq!(ctrl.level(), DegradationLevel::Coalesce);
     }
@@ -541,7 +567,10 @@ mod tests {
         // Only 9 frames — must NOT trigger yet.
         for _ in 0..(TRIGGER_WINDOW - 1) {
             let ev = ctrl.record_frame(20_000);
-            assert!(ev.is_none(), "Should not trigger before full 10-frame window");
+            assert!(
+                ev.is_none(),
+                "Should not trigger before full 10-frame window"
+            );
         }
         assert_eq!(ctrl.level(), DegradationLevel::Normal);
         // 10th frame — now should trigger.
@@ -561,7 +590,10 @@ mod tests {
         // Push 9 frames well above the threshold — but no trigger yet (window not full).
         for i in 0..9 {
             let ev = ctrl.record_frame(50_000);
-            assert!(ev.is_none(), "Frame {}: must not trigger before 10-frame window is full", i);
+            assert!(
+                ev.is_none(),
+                "Frame {i}: must not trigger before 10-frame window is full"
+            );
         }
         assert_eq!(ctrl.level(), DegradationLevel::Normal);
     }
@@ -572,7 +604,10 @@ mod tests {
         push_frames(&mut ctrl, 50_000, 9);
         // The 10th frame is the FIRST point at which the trigger can fire.
         let ev = ctrl.record_frame(50_000);
-        assert!(ev.is_some(), "10th frame above threshold should trigger degradation");
+        assert!(
+            ev.is_some(),
+            "10th frame above threshold should trigger degradation"
+        );
         assert_eq!(ctrl.level(), DegradationLevel::Coalesce);
     }
 
@@ -596,7 +631,10 @@ mod tests {
         // 29 clean frames — must NOT recover yet.
         for i in 0..(RECOVERY_WINDOW - 1) {
             let ev = ctrl.record_frame(5_000);
-            assert!(ev.is_none(), "Frame {i}: should not recover before 30 frames");
+            assert!(
+                ev.is_none(),
+                "Frame {i}: should not recover before 30 frames"
+            );
         }
         assert_eq!(ctrl.level(), DegradationLevel::Coalesce);
 
@@ -605,7 +643,7 @@ mod tests {
         assert!(ev.is_some(), "Should recover after 30 clean frames");
         let ev = ev.unwrap();
         assert_eq!(ev.previous_level, 1); // Coalesce
-        assert_eq!(ev.new_level, 0);      // Normal
+        assert_eq!(ev.new_level, 0); // Normal
         assert_eq!(ev.direction, DegradationDirection::Recover);
         assert_eq!(ctrl.level(), DegradationLevel::Normal);
     }
@@ -683,8 +721,16 @@ mod tests {
             // Force to specific level by poking internal state for simplicity.
             ctrl.level = level;
             let tiles = vec![
-                TileDescriptor { tile_id: SceneId::new(), lease_priority: 0, z_order: 1 },
-                TileDescriptor { tile_id: SceneId::new(), lease_priority: 1, z_order: 0 },
+                TileDescriptor {
+                    tile_id: SceneId::new(),
+                    lease_priority: 0,
+                    z_order: 1,
+                },
+                TileDescriptor {
+                    tile_id: SceneId::new(),
+                    lease_priority: 1,
+                    z_order: 0,
+                },
             ];
             let shed = ctrl.shed_tiles(&tiles);
             assert!(shed.is_empty(), "Level {level} must not shed any tiles");
@@ -703,16 +749,35 @@ mod tests {
 
         // 4 tiles: priorities 0, 1, 2, 2 (two at priority 2)
         let tiles = vec![
-            TileDescriptor { tile_id: id_p0, lease_priority: 0, z_order: 10 },
-            TileDescriptor { tile_id: id_p1, lease_priority: 1, z_order: 5 },
-            TileDescriptor { tile_id: id_p2a, lease_priority: 2, z_order: 3 },
-            TileDescriptor { tile_id: id_p2b, lease_priority: 2, z_order: 1 },
+            TileDescriptor {
+                tile_id: id_p0,
+                lease_priority: 0,
+                z_order: 10,
+            },
+            TileDescriptor {
+                tile_id: id_p1,
+                lease_priority: 1,
+                z_order: 5,
+            },
+            TileDescriptor {
+                tile_id: id_p2a,
+                lease_priority: 2,
+                z_order: 3,
+            },
+            TileDescriptor {
+                tile_id: id_p2b,
+                lease_priority: 2,
+                z_order: 1,
+            },
         ];
 
         let shed = ctrl.shed_tiles(&tiles);
         // 25% of 4 = 1 tile shed. Should be the priority-2/lowest-z_order tile.
         assert_eq!(shed.len(), 1);
-        assert_eq!(shed[0].tile_id, id_p2b, "Should shed p2/z1 (lowest z_order in highest priority)");
+        assert_eq!(
+            shed[0].tile_id, id_p2b,
+            "Should shed p2/z1 (lowest z_order in highest priority)"
+        );
     }
 
     #[test]
@@ -727,17 +792,35 @@ mod tests {
         let id_p2 = SceneId::new();
 
         let tiles = vec![
-            TileDescriptor { tile_id: id_p0, lease_priority: 0, z_order: 5 },
-            TileDescriptor { tile_id: id_p1, lease_priority: 1, z_order: 3 },
-            TileDescriptor { tile_id: id_p2, lease_priority: 2, z_order: 1 },
+            TileDescriptor {
+                tile_id: id_p0,
+                lease_priority: 0,
+                z_order: 5,
+            },
+            TileDescriptor {
+                tile_id: id_p1,
+                lease_priority: 1,
+                z_order: 3,
+            },
+            TileDescriptor {
+                tile_id: id_p2,
+                lease_priority: 2,
+                z_order: 1,
+            },
         ];
 
         let shed = ctrl.shed_tiles(&tiles);
         assert!(!shed.is_empty());
         // At least id_p2 must be in shed; id_p0 must NOT be.
         let shed_ids: Vec<SceneId> = shed.iter().map(|t| t.tile_id).collect();
-        assert!(shed_ids.contains(&id_p2), "Priority-2 tile must be shed first");
-        assert!(!shed_ids.contains(&id_p0), "Priority-0 tile must be preserved");
+        assert!(
+            shed_ids.contains(&id_p2),
+            "Priority-2 tile must be shed first"
+        );
+        assert!(
+            !shed_ids.contains(&id_p0),
+            "Priority-0 tile must be preserved"
+        );
     }
 
     #[test]
@@ -750,18 +833,39 @@ mod tests {
         let id_low = SceneId::new();
 
         let tiles = vec![
-            TileDescriptor { tile_id: id_high, lease_priority: 0, z_order: 10 },
-            TileDescriptor { tile_id: id_med,  lease_priority: 1, z_order: 5 },
-            TileDescriptor { tile_id: id_low,  lease_priority: 2, z_order: 1 },
+            TileDescriptor {
+                tile_id: id_high,
+                lease_priority: 0,
+                z_order: 10,
+            },
+            TileDescriptor {
+                tile_id: id_med,
+                lease_priority: 1,
+                z_order: 5,
+            },
+            TileDescriptor {
+                tile_id: id_low,
+                lease_priority: 2,
+                z_order: 1,
+            },
         ];
 
         let shed = ctrl.shed_tiles(&tiles);
         let shed_ids: Vec<SceneId> = shed.iter().map(|t| t.tile_id).collect();
 
         // id_high (priority=0, z_order=10) must be kept; everything else shed.
-        assert!(!shed_ids.contains(&id_high), "Highest-priority tile must not be shed");
-        assert!(shed_ids.contains(&id_med), "Medium-priority tile must be shed at Level 5");
-        assert!(shed_ids.contains(&id_low), "Lowest-priority tile must be shed at Level 5");
+        assert!(
+            !shed_ids.contains(&id_high),
+            "Highest-priority tile must not be shed"
+        );
+        assert!(
+            shed_ids.contains(&id_med),
+            "Medium-priority tile must be shed at Level 5"
+        );
+        assert!(
+            shed_ids.contains(&id_low),
+            "Lowest-priority tile must be shed at Level 5"
+        );
         assert_eq!(shed.len(), 2);
     }
 
@@ -784,13 +888,24 @@ mod tests {
         let id_low_z = SceneId::new();
 
         let tiles = vec![
-            TileDescriptor { tile_id: id_high_z, lease_priority: 1, z_order: 100 },
-            TileDescriptor { tile_id: id_low_z,  lease_priority: 1, z_order: 1 },
+            TileDescriptor {
+                tile_id: id_high_z,
+                lease_priority: 1,
+                z_order: 100,
+            },
+            TileDescriptor {
+                tile_id: id_low_z,
+                lease_priority: 1,
+                z_order: 1,
+            },
         ];
 
         let shed = ctrl.shed_tiles(&tiles);
         assert_eq!(shed.len(), 1);
-        assert_eq!(shed[0].tile_id, id_low_z, "Lower z_order must be shed first within same priority");
+        assert_eq!(
+            shed[0].tile_id, id_low_z,
+            "Lower z_order must be shed first within same priority"
+        );
     }
 
     // ── Level 1 coalescing ────────────────────────────────────────────────────
@@ -826,7 +941,10 @@ mod tests {
             }
         }
         // With ratio=2, expect exactly 10 emissions in 20 frames.
-        assert_eq!(emit_count, 10, "Coalesce ratio=2 should emit every other frame");
+        assert_eq!(
+            emit_count, 10,
+            "Coalesce ratio=2 should emit every other frame"
+        );
     }
 
     // ── Level 2/3 flags ───────────────────────────────────────────────────────
@@ -860,8 +978,10 @@ mod tests {
         assert_eq!(ev.previous_level, 0);
         assert_eq!(ev.new_level, 1);
         assert_eq!(ev.direction, DegradationDirection::Advance);
-        assert!(ev.frame_time_p95_us > TRIGGER_THRESHOLD_US,
-            "p95 should exceed trigger threshold");
+        assert!(
+            ev.frame_time_p95_us > TRIGGER_THRESHOLD_US,
+            "p95 should exceed trigger threshold"
+        );
     }
 
     #[test]
@@ -872,8 +992,10 @@ mod tests {
         assert_eq!(ev.previous_level, 1);
         assert_eq!(ev.new_level, 0);
         assert_eq!(ev.direction, DegradationDirection::Recover);
-        assert!(ev.frame_time_p95_us < RECOVERY_THRESHOLD_US,
-            "p95 should be below recovery threshold");
+        assert!(
+            ev.frame_time_p95_us < RECOVERY_THRESHOLD_US,
+            "p95 should be below recovery threshold"
+        );
     }
 
     // ── p95 helper ────────────────────────────────────────────────────────────

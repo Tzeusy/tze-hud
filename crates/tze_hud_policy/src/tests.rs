@@ -7,9 +7,9 @@
 mod arbitration_stack_tests {
     use crate::{
         ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, ArbitrationStack,
-        AttentionContext, BlockReason, ContentContext, InterruptionClass, MutationKind, OverrideState,
-        PolicyContext, PrivacyContext, ResourceContext, SafetyState, SecurityContext,
-        VisibilityClassification, ViewerClass,
+        AttentionContext, BlockReason, ContentContext, InterruptionClass, MutationKind,
+        OverrideState, PolicyContext, PrivacyContext, ResourceContext, SafetyState,
+        SecurityContext, ViewerClass, VisibilityClassification,
     };
     use tze_hud_scene::{SceneId, types::ContentionPolicy};
 
@@ -196,8 +196,7 @@ mod arbitration_stack_tests {
 
         assert!(
             matches!(&outcome, ArbitrationOutcome::CommitRedacted { .. }),
-            "Expected CommitRedacted, got {:?}",
-            outcome
+            "Expected CommitRedacted, got {outcome:?}"
         );
     }
 
@@ -220,7 +219,9 @@ mod arbitration_stack_tests {
 
         assert_eq!(
             outcome,
-            ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze }
+            ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze
+            }
         );
     }
 
@@ -249,8 +250,7 @@ mod arbitration_stack_tests {
         // Privacy must win: CommitRedacted (not Commit)
         assert!(
             matches!(&outcome, ArbitrationOutcome::CommitRedacted { .. }),
-            "Privacy must override Content: expected CommitRedacted, got {:?}",
-            outcome
+            "Privacy must override Content: expected CommitRedacted, got {outcome:?}"
         );
     }
 
@@ -276,7 +276,9 @@ mod arbitration_stack_tests {
         // Level 0 must win: Blocked (not Shed)
         assert_eq!(
             outcome,
-            ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze },
+            ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze
+            },
             "Human Override must win over Resource shed"
         );
     }
@@ -309,8 +311,7 @@ mod arbitration_stack_tests {
                 err.code == crate::ArbitrationErrorCode::CapabilityDenied &&
                 err.level == ArbitrationLevel::Security.index()
             ),
-            "Security must short-circuit: expected Reject(CapabilityDenied), got {:?}",
-            outcome
+            "Security must short-circuit: expected Reject(CapabilityDenied), got {outcome:?}"
         );
     }
 
@@ -341,7 +342,9 @@ mod arbitration_stack_tests {
         // Freeze must win — Blocked, not Queue
         assert_eq!(
             outcome,
-            ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze }
+            ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze
+            }
         );
     }
 
@@ -367,7 +370,9 @@ mod arbitration_stack_tests {
 
         assert_eq!(
             outcome,
-            ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze },
+            ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze
+            },
             "Freeze (Block) must win over budget exceeded (Suppress)"
         );
     }
@@ -397,14 +402,18 @@ mod arbitration_stack_tests {
 
         // Must be queued-with-redaction
         match &outcome {
-            ArbitrationOutcome::Queue { redacted, queue_reason, .. } => {
+            ArbitrationOutcome::Queue {
+                redacted,
+                queue_reason,
+                ..
+            } => {
                 assert!(redacted, "Queued mutation must carry redaction flag");
                 assert!(
                     matches!(queue_reason, crate::QueueReason::QuietHours { .. }),
                     "Queue reason must be QuietHours"
                 );
             }
-            other => panic!("Expected Queue with redacted=true, got {:?}", other),
+            other => panic!("Expected Queue with redacted=true, got {other:?}"),
         }
     }
 
@@ -507,7 +516,12 @@ mod arbitration_stack_tests {
             "agent_a",
             MutationKind::ZonePublication,
         );
-        assert_eq!(outcome, ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze });
+        assert_eq!(
+            outcome,
+            ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze
+            }
+        );
     }
 
     // ─── Privacy access matrix (spec lines 91-104) ───────────────────────────
@@ -606,11 +620,9 @@ mod arbitration_stack_tests {
             MutationKind::Transactional,
         );
 
-        assert!(
-            matches!(&outcome, ArbitrationOutcome::Reject(err) if
-                err.code == crate::ArbitrationErrorCode::LeaseInvalid
-            )
-        );
+        assert!(matches!(&outcome, ArbitrationOutcome::Reject(err) if
+            err.code == crate::ArbitrationErrorCode::LeaseInvalid
+        ));
     }
 
     #[test]
@@ -652,7 +664,13 @@ mod arbitration_stack_tests {
         );
 
         assert!(
-            matches!(&outcome, ArbitrationOutcome::Queue { queue_reason: crate::QueueReason::QuietHours { .. }, .. }),
+            matches!(
+                &outcome,
+                ArbitrationOutcome::Queue {
+                    queue_reason: crate::QueueReason::QuietHours { .. },
+                    ..
+                }
+            ),
             "NORMAL during quiet hours must be queued"
         );
     }
@@ -744,7 +762,10 @@ mod arbitration_stack_tests {
             matches!(
                 &outcome,
                 ArbitrationOutcome::Queue {
-                    queue_reason: crate::QueueReason::AttentionBudgetExhausted { per_agent: true, .. },
+                    queue_reason: crate::QueueReason::AttentionBudgetExhausted {
+                        per_agent: true,
+                        ..
+                    },
                     ..
                 }
             ),
@@ -773,7 +794,9 @@ mod arbitration_stack_tests {
         // Transactional mutations are NEVER shed
         assert_ne!(
             outcome,
-            ArbitrationOutcome::Shed { degradation_level: 5 },
+            ArbitrationOutcome::Shed {
+                degradation_level: 5
+            },
             "Transactional mutation must not be shed"
         );
         assert_eq!(outcome, ArbitrationOutcome::Commit);
@@ -795,7 +818,12 @@ mod arbitration_stack_tests {
             MutationKind::TileMutation,
         );
 
-        assert_eq!(outcome, ArbitrationOutcome::Shed { degradation_level: 3 });
+        assert_eq!(
+            outcome,
+            ArbitrationOutcome::Shed {
+                degradation_level: 3
+            }
+        );
     }
 
     // ─── Requirement: Content Level (spec lines 181-193) ─────────────────────
@@ -930,7 +958,9 @@ mod arbitration_stack_tests {
         // Level 0 wins even over valid lease (Level 3)
         assert_eq!(
             outcome,
-            ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze },
+            ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze
+            },
             "Level 0 freeze must block zone publications before Security check"
         );
     }
@@ -1073,8 +1103,7 @@ mod arbitration_stack_tests {
                     if err.code == ArbitrationErrorCode::TileBudgetExceeded
                     && err.level == ArbitrationLevel::Resource.index()
             ),
-            "Over-budget batch must be Reject(TileBudgetExceeded) at Level 5, got {:?}",
-            outcome
+            "Over-budget batch must be Reject(TileBudgetExceeded) at Level 5, got {outcome:?}"
         );
         // Explicitly confirm it is NOT Shed — agent must be informed.
         assert!(
@@ -1116,8 +1145,7 @@ mod arbitration_stack_tests {
                     ..
                 }
             ),
-            "HIGH must be queued when pass_through_class=Critical (threshold not met); got {:?}",
-            outcome
+            "HIGH must be queued when pass_through_class=Critical (threshold not met); got {outcome:?}"
         );
     }
 }

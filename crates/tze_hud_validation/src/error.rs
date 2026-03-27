@@ -24,9 +24,7 @@ pub enum ValidationError {
     GoldenIo { path: PathBuf, cause: String },
 
     /// The rendered image dimensions do not match the golden reference.
-    #[error(
-        "dimension mismatch: rendered {rendered_w}×{rendered_h}, golden {golden_w}×{golden_h}"
-    )]
+    #[error("dimension mismatch: rendered {rendered_w}×{rendered_h}, golden {golden_w}×{golden_h}")]
     DimensionMismatch {
         rendered_w: u32,
         rendered_h: u32,

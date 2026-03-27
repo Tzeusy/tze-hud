@@ -40,13 +40,13 @@
 //! Per-mutation policy check MUST complete in < 50us.
 
 use crate::content::{content_decision_to_outcome, evaluate_content};
-use crate::privacy::{apply_zone_ceiling, evaluate_privacy, PrivacyDecision};
-use crate::resource::{evaluate_resource, resource_decision_to_outcome, ResourceDecision};
+use crate::privacy::{PrivacyDecision, apply_zone_ceiling, evaluate_privacy};
+use crate::resource::{ResourceDecision, evaluate_resource, resource_decision_to_outcome};
 use crate::telemetry::{ArbitrationTelemetryEvent, PolicyTelemetry};
 use crate::types::{
     ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, AttentionContext,
-    BlockReason, InterruptionClass, MutationKind, PolicyContext,
-    QueueReason, VisibilityClassification,
+    BlockReason, InterruptionClass, MutationKind, PolicyContext, QueueReason,
+    VisibilityClassification,
 };
 use tze_hud_scene::SceneId;
 
@@ -141,21 +141,27 @@ pub fn evaluate_mutation(input: &MutationEvalInput<'_>) -> MutationEvalOutput {
     // Build capability set once per mutation (not once per path function).
     // This avoids redundant HashSet allocation if the same capability set
     // is used in both security checks of zone publication and tile mutation paths.
-    let cap_set =
-        crate::security::CapabilitySet::new(
-            input.ctx.security_context.granted_capabilities.iter().map(|s| s.as_str())
-        );
+    let cap_set = crate::security::CapabilitySet::new(
+        input
+            .ctx
+            .security_context
+            .granted_capabilities
+            .iter()
+            .map(|s| s.as_str()),
+    );
 
     let outcome = match input.kind {
-        MutationKind::ZonePublication => {
-            evaluate_zone_publication(input, &cap_set, &mut events)
-        }
+        MutationKind::ZonePublication => evaluate_zone_publication(input, &cap_set, &mut events),
         MutationKind::TileMutation | MutationKind::Transactional => {
             evaluate_tile_mutation(input, &cap_set, &mut events)
         }
     };
 
-    MutationEvalOutput { outcome, events, eval_us: 0 }
+    MutationEvalOutput {
+        outcome,
+        events,
+        eval_us: 0,
+    }
 }
 
 // ─── Zone publication evaluation path ────────────────────────────────────────
@@ -170,7 +176,9 @@ fn evaluate_zone_publication(
 
     // ── Level 0: Human Override — freeze check ────────────────────────────────
     if ctx.override_state.freeze_active {
-        return ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze };
+        return ArbitrationOutcome::Blocked {
+            block_reason: BlockReason::Freeze,
+        };
     }
 
     // ── Level 3: Security gate ────────────────────────────────────────────────
@@ -209,7 +217,10 @@ fn evaluate_zone_publication(
                 "Namespace violation: agent '{}' may not write to '{}'",
                 ctx.security_context.agent_namespace, input.target_namespace
             ),
-            hint: Some(format!("Agent namespace: '{}'", ctx.security_context.agent_namespace)),
+            hint: Some(format!(
+                "Agent namespace: '{}'",
+                ctx.security_context.agent_namespace
+            )),
             level: ArbitrationLevel::Security.index(),
         });
         events.push(ArbitrationTelemetryEvent::reject(
@@ -245,7 +256,9 @@ fn evaluate_zone_publication(
     // ── Level 2: Privacy decoration (Transform — does not reject) ─────────────
     let effective_classification = apply_zone_ceiling(
         input.agent_declared_classification,
-        input.zone_default_classification.unwrap_or(input.agent_declared_classification),
+        input
+            .zone_default_classification
+            .unwrap_or(input.agent_declared_classification),
     );
     let privacy_result = evaluate_privacy(&ctx.privacy_context, effective_classification);
     let redacted = matches!(privacy_result, PrivacyDecision::Redact(_));
@@ -256,7 +269,11 @@ fn evaluate_zone_publication(
     // Compose Level 2 (Transform) with Level 4 (Block).
     // If both would apply: queued-with-redaction (spec §7.3).
     match attention_outcome {
-        Some(ArbitrationOutcome::Queue { queue_reason, earliest_present_us, .. }) => {
+        Some(ArbitrationOutcome::Queue {
+            queue_reason,
+            earliest_present_us,
+            ..
+        }) => {
             // Emit rate-limited telemetry for Level 4 queuing
             // (rate-limiting is caller's responsibility; we emit an event here)
             events.push(ArbitrationTelemetryEvent::queue(
@@ -264,7 +281,11 @@ fn evaluate_zone_publication(
                 input.mutation_ref,
                 input.timestamp_us,
             ));
-            return ArbitrationOutcome::Queue { queue_reason, earliest_present_us, redacted };
+            return ArbitrationOutcome::Queue {
+                queue_reason,
+                earliest_present_us,
+                redacted,
+            };
         }
         Some(other) => return other,
         None => {}
@@ -375,7 +396,10 @@ fn evaluate_tile_mutation(
                 "Namespace violation: agent '{}' may not write to '{}'",
                 ctx.security_context.agent_namespace, input.target_namespace
             ),
-            hint: Some(format!("Agent namespace: '{}'", ctx.security_context.agent_namespace)),
+            hint: Some(format!(
+                "Agent namespace: '{}'",
+                ctx.security_context.agent_namespace
+            )),
             level: ArbitrationLevel::Security.index(),
         });
         events.push(ArbitrationTelemetryEvent::reject(
@@ -468,10 +492,14 @@ fn evaluate_attention(
 
     if ctx.quiet_hours_active {
         match ctx.interruption_class {
-            InterruptionClass::Critical | InterruptionClass::Silent => unreachable!("handled above"),
+            InterruptionClass::Critical | InterruptionClass::Silent => {
+                unreachable!("handled above")
+            }
             InterruptionClass::Low => {
                 // LOW is discarded during quiet hours.
-                return Some(ArbitrationOutcome::Shed { degradation_level: 0 });
+                return Some(ArbitrationOutcome::Shed {
+                    degradation_level: 0,
+                });
             }
             InterruptionClass::Normal => {
                 return Some(ArbitrationOutcome::Queue {
@@ -562,7 +590,11 @@ pub fn evaluate_batch(inputs: &[MutationEvalInput<'_>]) -> BatchEvalResult {
         outcomes.push(eval.outcome);
     }
 
-    BatchEvalResult { outcomes, telemetry, events: all_events }
+    BatchEvalResult {
+        outcomes,
+        telemetry,
+        events: all_events,
+    }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -572,8 +604,7 @@ mod mutation_tests {
     use super::*;
     use crate::types::{
         AttentionContext, ContentContext, InterruptionClass, OverrideState, PolicyContext,
-        PrivacyContext, RedactionStyle, ResourceContext, SafetyState, SecurityContext,
-        ViewerClass,
+        PrivacyContext, RedactionStyle, ResourceContext, SafetyState, SecurityContext, ViewerClass,
     };
     use tze_hud_scene::types::ContentionPolicy;
 
@@ -687,7 +718,12 @@ mod mutation_tests {
         ctx.override_state.freeze_active = true;
         let input = default_zone_input(&ctx);
         let output = evaluate_mutation(&input);
-        assert_eq!(output.outcome, ArbitrationOutcome::Blocked { block_reason: BlockReason::Freeze });
+        assert_eq!(
+            output.outcome,
+            ArbitrationOutcome::Blocked {
+                block_reason: BlockReason::Freeze
+            }
+        );
     }
 
     #[test]
@@ -741,7 +777,10 @@ mod mutation_tests {
             ArbitrationOutcome::Reject(err) if err.code == ArbitrationErrorCode::NamespaceViolation
         ));
         assert_eq!(output.events.len(), 1);
-        assert_eq!(output.events[0].code.as_deref(), Some("NAMESPACE_VIOLATION"));
+        assert_eq!(
+            output.events[0].code.as_deref(),
+            Some("NAMESPACE_VIOLATION")
+        );
     }
 
     #[test]
@@ -769,9 +808,17 @@ mod mutation_tests {
         let mut input = default_zone_input(&ctx);
         input.agent_declared_classification = VisibilityClassification::Private;
         let output = evaluate_mutation(&input);
-        assert!(matches!(output.outcome, ArbitrationOutcome::CommitRedacted { .. }));
+        assert!(matches!(
+            output.outcome,
+            ArbitrationOutcome::CommitRedacted { .. }
+        ));
         // Telemetry event for redaction
-        assert!(output.events.iter().any(|e| e.event == "arbitration_redact"));
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|e| e.event == "arbitration_redact")
+        );
     }
 
     /// WHEN sole viewer is owner THEN all content shown without redaction (spec lines 104-106)
@@ -811,7 +858,10 @@ mod mutation_tests {
         input2.zone_default_classification = Some(VisibilityClassification::Household);
         let output2 = evaluate_mutation(&input2);
         // Zone ceiling elevates to Household; KnownGuest cannot see Household → redacted
-        assert!(matches!(output2.outcome, ArbitrationOutcome::CommitRedacted { .. }));
+        assert!(matches!(
+            output2.outcome,
+            ArbitrationOutcome::CommitRedacted { .. }
+        ));
     }
 
     // ─── Level 5 resource enforcement ────────────────────────────────────────
@@ -825,7 +875,12 @@ mod mutation_tests {
         ctx.resource_context.degradation_level = 3;
         let input = default_zone_input(&ctx);
         let output = evaluate_mutation(&input);
-        assert!(matches!(output.outcome, ArbitrationOutcome::Shed { degradation_level: 3 }));
+        assert!(matches!(
+            output.outcome,
+            ArbitrationOutcome::Shed {
+                degradation_level: 3
+            }
+        ));
         // Shed telemetry event emitted
         assert!(output.events.iter().any(|e| e.event == "arbitration_shed"));
     }
@@ -961,23 +1016,25 @@ mod mutation_tests {
     #[test]
     fn test_batch_64_mutations_telemetry_accumulation() {
         let ctx = default_ctx();
-        let inputs: Vec<MutationEvalInput<'_>> = (0..64)
-            .map(|_| default_zone_input(&ctx))
-            .collect();
+        let inputs: Vec<MutationEvalInput<'_>> =
+            (0..64).map(|_| default_zone_input(&ctx)).collect();
         let result = evaluate_batch(&inputs);
         assert_eq!(result.outcomes.len(), 64);
         assert_eq!(result.telemetry.mutations_rejected, 0);
         // All 64 committed
-        assert!(result.outcomes.iter().all(|o| *o == ArbitrationOutcome::Commit));
+        assert!(
+            result
+                .outcomes
+                .iter()
+                .all(|o| *o == ArbitrationOutcome::Commit)
+        );
     }
 
     #[test]
     fn test_batch_rejection_counted_in_telemetry() {
         let mut ctx = default_ctx();
         ctx.security_context.granted_capabilities = vec![]; // no capabilities → all rejected
-        let inputs: Vec<MutationEvalInput<'_>> = (0..3)
-            .map(|_| default_zone_input(&ctx))
-            .collect();
+        let inputs: Vec<MutationEvalInput<'_>> = (0..3).map(|_| default_zone_input(&ctx)).collect();
         let result = evaluate_batch(&inputs);
         assert_eq!(result.telemetry.mutations_rejected, 3);
     }
@@ -987,9 +1044,7 @@ mod mutation_tests {
         let mut ctx = default_ctx();
         ctx.resource_context.should_shed = true;
         ctx.resource_context.degradation_level = 3;
-        let inputs: Vec<MutationEvalInput<'_>> = (0..2)
-            .map(|_| default_zone_input(&ctx))
-            .collect();
+        let inputs: Vec<MutationEvalInput<'_>> = (0..2).map(|_| default_zone_input(&ctx)).collect();
         let result = evaluate_batch(&inputs);
         assert_eq!(result.telemetry.mutations_shed, 2);
     }

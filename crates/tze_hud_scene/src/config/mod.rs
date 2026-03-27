@@ -285,10 +285,13 @@ name = "Main"
 "#;
         let loader = L::parse(toml).expect("parse should succeed even with mobile profile");
         let errors = loader.validate();
-        let has_mobile_error = errors.iter().any(|e| {
-            matches!(e.code, ConfigErrorCode::MobileProfileNotExercised)
-        });
-        assert!(has_mobile_error, "mobile profile should produce CONFIG_MOBILE_PROFILE_NOT_EXERCISED");
+        let has_mobile_error = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::MobileProfileNotExercised));
+        assert!(
+            has_mobile_error,
+            "mobile profile should produce CONFIG_MOBILE_PROFILE_NOT_EXERCISED"
+        );
     }
 
     // ── 3. Budget escalation prevention ───────────────────────────────────────
@@ -309,10 +312,13 @@ name = "Main"
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let errors = loader.validate();
-        let has_escalation = errors.iter().any(|e| {
-            matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)
-        });
-        assert!(has_escalation, "max_tiles=2048 exceeding base 1024 should produce BUDGET_ESCALATION");
+        let has_escalation = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation));
+        assert!(
+            has_escalation,
+            "max_tiles=2048 exceeding base 1024 should produce BUDGET_ESCALATION"
+        );
     }
 
     /// WHEN custom profile exceeds base boolean capability THEN CONFIG_PROFILE_CAPABILITY_ESCALATION.
@@ -330,10 +336,13 @@ name = "Main"
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let errors = loader.validate();
-        let has_cap_escalation = errors.iter().any(|e| {
-            matches!(e.code, ConfigErrorCode::ProfileCapabilityEscalation)
-        });
-        assert!(has_cap_escalation, "allow_background_zones=true over headless base should be CAPABILITY_ESCALATION");
+        let has_cap_escalation = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ProfileCapabilityEscalation));
+        assert!(
+            has_cap_escalation,
+            "allow_background_zones=true over headless base should be CAPABILITY_ESCALATION"
+        );
     }
 
     // ── 4. Capability vocabulary validation ────────────────────────────────────
@@ -352,10 +361,13 @@ capabilities = ["createTiles"]
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let errors = loader.validate();
-        let has_cap_error = errors.iter().any(|e| {
-            matches!(e.code, ConfigErrorCode::UnknownCapability)
-        });
-        assert!(has_cap_error, "non-canonical capability 'createTiles' should produce UNKNOWN_CAPABILITY");
+        let has_cap_error = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownCapability));
+        assert!(
+            has_cap_error,
+            "non-canonical capability 'createTiles' should produce UNKNOWN_CAPABILITY"
+        );
     }
 
     /// WHEN valid canonical capability names used THEN no error.
@@ -374,12 +386,27 @@ capabilities = ["createTiles"]
     #[test]
     fn test_non_canonical_capability_names_invalid() {
         // Pre-Round-14 names.
-        assert!(!is_canonical_capability("read_scene"), "read_scene is pre-Round-14");
-        assert!(!is_canonical_capability("receive_input"), "receive_input is pre-Round-14");
-        assert!(!is_canonical_capability("zone_publish:subtitle"), "zone_publish is pre-Round-14");
+        assert!(
+            !is_canonical_capability("read_scene"),
+            "read_scene is pre-Round-14"
+        );
+        assert!(
+            !is_canonical_capability("receive_input"),
+            "receive_input is pre-Round-14"
+        );
+        assert!(
+            !is_canonical_capability("zone_publish:subtitle"),
+            "zone_publish is pre-Round-14"
+        );
         // Wrong case / format.
-        assert!(!is_canonical_capability("CREATE_TILE"), "uppercase not allowed");
-        assert!(!is_canonical_capability("create-tiles"), "kebab-case not allowed");
+        assert!(
+            !is_canonical_capability("CREATE_TILE"),
+            "uppercase not allowed"
+        );
+        assert!(
+            !is_canonical_capability("create-tiles"),
+            "kebab-case not allowed"
+        );
     }
 
     // ── 5. Config includes rejected ────────────────────────────────────────────
@@ -397,10 +424,13 @@ name = "Main"
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let errors = loader.validate();
-        let has_includes_error = errors.iter().any(|e| {
-            matches!(e.code, ConfigErrorCode::ConfigIncludesNotSupported)
-        });
-        assert!(has_includes_error, "includes field should produce CONFIG_INCLUDES_NOT_SUPPORTED");
+        let has_includes_error = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ConfigIncludesNotSupported));
+        assert!(
+            has_includes_error,
+            "includes field should produce CONFIG_INCLUDES_NOT_SUPPORTED"
+        );
     }
 
     // ── 6. Minimal valid config ────────────────────────────────────────────────
@@ -416,7 +446,10 @@ name = "Home"
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let resolved = loader.freeze();
-        assert!(resolved.is_ok(), "minimal config should freeze successfully");
+        assert!(
+            resolved.is_ok(),
+            "minimal config should freeze successfully"
+        );
         let config = resolved.unwrap();
         assert_eq!(config.tab_names, vec!["Home".to_string()]);
     }
@@ -429,7 +462,9 @@ profile = "full-display"
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let errors = loader.validate();
-        let has_no_tabs = errors.iter().any(|e| matches!(e.code, ConfigErrorCode::NoTabs));
+        let has_no_tabs = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::NoTabs));
         assert!(has_no_tabs, "no [[tabs]] should produce CONFIG_NO_TABS");
     }
 
@@ -499,8 +534,13 @@ name = "Main"
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let errors = loader.validate();
-        let has_fps_error = errors.iter().any(|e| matches!(e.code, ConfigErrorCode::InvalidFpsRange));
-        assert!(has_fps_error, "target_fps < min_fps should produce CONFIG_INVALID_FPS_RANGE");
+        let has_fps_error = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::InvalidFpsRange));
+        assert!(
+            has_fps_error,
+            "target_fps < min_fps should produce CONFIG_INVALID_FPS_RANGE"
+        );
     }
 
     // ── 10. Reserved event prefix in capability ────────────────────────────────
@@ -519,10 +559,13 @@ capabilities = ["emit_scene_event:system.shutdown"]
 "#;
         let loader = L::parse(toml).expect("parse should succeed");
         let errors = loader.validate();
-        let has_reserved = errors.iter().any(|e| {
-            matches!(e.code, ConfigErrorCode::ReservedEventPrefix)
-        });
-        assert!(has_reserved, "emit_scene_event:system.* should produce CONFIG_RESERVED_EVENT_PREFIX");
+        let has_reserved = errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::ReservedEventPrefix));
+        assert!(
+            has_reserved,
+            "emit_scene_event:system.* should produce CONFIG_RESERVED_EVENT_PREFIX"
+        );
     }
 
     // ── Compile-time generic check ────────────────────────────────────────────
@@ -531,7 +574,8 @@ capabilities = ["emit_scene_event:system.shutdown"]
     #[ignore = "no implementation yet"]
     fn test_config_loader_generic_compile_check() {
         fn use_loader<L: ConfigLoader>() {
-            let result = L::parse("[runtime]\nprofile = \"full-display\"\n[[tabs]]\nname = \"T\"\n");
+            let result =
+                L::parse("[runtime]\nprofile = \"full-display\"\n[[tabs]]\nname = \"T\"\n");
             let _ = result;
         }
         // Call use_loader::<ConcreteImpl>() once an impl exists.

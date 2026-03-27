@@ -162,7 +162,11 @@ mod tests {
         CachedResult {
             accepted,
             created_ids: Vec::new(),
-            error_code: if accepted { String::new() } else { "ERR".to_string() },
+            error_code: if accepted {
+                String::new()
+            } else {
+                "ERR".to_string()
+            },
             error_message: String::new(),
         }
     }
@@ -208,7 +212,10 @@ mod tests {
 
         // Insert 5th → ids[1] evicted
         w.insert(ids[4].clone(), make_result(true));
-        assert!(w.lookup(&ids[1]).is_none(), "second oldest should be evicted");
+        assert!(
+            w.lookup(&ids[1]).is_none(),
+            "second oldest should be evicted"
+        );
         assert!(w.lookup(&ids[2]).is_some());
         assert!(w.lookup(&ids[3]).is_some());
         assert!(w.lookup(&ids[4]).is_some());
@@ -223,7 +230,10 @@ mod tests {
         let id = b"expiring00000000".to_vec();
         w.insert(id.clone(), make_result(true));
         // With ttl=0, the entry should be absent after the next lookup.
-        assert!(w.lookup(&id).is_none(), "entry should have expired immediately");
+        assert!(
+            w.lookup(&id).is_none(),
+            "entry should have expired immediately"
+        );
     }
 
     #[test]
@@ -240,7 +250,10 @@ mod tests {
         // A lookup triggers purge_expired, causing this entry to be swept too.
         assert_eq!(w.len(), 1, "freshly inserted entry exists before lookup");
         // Lookup triggers purge; with ttl=0 the new entry also expires immediately.
-        assert!(w.lookup(&id).is_none(), "ttl=0 re-insert should also miss on lookup");
+        assert!(
+            w.lookup(&id).is_none(),
+            "ttl=0 re-insert should also miss on lookup"
+        );
         // After lookup purge, cache is empty.
         assert_eq!(w.len(), 0, "entry purged after ttl=0 lookup");
     }

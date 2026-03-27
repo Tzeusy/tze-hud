@@ -199,9 +199,10 @@ impl QuietHoursGate {
     /// The event is always enqueued. If the zone's queue was at capacity, the
     /// oldest event is silently dropped to make room (overflow drops oldest-first).
     pub fn enqueue(&mut self, zone_id: Uuid, event: SceneEvent) {
-        let queue = self.zone_queues.entry(zone_id).or_insert_with(|| {
-            ZoneQueue::new_with_default_depth(ZoneContentionPolicy::Fifo)
-        });
+        let queue = self
+            .zone_queues
+            .entry(zone_id)
+            .or_insert_with(|| ZoneQueue::new_with_default_depth(ZoneContentionPolicy::Fifo));
         queue.push(event);
     }
 
@@ -230,7 +231,10 @@ impl QuietHoursGate {
 
     /// Number of queued events for a specific zone.
     pub fn zone_queue_len(&self, zone_id: Uuid) -> usize {
-        self.zone_queues.get(&zone_id).map(|q: &ZoneQueue| q.len()).unwrap_or(0)
+        self.zone_queues
+            .get(&zone_id)
+            .map(|q: &ZoneQueue| q.len())
+            .unwrap_or(0)
     }
 
     /// Total number of queued events across all zones.
@@ -403,7 +407,11 @@ mod tests {
         }
 
         let drained = gate.drain_queues();
-        assert_eq!(drained.len(), 1, "LatestWins must deliver only the last event");
+        assert_eq!(
+            drained.len(),
+            1,
+            "LatestWins must deliver only the last event"
+        );
         assert_eq!(drained[0].sequence, 10);
     }
 

@@ -27,7 +27,9 @@
 //! Zone contention resolution MUST complete in < 20us. This function is O(1)
 //! (single match on the contention policy variant).
 
-use crate::types::{ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, ContentContext};
+use crate::types::{
+    ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, ContentContext,
+};
 use tze_hud_scene::{SceneId, types::ContentionPolicy};
 
 // ─── Content decision ─────────────────────────────────────────────────────────
@@ -114,16 +116,17 @@ pub fn content_decision_to_outcome(
                 level: ArbitrationLevel::Content.index(),
             }))
         }
-        ContentDecision::StackFull { current_depth, max_depth } => {
-            Some(ArbitrationOutcome::Reject(ArbitrationError {
-                code: ArbitrationErrorCode::ZoneEvictionDenied,
-                agent_id: agent_id.into(),
-                mutation_ref,
-                message: format!("Stack zone at max depth {current_depth}/{max_depth}"),
-                hint: Some("Stack zone is full".to_string()),
-                level: ArbitrationLevel::Content.index(),
-            }))
-        }
+        ContentDecision::StackFull {
+            current_depth,
+            max_depth,
+        } => Some(ArbitrationOutcome::Reject(ArbitrationError {
+            code: ArbitrationErrorCode::ZoneEvictionDenied,
+            agent_id: agent_id.into(),
+            mutation_ref,
+            message: format!("Stack zone at max depth {current_depth}/{max_depth}"),
+            hint: Some("Stack zone is full".to_string()),
+            level: ArbitrationLevel::Content.index(),
+        })),
     }
 }
 
@@ -200,7 +203,10 @@ mod content_tests {
         ctx.occupant_lease_priority = Some(1); // occupant has higher priority
 
         let decision = evaluate_content(&ctx, SceneId::new());
-        assert!(matches!(decision, ContentDecision::ZoneEvictionDenied { .. }));
+        assert!(matches!(
+            decision,
+            ContentDecision::ZoneEvictionDenied { .. }
+        ));
     }
 
     // ─── Stack zone ───────────────────────────────────────────────────────────
@@ -224,7 +230,10 @@ mod content_tests {
         let decision = evaluate_content(&ctx, SceneId::new());
         assert!(matches!(
             decision,
-            ContentDecision::StackFull { current_depth: 8, max_depth: 8 }
+            ContentDecision::StackFull {
+                current_depth: 8,
+                max_depth: 8
+            }
         ));
     }
 
@@ -273,9 +282,15 @@ mod content_tests {
         };
 
         // Publish to tab_a succeeds
-        assert_eq!(evaluate_content(&ctx_a, SceneId::new()), ContentDecision::Pass);
+        assert_eq!(
+            evaluate_content(&ctx_a, SceneId::new()),
+            ContentDecision::Pass
+        );
         // Publish to tab_b also succeeds (separate zone, no interaction)
-        assert_eq!(evaluate_content(&ctx_b, SceneId::new()), ContentDecision::Pass);
+        assert_eq!(
+            evaluate_content(&ctx_b, SceneId::new()),
+            ContentDecision::Pass
+        );
     }
 
     // ─── content_decision_to_outcome ─────────────────────────────────────────
@@ -290,7 +305,9 @@ mod content_tests {
     fn test_content_eviction_denied_produces_reject() {
         let mutation_ref = SceneId::new();
         let outcome = content_decision_to_outcome(
-            ContentDecision::ZoneEvictionDenied { message: "denied".to_string() },
+            ContentDecision::ZoneEvictionDenied {
+                message: "denied".to_string(),
+            },
             "agent_a",
             mutation_ref,
         );
@@ -309,17 +326,18 @@ mod content_tests {
     fn test_content_stack_full_produces_reject() {
         let mutation_ref = SceneId::new();
         let outcome = content_decision_to_outcome(
-            ContentDecision::StackFull { current_depth: 8, max_depth: 8 },
+            ContentDecision::StackFull {
+                current_depth: 8,
+                max_depth: 8,
+            },
             "agent_a",
             mutation_ref,
         );
-        assert!(
-            matches!(
-                &outcome,
-                Some(ArbitrationOutcome::Reject(err))
-                    if err.code == ArbitrationErrorCode::ZoneEvictionDenied
-                    && err.level == ArbitrationLevel::Content.index()
-            )
-        );
+        assert!(matches!(
+            &outcome,
+            Some(ArbitrationOutcome::Reject(err))
+                if err.code == ArbitrationErrorCode::ZoneEvictionDenied
+                && err.level == ArbitrationLevel::Content.index()
+        ));
     }
 }

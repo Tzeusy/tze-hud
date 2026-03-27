@@ -91,7 +91,11 @@ impl PointerCaptureManager {
         }
         self.captures.insert(
             device_id,
-            CaptureState { tile_id, node_id, release_on_up },
+            CaptureState {
+                tile_id,
+                node_id,
+                release_on_up,
+            },
         );
         Ok(())
     }

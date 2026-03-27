@@ -14,8 +14,7 @@
 //! re-use individual checks.
 
 use crate::types::{
-    DecodedMeta, ResourceError, ResourceStoreConfig, ResourceType,
-    MAX_TEXTURE_DIMENSION_PX,
+    DecodedMeta, MAX_TEXTURE_DIMENSION_PX, ResourceError, ResourceStoreConfig, ResourceType,
 };
 
 // ─── Step 1: Capability check ─────────────────────────────────────────────────
@@ -51,14 +50,8 @@ pub fn check_hash(data: &[u8], expected: &[u8; 32]) -> Result<[u8; 32], Resource
     if computed == *expected {
         Ok(computed)
     } else {
-        let computed_hex: String = computed
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let expected_hex: String = expected
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let computed_hex: String = computed.iter().map(|b| format!("{b:02x}")).collect();
+        let expected_hex: String = expected.iter().map(|b| format!("{b:02x}")).collect();
         Err(ResourceError::HashMismatch {
             computed: computed_hex,
             expected: expected_hex,
@@ -71,7 +64,10 @@ pub fn check_hash(data: &[u8], expected: &[u8; 32]) -> Result<[u8; 32], Resource
 /// Verify that `byte_count` does not exceed `config.max_resource_bytes`.
 ///
 /// Spec: lines 286-288, RFC 0011 §8.1.
-pub fn check_raw_size(byte_count: usize, config: &ResourceStoreConfig) -> Result<(), ResourceError> {
+pub fn check_raw_size(
+    byte_count: usize,
+    config: &ResourceStoreConfig,
+) -> Result<(), ResourceError> {
     if byte_count > config.max_resource_bytes {
         Err(ResourceError::SizeExceeded {
             detail: format!(
@@ -260,9 +256,8 @@ fn decode_image(
     };
 
     // Decode to RGBA8.  The `image` crate will return an error for corrupt data.
-    let img = image::load_from_memory_with_format(data, format).map_err(|e| {
-        ResourceError::DecodeError(format!("{resource_type}: {e}"))
-    })?;
+    let img = image::load_from_memory_with_format(data, format)
+        .map_err(|e| ResourceError::DecodeError(format!("{resource_type}: {e}")))?;
 
     let width_px = img.width();
     let height_px = img.height();
@@ -329,6 +324,7 @@ fn validate_font(data: &[u8]) -> Result<DecodedMeta, ResourceError> {
 ///
 /// For the dedup-hit fast path (step 2 reveals the resource is already known),
 /// callers skip steps 3-6 entirely — no re-validation needed.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_upload(
     data: &[u8],
     expected_hash: &[u8; 32],
@@ -380,15 +376,11 @@ pub mod test_helpers {
         // Byte sequence verified with Python PIL: Image.open(BytesIO(data))
         // returns a 1×1 RGBA image.
         vec![
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-            0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
-            0x54, 0x78, 0xda, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
-            0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x56, 0xc7,
-            0x2f, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
-            0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xda, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x56, 0xc7,
+            0x2f, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ]
     }
 }
@@ -552,7 +544,8 @@ mod tests {
         // 9000 pixels wide exceeds MAX_TEXTURE_DIMENSION_PX (8192).
         let config = default_config();
         // data length doesn't matter here — dimension check fires first
-        let err = decode_and_validate(&vec![0u8; 4], ResourceType::ImageRgba8, &config, 9000, 1).unwrap_err();
+        let err =
+            decode_and_validate(&[0u8; 4], ResourceType::ImageRgba8, &config, 9000, 1).unwrap_err();
         assert!(matches!(err, ResourceError::SizeExceeded { .. }));
     }
 
@@ -595,8 +588,7 @@ mod tests {
         };
         // 2×2 = 16 bytes RGBA8, which exceeds the 8-byte limit.
         let data = vec![0u8; 16];
-        let err =
-            decode_and_validate(&data, ResourceType::ImageRgba8, &config, 2, 2).unwrap_err();
+        let err = decode_and_validate(&data, ResourceType::ImageRgba8, &config, 2, 2).unwrap_err();
         assert!(matches!(err, ResourceError::SizeExceeded { .. }));
     }
 

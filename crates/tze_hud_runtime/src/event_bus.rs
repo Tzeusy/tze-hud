@@ -58,7 +58,11 @@ pub enum InterruptionClass {
 impl InterruptionClass {
     /// Return the more restrictive (higher numeric value) of two classes.
     pub fn ceiling(self, other: InterruptionClass) -> InterruptionClass {
-        if self as u8 > other as u8 { self } else { other }
+        if self as u8 > other as u8 {
+            self
+        } else {
+            other
+        }
     }
 }
 
@@ -304,13 +308,12 @@ impl EventBus {
         // regardless of their InterruptionClass — the spec mandates they are
         // never dropped (spec lines 229-231, 264-265). CRITICAL-class events
         // also bypass since they represent urgent runtime conditions.
-        if !self.rate_limiter.allow() {
-            if event.class != InterruptionClass::Critical
-                && !event.event_type.starts_with("system.lease_")
-                && !event.event_type.starts_with("system.degradation_")
-            {
-                return false;
-            }
+        if !self.rate_limiter.allow()
+            && event.class != InterruptionClass::Critical
+            && !event.event_type.starts_with("system.lease_")
+            && !event.event_type.starts_with("system.degradation_")
+        {
+            return false;
         }
 
         // Blocked audit events are never delivered to agents.
@@ -364,9 +367,7 @@ impl EventBus {
             // category-based fan-out layouts; see dedup.rs for details.
 
             // Enqueue in the subscriber's coalesce buffer
-            let queue = self.subscriber_queues
-                .entry(namespace.clone())
-                .or_default();
+            let queue = self.subscriber_queues.entry(namespace.clone()).or_default();
             let under_backpressure = queue.len() >= coalesce::COALESCE_BUFFER_CAPACITY / 2;
             queue.enqueue(event.clone(), under_backpressure);
             delivered_to.push(namespace.clone());
@@ -451,11 +452,9 @@ impl Default for EventBus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subscriptions::{
-        CATEGORY_SCENE_TOPOLOGY, CATEGORY_ZONE_EVENTS,
-    };
     #[allow(unused_imports)]
-    use crate::subscriptions::{CATEGORY_LEASE_CHANGES, CATEGORY_DEGRADATION_NOTICES};
+    use crate::subscriptions::{CATEGORY_DEGRADATION_NOTICES, CATEGORY_LEASE_CHANGES};
+    use crate::subscriptions::{CATEGORY_SCENE_TOPOLOGY, CATEGORY_ZONE_EVENTS};
 
     fn make_bus_with_agents(agents: &[&str]) -> EventBus {
         let mut bus = EventBus::new();
@@ -468,12 +467,8 @@ mod tests {
     fn subscribe(bus: &mut EventBus, namespace: &str, categories: &[&str]) {
         let subscribe: Vec<(String, Option<String>)> =
             categories.iter().map(|c| (c.to_string(), None)).collect();
-        bus.subscriptions.apply_change(
-            namespace,
-            &subscribe,
-            &[],
-            &[],
-        );
+        bus.subscriptions
+            .apply_change(namespace, &subscribe, &[], &[]);
     }
 
     // ── Stage 2: Classification ───────────────────────────────────────────────
@@ -483,7 +478,7 @@ mod tests {
         let class = EventBus::classify(
             InterruptionClass::Critical,
             InterruptionClass::Critical, // no zone ceiling
-            true, // is agent event
+            true,                        // is agent event
         );
         assert_eq!(class, InterruptionClass::High);
     }
@@ -511,11 +506,7 @@ mod tests {
     #[test]
     fn test_ceiling_more_restrictive_wins() {
         // Agent declares NORMAL, zone ceiling is LOW → effective is LOW (more restrictive)
-        let class = EventBus::classify(
-            InterruptionClass::Normal,
-            InterruptionClass::Low,
-            false,
-        );
+        let class = EventBus::classify(InterruptionClass::Normal, InterruptionClass::Low, false);
         assert_eq!(class, InterruptionClass::Low);
     }
 
@@ -654,7 +645,11 @@ mod tests {
     #[test]
     fn test_zone_occupancy_delivered_once_with_both_subscriptions() {
         let mut bus = make_bus_with_agents(&["agent_a"]);
-        subscribe(&mut bus, "agent_a", &[CATEGORY_SCENE_TOPOLOGY, CATEGORY_ZONE_EVENTS]);
+        subscribe(
+            &mut bus,
+            "agent_a",
+            &[CATEGORY_SCENE_TOPOLOGY, CATEGORY_ZONE_EVENTS],
+        );
 
         // ZoneOccupancyChanged matches both categories
         let recipients = bus.emit(
@@ -667,8 +662,14 @@ mod tests {
         );
 
         // agent_a should appear exactly once in recipients
-        let count = recipients.iter().filter(|r| r.as_str() == "agent_a").count();
-        assert_eq!(count, 1, "ZoneOccupancyChanged must be delivered exactly once");
+        let count = recipients
+            .iter()
+            .filter(|r| r.as_str() == "agent_a")
+            .count();
+        assert_eq!(
+            count, 1,
+            "ZoneOccupancyChanged must be delivered exactly once"
+        );
 
         // And there should be exactly one event in the queue
         let drained = bus.drain_subscriber("agent_a");
@@ -728,7 +729,9 @@ mod tests {
                 None,
                 vec![],
             );
-            if !r.is_empty() { delivered += 1; }
+            if !r.is_empty() {
+                delivered += 1;
+            }
         }
 
         // At most 5 should be delivered (cap = 5)
@@ -820,8 +823,16 @@ mod tests {
             .iter()
             .filter(|e| e.entity_id.as_deref() == Some("tile-1"))
             .collect();
-        assert_eq!(tile1_events.len(), 1, "TileUpdated for tile-1 must coalesce to 1 under backpressure");
-        assert_eq!(tile1_events[0].payload, vec![4], "Latest payload must be retained");
+        assert_eq!(
+            tile1_events.len(),
+            1,
+            "TileUpdated for tile-1 must coalesce to 1 under backpressure"
+        );
+        assert_eq!(
+            tile1_events[0].payload,
+            vec![4],
+            "Latest payload must be retained"
+        );
     }
 
     #[test]
@@ -856,7 +867,11 @@ mod tests {
             .iter()
             .filter(|e| e.event_type == "system.lease_revoked")
             .collect();
-        assert_eq!(lease_events.len(), 1, "Lease event must not be dropped under backpressure");
+        assert_eq!(
+            lease_events.len(),
+            1,
+            "Lease event must not be dropped under backpressure"
+        );
     }
 
     // ── Four-stage pipeline ordering ─────────────────────────────────────────
@@ -873,7 +888,10 @@ mod tests {
             None,
             vec![],
         );
-        assert!(recipients.is_empty(), "Audit events must never be delivered to agents");
+        assert!(
+            recipients.is_empty(),
+            "Audit events must never be delivered to agents"
+        );
     }
 
     #[test]

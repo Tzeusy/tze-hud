@@ -23,8 +23,7 @@
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tze_hud_scene::{
-    Capability, Node, NodeData, Rect, SceneId,
-    SolidColorNode, Rgba,
+    Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry},
 };
@@ -45,10 +44,14 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
     let lease_id = scene.grant_lease(
         "agent.bench",
         600_000,
-        vec![Capability::CreateTile, Capability::CreateNode, Capability::UpdateNode],
+        vec![
+            Capability::CreateTile,
+            Capability::CreateNode,
+            Capability::UpdateNode,
+        ],
     );
 
-    let cols = 10usize.max(1);
+    let cols = 10usize;
     for i in 0..tile_count {
         let col = (i % cols) as f32;
         let row = (i / cols) as f32;
@@ -84,7 +87,9 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
                 }),
             };
             // Add as child of root
-            scene.add_node_to_tile(tile_id, Some(root_id), child).unwrap();
+            scene
+                .add_node_to_tile(tile_id, Some(root_id), child)
+                .unwrap();
         }
     }
 
@@ -97,14 +102,18 @@ fn bench_snapshot_100_tiles_1000_nodes(c: &mut Criterion) {
     // Primary spec requirement: 100 tiles with 1000 nodes total (10 nodes/tile)
     let scene = build_dense_scene(100, 10);
     assert!(scene.tile_count() == 100, "expected 100 tiles");
-    assert!(scene.node_count() >= 100, "expected at least 100 nodes (root nodes)");
+    assert!(
+        scene.node_count() >= 100,
+        "expected at least 100 nodes (root nodes)"
+    );
 
     let mut group = c.benchmark_group("snapshot");
-    group.bench_function(BenchmarkId::new("100_tiles_1000_nodes", "take_snapshot"), |b| {
-        b.iter(|| {
-            black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US)))
-        });
-    });
+    group.bench_function(
+        BenchmarkId::new("100_tiles_1000_nodes", "take_snapshot"),
+        |b| {
+            b.iter(|| black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US))));
+        },
+    );
     group.finish();
 }
 
@@ -113,9 +122,7 @@ fn bench_snapshot_empty_scene(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("snapshot");
     group.bench_function(BenchmarkId::new("empty_scene", "take_snapshot"), |b| {
-        b.iter(|| {
-            black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US)))
-        });
+        b.iter(|| black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US))));
     });
     group.finish();
 }
@@ -126,23 +133,24 @@ fn bench_snapshot_max_tiles_stress(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("snapshot");
     group.bench_function(BenchmarkId::new("max_tiles_stress", "take_snapshot"), |b| {
-        b.iter(|| {
-            black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US)))
-        });
+        b.iter(|| black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US))));
     });
     group.finish();
 }
 
 fn bench_snapshot_with_zones(c: &mut Criterion) {
     let registry = TestSceneRegistry::new();
-    let (scene, _) = registry.build("zone_publish_subtitle", ClockMs::FIXED).unwrap();
+    let (scene, _) = registry
+        .build("zone_publish_subtitle", ClockMs::FIXED)
+        .unwrap();
 
     let mut group = c.benchmark_group("snapshot");
-    group.bench_function(BenchmarkId::new("zone_publish_subtitle", "take_snapshot"), |b| {
-        b.iter(|| {
-            black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US)))
-        });
-    });
+    group.bench_function(
+        BenchmarkId::new("zone_publish_subtitle", "take_snapshot"),
+        |b| {
+            b.iter(|| black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US))));
+        },
+    );
     group.finish();
 }
 

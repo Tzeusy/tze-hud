@@ -138,9 +138,15 @@ impl SessionEnvelope {
     ) -> Self {
         let budget = ResourceBudget {
             max_tiles: requested_budget.max_tiles.min(HARD_MAX_TILES),
-            max_texture_bytes: requested_budget.max_texture_bytes.min(HARD_MAX_TEXTURE_BYTES),
-            max_update_rate_hz: requested_budget.max_update_rate_hz.min(HARD_MAX_UPDATE_RATE_HZ),
-            max_nodes_per_tile: requested_budget.max_nodes_per_tile.min(HARD_MAX_NODES_PER_TILE),
+            max_texture_bytes: requested_budget
+                .max_texture_bytes
+                .min(HARD_MAX_TEXTURE_BYTES),
+            max_update_rate_hz: requested_budget
+                .max_update_rate_hz
+                .min(HARD_MAX_UPDATE_RATE_HZ),
+            max_nodes_per_tile: requested_budget
+                .max_nodes_per_tile
+                .min(HARD_MAX_NODES_PER_TILE),
         };
         let max_active_leases = requested_max_leases.min(HARD_MAX_ACTIVE_LEASES);
         Self {
@@ -175,9 +181,7 @@ impl SessionEnvelope {
         // - Event subscription buffers: 0–4 pending messages × ~64 B = negligible at steady state
         //
         // Combined upper bound for all session state remains well under 64 KB.
-        std::mem::size_of::<SessionEnvelope>()
-            + self.session_id.len()
-            + self.namespace.len()
+        std::mem::size_of::<SessionEnvelope>() + self.session_id.len() + self.namespace.len()
     }
 }
 

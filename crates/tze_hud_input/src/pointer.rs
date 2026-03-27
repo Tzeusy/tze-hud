@@ -28,24 +28,24 @@ pub struct Modifiers {
 
 impl Modifiers {
     /// No modifier keys held.
-    pub const NONE: Modifiers = Modifiers { shift: false, ctrl: false, alt: false, meta: false };
+    pub const NONE: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+    };
 }
 
 // ─── Pointer button ──────────────────────────────────────────────────────────
 
 /// Which pointer button triggered the event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PointerButton {
-    Primary,   // Left mouse button / main touch contact
+    #[default]
+    Primary, // Left mouse button / main touch contact
     Secondary, // Right mouse button / two-finger tap
     Middle,    // Middle mouse button / wheel press
     Other(u8), // X1, X2, additional buttons
-}
-
-impl Default for PointerButton {
-    fn default() -> Self {
-        PointerButton::Primary
-    }
 }
 
 // ─── Common pointer fields ────────────────────────────────────────────────────
@@ -227,7 +227,12 @@ mod tests {
             local_y: 20.0,
             display_x: 110.0,
             display_y: 120.0,
-            modifiers: Modifiers { shift: true, ctrl: false, alt: false, meta: false },
+            modifiers: Modifiers {
+                shift: true,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            },
             timestamp_mono_us: MonoUs(1_234_567),
         };
         let json = serde_json::to_string(&f).unwrap();

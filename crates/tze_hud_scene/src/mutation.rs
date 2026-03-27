@@ -29,12 +29,12 @@
 //! MUST overwrite it from the authenticated principal before calling
 //! [`SceneGraph::apply_batch`].
 
-use crate::types::*;
 use crate::graph::SceneGraph;
 use crate::timing::domains::WallUs;
-use crate::validation::{BatchRejected, ValidationError};
+use crate::types::*;
 #[cfg(test)]
 use crate::validation::ValidationErrorCode;
+use crate::validation::{BatchRejected, ValidationError};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of mutations in a single batch (RFC 0001 §3.1).
@@ -380,17 +380,9 @@ impl SceneGraph {
                                 ),
                             }
                         };
-                        let rejection = BatchRejected::single(
-                            batch.batch_id,
-                            idx,
-                            mutation.type_name(),
-                            &err,
-                        );
-                        return MutationResult::rejected_with_error(
-                            batch.batch_id,
-                            rejection,
-                            err,
-                        );
+                        let rejection =
+                            BatchRejected::single(batch.batch_id, idx, mutation.type_name(), &err);
+                        return MutationResult::rejected_with_error(batch.batch_id, rejection, err);
                     }
                 } else {
                     // Only report LeaseNotFound for mutations that embed their own
@@ -398,12 +390,8 @@ impl SceneGraph {
                     // was derived from the tile, the tile not having a valid lease is
                     // a transient state that should be reported as LeaseNotFound.
                     let err = ValidationError::LeaseNotFound { id: lease_id };
-                    let rejection = BatchRejected::single(
-                        batch.batch_id,
-                        idx,
-                        mutation.type_name(),
-                        &err,
-                    );
+                    let rejection =
+                        BatchRejected::single(batch.batch_id, idx, mutation.type_name(), &err);
                     return MutationResult::rejected_with_error(batch.batch_id, rejection, err);
                 }
             }
@@ -414,7 +402,7 @@ impl SceneGraph {
         for lid in &lease_ids {
             if let Err(budget_err) = self.check_budget(lid, batch) {
                 let err = ValidationError::BudgetExceeded {
-                    resource: format!("{}", budget_err),
+                    resource: format!("{budget_err}"),
                 };
                 let rejection = BatchRejected::batch_level(batch.batch_id, "batch", &err);
                 return MutationResult::rejected_with_error(batch.batch_id, rejection, err);
@@ -437,12 +425,8 @@ impl SceneGraph {
                 Err(e) => {
                     // Rollback to snapshot
                     *self = snapshot;
-                    let rejection = BatchRejected::single(
-                        batch.batch_id,
-                        idx,
-                        mutation.type_name(),
-                        &e,
-                    );
+                    let rejection =
+                        BatchRejected::single(batch.batch_id, idx, mutation.type_name(), &e);
                     return MutationResult::rejected_with_error(batch.batch_id, rejection, e);
                 }
             }
@@ -504,9 +488,7 @@ impl SceneGraph {
             | SceneMutation::SetTileRoot { tile_id, .. }
             | SceneMutation::AddNode { tile_id, .. }
             | SceneMutation::JoinSyncGroup { tile_id, .. }
-            | SceneMutation::LeaveSyncGroup { tile_id } => {
-                tiles.get(tile_id).map(|t| t.lease_id)
-            }
+            | SceneMutation::LeaveSyncGroup { tile_id } => tiles.get(tile_id).map(|t| t.lease_id),
             // Tab mutations, zone mutations, sync group mutations other than
             // tile-targeting ones: no per-mutation lease check at Stage 1.
             _ => None,
@@ -528,7 +510,9 @@ impl SceneGraph {
             if let Some(root_id) = tile.root_node {
                 let mut visited = std::collections::HashSet::new();
                 if let Err(cycle_node) = self.detect_cycle(root_id, &mut visited) {
-                    return Err(ValidationError::CycleDetected { node_id: cycle_node });
+                    return Err(ValidationError::CycleDetected {
+                        node_id: cycle_node,
+                    });
                 }
             }
         }
@@ -607,7 +591,10 @@ impl SceneGraph {
     ) -> Result<Vec<SceneId>, ValidationError> {
         match mutation {
             // ── Tab mutations ─────────────────────────────────────────────────
-            SceneMutation::CreateTab { name, display_order } => {
+            SceneMutation::CreateTab {
+                name,
+                display_order,
+            } => {
                 let id = self.create_tab(name, *display_order)?;
                 Ok(vec![id])
             }
@@ -652,11 +639,17 @@ impl SceneGraph {
                 self.update_tile_opacity(*tile_id, *opacity, namespace)?;
                 Ok(vec![])
             }
-            SceneMutation::UpdateTileInputMode { tile_id, input_mode } => {
+            SceneMutation::UpdateTileInputMode {
+                tile_id,
+                input_mode,
+            } => {
                 self.update_tile_input_mode(*tile_id, *input_mode, namespace)?;
                 Ok(vec![])
             }
-            SceneMutation::UpdateTileSyncGroup { tile_id, sync_group } => {
+            SceneMutation::UpdateTileSyncGroup {
+                tile_id,
+                sync_group,
+            } => {
                 if let Some(group_id) = sync_group {
                     // Use checked variant to enforce ownership: agent must own both tile and group.
                     self.join_sync_group_checked(*tile_id, *group_id, namespace)?;
@@ -666,7 +659,10 @@ impl SceneGraph {
                 }
                 Ok(vec![])
             }
-            SceneMutation::UpdateTileExpiry { tile_id, expires_at } => {
+            SceneMutation::UpdateTileExpiry {
+                tile_id,
+                expires_at,
+            } => {
                 self.update_tile_expiry(*tile_id, *expires_at, namespace)?;
                 Ok(vec![])
             }
@@ -785,15 +781,16 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
-        let batch = make_batch("agent", vec![
-            SceneMutation::CreateTile {
+        let batch = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
                 tab_id,
                 namespace: "agent".to_string(),
                 lease_id,
                 bounds: Rect::new(10.0, 10.0, 200.0, 150.0),
                 z_order: 1,
-            },
-        ]);
+            }],
+        );
 
         let result = scene.apply_batch(&batch);
         assert!(result.applied);
@@ -808,23 +805,26 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
-        let batch = make_batch("agent", vec![
-            SceneMutation::CreateTile {
-                tab_id,
-                namespace: "agent".to_string(),
-                lease_id,
-                bounds: Rect::new(10.0, 10.0, 200.0, 150.0),
-                z_order: 1,
-            },
-            // This should fail — invalid bounds
-            SceneMutation::CreateTile {
-                tab_id,
-                namespace: "agent".to_string(),
-                lease_id,
-                bounds: Rect::new(10.0, 10.0, 0.0, 0.0), // invalid
-                z_order: 2,
-            },
-        ]);
+        let batch = make_batch(
+            "agent",
+            vec![
+                SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: "agent".to_string(),
+                    lease_id,
+                    bounds: Rect::new(10.0, 10.0, 200.0, 150.0),
+                    z_order: 1,
+                },
+                // This should fail — invalid bounds
+                SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: "agent".to_string(),
+                    lease_id,
+                    bounds: Rect::new(10.0, 10.0, 0.0, 0.0), // invalid
+                    z_order: 2,
+                },
+            ],
+        );
 
         let result = scene.apply_batch(&batch);
         assert!(!result.applied);
@@ -859,7 +859,10 @@ mod tests {
         let result = scene.apply_batch(&batch);
         assert!(!result.applied);
         let rej = result.rejection.unwrap();
-        assert_eq!(rej.primary_code(), Some(ValidationErrorCode::BatchSizeExceeded));
+        assert_eq!(
+            rej.primary_code(),
+            Some(ValidationErrorCode::BatchSizeExceeded)
+        );
         // No tiles created
         assert_eq!(scene.tile_count(), 0);
     }
@@ -875,18 +878,18 @@ mod tests {
         // Grant a lease with a 1ms TTL, then immediately expire it
         let lease_id = scene.grant_lease("agent", 1, vec![Capability::CreateTile]);
         // Advance the clock past TTL by expiring leases (simulated by direct state manipulation)
-        scene.leases.get_mut(&lease_id).unwrap().state =
-            crate::types::LeaseState::Expired;
+        scene.leases.get_mut(&lease_id).unwrap().state = crate::types::LeaseState::Expired;
 
-        let batch = make_batch("agent", vec![
-            SceneMutation::CreateTile {
+        let batch = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
                 tab_id,
                 namespace: "agent".to_string(),
                 lease_id,
                 bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
                 z_order: 1,
-            },
-        ]);
+            }],
+        );
 
         let result = scene.apply_batch(&batch);
         assert!(!result.applied);
@@ -894,8 +897,13 @@ mod tests {
         let code = rej.primary_code().unwrap();
         // Must be a lease-stage error, not a budget error
         assert!(
-            matches!(code, ValidationErrorCode::LeaseInvalidState | ValidationErrorCode::LeaseExpired | ValidationErrorCode::LeaseNotFound),
-            "expected lease-stage error, got {:?}", code
+            matches!(
+                code,
+                ValidationErrorCode::LeaseInvalidState
+                    | ValidationErrorCode::LeaseExpired
+                    | ValidationErrorCode::LeaseNotFound
+            ),
+            "expected lease-stage error, got {code:?}"
         );
     }
 
@@ -907,19 +915,23 @@ mod tests {
 
         let mut prev_seq = 0u64;
         for z in 1..=5u32 {
-            let batch = make_batch("agent", vec![
-                SceneMutation::CreateTile {
+            let batch = make_batch(
+                "agent",
+                vec![SceneMutation::CreateTile {
                     tab_id,
                     namespace: "agent".to_string(),
                     lease_id,
                     bounds: Rect::new(z as f32 * 10.0, 0.0, 50.0, 50.0),
                     z_order: z,
-                },
-            ]);
+                }],
+            );
             let result = scene.apply_batch(&batch);
             assert!(result.applied, "batch {z} failed");
             let seq = result.sequence_number.unwrap();
-            assert!(seq > prev_seq, "sequence {seq} not strictly greater than {prev_seq}");
+            assert!(
+                seq > prev_seq,
+                "sequence {seq} not strictly greater than {prev_seq}"
+            );
             prev_seq = seq;
         }
     }
@@ -931,32 +943,37 @@ mod tests {
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
         // Create first tile at z_order=1 with bounds [0,0,200,200]
-        let b1 = make_batch("agent", vec![
-            SceneMutation::CreateTile {
+        let b1 = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
                 tab_id,
                 namespace: "agent".to_string(),
                 lease_id,
                 bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
                 z_order: 1,
-            },
-        ]);
+            }],
+        );
         let r1 = scene.apply_batch(&b1);
         assert!(r1.applied);
 
         // Try to create a second tile at same z_order=1 with overlapping bounds
-        let b2 = make_batch("agent", vec![
-            SceneMutation::CreateTile {
+        let b2 = make_batch(
+            "agent",
+            vec![SceneMutation::CreateTile {
                 tab_id,
                 namespace: "agent".to_string(),
                 lease_id,
                 bounds: Rect::new(100.0, 100.0, 200.0, 200.0), // overlaps first tile
-                z_order: 1, // same z_order
-            },
-        ]);
+                z_order: 1,                                    // same z_order
+            }],
+        );
         let r2 = scene.apply_batch(&b2);
         assert!(!r2.applied, "should reject z-order conflict");
         let rej = r2.rejection.unwrap();
-        assert_eq!(rej.primary_code(), Some(ValidationErrorCode::ZOrderConflict));
+        assert_eq!(
+            rej.primary_code(),
+            Some(ValidationErrorCode::ZOrderConflict)
+        );
     }
 
     #[test]
@@ -964,12 +981,15 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
 
         // Create a sync group via mutation batch
-        let create_batch = make_batch("agent", vec![SceneMutation::CreateSyncGroup {
-            name: Some("my-group".to_string()),
-            owner_namespace: "agent".to_string(),
-            commit_policy: SyncCommitPolicy::AllOrDefer,
-            max_deferrals: 3,
-        }]);
+        let create_batch = make_batch(
+            "agent",
+            vec![SceneMutation::CreateSyncGroup {
+                name: Some("my-group".to_string()),
+                owner_namespace: "agent".to_string(),
+                commit_policy: SyncCommitPolicy::AllOrDefer,
+                max_deferrals: 3,
+            }],
+        );
         let result = scene.apply_batch(&create_batch);
         assert!(result.applied);
         assert_eq!(result.created_ids.len(), 1);
@@ -977,9 +997,7 @@ mod tests {
         assert_eq!(scene.sync_group_count(), 1);
 
         // Delete via mutation batch
-        let delete_batch = make_batch("agent", vec![
-            SceneMutation::DeleteSyncGroup { group_id },
-        ]);
+        let delete_batch = make_batch("agent", vec![SceneMutation::DeleteSyncGroup { group_id }]);
         let result = scene.apply_batch(&delete_batch);
         assert!(result.applied);
         assert_eq!(scene.sync_group_count(), 0);
@@ -991,33 +1009,41 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         // Create group and join tile in one batch
-        let batch = make_batch("agent", vec![SceneMutation::CreateSyncGroup {
-            name: None,
-            owner_namespace: "agent".to_string(),
-            commit_policy: SyncCommitPolicy::AvailableMembers,
-            max_deferrals: 0,
-        }]);
+        let batch = make_batch(
+            "agent",
+            vec![SceneMutation::CreateSyncGroup {
+                name: None,
+                owner_namespace: "agent".to_string(),
+                commit_policy: SyncCommitPolicy::AvailableMembers,
+                max_deferrals: 0,
+            }],
+        );
         let result = scene.apply_batch(&batch);
         assert!(result.applied);
         let group_id = result.created_ids[0];
 
         // Join tile to group
-        let join_batch = make_batch("agent", vec![
-            SceneMutation::JoinSyncGroup { tile_id, group_id },
-        ]);
+        let join_batch = make_batch(
+            "agent",
+            vec![SceneMutation::JoinSyncGroup { tile_id, group_id }],
+        );
         let result = scene.apply_batch(&join_batch);
         assert!(result.applied);
         assert_eq!(scene.tiles[&tile_id].sync_group, Some(group_id));
         assert!(scene.sync_groups[&group_id].members.contains(&tile_id));
 
         // Leave sync group
-        let leave_batch = make_batch("agent", vec![
-            SceneMutation::LeaveSyncGroup { tile_id },
-        ]);
+        let leave_batch = make_batch("agent", vec![SceneMutation::LeaveSyncGroup { tile_id }]);
         let result = scene.apply_batch(&leave_batch);
         assert!(result.applied);
         assert_eq!(scene.tiles[&tile_id].sync_group, None);
@@ -1030,16 +1056,25 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 100.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 100.0, 100.0),
+                1,
+            )
             .unwrap();
 
         let nonexistent_group = SceneId::new();
 
         // Batch that tries to join a non-existent group — should fail and rollback
-        let batch = make_batch("agent", vec![SceneMutation::JoinSyncGroup {
-            tile_id,
-            group_id: nonexistent_group,
-        }]);
+        let batch = make_batch(
+            "agent",
+            vec![SceneMutation::JoinSyncGroup {
+                tile_id,
+                group_id: nonexistent_group,
+            }],
+        );
         let result = scene.apply_batch(&batch);
         assert!(!result.applied);
         assert!(result.rejection.is_some());
@@ -1054,20 +1089,23 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![Capability::CreateTile]);
 
-        let batch = make_batch("agent", vec![
-            SceneMutation::CreateTile {
-                tab_id,
-                namespace: "agent".to_string(),
-                lease_id,
-                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-                z_order: 1,
-            },
-            // Second mutation fails with invalid bounds
-            SceneMutation::UpdateTileBounds {
-                tile_id: SceneId::new(), // non-existent tile
-                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-            },
-        ]);
+        let batch = make_batch(
+            "agent",
+            vec![
+                SceneMutation::CreateTile {
+                    tab_id,
+                    namespace: "agent".to_string(),
+                    lease_id,
+                    bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                    z_order: 1,
+                },
+                // Second mutation fails with invalid bounds
+                SceneMutation::UpdateTileBounds {
+                    tile_id: SceneId::new(), // non-existent tile
+                    bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                },
+            ],
+        );
 
         let result = scene.apply_batch(&batch);
         assert!(!result.applied);

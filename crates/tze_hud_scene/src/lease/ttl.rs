@@ -16,8 +16,8 @@
 //! All timestamps use milliseconds from the injected [`Clock::now_millis()`].
 //! Precision: ±100 ms per spec §TTL Accounting Precision.
 
-use crate::clock::Clock;
 use super::RenewalPolicy;
+use crate::clock::Clock;
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -421,7 +421,7 @@ mod tests {
         let remaining = ttl.remaining_ms().unwrap();
         // After resume, still ~50_000ms (suspension not counted)
         assert!(
-            remaining >= 49_900 && remaining <= 50_100,
+            (49_900..=50_100).contains(&remaining),
             "expected ≈50_000ms after resume, got {remaining}"
         );
     }
@@ -440,7 +440,7 @@ mod tests {
         let remaining = ttl.remaining_ms().unwrap();
         // Should be ≈25_000ms (30_000 - 5_000 before suspension)
         assert!(
-            remaining >= 24_900 && remaining <= 25_100,
+            (24_900..=25_100).contains(&remaining),
             "ONE_SHOT: expected ≈25_000ms, got {remaining}"
         );
     }
@@ -466,7 +466,7 @@ mod tests {
         // Effective elapsed = 5s + 5s = 10s (suspensions not counted)
         let remaining = ttl.remaining_ms().unwrap();
         assert!(
-            remaining >= 49_900 && remaining <= 50_100,
+            (49_900..=50_100).contains(&remaining),
             "expected ≈50_000ms, got {remaining}"
         );
     }
@@ -677,7 +677,10 @@ mod tests {
         clock.advance(3_000);
         // total_suspension_ms should be ≈3_000 (ongoing)
         let total = ttl.total_suspension_ms();
-        assert!(total >= 2_900 && total <= 3_100, "expected ≈3_000ms, got {total}");
+        assert!(
+            (2_900..=3_100).contains(&total),
+            "expected ≈3_000ms, got {total}"
+        );
     }
 
     // ── Idempotent on_suspend ─────────────────────────────────────────────────
@@ -710,7 +713,7 @@ mod tests {
         // effective elapsed = 5s (before first suspend); suspension = 8s counted
         // remaining = 60_000 - 5_000 = 55_000ms
         assert!(
-            remaining >= 54_900 && remaining <= 55_100,
+            (54_900..=55_100).contains(&remaining),
             "expected ≈55_000ms after resume, got {remaining}"
         );
     }

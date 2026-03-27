@@ -44,11 +44,11 @@ impl ViewerClass {
     /// is the 300ms cross-fade on viewer class transition).
     pub fn icon_label(&self) -> &'static str {
         match self {
-            ViewerClass::Owner => "●",          // filled circle
+            ViewerClass::Owner => "●",           // filled circle
             ViewerClass::HouseholdMember => "◕", // partial circle
             ViewerClass::KnownGuest => "○",      // outline circle
-            ViewerClass::Unknown => "?",          // question mark
-            ViewerClass::Nobody => "·",           // dim circle
+            ViewerClass::Unknown => "?",         // question mark
+            ViewerClass::Nobody => "·",          // dim circle
         }
     }
 }
@@ -138,7 +138,7 @@ impl ViewerClassTransition {
 /// Chrome state is NEVER exposed through any agent-facing API. Chrome elements
 /// do NOT appear in scene topology queries. Chrome elements are NOT addressable
 /// via SceneId.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChromeState {
     /// Current ordered tab list. These are runtime-managed, not agent-supplied.
     pub tabs: Vec<ChromeTab>,
@@ -160,23 +160,6 @@ pub struct ChromeState {
     pub health: SystemHealth,
     /// Capture surface active (v1-reserved: always false — overlay-only redaction).
     pub capture_surface_active: bool,
-}
-
-impl Default for ChromeState {
-    fn default() -> Self {
-        Self {
-            tabs: Vec::new(),
-            active_tab_index: 0,
-            tab_bar_position: TabBarPosition::default(),
-            viewer_class: ViewerClass::default(),
-            viewer_class_transition: None,
-            safe_mode_active: false,
-            mute_active: false,
-            connected_agent_count: 0,
-            health: SystemHealth::default(),
-            capture_surface_active: false,
-        }
-    }
 }
 
 impl ChromeState {
@@ -356,9 +339,7 @@ impl ChromeLayout {
         };
         let (tab_bar_y, content_y, content_height) = match state.tab_bar_position {
             TabBarPosition::Top => (0.0, bar_h, display_height - bar_h),
-            TabBarPosition::Bottom => {
-                (display_height - bar_h, 0.0, display_height - bar_h)
-            }
+            TabBarPosition::Bottom => (display_height - bar_h, 0.0, display_height - bar_h),
             TabBarPosition::Hidden => (0.0, 0.0, display_height),
         };
 
@@ -419,7 +400,11 @@ pub fn handle_shortcut(state: &mut ChromeState, shortcut: ChromeShortcut) -> Sho
     match shortcut {
         ChromeShortcut::NextTab => {
             let switched = state.switch_to_next_tab();
-            let new_idx = if switched { Some(state.active_tab_index) } else { None };
+            let new_idx = if switched {
+                Some(state.active_tab_index)
+            } else {
+                None
+            };
             ShortcutResult {
                 consumed: true,
                 tab_switched: switched,
@@ -429,7 +414,11 @@ pub fn handle_shortcut(state: &mut ChromeState, shortcut: ChromeShortcut) -> Sho
         }
         ChromeShortcut::PrevTab => {
             let switched = state.switch_to_prev_tab();
-            let new_idx = if switched { Some(state.active_tab_index) } else { None };
+            let new_idx = if switched {
+                Some(state.active_tab_index)
+            } else {
+                None
+            };
             ShortcutResult {
                 consumed: true,
                 tab_switched: switched,
@@ -441,7 +430,11 @@ pub fn handle_shortcut(state: &mut ChromeState, shortcut: ChromeShortcut) -> Sho
             // n is 1-indexed (Ctrl+1 = index 0, Ctrl+8 = index 7).
             let idx = n.saturating_sub(1);
             let switched = state.switch_to_tab_index(idx);
-            let new_idx = if switched { Some(state.active_tab_index) } else { None };
+            let new_idx = if switched {
+                Some(state.active_tab_index)
+            } else {
+                None
+            };
             ShortcutResult {
                 consumed: true,
                 tab_switched: switched,
@@ -451,7 +444,11 @@ pub fn handle_shortcut(state: &mut ChromeState, shortcut: ChromeShortcut) -> Sho
         }
         ChromeShortcut::LastTab => {
             let switched = state.switch_to_last_tab();
-            let new_idx = if switched { Some(state.active_tab_index) } else { None };
+            let new_idx = if switched {
+                Some(state.active_tab_index)
+            } else {
+                None
+            };
             ShortcutResult {
                 consumed: true,
                 tab_switched: switched,
@@ -596,7 +593,9 @@ pub struct CollectingAuditSink {
 
 impl CollectingAuditSink {
     pub fn new() -> Self {
-        Self { events: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            events: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     pub fn drain(&self) -> Vec<ShellAuditEvent> {
@@ -646,8 +645,15 @@ pub struct ChromeRenderer {
 
 impl ChromeRenderer {
     /// Create a new chrome renderer backed by the given state.
-    pub fn new(chrome_state: Arc<RwLock<ChromeState>>, audit_sink: Arc<dyn ShellAuditSink>) -> Self {
-        Self { chrome_state, layout: None, audit_sink }
+    pub fn new(
+        chrome_state: Arc<RwLock<ChromeState>>,
+        audit_sink: Arc<dyn ShellAuditSink>,
+    ) -> Self {
+        Self {
+            chrome_state,
+            layout: None,
+            audit_sink,
+        }
     }
 
     /// Create with a no-op audit sink (for headless/test use).
@@ -685,7 +691,12 @@ impl ChromeRenderer {
         }
 
         // Render viewer class indicator + system status (only when tab bar is visible).
-        cmds.extend(self.build_status_indicator_cmds(&state, &layout, display_width, display_height));
+        cmds.extend(self.build_status_indicator_cmds(
+            &state,
+            &layout,
+            display_width,
+            display_height,
+        ));
 
         // Safe mode overlay (if active) — renders over everything.
         if state.safe_mode_active {
@@ -699,11 +710,7 @@ impl ChromeRenderer {
 
     // ── Tab bar ──────────────────────────────────────────────────────────
 
-    fn build_tab_bar_cmds(
-        &self,
-        state: &ChromeState,
-        layout: &ChromeLayout,
-    ) -> Vec<ChromeDrawCmd> {
+    fn build_tab_bar_cmds(&self, state: &ChromeState, layout: &ChromeLayout) -> Vec<ChromeDrawCmd> {
         let mut cmds = Vec::new();
 
         // Tab bar background.
@@ -721,7 +728,11 @@ impl ChromeRenderer {
         }
 
         let fits = layout.tabs_that_fit.max(1);
-        let overflow_count = if tabs.len() > fits { tabs.len() - fits } else { 0 };
+        let overflow_count = if tabs.len() > fits {
+            tabs.len() - fits
+        } else {
+            0
+        };
         let visible_count = tabs.len().min(fits);
 
         // Find which tab slice to show (ensure active tab is visible).
@@ -819,8 +830,8 @@ impl ChromeRenderer {
 
         // Health dot color.
         let dot_color = match state.health {
-            SystemHealth::AllConnected => [0.2, 0.8, 0.3, 1.0],           // green
-            SystemHealth::SomeDegraded => [0.9, 0.7, 0.1, 1.0],           // amber
+            SystemHealth::AllConnected => [0.2, 0.8, 0.3, 1.0], // green
+            SystemHealth::SomeDegraded => [0.9, 0.7, 0.1, 1.0], // amber
             SystemHealth::AllDisconnectedOrSafeMode => [0.8, 0.2, 0.2, 1.0], // red
         };
         let dot_size = 10.0;
@@ -876,7 +887,8 @@ impl ChromeRenderer {
         });
 
         // Mute control (v1-reserved: rendered disabled/greyed).
-        let mute_x = display_width - ChromeState::STATUS_INDICATOR_WIDTH_PX
+        let mute_x = display_width
+            - ChromeState::STATUS_INDICATOR_WIDTH_PX
             - ChromeState::MUTE_CONTROL_WIDTH_PX;
         cmds.push(ChromeDrawCmd {
             x: mute_x,
@@ -957,11 +969,11 @@ impl ChromeRenderer {
 /// Alpha is encoded in `[3]`. Call sites use the full array for cross-fade interpolation.
 fn viewer_class_color(vc: ViewerClass) -> [f32; 4] {
     match vc {
-        ViewerClass::Owner => [0.4, 0.7, 1.0, 1.0],         // bright blue filled
+        ViewerClass::Owner => [0.4, 0.7, 1.0, 1.0], // bright blue filled
         ViewerClass::HouseholdMember => [0.4, 0.7, 1.0, 0.7], // medium blue partial
-        ViewerClass::KnownGuest => [0.4, 0.7, 1.0, 0.4],    // outline blue
-        ViewerClass::Unknown => [0.7, 0.7, 0.7, 0.8],        // grey question
-        ViewerClass::Nobody => [0.4, 0.4, 0.4, 0.3],         // dim
+        ViewerClass::KnownGuest => [0.4, 0.7, 1.0, 0.4], // outline blue
+        ViewerClass::Unknown => [0.7, 0.7, 0.7, 0.8], // grey question
+        ViewerClass::Nobody => [0.4, 0.4, 0.4, 0.3], // dim
     }
 }
 
@@ -1034,7 +1046,11 @@ impl std::fmt::Display for DiagnosticSnapshot {
         writeln!(f, "  timestamp_mono_us:  {}", self.timestamp_mono_us)?;
         writeln!(f, "  active_lease_count: {}", self.active_lease_count)?;
         writeln!(f, "  connected_agents:   {}", self.connected_agent_count)?;
-        writeln!(f, "  tabs:               {} (active: {})", self.tab_count, self.active_tab_index)?;
+        writeln!(
+            f,
+            "  tabs:               {} (active: {})",
+            self.tab_count, self.active_tab_index
+        )?;
         writeln!(f, "  tab_bar_position:   {}", self.tab_bar_position_label)?;
         writeln!(f, "  viewer_class:       {}", self.viewer_class_label)?;
         writeln!(f, "  safe_mode:          {}", self.safe_mode_active)?;
@@ -1088,7 +1104,10 @@ mod tests {
         assert!(!state.safe_mode_active);
         assert!(!state.mute_active);
         assert_eq!(state.connected_agent_count, 0);
-        assert!(!state.capture_surface_active, "v1: capture_surface_active must always be false");
+        assert!(
+            !state.capture_surface_active,
+            "v1: capture_surface_active must always be false"
+        );
     }
 
     #[test]
@@ -1188,7 +1207,10 @@ mod tests {
 
         let result = handle_shortcut(&mut state, ChromeShortcut::NextTab);
 
-        assert!(result.consumed, "shortcut must be consumed — never routed to agents");
+        assert!(
+            result.consumed,
+            "shortcut must be consumed — never routed to agents"
+        );
         assert!(result.tab_switched);
         assert_eq!(result.new_tab_index, Some(1));
         assert_eq!(state.active_tab_index, 1);
@@ -1227,7 +1249,7 @@ mod tests {
     fn ctrl_9_switches_to_last_tab() {
         let mut state = ChromeState::new();
         for i in 1..=5 {
-            state.add_tab(i, format!("Tab {}", i));
+            state.add_tab(i, format!("Tab {i}"));
         }
 
         let result = handle_shortcut(&mut state, ChromeShortcut::LastTab);
@@ -1288,7 +1310,10 @@ mod tests {
         let mut state = ChromeState::new();
         state.viewer_class = ViewerClass::Owner;
         state.begin_viewer_class_transition(ViewerClass::Owner);
-        assert!(state.viewer_class_transition.is_none(), "no transition needed for same class");
+        assert!(
+            state.viewer_class_transition.is_none(),
+            "no transition needed for same class"
+        );
     }
 
     #[test]
@@ -1305,7 +1330,10 @@ mod tests {
 
         // Verify the payload only contains class values.
         match event.payload {
-            AuditPayload::ViewerClassChanged { old_class, new_class } => {
+            AuditPayload::ViewerClassChanged {
+                old_class,
+                new_class,
+            } => {
                 assert_eq!(old_class, ViewerClass::Owner);
                 assert_eq!(new_class, ViewerClass::Unknown);
                 // There are no other fields — privacy constraint satisfied.
@@ -1369,8 +1397,14 @@ mod tests {
 
         // No command should have zero or negative dimensions.
         for cmd in &cmds {
-            assert!(cmd.width > 0.0, "draw command width must be positive: {:?}", cmd);
-            assert!(cmd.height > 0.0, "draw command height must be positive: {:?}", cmd);
+            assert!(
+                cmd.width > 0.0,
+                "draw command width must be positive: {cmd:?}"
+            );
+            assert!(
+                cmd.height > 0.0,
+                "draw command height must be positive: {cmd:?}"
+            );
         }
     }
 
@@ -1388,7 +1422,10 @@ mod tests {
 
         let mut renderer = ChromeRenderer::new_headless(chrome_state);
         let cmds = renderer.render_chrome(1920.0, 1080.0);
-        assert!(!cmds.is_empty(), "chrome must render correctly after all agents crash");
+        assert!(
+            !cmds.is_empty(),
+            "chrome must render correctly after all agents crash"
+        );
     }
 
     // ── Chrome above all agent content ────────────────────────────────────
@@ -1415,7 +1452,10 @@ mod tests {
 
         // Chrome commands are generated independently — they do not depend on tile count.
         // This proves separability: content pass and chrome pass are decoupled.
-        assert!(!chrome_cmds.is_empty(), "chrome pass must generate commands");
+        assert!(
+            !chrome_cmds.is_empty(),
+            "chrome pass must generate commands"
+        );
     }
 
     // ── Tab bar overflow ──────────────────────────────────────────────────
@@ -1425,7 +1465,7 @@ mod tests {
         let mut state = ChromeState::new();
         // Add many tabs — more than will fit in 1920px with MIN_TAB_WIDTH_PX=80.
         for i in 0..30 {
-            state.add_tab(i, format!("Tab {}", i));
+            state.add_tab(i, format!("Tab {i}"));
         }
 
         let chrome_state = Arc::new(RwLock::new(state));
@@ -1439,7 +1479,10 @@ mod tests {
                 && (c.color[1] - 0.3).abs() < 0.01
                 && (c.color[2] - 0.5).abs() < 0.01
         });
-        assert!(has_overflow_badge, "expected overflow badge rect when tabs overflow");
+        assert!(
+            has_overflow_badge,
+            "expected overflow badge rect when tabs overflow"
+        );
     }
 
     #[test]
@@ -1466,7 +1509,10 @@ mod tests {
                 && (c.color[1] - 0.08).abs() < 0.01
                 && (c.color[2] - 0.12).abs() < 0.01
         });
-        assert!(!has_tab_bar_bg, "tab bar background must not render when position=hidden");
+        assert!(
+            !has_tab_bar_bg,
+            "tab bar background must not render when position=hidden"
+        );
 
         // Keyboard shortcuts still work when hidden.
         let mut state = chrome_state.write().unwrap();
@@ -1526,7 +1572,10 @@ mod tests {
                 && c.height == 1080.0
                 && (c.color[3] - 0.85).abs() < 0.01
         });
-        assert!(has_full_overlay, "expected full-viewport safe mode dimming overlay");
+        assert!(
+            has_full_overlay,
+            "expected full-viewport safe mode dimming overlay"
+        );
 
         // Should have a "Resume" button (blue rect).
         let has_resume_btn = cmds.iter().any(|c| {
@@ -1534,7 +1583,10 @@ mod tests {
                 && (c.color[1] - 0.5).abs() < 0.01
                 && (c.color[2] - 0.9).abs() < 0.01
         });
-        assert!(has_resume_btn, "expected Resume button in safe mode overlay");
+        assert!(
+            has_resume_btn,
+            "expected Resume button in safe mode overlay"
+        );
     }
 
     // ── Diagnostic surface ────────────────────────────────────────────────
@@ -1554,7 +1606,10 @@ mod tests {
         assert_eq!(snap.viewer_class_label, "owner");
         assert_eq!(snap.active_lease_count, 5);
         assert!(!snap.safe_mode_active);
-        assert!(!snap.capture_surface_active, "v1: capture_surface_active must be false");
+        assert!(
+            !snap.capture_surface_active,
+            "v1: capture_surface_active must be false"
+        );
         assert_eq!(snap.timestamp_mono_us, 999_000);
     }
 
@@ -1562,7 +1617,7 @@ mod tests {
     fn diagnostic_display_formats_correctly() {
         let state = ChromeState::new();
         let snap = collect_diagnostic(&state, 0, 0);
-        let output = format!("{}", snap);
+        let output = format!("{snap}");
         assert!(output.contains("tze_hud Chrome Diagnostic Snapshot"));
         assert!(output.contains("unknown"));
     }
@@ -1626,7 +1681,10 @@ mod tests {
         // Chrome must render regardless of what policies are being evaluated.
         let cmds = renderer.render_chrome(1920.0, 1080.0);
 
-        assert!(!cmds.is_empty(), "chrome must be visible during policy evaluation");
+        assert!(
+            !cmds.is_empty(),
+            "chrome must be visible during policy evaluation"
+        );
 
         // Verify health dot is green (AllConnected).
         let has_green_dot = cmds.iter().any(|c| {
@@ -1635,7 +1693,10 @@ mod tests {
             (c.color[1] - 0.8).abs() < 0.01 &&
             (c.color[2] - 0.3).abs() < 0.01
         });
-        assert!(has_green_dot, "expected green health dot for AllConnected with 3 agents");
+        assert!(
+            has_green_dot,
+            "expected green health dot for AllConnected with 3 agents"
+        );
     }
 
     // ── Separable render passes ───────────────────────────────────────────
@@ -1646,7 +1707,7 @@ mod tests {
         // rendering are separable passes. V1 ships overlay-only redaction
         // (capture_surface_active always false).
         let chrome_state = Arc::new(RwLock::new({
-            let mut state = ChromeState::new();
+            let state = ChromeState::new();
             assert!(
                 !state.capture_surface_active,
                 "v1 invariant: capture_surface_active must always be false"

@@ -45,9 +45,10 @@ pub const GRACE_PRECISION_MS: u64 = 100;
 ///   (lines 231–233, adapted).
 /// - `BudgetWarning`: amber border for budget ≥ 80% (line 170).
 /// - `None`: normal rendering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum TileVisualHint {
     /// Tile renders normally.
+    #[default]
     None,
     /// Agent is disconnected; tile is frozen at last state.
     /// Displayed within 1 frame of `disconnect` (spec line 133).
@@ -57,12 +58,6 @@ pub enum TileVisualHint {
     StaleBadge,
     /// Budget soft limit (≥ 80%) reached; amber border.
     BudgetWarning,
-}
-
-impl Default for TileVisualHint {
-    fn default() -> Self {
-        TileVisualHint::None
-    }
 }
 
 // ─── GracePeriodTimer ────────────────────────────────────────────────────────
@@ -91,7 +86,11 @@ pub struct GracePeriodTimer {
 impl GracePeriodTimer {
     /// Create a new `GracePeriodTimer`.
     pub fn new(lease_id: SceneId, orphaned_at_ms: u64, grace_ms: u64) -> Self {
-        Self { lease_id, orphaned_at_ms, grace_ms }
+        Self {
+            lease_id,
+            orphaned_at_ms,
+            grace_ms,
+        }
     }
 
     /// Milliseconds elapsed since orphaning.
@@ -177,9 +176,7 @@ pub enum ZonePublishResult {
 ///   publishes rejected)
 /// - SUSPENDED → `RejectedSafeModeActive`
 /// - terminal states → `RejectedLeaseTerminal`
-pub fn check_zone_publish_allowed(
-    lease_state: crate::lease::LeaseState,
-) -> ZonePublishResult {
+pub fn check_zone_publish_allowed(lease_state: crate::lease::LeaseState) -> ZonePublishResult {
     use crate::lease::LeaseState;
     match lease_state {
         LeaseState::Active => ZonePublishResult::Accepted,
@@ -304,11 +301,16 @@ mod tests {
     #[test]
     fn zone_publish_rejected_when_terminal() {
         use crate::lease::LeaseState;
-        for state in [LeaseState::Revoked, LeaseState::Expired, LeaseState::Released, LeaseState::Denied] {
+        for state in [
+            LeaseState::Revoked,
+            LeaseState::Expired,
+            LeaseState::Released,
+            LeaseState::Denied,
+        ] {
             assert_eq!(
                 check_zone_publish_allowed(state),
                 ZonePublishResult::RejectedLeaseTerminal,
-                "expected RejectedLeaseTerminal for {:?}", state
+                "expected RejectedLeaseTerminal for {state:?}"
             );
         }
     }

@@ -217,7 +217,9 @@ mod tests {
     fn test_safe_mode_is_first_in_drain_when_pushed_first() {
         let mut q = OverrideCommandQueue::new();
         q.push(OverrideCommand::SafeMode);
-        q.push(OverrideCommand::Dismiss { tile_id: SceneId::new() });
+        q.push(OverrideCommand::Dismiss {
+            tile_id: SceneId::new(),
+        });
 
         let cmds = q.drain();
         assert_eq!(cmds[0], OverrideCommand::SafeMode);

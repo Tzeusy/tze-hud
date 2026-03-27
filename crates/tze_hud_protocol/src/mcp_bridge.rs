@@ -96,7 +96,8 @@ mod tests {
 
     #[test]
     fn test_build_runtime_error_data_minimal() {
-        let data = build_runtime_error_data(error_codes::LEASE_EXPIRED, "Lease expired", None, None);
+        let data =
+            build_runtime_error_data(error_codes::LEASE_EXPIRED, "Lease expired", None, None);
         assert_eq!(data["error_code"], "LEASE_EXPIRED");
         assert_eq!(data["message"], "Lease expired");
         assert!(data.get("context").is_none() || data["context"].is_null());

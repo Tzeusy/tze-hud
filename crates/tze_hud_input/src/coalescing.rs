@@ -18,9 +18,11 @@
 //! 3. Returns `CoalesceResult` indicating whether the incoming event was merged
 //!    into an existing slot (no need to enqueue) or should be enqueued normally.
 
+use crate::envelope::{
+    InputEnvelope, PointerEnterData, PointerLeaveData, PointerMoveData, ScrollOffsetChangedData,
+};
 use std::collections::HashMap;
 use tze_hud_scene::SceneId;
-use crate::envelope::{InputEnvelope, PointerMoveData, PointerEnterData, PointerLeaveData, ScrollOffsetChangedData};
 
 /// Outcome from a coalescing attempt.
 #[derive(Debug, PartialEq, Eq)]
@@ -45,10 +47,7 @@ impl EventCoalescer {
     ///
     /// If found, the existing entry is **replaced** with the incoming event
     /// (latest position wins). Returns `Merged` if replaced, `NotMerged` otherwise.
-    pub fn coalesce_move(
-        queue: &mut [InputEnvelope],
-        incoming: PointerMoveData,
-    ) -> CoalesceResult {
+    pub fn coalesce_move(queue: &mut [InputEnvelope], incoming: PointerMoveData) -> CoalesceResult {
         for slot in queue.iter_mut().rev() {
             if let InputEnvelope::PointerMove(existing) = slot
                 && existing.tile_id == incoming.tile_id
@@ -419,7 +418,11 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, InputEnvelope::PointerMove(_)))
             .collect();
-        assert_eq!(moves.len(), 1, "only one PointerMove should survive coalescing");
+        assert_eq!(
+            moves.len(),
+            1,
+            "only one PointerMove should survive coalescing"
+        );
         if let InputEnvelope::PointerMove(d) = &moves[0] {
             // Latest move was i=9
             assert!((d.local_x - 9.0).abs() < 0.001);
@@ -501,6 +504,10 @@ mod tests {
             .iter()
             .filter(|e| matches!(e, InputEnvelope::PointerDown(_)))
             .collect();
-        assert_eq!(downs.len(), 2, "both transactional down events must survive");
+        assert_eq!(
+            downs.len(),
+            2,
+            "both transactional down events must survive"
+        );
     }
 }

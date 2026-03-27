@@ -226,7 +226,7 @@ pub fn build_redaction_cmds(bounds: Rect, style: RedactionStyle) -> Vec<ChromeDr
             // Pre-check: if the grid would exceed the cap, skip accent rects
             // entirely (the base fill above already covers the tile).
             let total_cells = cols as usize * rows as usize;
-            let accent_cells = (total_cells + 1) / 2; // ceil(total/2) worst-case
+            let accent_cells = total_cells.div_ceil(2); // ceil(total/2) worst-case
             if accent_cells <= MAX_PATTERN_ACCENT_RECTS {
                 for row in 0..rows {
                     for col in 0..cols {
@@ -321,7 +321,11 @@ impl RedactionFrame {
                 tile_redacted[idx] = is_tile_redacted(viewer_class, cls);
             }
         }
-        Self { viewer_class, style, tile_redacted }
+        Self {
+            viewer_class,
+            style,
+            tile_redacted,
+        }
     }
 
     /// Returns `true` if the tile at `tile_index` should have its content replaced
@@ -350,8 +354,7 @@ mod tests {
         ] {
             assert!(
                 !is_tile_redacted(ViewerClass::Owner, cls),
-                "Owner must never be redacted (classification={:?})",
-                cls
+                "Owner must never be redacted (classification={cls:?})"
             );
         }
     }
@@ -359,20 +362,35 @@ mod tests {
     /// WHEN HouseholdMember views Public or Household THEN not redacted.
     #[test]
     fn household_member_sees_public_and_household() {
-        assert!(!is_tile_redacted(ViewerClass::HouseholdMember, ContentClassification::Public));
-        assert!(!is_tile_redacted(ViewerClass::HouseholdMember, ContentClassification::Household));
-        assert!(is_tile_redacted(ViewerClass::HouseholdMember, ContentClassification::Private));
-        assert!(is_tile_redacted(ViewerClass::HouseholdMember, ContentClassification::Sensitive));
+        assert!(!is_tile_redacted(
+            ViewerClass::HouseholdMember,
+            ContentClassification::Public
+        ));
+        assert!(!is_tile_redacted(
+            ViewerClass::HouseholdMember,
+            ContentClassification::Household
+        ));
+        assert!(is_tile_redacted(
+            ViewerClass::HouseholdMember,
+            ContentClassification::Private
+        ));
+        assert!(is_tile_redacted(
+            ViewerClass::HouseholdMember,
+            ContentClassification::Sensitive
+        ));
     }
 
     /// WHEN KnownGuest/Unknown/Nobody views non-Public THEN redacted.
     #[test]
     fn restricted_viewers_see_only_public() {
-        for viewer in [ViewerClass::KnownGuest, ViewerClass::Unknown, ViewerClass::Nobody] {
+        for viewer in [
+            ViewerClass::KnownGuest,
+            ViewerClass::Unknown,
+            ViewerClass::Nobody,
+        ] {
             assert!(
                 !is_tile_redacted(viewer, ContentClassification::Public),
-                "viewer {:?} must see Public",
-                viewer
+                "viewer {viewer:?} must see Public"
             );
             for cls in [
                 ContentClassification::Household,
@@ -381,9 +399,7 @@ mod tests {
             ] {
                 assert!(
                     is_tile_redacted(viewer, cls),
-                    "viewer {:?} must not see {:?}",
-                    viewer,
-                    cls
+                    "viewer {viewer:?} must not see {cls:?}"
                 );
             }
         }
@@ -403,7 +419,10 @@ mod tests {
         // Placeholder must fill tile bounds (layout preserved)
         let bounds = Rect::new(100.0, 200.0, 400.0, 300.0);
         let cmds = build_redaction_cmds(bounds, RedactionStyle::Blank);
-        assert!(!cmds.is_empty(), "redaction placeholder must produce draw commands");
+        assert!(
+            !cmds.is_empty(),
+            "redaction placeholder must produce draw commands"
+        );
 
         // All commands must be within tile bounds
         for cmd in &cmds {
@@ -423,7 +442,10 @@ mod tests {
         let state = TileRedactionState::Redacted {
             classification: ContentClassification::Private,
         };
-        assert!(!hit_regions_enabled(&state), "hit regions must be disabled when redacted");
+        assert!(
+            !hit_regions_enabled(&state),
+            "hit regions must be disabled when redacted"
+        );
     }
 
     /// Scenario: Redaction removed on viewer change (spec line 193).
@@ -441,7 +463,10 @@ mod tests {
 
         // Clear state means hit regions are re-enabled
         let clear_state = TileRedactionState::Clear;
-        assert!(hit_regions_enabled(&clear_state), "hit regions must be enabled when clear");
+        assert!(
+            hit_regions_enabled(&clear_state),
+            "hit regions must be enabled when clear"
+        );
     }
 
     /// Scenario: Agent cannot detect redaction (spec line 241).
@@ -452,7 +477,9 @@ mod tests {
     fn agent_cannot_detect_redaction_state_type_check() {
         // TileRedactionState is in the shell module.  This test asserts that
         // `is_redacted()` returns the correct value without any agent-facing API.
-        let redacted = TileRedactionState::Redacted { classification: ContentClassification::Private };
+        let redacted = TileRedactionState::Redacted {
+            classification: ContentClassification::Private,
+        };
         let clear = TileRedactionState::Clear;
 
         assert!(redacted.is_redacted());
@@ -467,7 +494,11 @@ mod tests {
         let bounds = Rect::new(50.0, 75.0, 300.0, 200.0);
         let cmds = build_redaction_cmds(bounds, RedactionStyle::Blank);
 
-        assert_eq!(cmds.len(), 1, "blank style should produce exactly one draw command");
+        assert_eq!(
+            cmds.len(),
+            1,
+            "blank style should produce exactly one draw command"
+        );
         let cmd = &cmds[0];
         assert!((cmd.x - bounds.x).abs() < 0.01);
         assert!((cmd.y - bounds.y).abs() < 0.01);
@@ -482,7 +513,10 @@ mod tests {
         let cmds = build_redaction_cmds(bounds, RedactionStyle::Pattern);
 
         // At least a base rect plus some accent cells
-        assert!(cmds.len() > 1, "pattern style must produce more than one draw command");
+        assert!(
+            cmds.len() > 1,
+            "pattern style must produce more than one draw command"
+        );
 
         // All commands must be within tile bounds (with 1px tolerance)
         for cmd in &cmds {
@@ -544,8 +578,14 @@ mod tests {
         let base = &pattern_cmds[0];
         assert!((base.x - bounds.x).abs() < 0.01, "pattern base x mismatch");
         assert!((base.y - bounds.y).abs() < 0.01, "pattern base y mismatch");
-        assert!((base.width - bounds.width).abs() < 0.01, "pattern base width mismatch");
-        assert!((base.height - bounds.height).abs() < 0.01, "pattern base height mismatch");
+        assert!(
+            (base.width - bounds.width).abs() < 0.01,
+            "pattern base width mismatch"
+        );
+        assert!(
+            (base.height - bounds.height).abs() < 0.01,
+            "pattern base height mismatch"
+        );
     }
 
     // ── RedactionFrame ────────────────────────────────────────────────────
@@ -565,7 +605,10 @@ mod tests {
         );
 
         assert!(!frame.is_redacted(0), "public tile must not be redacted");
-        assert!(frame.is_redacted(1), "private tile must be redacted for Unknown viewer");
+        assert!(
+            frame.is_redacted(1),
+            "private tile must be redacted for Unknown viewer"
+        );
         assert!(!frame.is_redacted(2), "public tile must not be redacted");
     }
 
@@ -585,7 +628,10 @@ mod tests {
         );
 
         for i in 0..4 {
-            assert!(!frame.is_redacted(i), "Owner must not have any tile redacted (tile {})", i);
+            assert!(
+                !frame.is_redacted(i),
+                "Owner must not have any tile redacted (tile {i})"
+            );
         }
     }
 
@@ -596,14 +642,25 @@ mod tests {
         let classifications = &[(0, ContentClassification::Private)];
 
         // Unknown viewer → redacted
-        let frame_unknown =
-            RedactionFrame::build(ViewerClass::Unknown, RedactionStyle::Blank, 1, classifications);
+        let frame_unknown = RedactionFrame::build(
+            ViewerClass::Unknown,
+            RedactionStyle::Blank,
+            1,
+            classifications,
+        );
         assert!(frame_unknown.is_redacted(0));
 
         // Owner viewer → not redacted
-        let frame_owner =
-            RedactionFrame::build(ViewerClass::Owner, RedactionStyle::Blank, 1, classifications);
-        assert!(!frame_owner.is_redacted(0), "redaction must clear when viewer becomes Owner");
+        let frame_owner = RedactionFrame::build(
+            ViewerClass::Owner,
+            RedactionStyle::Blank,
+            1,
+            classifications,
+        );
+        assert!(
+            !frame_owner.is_redacted(0),
+            "redaction must clear when viewer becomes Owner"
+        );
     }
 
     // ── Hit region gating ─────────────────────────────────────────────────
@@ -611,16 +668,23 @@ mod tests {
     /// WHEN tile is redacted THEN hit regions are disabled.
     #[test]
     fn hit_regions_disabled_when_redacted() {
-        let state =
-            TileRedactionState::Redacted { classification: ContentClassification::Sensitive };
-        assert!(!hit_regions_enabled(&state), "hit regions must be disabled when tile is redacted");
+        let state = TileRedactionState::Redacted {
+            classification: ContentClassification::Sensitive,
+        };
+        assert!(
+            !hit_regions_enabled(&state),
+            "hit regions must be disabled when tile is redacted"
+        );
     }
 
     /// WHEN tile is clear THEN hit regions are enabled.
     #[test]
     fn hit_regions_enabled_when_clear() {
         let state = TileRedactionState::Clear;
-        assert!(hit_regions_enabled(&state), "hit regions must be enabled when tile is clear");
+        assert!(
+            hit_regions_enabled(&state),
+            "hit regions must be enabled when tile is clear"
+        );
     }
 
     // ── Capture-safe architecture ─────────────────────────────────────────
@@ -663,8 +727,12 @@ mod tests {
         ];
 
         // --- Unknown viewer ---
-        let frame_unknown =
-            RedactionFrame::build(ViewerClass::Unknown, RedactionStyle::Pattern, 2, scene_tiles);
+        let frame_unknown = RedactionFrame::build(
+            ViewerClass::Unknown,
+            RedactionStyle::Pattern,
+            2,
+            scene_tiles,
+        );
 
         assert!(
             !frame_unknown.is_redacted(0),
@@ -678,11 +746,15 @@ mod tests {
         // Placeholder for the sensitive tile must cover its bounds.
         let sensitive_bounds = Rect::new(980.0, 0.0, 940.0, 1080.0);
         let cmds = build_redaction_cmds(sensitive_bounds, RedactionStyle::Pattern);
-        assert!(!cmds.is_empty(), "redaction placeholder for sensitive tile must produce commands");
+        assert!(
+            !cmds.is_empty(),
+            "redaction placeholder for sensitive tile must produce commands"
+        );
 
         // Hit regions on the sensitive tile must be disabled.
-        let sensitive_state =
-            TileRedactionState::Redacted { classification: ContentClassification::Sensitive };
+        let sensitive_state = TileRedactionState::Redacted {
+            classification: ContentClassification::Sensitive,
+        };
         assert!(!hit_regions_enabled(&sensitive_state));
 
         // --- Owner viewer ---
@@ -716,7 +788,13 @@ mod tests {
         assert!(!cmds.is_empty());
         // If we change the viewer class, we re-evaluate is_tile_redacted() and
         // rebuild the commands — no dependency on the content pass.
-        assert!(!is_tile_redacted(ViewerClass::Owner, ContentClassification::Private));
-        assert!(is_tile_redacted(ViewerClass::Unknown, ContentClassification::Private));
+        assert!(!is_tile_redacted(
+            ViewerClass::Owner,
+            ContentClassification::Private
+        ));
+        assert!(is_tile_redacted(
+            ViewerClass::Unknown,
+            ContentClassification::Private
+        ));
     }
 }

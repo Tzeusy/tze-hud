@@ -93,8 +93,16 @@ pub fn compute_spread(arrivals: &[TileArrival]) -> (DurationUs, Vec<SceneId>) {
         return (DurationUs::ZERO, vec![]);
     }
 
-    let min_arrival = arrivals.iter().map(|a| a.arrival_wall_us).min().unwrap_or(WallUs::NOT_SET);
-    let max_arrival = arrivals.iter().map(|a| a.arrival_wall_us).max().unwrap_or(WallUs::NOT_SET);
+    let min_arrival = arrivals
+        .iter()
+        .map(|a| a.arrival_wall_us)
+        .min()
+        .unwrap_or(WallUs::NOT_SET);
+    let max_arrival = arrivals
+        .iter()
+        .map(|a| a.arrival_wall_us)
+        .max()
+        .unwrap_or(WallUs::NOT_SET);
     let spread = DurationUs(max_arrival.0.saturating_sub(min_arrival.0));
 
     let slow_tiles: Vec<SceneId> = arrivals
@@ -166,7 +174,10 @@ mod tests {
     use super::*;
 
     fn arrival(tile_id: SceneId, arrival_wall_us: u64) -> TileArrival {
-        TileArrival { tile_id, arrival_wall_us: WallUs(arrival_wall_us) }
+        TileArrival {
+            tile_id,
+            arrival_wall_us: WallUs(arrival_wall_us),
+        }
     }
 
     // ── compute_spread ────────────────────────────────────────────────────────
@@ -228,8 +239,10 @@ mod tests {
         let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
 
         assert_eq!(record.sync_group_max_drift_us, DurationUs(300));
-        assert!(!record.sync_drift_budget_exceeded,
-            "300µs < 500µs budget should not exceed");
+        assert!(
+            !record.sync_drift_budget_exceeded,
+            "300µs < 500µs budget should not exceed"
+        );
         assert!(record.stale_tiles.is_empty());
         assert!(alerts.is_empty());
     }
@@ -251,10 +264,14 @@ mod tests {
         let (record, alerts) = evaluate_frame_drift(&[group], DEFAULT_SYNC_DRIFT_BUDGET_US);
 
         assert_eq!(record.sync_group_max_drift_us, DurationUs(800));
-        assert!(record.sync_drift_budget_exceeded,
-            "800µs > 500µs budget must set exceeded flag");
-        assert!(record.stale_tiles.contains(&t2),
-            "t2 (slow tile) must be in stale_tiles");
+        assert!(
+            record.sync_drift_budget_exceeded,
+            "800µs > 500µs budget must set exceeded flag"
+        );
+        assert!(
+            record.stale_tiles.contains(&t2),
+            "t2 (slow tile) must be in stale_tiles"
+        );
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0].group_id, gid);
         assert_eq!(alerts[0].observed_drift_us, DurationUs(800));
@@ -294,11 +311,13 @@ mod tests {
             tile_arrivals: vec![arrival(t3, 3_000_000), arrival(t4, 3_000_700)],
         };
 
-        let (record, alerts) =
-            evaluate_frame_drift(&[g1, g2], DEFAULT_SYNC_DRIFT_BUDGET_US);
+        let (record, alerts) = evaluate_frame_drift(&[g1, g2], DEFAULT_SYNC_DRIFT_BUDGET_US);
 
-        assert_eq!(record.sync_group_max_drift_us, DurationUs(700),
-            "max drift should be worst across both groups");
+        assert_eq!(
+            record.sync_group_max_drift_us,
+            DurationUs(700),
+            "max drift should be worst across both groups"
+        );
         assert!(record.sync_drift_budget_exceeded);
         // Only t4 from group 2 is stale
         assert!(!record.stale_tiles.contains(&t2));

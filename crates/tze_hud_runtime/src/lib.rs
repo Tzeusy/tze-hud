@@ -76,180 +76,165 @@
 //! - [`quiet_hours`] — quiet-hours gate (deliver / queue / discard) and
 //!   per-zone FIFO queues with LatestWins coalescing.
 
+pub mod admission;
 pub mod agent_events;
+pub mod attention_budget;
 pub mod budget;
 pub mod channels;
 pub mod degradation;
+pub mod event_bus;
 pub mod headless;
 pub mod mcp;
-pub mod windowed;
-pub mod runtime_context;
-pub mod subscriptions;
-pub mod event_bus;
-pub mod quiet_hours;
-pub mod attention_budget;
-pub mod shell;
-pub mod tab_switch_trigger;
 pub mod pipeline;
-pub mod threads;
-pub mod window;
-pub mod session;
-pub mod admission;
-pub mod trace_capture;
+pub mod quiet_hours;
 pub mod reload_triggers;
+pub mod runtime_context;
+pub mod session;
+pub mod shell;
+pub mod subscriptions;
+pub mod tab_switch_trigger;
+pub mod threads;
+pub mod trace_capture;
+pub mod window;
+pub mod windowed;
 
-pub use agent_events::{
-    AgentEventHandler, EmissionError, EmissionOutcome, EmissionResult,
-    MAX_PAYLOAD_BYTES, DEFAULT_MAX_EVENTS_PER_SECOND,
-};
 pub use agent_events::rate_limiter::AgentEventRateLimiter;
+pub use agent_events::{
+    AgentEventHandler, DEFAULT_MAX_EVENTS_PER_SECOND, EmissionError, EmissionOutcome,
+    EmissionResult, MAX_PAYLOAD_BYTES,
+};
+pub use attention_budget::{
+    AttentionBudgetOutcome, AttentionBudgetTracker, DEFAULT_AGENT_BUDGET,
+    DEFAULT_STACK_ZONE_BUDGET, DEFAULT_ZONE_BUDGET, EarnedUrgencyConfig, EarnedUrgencyTracker,
+    ROLLING_WINDOW_US, UrgencyRecord, WARNING_FRACTION,
+};
 pub use budget::{
-    AgentResourceState, BudgetCheckOutcome, BudgetEnforcer, BudgetState,
-    BudgetTelemetrySink, CollectingTelemetrySink, NoopTelemetrySink,
+    AgentResourceState, BudgetCheckOutcome, BudgetEnforcer, BudgetState, BudgetTelemetrySink,
+    CollectingTelemetrySink, NoopTelemetrySink,
 };
 pub use channels::{
-    ChannelSet, OverflowCounters,
+    BackpressureReceiver,
+    // Backpressure channel types
+    BackpressureSender,
+    ChannelSet,
+    CoalesceKeyReceiver,
+    // Coalesce-key channel types
+    CoalesceKeySender,
+    CoalesceKeyed,
+    EphemeralEventKind,
+    FrameReadyRx,
+    // FrameReadySignal
+    FrameReadyTx,
+    // Capacity constants
+    INPUT_EVENT_CAPACITY,
+    // Message payloads
+    InputEvent,
+    InputEventKind,
+    LocalPatchKind,
+    OverflowCounters,
     // Ring-buffer types
     RingBuffer,
-    // Backpressure channel types
-    BackpressureSender, BackpressureReceiver, backpressure_channel,
-    // Coalesce-key channel types
-    CoalesceKeySender, CoalesceKeyReceiver, CoalesceKeyed,
-    StateStreamKey, StateStreamEventKind,
-    coalesce_key_channel,
-    // FrameReadySignal
-    FrameReadyTx, FrameReadyRx, frame_ready_channel,
-    // Message payloads
-    InputEvent, InputEventKind,
-    SceneLocalPatch, LocalPatchKind,
-    SceneEventEphemeral, EphemeralEventKind,
-    SceneEventTransactional, TransactionalEventKind,
-    SceneEventStateStream, StateStreamPayload,
+    SCENE_EVENT_EPHEMERAL_CAPACITY,
+    SCENE_EVENT_STATE_STREAM_CAPACITY,
+    SCENE_EVENT_TRANSACTIONAL_CAPACITY,
+    SCENE_LOCAL_PATCH_CAPACITY,
+    SceneEventEphemeral,
+    SceneEventStateStream,
+    SceneEventTransactional,
+    SceneLocalPatch,
+    StateStreamEventKind,
+    StateStreamKey,
+    StateStreamPayload,
+    TELEMETRY_RECORD_CAPACITY,
     TelemetryRecord,
-    // Capacity constants
-    INPUT_EVENT_CAPACITY, SCENE_LOCAL_PATCH_CAPACITY,
-    SCENE_EVENT_EPHEMERAL_CAPACITY, TELEMETRY_RECORD_CAPACITY,
-    SCENE_EVENT_TRANSACTIONAL_CAPACITY, SCENE_EVENT_STATE_STREAM_CAPACITY,
+    TransactionalEventKind,
+    backpressure_channel,
+    coalesce_key_channel,
+    frame_ready_channel,
 };
-pub use degradation::{
-    DegradationConfig, DegradationController, DegradationLevel, TileDescriptor,
+pub use degradation::{DegradationConfig, DegradationController, DegradationLevel, TileDescriptor};
+pub use event_bus::{
+    AGGREGATE_RATE_CAP, AggregateRateLimiter, ClassifiedEvent, EventBus, InterruptionClass,
+    SubscriberQueue,
 };
 pub use headless::HeadlessRuntime;
 pub use mcp::{McpServerConfig, start_mcp_http_server};
-pub use windowed::{WindowedRuntime, WindowedConfig};
+pub use quiet_hours::{
+    GateDecision, QuietHoursConfig, QuietHoursGate, ZoneContentionPolicy, ZoneQueue,
+};
 pub use runtime_context::{FallbackPolicy, RuntimeContext, SharedRuntimeContext};
-pub use subscriptions::{
-    AgentSubscriptions, Subscription, SubscriptionChangeOutcome, SubscriptionRegistry,
-    CATEGORY_AGENT_EVENTS, CATEGORY_ATTENTION_EVENTS, CATEGORY_DEGRADATION_NOTICES,
-    CATEGORY_FOCUS_EVENTS, CATEGORY_INPUT_EVENTS, CATEGORY_LEASE_CHANGES,
-    CATEGORY_SCENE_TOPOLOGY, CATEGORY_TELEMETRY_FRAMES, CATEGORY_ZONE_EVENTS,
-    MAX_SUBSCRIPTIONS_PER_AGENT, MANDATORY_CATEGORIES,
-    category_prefix, required_capability,
-};
-pub use event_bus::{
-    AggregateRateLimiter, ClassifiedEvent, EventBus, InterruptionClass,
-    SubscriberQueue, AGGREGATE_RATE_CAP,
-};
-pub use quiet_hours::{GateDecision, QuietHoursConfig, QuietHoursGate, ZoneContentionPolicy, ZoneQueue};
-pub use attention_budget::{
-    AttentionBudgetOutcome, AttentionBudgetTracker, EarnedUrgencyConfig, EarnedUrgencyTracker,
-    UrgencyRecord, DEFAULT_AGENT_BUDGET, DEFAULT_ZONE_BUDGET, DEFAULT_STACK_ZONE_BUDGET,
-    WARNING_FRACTION, ROLLING_WINDOW_US,
-};
 pub use shell::chrome::{
-    AgentVisibleTopology, AuditPayload, AuditTrigger, ChromeLayout,
-    ChromeRenderer, ChromeShortcut, ChromeState, ChromeTab, CollectingAuditSink,
-    DiagnosticSnapshot, DismissTileResult, NoopAuditSink, RevokeReason, SafeModeEntryReason,
-    ShellAuditEvent, ShellAuditSink, ShortcutResult, SystemHealth, TabBarPosition,
-    ViewerClass, ViewerClassTransition, collect_diagnostic, handle_shortcut,
-    strip_chrome_from_topology,
+    AgentVisibleTopology, AuditPayload, AuditTrigger, ChromeLayout, ChromeRenderer, ChromeShortcut,
+    ChromeState, ChromeTab, CollectingAuditSink, DiagnosticSnapshot, DismissTileResult,
+    NoopAuditSink, RevokeReason, SafeModeEntryReason, ShellAuditEvent, ShellAuditSink,
+    ShortcutResult, SystemHealth, TabBarPosition, ViewerClass, ViewerClassTransition,
+    collect_diagnostic, handle_shortcut, strip_chrome_from_topology,
 };
 pub use shell::safe_mode::{
-    classify_safe_mode_input, LeaseResumeInfo, SafeModeController, SafeModeEntryResult,
-    SafeModeExitResult, SafeModeInput, SafeModeInputResult, ShellOverrideState,
+    LeaseResumeInfo, SafeModeController, SafeModeEntryResult, SafeModeExitResult, SafeModeInput,
+    SafeModeInputResult, ShellOverrideState, classify_safe_mode_input,
 };
+pub use subscriptions::{
+    AgentSubscriptions, CATEGORY_AGENT_EVENTS, CATEGORY_ATTENTION_EVENTS,
+    CATEGORY_DEGRADATION_NOTICES, CATEGORY_FOCUS_EVENTS, CATEGORY_INPUT_EVENTS,
+    CATEGORY_LEASE_CHANGES, CATEGORY_SCENE_TOPOLOGY, CATEGORY_TELEMETRY_FRAMES,
+    CATEGORY_ZONE_EVENTS, MANDATORY_CATEGORIES, MAX_SUBSCRIPTIONS_PER_AGENT, Subscription,
+    SubscriptionChangeOutcome, SubscriptionRegistry, category_prefix, required_capability,
+};
+pub use windowed::{WindowedConfig, WindowedRuntime};
 // ChromeDrawCmd is defined in tze_hud_compositor to avoid circular deps.
-pub use tze_hud_compositor::ChromeDrawCmd;
-pub use tab_switch_trigger::{
-    ACTIVE_TAB_CHANGED_EVENT_TYPE, AttentionGate, BlockingGate,
-    PermissiveGate, TabSwitchOutcome, TabSwitchTrigger,
-};
 pub use shell::{
-    classify_mutation_batch, EnqueueResult, FreezeManager, FreezeQueue, FreezeState,
-    MutationTrafficClass, QueuedMutation, DEFAULT_AUTO_UNFREEZE_MS,
-    DEFAULT_FREEZE_QUEUE_CAPACITY, QUEUE_PRESSURE_FRACTION,
+    DEFAULT_AUTO_UNFREEZE_MS, DEFAULT_FREEZE_QUEUE_CAPACITY, EnqueueResult, FreezeManager,
+    FreezeQueue, FreezeState, MutationTrafficClass, QUEUE_PRESSURE_FRACTION, QueuedMutation,
+    classify_mutation_batch,
 };
+pub use tab_switch_trigger::{
+    ACTIVE_TAB_CHANGED_EVENT_TYPE, AttentionGate, BlockingGate, PermissiveGate, TabSwitchOutcome,
+    TabSwitchTrigger,
+};
+pub use tze_hud_compositor::ChromeDrawCmd;
 
 pub use shell::redaction::{
-    ContentClassification,
-    RedactionStyle,
-    RedactionFrame,
-    TileRedactionState,
-    is_tile_redacted,
-    hit_regions_enabled,
-    build_redaction_cmds,
-    PATTERN_CELL_PX,
-    MAX_PATTERN_ACCENT_RECTS,
-    REDACTION_BLANK_COLOR,
-    REDACTION_PATTERN_BASE,
-    REDACTION_PATTERN_ACCENT,
+    ContentClassification, MAX_PATTERN_ACCENT_RECTS, PATTERN_CELL_PX, REDACTION_BLANK_COLOR,
+    REDACTION_PATTERN_ACCENT, REDACTION_PATTERN_BASE, RedactionFrame, RedactionStyle,
+    TileRedactionState, build_redaction_cmds, hit_regions_enabled, is_tile_redacted,
 };
 
+pub use admission::{
+    AdmissionController, AdmissionOutcome, DEFAULT_MAX_GUEST_SESSIONS,
+    DEFAULT_MAX_RESIDENT_SESSIONS, DEFAULT_MAX_TOTAL_SESSIONS, HARD_MAX_GUEST_SESSIONS,
+    HARD_MAX_RESIDENT_SESSIONS, HARD_MAX_TOTAL_SESSIONS, HotConnectSnapshot, LimitKind,
+    ResourceExhaustedDetail, SessionLimits,
+};
 pub use pipeline::{
-    FramePipeline, HitTestSnapshot, TileBoundsEntry,
-    STAGE1_BUDGET_US, STAGE2_BUDGET_US, STAGE12_COMBINED_BUDGET_US,
-    STAGE3_BUDGET_US, STAGE4_BUDGET_US, STAGE5_BUDGET_US,
-    STAGE6_BUDGET_US, STAGE7_BUDGET_US, STAGE8_BUDGET_US,
-    TOTAL_PIPELINE_BUDGET_US, INPUT_TO_LOCAL_ACK_BUDGET_US,
-    INPUT_TO_SCENE_COMMIT_BUDGET_US, INPUT_TO_NEXT_PRESENT_BUDGET_US,
-    IntakeResult, MutationIntakeStage, PendingCleanup,
-    DEFAULT_POST_REVOCATION_CLEANUP_DELAY_MS,
-    MIN_POST_REVOCATION_CLEANUP_DELAY_MS,
-    MAX_POST_REVOCATION_CLEANUP_DELAY_MS,
-};
-pub use threads::{
-    ShutdownToken, ShutdownReason, ShutdownConfig,
-    ThreadRole,
-    CompositorThreadHandle, CompositorReady,
-    spawn_compositor_thread, spawn_telemetry_thread,
-    NetworkRuntime,
-    elevate_main_thread_priority,
-    graceful_shutdown,
-};
-pub use window::{
-    WindowMode, WindowConfig, HitRegion,
-    OverlaySupport, FallbackReason,
-    resolve_window_mode, check_overlay_support,
-    should_capture_pointer_event,
+    DEFAULT_POST_REVOCATION_CLEANUP_DELAY_MS, FramePipeline, HitTestSnapshot,
+    INPUT_TO_LOCAL_ACK_BUDGET_US, INPUT_TO_NEXT_PRESENT_BUDGET_US, INPUT_TO_SCENE_COMMIT_BUDGET_US,
+    IntakeResult, MAX_POST_REVOCATION_CLEANUP_DELAY_MS, MIN_POST_REVOCATION_CLEANUP_DELAY_MS,
+    MutationIntakeStage, PendingCleanup, STAGE1_BUDGET_US, STAGE2_BUDGET_US, STAGE3_BUDGET_US,
+    STAGE4_BUDGET_US, STAGE5_BUDGET_US, STAGE6_BUDGET_US, STAGE7_BUDGET_US, STAGE8_BUDGET_US,
+    STAGE12_COMBINED_BUDGET_US, TOTAL_PIPELINE_BUDGET_US, TileBoundsEntry,
 };
 pub use session::{
-    AgentKind, SessionEnvelope, assert_memory_overhead_within_budget,
-    DEFAULT_MAX_TILES, DEFAULT_MAX_TEXTURE_BYTES, DEFAULT_MAX_UPDATE_RATE_HZ,
-    DEFAULT_MAX_NODES_PER_TILE, DEFAULT_MAX_ACTIVE_LEASES,
-    HARD_MAX_TILES, HARD_MAX_TEXTURE_BYTES, HARD_MAX_UPDATE_RATE_HZ,
-    HARD_MAX_NODES_PER_TILE, HARD_MAX_ACTIVE_LEASES,
-};
-pub use admission::{
-    AdmissionController, AdmissionOutcome, HotConnectSnapshot, LimitKind,
-    ResourceExhaustedDetail, SessionLimits,
-    DEFAULT_MAX_RESIDENT_SESSIONS, DEFAULT_MAX_GUEST_SESSIONS, DEFAULT_MAX_TOTAL_SESSIONS,
-    HARD_MAX_RESIDENT_SESSIONS, HARD_MAX_GUEST_SESSIONS, HARD_MAX_TOTAL_SESSIONS,
+    AgentKind, DEFAULT_MAX_ACTIVE_LEASES, DEFAULT_MAX_NODES_PER_TILE, DEFAULT_MAX_TEXTURE_BYTES,
+    DEFAULT_MAX_TILES, DEFAULT_MAX_UPDATE_RATE_HZ, HARD_MAX_ACTIVE_LEASES, HARD_MAX_NODES_PER_TILE,
+    HARD_MAX_TEXTURE_BYTES, HARD_MAX_TILES, HARD_MAX_UPDATE_RATE_HZ, SessionEnvelope,
+    assert_memory_overhead_within_budget,
 };
 pub use shell::badges::{
-    TileBadgeState,
+    BUDGET_WARNING_AMBER_COLOR, BUDGET_WARNING_BORDER_OPACITY, BUDGET_WARNING_BORDER_PX,
+    BackpressureSignal, BadgeFrame, DISCONNECTED_BADGE_OPACITY, DISCONNECTED_CONTENT_OPACITY,
+    DISCONNECTION_BADGE_BG_COLOR, DISCONNECTION_BADGE_ICON_COLOR, DISCONNECTION_BADGE_OFFSET_PX,
+    DISCONNECTION_BADGE_SIZE_PX, DISCONNECTION_CONTENT_SCRIM_COLOR, TileBadgeState,
     build_badge_cmds,
-    BadgeFrame,
-    BackpressureSignal,
-    DISCONNECTED_CONTENT_OPACITY,
-    DISCONNECTED_BADGE_OPACITY,
-    BUDGET_WARNING_BORDER_PX,
-    BUDGET_WARNING_BORDER_OPACITY,
-    BUDGET_WARNING_AMBER_COLOR,
-    DISCONNECTION_BADGE_SIZE_PX,
-    DISCONNECTION_BADGE_OFFSET_PX,
-    DISCONNECTION_BADGE_BG_COLOR,
-    DISCONNECTION_BADGE_ICON_COLOR,
-    DISCONNECTION_CONTENT_SCRIM_COLOR,
+};
+pub use threads::{
+    CompositorReady, CompositorThreadHandle, NetworkRuntime, ShutdownConfig, ShutdownReason,
+    ShutdownToken, ThreadRole, elevate_main_thread_priority, graceful_shutdown,
+    spawn_compositor_thread, spawn_telemetry_thread,
+};
+pub use window::{
+    FallbackReason, HitRegion, OverlaySupport, WindowConfig, WindowMode, check_overlay_support,
+    resolve_window_mode, should_capture_pointer_event,
 };
 
 // ── Record/Replay Trace capture ───────────────────────────────────────────────

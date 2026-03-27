@@ -180,10 +180,7 @@ pub fn evaluate_safety(state: &SafetyState, gpu: &GpuFailureContext) -> SafetySi
     };
 
     if let Some(reason) = tier2_reason {
-        signal = SafetySignal::most_severe(
-            signal,
-            SafetySignal::SafeModeEntry { reason },
-        );
+        signal = SafetySignal::most_severe(signal, SafetySignal::SafeModeEntry { reason });
     }
 
     // Tier 3: overlay cannot render — catastrophic exit (highest severity).
@@ -267,8 +264,7 @@ mod tests {
                     reason: SafeModeEntryReason::GpuDeviceLost
                 }
             ),
-            "Expected SafeModeEntry(GpuDeviceLost), got {:?}",
-            signal
+            "Expected SafeModeEntry(GpuDeviceLost), got {signal:?}"
         );
         assert!(signal.should_short_circuit());
     }
@@ -415,23 +411,35 @@ mod tests {
 
     #[test]
     fn test_catastrophic_exit_beats_safe_mode_entry() {
-        let a = SafetySignal::SafeModeEntry { reason: SafeModeEntryReason::GpuDeviceLost };
+        let a = SafetySignal::SafeModeEntry {
+            reason: SafeModeEntryReason::GpuDeviceLost,
+        };
         let b = SafetySignal::CatastrophicExit;
-        assert_eq!(SafetySignal::most_severe(a, b), SafetySignal::CatastrophicExit);
-        assert_eq!(SafetySignal::most_severe(b, a), SafetySignal::CatastrophicExit);
+        assert_eq!(
+            SafetySignal::most_severe(a, b),
+            SafetySignal::CatastrophicExit
+        );
+        assert_eq!(
+            SafetySignal::most_severe(b, a),
+            SafetySignal::CatastrophicExit
+        );
     }
 
     #[test]
     fn test_safe_mode_entry_beats_gpu_reconfiguration() {
         let a = SafetySignal::GpuReconfiguration;
-        let b = SafetySignal::SafeModeEntry { reason: SafeModeEntryReason::GpuDeviceLost };
+        let b = SafetySignal::SafeModeEntry {
+            reason: SafeModeEntryReason::GpuDeviceLost,
+        };
         assert_eq!(SafetySignal::most_severe(a, b), b);
     }
 
     #[test]
     fn test_safe_mode_entry_beats_nominal() {
         let a = SafetySignal::Nominal;
-        let b = SafetySignal::SafeModeEntry { reason: SafeModeEntryReason::CriticalError };
+        let b = SafetySignal::SafeModeEntry {
+            reason: SafeModeEntryReason::CriticalError,
+        };
         assert_eq!(SafetySignal::most_severe(a, b), b);
     }
 
@@ -469,10 +477,12 @@ mod tests {
 
     #[test]
     fn test_should_short_circuit_is_true_for_safe_mode_and_catastrophic() {
-        assert!(SafetySignal::SafeModeEntry {
-            reason: SafeModeEntryReason::GpuDeviceLost
-        }
-        .should_short_circuit());
+        assert!(
+            SafetySignal::SafeModeEntry {
+                reason: SafeModeEntryReason::GpuDeviceLost
+            }
+            .should_short_circuit()
+        );
         assert!(SafetySignal::CatastrophicExit.should_short_circuit());
     }
 }

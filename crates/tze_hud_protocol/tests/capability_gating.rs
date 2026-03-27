@@ -7,15 +7,15 @@
 //!
 //! Test count target: ≥10 tests.
 
+use tze_hud_protocol::auth::AuthResult;
 use tze_hud_protocol::auth::{
-    CapabilityPolicy, authenticate_session_init, negotiate_version,
-    RUNTIME_MIN_VERSION, RUNTIME_MAX_VERSION,
-};
-use tze_hud_protocol::proto::session::{
-    AuthCredential, PreSharedKeyCredential, LocalSocketCredential,
+    CapabilityPolicy, RUNTIME_MAX_VERSION, RUNTIME_MIN_VERSION, authenticate_session_init,
+    negotiate_version,
 };
 use tze_hud_protocol::proto::session::auth_credential::Credential;
-use tze_hud_protocol::auth::AuthResult;
+use tze_hud_protocol::proto::session::{
+    AuthCredential, LocalSocketCredential, PreSharedKeyCredential,
+};
 
 // ─── Capability Policy ───────────────────────────────────────────────────────
 
@@ -24,7 +24,10 @@ use tze_hud_protocol::auth::AuthResult;
 fn resident_mcp_capability_granted_when_allowed() {
     let policy = CapabilityPolicy::new(vec!["resident_mcp".to_string()]);
     let result = policy.evaluate_capability_request(&["resident_mcp".to_string()]);
-    assert!(result.is_ok(), "resident_mcp must be granted when in allowed set");
+    assert!(
+        result.is_ok(),
+        "resident_mcp must be granted when in allowed set"
+    );
     assert_eq!(result.unwrap(), vec!["resident_mcp"]);
 }
 
@@ -33,7 +36,10 @@ fn resident_mcp_capability_granted_when_allowed() {
 fn capability_request_denied_when_not_allowed() {
     let policy = CapabilityPolicy::new(vec!["read_scene_topology".to_string()]);
     let result = policy.evaluate_capability_request(&["resident_mcp".to_string()]);
-    assert!(result.is_err(), "resident_mcp must be denied when not in allowed set");
+    assert!(
+        result.is_err(),
+        "resident_mcp must be denied when not in allowed set"
+    );
     let denied = result.unwrap_err();
     assert!(denied.contains(&"resident_mcp".to_string()));
 }
@@ -42,11 +48,12 @@ fn capability_request_denied_when_not_allowed() {
 #[test]
 fn guest_policy_denies_all_capabilities() {
     let policy = CapabilityPolicy::guest();
-    let result = policy.evaluate_capability_request(&[
-        "resident_mcp".to_string(),
-        "create_tile".to_string(),
-    ]);
-    assert!(result.is_err(), "guest policy must deny all capability requests");
+    let result = policy
+        .evaluate_capability_request(&["resident_mcp".to_string(), "create_tile".to_string()]);
+    assert!(
+        result.is_err(),
+        "guest policy must deny all capability requests"
+    );
 }
 
 /// WHEN unrestricted policy THEN any capability request succeeds.
@@ -59,7 +66,10 @@ fn unrestricted_policy_allows_any_capability() {
         "access_input_events".to_string(),
         "publish_zone:subtitle".to_string(),
     ]);
-    assert!(result.is_ok(), "unrestricted policy must allow any capability");
+    assert!(
+        result.is_ok(),
+        "unrestricted policy must allow any capability"
+    );
     assert!(policy.is_unrestricted());
 }
 
@@ -72,10 +82,15 @@ fn partial_capability_request_entirely_denied() {
         "read_scene_topology".to_string(),
         "resident_mcp".to_string(), // not in allowed set
     ]);
-    assert!(result.is_err(), "partial capability request must be entirely denied");
+    assert!(
+        result.is_err(),
+        "partial capability request must be entirely denied"
+    );
     let denied = result.unwrap_err();
-    assert!(denied.contains(&"resident_mcp".to_string()),
-        "denied list must include the unauthorized capability");
+    assert!(
+        denied.contains(&"resident_mcp".to_string()),
+        "denied list must include the unauthorized capability"
+    );
 }
 
 /// WHEN guest policy created THEN is_unrestricted returns false.
@@ -90,7 +105,10 @@ fn guest_policy_is_not_unrestricted() {
 fn fine_grained_publish_zone_capability_matches_specific_zone() {
     let policy = CapabilityPolicy::new(vec!["publish_zone:subtitle".to_string()]);
     let result = policy.evaluate_capability_request(&["publish_zone:subtitle".to_string()]);
-    assert!(result.is_ok(), "publish_zone:subtitle must be granted when in allowed set");
+    assert!(
+        result.is_ok(),
+        "publish_zone:subtitle must be granted when in allowed set"
+    );
 }
 
 /// WHEN agent requests publish_zone:other with only publish_zone:subtitle THEN denied.
@@ -98,8 +116,10 @@ fn fine_grained_publish_zone_capability_matches_specific_zone() {
 fn fine_grained_publish_zone_capability_does_not_match_other_zone() {
     let policy = CapabilityPolicy::new(vec!["publish_zone:subtitle".to_string()]);
     let result = policy.evaluate_capability_request(&["publish_zone:notification".to_string()]);
-    assert!(result.is_err(),
-        "publish_zone:notification must not be granted when only publish_zone:subtitle is allowed");
+    assert!(
+        result.is_err(),
+        "publish_zone:notification must not be granted when only publish_zone:subtitle is allowed"
+    );
 }
 
 // ─── Authentication ───────────────────────────────────────────────────────────
@@ -127,8 +147,10 @@ fn psk_authentication_fails_with_wrong_key() {
         })),
     };
     let result = authenticate_session_init(Some(&cred), "", server_psk);
-    assert!(matches!(result, AuthResult::Failed(_)),
-        "wrong PSK must fail authentication");
+    assert!(
+        matches!(result, AuthResult::Failed(_)),
+        "wrong PSK must fail authentication"
+    );
 }
 
 /// WHEN local socket credential provided THEN authentication accepted unconditionally (v1).
@@ -141,8 +163,11 @@ fn local_socket_authentication_accepted_unconditionally() {
         })),
     };
     let result = authenticate_session_init(Some(&cred), "", "server-psk");
-    assert_eq!(result, AuthResult::Accepted,
-        "local socket credential must be accepted unconditionally on loopback");
+    assert_eq!(
+        result,
+        AuthResult::Accepted,
+        "local socket credential must be accepted unconditionally on loopback"
+    );
 }
 
 /// WHEN legacy PSK field used (no auth_credential) THEN falls back to legacy check.
@@ -167,8 +192,10 @@ fn legacy_psk_fallback_rejected() {
 fn empty_auth_credential_fails() {
     let cred = AuthCredential { credential: None };
     let result = authenticate_session_init(Some(&cred), "", "server-psk");
-    assert!(matches!(result, AuthResult::Failed(_)),
-        "empty AuthCredential must fail authentication");
+    assert!(
+        matches!(result, AuthResult::Failed(_)),
+        "empty AuthCredential must fail authentication"
+    );
 }
 
 // ─── Protocol version negotiation ────────────────────────────────────────────
@@ -194,8 +221,10 @@ fn version_negotiation_picks_highest_mutual_version() {
 fn version_negotiation_fails_when_no_intersection() {
     // Agent only supports pre-v1.0
     let version = negotiate_version(900, 999);
-    assert!(version.is_err(),
-        "version negotiation must fail when agent range does not intersect runtime range");
+    assert!(
+        version.is_err(),
+        "version negotiation must fail when agent range does not intersect runtime range"
+    );
 }
 
 /// WHEN agent sends min=0, max=0 (unset) THEN treated as v1.0.
@@ -211,6 +240,8 @@ fn version_negotiation_treats_zero_as_v1_0() {
 fn version_negotiation_fails_when_agent_requires_newer() {
     // Agent requires v1.2+
     let version = negotiate_version(1002, 1010);
-    assert!(version.is_err(),
-        "negotiation must fail when agent minimum exceeds runtime maximum");
+    assert!(
+        version.is_err(),
+        "negotiation must fail when agent minimum exceeds runtime maximum"
+    );
 }

@@ -115,8 +115,11 @@ mod tests {
         // Create a temp file.
         let dir = std::env::temp_dir();
         let file = dir.join("tze_hud_test_j90m_cli.toml");
-        std::fs::write(&file, b"[runtime]\nprofile = \"headless\"\n[[tabs]]\nname = \"T\"\n")
-            .unwrap();
+        std::fs::write(
+            &file,
+            b"[runtime]\nprofile = \"headless\"\n[[tabs]]\nname = \"T\"\n",
+        )
+        .unwrap();
         let result = resolve_config_path(Some(file.to_str().unwrap()));
         assert!(result.is_ok(), "should find the file");
         assert_eq!(result.unwrap(), file.to_string_lossy().as_ref());

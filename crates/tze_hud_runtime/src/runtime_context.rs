@@ -124,7 +124,6 @@ impl Default for FallbackPolicy {
 pub struct RuntimeContext {
     // ── Frozen fields ─────────────────────────────────────────────────────────
     // Immutable after construction. Require restart to change.
-
     /// Resolved display profile with budget values.
     pub profile: DisplayProfile,
 
@@ -137,7 +136,6 @@ pub struct RuntimeContext {
 
     // ── Hot-reloadable fields ─────────────────────────────────────────────────
     // Atomically swappable via SIGHUP or ReloadConfig RPC.
-
     /// Hot-reloadable policy sections: privacy, degradation, chrome,
     /// and agents.dynamic_policy.
     ///
@@ -325,9 +323,10 @@ mod tests {
 
     #[test]
     fn from_config_populates_agent_capabilities() {
-        let config = make_config(vec![
-            ("weather-agent", vec!["create_tiles", "modify_own_tiles"]),
-        ]);
+        let config = make_config(vec![(
+            "weather-agent",
+            vec!["create_tiles", "modify_own_tiles"],
+        )]);
         let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
         let caps = ctx.agent_capabilities("weather-agent").unwrap();
         assert!(caps.contains(&"create_tiles".to_string()));
@@ -443,7 +442,10 @@ mod tests {
     #[test]
     fn reload_hot_config_enables_dynamic_agents() {
         let ctx = RuntimeContext::headless_default();
-        assert!(ctx.hot_config().dynamic_policy.is_none(), "dynamic_policy absent by default");
+        assert!(
+            ctx.hot_config().dynamic_policy.is_none(),
+            "dynamic_policy absent by default"
+        );
 
         let new_hot = HotReloadableConfig {
             privacy: RawPrivacy::default(),
@@ -459,7 +461,10 @@ mod tests {
         ctx.reload_hot_config(new_hot);
 
         let hot = ctx.hot_config();
-        let dp = hot.dynamic_policy.as_ref().expect("dynamic_policy should be set");
+        let dp = hot
+            .dynamic_policy
+            .as_ref()
+            .expect("dynamic_policy should be set");
         assert!(dp.allow_dynamic_agents);
     }
 
@@ -489,9 +494,7 @@ mod tests {
     /// Frozen sections must not change after a reload.
     #[test]
     fn reload_hot_config_does_not_touch_frozen_fields() {
-        let config = make_config(vec![
-            ("my-agent", vec!["create_tiles"]),
-        ]);
+        let config = make_config(vec![("my-agent", vec!["create_tiles"])]);
         let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
 
         // Snapshot frozen state before reload.
@@ -514,22 +517,33 @@ mod tests {
         assert_eq!(ctx.profile.max_tiles, max_tiles_before);
         // Frozen agent registry unchanged.
         let policy = ctx.capability_policy_for("my-agent");
-        assert!(policy.evaluate_capability_request(&["create_tiles".to_string()]).is_ok());
+        assert!(
+            policy
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_ok()
+        );
     }
 
     // ── capability_policy_for ─────────────────────────────────────────────────
 
     #[test]
     fn registered_agent_gets_configured_capabilities() {
-        let config = make_config(vec![
-            ("agent-a", vec!["create_tiles", "read_scene_topology"]),
-        ]);
+        let config = make_config(vec![(
+            "agent-a",
+            vec!["create_tiles", "read_scene_topology"],
+        )]);
         let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
         let policy = ctx.capability_policy_for("agent-a");
         let result = policy.evaluate_capability_request(&["create_tiles".to_string()]);
-        assert!(result.is_ok(), "registered agent should be granted create_tiles");
+        assert!(
+            result.is_ok(),
+            "registered agent should be granted create_tiles"
+        );
         let result = policy.evaluate_capability_request(&["overlay_privileges".to_string()]);
-        assert!(result.is_err(), "registered agent should be denied unconfigured capability");
+        assert!(
+            result.is_err(),
+            "registered agent should be denied unconfigured capability"
+        );
     }
 
     #[test]
@@ -539,7 +553,10 @@ mod tests {
         let policy = ctx.capability_policy_for("unknown-agent");
         assert!(!policy.is_unrestricted());
         let result = policy.evaluate_capability_request(&["create_tiles".to_string()]);
-        assert!(result.is_err(), "unregistered agent should be denied under guest fallback");
+        assert!(
+            result.is_err(),
+            "unregistered agent should be denied under guest fallback"
+        );
     }
 
     #[test]
@@ -560,13 +577,29 @@ mod tests {
 
         // agent-a can create tiles but not read telemetry
         let policy_a = ctx.capability_policy_for("agent-a");
-        assert!(policy_a.evaluate_capability_request(&["create_tiles".to_string()]).is_ok());
-        assert!(policy_a.evaluate_capability_request(&["read_telemetry".to_string()]).is_err());
+        assert!(
+            policy_a
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_ok()
+        );
+        assert!(
+            policy_a
+                .evaluate_capability_request(&["read_telemetry".to_string()])
+                .is_err()
+        );
 
         // agent-b can read telemetry but not create tiles
         let policy_b = ctx.capability_policy_for("agent-b");
-        assert!(policy_b.evaluate_capability_request(&["read_telemetry".to_string()]).is_ok());
-        assert!(policy_b.evaluate_capability_request(&["create_tiles".to_string()]).is_err());
+        assert!(
+            policy_b
+                .evaluate_capability_request(&["read_telemetry".to_string()])
+                .is_ok()
+        );
+        assert!(
+            policy_b
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_err()
+        );
     }
 
     // ── Spec: Agent Registration with Per-Agent Budget Overrides ─────────────
@@ -577,19 +610,39 @@ mod tests {
         // This test encodes the core invariant: after wiring config,
         // PSK auth no longer implies unrestricted "*" — only registered
         // agents get their listed capabilities.
-        let config = make_config(vec![
-            ("my-agent", vec!["create_tiles", "modify_own_tiles", "access_input_events"]),
-        ]);
+        let config = make_config(vec![(
+            "my-agent",
+            vec!["create_tiles", "modify_own_tiles", "access_input_events"],
+        )]);
         let ctx = RuntimeContext::from_config(config, FallbackPolicy::Guest);
         let policy = ctx.capability_policy_for("my-agent");
 
         // Should NOT be unrestricted
-        assert!(!policy.is_unrestricted(), "config-registered agent policy must not be unrestricted");
+        assert!(
+            !policy.is_unrestricted(),
+            "config-registered agent policy must not be unrestricted"
+        );
 
         // Should allow exactly the listed capabilities
-        assert!(policy.evaluate_capability_request(&["create_tiles".to_string()]).is_ok());
-        assert!(policy.evaluate_capability_request(&["modify_own_tiles".to_string()]).is_ok());
-        assert!(policy.evaluate_capability_request(&["access_input_events".to_string()]).is_ok());
-        assert!(policy.evaluate_capability_request(&["overlay_privileges".to_string()]).is_err());
+        assert!(
+            policy
+                .evaluate_capability_request(&["create_tiles".to_string()])
+                .is_ok()
+        );
+        assert!(
+            policy
+                .evaluate_capability_request(&["modify_own_tiles".to_string()])
+                .is_ok()
+        );
+        assert!(
+            policy
+                .evaluate_capability_request(&["access_input_events".to_string()])
+                .is_ok()
+        );
+        assert!(
+            policy
+                .evaluate_capability_request(&["overlay_privileges".to_string()])
+                .is_err()
+        );
     }
 }

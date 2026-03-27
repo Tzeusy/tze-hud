@@ -96,8 +96,14 @@ pub enum AutoDetectResult {
 pub fn auto_detect_profile(gpu_vram_mb: u64, refresh_hz: u32) -> AutoDetectResult {
     // Step 1a: display server environment variables.
     // A display is "set" only if the variable exists AND is non-empty.
-    let display_set = std::env::var("DISPLAY").ok().filter(|v| !v.is_empty()).is_some()
-        || std::env::var("WAYLAND_DISPLAY").ok().filter(|v| !v.is_empty()).is_some();
+    let display_set = std::env::var("DISPLAY")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .is_some()
+        || std::env::var("WAYLAND_DISPLAY")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .is_some();
     if !display_set {
         return AutoDetectResult::Headless(HeadlessSignal::NoDisplayEnv);
     }
@@ -176,13 +182,21 @@ pub(crate) fn profile_ceiling_for_validation(raw: &RawConfig) -> Option<DisplayP
             let ceiling = DisplayProfile {
                 name: "custom".into(),
                 max_tiles: dp.and_then(|d| d.max_tiles).unwrap_or(base.max_tiles),
-                max_texture_mb: dp.and_then(|d| d.max_texture_mb).unwrap_or(base.max_texture_mb),
+                max_texture_mb: dp
+                    .and_then(|d| d.max_texture_mb)
+                    .unwrap_or(base.max_texture_mb),
                 max_agents: dp.and_then(|d| d.max_agents).unwrap_or(base.max_agents),
-                max_agent_update_hz: dp.and_then(|d| d.max_agent_update_hz).unwrap_or(base.max_agent_update_hz),
+                max_agent_update_hz: dp
+                    .and_then(|d| d.max_agent_update_hz)
+                    .unwrap_or(base.max_agent_update_hz),
                 target_fps: dp.and_then(|d| d.target_fps).unwrap_or(base.target_fps),
                 min_fps: dp.and_then(|d| d.min_fps).unwrap_or(base.min_fps),
-                allow_background_zones: dp.and_then(|d| d.allow_background_zones).unwrap_or(base.allow_background_zones),
-                allow_chrome_zones: dp.and_then(|d| d.allow_chrome_zones).unwrap_or(base.allow_chrome_zones),
+                allow_background_zones: dp
+                    .and_then(|d| d.allow_background_zones)
+                    .unwrap_or(base.allow_background_zones),
+                allow_chrome_zones: dp
+                    .and_then(|d| d.allow_chrome_zones)
+                    .unwrap_or(base.allow_chrome_zones),
             };
             Some(ceiling)
         }
@@ -221,7 +235,8 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
             field_path: "display_profile.extends".into(),
             expected: "\"full-display\" or \"mobile\" (headless is not extendable)".into(),
             got: "\"headless\"".into(),
-            hint: "the headless profile cannot be extended; use full-display or remove extends".into(),
+            hint: "the headless profile cannot be extended; use full-display or remove extends"
+                .into(),
         });
         return; // remaining extends checks are moot
     }
@@ -234,8 +249,7 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
             expected: "\"full-display\" or \"mobile\"".into(),
             got: format!("{extends:?}"),
             hint: format!(
-                "unknown profile {:?} in extends; valid extendable built-ins: full-display, mobile",
-                extends
+                "unknown profile {extends:?} in extends; valid extendable built-ins: full-display, mobile"
             ),
         });
         return;
@@ -245,18 +259,19 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
     // If [runtime].profile names a built-in (not "custom") and [display_profile].extends
     // names a DIFFERENT built-in, that's a conflict.
     if let Some(p) = runtime_profile
-        && matches!(p, "full-display" | "headless") && p != extends {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::ProfileExtendsConflictsWithProfile,
-                field_path: "display_profile.extends".into(),
-                expected: format!(
-                    "extends must be absent or match the built-in profile ({p:?})"
-                ),
-                got: format!("profile={p:?}, extends={extends:?}"),
-                hint: "set [runtime].profile = \"custom\" to use extends, or remove the extends field".to_string(),
-            });
-            return;
-        }
+        && matches!(p, "full-display" | "headless")
+        && p != extends
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::ProfileExtendsConflictsWithProfile,
+            field_path: "display_profile.extends".into(),
+            expected: format!("extends must be absent or match the built-in profile ({p:?})"),
+            got: format!("profile={p:?}, extends={extends:?}"),
+            hint: "set [runtime].profile = \"custom\" to use extends, or remove the extends field"
+                .to_string(),
+        });
+        return;
+    }
 
     // ── Budget and capability escalation checks ───────────────────────────────
     // Only run if the base profile is known (already checked above).
@@ -273,25 +288,34 @@ fn validate_budget_escalation(
     // Numeric budget fields.
     let numeric_checks: &[(&str, Option<u32>, u32)] = &[
         ("display_profile.max_tiles", dp.max_tiles, base.max_tiles),
-        ("display_profile.max_texture_mb", dp.max_texture_mb, base.max_texture_mb),
+        (
+            "display_profile.max_texture_mb",
+            dp.max_texture_mb,
+            base.max_texture_mb,
+        ),
         ("display_profile.max_agents", dp.max_agents, base.max_agents),
-        ("display_profile.max_agent_update_hz", dp.max_agent_update_hz, base.max_agent_update_hz),
+        (
+            "display_profile.max_agent_update_hz",
+            dp.max_agent_update_hz,
+            base.max_agent_update_hz,
+        ),
     ];
 
     for (field, override_val, base_val) in numeric_checks {
         if let Some(ov) = override_val
-            && *ov > *base_val {
-                errors.push(ConfigError {
-                    code: ConfigErrorCode::ProfileBudgetEscalation,
-                    field_path: field.to_string(),
-                    expected: format!("<= {base_val} (base profile ceiling)"),
-                    got: format!("{ov}"),
-                    hint: format!(
-                        "{field} = {ov} exceeds the base profile ceiling of {base_val}; \
+            && *ov > *base_val
+        {
+            errors.push(ConfigError {
+                code: ConfigErrorCode::ProfileBudgetEscalation,
+                field_path: field.to_string(),
+                expected: format!("<= {base_val} (base profile ceiling)"),
+                got: format!("{ov}"),
+                hint: format!(
+                    "{field} = {ov} exceeds the base profile ceiling of {base_val}; \
                          custom profiles MUST NOT escalate budgets above the base profile"
-                    ),
-                });
-            }
+                ),
+            });
+        }
     }
 
     // max_media_streams — no corresponding field in DisplayProfile yet.
@@ -300,26 +324,30 @@ fn validate_budget_escalation(
 
     // Boolean capability fields.
     if let Some(allow_bg) = dp.allow_background_zones
-        && allow_bg && !base.allow_background_zones {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::ProfileCapabilityEscalation,
-                field_path: "display_profile.allow_background_zones".into(),
-                expected: "false (base profile disallows background zones)".to_string(),
-                got: "true".into(),
-                hint: "cannot enable allow_background_zones when the base profile disables it".into(),
-            });
-        }
+        && allow_bg
+        && !base.allow_background_zones
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::ProfileCapabilityEscalation,
+            field_path: "display_profile.allow_background_zones".into(),
+            expected: "false (base profile disallows background zones)".to_string(),
+            got: "true".into(),
+            hint: "cannot enable allow_background_zones when the base profile disables it".into(),
+        });
+    }
 
     if let Some(allow_chrome) = dp.allow_chrome_zones
-        && allow_chrome && !base.allow_chrome_zones {
-            errors.push(ConfigError {
-                code: ConfigErrorCode::ProfileCapabilityEscalation,
-                field_path: "display_profile.allow_chrome_zones".into(),
-                expected: "false (base profile disallows chrome zones)".into(),
-                got: "true".into(),
-                hint: "cannot enable allow_chrome_zones when the base profile disables it".into(),
-            });
-        }
+        && allow_chrome
+        && !base.allow_chrome_zones
+    {
+        errors.push(ConfigError {
+            code: ConfigErrorCode::ProfileCapabilityEscalation,
+            field_path: "display_profile.allow_chrome_zones".into(),
+            expected: "false (base profile disallows chrome zones)".into(),
+            got: "true".into(),
+            hint: "cannot enable allow_chrome_zones when the base profile disables it".into(),
+        });
+    }
 }
 
 // ─── Profile resolution ───────────────────────────────────────────────────────
@@ -365,13 +393,14 @@ pub fn resolve_profile(
         other => {
             debug_assert!(
                 false,
-                "resolve_profile() called with unvalidated profile {:?}; run validate() first",
-                other
+                "resolve_profile() called with unvalidated profile {other:?}; run validate() first"
             );
             Err(vec![ConfigError {
                 code: ConfigErrorCode::Other("CONFIG_UNVALIDATED_PROFILE".into()),
                 field_path: "runtime.profile".into(),
-                expected: "a validated profile (run TzeHudConfig::validate() before resolve_profile)".into(),
+                expected:
+                    "a validated profile (run TzeHudConfig::validate() before resolve_profile)"
+                        .into(),
                 got: format!("{other:?}"),
                 hint: "call TzeHudConfig::freeze() which validates before resolving".into(),
             }])
@@ -380,7 +409,10 @@ pub fn resolve_profile(
 }
 
 /// Resolve the effective profile for `profile = "auto"`.
-fn resolve_auto_profile(gpu_vram_mb: u64, refresh_hz: u32) -> Result<DisplayProfile, Vec<ConfigError>> {
+fn resolve_auto_profile(
+    gpu_vram_mb: u64,
+    refresh_hz: u32,
+) -> Result<DisplayProfile, Vec<ConfigError>> {
     match auto_detect_profile(gpu_vram_mb, refresh_hz) {
         AutoDetectResult::Headless(signal) => {
             // Log the detection signal.  In the real runtime this would use tracing::info!().
@@ -429,7 +461,9 @@ fn resolve_custom_profile(raw: &RawConfig) -> Result<DisplayProfile, Vec<ConfigE
         max_agent_update_hz: dp.max_agent_update_hz.unwrap_or(base.max_agent_update_hz),
         target_fps: dp.target_fps.unwrap_or(base.target_fps),
         min_fps: dp.min_fps.unwrap_or(base.min_fps),
-        allow_background_zones: dp.allow_background_zones.unwrap_or(base.allow_background_zones),
+        allow_background_zones: dp
+            .allow_background_zones
+            .unwrap_or(base.allow_background_zones),
         allow_chrome_zones: dp.allow_chrome_zones.unwrap_or(base.allow_chrome_zones),
     };
 
@@ -505,7 +539,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_display_profile(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::HeadlessNotExtendable)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::HeadlessNotExtendable)),
             "extends=headless must produce CONFIG_HEADLESS_NOT_EXTENDABLE, got: {:?}",
             errors.iter().map(|e| &e.code).collect::<Vec<_>>()
         );
@@ -547,8 +583,7 @@ mod tests {
             .collect();
         assert!(
             relevant_errors.is_empty(),
-            "extends=mobile with profile=custom should be accepted, got: {:?}",
-            relevant_errors
+            "extends=mobile with profile=custom should be accepted, got: {relevant_errors:?}"
         );
     }
 
@@ -572,8 +607,14 @@ mod tests {
         };
         let resolved = resolve_custom_profile(&raw).expect("should resolve");
         let mobile = mobile_budget();
-        assert_eq!(resolved.max_tiles, mobile.max_tiles, "custom extends mobile should use mobile max_tiles");
-        assert_eq!(resolved.max_texture_mb, mobile.max_texture_mb, "custom extends mobile should use mobile max_texture_mb");
+        assert_eq!(
+            resolved.max_tiles, mobile.max_tiles,
+            "custom extends mobile should use mobile max_tiles"
+        );
+        assert_eq!(
+            resolved.max_texture_mb, mobile.max_texture_mb,
+            "custom extends mobile should use mobile max_texture_mb"
+        );
     }
 
     // ── Spec §Profile Auto-Detection ─────────────────────────────────────────
@@ -592,13 +633,14 @@ mod tests {
         // To test the env var path without modifying env, we use a separate
         // helper that accepts overridden display detection.
         let result = auto_detect_headless_for_test(
-            /*display_set=*/ false,
-            /*docker=*/ false,
-            /*gpu_vram_mb=*/ 8192,
+            /*display_set=*/ false, /*docker=*/ false, /*gpu_vram_mb=*/ 8192,
             /*refresh_hz=*/ 144,
         );
         assert!(
-            matches!(result, AutoDetectResult::Headless(HeadlessSignal::NoDisplayEnv)),
+            matches!(
+                result,
+                AutoDetectResult::Headless(HeadlessSignal::NoDisplayEnv)
+            ),
             "should select headless when display env unset, got: {result:?}"
         );
     }
@@ -607,9 +649,8 @@ mod tests {
     #[test]
     fn spec_auto_detect_full_display_with_capable_gpu() {
         let result = auto_detect_headless_for_test(
-            /*display_set=*/ true,
-            /*docker=*/ false,
-            /*gpu_vram_mb=*/ 8192,  // 8GB > 4GB threshold
+            /*display_set=*/ true, /*docker=*/ false,
+            /*gpu_vram_mb=*/ 8192, // 8GB > 4GB threshold
             /*refresh_hz=*/ 60,
         );
         assert!(
@@ -622,9 +663,8 @@ mod tests {
     #[test]
     fn spec_auto_detect_ambiguous_with_low_vram() {
         let result = auto_detect_headless_for_test(
-            /*display_set=*/ true,
-            /*docker=*/ false,
-            /*gpu_vram_mb=*/ 2048,  // 2GB < 4GB threshold
+            /*display_set=*/ true, /*docker=*/ false,
+            /*gpu_vram_mb=*/ 2048, // 2GB < 4GB threshold
             /*refresh_hz=*/ 60,
         );
         assert!(
@@ -641,9 +681,8 @@ mod tests {
     fn spec_auto_detect_ambiguous_produces_structured_error() {
         // Simulate: display server IS present (display_set=true), but GPU VRAM < 4GB threshold.
         let result = auto_detect_headless_for_test(
-            /*display_set=*/ true,
-            /*docker=*/ false,
-            /*gpu_vram_mb=*/ 2048,  // below 4096 MB threshold
+            /*display_set=*/ true, /*docker=*/ false,
+            /*gpu_vram_mb=*/ 2048, // below 4096 MB threshold
             /*refresh_hz=*/ 60,
         );
         assert!(
@@ -685,7 +724,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_display_profile(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
             "max_tiles=2048 > base 1024 must produce CONFIG_PROFILE_BUDGET_ESCALATION, got: {:?}",
             errors.iter().map(|e| &e.code).collect::<Vec<_>>()
         );
@@ -710,7 +751,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_display_profile(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ProfileBudgetEscalation)),
             "max_texture_mb escalation must produce CONFIG_PROFILE_BUDGET_ESCALATION"
         );
     }
@@ -738,7 +781,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_display_profile(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileCapabilityEscalation)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ProfileCapabilityEscalation)),
             "allow_background_zones=true over mobile base must produce CONFIG_PROFILE_CAPABILITY_ESCALATION, got: {:?}",
             errors.iter().map(|e| &e.code).collect::<Vec<_>>()
         );
@@ -767,14 +812,14 @@ mod tests {
             .filter(|e| {
                 matches!(
                     e.code,
-                    ConfigErrorCode::ProfileBudgetEscalation | ConfigErrorCode::ProfileCapabilityEscalation
+                    ConfigErrorCode::ProfileBudgetEscalation
+                        | ConfigErrorCode::ProfileCapabilityEscalation
                 )
             })
             .collect();
         assert!(
             escalation_errors.is_empty(),
-            "budget within ceiling should not produce escalation errors, got: {:?}",
-            escalation_errors
+            "budget within ceiling should not produce escalation errors, got: {escalation_errors:?}"
         );
     }
 
@@ -801,7 +846,9 @@ mod tests {
         let mut errors = Vec::new();
         validate_display_profile(&raw, &mut errors);
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ProfileExtendsConflictsWithProfile)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ProfileExtendsConflictsWithProfile)),
             "profile=full-display + extends=mobile must produce CONFIG_PROFILE_EXTENDS_CONFLICTS, got: {:?}",
             errors.iter().map(|e| &e.code).collect::<Vec<_>>()
         );
@@ -895,9 +942,15 @@ mod tests {
             ..Default::default()
         };
         let resolved = resolve_custom_profile(&raw).expect("should resolve");
-        assert_eq!(resolved.max_tiles, 512, "override max_tiles should be applied");
+        assert_eq!(
+            resolved.max_tiles, 512,
+            "override max_tiles should be applied"
+        );
         // Other values should fall back to base.
-        assert_eq!(resolved.max_texture_mb, DisplayProfile::full_display().max_texture_mb);
+        assert_eq!(
+            resolved.max_texture_mb,
+            DisplayProfile::full_display().max_texture_mb
+        );
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -924,5 +977,4 @@ mod tests {
         }
         AutoDetectResult::Ambiguous
     }
-
 }

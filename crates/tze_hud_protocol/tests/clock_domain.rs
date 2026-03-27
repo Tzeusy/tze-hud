@@ -16,20 +16,10 @@
 //! NOT use these types; use `InputEnvelope` / `EventBatch` (RFC 0004) instead.
 
 use tze_hud_protocol::proto::session::{
-    ClientMessage, ServerMessage, SessionInit, SessionEstablished,
-    LeaseStateChange, TimingHints, SceneSnapshot, TelemetryFrame,
-    RuntimeTelemetryFrame, SessionSuspended, SessionResumed, Heartbeat,
-    ZonePublish, MutationBatch,
+    Heartbeat, LeaseStateChange, SceneSnapshot, SessionEstablished, SessionInit, TimingHints,
 };
 use tze_hud_protocol::proto::{
-    PointerMoveEvent, PointerDownEvent, PointerUpEvent, PointerEnterEvent,
-    PointerLeaveEvent, PointerCancelEvent, ClickEvent,
-    KeyDownEvent, KeyUpEvent, CharacterEvent,
-    FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent,
-    ImeCompositionStartEvent, ImeCompositionUpdateEvent, ImeCompositionEndEvent,
-    GestureEvent, ScrollOffsetChangedEvent, CommandInputEvent,
-    TileCreatedEvent, TileDeletedEvent, TileUpdatedEvent, LeaseEvent,
-    EventBatch,
+    EventBatch, FocusGainedEvent, KeyDownEvent, PointerDownEvent, PointerMoveEvent,
 };
 
 // ─── Naming convention helper ─────────────────────────────────────────────────
@@ -55,64 +45,150 @@ impl TimestampField {
 fn all_timestamp_fields() -> Vec<TimestampField> {
     vec![
         // session.proto — ClientMessage envelope
-        TimestampField { message: "ClientMessage", field: "timestamp_wall_us" },
-
+        TimestampField {
+            message: "ClientMessage",
+            field: "timestamp_wall_us",
+        },
         // session.proto — ServerMessage envelope
-        TimestampField { message: "ServerMessage", field: "timestamp_wall_us" },
-
+        TimestampField {
+            message: "ServerMessage",
+            field: "timestamp_wall_us",
+        },
         // session.proto — SessionInit
-        TimestampField { message: "SessionInit", field: "agent_timestamp_wall_us" },
-
+        TimestampField {
+            message: "SessionInit",
+            field: "agent_timestamp_wall_us",
+        },
         // session.proto — SessionEstablished
-        TimestampField { message: "SessionEstablished", field: "compositor_timestamp_wall_us" },
-
+        TimestampField {
+            message: "SessionEstablished",
+            field: "compositor_timestamp_wall_us",
+        },
         // session.proto — LeaseStateChange
-        TimestampField { message: "LeaseStateChange", field: "timestamp_wall_us" },
-
+        TimestampField {
+            message: "LeaseStateChange",
+            field: "timestamp_wall_us",
+        },
         // session.proto — TimingHints (MutationBatch scheduling)
-        TimestampField { message: "TimingHints", field: "present_at_wall_us" },
-        TimestampField { message: "TimingHints", field: "expires_at_wall_us" },
-
+        TimestampField {
+            message: "TimingHints",
+            field: "present_at_wall_us",
+        },
+        TimestampField {
+            message: "TimingHints",
+            field: "expires_at_wall_us",
+        },
         // session.proto — SceneSnapshot
-        TimestampField { message: "SceneSnapshot", field: "snapshot_wall_us" },
-        TimestampField { message: "SceneSnapshot", field: "snapshot_mono_us" },
-
+        TimestampField {
+            message: "SceneSnapshot",
+            field: "snapshot_wall_us",
+        },
+        TimestampField {
+            message: "SceneSnapshot",
+            field: "snapshot_mono_us",
+        },
         // session.proto — TelemetryFrame
-        TimestampField { message: "TelemetryFrame", field: "sample_timestamp_wall_us" },
-
+        TimestampField {
+            message: "TelemetryFrame",
+            field: "sample_timestamp_wall_us",
+        },
         // session.proto — RuntimeTelemetryFrame
-        TimestampField { message: "RuntimeTelemetryFrame", field: "sample_timestamp_wall_us" },
-
+        TimestampField {
+            message: "RuntimeTelemetryFrame",
+            field: "sample_timestamp_wall_us",
+        },
         // session.proto — SessionSuspended
-        TimestampField { message: "SessionSuspended", field: "timestamp_wall_us" },
-
+        TimestampField {
+            message: "SessionSuspended",
+            field: "timestamp_wall_us",
+        },
         // session.proto — SessionResumed
-        TimestampField { message: "SessionResumed", field: "timestamp_wall_us" },
-
+        TimestampField {
+            message: "SessionResumed",
+            field: "timestamp_wall_us",
+        },
         // session.proto — Heartbeat (monotonic for RTT)
-        TimestampField { message: "Heartbeat", field: "timestamp_mono_us" },
-
+        TimestampField {
+            message: "Heartbeat",
+            field: "timestamp_mono_us",
+        },
         // events.proto — RFC 0004 pointer events (all _mono_us)
-        TimestampField { message: "PointerMoveEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "PointerDownEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "PointerUpEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "PointerEnterEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "PointerLeaveEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "PointerCancelEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "ClickEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "KeyDownEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "KeyUpEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "CharacterEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "FocusGainedEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "FocusLostEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "CaptureReleasedEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "ImeCompositionStartEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "ImeCompositionUpdateEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "ImeCompositionEndEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "GestureEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "ScrollOffsetChangedEvent", field: "timestamp_mono_us" },
-        TimestampField { message: "CommandInputEvent", field: "timestamp_mono_us" },
-
+        TimestampField {
+            message: "PointerMoveEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "PointerDownEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "PointerUpEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "PointerEnterEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "PointerLeaveEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "PointerCancelEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "ClickEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "KeyDownEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "KeyUpEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "CharacterEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "FocusGainedEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "FocusLostEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "CaptureReleasedEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "ImeCompositionStartEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "ImeCompositionUpdateEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "ImeCompositionEndEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "GestureEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "ScrollOffsetChangedEvent",
+            field: "timestamp_mono_us",
+        },
+        TimestampField {
+            message: "CommandInputEvent",
+            field: "timestamp_mono_us",
+        },
         // events.proto — EventBatch
         // NOTE: batch_ts_us uses _us suffix rather than _wall_us because it was
         // defined before the RFC 0005 §2.4 naming refinement. It carries a
@@ -134,7 +210,10 @@ fn all_timestamp_fields_have_correct_clock_domain_suffix() {
 
     for f in &fields {
         if !f.is_compliant() {
-            violations.push(format!("{}.{}: must end in _wall_us or _mono_us", f.message, f.field));
+            violations.push(format!(
+                "{}.{}: must end in _wall_us or _mono_us",
+                f.message, f.field
+            ));
         }
     }
 
@@ -145,9 +224,12 @@ fn all_timestamp_fields_have_correct_clock_domain_suffix() {
     );
 
     // Verify we're checking a meaningful number of fields
-    assert!(fields.len() >= 25,
+    assert!(
+        fields.len() >= 25,
         "Expected ≥25 timestamp fields to check; only found {}. \
-         Please add newly introduced timestamp fields to this list.", fields.len());
+         Please add newly introduced timestamp fields to this list.",
+        fields.len()
+    );
 }
 
 // ─── Spot checks: specific messages use correct clock domain ─────────────────
@@ -156,10 +238,16 @@ fn all_timestamp_fields_have_correct_clock_domain_suffix() {
 #[test]
 fn pointer_events_use_monotonic_timestamps() {
     // Verify by construction that these fields exist and accept u64
-    let pm = PointerMoveEvent { timestamp_mono_us: 12345, ..Default::default() };
+    let pm = PointerMoveEvent {
+        timestamp_mono_us: 12345,
+        ..Default::default()
+    };
     assert_eq!(pm.timestamp_mono_us, 12345);
 
-    let pd = PointerDownEvent { timestamp_mono_us: 67890, ..Default::default() };
+    let pd = PointerDownEvent {
+        timestamp_mono_us: 67890,
+        ..Default::default()
+    };
     assert_eq!(pd.timestamp_mono_us, 67890);
 }
 
@@ -167,7 +255,9 @@ fn pointer_events_use_monotonic_timestamps() {
 #[test]
 fn heartbeat_uses_monotonic_timestamp() {
     // RTT calculation: recv_mono_us - send_mono_us
-    let hb = Heartbeat { timestamp_mono_us: 999_999 };
+    let hb = Heartbeat {
+        timestamp_mono_us: 999_999,
+    };
     assert_eq!(hb.timestamp_mono_us, 999_999);
 }
 
@@ -214,8 +304,10 @@ fn timing_hints_use_wall_clock_domain() {
         present_at_wall_us: 1_700_000_000_000_000,
         expires_at_wall_us: 1_700_000_001_000_000,
     };
-    assert!(hints.present_at_wall_us < hints.expires_at_wall_us,
-        "present_at must be before expires_at");
+    assert!(
+        hints.present_at_wall_us < hints.expires_at_wall_us,
+        "present_at must be before expires_at"
+    );
 }
 
 /// WHEN LeaseStateChange THEN timestamp uses _wall_us.
@@ -236,9 +328,18 @@ fn lease_state_change_uses_wall_clock_timestamp() {
 fn new_rfc0004_events_use_mono_us_not_raw_timestamp_ms() {
     // RFC 0004 §9.1 mandates _mono_us. The older InputEvent used timestamp_ms (legacy).
     // New v1 messages must not use bare `timestamp_ms`.
-    let pm = PointerMoveEvent { timestamp_mono_us: 1000, ..Default::default() };
-    let ke = KeyDownEvent { timestamp_mono_us: 2000, ..Default::default() };
-    let fg = FocusGainedEvent { timestamp_mono_us: 3000, ..Default::default() };
+    let pm = PointerMoveEvent {
+        timestamp_mono_us: 1000,
+        ..Default::default()
+    };
+    let ke = KeyDownEvent {
+        timestamp_mono_us: 2000,
+        ..Default::default()
+    };
+    let fg = FocusGainedEvent {
+        timestamp_mono_us: 3000,
+        ..Default::default()
+    };
 
     // They compile and have the mono_us field (not timestamp_ms)
     assert_eq!(pm.timestamp_mono_us, 1000);
@@ -259,4 +360,3 @@ fn event_batch_assembly_timestamp_follows_convention() {
     // batch_ts_us is a wall-clock timestamp — convention: _us suffix is acceptable here
     // as this field predates the _wall_us refinement in RFC 0005
 }
-

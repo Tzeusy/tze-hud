@@ -25,24 +25,24 @@
 //! Instead, we exercise the conversion helpers and in-process batch validation directly,
 //! which covers all meaningful rejection paths.
 
+use proptest::prelude::*;
 use tze_hud_protocol::{
-    convert::{proto_node_to_scene, proto_rect_to_scene, proto_to_scene_id, proto_to_resource_id,
-               proto_zone_content_to_scene},
+    convert::{
+        proto_node_to_scene, proto_rect_to_scene, proto_to_resource_id, proto_to_scene_id,
+        proto_zone_content_to_scene,
+    },
     proto::{
-        node_proto::Data as ProtoNodeData,
-        NodeProto, Rect as ProtoRect, Rgba as ProtoRgba,
-        SolidColorNodeProto, TextMarkdownNodeProto, StaticImageNodeProto,
-        SceneIdProto, ResourceIdProto,
-        ZoneContent as ProtoZoneContent,
+        NodeProto, Rect as ProtoRect, ResourceIdProto, Rgba as ProtoRgba, SceneIdProto,
+        SolidColorNodeProto, StaticImageNodeProto, TextMarkdownNodeProto,
+        ZoneContent as ProtoZoneContent, node_proto::Data as ProtoNodeData,
     },
 };
 use tze_hud_scene::{
     graph::SceneGraph,
-    mutation::{MutationBatch, SceneMutation, MAX_BATCH_SIZE},
+    mutation::{MAX_BATCH_SIZE, MutationBatch, SceneMutation},
     test_scenes::assert_layer0_invariants,
     types::{Capability, Rect, SceneId},
 };
-use proptest::prelude::*;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -50,7 +50,11 @@ fn clean_scene() -> SceneGraph {
     SceneGraph::new(1920.0, 1080.0)
 }
 
-fn make_batch(agent: &str, lease_id: Option<SceneId>, mutations: Vec<SceneMutation>) -> MutationBatch {
+fn make_batch(
+    agent: &str,
+    lease_id: Option<SceneId>,
+    mutations: Vec<SceneMutation>,
+) -> MutationBatch {
     MutationBatch {
         batch_id: SceneId::new(),
         agent_namespace: agent.to_string(),
@@ -72,21 +76,27 @@ fn proto_scene_id_empty_bytes_returns_none() {
 /// 15-byte slice → must return None (not exactly 16 bytes).
 #[test]
 fn proto_scene_id_15_bytes_returns_none() {
-    let p = SceneIdProto { bytes: vec![0u8; 15] };
+    let p = SceneIdProto {
+        bytes: vec![0u8; 15],
+    };
     assert_eq!(proto_to_scene_id(&p), None);
 }
 
 /// 17-byte slice → must return None.
 #[test]
 fn proto_scene_id_17_bytes_returns_none() {
-    let p = SceneIdProto { bytes: vec![0u8; 17] };
+    let p = SceneIdProto {
+        bytes: vec![0u8; 17],
+    };
     assert_eq!(proto_to_scene_id(&p), None);
 }
 
 /// 16 zero bytes → valid null SceneId.
 #[test]
 fn proto_scene_id_null_16_bytes_returns_some() {
-    let p = SceneIdProto { bytes: vec![0u8; 16] };
+    let p = SceneIdProto {
+        bytes: vec![0u8; 16],
+    };
     let id = proto_to_scene_id(&p);
     assert!(id.is_some());
     assert!(id.unwrap().is_null());
@@ -95,7 +105,9 @@ fn proto_scene_id_null_16_bytes_returns_some() {
 /// Oversized bytes → must return None.
 #[test]
 fn proto_scene_id_oversized_bytes_returns_none() {
-    let p = SceneIdProto { bytes: vec![0u8; 1024] };
+    let p = SceneIdProto {
+        bytes: vec![0u8; 1024],
+    };
     assert_eq!(proto_to_scene_id(&p), None);
 }
 
@@ -104,21 +116,27 @@ fn proto_scene_id_oversized_bytes_returns_none() {
 /// 31-byte slice → ResourceId must be None.
 #[test]
 fn proto_resource_id_31_bytes_returns_none() {
-    let p = ResourceIdProto { bytes: vec![0u8; 31] };
+    let p = ResourceIdProto {
+        bytes: vec![0u8; 31],
+    };
     assert_eq!(proto_to_resource_id(&p), None);
 }
 
 /// 33-byte slice → ResourceId must be None.
 #[test]
 fn proto_resource_id_33_bytes_returns_none() {
-    let p = ResourceIdProto { bytes: vec![0u8; 33] };
+    let p = ResourceIdProto {
+        bytes: vec![0u8; 33],
+    };
     assert_eq!(proto_to_resource_id(&p), None);
 }
 
 /// 32-byte slice → valid ResourceId.
 #[test]
 fn proto_resource_id_32_bytes_ok() {
-    let p = ResourceIdProto { bytes: vec![0u8; 32] };
+    let p = ResourceIdProto {
+        bytes: vec![0u8; 32],
+    };
     assert!(proto_to_resource_id(&p).is_some());
 }
 
@@ -128,20 +146,35 @@ fn proto_resource_id_32_bytes_ok() {
 /// The validation layer (SceneGraph) rejects them.
 #[test]
 fn proto_rect_nan_does_not_panic() {
-    let r = proto_rect_to_scene(&ProtoRect { x: f32::NAN, y: 0.0, width: 10.0, height: 10.0 });
+    let r = proto_rect_to_scene(&ProtoRect {
+        x: f32::NAN,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    });
     assert!(r.x.is_nan());
 }
 
 #[test]
 fn proto_rect_inf_does_not_panic() {
-    let r = proto_rect_to_scene(&ProtoRect { x: f32::INFINITY, y: 0.0, width: 10.0, height: 10.0 });
+    let r = proto_rect_to_scene(&ProtoRect {
+        x: f32::INFINITY,
+        y: 0.0,
+        width: 10.0,
+        height: 10.0,
+    });
     assert!(r.x.is_infinite());
 }
 
 #[test]
 fn proto_rect_negative_dims_does_not_panic() {
     // Conversion layer just maps the values; rejection is the scene graph's job.
-    let r = proto_rect_to_scene(&ProtoRect { x: 0.0, y: 0.0, width: -10.0, height: -10.0 });
+    let r = proto_rect_to_scene(&ProtoRect {
+        x: 0.0,
+        y: 0.0,
+        width: -10.0,
+        height: -10.0,
+    });
     assert_eq!(r.width, -10.0);
 }
 
@@ -150,7 +183,10 @@ fn proto_rect_negative_dims_does_not_panic() {
 /// NodeProto with no data → proto_node_to_scene must return None (not panic).
 #[test]
 fn proto_node_no_data_returns_none() {
-    let n = NodeProto { id: vec![], data: None };
+    let n = NodeProto {
+        id: vec![],
+        data: None,
+    };
     assert_eq!(proto_node_to_scene(&n), None);
 }
 
@@ -165,7 +201,12 @@ fn proto_node_static_image_empty_resource_id_returns_none() {
             height: 100,
             decoded_bytes: 0,
             fit_mode: 0,
-            bounds: Some(ProtoRect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }),
+            bounds: Some(ProtoRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }),
         })),
     };
     assert_eq!(proto_node_to_scene(&n), None);
@@ -182,7 +223,12 @@ fn proto_node_static_image_malformed_resource_id_returns_none() {
             height: 100,
             decoded_bytes: 0,
             fit_mode: 0,
-            bounds: Some(ProtoRect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }),
+            bounds: Some(ProtoRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }),
         })),
     };
     assert_eq!(proto_node_to_scene(&n), None);
@@ -199,7 +245,12 @@ fn proto_node_static_image_valid_returns_some() {
             height: 100,
             decoded_bytes: 0,
             fit_mode: 0,
-            bounds: Some(ProtoRect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }),
+            bounds: Some(ProtoRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            }),
         })),
     };
     assert!(proto_node_to_scene(&n).is_some());
@@ -211,7 +262,12 @@ fn proto_node_solid_color_no_bounds_returns_some() {
     let n = NodeProto {
         id: vec![],
         data: Some(ProtoNodeData::SolidColor(SolidColorNodeProto {
-            color: Some(ProtoRgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+            color: Some(ProtoRgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            }),
             bounds: None, // missing bounds
         })),
     };
@@ -226,15 +282,28 @@ fn proto_node_text_zero_font_size_defaults_to_16() {
         id: vec![],
         data: Some(ProtoNodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "hello".into(),
-            bounds: Some(ProtoRect { x: 0.0, y: 0.0, width: 100.0, height: 50.0 }),
+            bounds: Some(ProtoRect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 50.0,
+            }),
             font_size_px: 0.0, // zero → should be defaulted
-            color: Some(ProtoRgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
+            color: Some(ProtoRgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            }),
             background: None,
         })),
     };
     let node = proto_node_to_scene(&n).expect("must produce a node");
     if let tze_hud_scene::types::NodeData::TextMarkdown(tm) = node.data {
-        assert_eq!(tm.font_size_px, 16.0, "zero font_size_px must be replaced by 16.0");
+        assert_eq!(
+            tm.font_size_px, 16.0,
+            "zero font_size_px must be replaced by 16.0"
+        );
     } else {
         panic!("Expected TextMarkdown node");
     }
@@ -258,23 +327,34 @@ fn mutation_batch_nonexistent_tab_id_rejected() {
     let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
 
     let bogus_tab = SceneId::new();
-    let batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::CreateTile {
+    let batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::CreateTile {
             tab_id: bogus_tab,
             namespace: "agent".into(),
             lease_id: lease,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             z_order: 1,
-        },
-    ]);
+        }],
+    );
 
     let result = scene.apply_batch(&batch);
-    assert!(!result.applied, "batch with nonexistent tab must be rejected");
-    assert!(result.rejection.is_some(), "rejection must carry structured error");
+    assert!(
+        !result.applied,
+        "batch with nonexistent tab must be rejected"
+    );
+    assert!(
+        result.rejection.is_some(),
+        "rejection must carry structured error"
+    );
     assert_eq!(scene.tile_count(), 0, "no tiles after rejection");
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violation after rejected batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violation after rejected batch: {violations:?}"
+    );
 }
 
 /// A batch with MAX_BATCH_SIZE + 1 mutations must be rejected with BatchSizeExceeded.
@@ -302,7 +382,10 @@ fn mutation_batch_oversized_rejected_with_structured_error() {
     assert_eq!(scene.tile_count(), 0, "no tiles created");
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violation after oversized batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violation after oversized batch: {violations:?}"
+    );
 }
 
 /// A batch referencing an expired lease must be rejected at Stage 1.
@@ -317,22 +400,27 @@ fn mutation_batch_expired_lease_rejected_before_other_checks() {
     // Force the lease into Expired state.
     scene.leases.get_mut(&lease).unwrap().state = LeaseState::Expired;
 
-    let batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::CreateTile {
+    let batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::CreateTile {
             tab_id: tab,
             namespace: "agent".into(),
             lease_id: lease,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             z_order: 1,
-        },
-    ]);
+        }],
+    );
 
     let result = scene.apply_batch(&batch);
     assert!(!result.applied, "expired lease must reject batch");
     assert_eq!(scene.tile_count(), 0);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after expired-lease batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after expired-lease batch: {violations:?}"
+    );
 }
 
 /// A batch with NaN bounds must be rejected without crashing.
@@ -342,15 +430,17 @@ fn mutation_batch_nan_bounds_rejected() {
     let tab = scene.create_tab("Tab", 0).unwrap();
     let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
 
-    let batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::CreateTile {
+    let batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::CreateTile {
             tab_id: tab,
             namespace: "agent".into(),
             lease_id: lease,
             bounds: Rect::new(f32::NAN, 0.0, 100.0, 100.0),
             z_order: 1,
-        },
-    ]);
+        }],
+    );
 
     // Must not panic; result must be a rejection.
     let result = scene.apply_batch(&batch);
@@ -358,7 +448,10 @@ fn mutation_batch_nan_bounds_rejected() {
     assert_eq!(scene.tile_count(), 0);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after NaN-bounds batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after NaN-bounds batch: {violations:?}"
+    );
 }
 
 /// A batch with Inf bounds must be rejected without crashing.
@@ -368,22 +461,27 @@ fn mutation_batch_inf_bounds_rejected() {
     let tab = scene.create_tab("Tab", 0).unwrap();
     let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
 
-    let batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::CreateTile {
+    let batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::CreateTile {
             tab_id: tab,
             namespace: "agent".into(),
             lease_id: lease,
             bounds: Rect::new(0.0, 0.0, f32::INFINITY, 100.0),
             z_order: 1,
-        },
-    ]);
+        }],
+    );
 
     let result = scene.apply_batch(&batch);
     assert!(!result.applied, "Inf bounds must be rejected");
     assert_eq!(scene.tile_count(), 0);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after Inf-bounds batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after Inf-bounds batch: {violations:?}"
+    );
 }
 
 /// Empty agent_namespace on a batch — the protocol layer populates namespace from
@@ -407,15 +505,13 @@ fn mutation_batch_empty_namespace_invariant() {
     let batch = MutationBatch {
         batch_id: SceneId::new(),
         agent_namespace: String::new(), // mismatch: lease is "valid.agent"
-        mutations: vec![
-            SceneMutation::CreateTile {
-                tab_id: tab,
-                namespace: String::new(), // mismatch
-                lease_id: lease,
-                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
-                z_order: 1,
-            },
-        ],
+        mutations: vec![SceneMutation::CreateTile {
+            tab_id: tab,
+            namespace: String::new(), // mismatch
+            lease_id: lease,
+            bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            z_order: 1,
+        }],
         timing_hints: None,
         lease_id: Some(lease),
     };
@@ -427,7 +523,10 @@ fn mutation_batch_empty_namespace_invariant() {
     let _ = result;
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after empty-namespace batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after empty-namespace batch: {violations:?}"
+    );
 }
 
 /// Mutation referencing a non-existent tile must be rejected cleanly.
@@ -441,9 +540,9 @@ fn mutation_batch_nonexistent_tile_rejected() {
     let batch = MutationBatch {
         batch_id: SceneId::new(),
         agent_namespace: "agent".into(),
-        mutations: vec![
-            SceneMutation::DeleteTile { tile_id: bogus_tile },
-        ],
+        mutations: vec![SceneMutation::DeleteTile {
+            tile_id: bogus_tile,
+        }],
         timing_hints: None,
         lease_id: None,
     };
@@ -452,7 +551,10 @@ fn mutation_batch_nonexistent_tile_rejected() {
     assert!(!result.applied, "referencing non-existent tile must fail");
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after bogus tile batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after bogus tile batch: {violations:?}"
+    );
 }
 
 /// Z-order at the zone-reserved boundary (ZONE_TILE_Z_MIN) must be rejected for agent tiles.
@@ -464,22 +566,30 @@ fn mutation_batch_zone_reserved_z_order_rejected() {
     let tab = scene.create_tab("Tab", 0).unwrap();
     let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
 
-    let batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::CreateTile {
+    let batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::CreateTile {
             tab_id: tab,
             namespace: "agent".into(),
             lease_id: lease,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             z_order: ZONE_TILE_Z_MIN, // in the zone-reserved range
-        },
-    ]);
+        }],
+    );
 
     let result = scene.apply_batch(&batch);
-    assert!(!result.applied, "z_order in zone-reserved range must be rejected");
+    assert!(
+        !result.applied,
+        "z_order in zone-reserved range must be rejected"
+    );
     assert_eq!(scene.tile_count(), 0);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violation after zone-z-order batch: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violation after zone-z-order batch: {violations:?}"
+    );
 }
 
 /// Sequence of create → update → delete cycles using apply_batch does not leak state.
@@ -490,32 +600,38 @@ fn mutation_batch_create_update_delete_no_leak() {
     let lease = scene.grant_lease("agent", 300_000, vec![Capability::CreateTile]);
 
     // Create a tile.
-    let create_batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::CreateTile {
+    let create_batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::CreateTile {
             tab_id: tab,
             namespace: "agent".into(),
             lease_id: lease,
             bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
             z_order: 1,
-        },
-    ]);
+        }],
+    );
     let r1 = scene.apply_batch(&create_batch);
     assert!(r1.applied);
     let tile_id = r1.created_ids[0];
 
     // Update bounds.
-    let update_batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::UpdateTileBounds {
+    let update_batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::UpdateTileBounds {
             tile_id,
             bounds: Rect::new(10.0, 10.0, 200.0, 200.0),
-        },
-    ]);
+        }],
+    );
     assert!(scene.apply_batch(&update_batch).applied);
 
     // Delete the tile.
-    let delete_batch = make_batch("agent", Some(lease), vec![
-        SceneMutation::DeleteTile { tile_id },
-    ]);
+    let delete_batch = make_batch(
+        "agent",
+        Some(lease),
+        vec![SceneMutation::DeleteTile { tile_id }],
+    );
     assert!(scene.apply_batch(&delete_batch).applied);
 
     // No tiles, no nodes.
@@ -523,7 +639,10 @@ fn mutation_batch_create_update_delete_no_leak() {
     assert_eq!(scene.node_count(), 0);
 
     let violations = assert_layer0_invariants(&scene);
-    assert!(violations.is_empty(), "Layer 0 violations after create/update/delete: {violations:?}");
+    assert!(
+        violations.is_empty(),
+        "Layer 0 violations after create/update/delete: {violations:?}"
+    );
 }
 
 // ─── Proptest: protocol boundary fuzzing ─────────────────────────────────────
@@ -708,7 +827,10 @@ fn mcp_error_codes_are_stable() {
     assert_eq!(error_codes::SAFE_MODE_ACTIVE, "SAFE_MODE_ACTIVE");
     assert_eq!(error_codes::TIMESTAMP_TOO_OLD, "TIMESTAMP_TOO_OLD");
     assert_eq!(error_codes::TIMESTAMP_TOO_FUTURE, "TIMESTAMP_TOO_FUTURE");
-    assert_eq!(error_codes::TIMESTAMP_EXPIRY_BEFORE_PRESENT, "TIMESTAMP_EXPIRY_BEFORE_PRESENT");
+    assert_eq!(
+        error_codes::TIMESTAMP_EXPIRY_BEFORE_PRESENT,
+        "TIMESTAMP_EXPIRY_BEFORE_PRESENT"
+    );
     assert_eq!(error_codes::NOT_FOUND, "NOT_FOUND");
     assert_eq!(error_codes::PERMISSION_DENIED, "PERMISSION_DENIED");
 }

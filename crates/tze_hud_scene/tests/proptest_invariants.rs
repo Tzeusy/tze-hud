@@ -30,11 +30,11 @@
 
 use proptest::prelude::*;
 use tze_hud_scene::{
+    MAX_BATCH_SIZE,
     graph::SceneGraph,
     invariants::check_all,
     mutation::{MutationBatch, SceneMutation},
     types::{Capability, Rect, SceneId},
-    MAX_BATCH_SIZE,
 };
 
 // ─── PropTest configuration ───────────────────────────────────────────────────
@@ -57,9 +57,13 @@ fn proptest_config() -> proptest::test_runner::Config {
 
 /// Generate a valid tile bounds entirely within a 1920×1080 display.
 fn arb_tile_bounds() -> impl Strategy<Value = Rect> {
-    (0.0f32..1800.0, 0.0f32..980.0, 10.0f32..120.0, 10.0f32..100.0).prop_map(|(x, y, w, h)| {
-        Rect::new(x, y, w, h)
-    })
+    (
+        0.0f32..1800.0,
+        0.0f32..980.0,
+        10.0f32..120.0,
+        10.0f32..100.0,
+    )
+        .prop_map(|(x, y, w, h)| Rect::new(x, y, w, h))
 }
 
 /// Generate a valid opacity in [0.0, 1.0].
@@ -101,7 +105,11 @@ struct ValidSceneParams {
 
 fn arb_valid_scene_params() -> impl Strategy<Value = ValidSceneParams> {
     (1usize..=4, 1usize..=6, arb_opacity()).prop_map(|(tab_count, tiles_per_tab, opacity)| {
-        ValidSceneParams { tab_count, tiles_per_tab, opacity }
+        ValidSceneParams {
+            tab_count,
+            tiles_per_tab,
+            opacity,
+        }
     })
 }
 
@@ -109,14 +117,14 @@ fn build_valid_scene(params: &ValidSceneParams) -> SceneGraph {
     let mut graph = SceneGraph::new(1920.0, 1080.0);
 
     for tab_idx in 0..params.tab_count {
-        let tab_name = format!("Tab{}", tab_idx);
+        let tab_name = format!("Tab{tab_idx}");
         let tab_id = graph
             .create_tab(&tab_name, tab_idx as u32)
             .expect("create_tab failed in build_valid_scene");
 
         // Create a fresh lease per tab to avoid budget pressure from multiple tabs.
         let lease_id = graph.grant_lease(
-            &format!("agent.t{}", tab_idx),
+            &format!("agent.t{tab_idx}"),
             300_000,
             vec![Capability::CreateTile],
         );
@@ -132,7 +140,7 @@ fn build_valid_scene(params: &ValidSceneParams) -> SceneGraph {
             let tile_id = graph
                 .create_tile(
                     tab_id,
-                    &format!("agent.t{}", tab_idx),
+                    &format!("agent.t{tab_idx}"),
                     lease_id,
                     bounds,
                     z_order,

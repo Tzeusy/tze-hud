@@ -11,15 +11,12 @@
 //!
 //! Test count target: ≥4 tests.
 
-use tze_hud_protocol::session_server::{
-    SessionConfig, TrafficClass, classify_server_payload,
-};
-use tze_hud_protocol::proto::session::{
-    BackpressureSignal, SessionEstablished, SessionError, MutationResult,
-    LeaseResponse, Heartbeat, SceneSnapshot, RuntimeTelemetryFrame,
-    server_message::Payload as ServerPayload,
-};
 use prost::Message;
+use tze_hud_protocol::proto::session::{
+    BackpressureSignal, Heartbeat, LeaseResponse, MutationResult, RuntimeTelemetryFrame,
+    SceneSnapshot, SessionEstablished, server_message::Payload as ServerPayload,
+};
+use tze_hud_protocol::session_server::{SessionConfig, TrafficClass, classify_server_payload};
 
 // ─── Traffic class classification ─────────────────────────────────────────────
 
@@ -48,7 +45,9 @@ fn transactional_messages_never_dropped() {
 /// Ephemeral messages are droppable (classified as Ephemeral).
 #[test]
 fn heartbeat_is_ephemeral_and_droppable() {
-    let payload = ServerPayload::Heartbeat(Heartbeat { timestamp_mono_us: 12345 });
+    let payload = ServerPayload::Heartbeat(Heartbeat {
+        timestamp_mono_us: 12345,
+    });
     assert_eq!(
         classify_server_payload(&payload),
         TrafficClass::Ephemeral,
@@ -81,17 +80,24 @@ fn backpressure_signal_at_80_percent_triggers_pressure_notice() {
     let pressure_threshold = 0.80_f32;
 
     // Below threshold: no pressure
-    let below = BackpressureSignal { queue_pressure: 0.75, suggested_action: String::new() };
-    assert!(below.queue_pressure < pressure_threshold,
-        "0.75 is below the 80% pressure threshold");
+    let below = BackpressureSignal {
+        queue_pressure: 0.75,
+        suggested_action: String::new(),
+    };
+    assert!(
+        below.queue_pressure < pressure_threshold,
+        "0.75 is below the 80% pressure threshold"
+    );
 
     // At threshold: pressure signal triggered
     let at_threshold = BackpressureSignal {
         queue_pressure: 0.80,
         suggested_action: "reduce_rate".to_string(),
     };
-    assert!(at_threshold.queue_pressure >= pressure_threshold,
-        "0.80 must trigger pressure signal (session-protocol/spec.md lines 238-249)");
+    assert!(
+        at_threshold.queue_pressure >= pressure_threshold,
+        "0.80 must trigger pressure signal (session-protocol/spec.md lines 238-249)"
+    );
     assert_eq!(at_threshold.suggested_action, "reduce_rate");
 
     // Above threshold: pressure signal triggered
@@ -109,8 +115,10 @@ fn backpressure_signal_full_queue_mutation_dropped() {
         queue_pressure: 1.0,
         suggested_action: "stop".to_string(),
     };
-    assert_eq!(full.queue_pressure, 1.0,
-        "queue_pressure of 1.0 indicates full queue — mutations dropped");
+    assert_eq!(
+        full.queue_pressure, 1.0,
+        "queue_pressure of 1.0 indicates full queue — mutations dropped"
+    );
 }
 
 /// BackpressureSignal itself is classified as Transactional (must not be dropped).
@@ -136,8 +144,10 @@ fn freeze_queue_pressure_threshold_is_80_percent() {
     // This matches session-protocol/spec.md lines 238-249
     let capacity = 1000usize;
     let threshold = (capacity as f32 * 0.80) as usize;
-    assert_eq!(threshold, 800,
-        "pressure threshold at 80% of 1000 must be 800 (session-protocol/spec.md)");
+    assert_eq!(
+        threshold, 800,
+        "pressure threshold at 80% of 1000 must be 800 (session-protocol/spec.md)"
+    );
 }
 
 /// Backpressure signal round-trips correctly.
@@ -150,8 +160,10 @@ fn backpressure_signal_roundtrip_preserves_pressure_value() {
     let mut buf = Vec::new();
     orig.encode(&mut buf).unwrap();
     let decoded = BackpressureSignal::decode(buf.as_slice()).unwrap();
-    assert!((decoded.queue_pressure - orig.queue_pressure).abs() < 1e-6,
-        "pressure value must survive serialization");
+    assert!(
+        (decoded.queue_pressure - orig.queue_pressure).abs() < 1e-6,
+        "pressure value must survive serialization"
+    );
     assert_eq!(decoded.suggested_action, "coalesce");
 }
 
@@ -162,8 +174,10 @@ fn backpressure_signal_roundtrip_preserves_pressure_value() {
 fn ephemeral_buffer_max_default_value() {
     let cfg = SessionConfig::default();
     // Default: 16 per session_server.rs (tunable)
-    assert!(cfg.ephemeral_buffer_max > 0,
-        "ephemeral_buffer_max must be > 0 to allow some ephemeral messages");
+    assert!(
+        cfg.ephemeral_buffer_max > 0,
+        "ephemeral_buffer_max must be > 0 to allow some ephemeral messages"
+    );
 }
 
 /// Transactional messages queue without limit (backed by gRPC backpressure on overflow).
@@ -176,7 +190,10 @@ fn transactional_not_droppable_different_from_ephemeral() {
     let tc = classify_server_payload(&transactional);
     let te = classify_server_payload(&ephemeral);
 
-    assert_ne!(tc, te, "Transactional and Ephemeral must be different traffic classes");
+    assert_ne!(
+        tc, te,
+        "Transactional and Ephemeral must be different traffic classes"
+    );
     assert_eq!(tc, TrafficClass::Transactional);
     assert_eq!(te, TrafficClass::Ephemeral);
 }

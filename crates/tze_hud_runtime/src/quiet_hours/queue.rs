@@ -185,8 +185,15 @@ mod tests {
             q.push(make_event(seq));
         }
         let drained = q.drain();
-        assert_eq!(drained.len(), 1, "LatestWins must deliver exactly one event");
-        assert_eq!(drained[0].sequence, 10, "LatestWins must deliver the last event");
+        assert_eq!(
+            drained.len(),
+            1,
+            "LatestWins must deliver exactly one event"
+        );
+        assert_eq!(
+            drained[0].sequence, 10,
+            "LatestWins must deliver the last event"
+        );
     }
 
     /// LatestWins with no events returns empty vec.
@@ -235,7 +242,11 @@ mod tests {
 
         // One more triggers drop.
         q.push(make_event(DEPTH as u64 + 1));
-        assert_eq!(q.len(), DEPTH, "length must remain at max_depth after overflow");
+        assert_eq!(
+            q.len(),
+            DEPTH,
+            "length must remain at max_depth after overflow"
+        );
 
         // First event (seq=1) must be gone.
         let drained = q.drain();

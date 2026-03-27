@@ -92,9 +92,14 @@ impl AttentionDecision {
             AttentionDecision::QueueQuietHours { window_end_us } => {
                 Some(QueueReason::QuietHours { window_end_us })
             }
-            AttentionDecision::Coalesce { per_agent, per_zone, .. } => {
-                Some(QueueReason::AttentionBudgetExhausted { per_agent, per_zone })
-            }
+            AttentionDecision::Coalesce {
+                per_agent,
+                per_zone,
+                ..
+            } => Some(QueueReason::AttentionBudgetExhausted {
+                per_agent,
+                per_zone,
+            }),
             _ => None,
         }
     }
@@ -291,7 +296,9 @@ mod attention_eval_tests {
         let decision = evaluate_attention(&ctx);
         assert_eq!(
             decision,
-            AttentionDecision::QueueQuietHours { window_end_us: None }
+            AttentionDecision::QueueQuietHours {
+                window_end_us: None
+            }
         );
     }
 
@@ -357,10 +364,12 @@ mod attention_eval_tests {
         assert!(
             matches!(
                 &decision,
-                AttentionDecision::Coalesce { per_agent: true, .. }
+                AttentionDecision::Coalesce {
+                    per_agent: true,
+                    ..
+                }
             ),
-            "Agent budget exhausted must coalesce; got {:?}",
-            decision
+            "Agent budget exhausted must coalesce; got {decision:?}"
         );
     }
 
@@ -373,9 +382,11 @@ mod attention_eval_tests {
 
         let decision = evaluate_attention(&ctx);
         assert!(
-            matches!(&decision, AttentionDecision::Coalesce { per_zone: true, .. }),
-            "Zone budget exhausted must coalesce; got {:?}",
-            decision
+            matches!(
+                &decision,
+                AttentionDecision::Coalesce { per_zone: true, .. }
+            ),
+            "Zone budget exhausted must coalesce; got {decision:?}"
         );
     }
 
@@ -410,7 +421,10 @@ mod attention_eval_tests {
         ctx.budget_refill_us = Some(9_000_000);
         ctx.interruption_class = InterruptionClass::Normal;
 
-        if let AttentionDecision::Coalesce { budget_refill_us, .. } = evaluate_attention(&ctx) {
+        if let AttentionDecision::Coalesce {
+            budget_refill_us, ..
+        } = evaluate_attention(&ctx)
+        {
             assert_eq!(budget_refill_us, Some(9_000_000));
         } else {
             panic!("Expected Coalesce");
@@ -442,11 +456,16 @@ mod attention_eval_tests {
 
     #[test]
     fn test_into_queue_reason_quiet_hours() {
-        let d = AttentionDecision::QueueQuietHours { window_end_us: Some(42) };
+        let d = AttentionDecision::QueueQuietHours {
+            window_end_us: Some(42),
+        };
         let reason = d.into_queue_reason();
-        assert!(
-            matches!(reason, Some(QueueReason::QuietHours { window_end_us: Some(42) }))
-        );
+        assert!(matches!(
+            reason,
+            Some(QueueReason::QuietHours {
+                window_end_us: Some(42)
+            })
+        ));
     }
 
     #[test]
@@ -457,15 +476,13 @@ mod attention_eval_tests {
             budget_refill_us: None,
         };
         let reason = d.into_queue_reason();
-        assert!(
-            matches!(
-                reason,
-                Some(QueueReason::AttentionBudgetExhausted {
-                    per_agent: true,
-                    per_zone: false
-                })
-            )
-        );
+        assert!(matches!(
+            reason,
+            Some(QueueReason::AttentionBudgetExhausted {
+                per_agent: true,
+                per_zone: false
+            })
+        ));
     }
 
     #[test]

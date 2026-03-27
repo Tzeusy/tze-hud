@@ -20,7 +20,7 @@
 //!    (same as `PointerDownEvent` in Stage 2).
 //! 2. Returns a `CommandDispatch` with `activate_pressed_state = true` so the
 //!    compositor thread can apply the `SceneLocalPatch`.
-//! Latency budget: `input_to_local_ack` p99 < 4ms (same as pointer).
+//!    Latency budget: `input_to_local_ack` p99 < 4ms (same as pointer).
 //!
 //! # NAVIGATE_NEXT with no focus (spec lines 323–326)
 //! When `action == CommandAction::NavigateNext` and focus is `FocusOwner::None`,
@@ -36,9 +36,9 @@
 //! - Lines 411–413: Pointer-Free Navigation
 
 use serde::{Deserialize, Serialize};
-use tze_hud_scene::{MonoUs, SceneId, NodeData};
-use tze_hud_scene::graph::SceneGraph;
 use std::time::Instant;
+use tze_hud_scene::graph::SceneGraph;
+use tze_hud_scene::{MonoUs, NodeData, SceneId};
 
 use crate::focus_tree::FocusOwner;
 
@@ -244,9 +244,7 @@ impl Default for CommandProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tze_hud_scene::{
-        Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId,
-    };
+    use tze_hud_scene::{Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId};
 
     // ── Test scene helpers ────────────────────────────────────────────────────
 
@@ -255,7 +253,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("test-agent", 60_000, vec![Capability::CreateTile]);
         let tile_id = scene
-            .create_tile(tab_id, "test-agent", lease_id, Rect::new(0.0, 0.0, 400.0, 300.0), 1)
+            .create_tile(
+                tab_id,
+                "test-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
             .unwrap();
 
         let node_id = SceneId::new();
@@ -403,8 +407,7 @@ mod tests {
 
             assert!(
                 dispatch.is_some(),
-                "action {:?} should produce a CommandDispatch",
-                action
+                "action {action:?} should produce a CommandDispatch"
             );
             assert_eq!(dispatch.unwrap().event.action, action);
         }
@@ -592,8 +595,7 @@ mod tests {
 
             assert!(
                 result.is_some(),
-                "pointer-free equivalent '{}' must produce a dispatch",
-                label
+                "pointer-free equivalent '{label}' must produce a dispatch"
             );
         }
     }

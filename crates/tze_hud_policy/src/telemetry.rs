@@ -55,13 +55,18 @@ impl PolicyTelemetry {
     /// Merge another `PolicyTelemetry` record into this one (additive).
     pub fn merge(&mut self, other: &PolicyTelemetry) {
         // For latency, take the max (worst-case p99 across merged frame windows).
-        self.per_frame_eval_us = self.per_frame_eval_us.saturating_add(other.per_frame_eval_us);
-        self.per_mutation_eval_us_p99 =
-            self.per_mutation_eval_us_p99.max(other.per_mutation_eval_us_p99);
-        self.mutations_rejected =
-            self.mutations_rejected.saturating_add(other.mutations_rejected);
-        self.mutations_redacted =
-            self.mutations_redacted.saturating_add(other.mutations_redacted);
+        self.per_frame_eval_us = self
+            .per_frame_eval_us
+            .saturating_add(other.per_frame_eval_us);
+        self.per_mutation_eval_us_p99 = self
+            .per_mutation_eval_us_p99
+            .max(other.per_mutation_eval_us_p99);
+        self.mutations_rejected = self
+            .mutations_rejected
+            .saturating_add(other.mutations_rejected);
+        self.mutations_redacted = self
+            .mutations_redacted
+            .saturating_add(other.mutations_redacted);
         self.mutations_queued = self.mutations_queued.saturating_add(other.mutations_queued);
         self.mutations_shed = self.mutations_shed.saturating_add(other.mutations_shed);
         self.override_commands_processed = self
@@ -143,11 +148,7 @@ impl ArbitrationTelemetryEvent {
     }
 
     /// Create a Shed event (Level 5 degradation shedding).
-    pub fn shed(
-        agent_id: impl Into<String>,
-        mutation_ref: SceneId,
-        timestamp_us: u64,
-    ) -> Self {
+    pub fn shed(agent_id: impl Into<String>, mutation_ref: SceneId, timestamp_us: u64) -> Self {
         Self {
             event: "arbitration_shed",
             kind: ArbitrationEventKind::Shed,
@@ -160,11 +161,7 @@ impl ArbitrationTelemetryEvent {
     }
 
     /// Create a Redact event (Level 2 privacy redaction).
-    pub fn redact(
-        agent_id: impl Into<String>,
-        mutation_ref: SceneId,
-        timestamp_us: u64,
-    ) -> Self {
+    pub fn redact(agent_id: impl Into<String>, mutation_ref: SceneId, timestamp_us: u64) -> Self {
         Self {
             event: "arbitration_redact",
             kind: ArbitrationEventKind::Redact,
@@ -177,11 +174,7 @@ impl ArbitrationTelemetryEvent {
     }
 
     /// Create a Queue event (Level 4 attention budget / quiet hours).
-    pub fn queue(
-        agent_id: impl Into<String>,
-        mutation_ref: SceneId,
-        timestamp_us: u64,
-    ) -> Self {
+    pub fn queue(agent_id: impl Into<String>, mutation_ref: SceneId, timestamp_us: u64) -> Self {
         Self {
             event: "arbitration_queue",
             kind: ArbitrationEventKind::Queue,
@@ -296,7 +289,7 @@ impl MutationLatencyAccumulator {
         let n = self.samples.len();
         // Nearest-rank method: ceil(0.99 * n) using integer arithmetic.
         // rank = ceil(99 * n / 100) = (99 * n + 99) / 100
-        let rank = (99 * n + 99) / 100;
+        let rank = (99 * n).div_ceil(100);
         let idx = (rank - 1).min(n - 1);
         self.samples[idx]
     }

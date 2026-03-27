@@ -28,8 +28,8 @@
 //! When in `Throttle` tier, the effective `update_rate_hz` for the lease is
 //! 50% of its nominal budget value (spec §Throttle after 5 seconds).
 
-use crate::clock::Clock;
 use super::BudgetTier;
+use crate::clock::Clock;
 
 // ─── Enforcement time constants ───────────────────────────────────────────────
 
@@ -301,7 +301,11 @@ mod tests {
     fn test_warning_triggered_at_80pct() {
         let (mut ladder, _) = make_ladder(0);
         let action = ladder.tick(0.80);
-        assert_eq!(ladder.tier(), BudgetTier::Warning, "should enter Warning at 80%");
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Warning,
+            "should enter Warning at 80%"
+        );
         assert_eq!(action, EnforcementAction::Warn);
     }
 
@@ -312,7 +316,11 @@ mod tests {
         ladder.tick(0.85); // enter Warning
         clock.advance(1_000); // 1s into warning
         let action = ladder.tick(0.70); // resolved
-        assert_eq!(ladder.tier(), BudgetTier::Normal, "should return to Normal when resolved");
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Normal,
+            "should return to Normal when resolved"
+        );
         assert_eq!(action, EnforcementAction::None);
     }
 
@@ -338,7 +346,11 @@ mod tests {
         assert_eq!(ladder.tier(), BudgetTier::Warning);
         clock.advance(5_001); // > 5s
         let action = ladder.tick(0.85);
-        assert_eq!(ladder.tier(), BudgetTier::Throttle, "should throttle after 5s");
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Throttle,
+            "should throttle after 5s"
+        );
         assert_eq!(action, EnforcementAction::Throttle);
     }
 
@@ -350,8 +362,10 @@ mod tests {
         clock.advance(5_001);
         ladder.tick(0.85); // Throttle now
         assert_eq!(ladder.tier(), BudgetTier::Throttle);
-        assert!((ladder.effective_rate_multiplier() - 0.5).abs() < f32::EPSILON,
-            "throttle should halve effective rate");
+        assert!(
+            (ladder.effective_rate_multiplier() - 0.5).abs() < f32::EPSILON,
+            "throttle should halve effective rate"
+        );
     }
 
     /// WHEN throttle is active and usage drops THEN Throttle remains sticky (not auto-reset).
@@ -363,8 +377,11 @@ mod tests {
         clock.advance(5_001);
         ladder.tick(0.85); // Throttle
         let action = ladder.tick(0.50); // usage drops but Throttle stays
-        assert_eq!(ladder.tier(), BudgetTier::Throttle,
-            "Throttle is sticky — does not auto-reset when usage drops");
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Throttle,
+            "Throttle is sticky — does not auto-reset when usage drops"
+        );
         assert_eq!(action, EnforcementAction::Throttle);
     }
 
@@ -375,12 +392,16 @@ mod tests {
     #[test]
     fn test_revocation_after_30s_throttle() {
         let (mut ladder, clock) = make_ladder(0);
-        ladder.tick(0.85);           // Warning
+        ladder.tick(0.85); // Warning
         clock.advance(5_001);
-        ladder.tick(0.85);           // Throttle
-        clock.advance(30_001);       // 30s+ in Throttle
+        ladder.tick(0.85); // Throttle
+        clock.advance(30_001); // 30s+ in Throttle
         let action = ladder.tick(0.85);
-        assert_eq!(ladder.tier(), BudgetTier::Revocation, "should revoke after 30s throttle");
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Revocation,
+            "should revoke after 30s throttle"
+        );
         assert_eq!(action, EnforcementAction::Revoke);
     }
 
@@ -408,8 +429,13 @@ mod tests {
         let (mut ladder, _) = make_ladder(0);
         // Still at Normal
         assert_eq!(ladder.tier(), BudgetTier::Normal);
-        let action = ladder.report_critical_bypass(CriticalBypassTrigger::CriticalTextureOomAttempt);
-        assert_eq!(ladder.tier(), BudgetTier::Revocation, "critical bypass must immediately revoke");
+        let action =
+            ladder.report_critical_bypass(CriticalBypassTrigger::CriticalTextureOomAttempt);
+        assert_eq!(
+            ladder.tier(),
+            BudgetTier::Revocation,
+            "critical bypass must immediately revoke"
+        );
         assert_eq!(action, EnforcementAction::Revoke);
     }
 
@@ -418,7 +444,8 @@ mod tests {
     fn test_critical_bypass_from_warning_skips_throttle() {
         let (mut ladder, _) = make_ladder(0);
         ladder.tick(0.85); // Warning
-        let action = ladder.report_critical_bypass(CriticalBypassTrigger::CriticalTextureOomAttempt);
+        let action =
+            ladder.report_critical_bypass(CriticalBypassTrigger::CriticalTextureOomAttempt);
         assert_eq!(ladder.tier(), BudgetTier::Revocation);
         assert_eq!(action, EnforcementAction::Revoke);
     }
@@ -430,7 +457,11 @@ mod tests {
         for i in 0..=10u32 {
             let is_critical = ladder.record_invariant_violation();
             if i < 10 {
-                assert!(!is_critical, "violation {} should not trigger (need >10)", i + 1);
+                assert!(
+                    !is_critical,
+                    "violation {} should not trigger (need >10)",
+                    i + 1
+                );
             } else {
                 assert!(is_critical, "11th violation should trigger critical bypass");
             }
@@ -446,8 +477,11 @@ mod tests {
             let is_critical = ladder.record_invariant_violation();
             assert!(!is_critical);
         }
-        assert_ne!(ladder.tier(), BudgetTier::Revocation,
-            "exactly 10 violations must NOT trigger revocation (threshold is >10)");
+        assert_ne!(
+            ladder.tier(),
+            BudgetTier::Revocation,
+            "exactly 10 violations must NOT trigger revocation (threshold is >10)"
+        );
     }
 
     // ── 6. Effective rate multiplier ──────────────────────────────────────
@@ -465,8 +499,11 @@ mod tests {
         let (mut ladder, _) = make_ladder(0);
         ladder.tick(0.85);
         assert_eq!(ladder.tier(), BudgetTier::Warning);
-        assert_eq!(ladder.effective_rate_multiplier(), 1.0,
-            "warning tier must not reduce rate");
+        assert_eq!(
+            ladder.effective_rate_multiplier(),
+            1.0,
+            "warning tier must not reduce rate"
+        );
     }
 
     // ── 7. Duration helpers ───────────────────────────────────────────────
@@ -478,8 +515,10 @@ mod tests {
         ladder.tick(0.85);
         clock.advance(2_500);
         let dur = ladder.warning_duration_ms();
-        assert!(dur >= 2_400 && dur <= 2_600,
-            "expected ≈2500ms warning duration, got {dur}");
+        assert!(
+            (2_400..=2_600).contains(&dur),
+            "expected ≈2500ms warning duration, got {dur}"
+        );
     }
 
     /// WHEN not in Warning tier THEN warning_duration_ms is 0.
@@ -498,8 +537,10 @@ mod tests {
         ladder.tick(0.85); // enter Throttle
         clock.advance(10_000);
         let dur = ladder.throttle_duration_ms();
-        assert!(dur >= 9_900 && dur <= 10_100,
-            "expected ≈10000ms throttle duration, got {dur}");
+        assert!(
+            (9_900..=10_100).contains(&dur),
+            "expected ≈10000ms throttle duration, got {dur}"
+        );
     }
 
     // ── 8. Full ladder walkthrough ────────────────────────────────────────

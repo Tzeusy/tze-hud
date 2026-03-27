@@ -56,7 +56,10 @@ fn normal_monotonic_sequence_accepted() {
     let mut last = 0u64;
     for seq in 1..=100u64 {
         let result = validate_sequence(last, seq, max_gap);
-        assert!(result.is_ok(), "sequence {} must be accepted after {}", seq, last);
+        assert!(
+            result.is_ok(),
+            "sequence {seq} must be accepted after {last}"
+        );
         last = seq;
     }
 }
@@ -78,7 +81,10 @@ fn sequence_gap_exactly_max_is_accepted() {
     let max_gap = 100u64;
     let last = 50u64;
     let result = validate_sequence(last, last + max_gap, max_gap);
-    assert!(result.is_ok(), "gap equal to max_sequence_gap must be accepted");
+    assert!(
+        result.is_ok(),
+        "gap equal to max_sequence_gap must be accepted"
+    );
 }
 
 /// WHEN gap is 1 (consecutive) THEN accepted.
@@ -104,9 +110,12 @@ fn sequence_gap_50_is_accepted() {
 fn sequence_gap_101_triggers_gap_exceeded() {
     let max_gap = 100u64;
     let result = validate_sequence(1, 102, max_gap);
-    assert_eq!(result, Err(SequenceError::SequenceGapExceeded),
+    assert_eq!(
+        result,
+        Err(SequenceError::SequenceGapExceeded),
         "gap of 101 must trigger SEQUENCE_GAP_EXCEEDED \
-         (session-protocol/spec.md lines 212-223)");
+         (session-protocol/spec.md lines 212-223)"
+    );
 }
 
 /// WHEN gap is 1000 (large jump) THEN SEQUENCE_GAP_EXCEEDED error.
@@ -114,8 +123,11 @@ fn sequence_gap_101_triggers_gap_exceeded() {
 fn large_sequence_gap_triggers_gap_exceeded() {
     let max_gap = 100u64;
     let result = validate_sequence(1, 1001, max_gap);
-    assert_eq!(result, Err(SequenceError::SequenceGapExceeded),
-        "gap of 1000 must trigger SEQUENCE_GAP_EXCEEDED");
+    assert_eq!(
+        result,
+        Err(SequenceError::SequenceGapExceeded),
+        "gap of 1000 must trigger SEQUENCE_GAP_EXCEEDED"
+    );
 }
 
 // ─── Regression: SEQUENCE_REGRESSION ─────────────────────────────────────────
@@ -126,9 +138,12 @@ fn sequence_regression_triggers_error() {
     let max_gap = 100u64;
     // Regression: last=100, new=99
     let result = validate_sequence(100, 99, max_gap);
-    assert_eq!(result, Err(SequenceError::SequenceRegression),
+    assert_eq!(
+        result,
+        Err(SequenceError::SequenceRegression),
         "sequence regression must trigger SEQUENCE_REGRESSION \
-         (session-protocol/spec.md lines 212-223)");
+         (session-protocol/spec.md lines 212-223)"
+    );
 }
 
 /// WHEN sequence repeats (same number) THEN SEQUENCE_REGRESSION error.
@@ -136,8 +151,11 @@ fn sequence_regression_triggers_error() {
 fn sequence_repeat_triggers_regression() {
     let max_gap = 100u64;
     let result = validate_sequence(50, 50, max_gap);
-    assert_eq!(result, Err(SequenceError::SequenceRegression),
-        "repeated sequence number must trigger SEQUENCE_REGRESSION");
+    assert_eq!(
+        result,
+        Err(SequenceError::SequenceRegression),
+        "repeated sequence number must trigger SEQUENCE_REGRESSION"
+    );
 }
 
 /// WHEN sequence wraps to 0 THEN SEQUENCE_REGRESSION (0 is invalid, sequences start at 1).
@@ -145,8 +163,11 @@ fn sequence_repeat_triggers_regression() {
 fn sequence_zero_triggers_regression() {
     let max_gap = 100u64;
     let result = validate_sequence(5, 0, max_gap);
-    assert_eq!(result, Err(SequenceError::SequenceRegression),
-        "sequence 0 is invalid; sequences start at 1");
+    assert_eq!(
+        result,
+        Err(SequenceError::SequenceRegression),
+        "sequence 0 is invalid; sequences start at 1"
+    );
 }
 
 // ─── Max sequence gap configuration ──────────────────────────────────────────
@@ -155,8 +176,10 @@ fn sequence_zero_triggers_regression() {
 #[test]
 fn max_sequence_gap_default_is_100() {
     let cfg = SessionConfig::default();
-    assert_eq!(cfg.max_sequence_gap, 100,
-        "max_sequence_gap must be 100 per session-protocol/spec.md lines 212-223");
+    assert_eq!(
+        cfg.max_sequence_gap, 100,
+        "max_sequence_gap must be 100 per session-protocol/spec.md lines 212-223"
+    );
 }
 
 /// WHEN sequences jump exactly at boundary (gap=100) vs over (gap=101).
@@ -165,7 +188,10 @@ fn boundary_gap_100_vs_101() {
     let max_gap = 100u64;
 
     // Gap exactly 100: accept
-    assert!(validate_sequence(200, 300, max_gap).is_ok(), "gap=100 must be accepted");
+    assert!(
+        validate_sequence(200, 300, max_gap).is_ok(),
+        "gap=100 must be accepted"
+    );
 
     // Gap 101: reject
     assert_eq!(

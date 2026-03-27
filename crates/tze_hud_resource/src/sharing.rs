@@ -145,7 +145,8 @@ impl SharingContext {
             self.refcount.inc_ref_with_decoded_bytes(resource_id)?;
 
         // Charge the agent's budget (full decoded size per reference).
-        self.budget.on_node_ref_added(agent_ns, resource_id, decoded_bytes);
+        self.budget
+            .on_node_ref_added(agent_ns, resource_id, decoded_bytes);
 
         let _ = now_ms; // accepted for future rate-limiting use; unused for now
 
@@ -256,6 +257,7 @@ impl SharingContext {
     /// Intentionally `pub(crate)` — external callers must not be able to
     /// enumerate GC candidates via `candidates().snapshot()`, which would
     /// violate the no-enumeration invariant (spec lines 175-177).
+    #[allow(dead_code)] // used by GC integration path; not yet wired up end-to-end
     pub(crate) fn refcount_layer(&self) -> &RefcountLayer {
         &self.refcount
     }
@@ -310,10 +312,7 @@ mod tests {
     }
 
     /// Create a SharingContext pre-populated with one resource.
-    fn context_with_resource(
-        id: ResourceId,
-        decoded_bytes: usize,
-    ) -> SharingContext {
+    fn context_with_resource(id: ResourceId, decoded_bytes: usize) -> SharingContext {
         let dedup = DedupIndex::new();
         dedup.insert(id, make_resource(id, decoded_bytes)).unwrap();
         SharingContext::new(dedup)
@@ -367,7 +366,10 @@ mod tests {
 
         // Agent A deletes its node.
         let new_rc = ctx.remove_node_ref("agent_a", resource_id, 0).unwrap();
-        assert_eq!(new_rc, 1, "refcount must be 1 — Agent B still references the resource");
+        assert_eq!(
+            new_rc, 1,
+            "refcount must be 1 — Agent B still references the resource"
+        );
 
         // Resource must NOT be in GC candidacy.
         let candidates = ctx.refcount_layer().candidates().snapshot();
@@ -489,7 +491,7 @@ mod tests {
     /// (read is cap-free while upload is gated).
     #[test]
     fn upload_requires_capability_reference_does_not() {
-        use crate::validation::{check_capability, CAPABILITY_UPLOAD_RESOURCE};
+        use crate::validation::{CAPABILITY_UPLOAD_RESOURCE, check_capability};
 
         // Upload gate: guest (empty caps) is denied.
         let guest_caps: Vec<String> = vec![];
@@ -544,7 +546,11 @@ mod tests {
         assert_eq!(ctx.agent_used_bytes("agent_a"), decoded);
 
         ctx.remove_node_ref("agent_a", resource_id, 0).unwrap();
-        assert_eq!(ctx.agent_used_bytes("agent_a"), 0, "budget must be cleared after node deletion");
+        assert_eq!(
+            ctx.agent_used_bytes("agent_a"),
+            0,
+            "budget must be cleared after node deletion"
+        );
     }
 
     // ── GC candidacy after all agents delete ─────────────────────────────────
@@ -622,10 +628,16 @@ mod tests {
         let ten_mib = 10 * 1024 * 1024;
 
         // 4 MiB used; 4 MiB more fits within 10 MiB.
-        assert!(ctx.check_agent_budget("agent_a", 4 * 1024 * 1024, ten_mib).is_ok());
+        assert!(
+            ctx.check_agent_budget("agent_a", 4 * 1024 * 1024, ten_mib)
+                .is_ok()
+        );
 
         // 4 MiB used; 7 MiB more would exceed 10 MiB.
-        assert!(ctx.check_agent_budget("agent_a", 7 * 1024 * 1024, ten_mib).is_err());
+        assert!(
+            ctx.check_agent_budget("agent_a", 7 * 1024 * 1024, ten_mib)
+                .is_err()
+        );
     }
 
     // ── Agent revocation clears budget ────────────────────────────────────────

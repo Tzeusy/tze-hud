@@ -34,7 +34,7 @@ pub mod uia;
 pub mod nsaccessibility;
 
 use serde::{Deserialize, Serialize};
-use tze_hud_scene::{SceneId, SceneGraph};
+use tze_hud_scene::{SceneGraph, SceneId};
 
 // ─── Shared stub helper ───────────────────────────────────────────────────────
 
@@ -46,6 +46,12 @@ use tze_hud_scene::{SceneId, SceneGraph};
 /// every platform module.
 pub struct WarnOnce {
     warned: bool,
+}
+
+impl Default for WarnOnce {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl WarnOnce {

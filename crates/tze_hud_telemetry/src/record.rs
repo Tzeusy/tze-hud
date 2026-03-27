@@ -30,7 +30,6 @@ pub struct FrameTelemetry {
     pub frame_time_us: u64,
 
     // ── Per-stage timings ────────────────────────────────────────────────────
-
     /// Stage 1 — Input Drain (main thread). p99 budget: 500us.
     /// Drain OS input events, attach hardware timestamps, enqueue InputEvent records.
     pub stage1_input_drain_us: u64,
@@ -70,7 +69,6 @@ pub struct FrameTelemetry {
     // the elapsed time from the triggering input event to a specific pipeline
     // boundary for the *current frame*. A value of 0 means no input event
     // occurred this frame for that measurement point.
-
     /// input_to_local_ack — time from input event arrival to Stage 2 completion
     /// (local visual feedback rendered). p99 budget: 4ms (4_000 µs).
     /// Populated by the input processor; 0 when no input event occurred this frame.
@@ -95,7 +93,6 @@ pub struct FrameTelemetry {
     // Rust callers that were written against the pre-stage-naming API.
     // If downstream consumers read the serialized JSON, migrate to the canonical
     // `stageN_*_us` field names; these aliases will not be present in the output.
-
     /// Alias for stage1_input_drain_us (in-process only; not serialized).
     #[serde(skip)]
     pub input_drain_us: u64,
@@ -110,7 +107,6 @@ pub struct FrameTelemetry {
     pub gpu_submit_us: u64,
 
     // ── Scene counters ───────────────────────────────────────────────────────
-
     /// Number of visible tiles this frame.
     pub tile_count: u32,
     /// Number of nodes rendered this frame.
@@ -131,7 +127,6 @@ pub struct FrameTelemetry {
     // RFC 0002 §3.2 Stage 8 requires per-frame invariant violation counts so
     // that LLM-driven debugging can detect scene corruption at the frame level,
     // not just at session boundary via SessionSummary counters.
-
     /// Number of scene-commit rejections this frame (Stage 4 batches where
     /// `applied == false`). Each rejected batch represents a scene mutation
     /// that failed validation — lease checks, budget checks, bounds checks,
@@ -622,7 +617,7 @@ mod tests {
         let mut summary = SessionSummary::new();
 
         // Populate each bucket independently
-        summary.input_to_local_ack.record(1_000);    // 1ms
+        summary.input_to_local_ack.record(1_000); // 1ms
         summary.input_to_scene_commit.record(10_000); // 10ms
         summary.input_to_next_present.record(20_000); // 20ms
 
@@ -632,26 +627,41 @@ mod tests {
             "input_to_local_ack p99 must be under 4ms budget"
         );
         assert!(
-            summary.input_to_scene_commit.assert_p99_under(50_000).is_ok(),
+            summary
+                .input_to_scene_commit
+                .assert_p99_under(50_000)
+                .is_ok(),
             "input_to_scene_commit p99 must be under 50ms budget"
         );
         assert!(
-            summary.input_to_next_present.assert_p99_under(33_000).is_ok(),
+            summary
+                .input_to_next_present
+                .assert_p99_under(33_000)
+                .is_ok(),
             "input_to_next_present p99 must be under 33ms budget"
         );
 
         // Serialized JSON must contain all three bucket names
         let json = summary.to_json().unwrap();
-        assert!(json.contains("input_to_local_ack"), "JSON must contain input_to_local_ack");
-        assert!(json.contains("input_to_scene_commit"), "JSON must contain input_to_scene_commit");
-        assert!(json.contains("input_to_next_present"), "JSON must contain input_to_next_present");
+        assert!(
+            json.contains("input_to_local_ack"),
+            "JSON must contain input_to_local_ack"
+        );
+        assert!(
+            json.contains("input_to_scene_commit"),
+            "JSON must contain input_to_scene_commit"
+        );
+        assert!(
+            json.contains("input_to_next_present"),
+            "JSON must contain input_to_next_present"
+        );
     }
 
     /// Verify that FrameTelemetry carries all three split latency fields.
     #[test]
     fn test_frame_telemetry_has_split_latency_fields() {
         let mut frame = FrameTelemetry::new(1);
-        frame.input_to_local_ack_us = 500;     // 0.5ms
+        frame.input_to_local_ack_us = 500; // 0.5ms
         frame.input_to_scene_commit_us = 5_000; // 5ms
         frame.input_to_next_present_us = 15_000; // 15ms
 
@@ -662,9 +672,18 @@ mod tests {
 
         // Serialized JSON must contain all three field names
         let json = serde_json::to_string(&frame).unwrap();
-        assert!(json.contains("input_to_local_ack_us"), "JSON must contain input_to_local_ack_us");
-        assert!(json.contains("input_to_scene_commit_us"), "JSON must contain input_to_scene_commit_us");
-        assert!(json.contains("input_to_next_present_us"), "JSON must contain input_to_next_present_us");
+        assert!(
+            json.contains("input_to_local_ack_us"),
+            "JSON must contain input_to_local_ack_us"
+        );
+        assert!(
+            json.contains("input_to_scene_commit_us"),
+            "JSON must contain input_to_scene_commit_us"
+        );
+        assert!(
+            json.contains("input_to_next_present_us"),
+            "JSON must contain input_to_next_present_us"
+        );
     }
 
     #[test]
@@ -724,8 +743,14 @@ mod tests {
         let result = bucket.assert_p99_under(16_600);
         assert!(result.is_err());
         let msg = result.unwrap_err();
-        assert!(msg.contains("20000us"), "error should contain actual: {msg}");
-        assert!(msg.contains("16600us"), "error should contain budget: {msg}");
+        assert!(
+            msg.contains("20000us"),
+            "error should contain actual: {msg}"
+        );
+        assert!(
+            msg.contains("16600us"),
+            "error should contain budget: {msg}"
+        );
     }
 
     #[test]
@@ -746,7 +771,7 @@ mod tests {
             CalibrationStatus::Uncalibrated { raw_p99 } => {
                 assert!(raw_p99 > 0, "raw_p99 should be populated");
             }
-            other => panic!("expected Uncalibrated, got {:?}", other),
+            other => panic!("expected Uncalibrated, got {other:?}"),
         }
     }
 
@@ -760,7 +785,7 @@ mod tests {
         assert!(result.is_ok());
         match result.unwrap() {
             CalibrationStatus::Pass(p99) => assert_eq!(p99, 5_000),
-            other => panic!("expected Pass, got {:?}", other),
+            other => panic!("expected Pass, got {other:?}"),
         }
     }
 
@@ -779,7 +804,10 @@ mod tests {
     fn test_assert_p99_calibrated_empty_bucket_returns_err_even_when_uncalibrated() {
         let bucket = LatencyBucket::new("empty");
         let result = bucket.assert_p99_calibrated(None, 16_600);
-        assert!(result.is_err(), "empty bucket should return Err even in uncalibrated path");
+        assert!(
+            result.is_err(),
+            "empty bucket should return Err even in uncalibrated path"
+        );
         assert!(result.unwrap_err().contains("no samples"));
     }
 
@@ -831,8 +859,14 @@ mod tests {
             json.contains("layer0_checks_failed_this_frame"),
             "JSON must contain layer0_checks_failed_this_frame"
         );
-        assert!(json.contains("\"invariant_violations_this_frame\":3"), "value must be 3");
-        assert!(json.contains("\"layer0_checks_failed_this_frame\":1"), "value must be 1");
+        assert!(
+            json.contains("\"invariant_violations_this_frame\":3"),
+            "value must be 3"
+        );
+        assert!(
+            json.contains("\"layer0_checks_failed_this_frame\":1"),
+            "value must be 1"
+        );
     }
 
     /// Verify record_frame_correctness accumulates invariant_violations into

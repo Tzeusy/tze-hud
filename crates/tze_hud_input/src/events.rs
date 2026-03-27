@@ -27,15 +27,10 @@ use crate::pointer::{
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HitTestResult {
     /// A HitRegionNode was hit. Routes to that tile's lease owner.
-    NodeHit {
-        tile_id: SceneId,
-        node_id: SceneId,
-    },
+    NodeHit { tile_id: SceneId, node_id: SceneId },
     /// A tile was hit but no HitRegionNode was hit within it.
     /// Routes to the tile's lease owner with a null node_id.
-    TileHit {
-        tile_id: SceneId,
-    },
+    TileHit { tile_id: SceneId },
     /// A chrome element was hit. Handled locally; no agent notification.
     ChromeHit {
         /// Opaque identifier for the chrome element (e.g., tab bar item ID).
@@ -50,7 +45,10 @@ pub enum HitTestResult {
 impl HitTestResult {
     /// Whether this hit requires agent notification.
     pub fn requires_agent_dispatch(&self) -> bool {
-        matches!(self, HitTestResult::NodeHit { .. } | HitTestResult::TileHit { .. })
+        matches!(
+            self,
+            HitTestResult::NodeHit { .. } | HitTestResult::TileHit { .. }
+        )
     }
 }
 
@@ -109,7 +107,13 @@ pub struct LocalStateUpdate {
 impl LocalStateUpdate {
     /// Construct a simple state update with no rollback.
     pub fn new(node_id: SceneId) -> Self {
-        Self { node_id, pressed: None, hovered: None, focused: None, rollback: false }
+        Self {
+            node_id,
+            pressed: None,
+            hovered: None,
+            focused: None,
+            rollback: false,
+        }
     }
 
     /// Set pressed state and return self for chaining.
@@ -166,12 +170,22 @@ pub struct ScrollOffsetUpdate {
 impl ScrollOffsetUpdate {
     /// Construct a user-initiated scroll offset update (absolute).
     pub fn from_user(tile_id: SceneId, offset_x: f32, offset_y: f32) -> Self {
-        Self { tile_id, offset_x, offset_y, user_initiated: true }
+        Self {
+            tile_id,
+            offset_x,
+            offset_y,
+            user_initiated: true,
+        }
     }
 
     /// Construct an agent-requested scroll offset update (absolute).
     pub fn from_agent(tile_id: SceneId, offset_x: f32, offset_y: f32) -> Self {
-        Self { tile_id, offset_x, offset_y, user_initiated: false }
+        Self {
+            tile_id,
+            offset_x,
+            offset_y,
+            user_initiated: false,
+        }
     }
 }
 
@@ -225,7 +239,13 @@ impl SceneLocalPatch {
         hovered: Option<bool>,
         focused: Option<bool>,
     ) {
-        self.node_updates.push(LocalStateUpdate { node_id, pressed, hovered, focused, rollback: false });
+        self.node_updates.push(LocalStateUpdate {
+            node_id,
+            pressed,
+            hovered,
+            focused,
+            rollback: false,
+        });
     }
 
     /// Merge another patch into this one (in-place coalescing).
@@ -246,11 +266,19 @@ impl SceneLocalPatch {
         }
         // Scroll updates: coalesce per tile_id with user-priority.
         for incoming in other.scroll_updates {
-            if let Some(existing) = self.scroll_updates.iter_mut().find(|u| u.tile_id == incoming.tile_id) {
+            if let Some(existing) = self
+                .scroll_updates
+                .iter_mut()
+                .find(|u| u.tile_id == incoming.tile_id)
+            {
                 match (existing.user_initiated, incoming.user_initiated) {
-                    (false, true) => { *existing = incoming; }
+                    (false, true) => {
+                        *existing = incoming;
+                    }
                     (true, false) => {}
-                    _ => { *existing = incoming; }
+                    _ => {
+                        *existing = incoming;
+                    }
                 }
             } else {
                 self.scroll_updates.push(incoming);
@@ -333,7 +361,11 @@ pub struct EventBatch {
 
 impl EventBatch {
     pub fn new(frame_number: u64, batch_ts_us: u64) -> Self {
-        Self { frame_number, batch_ts_us, events: Vec::new() }
+        Self {
+            frame_number,
+            batch_ts_us,
+            events: Vec::new(),
+        }
     }
 
     /// Add an event to the batch. Maintains ascending timestamp order.
@@ -371,11 +403,25 @@ mod tests {
 
     #[test]
     fn hit_test_result_requires_dispatch() {
-        assert!(HitTestResult::NodeHit { tile_id: SceneId::new(), node_id: SceneId::new() }
-            .requires_agent_dispatch());
-        assert!(HitTestResult::TileHit { tile_id: SceneId::new() }.requires_agent_dispatch());
-        assert!(!HitTestResult::ChromeHit { element_id: "tab-bar".to_string() }
-            .requires_agent_dispatch());
+        assert!(
+            HitTestResult::NodeHit {
+                tile_id: SceneId::new(),
+                node_id: SceneId::new()
+            }
+            .requires_agent_dispatch()
+        );
+        assert!(
+            HitTestResult::TileHit {
+                tile_id: SceneId::new()
+            }
+            .requires_agent_dispatch()
+        );
+        assert!(
+            !HitTestResult::ChromeHit {
+                element_id: "tab-bar".to_string()
+            }
+            .requires_agent_dispatch()
+        );
         assert!(!HitTestResult::Passthrough.requires_agent_dispatch());
     }
 
@@ -413,7 +459,11 @@ mod tests {
         }));
 
         let timestamps: Vec<MonoUs> = batch.events.iter().map(|e| e.timestamp_mono_us()).collect();
-        assert_eq!(timestamps, vec![MonoUs(100), MonoUs(200), MonoUs(300)], "events must be ordered by timestamp");
+        assert_eq!(
+            timestamps,
+            vec![MonoUs(100), MonoUs(200), MonoUs(300)],
+            "events must be ordered by timestamp"
+        );
     }
 
     #[test]
@@ -422,14 +472,24 @@ mod tests {
             fields: make_fields(0),
             button: crate::pointer::PointerButton::Primary,
         });
-        let move_evt = InputEnvelope::PointerMove(PointerMoveEvent { fields: make_fields(0) });
+        let move_evt = InputEnvelope::PointerMove(PointerMoveEvent {
+            fields: make_fields(0),
+        });
         assert!(down.is_transactional(), "PointerDown must be transactional");
-        assert!(!move_evt.is_transactional(), "PointerMove must NOT be transactional");
+        assert!(
+            !move_evt.is_transactional(),
+            "PointerMove must NOT be transactional"
+        );
     }
 
     #[test]
     fn context_menu_is_transactional() {
-        let evt = InputEnvelope::ContextMenu(ContextMenuEvent { fields: make_fields(0) });
-        assert!(evt.is_transactional(), "ContextMenuEvent must be transactional");
+        let evt = InputEnvelope::ContextMenu(ContextMenuEvent {
+            fields: make_fields(0),
+        });
+        assert!(
+            evt.is_transactional(),
+            "ContextMenuEvent must be transactional"
+        );
     }
 }

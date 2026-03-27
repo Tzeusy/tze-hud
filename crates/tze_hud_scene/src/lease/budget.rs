@@ -75,11 +75,17 @@ pub enum BudgetHardViolation {
     /// A tile would exceed `max_nodes_per_tile`.
     NodesPerTileExceeded { proposed: u32, limit: u32 },
     /// Texture allocation would exceed `texture_bytes_total`.
-    TextureBytesExceeded { current_bytes: u64, limit_bytes: u64 },
+    TextureBytesExceeded {
+        current_bytes: u64,
+        limit_bytes: u64,
+    },
     /// An agent's active-lease count would exceed `max_active_leases`.
     ActiveLeasesExceeded { current: u32, limit: u32 },
     /// Texture OOM: critical bypass (no ladder, direct revocation).
-    CriticalTextureOomAttempt { requested_bytes: u64, hard_max_bytes: u64 },
+    CriticalTextureOomAttempt {
+        requested_bytes: u64,
+        hard_max_bytes: u64,
+    },
 }
 
 // ─── Soft-limit check (80%) ───────────────────────────────────────────────────
@@ -170,9 +176,7 @@ pub fn check_budget_hard(
 
     // ── Tile count ────────────────────────────────────────────────────────
     if delta.delta_tiles > 0 {
-        let proposed_tiles = usage
-            .tile_count
-            .saturating_add(delta.delta_tiles as u32);
+        let proposed_tiles = usage.tile_count.saturating_add(delta.delta_tiles as u32);
         if proposed_tiles > budget.max_tiles as u32 {
             return Err(BudgetHardViolation::TileCountExceeded {
                 current: proposed_tiles,
@@ -182,9 +186,7 @@ pub fn check_budget_hard(
     }
 
     // ── Nodes per tile ────────────────────────────────────────────────────
-    if delta.max_nodes_in_batch > 0
-        && delta.max_nodes_in_batch > budget.max_nodes_per_tile as u32
-    {
+    if delta.max_nodes_in_batch > 0 && delta.max_nodes_in_batch > budget.max_nodes_per_tile as u32 {
         return Err(BudgetHardViolation::NodesPerTileExceeded {
             proposed: delta.max_nodes_in_batch,
             limit: budget.max_nodes_per_tile as u32,
@@ -278,8 +280,10 @@ mod tests {
         let budget = default_budget();
         let usage = zero_usage();
         let warnings = check_budget_soft(&budget, &usage);
-        assert!(warnings.iter().all(|w| w.is_none()),
-            "no dimensions should warn below 80%");
+        assert!(
+            warnings.iter().all(|w| w.is_none()),
+            "no dimensions should warn below 80%"
+        );
     }
 
     /// WHEN tile count at 80% THEN TileCount dimension is returned.
@@ -292,7 +296,7 @@ mod tests {
         };
         let warnings = check_budget_soft(&budget, &usage);
         assert!(
-            warnings.iter().any(|w| *w == Some(BudgetDimension::TileCount)),
+            warnings.contains(&Some(BudgetDimension::TileCount)),
             "TileCount should be warned at 87.5%"
         );
     }
@@ -305,14 +309,14 @@ mod tests {
         let budget = default_budget(); // texture_bytes_total = 64 MiB
         // Use integer arithmetic: ceiling of (total * 4 / 5) ensures usage * 5 >= total * 4.
         let total = budget.texture_bytes_total;
-        let eighty_pct = (total * 4 + 4) / 5;
+        let eighty_pct = (total * 4).div_ceil(5);
         let usage = BudgetUsage {
             texture_bytes_used: eighty_pct,
             ..BudgetUsage::default()
         };
         let warnings = check_budget_soft(&budget, &usage);
         assert!(
-            warnings.iter().any(|w| *w == Some(BudgetDimension::TextureBytes)),
+            warnings.contains(&Some(BudgetDimension::TextureBytes)),
             "TextureBytes should be warned at exactly 80% (used={eighty_pct}, total={total})"
         );
     }
@@ -369,7 +373,7 @@ mod tests {
         let result = check_budget_hard(&budget, &usage, &delta, u64::MAX);
         assert!(
             matches!(result, Err(BudgetHardViolation::TileCountExceeded { .. })),
-            "expected TileCountExceeded, got {:?}", result
+            "expected TileCountExceeded, got {result:?}"
         );
     }
 
@@ -383,11 +387,20 @@ mod tests {
             tile_count: 8,
             ..BudgetUsage::default()
         };
-        let delta = BudgetDelta { delta_tiles: 1, ..Default::default() };
+        let delta = BudgetDelta {
+            delta_tiles: 1,
+            ..Default::default()
+        };
         let result = check_budget_hard(&budget, &usage, &delta, u64::MAX);
         assert!(
-            matches!(result, Err(BudgetHardViolation::TileCountExceeded { current: 9, limit: 8 })),
-            "9th tile must produce TileCountExceeded(current=9, limit=8): {:?}", result
+            matches!(
+                result,
+                Err(BudgetHardViolation::TileCountExceeded {
+                    current: 9,
+                    limit: 8
+                })
+            ),
+            "9th tile must produce TileCountExceeded(current=9, limit=8): {result:?}"
         );
     }
 
@@ -403,8 +416,14 @@ mod tests {
         };
         let result = check_budget_hard(&budget, &usage, &delta, u64::MAX);
         assert!(
-            matches!(result, Err(BudgetHardViolation::NodesPerTileExceeded { proposed: 33, limit: 32 })),
-            "expected NodesPerTileExceeded(33, 32): {:?}", result
+            matches!(
+                result,
+                Err(BudgetHardViolation::NodesPerTileExceeded {
+                    proposed: 33,
+                    limit: 32
+                })
+            ),
+            "expected NodesPerTileExceeded(33, 32): {result:?}"
         );
     }
 
@@ -423,8 +442,11 @@ mod tests {
         };
         let result = check_budget_hard(&budget, &usage, &delta, u64::MAX);
         assert!(
-            matches!(result, Err(BudgetHardViolation::TextureBytesExceeded { .. })),
-            "expected TextureBytesExceeded: {:?}", result
+            matches!(
+                result,
+                Err(BudgetHardViolation::TextureBytesExceeded { .. })
+            ),
+            "expected TextureBytesExceeded: {result:?}"
         );
     }
 
@@ -443,8 +465,11 @@ mod tests {
         let hard_max = 2_000_000_000u64;
         let result = check_budget_hard(&budget, &usage, &delta, hard_max);
         assert!(
-            matches!(result, Err(BudgetHardViolation::CriticalTextureOomAttempt { .. })),
-            "expected CriticalTextureOomAttempt: {:?}", result
+            matches!(
+                result,
+                Err(BudgetHardViolation::CriticalTextureOomAttempt { .. })
+            ),
+            "expected CriticalTextureOomAttempt: {result:?}"
         );
     }
 
@@ -459,29 +484,44 @@ mod tests {
         budget.max_nodes_per_tile = 32;
 
         // Creating the 8th tile is allowed
-        let usage7 = BudgetUsage { tile_count: 7, ..Default::default() };
-        let delta_one_tile = BudgetDelta { delta_tiles: 1, ..Default::default() };
+        let usage7 = BudgetUsage {
+            tile_count: 7,
+            ..Default::default()
+        };
+        let delta_one_tile = BudgetDelta {
+            delta_tiles: 1,
+            ..Default::default()
+        };
         assert!(
             check_budget_hard(&budget, &usage7, &delta_one_tile, u64::MAX).is_ok(),
             "creating 8th tile (total=8) must be allowed"
         );
 
         // Creating a 9th tile is rejected
-        let usage8 = BudgetUsage { tile_count: 8, ..Default::default() };
+        let usage8 = BudgetUsage {
+            tile_count: 8,
+            ..Default::default()
+        };
         assert!(
             check_budget_hard(&budget, &usage8, &delta_one_tile, u64::MAX).is_err(),
             "creating 9th tile must be rejected"
         );
 
         // 32 nodes per tile is allowed
-        let delta_32_nodes = BudgetDelta { max_nodes_in_batch: 32, ..Default::default() };
+        let delta_32_nodes = BudgetDelta {
+            max_nodes_in_batch: 32,
+            ..Default::default()
+        };
         assert!(
             check_budget_hard(&budget, &BudgetUsage::default(), &delta_32_nodes, u64::MAX).is_ok(),
             "32 nodes per tile must be allowed"
         );
 
         // 33 nodes per tile is rejected
-        let delta_33_nodes = BudgetDelta { max_nodes_in_batch: 33, ..Default::default() };
+        let delta_33_nodes = BudgetDelta {
+            max_nodes_in_batch: 33,
+            ..Default::default()
+        };
         assert!(
             check_budget_hard(&budget, &BudgetUsage::default(), &delta_33_nodes, u64::MAX).is_err(),
             "33 nodes per tile must be rejected"
@@ -494,8 +534,10 @@ mod tests {
     #[test]
     fn test_max_concurrent_streams_zero_in_v1() {
         let budget = ResourceBudget::default();
-        assert_eq!(budget.max_concurrent_streams, 0,
-            "max_concurrent_streams must be 0 in v1 (media streams deferred)");
+        assert_eq!(
+            budget.max_concurrent_streams, 0,
+            "max_concurrent_streams must be 0 in v1 (media streams deferred)"
+        );
     }
 
     // ── Latency requirement (spec lines 204-211) ──────────────────────────
@@ -531,7 +573,8 @@ mod tests {
         assert!(
             max_elapsed_us <= NOMINAL_BUDGET_US * CI_MULTIPLIER,
             "budget check exceeded latency budget: max {}µs > {}µs",
-            max_elapsed_us, NOMINAL_BUDGET_US * CI_MULTIPLIER
+            max_elapsed_us,
+            NOMINAL_BUDGET_US * CI_MULTIPLIER
         );
     }
 
@@ -547,6 +590,9 @@ mod tests {
         // other agent(s) also add the same shared bytes to their own usage total.
         // This function returns exclusive + shared (= 150) for this agent's view.
         let counted = anti_collusion_texture_bytes(exclusive, shared);
-        assert_eq!(counted, 150, "exclusive({exclusive}) + shared({shared}) should be 150");
+        assert_eq!(
+            counted, 150,
+            "exclusive({exclusive}) + shared({shared}) should be 150"
+        );
     }
 }

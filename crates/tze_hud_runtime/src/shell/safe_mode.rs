@@ -42,18 +42,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use tze_hud_protocol::proto::session::{
-    server_message::Payload as ServerPayload,
-    ServerMessage,
-    SessionSuspended,
-    SessionResumed,
+    ServerMessage, SessionResumed, SessionSuspended, server_message::Payload as ServerPayload,
 };
 use tze_hud_protocol::session::SharedState;
 use tze_hud_scene::types::LeaseState;
 use tze_hud_scene::types::SceneId;
 
 use super::chrome::{
-    AuditPayload, AuditTrigger, ChromeState,
-    NoopAuditSink, SafeModeEntryReason, ShellAuditEvent, ShellAuditSink,
+    AuditPayload, AuditTrigger, ChromeState, NoopAuditSink, SafeModeEntryReason, ShellAuditEvent,
+    ShellAuditSink,
 };
 
 // ─── Shell-owned override state ───────────────────────────────────────────────
@@ -396,7 +393,10 @@ impl SafeModeController {
 
         let now_ms = now_wall_ms();
         let now_us = now_ms.saturating_mul(1_000);
-        let entered_at_us = self.override_state.safe_mode_entered_at_ms.saturating_mul(1_000);
+        let entered_at_us = self
+            .override_state
+            .safe_mode_entered_at_ms
+            .saturating_mul(1_000);
         let suspension_duration_us = now_us.saturating_sub(entered_at_us);
 
         // Step 1: Dismiss overlay immediately so the next compositor frame has no overlay.
@@ -432,7 +432,12 @@ impl SafeModeController {
                             let remaining_ms = l.ttl_remaining_at_suspend_ms.unwrap_or(l.ttl_ms);
                             now_us.saturating_add(remaining_ms.saturating_mul(1_000))
                         };
-                        (l.id, l.namespace.clone(), adjusted_expires_wall_us, susp_dur_us)
+                        (
+                            l.id,
+                            l.namespace.clone(),
+                            adjusted_expires_wall_us,
+                            susp_dur_us,
+                        )
                     })
                     .collect();
                 // Step 2b: Resume all SUSPENDED leases → ACTIVE; TTL adjusted.
@@ -444,18 +449,20 @@ impl SafeModeController {
             // Build LeaseResume descriptors for the caller.
             let lease_resumes: Vec<LeaseResumeInfo> = suspended_info
                 .into_iter()
-                .map(|(lease_id, namespace, adjusted_expires_wall_us, susp_dur_us)| {
-                    LeaseResumeInfo {
-                        lease_id,
-                        namespace,
-                        adjusted_expires_at_wall_us: if adjusted_expires_wall_us == 0 {
-                            None // indefinite TTL
-                        } else {
-                            Some(adjusted_expires_wall_us)
-                        },
-                        suspension_duration_us: susp_dur_us,
-                    }
-                })
+                .map(
+                    |(lease_id, namespace, adjusted_expires_wall_us, susp_dur_us)| {
+                        LeaseResumeInfo {
+                            lease_id,
+                            namespace,
+                            adjusted_expires_at_wall_us: if adjusted_expires_wall_us == 0 {
+                                None // indefinite TTL
+                            } else {
+                                Some(adjusted_expires_wall_us)
+                            },
+                            suspension_duration_us: susp_dur_us,
+                        }
+                    },
+                )
                 .collect();
 
             // Step 3: Clear safe mode flag — mutation intake accepts new batches.
@@ -580,16 +587,16 @@ fn now_wall_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::sync::{Arc, RwLock};
-    use tokio::sync::Mutex;
-    use tze_hud_scene::graph::SceneGraph;
-    use tze_hud_scene::types::LeaseState;
-    use tze_hud_protocol::session::{RuntimeDegradationLevel, SessionRegistry, SharedState};
-    use tze_hud_protocol::token::TokenStore;
     use super::super::chrome::{
         AuditPayload, ChromeState, CollectingAuditSink, SafeModeEntryReason,
     };
+    use super::*;
+    use std::sync::{Arc, RwLock};
+    use tokio::sync::Mutex;
+    use tze_hud_protocol::session::{SessionRegistry, SharedState};
+    use tze_hud_protocol::token::TokenStore;
+    use tze_hud_scene::graph::SceneGraph;
+    use tze_hud_scene::types::LeaseState;
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -606,9 +613,7 @@ mod tests {
         }))
     }
 
-    fn make_controller_with_sink(
-        sink: Arc<CollectingAuditSink>,
-    ) -> SafeModeController {
+    fn make_controller_with_sink(sink: Arc<CollectingAuditSink>) -> SafeModeController {
         let shared = make_shared_state();
         let chrome = Arc::new(RwLock::new(ChromeState::new()));
         SafeModeController::new(shared, chrome, sink)
@@ -640,14 +645,23 @@ mod tests {
         // Verify lease is ACTIVE before entry.
         {
             let st = ctrl.shared_state.lock().await;
-            assert_eq!(st.scene.lock().await.leases[&lease_id].state, LeaseState::Active);
+            assert_eq!(
+                st.scene.lock().await.leases[&lease_id].state,
+                LeaseState::Active
+            );
         }
 
         let result = ctrl.enter_safe_mode_viewer_action().await;
 
-        assert!(ctrl.is_safe_mode_active(), "safe mode must be active after entry");
+        assert!(
+            ctrl.is_safe_mode_active(),
+            "safe mode must be active after entry"
+        );
         assert_eq!(result.leases_suspended, 1, "one lease should be suspended");
-        assert!(!ctrl.is_freeze_active(), "freeze must be inactive after safe mode entry");
+        assert!(
+            !ctrl.is_freeze_active(),
+            "freeze must be inactive after safe mode entry"
+        );
 
         // Lease must be SUSPENDED — NOT revoked.
         {
@@ -657,13 +671,19 @@ mod tests {
                 LeaseState::Suspended,
                 "lease must be SUSPENDED not REVOKED — identity preserved"
             );
-            assert!(st.safe_mode_active, "SharedState.safe_mode_active must be true");
+            assert!(
+                st.safe_mode_active,
+                "SharedState.safe_mode_active must be true"
+            );
         }
 
         // ChromeState reflects safe mode → overlay will render on next frame.
         {
             let chrome = ctrl.chrome_state.read().unwrap();
-            assert!(chrome.safe_mode_active, "ChromeState.safe_mode_active must be true");
+            assert!(
+                chrome.safe_mode_active,
+                "ChromeState.safe_mode_active must be true"
+            );
         }
     }
 
@@ -708,7 +728,10 @@ mod tests {
         let result = ctrl.enter_safe_mode_viewer_action().await;
 
         assert!(ctrl.is_safe_mode_active());
-        assert!(!ctrl.is_freeze_active(), "freeze MUST be false after safe mode entry");
+        assert!(
+            !ctrl.is_freeze_active(),
+            "freeze MUST be false after safe mode entry"
+        );
         assert!(result.freeze_was_cancelled);
         ctrl.override_state_for_test().assert_invariant();
     }
@@ -766,7 +789,10 @@ mod tests {
         ctrl.exit_safe_mode().await;
 
         assert!(!ctrl.is_safe_mode_active());
-        assert!(!ctrl.is_freeze_active(), "freeze must be inactive after safe mode exit");
+        assert!(
+            !ctrl.is_freeze_active(),
+            "freeze must be inactive after safe mode exit"
+        );
         ctrl.override_state_for_test().assert_invariant();
     }
 
@@ -786,15 +812,24 @@ mod tests {
         ctrl.enter_safe_mode_viewer_action().await;
         {
             let st = ctrl.shared_state.lock().await;
-            assert_eq!(st.scene.lock().await.leases[&lease_id].state, LeaseState::Suspended);
+            assert_eq!(
+                st.scene.lock().await.leases[&lease_id].state,
+                LeaseState::Suspended
+            );
         }
 
         // Exit: lease should return to ACTIVE.
         let result = ctrl.exit_safe_mode().await;
 
-        assert!(!ctrl.is_safe_mode_active(), "safe mode must be inactive after exit");
+        assert!(
+            !ctrl.is_safe_mode_active(),
+            "safe mode must be inactive after exit"
+        );
         assert_eq!(result.leases_resumed, 1, "one lease should be resumed");
-        assert!(!result.lease_resumes.is_empty(), "must have lease resume info");
+        assert!(
+            !result.lease_resumes.is_empty(),
+            "must have lease resume info"
+        );
 
         {
             let st = ctrl.shared_state.lock().await;
@@ -803,7 +838,10 @@ mod tests {
                 LeaseState::Active,
                 "lease must return to ACTIVE — agents do not re-request"
             );
-            assert!(!st.safe_mode_active, "SharedState.safe_mode_active must be false");
+            assert!(
+                !st.safe_mode_active,
+                "SharedState.safe_mode_active must be false"
+            );
         }
 
         // Overlay dismissed.
@@ -831,7 +869,10 @@ mod tests {
             let scene = st.scene.lock().await;
             let l = &scene.leases[&lease_id];
             assert_eq!(l.namespace, ns_before, "namespace preserved across cycle");
-            assert_eq!(l.priority, priority_before, "priority preserved across cycle");
+            assert_eq!(
+                l.priority, priority_before,
+                "priority preserved across cycle"
+            );
         }
     }
 
@@ -947,8 +988,7 @@ mod tests {
             assert_eq!(
                 classify_safe_mode_input(input, false),
                 SafeModeInputResult::PassThrough,
-                "input {:?} must pass through when safe mode is inactive",
-                input
+                "input {input:?} must pass through when safe mode is inactive"
             );
         }
     }
@@ -969,7 +1009,10 @@ mod tests {
 
         // Lease still SUSPENDED, not double-touched.
         let st = ctrl.shared_state.lock().await;
-        assert_eq!(st.scene.lock().await.leases[&lease_id].state, LeaseState::Suspended);
+        assert_eq!(
+            st.scene.lock().await.leases[&lease_id].state,
+            LeaseState::Suspended
+        );
     }
 
     /// Exiting safe mode when not active is a no-op.
@@ -995,11 +1038,15 @@ mod tests {
 
         let events = sink.drain();
         assert!(
-            events.iter().any(|e| matches!(e.payload, AuditPayload::SafeModeEntered { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e.payload, AuditPayload::SafeModeEntered { .. })),
             "SafeModeEntered audit event must be emitted"
         );
         assert!(
-            events.iter().any(|e| matches!(e.payload, AuditPayload::SafeModeExited)),
+            events
+                .iter()
+                .any(|e| matches!(e.payload, AuditPayload::SafeModeExited)),
             "SafeModeExited audit event must be emitted"
         );
     }
@@ -1015,7 +1062,9 @@ mod tests {
 
         let events = sink.drain();
         assert!(
-            events.iter().any(|e| matches!(e.payload, AuditPayload::FreezeDeactivated)),
+            events
+                .iter()
+                .any(|e| matches!(e.payload, AuditPayload::FreezeDeactivated)),
             "FreezeDeactivated audit event must be emitted when freeze is cancelled"
         );
     }
@@ -1034,7 +1083,12 @@ mod tests {
         {
             let st = shared.lock().await;
             let mut scene = st.scene.lock().await;
-            for ns in ["system.agent", "high.priority.agent", "normal.agent", "low.agent"] {
+            for ns in [
+                "system.agent",
+                "high.priority.agent",
+                "normal.agent",
+                "low.agent",
+            ] {
                 scene.grant_lease(ns, 60_000, vec![]);
             }
         }
@@ -1047,9 +1101,10 @@ mod tests {
         {
             let st = shared.lock().await;
             let scene = st.scene.lock().await;
-            let all_suspended = scene.leases.values().all(|l| {
-                l.state == LeaseState::Suspended || l.state.is_terminal()
-            });
+            let all_suspended = scene
+                .leases
+                .values()
+                .all(|l| l.state == LeaseState::Suspended || l.state.is_terminal());
             assert!(
                 all_suspended,
                 "ALL leases must be SUSPENDED — safe mode overrides all policy levels"
@@ -1087,12 +1142,15 @@ mod tests {
         // — no scene graph access required.
         let mut renderer = ChromeRenderer::new_headless(chrome);
         let cmds = renderer.render_chrome(1920.0, 1080.0);
-        assert!(!cmds.is_empty(), "chrome renderer must produce commands in safe mode");
+        assert!(
+            !cmds.is_empty(),
+            "chrome renderer must produce commands in safe mode"
+        );
 
         // Full-viewport dimming overlay must be present.
-        let has_full_overlay = cmds.iter().any(|c| {
-            c.x == 0.0 && c.y == 0.0 && c.width == 1920.0 && c.height == 1080.0
-        });
+        let has_full_overlay = cmds
+            .iter()
+            .any(|c| c.x == 0.0 && c.y == 0.0 && c.width == 1920.0 && c.height == 1080.0);
         assert!(has_full_overlay, "full-viewport overlay must be present");
     }
 
@@ -1125,7 +1183,10 @@ mod tests {
             let registered = st
                 .sessions
                 .register_server_message_tx(&session.session_id, tx);
-            assert!(registered, "register_server_message_tx must return true for known session");
+            assert!(
+                registered,
+                "register_server_message_tx must return true for known session"
+            );
         }
 
         // Enter safe mode — expect SessionSuspended.

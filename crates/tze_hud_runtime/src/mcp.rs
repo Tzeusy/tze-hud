@@ -83,9 +83,8 @@ pub async fn start_mcp_http_server(
         "MCP HTTP listener bound"
     );
 
-    let server = Arc::new(
-        McpServer::with_shared_scene(scene).with_config(McpConfig::with_psk(&config.psk)),
-    );
+    let server =
+        Arc::new(McpServer::with_shared_scene(scene).with_config(McpConfig::with_psk(&config.psk)));
 
     let handle = tokio::spawn(async move {
         run_accept_loop(listener, server, shutdown, local_addr).await;
@@ -170,27 +169,24 @@ async fn handle_connection(
     let raw = &buf[..n];
 
     // Split header section from body at the blank line.
-    let (header_section, body) =
-        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-            let headers = std::str::from_utf8(&raw[..pos]).unwrap_or("");
-            let body = std::str::from_utf8(&raw[pos + 4..]).unwrap_or("");
-            (headers, body)
-        } else {
-            ("", std::str::from_utf8(raw).unwrap_or(""))
-        };
+    let (header_section, body) = if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+        let headers = std::str::from_utf8(&raw[..pos]).unwrap_or("");
+        let body = std::str::from_utf8(&raw[pos + 4..]).unwrap_or("");
+        (headers, body)
+    } else {
+        ("", std::str::from_utf8(raw).unwrap_or(""))
+    };
 
     // Extract Bearer token from `Authorization` header (case-insensitive).
     let bearer_token = header_section
         .lines()
         .find(|l| l.to_lowercase().starts_with("authorization:"))
-        .and_then(|l| l.splitn(2, ':').nth(1))
+        .and_then(|l| l.split_once(':').map(|x| x.1))
         .map(|v| v.trim())
         .and_then(|v| {
             let mut parts = v.splitn(2, ' ');
             match (parts.next(), parts.next()) {
-                (Some(scheme), Some(credentials))
-                    if scheme.eq_ignore_ascii_case("bearer") =>
-                {
+                (Some(scheme), Some(credentials)) if scheme.eq_ignore_ascii_case("bearer") => {
                     Some(credentials.trim().to_owned())
                 }
                 _ => None,
@@ -304,8 +300,14 @@ mod tests {
         let resp = http_post(addr, body, Some("test-key")).await;
 
         // Response should be HTTP 200 with a JSON-RPC result.
-        assert!(resp.contains("HTTP/1.1 200"), "expected HTTP 200, got: {resp}");
-        assert!(resp.contains("\"result\""), "expected result field, got: {resp}");
+        assert!(
+            resp.contains("HTTP/1.1 200"),
+            "expected HTTP 200, got: {resp}"
+        );
+        assert!(
+            resp.contains("\"result\""),
+            "expected result field, got: {resp}"
+        );
 
         shutdown.trigger(crate::threads::ShutdownReason::Clean);
         handle.await.expect("task");
@@ -371,7 +373,10 @@ mod tests {
         let resp = http_post(addr, body, Some("wrong-key")).await;
 
         assert!(resp.contains("HTTP/1.1 200"));
-        assert!(resp.contains("\"error\""), "expected auth error, got: {resp}");
+        assert!(
+            resp.contains("\"error\""),
+            "expected auth error, got: {resp}"
+        );
 
         shutdown.trigger(crate::threads::ShutdownReason::Clean);
         handle.await.expect("task");
@@ -467,11 +472,10 @@ mod tests {
 
         // Trigger shutdown and verify the task exits within a reasonable time.
         shutdown.trigger(crate::threads::ShutdownReason::Clean);
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            handle,
-        )
-        .await;
-        assert!(result.is_ok(), "MCP server task did not exit within 2s after shutdown");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
+        assert!(
+            result.is_ok(),
+            "MCP server task did not exit within 2s after shutdown"
+        );
     }
 }

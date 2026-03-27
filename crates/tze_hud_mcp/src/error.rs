@@ -64,7 +64,10 @@ impl JsonRpcError {
     }
 
     pub fn method_not_found(method: &str) -> Self {
-        Self::new(codes::METHOD_NOT_FOUND, format!("Method not found: {method}"))
+        Self::new(
+            codes::METHOD_NOT_FOUND,
+            format!("Method not found: {method}"),
+        )
     }
 
     pub fn invalid_params(reason: impl Into<String>) -> Self {
