@@ -148,6 +148,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
         mcp_port: 0,  // Disabled for the standalone windowed demo.
         psk: "vertical-slice-key".to_string(),
         target_fps: 60,
+        config_toml: None, // No configuration file for the standalone demo.
     };
 
     let runtime = WindowedRuntime::new(config);
