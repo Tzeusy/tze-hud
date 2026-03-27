@@ -1,6 +1,6 @@
 # Operator Checklist: Canonical App Binary Deployment
 
-This document provides operators and automation engineers with a checklist for using the canonical `tze_hud_app` binary for cross-machine validation and deployment.
+This document provides operators and automation engineers with a checklist for using the canonical `tze_hud` binary for cross-machine validation and deployment.
 
 ## Pre-Deployment Checklist
 

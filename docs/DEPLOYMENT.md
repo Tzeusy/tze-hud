@@ -1,10 +1,10 @@
 # Cross-Machine Deployment and Validation Guide
 
-This guide covers deploying the canonical `tze_hud_app` runtime binary to Windows for testing and validation workflows.
+This guide covers deploying the canonical `tze_hud` runtime binary to Windows for testing and validation workflows.
 
 ## Overview
 
-The **canonical runtime app binary** (`tze_hud_app`) is the production-ready executable designed for:
+The **canonical runtime app binary** (`tze_hud`, from the `tze_hud_app` crate) is the production-ready executable designed for:
 - Cross-machine deployment (Linux build → Windows deploy)
 - MCP HTTP endpoint exposure in windowed mode
 - Automated zone publishing validation
@@ -14,8 +14,8 @@ This is distinct from demo binaries (`vertical_slice`, `benchmark`, `render_arti
 
 ## Canonical App Binary Identity
 
-- **Crate**: Part of non-demo workspace members
-- **Binary name**: `tze_hud_app`
+- **Crate**: `tze_hud_app` (non-demo workspace member)
+- **Binary name**: `tze_hud`
 - **Windows artifact path** (cross-compiled from Linux):
   - `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - **Windows native build**:

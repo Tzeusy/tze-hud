@@ -13,7 +13,7 @@ This README is command-first and focused on four workflows:
 
 ### Canonical Runtime App Binary
 - **Purpose**: Production-ready runtime executable for cross-machine deployment and MCP publishing operations.
-- **Binary name** (TBD): `tze_hud_app` (canonical application binary, part of a non-demo binary target in Cargo workspace)
+- **Binary name**: `tze_hud` (from the `tze_hud_app` crate, canonical application binary, part of a non-demo binary target in Cargo workspace)
 - **Windows artifact**: `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - **Configuration**: Supports TOML configuration file with windowed display settings and network endpoint configuration.
 - **Network support**: Includes full `NetworkRuntime` with MCP HTTP listener lifecycle in windowed mode.
@@ -97,7 +97,7 @@ target\x86_64-pc-windows-msvc\release\tze_hud.exe
 
 ## 1.1) Configuration for Canonical Runtime App
 
-The canonical `tze_hud_app` binary requires a runtime configuration file (TOML format) to:
+The canonical `tze_hud` binary requires a runtime configuration file (TOML format) to:
 - Set window dimensions and display mode
 - Enable/disable network endpoints (gRPC, MCP HTTP)
 - Configure endpoint bind addresses and authentication
@@ -144,7 +144,7 @@ For Windows deployment automation, see [Cross-Machine Deployment](#cross-machine
 
 ## 1.2) Cross-Machine Deployment
 
-The canonical `tze_hud_app` binary is designed for automated cross-machine deployment using SSH+SCP.
+The canonical `tze_hud` binary is designed for automated cross-machine deployment using SSH+SCP.
 
 ### Prerequisites
 

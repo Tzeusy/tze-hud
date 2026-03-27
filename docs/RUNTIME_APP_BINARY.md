@@ -2,7 +2,7 @@
 
 ## Overview
 
-The **canonical runtime application binary** (`tze_hud_app`) is the production-ready, operator-facing executable for tze_hud. It is distinct from and should not be confused with demo/reference binaries.
+The **canonical runtime application binary** (`tze_hud`, from the `tze_hud_app` crate) is the production-ready, operator-facing executable for tze_hud. It is distinct from and should not be confused with demo/reference binaries.
 
 ## Binary Classifications
 
@@ -11,9 +11,9 @@ The **canonical runtime application binary** (`tze_hud_app`) is the production-r
 **Purpose**: Production runtime for cross-machine deployment, MCP publishing, and automated workflows.
 
 **Location in codebase**:
-- Binary target: `tze_hud_app` (non-demo workspace member)
+- Crate: `tze_hud_app` (non-demo workspace member)
 - Source: Main crates + minimal app entrypoint
-- **Binary name**: `tze_hud_app`
+- **Binary name**: `tze_hud`
 
 **Key features**:
 - Configuration-driven startup (window mode, dimensions, network endpoints)
@@ -126,7 +126,7 @@ cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 The canonical app requires a TOML configuration file passed via CLI:
 
 ```bash
-./tze_hud_app --config /path/to/config.toml
+./tze_hud --config /path/to/config.toml
 # or on Windows:
 .\tze_hud.exe --config C:\path\to\config.toml
 ```
@@ -223,18 +223,18 @@ For automation purposes, the canonical app produces stable, deterministic artifa
 
 ### Artifact Naming
 
-- **Base name**: `tze_hud_app` (always the same)
+- **Base name**: `tze_hud` (always the same)
 - **Extension**: `.exe` on Windows, no extension on Unix-like
 - **Full name examples**:
   - Windows: `tze_hud.exe`
-  - Linux: `tze_hud_app`
+  - Linux: `tze_hud`
 
 ### Build Output Paths
 
 | Target | Profile | Path |
 |--------|---------|------|
-| Linux (native) | debug | `target/debug/tze_hud_app` |
-| Linux (native) | release | `target/release/tze_hud_app` |
+| Linux (native) | debug | `target/debug/tze_hud` |
+| Linux (native) | release | `target/release/tze_hud` |
 | Windows (cross) | debug | `target/x86_64-pc-windows-gnu/debug/tze_hud.exe` |
 | Windows (cross) | release | `target/x86_64-pc-windows-gnu/release/tze_hud.exe` |
 | Windows (native) | debug | `target/x86_64-pc-windows-msvc/debug/tze_hud.exe` |
