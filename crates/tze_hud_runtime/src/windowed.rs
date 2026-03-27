@@ -89,7 +89,10 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 
 use tze_hud_compositor::{Compositor, WindowSurface};
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
+use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
+use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
+use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::ZoneContent;
@@ -100,6 +103,8 @@ use crate::channels::{
     INPUT_EVENT_CAPACITY,
 };
 use crate::pipeline::FramePipeline;
+use crate::reload_triggers::RuntimeServiceImpl;
+use crate::runtime_context::{RuntimeContext, SharedRuntimeContext};
 use crate::threads::{
     spawn_compositor_thread, CompositorReady, NetworkRuntime, ShutdownToken,
 };
@@ -149,7 +154,19 @@ struct WindowedRuntimeState {
     /// Compositor thread handle (stored so it can be joined on shutdown).
     compositor_handle: Option<std::thread::JoinHandle<()>>,
     /// Network runtime for gRPC / MCP.
+    ///
+    /// Kept alive for the duration of the windowed runtime. Dropping this
+    /// shuts down all network tasks (gRPC server, future MCP bridge).
     network_rt: Option<NetworkRuntime>,
+    /// Network task join handles (gRPC server tasks spawned onto `network_rt`).
+    ///
+    /// Stored so they can be aborted on shutdown. Dropping the `JoinHandle`
+    /// does not kill the task; call `.abort()` explicitly.
+    network_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Immutable runtime context (capability policy, profile budgets).
+    runtime_context: SharedRuntimeContext,
+    /// Whether unknown agents receive unrestricted capabilities.
+    fallback_unrestricted: bool,
     /// Shared scene + session state.
     shared_state: Arc<Mutex<SharedState>>,
     /// Input channel (ring buffer) — main thread writes, compositor thread reads.
@@ -848,10 +865,40 @@ impl WindowedRuntime {
         ));
         let shutdown = ShutdownToken::new();
 
+        // ── RuntimeContext ─────────────────────────────────────────────────────
+        // Build a minimal RuntimeContext for the windowed runtime.
+        // The windowed runtime currently starts with the headless default (all agents
+        // are treated as guests). Config-file-driven capability grants will be wired
+        // in a follow-up once config loading is plumbed into WindowedConfig.
+        let runtime_context: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
+        // Windowed runtime currently allows unknown agents (dev-friendly default).
+        // This will be driven by the loaded config in a future task.
+        let fallback_unrestricted = true;
+
+        // ── Network runtime + gRPC server ──────────────────────────────────────
+        // Spawn the Tokio multi-thread runtime for all network tasks (gRPC, MCP).
+        // The runtime is created before the winit event loop so that network
+        // services are available immediately after the process starts.
+        //
+        // Per spec §Thread Model (line 15): "Network thread(s) — Tokio multi-thread
+        // runtime for gRPC server, MCP bridge, session management."
+        //
+        // gRPC server is disabled when grpc_port == 0 (per WindowedConfig docs).
+        let (network_rt, network_handles) = start_network_services(
+            cfg.grpc_port,
+            &cfg.psk,
+            shared_state.clone(),
+            Arc::clone(&runtime_context),
+            fallback_unrestricted,
+        )?;
+
         let app_state = WindowedRuntimeState {
             config: cfg,
             compositor_handle: None,
-            network_rt: None,
+            network_rt,
+            network_handles,
+            runtime_context,
+            fallback_unrestricted,
             shared_state,
             input_ring,
             frame_ready_rx,
@@ -878,6 +925,14 @@ impl WindowedRuntime {
         event_loop.set_control_flow(ControlFlow::Poll);
         event_loop.run_app(&mut app)?;
 
+        // ── Shutdown: abort network tasks, then join compositor ─────────────────
+        //
+        // The shutdown token was triggered via CloseRequested. Abort all spawned
+        // network tasks so gRPC servers do not linger past process exit.
+        for handle in app.state.network_handles.drain(..) {
+            handle.abort();
+        }
+
         // Cleanly join the compositor thread after the event loop exits.
         //
         // Without this, the compositor thread is detached (JoinHandle drop ≠
@@ -896,8 +951,82 @@ impl WindowedRuntime {
             }
         }
 
+        // Drop the NetworkRuntime last — this shuts down the Tokio runtime and
+        // waits for all network tasks to terminate.
+        drop(app.state.network_rt.take());
+
         Ok(())
     }
+}
+
+// ─── Network service startup ──────────────────────────────────────────────────
+
+/// Start network services (gRPC) on a dedicated Tokio multi-thread runtime.
+///
+/// Returns `(network_rt, handles)`:
+/// - `network_rt` is `Some(NetworkRuntime)` when `grpc_port != 0`; `None` if
+///   all services are disabled (port 0 disables gRPC).
+/// - `handles` contains join handles for each spawned server task.
+///
+/// ## gRPC server
+///
+/// When `grpc_port != 0`, starts the `HudSession` gRPC server on `[::1]:grpc_port`.
+/// Setting `grpc_port = 0` skips server creation (compositor-only mode).
+///
+/// ## Errors
+///
+/// Returns `Err` if the `NetworkRuntime` Tokio runtime cannot be created, or if
+/// the gRPC server address fails to parse.
+fn start_network_services(
+    grpc_port: u16,
+    psk: &str,
+    shared_state: Arc<Mutex<SharedState>>,
+    runtime_context: SharedRuntimeContext,
+    fallback_unrestricted: bool,
+) -> Result<(Option<NetworkRuntime>, Vec<tokio::task::JoinHandle<()>>), Box<dyn std::error::Error>> {
+    if grpc_port == 0 {
+        tracing::info!("windowed runtime: gRPC server disabled (grpc_port = 0); running compositor-only");
+        return Ok((None, Vec::new()));
+    }
+
+    // Build the multi-thread Tokio runtime for network tasks.
+    let network_rt = NetworkRuntime::new().map_err(|e| {
+        format!("windowed runtime: failed to build network Tokio runtime: {e}")
+    })?;
+
+    let addr: std::net::SocketAddr = format!("[::1]:{grpc_port}").parse().map_err(|e| {
+        format!("windowed runtime: invalid gRPC address (port {grpc_port}): {e}")
+    })?;
+
+    // Wire config-driven capability registry into the session service.
+    let agent_caps = runtime_context.snapshot_agent_capabilities();
+    let service = HudSessionImpl::from_shared_state_with_config(
+        shared_state,
+        psk,
+        agent_caps,
+        fallback_unrestricted,
+    );
+
+    // Wire RuntimeService (ReloadConfig RPC) alongside HudSession.
+    let runtime_svc = RuntimeServiceImpl::new(Arc::clone(&runtime_context));
+
+    tracing::info!(grpc_addr = %addr, "windowed runtime: starting gRPC server");
+
+    // Spawn the combined gRPC server task onto the network runtime.
+    let handle = network_rt.rt.spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(HudSessionServer::new(service))
+            .add_service(RuntimeServiceServer::new(runtime_svc))
+            .serve(addr)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "gRPC server exited with error");
+            });
+    });
+
+    tracing::info!(grpc_addr = %addr, "windowed runtime: gRPC server task spawned");
+
+    Ok((Some(network_rt), vec![handle]))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1138,5 +1267,109 @@ mod tests {
         let cfg = WindowedConfig::default();
         assert!(cfg.window.width > 0, "default width must be positive");
         assert!(cfg.window.height > 0, "default height must be positive");
+    }
+
+    // ── Network service startup ───────────────────────────────────────────────
+    //
+    // These tests exercise `start_network_services` directly — no winit window
+    // is required. They verify the config-driven endpoint enable/disable
+    // behaviour described in the acceptance criteria.
+
+    use tokio::sync::Mutex as TokioMutex;
+
+    fn make_shared_state() -> Arc<TokioMutex<SharedState>> {
+        use tze_hud_protocol::session::{SessionRegistry, RuntimeDegradationLevel};
+        use tze_hud_protocol::token::TokenStore;
+        use tze_hud_scene::graph::SceneGraph;
+        let scene = SceneGraph::new(1920.0, 1080.0);
+        let sessions = SessionRegistry::new("test-psk");
+        Arc::new(TokioMutex::new(SharedState {
+            scene,
+            sessions,
+            safe_mode_active: false,
+            token_store: TokenStore::new(),
+            freeze_active: false,
+            degradation_level: RuntimeDegradationLevel::Normal,
+        }))
+    }
+
+    /// When `grpc_port == 0`, `start_network_services` must return `None` for
+    /// the runtime and an empty handle list (compositor-only mode, AC §2).
+    #[test]
+    fn start_network_services_grpc_port_zero_returns_no_runtime() {
+        let shared_state = make_shared_state();
+        let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
+        let (rt, handles) = start_network_services(0, "test-psk", shared_state, ctx, true)
+            .expect("start_network_services should not fail for port 0");
+        assert!(
+            rt.is_none(),
+            "grpc_port=0 must not create a NetworkRuntime (compositor-only)"
+        );
+        assert!(
+            handles.is_empty(),
+            "grpc_port=0 must not spawn any network task handles"
+        );
+    }
+
+    /// When `grpc_port != 0`, `start_network_services` must return `Some` for
+    /// the runtime and at least one spawned task handle (AC §1).
+    #[test]
+    fn start_network_services_nonzero_port_returns_runtime_and_handle() {
+        let shared_state = make_shared_state();
+        let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
+        // Use a high ephemeral port unlikely to conflict.
+        let (rt, handles) =
+            start_network_services(59781, "test-psk", shared_state, ctx, true)
+                .expect("start_network_services should not error for a valid port");
+        assert!(
+            rt.is_some(),
+            "non-zero grpc_port must create a NetworkRuntime"
+        );
+        assert!(
+            !handles.is_empty(),
+            "non-zero grpc_port must spawn at least one network task handle"
+        );
+        // Abort the spawned task so the test doesn't leave a lingering server.
+        for h in handles {
+            h.abort();
+        }
+    }
+
+    /// `WindowedConfig` with `grpc_port = 0` reflects a "compositor-only" intent.
+    /// Verify the config field is stored and readable (AC §2 — explicit disable).
+    #[test]
+    fn windowed_config_grpc_port_zero_is_compositor_only() {
+        let cfg = WindowedConfig {
+            grpc_port: 0,
+            ..WindowedConfig::default()
+        };
+        assert_eq!(
+            cfg.grpc_port, 0,
+            "grpc_port=0 must be stored and readable as 0 (endpoint disabled)"
+        );
+    }
+
+    /// `WindowedConfig` with `grpc_port = 50051` (default) signals network enabled.
+    #[test]
+    fn windowed_config_grpc_port_nonzero_enables_network() {
+        let cfg = WindowedConfig::default();
+        assert_ne!(
+            cfg.grpc_port, 0,
+            "default grpc_port must be non-zero (gRPC enabled by default)"
+        );
+    }
+
+    /// Two successive calls with `grpc_port = 0` must both return `(None, [])`.
+    /// Verifies idempotency of the disabled path (AC §2 deterministic).
+    #[test]
+    fn start_network_services_grpc_port_zero_is_idempotent() {
+        for _ in 0..2 {
+            let shared_state = make_shared_state();
+            let ctx: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
+            let (rt, handles) = start_network_services(0, "psk", shared_state, ctx, false)
+                .expect("port-0 must not error");
+            assert!(rt.is_none());
+            assert!(handles.is_empty());
+        }
     }
 }
