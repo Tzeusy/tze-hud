@@ -117,7 +117,7 @@ fn roundtrip_rgba_zero() {
 #[test]
 fn roundtrip_node_proto_solid_color() {
     let orig = NodeProto {
-        id: "node-abc".to_string(),
+        id: b"node-abc".to_vec(),
         data: Some(NodeData::SolidColor(SolidColorNodeProto {
             color: Some(Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
             bounds: Some(Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 }),
@@ -136,7 +136,7 @@ fn roundtrip_node_proto_solid_color() {
 #[test]
 fn roundtrip_node_proto_text_markdown() {
     let orig = NodeProto {
-        id: "node-text".to_string(),
+        id: b"node-text".to_vec(),
         data: Some(NodeData::TextMarkdown(TextMarkdownNodeProto {
             content: "**hello world**".to_string(),
             bounds: Some(Rect { x: 0.0, y: 0.0, width: 200.0, height: 100.0 }),
@@ -158,7 +158,7 @@ fn roundtrip_node_proto_text_markdown() {
 #[test]
 fn roundtrip_node_proto_hit_region() {
     let orig = NodeProto {
-        id: "hit-1".to_string(),
+        id: b"hit-1".to_vec(),
         data: Some(NodeData::HitRegion(HitRegionNodeProto {
             bounds: Some(Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 }),
             interaction_id: "btn-primary".to_string(),
@@ -187,7 +187,7 @@ fn roundtrip_node_proto_static_image_all_fit_modes() {
         ImageFitModeProto::ImageFitModeScaleDown,
     ] {
         let orig = NodeProto {
-            id: "img-node".to_string(),
+            id: b"img-node".to_vec(),
             data: Some(NodeData::StaticImage(StaticImageNodeProto {
                 resource_id: vec![0xAB; 32],
                 width: 1920,
@@ -211,7 +211,7 @@ fn roundtrip_node_proto_static_image_all_fit_modes() {
 #[test]
 fn roundtrip_create_tile_mutation() {
     let orig = CreateTileMutation {
-        tab_id: "tab-001".to_string(),
+        tab_id: b"tab-001".to_vec(),
         bounds: Some(Rect { x: 0.0, y: 0.0, width: 300.0, height: 200.0 }),
         z_order: 5,
     };
@@ -226,7 +226,7 @@ fn roundtrip_mutation_proto_all_variants() {
     // CreateTile
     let m1 = MutationProto {
         mutation: Some(Mutation::CreateTile(CreateTileMutation {
-            tab_id: "t".to_string(), bounds: None, z_order: 0,
+            tab_id: b"t".to_vec(), bounds: None, z_order: 0,
         })),
     };
     let d1 = round_trip(&m1);
@@ -235,7 +235,7 @@ fn roundtrip_mutation_proto_all_variants() {
     // SetTileRoot
     let m2 = MutationProto {
         mutation: Some(Mutation::SetTileRoot(SetTileRootMutation {
-            tile_id: "tile-1".to_string(), node: None,
+            tile_id: b"tile-1".to_vec(), node: None,
         })),
     };
     let d2 = round_trip(&m2);
@@ -362,7 +362,7 @@ fn roundtrip_input_event_all_kinds() {
             display_x: 100.0,
             display_y: 200.0,
             kind: kind as i32,
-            timestamp_ms: 1_700_000_000_000,
+            timestamp_mono_us: 1_700_000_000_000,
         };
         let decoded = round_trip(&orig);
         assert_eq!(orig.kind, decoded.kind);
@@ -375,24 +375,24 @@ fn roundtrip_tile_created_event() {
     let orig = TileCreatedEvent {
         tile_id: "tile-001".to_string(),
         namespace: "weather-agent".to_string(),
-        timestamp_ms: 999_999,
+        timestamp_wall_us: 999_999,
     };
     let decoded = round_trip(&orig);
     assert_eq!(orig.tile_id, decoded.tile_id);
     assert_eq!(orig.namespace, decoded.namespace);
-    assert_eq!(orig.timestamp_ms, decoded.timestamp_ms);
+    assert_eq!(orig.timestamp_wall_us, decoded.timestamp_wall_us);
 }
 
 #[test]
 fn roundtrip_tile_deleted_event() {
-    let orig = TileDeletedEvent { tile_id: "tile-002".to_string(), timestamp_ms: 1234 };
+    let orig = TileDeletedEvent { tile_id: "tile-002".to_string(), timestamp_wall_us: 1234 };
     let decoded = round_trip(&orig);
     assert_eq!(orig.tile_id, decoded.tile_id);
 }
 
 #[test]
 fn roundtrip_tile_updated_event() {
-    let orig = TileUpdatedEvent { tile_id: "tile-003".to_string(), timestamp_ms: 5678 };
+    let orig = TileUpdatedEvent { tile_id: "tile-003".to_string(), timestamp_wall_us: 5678 };
     let decoded = round_trip(&orig);
     assert_eq!(orig.tile_id, decoded.tile_id);
 }
@@ -410,7 +410,7 @@ fn roundtrip_lease_event_all_kinds() {
             lease_id: "lease-abc".to_string(),
             namespace: "agent-1".to_string(),
             kind: kind as i32,
-            timestamp_ms: 42,
+            timestamp_wall_us: 42,
         };
         let decoded = round_trip(&orig);
         assert_eq!(orig.kind, decoded.kind);
@@ -421,9 +421,9 @@ fn roundtrip_lease_event_all_kinds() {
 fn roundtrip_scene_event_all_variants() {
     // tile_created
     let s1 = SceneEvent {
-        timestamp_ms: 100,
+        timestamp_wall_us: 100,
         event: Some(SceneEventPayload::TileCreated(TileCreatedEvent {
-            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_ms: 100,
+            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_wall_us: 100,
         })),
     };
     let d1 = round_trip(&s1);
@@ -431,25 +431,25 @@ fn roundtrip_scene_event_all_variants() {
 
     // tile_deleted
     let s2 = SceneEvent {
-        timestamp_ms: 200,
+        timestamp_wall_us: 200,
         event: Some(SceneEventPayload::TileDeleted(TileDeletedEvent {
-            tile_id: "t2".to_string(), timestamp_ms: 200,
+            tile_id: "t2".to_string(), timestamp_wall_us: 200,
         })),
     };
     assert!(matches!(round_trip(&s2).event, Some(SceneEventPayload::TileDeleted(_))));
 
     // tile_updated
     let s3 = SceneEvent {
-        timestamp_ms: 300,
+        timestamp_wall_us: 300,
         event: Some(SceneEventPayload::TileUpdated(TileUpdatedEvent {
-            tile_id: "t3".to_string(), timestamp_ms: 300,
+            tile_id: "t3".to_string(), timestamp_wall_us: 300,
         })),
     };
     assert!(matches!(round_trip(&s3).event, Some(SceneEventPayload::TileUpdated(_))));
 
     // input
     let s4 = SceneEvent {
-        timestamp_ms: 400,
+        timestamp_wall_us: 400,
         event: Some(SceneEventPayload::Input(InputEvent {
             tile_id: "t4".to_string(), kind: InputEventKind::PointerDown as i32, ..Default::default()
         })),
@@ -458,12 +458,12 @@ fn roundtrip_scene_event_all_variants() {
 
     // lease
     let s5 = SceneEvent {
-        timestamp_ms: 500,
+        timestamp_wall_us: 500,
         event: Some(SceneEventPayload::Lease(LeaseEvent {
             lease_id: "l1".to_string(),
             namespace: "ns".to_string(),
             kind: LeaseEventKind::LeaseGranted as i32,
-            timestamp_ms: 500,
+            timestamp_wall_us: 500,
         })),
     };
     assert!(matches!(round_trip(&s5).event, Some(SceneEventPayload::Lease(_))));
@@ -883,7 +883,7 @@ fn roundtrip_mutation_batch() {
         mutations: vec![
             tze_hud_protocol::proto::MutationProto {
                 mutation: Some(Mutation::CreateTile(CreateTileMutation {
-                    tab_id: "tab-1".to_string(),
+                    tab_id: b"tab-1".to_vec(),
                     bounds: Some(Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 }),
                     z_order: 1,
                 })),
@@ -1131,14 +1131,14 @@ fn roundtrip_scene_snapshot() {
 fn roundtrip_scene_delta_variants() {
     let d1 = SceneDelta {
         delta: Some(Delta::TileCreated(TileCreatedEvent {
-            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_ms: 0,
+            tile_id: "t1".to_string(), namespace: "ns".to_string(), timestamp_wall_us: 0,
         })),
     };
     assert!(matches!(round_trip(&d1).delta, Some(Delta::TileCreated(_))));
 
     let d2 = SceneDelta {
         delta: Some(Delta::TileDeleted(TileDeletedEvent {
-            tile_id: "t2".to_string(), timestamp_ms: 0,
+            tile_id: "t2".to_string(), timestamp_wall_us: 0,
         })),
     };
     assert!(matches!(round_trip(&d2).delta, Some(Delta::TileDeleted(_))));
@@ -1148,7 +1148,7 @@ fn roundtrip_scene_delta_variants() {
             lease_id: "l1".to_string(),
             namespace: "ns".to_string(),
             kind: LeaseEventKind::LeaseGranted as i32,
-            timestamp_ms: 0,
+            timestamp_wall_us: 0,
         })),
     };
     assert!(matches!(round_trip(&d3).delta, Some(Delta::LeaseEvent(_))));

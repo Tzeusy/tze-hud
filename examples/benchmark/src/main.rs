@@ -104,6 +104,8 @@ mod tests {
             speed_factor: 1.0,
             scene_ops_per_sec: 550_000.0,
             hash_throughput_mbps: 800.0,
+            gpu_fill_factor: None,
+            texture_upload_factor: None,
             timestamp: 1_700_000_000,
             calibration_duration_us: 100_000,
         };

@@ -357,7 +357,7 @@ async fn create_tile(
                     mutations: vec![proto::MutationProto {
                         mutation: Some(proto::mutation_proto::Mutation::CreateTile(
                             proto::CreateTileMutation {
-                                tab_id: String::new(),
+                                tab_id: vec![],
                                 bounds: Some(proto::Rect {
                                     x: bounds[0],
                                     y: bounds[1],
@@ -415,12 +415,12 @@ fn tile_id_bytes_to_string(bytes: &[u8]) -> String {
 /// It exercises the full mutation → scene commit → layout pipeline
 /// without requiring a proto-level DeleteTile (which is not in the v1 proto).
 ///
-/// `tile_id_str` is the hyphenated UUID string returned by `tile_id_bytes_to_string`.
+/// `tile_id_bytes` is the 16-byte UUIDv7 tile identifier.
 /// The `cycle_idx` parameter is embedded in the content to make each update
 /// distinct and detectable during post-run analysis.
 async fn update_tile_content(
     session: &mut SoakAgentSession,
-    tile_id_str: String,
+    tile_id_bytes: Vec<u8>,
     cycle_idx: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let batch_id: Vec<u8> = uuid::Uuid::now_v7().as_bytes().to_vec();
@@ -443,9 +443,9 @@ async fn update_tile_content(
                     mutations: vec![proto::MutationProto {
                         mutation: Some(proto::mutation_proto::Mutation::SetTileRoot(
                             proto::SetTileRootMutation {
-                                tile_id: tile_id_str,
+                                tile_id: tile_id_bytes,
                                 node: Some(proto::NodeProto {
-                                    id: String::new(),
+                                    id: vec![],
                                     data: Some(proto::node_proto::Data::SolidColor(
                                         proto::SolidColorNodeProto {
                                             bounds: Some(proto::Rect {
@@ -661,6 +661,7 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
         height: DISPLAY_H,
         grpc_port: SOAK_GRPC_PORT,
         psk: SOAK_PSK.to_string(),
+        config_toml: None,
     };
     let mut runtime = HeadlessRuntime::new(runtime_cfg).await?;
 
@@ -719,9 +720,8 @@ async fn test_soak_resource_growth() -> Result<(), Box<dyn std::error::Error>> {
         // - Update tile content (SetTileRoot) — exercises mutation pipeline
         // - Publish to the subtitle zone (LatestWins — no accumulation risk)
         for (idx, agent) in agents.iter_mut().enumerate() {
-            let tile_id_str = tile_id_bytes_to_string(&agent_tile_ids[idx]);
             // Best-effort content update — ignore per-cycle errors
-            let _ = update_tile_content(agent, tile_id_str, epoch_idx).await;
+            let _ = update_tile_content(agent, agent_tile_ids[idx].clone(), epoch_idx).await;
 
             // Publish to the subtitle zone (LatestWins — no accumulation risk)
             let text = format!("soak-{idx}-epoch-{epoch_idx}");
@@ -833,6 +833,7 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
         height: DISPLAY_H,
         grpc_port,
         psk: SOAK_PSK.to_string(),
+        config_toml: None,
     };
     let runtime_cell = tokio::sync::Mutex::new(
         HeadlessRuntime::new(runtime_cfg).await?,
@@ -1036,6 +1037,7 @@ async fn test_lease_expiry_frees_resources() -> Result<(), Box<dyn std::error::E
         height: DISPLAY_H,
         grpc_port,
         psk: SOAK_PSK.to_string(),
+        config_toml: None,
     };
     let runtime_cell = tokio::sync::Mutex::new(
         HeadlessRuntime::new(runtime_cfg).await?,
