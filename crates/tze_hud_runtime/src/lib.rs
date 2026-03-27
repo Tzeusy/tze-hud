@@ -1,6 +1,32 @@
 //! # tze_hud_runtime
 //!
-//! Runtime kernel for tze_hud. Orchestrates the 8-stage frame pipeline:
+//! Runtime kernel for tze_hud — the **orchestration layer**.
+//!
+//! ## Governance Authority Map
+//!
+//! The runtime orchestrates; it does not own policy arbitration or resource accounting.
+//! The authority split is:
+//!
+//! | Authority | Crate | Role |
+//! |-----------|-------|------|
+//! | Policy arbitration | `tze_hud_policy` | Pure read-only evaluator; no side effects |
+//! | Resource accounting | `tze_hud_resource` | Decoded-byte budget registry; GC; dedup |
+//! | Budget enforcement | `tze_hud_runtime::budget` | Enforcement ladder (Warning/Throttle/Revoke) |
+//! | Attention budgets | `tze_hud_runtime::attention_budget` | Stateful event-pipeline tracker |
+//! | Override state | `tze_hud_runtime::shell::SafeModeController` | Sole writer of freeze/safe-mode flags |
+//! | Scene orchestration | `tze_hud_runtime` (this crate) | Wires authority modules; drives pipeline |
+//!
+//! **The runtime builds `PolicyContext` snapshots and passes them to `tze_hud_policy`
+//! for evaluation. It then executes the resulting `ArbitrationOutcome`. Policy
+//! evaluation and execution are always kept separate — no policy decisions are
+//! embedded directly in the frame pipeline.**
+//!
+//! See `budget.rs`, `attention_budget/`, and `shell/safe_mode.rs` for boundary
+//! doc comments in each authority module.
+//!
+//! ## Frame Pipeline
+//!
+//! Orchestrates the 8-stage frame pipeline:
 //!
 //! | Stage | Name               | Thread     | Budget (p99) |
 //! |-------|--------------------|------------|-------------|

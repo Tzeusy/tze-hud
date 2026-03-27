@@ -1,6 +1,27 @@
 //! # tze_hud_resource
 //!
-//! Content-addressed resource store for tze_hud.
+//! Content-addressed resource store for tze_hud — the **resource accounting authority**.
+//!
+//! ## Authority Boundary
+//!
+//! This crate owns all decoded-byte budget accounting for uploaded resources
+//! (textures, fonts, etc.). It is the single source of truth for:
+//!
+//! - Whether an agent's decoded resource usage would exceed its per-tile or
+//!   per-agent texture budget.
+//! - Per-agent reference counts and GC candidacy.
+//!
+//! The runtime calls into this crate during mutation validation to check and
+//! charge resource budgets. The policy crate (`tze_hud_policy`) consumes the
+//! outcome via `ResourceContext.budget_exceeded` — it never reads the
+//! `BudgetRegistry` directly, and it never writes resource state.
+//!
+//! **Do not add enforcement-ladder logic here.** The enforcement ladder
+//! (Warning → Throttle → Revoke) lives in `tze_hud_runtime::budget::BudgetEnforcer`,
+//! which tracks per-agent budget state over time. This crate tracks instantaneous
+//! decoded-byte accounting only.
+//!
+//! ## Contents
 //!
 //! Implements RFC 0011 upload, deduplication, reference counting, GC, budget
 //! accounting, and font cache requirements:

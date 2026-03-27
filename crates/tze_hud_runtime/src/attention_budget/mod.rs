@@ -29,6 +29,29 @@
 //! The attention budget sits at Stage 3 (Policy Filtering). It is consulted
 //! **after** the quiet-hours gate.  HIGH events may pass through quiet hours
 //! but are still subject to budget enforcement.
+//!
+//! ## Authority Boundary
+//!
+//! This module is the **runtime attention budget enforcement authority**.
+//!
+//! - **This module (`AttentionBudgetTracker`)**: stateful tracker. Holds per-agent and
+//!   per-zone `VecDeque<u64>` timestamp windows. Called directly from the event pipeline
+//!   at Stage 3 to record interruptions and determine coalescing behavior.
+//!
+//! - **`tze_hud_policy::attention_budget::AttentionBudget`**: a stateless ring-buffer
+//!   counter used by the policy arbitration stack (Level 4) for pure evaluation. It uses
+//!   a per-second slot ring rather than a timestamp VecDeque, optimised for O(1) reads.
+//!
+//! Both modules define the same default constants (`DEFAULT_AGENT_BUDGET = 20`,
+//! `DEFAULT_ZONE_BUDGET = 10`, `DEFAULT_STACK_ZONE_BUDGET = 30`). The runtime crate
+//! does not depend on the policy crate; these constants are deliberately mirrored and
+//! must be kept in sync with `tze_hud_policy::attention_budget`. See:
+//! `crates/tze_hud_policy/src/attention_budget.rs` constants
+//! `DEFAULT_PER_AGENT_LIMIT`, `DEFAULT_PER_ZONE_LIMIT`, `DEFAULT_PER_ZONE_STACK_LIMIT`.
+//!
+//! **Do not consolidate** these into one implementation: the policy crate must remain
+//! dependency-free (it cannot import the runtime), and the runtime needs the timestamp
+//! VecDeque for event-pipeline integration. The constants are the single shared contract.
 
 pub mod urgency;
 

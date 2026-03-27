@@ -8,6 +8,29 @@
 //!
 //! The frame-time guardian is also implemented here: if Stage 3–5 cumulative
 //! time exceeds 3ms, the lowest-priority tiles are shed for that frame.
+//!
+//! # Authority Boundary
+//!
+//! This module is the **resource budget enforcement authority** for `tze_hud_runtime`.
+//!
+//! Responsibility split:
+//!
+//! - **This module (`BudgetEnforcer`)**: owns the per-agent enforcement state machine
+//!   (Normal/Warning/Throttled/Revoked), the enforcement ladder tick, the
+//!   frame-time guardian, and the per-mutation admission gate. This is stateful —
+//!   it tracks resource counters over time and escalates/de-escalates accordingly.
+//!
+//! - **`tze_hud_policy::resource`**: a stateless pure evaluator. It receives a
+//!   `ResourceContext` snapshot (populated from this module's state) and returns a
+//!   `ResourceDecision`. It does NOT own any resource state or counters.
+//!
+//! - **`tze_hud_resource::budget::BudgetRegistry`**: owns decoded-byte accounting
+//!   for uploaded resources (textures). This module tracks tile counts, update rate,
+//!   and the enforcement ladder; `BudgetRegistry` tracks raw decoded byte totals.
+//!   They are complementary, not competing.
+//!
+//! **Do not duplicate budget enforcement logic in `tze_hud_policy`.** Policy only
+//! evaluates snapshots; it never advances the enforcement ladder.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};

@@ -30,6 +30,20 @@
 //! | Per-zone limit         | 10 / min |
 //! | Per-zone (Stack zones) | 30 / min |
 //! | Window                 | 60 s    |
+//!
+//! ## Authority Boundary
+//!
+//! This module provides a pure, stateless-except-for-counter ring-buffer implementation
+//! used by Level 4 of the arbitration stack (`tze_hud_policy::stack`). It is evaluated
+//! as part of the read-only policy evaluation path — no event-pipeline state is written here.
+//!
+//! **Mirror constants**: The runtime attention-budget module
+//! (`tze_hud_runtime::attention_budget`) also defines the same defaults under different
+//! names: `DEFAULT_AGENT_BUDGET = 20`, `DEFAULT_ZONE_BUDGET = 10`,
+//! `DEFAULT_STACK_ZONE_BUDGET = 30`. These must be kept in sync with
+//! `DEFAULT_PER_AGENT_LIMIT`, `DEFAULT_PER_ZONE_LIMIT`, `DEFAULT_PER_ZONE_STACK_LIMIT`
+//! defined here. The runtime crate cannot depend on this crate, so the constants are
+//! intentionally duplicated. Any change here requires a matching change there.
 
 /// Default rolling window in seconds.
 pub const DEFAULT_WINDOW_SECS: u32 = 60;

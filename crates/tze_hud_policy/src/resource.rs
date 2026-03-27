@@ -16,6 +16,21 @@
 //!
 //! A mutation shed at Level 5 MUST have already passed all higher levels (3, 2, 4).
 //! The per-mutation pipeline enforces this by evaluating Level 5 after higher levels.
+//!
+//! ## Authority Boundary
+//!
+//! This module is a **pure evaluator** for Level 5 resource policy.
+//!
+//! - It reads `ResourceContext` (a snapshot populated by the runtime) and returns a
+//!   `ResourceDecision`. It has no side effects and owns no budget state.
+//! - **Budget state is owned by the runtime**: `tze_hud_runtime::budget::BudgetEnforcer`
+//!   tracks tile counts, texture bytes, update rate, and the enforcement ladder.
+//!   It populates `ResourceContext.budget_exceeded` and `ResourceContext.should_shed`
+//!   before calling this evaluator.
+//! - **Decoded-byte accounting is owned by**: `tze_hud_resource::budget::BudgetRegistry`.
+//!
+//! This module must remain a pure function. Any change that would require reading mutable
+//! state or writing resource counters belongs in `tze_hud_runtime::budget` instead.
 
 use crate::types::{ArbitrationError, ArbitrationErrorCode, ArbitrationLevel, ArbitrationOutcome, ResourceContext};
 use tze_hud_scene::SceneId;

@@ -26,6 +26,24 @@
 //! - **Purity constraint**: freeze/safe-mode state transitions are owned by the system shell.
 //!   The policy crate only reads `OverrideState`; it never writes it.
 //!
+//! ## Authority Boundary
+//!
+//! This crate is the **read-only policy arbitration authority**.
+//!
+//! - It evaluates mutations against a snapshot of current state (`PolicyContext`) and
+//!   returns a decision (`ArbitrationOutcome`).
+//! - It has **no side effects**: it never mutates session state, resource counters,
+//!   override flags, or attention budgets.
+//! - All state transitions (budget enforcement ladder, override flag writes, resource
+//!   accounting) are the exclusive responsibility of their respective authorities:
+//!   - **Override state / freeze / safe-mode** → `tze_hud_runtime::shell::SafeModeController`
+//!   - **Resource budget enforcement ladder** → `tze_hud_runtime::budget::BudgetEnforcer`
+//!   - **Resource accounting (decoded bytes)** → `tze_hud_resource::budget::BudgetRegistry`
+//!   - **Scene orchestration** → `tze_hud_runtime` (orchestrates; does not evaluate policy)
+//!
+//! The runtime builds a `PolicyContext` snapshot, calls this crate to evaluate it, and then
+//! executes the resulting outcome. Policy evaluation and outcome execution are always separated.
+//!
 //! ## Usage
 //!
 //! ```rust,ignore

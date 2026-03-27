@@ -1,5 +1,21 @@
 //! Per-agent budget accounting for shared resources.
 //!
+//! ## Authority Boundary
+//!
+//! This module is the **decoded-byte resource accounting authority**.
+//!
+//! - **`BudgetRegistry`** tracks how many decoded bytes each agent has consumed
+//!   across all resource references. This is the single source of truth for
+//!   `texture_bytes_per_tile` and `texture_bytes_total` budget checks.
+//!
+//! - **The enforcement ladder** (Warning → Throttle → Revoke) is NOT here.
+//!   That lives in `tze_hud_runtime::budget::BudgetEnforcer`, which consumes
+//!   budget check outcomes from this registry to advance its state machine.
+//!
+//! - **Policy evaluation** for resource checks at Level 5 is NOT here.
+//!   That is `tze_hud_policy::resource::evaluate_resource`, which receives
+//!   a `ResourceContext` snapshot and returns a pure `ResourceDecision`.
+//!
 //! ## Budget semantics
 //!
 //! Texture bytes are charged to **the agent whose scene-graph node references
