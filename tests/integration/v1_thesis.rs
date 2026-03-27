@@ -311,6 +311,30 @@ async fn connect_agent(
     })
 }
 
+/// Receive the next non-`LeaseStateChange` server message, draining any
+/// `LeaseStateChange` events that arrive as the lease transitions from
+/// `REQUESTED` to `ACTIVE` before the first mutation response.
+///
+/// The server may emit `LeaseStateChange` messages asynchronously (e.g., when
+/// a lease is first used and transitions states).  Callers waiting for a
+/// specific response type (e.g., `MutationResult`, `ZonePublishResult`) must
+/// skip these interleaved state-change messages rather than treating them as
+/// unexpected payloads.
+async fn next_non_state_change(
+    rx: &mut tonic::codec::Streaming<session_proto::ServerMessage>,
+) -> Result<session_proto::ServerMessage, Box<dyn std::error::Error>> {
+    loop {
+        let msg = rx.next().await.ok_or("stream ended unexpectedly")??;
+        match &msg.payload {
+            Some(session_proto::server_message::Payload::LeaseStateChange(_)) => {
+                // Drain and continue — state changes can interleave before responses.
+                continue;
+            }
+            _ => return Ok(msg),
+        }
+    }
+}
+
 /// Create a tile via gRPC and return its ID bytes.
 async fn create_tile_via_grpc(
     session: &mut AgentSession,
@@ -349,8 +373,8 @@ async fn create_tile_via_grpc(
         })
         .await?;
 
-    // Read MutationResult
-    let msg = session.rx.next().await.ok_or("no mutation result")??;
+    // Read MutationResult, skipping any interleaved LeaseStateChange events.
+    let msg = next_non_state_change(&mut session.rx).await?;
     match &msg.payload {
         Some(session_proto::server_message::Payload::MutationResult(result)) if result.accepted => {
             let tile_id =
@@ -394,8 +418,8 @@ async fn publish_stream_text_to_zone_via_grpc(
         })
         .await?;
 
-    // Read ZonePublishResult
-    let msg = session.rx.next().await.ok_or("no zone publish result")??;
+    // Read ZonePublishResult, skipping any interleaved LeaseStateChange events.
+    let msg = next_non_state_change(&mut session.rx).await?;
     match &msg.payload {
         Some(session_proto::server_message::Payload::ZonePublishResult(result))
             if result.accepted =>

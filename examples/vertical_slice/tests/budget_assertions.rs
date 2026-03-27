@@ -678,7 +678,7 @@ fn test_transaction_validation_p99_within_budget() {
                     80.0,
                     60.0,
                 ),
-                z_order: (i as u32 % 10) + 1,
+                z_order: i as u32 + 1,
             }],
             timing_hints: None,
             lease_id: None,
@@ -802,7 +802,11 @@ async fn test_texture_upload_p99_within_budget() {
         let state = runtime.shared_state().lock().await;
         let mut scene = state.scene.lock().await;
         let tab = scene.active_tab.expect("active tab");
-        let lease = scene.grant_lease("upload-test", 60_000, vec![]);
+        let lease = scene.grant_lease(
+            "upload-test",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
         if let Some(l) = scene.leases.get_mut(&lease) {
             l.resource_budget.max_tiles = 4;
         }
