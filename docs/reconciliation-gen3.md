@@ -1,3 +1,5 @@
+> **HISTORICAL DOCUMENT** — This is the Gen-3 reconciliation snapshot (2026-03-26). It has been superseded by Gen-4. For the current baseline, see [docs/RECONCILIATION_STATUS.md](RECONCILIATION_STATUS.md).
+
 # Gen-3 Reconciliation: Spec-to-Code Coverage
 
 **Issue:** hud-nsyt.5
