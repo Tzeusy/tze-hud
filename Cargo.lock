@@ -3001,6 +3001,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tze_hud_app"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tze_hud_config",
+ "tze_hud_runtime",
+]
+
+[[package]]
 name = "tze_hud_compositor"
 version = "0.1.0"
 dependencies = [

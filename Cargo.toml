@@ -13,6 +13,7 @@ members = [
     "crates/tze_hud_config",
     "crates/tze_hud_resource",
     "crates/tze_hud_validation",
+    "app/tze_hud_app",
     "examples/vertical_slice",
     "examples/benchmark",
     "examples/render_artifacts",
@@ -43,7 +44,7 @@ winit = "0.30"
 
 # Telemetry / timing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Testing
 proptest = "1"
