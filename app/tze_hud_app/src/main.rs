@@ -331,6 +331,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    // Serialize all tests that mutate env vars.
+    // Rust's test harness runs tests in parallel by default; without this mutex,
+    // concurrent tests can observe or overwrite each other's env var changes,
+    // causing data races (UB) and flaky failures.
+    // Pattern mirrors tze_hud_compositor::renderer::ENV_VAR_MUTEX.
+    static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // ── parse_window_mode ────────────────────────────────────────────────────
 
     #[test]
@@ -357,9 +364,10 @@ mod tests {
 
     #[test]
     fn parse_options_defaults_when_no_args() {
-        // Safety: test process is single-threaded at this point; env mutation
-        // is safe when no other threads read these vars concurrently.
-        // Rust 2024 requires unsafe for remove_var.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard; no other test
+        // touches these vars while _guard is held. Rust 2024 requires unsafe
+        // for remove_var.
         unsafe {
             std::env::remove_var("TZE_HUD_WINDOW_MODE");
             std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
@@ -382,7 +390,8 @@ mod tests {
 
     #[test]
     fn parse_options_window_mode_overlay() {
-        // Safety: see parse_options_defaults_when_no_args.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe { std::env::remove_var("TZE_HUD_WINDOW_MODE"); }
         let args: Vec<String> = vec!["--window-mode".to_string(), "overlay".to_string()];
         let opts = parse_options(&args).unwrap();
@@ -391,7 +400,8 @@ mod tests {
 
     #[test]
     fn parse_options_width_and_height() {
-        // Safety: see parse_options_defaults_when_no_args.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe {
             std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
             std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
@@ -407,7 +417,8 @@ mod tests {
 
     #[test]
     fn parse_options_grpc_port_zero_disables() {
-        // Safety: see parse_options_defaults_when_no_args.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe { std::env::remove_var("TZE_HUD_GRPC_PORT"); }
         let args: Vec<String> = vec!["--grpc-port".to_string(), "0".to_string()];
         let opts = parse_options(&args).unwrap();
@@ -416,7 +427,8 @@ mod tests {
 
     #[test]
     fn parse_options_fps() {
-        // Safety: see parse_options_defaults_when_no_args.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe { std::env::remove_var("TZE_HUD_FPS"); }
         let args: Vec<String> = vec!["--fps".to_string(), "30".to_string()];
         let opts = parse_options(&args).unwrap();
@@ -432,7 +444,8 @@ mod tests {
 
     #[test]
     fn parse_options_psk() {
-        // Safety: see parse_options_defaults_when_no_args.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe { std::env::remove_var("TZE_HUD_PSK"); }
         let args: Vec<String> = vec!["--psk".to_string(), "my-secret-key".to_string()];
         let opts = parse_options(&args).unwrap();
@@ -457,7 +470,8 @@ mod tests {
 
     #[test]
     fn parse_options_width_non_integer_returns_error() {
-        // Safety: see parse_options_defaults_when_no_args.
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
         unsafe { std::env::remove_var("TZE_HUD_WINDOW_WIDTH"); }
         let args: Vec<String> = vec!["--width".to_string(), "bad".to_string()];
         let err = parse_options(&args).unwrap_err();
