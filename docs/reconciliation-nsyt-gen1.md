@@ -1,3 +1,5 @@
+> **HISTORICAL DOCUMENT** — This is the hud-nsyt epic reconciliation (2026-03-26), verifying sibling bead deliverables against the epic scope. It is a point-in-time audit, not the current spec-code coverage baseline. For the current baseline, see [docs/RECONCILIATION_STATUS.md](RECONCILIATION_STATUS.md).
+
 # Reconciliation: hud-nsyt Epic vs. Sibling Bead Deliverables
 
 **Issue:** hud-nsyt.6

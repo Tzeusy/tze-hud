@@ -276,7 +276,7 @@ TZE_HUD_SOAK_SECS=3600 cargo test -p integration --test soak -- --nocapture   # 
 TZE_HUD_SOAK_SECS=21600 cargo test -p integration --test soak -- --nocapture  # 6 hours
 ```
 
-Note: `tests/integration/multi_agent.rs` currently has known compile issues in this branch. Run it once fixed:
+Multi-agent integration tests:
 
 ```bash
 cargo test -p integration --test multi_agent -- --nocapture
