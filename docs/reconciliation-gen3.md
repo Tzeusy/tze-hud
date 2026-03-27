@@ -357,7 +357,7 @@ Status legend unchanged from gen-1/gen-2:
 | # | v1.md requirement | RFC section | Crate/module | Status |
 |---|-------------------|-------------|-------------|--------|
 | Sec1 | Agent authentication (PSK + local socket) | RFC 0002 §4.1 | `session::SessionRegistry` with PSK | FULL |
-| Sec2 | Capability scopes (additive grants, revocation) | RFC 0001 §3.3, RFC 0002 §4.3 | Full capability vocabulary; grant-time enforcement; live revocation of individual capabilities absent | PARTIAL |
+| Sec2 | Capability scopes (additive grants, revocation) | RFC 0001 §3.3, RFC 0002 §4.3 | Full capability vocabulary; grant-time enforcement; live revocation via `HudSessionImpl::revoke_capability_on_lease()` → `CapabilityRevocationEvent` broadcast → `handle_capability_revocation()` → CapabilityNotice + LeaseStateChange | FULL |
 | Sec3 | Agent isolation (no cross-agent content access) | RFC 0001 §1.2 namespace isolation | Namespace isolation in `SceneGraph`; per-namespace event dispatch in `session.rs` | FULL |
 | Sec4 | Resource budgets (enforced, throttle + revoke) | RFC 0002 §5 | `BudgetEnforcer` with full ladder; `check_mutation` + `tick` | FULL |
 
@@ -460,20 +460,17 @@ FULL +19 (32→51), PARTIAL −10 (13→3), RFC-ONLY −5 (9→4), ABSENT −1 (
 
 ## 5. Remaining Gaps
 
-Three PARTIAL items and four RFC-ONLY items remain. None are blocking for the v1 thesis.
+Two PARTIAL items and four RFC-ONLY items remain. None are blocking for the v1 thesis.
 
-### GAP-G3-4: Sec2 — live capability revocation from active lease
+### ~~GAP-G3-4: Sec2 — live capability revocation from active lease~~ (CLOSED)
 
-RFC 0001 §3.3 specifies that the runtime may revoke individual capabilities from an
-active lease (e.g., remove `PublishZone(subtitle)` without full lease revocation).
-`CapabilityPolicy` enforces at grant time and the full canonical vocabulary is defined,
-but there is no RPC or internal mechanism to mutate `Lease.capabilities` for an active
-lease at runtime.
-
-**Impact:** Low for v1 thesis; medium for multi-agent coordination where agents may
-acquire overly broad capabilities and need them narrowed without eviction.
-
-**Suggested:** `task`, P3.
+Closed by hud-6x3o. `HudSessionImpl::revoke_capability_on_lease()` broadcasts a
+`CapabilityRevocationEvent` to all active session handlers; the owning session calls
+`SceneGraph::revoke_capability()`, then delivers `CapabilityNotice(revoked=[cap])` and
+a `LeaseStateChange` (state remains ACTIVE, reason = `CAPABILITY_REVOKED:<name>`) to
+the agent. Seven integration tests cover the happy path, lease-state preservation,
+scene-graph scope narrowing, noop for missing capabilities, and error paths. Sec2
+status updated to FULL.
 
 ### GAP-G3-5: V1 / Layer 1 colour assertions still ignored
 
