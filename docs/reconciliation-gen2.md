@@ -1,3 +1,5 @@
+> **HISTORICAL DOCUMENT** — This is the Gen-2 reconciliation snapshot (2026-03-22). It has been superseded by Gen-3. For the current baseline, see [docs/RECONCILIATION_STATUS.md](RECONCILIATION_STATUS.md).
+
 # Gen-2 Reconciliation: Spec-to-Code Coverage
 
 **Issue:** rig-j1v
