@@ -16,6 +16,7 @@
 //! | `--width <px>`      | `TZE_HUD_WINDOW_WIDTH` | `1920`       | Window width in pixels.                  |
 //! | `--height <px>`     | `TZE_HUD_WINDOW_HEIGHT`| `1080`       | Window height in pixels.                 |
 //! | `--grpc-port <port>`| `TZE_HUD_GRPC_PORT`    | `50051`      | gRPC listen port (0 to disable).         |
+//! | `--mcp-port <port>` | `TZE_HUD_MCP_PORT`     | `9090`       | MCP HTTP listen port (0 to disable).     |
 //! | `--psk <key>`       | `TZE_HUD_PSK`          | `tze-hud-key`| Pre-shared key for session authentication.|
 //! | `--fps <n>`         | `TZE_HUD_FPS`          | `60`         | Target frames per second.                |
 //! | `--help`            | —                      | —            | Print this help and exit.                |
@@ -73,6 +74,8 @@ OPTIONS:
                            (env: TZE_HUD_WINDOW_HEIGHT)
     --grpc-port <port>     gRPC listen port; 0 to disable  [default: 50051]
                            (env: TZE_HUD_GRPC_PORT)
+    --mcp-port <port>      MCP HTTP listen port; 0 to disable  [default: 9090]
+                           (env: TZE_HUD_MCP_PORT)
     --psk <key>            Pre-shared key for session authentication  [default: tze-hud-key]
                            (env: TZE_HUD_PSK)
     --fps <n>              Target frames per second  [default: 60]
@@ -107,6 +110,7 @@ struct StartupOptions {
     width: u32,
     height: u32,
     grpc_port: u16,
+    mcp_port: u16,
     psk: String,
     fps: u32,
 }
@@ -119,6 +123,7 @@ impl Default for StartupOptions {
             width: 1920,
             height: 1080,
             grpc_port: 50051,
+            mcp_port: 9090,
             psk: "tze-hud-key".to_string(),
             fps: 60,
         }
@@ -149,6 +154,11 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
         opts.grpc_port = v
             .parse::<u16>()
             .map_err(|_| format!("TZE_HUD_GRPC_PORT: invalid port: {v:?}"))?;
+    }
+    if let Ok(v) = std::env::var("TZE_HUD_MCP_PORT") {
+        opts.mcp_port = v
+            .parse::<u16>()
+            .map_err(|_| format!("TZE_HUD_MCP_PORT: invalid port: {v:?}"))?;
     }
     if let Ok(v) = std::env::var("TZE_HUD_PSK") {
         opts.psk = v;
@@ -212,6 +222,15 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                 opts.grpc_port = val
                     .parse::<u16>()
                     .map_err(|_| format!("--grpc-port: invalid port: {val:?}"))?;
+            }
+            "--mcp-port" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| "--mcp-port requires a port number argument".to_string())?;
+                opts.mcp_port = val
+                    .parse::<u16>()
+                    .map_err(|_| format!("--mcp-port: invalid port: {val:?}"))?;
             }
             "--psk" => {
                 i += 1;
@@ -305,6 +324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         width = opts.width,
         height = opts.height,
         grpc_port = opts.grpc_port,
+        mcp_port = opts.mcp_port,
         fps = opts.fps,
         "tze_hud runtime starting"
     );
@@ -317,6 +337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             title: "tze_hud".to_string(),
         },
         grpc_port: opts.grpc_port,
+        mcp_port: opts.mcp_port,
         psk: opts.psk,
         target_fps: opts.fps,
     };
@@ -373,6 +394,7 @@ mod tests {
             std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
             std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
             std::env::remove_var("TZE_HUD_GRPC_PORT");
+            std::env::remove_var("TZE_HUD_MCP_PORT");
             std::env::remove_var("TZE_HUD_PSK");
             std::env::remove_var("TZE_HUD_FPS");
         }
@@ -382,6 +404,7 @@ mod tests {
         assert_eq!(opts.width, 1920);
         assert_eq!(opts.height, 1080);
         assert_eq!(opts.grpc_port, 50051);
+        assert_eq!(opts.mcp_port, 9090);
         assert_eq!(opts.fps, 60);
         assert!(opts.config_path.is_none());
     }
@@ -423,6 +446,26 @@ mod tests {
         let args: Vec<String> = vec!["--grpc-port".to_string(), "0".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.grpc_port, 0);
+    }
+
+    #[test]
+    fn parse_options_mcp_port() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe { std::env::remove_var("TZE_HUD_MCP_PORT"); }
+        let args: Vec<String> = vec!["--mcp-port".to_string(), "8080".to_string()];
+        let opts = parse_options(&args).unwrap();
+        assert_eq!(opts.mcp_port, 8080);
+    }
+
+    #[test]
+    fn parse_options_mcp_port_zero_disables() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe { std::env::remove_var("TZE_HUD_MCP_PORT"); }
+        let args: Vec<String> = vec!["--mcp-port".to_string(), "0".to_string()];
+        let opts = parse_options(&args).unwrap();
+        assert_eq!(opts.mcp_port, 0);
     }
 
     #[test]
