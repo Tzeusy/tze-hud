@@ -234,9 +234,8 @@ async fn connect_soak_agent(
                 agent_display_name: format!("{} (soak test)", agent_id),
                 pre_shared_key: SOAK_PSK.to_string(),
                 requested_capabilities: vec![
-                    "create_tile".to_string(),
-                    "create_node".to_string(),
-                    "update_tile".to_string(),
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
                 ],
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
@@ -282,9 +281,8 @@ async fn connect_soak_agent(
             session_proto::LeaseRequest {
                 ttl_ms: lease_ttl_ms,
                 capabilities: vec![
-                    "create_tile".to_string(),
-                    "create_node".to_string(),
-                    "update_tile".to_string(),
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
                 ],
                 lease_priority,
             },
@@ -1151,9 +1149,8 @@ async fn connect_soak_agent_to(
                 agent_display_name: format!("{} (soak test)", agent_id),
                 pre_shared_key: SOAK_PSK.to_string(),
                 requested_capabilities: vec![
-                    "create_tile".to_string(),
-                    "create_node".to_string(),
-                    "update_tile".to_string(),
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
                 ],
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
                 resume_token: Vec::new(),
@@ -1196,9 +1193,8 @@ async fn connect_soak_agent_to(
             session_proto::LeaseRequest {
                 ttl_ms: lease_ttl_ms,
                 capabilities: vec![
-                    "create_tile".to_string(),
-                    "create_node".to_string(),
-                    "update_tile".to_string(),
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
                 ],
                 lease_priority,
             },
