@@ -102,7 +102,7 @@ ALIGNED.
 
 ### Subscription silent downgrade
 
-**Finding (SHOULD-FIX, FIXED):** §7.2 originally stated that capability-denied subscriptions are "silently downgraded." For an LLM-native system (architecture.md §"Error model": "LLMs cannot self-correct from 'INVALID_ARGUMENT' with no details"), silent drops are anti-doctrine. Agents that request `input_events` but lack `receive_input` capability would silently receive no input events and have no way to know why. Fixed by adding `active_subscriptions` and `denied_subscriptions` fields to `SessionEstablished` (§1.3) and its proto definition (§9). This is consistent with the "structured, machine-readable, diagnostic" error model doctrine.
+**Finding (SHOULD-FIX, FIXED):** §7.2 originally stated that capability-denied subscriptions are "silently downgraded." For an LLM-native system (architecture.md §"Error model": "LLMs cannot self-correct from 'INVALID_ARGUMENT' with no details"), silent drops are anti-doctrine. Agents that request `input_events` but lack `access_input_events` capability would silently receive no input events and have no way to know why. Fixed by adding `active_subscriptions` and `denied_subscriptions` fields to `SessionEstablished` (§1.3) and its proto definition (§9). This is consistent with the "structured, machine-readable, diagnostic" error model doctrine.
 
 ### max_concurrent_sessions split
 

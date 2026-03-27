@@ -27,7 +27,7 @@ All prior round fixes held. The RFC faithfully implements the full doctrine mand
 | architecture.md: Error model — structured, machine-readable | `BatchRejected`, typed `ValidationErrorCode`, `context_json`, `correction_hint` | Pass |
 | architecture.md: Screen sovereignty — namespace from session | `agent_namespace` is `reserved 2` in `MutationBatch` | Pass |
 | architecture.md: Chrome layer — agents cannot render into it | Chrome layer zone tiles are "runtime-rendered"; agents publish data, runtime renders | Pass |
-| security.md: Capability scopes are additive and granular | §3.3 capability checks per mutation type; `create_tiles`, `modify_own_tiles`, `manage_tabs`, `zone_publish:<name>` | Pass (tab rules fixed R4) |
+| security.md: Capability scopes are additive and granular | §3.3 capability checks per mutation type; `create_tiles`, `modify_own_tiles`, `manage_tabs`, `publish_zone:<name>` | Pass (tab rules fixed R4) |
 | validation.md: DR-V1 Scene separable from renderer | §12 `tze_scene` crate has no GPU dependency | Pass |
 | validation.md: DR-V3 Structured telemetry | Snapshot and diff are serializable; telemetry fields defined | Pass |
 | validation.md: DR-V4 Deterministic test scenes | BTreeMap for maps, deterministic serialization order documented | Pass |
@@ -135,7 +135,7 @@ The snapshot is the reconnect mechanism (per §4.2, agents always receive a full
 
 **Problem:** The Lease Check subsection specified:
 - Tile mutation validation (requires `modify_own_tiles` capability + valid lease)
-- Zone publish validation (requires `zone_publish:<name>` capability + publish token)
+- Zone publish validation (requires `publish_zone:<name>` capability + publish token)
 
 But it did **not** specify validation rules for:
 - Tab mutations: `CreateTab`, `DeleteTab`, `RenameTab`, `ReorderTab`, `SwitchActiveTab`
@@ -170,7 +170,7 @@ The capability `manage_tabs` was mentioned only in a capability-name note, not i
 
 **Problem:** "The Session/Protocol RFC must define how tokens are issued during auth and their expiry semantics" with no boundary conditions stated in RFC 0001. This creates a circular dependency: RFC 0001 defines the `ZonePublishToken` field that agents use in every zone publish mutation, but says nothing about its lifetime. RFC 0005 is supposed to define it, but RFC 0005 needs to know the expected semantics to design them.
 
-**Fix applied:** Added normative expectation: token is session-scoped and zone-scoped, invalidated on session end or `zone_publish:<name>` capability revocation, not transferable between sessions. RFC 0005 defines the encoding; RFC 0001 defines the behavioral contract.
+**Fix applied:** Added normative expectation: token is session-scoped and zone-scoped, invalidated on session end or `publish_zone:<name>` capability revocation, not transferable between sessions. RFC 0005 defines the encoding; RFC 0001 defines the behavioral contract.
 
 ---
 

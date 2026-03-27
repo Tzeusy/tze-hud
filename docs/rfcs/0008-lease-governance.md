@@ -80,7 +80,7 @@ Leases are not tiles. A single lease may govern multiple tiles. Conversely, each
 | `ZonePublish` (resident agent path) | Yes -- lease must be `ACTIVE` and include `publish_zone:<zone_type>` capability |
 | `ZonePublish` (guest MCP path) | No -- guest uses `ZonePublishToken`; runtime holds the underlying tile |
 | `CreateTab`, `RemoveTab` | No -- tab operations require `manage_tabs` capability, not a surface lease |
-| Read operations (scene queries, hit-test) | No -- read access is governed by `read_scene` capability, not leases |
+| Read operations (scene queries, hit-test) | No -- read access is governed by `read_scene_topology` capability, not leases |
 
 ### 1.3 Lease Identity
 

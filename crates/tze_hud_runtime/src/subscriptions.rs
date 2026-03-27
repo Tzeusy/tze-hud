@@ -58,12 +58,12 @@ pub fn category_prefix(category: &str) -> Option<&'static str> {
 pub fn required_capability(category: &str) -> Option<&'static str> {
     match category {
         CATEGORY_SCENE_TOPOLOGY => None, // open to all
-        CATEGORY_INPUT_EVENTS => Some("receive_input"),
-        CATEGORY_FOCUS_EVENTS => None, // open to all
+        CATEGORY_INPUT_EVENTS => Some("access_input_events"),
+        CATEGORY_FOCUS_EVENTS => Some("access_input_events"),
         CATEGORY_DEGRADATION_NOTICES => None, // mandatory/always granted
         CATEGORY_LEASE_CHANGES => None, // mandatory/always granted
         CATEGORY_ZONE_EVENTS => None, // open to all
-        CATEGORY_TELEMETRY_FRAMES => Some("telemetry_read"),
+        CATEGORY_TELEMETRY_FRAMES => Some("read_telemetry"),
         CATEGORY_ATTENTION_EVENTS => None, // open to all
         CATEGORY_AGENT_EVENTS => None, // open to all
         _ => None,
@@ -533,10 +533,53 @@ mod tests {
         let outcome2 = subs.apply_change(
             &subscribe(&[CATEGORY_INPUT_EVENTS]),
             &[],
-            &caps(&["receive_input"]),
+            &caps(&["access_input_events"]),
         );
         assert!(outcome2.denied.is_empty());
         assert!(outcome2.active.contains(&CATEGORY_INPUT_EVENTS.to_string()));
+    }
+
+    #[test]
+    fn test_focus_events_requires_access_input_events_capability() {
+        let mut subs = AgentSubscriptions::new();
+        // Without capability: denied
+        let outcome = subs.apply_change(
+            &subscribe(&[CATEGORY_FOCUS_EVENTS]),
+            &[],
+            &caps(&[]),
+        );
+        assert!(outcome.denied.contains(&CATEGORY_FOCUS_EVENTS.to_string()));
+        assert!(!outcome.active.contains(&CATEGORY_FOCUS_EVENTS.to_string()));
+
+        // With canonical access_input_events capability: granted
+        let outcome2 = subs.apply_change(
+            &subscribe(&[CATEGORY_FOCUS_EVENTS]),
+            &[],
+            &caps(&["access_input_events"]),
+        );
+        assert!(outcome2.denied.is_empty());
+        assert!(outcome2.active.contains(&CATEGORY_FOCUS_EVENTS.to_string()));
+    }
+
+    #[test]
+    fn test_telemetry_frames_requires_read_telemetry_capability() {
+        let mut subs = AgentSubscriptions::new();
+        // Without capability: denied
+        let outcome = subs.apply_change(
+            &subscribe(&[CATEGORY_TELEMETRY_FRAMES]),
+            &[],
+            &caps(&[]),
+        );
+        assert!(outcome.denied.contains(&CATEGORY_TELEMETRY_FRAMES.to_string()));
+
+        // With canonical read_telemetry capability: granted
+        let outcome2 = subs.apply_change(
+            &subscribe(&[CATEGORY_TELEMETRY_FRAMES]),
+            &[],
+            &caps(&["read_telemetry"]),
+        );
+        assert!(outcome2.denied.is_empty());
+        assert!(outcome2.active.contains(&CATEGORY_TELEMETRY_FRAMES.to_string()));
     }
 
     // ── 32-subscription limit ──────────────────────────────────────────────────
