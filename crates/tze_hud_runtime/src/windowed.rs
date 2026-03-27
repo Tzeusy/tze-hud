@@ -88,12 +88,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
 use tze_hud_compositor::{Compositor, WindowSurface};
+use tze_hud_config::TzeHudConfig;
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
+use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::ZoneContent;
 use tze_hud_telemetry::TelemetryCollector;
@@ -139,6 +141,21 @@ pub struct WindowedConfig {
     pub psk: String,
     /// Target frames per second.  Default: 60.
     pub target_fps: u32,
+    /// Raw TOML content of the configuration file, if one was loaded.
+    ///
+    /// When `Some`, the windowed runtime parses this at startup and applies the
+    /// capability grants from `[agents.registered]` to the `RuntimeContext`.
+    /// When `None`, the runtime falls back to `RuntimeContext::headless_default()`
+    /// (all agents treated as guests).
+    ///
+    /// ## Source
+    ///
+    /// Populated by the application binary when `resolve_config_path` succeeds:
+    /// ```rust,ignore
+    /// let config_path = resolve_config_path(opts.config_path.as_deref());
+    /// let config_toml = config_path.ok().and_then(|p| std::fs::read_to_string(&p).ok());
+    /// ```
+    pub config_toml: Option<String>,
 }
 
 impl Default for WindowedConfig {
@@ -149,6 +166,7 @@ impl Default for WindowedConfig {
             mcp_port: 9090,
             psk: "tze-hud-key".to_string(),
             target_fps: 60,
+            config_toml: None,
         }
     }
 }
@@ -876,14 +894,18 @@ impl WindowedRuntime {
         let shutdown = ShutdownToken::new();
 
         // ── RuntimeContext ─────────────────────────────────────────────────────
-        // Build a minimal RuntimeContext for the windowed runtime.
-        // The windowed runtime currently starts with the headless default (all agents
-        // are treated as guests). Config-file-driven capability grants will be wired
-        // in a follow-up once config loading is plumbed into WindowedConfig.
-        let runtime_context: SharedRuntimeContext = Arc::new(RuntimeContext::headless_default());
-        // Windowed runtime currently allows unknown agents (dev-friendly default).
-        // This will be driven by the loaded config in a future task.
-        let fallback_unrestricted = true;
+        // Build the RuntimeContext from the config file when one is provided, or
+        // fall back to headless_default() when no config file is present.
+        //
+        // Config-driven path: parse the TOML, validate, freeze into a ResolvedConfig,
+        // and extract the HotReloadableConfig for the initial hot sections.
+        // The fallback_policy (Guest vs Unrestricted) is determined by whether
+        // a config file is present:
+        //   - Config present → Guest (registered agents only, all others denied).
+        //   - No config → Unrestricted (dev-friendly; any PSK-authenticated agent
+        //     gets all capabilities without a registration entry).
+        let (runtime_context, fallback_unrestricted): (SharedRuntimeContext, bool) =
+            build_runtime_context(&cfg);
 
         // ── Network runtime + gRPC + MCP HTTP servers ──────────────────────────
         // Spawn the Tokio multi-thread runtime for all network tasks (gRPC, MCP).
@@ -1041,6 +1063,102 @@ impl WindowedRuntime {
         }
 
         Ok(())
+    }
+}
+
+// ─── Runtime context construction ────────────────────────────────────────────
+
+/// Build a `RuntimeContext` from the windowed config.
+///
+/// When `cfg.config_toml` is `Some`, the TOML is parsed and validated.  On
+/// success, capability grants from `[agents.registered]` and the hot-reloadable
+/// sections (`[privacy]`, `[degradation]`, `[chrome]`, `[agents.dynamic_policy]`)
+/// are loaded into the context.  The fallback policy is `Guest` (registered
+/// agents only).
+///
+/// When `cfg.config_toml` is `None` (no config file), the context falls back to
+/// `RuntimeContext::headless_default()` and `fallback_unrestricted = true` for
+/// dev-friendly behaviour (any PSK-authenticated agent gets all capabilities).
+///
+/// Parse or validation errors are logged as warnings and cause a graceful
+/// fallback to `headless_default()` so the runtime can still start.
+///
+/// Returns `(runtime_context, fallback_unrestricted)`.
+fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
+    match &cfg.config_toml {
+        None => {
+            // No config file — fall back to headless default.
+            tracing::debug!(
+                "windowed runtime: no config TOML provided; \
+                 using headless_default (all agents unrestricted)"
+            );
+            (Arc::new(RuntimeContext::headless_default()), true)
+        }
+        Some(toml_src) => {
+            // Parse the TOML.
+            let loader = match TzeHudConfig::parse(toml_src) {
+                Ok(l) => l,
+                Err(parse_err) => {
+                    tracing::warn!(
+                        error = %parse_err.message,
+                        line = parse_err.line,
+                        column = parse_err.column,
+                        "windowed runtime: config TOML parse error; \
+                         falling back to headless_default"
+                    );
+                    return (Arc::new(RuntimeContext::headless_default()), false);
+                }
+            };
+
+            // Validate and freeze into a ResolvedConfig.
+            let resolved = match loader.freeze() {
+                Ok(r) => r,
+                Err(errors) => {
+                    for err in &errors {
+                        tracing::warn!(
+                            code = ?err.code,
+                            field = %err.field_path,
+                            expected = %err.expected,
+                            got = %err.got,
+                            hint = %err.hint,
+                            "windowed runtime: config validation error"
+                        );
+                    }
+                    tracing::warn!(
+                        "windowed runtime: {} config validation error(s); \
+                         falling back to headless_default",
+                        errors.len()
+                    );
+                    return (Arc::new(RuntimeContext::headless_default()), false);
+                }
+            };
+
+            // Parse hot-reloadable sections from the same TOML so the initial
+            // privacy/degradation/chrome/dynamic_policy settings take effect
+            // immediately (before the first SIGHUP).
+            let hot = match tze_hud_config::reload_config(toml_src) {
+                Ok(h) => h,
+                Err(_) => {
+                    // Validation already passed above; this should not happen.
+                    // Fall back to defaults for hot sections if it does.
+                    tze_hud_config::HotReloadableConfig::default()
+                }
+            };
+
+            tracing::info!(
+                profile = %resolved.profile.name,
+                agents = resolved.agent_capabilities.len(),
+                "windowed runtime: config loaded; \
+                 capability grants applied from [agents.registered]"
+            );
+
+            let ctx = RuntimeContext::from_config_with_hot(
+                resolved,
+                crate::runtime_context::FallbackPolicy::Guest,
+                hot,
+            );
+            (Arc::new(ctx), false)
+        }
     }
 }
 
@@ -1457,5 +1575,187 @@ mod tests {
             assert!(rt.is_none());
             assert!(handles.is_empty());
         }
+    }
+
+    // ── build_runtime_context: config-driven and fallback behaviour ───────────
+
+    /// Acceptance criterion 2: when no config TOML is provided, the runtime
+    /// falls back to headless_default() with fallback_unrestricted = true.
+    #[test]
+    fn build_runtime_context_no_config_toml_uses_headless_default() {
+        let cfg = WindowedConfig {
+            config_toml: None,
+            ..WindowedConfig::default()
+        };
+        let (ctx, fallback_unrestricted) = build_runtime_context(&cfg);
+        // Fallback unrestricted should be true (dev-friendly default).
+        assert!(
+            fallback_unrestricted,
+            "no-config path must set fallback_unrestricted=true"
+        );
+        // Profile name must be "headless" (headless_default behaviour).
+        assert_eq!(
+            ctx.profile.name, "headless",
+            "no-config path must use the headless profile"
+        );
+        // Hot config should be all defaults.
+        let hot = ctx.hot_config();
+        assert!(
+            hot.privacy.redaction_style.is_none(),
+            "hot config privacy must default to None when no config file is given"
+        );
+    }
+
+    /// Acceptance criterion 1: when a valid config TOML is provided, capability
+    /// grants from [agents.registered] are parsed and applied.
+    #[test]
+    fn build_runtime_context_with_valid_config_applies_capability_grants() {
+        let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[agents.registered.weather-agent]
+capabilities = ["create_tiles", "modify_own_tiles"]
+"#;
+        let cfg = WindowedConfig {
+            config_toml: Some(toml.to_string()),
+            ..WindowedConfig::default()
+        };
+        let (ctx, fallback_unrestricted) = build_runtime_context(&cfg);
+        // Config-driven path: fallback must be Guest (not unrestricted).
+        assert!(
+            !fallback_unrestricted,
+            "config-driven path must set fallback_unrestricted=false"
+        );
+        // Registered agent capabilities must be applied.
+        let caps = ctx.agent_capabilities("weather-agent");
+        assert!(
+            caps.is_some(),
+            "weather-agent must appear in the capability registry"
+        );
+        let caps = caps.unwrap();
+        assert!(
+            caps.contains(&"create_tiles".to_string()),
+            "weather-agent must have create_tiles grant"
+        );
+        assert!(
+            caps.contains(&"modify_own_tiles".to_string()),
+            "weather-agent must have modify_own_tiles grant"
+        );
+        // Unregistered agent must get guest (denied) policy.
+        let policy = ctx.capability_policy_for("unknown-agent");
+        assert!(
+            policy.evaluate_capability_request(&["create_tiles".to_string()]).is_err(),
+            "unregistered agent must be denied under config-driven Guest fallback"
+        );
+    }
+
+    /// Acceptance criterion 1: config-driven context uses the full-display profile.
+    #[test]
+    fn build_runtime_context_with_config_uses_configured_profile() {
+        let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+        let cfg = WindowedConfig {
+            config_toml: Some(toml.to_string()),
+            ..WindowedConfig::default()
+        };
+        let (ctx, _) = build_runtime_context(&cfg);
+        assert_eq!(
+            ctx.profile.name, "full-display",
+            "config-driven path must use the profile specified in the TOML"
+        );
+    }
+
+    /// Acceptance criterion 3 (fallback): invalid TOML falls back to
+    /// headless_default() rather than crashing.
+    #[test]
+    fn build_runtime_context_invalid_toml_falls_back_to_headless() {
+        let bad_toml = "this is not valid TOML [\n";
+        let cfg = WindowedConfig {
+            config_toml: Some(bad_toml.to_string()),
+            ..WindowedConfig::default()
+        };
+        let (ctx, fallback_unrestricted) = build_runtime_context(&cfg);
+        // Must fall back gracefully to headless, but NOT unrestricted.
+        // An operator who provided a config intended to restrict capabilities.
+        assert!(
+            !fallback_unrestricted,
+            "parse-error path must NOT fall back to unrestricted"
+        );
+        assert_eq!(
+            ctx.profile.name, "headless",
+            "parse-error path must fall back to headless profile"
+        );
+    }
+
+    /// Acceptance criterion 3 (fallback): config with validation errors falls
+    /// back to headless_default() rather than crashing.
+    #[test]
+    fn build_runtime_context_validation_error_falls_back_to_headless() {
+        // Missing required [[tabs]] section → validation error.
+        let invalid_toml = r#"
+[runtime]
+profile = "full-display"
+"#;
+        let cfg = WindowedConfig {
+            config_toml: Some(invalid_toml.to_string()),
+            ..WindowedConfig::default()
+        };
+        let (ctx, fallback_unrestricted) = build_runtime_context(&cfg);
+        // Must fall back gracefully to headless, but NOT unrestricted.
+        // An operator who provided a config intended to restrict capabilities.
+        assert!(
+            !fallback_unrestricted,
+            "validation-error path must NOT fall back to unrestricted"
+        );
+        assert_eq!(
+            ctx.profile.name, "headless",
+            "validation-error path must fall back to headless profile"
+        );
+    }
+
+    /// Hot-reloadable sections (privacy, degradation) from the initial config
+    /// are applied immediately — no SIGHUP required.
+    #[test]
+    fn build_runtime_context_hot_sections_applied_from_config() {
+        let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[privacy]
+redaction_style = "blank"
+"#;
+        let cfg = WindowedConfig {
+            config_toml: Some(toml.to_string()),
+            ..WindowedConfig::default()
+        };
+        let (ctx, _) = build_runtime_context(&cfg);
+        let hot = ctx.hot_config();
+        assert_eq!(
+            hot.privacy.redaction_style,
+            Some("blank".to_string()),
+            "privacy.redaction_style from config must be applied immediately at startup"
+        );
+    }
+
+    /// Acceptance criterion 1: default WindowedConfig has no config_toml.
+    #[test]
+    fn windowed_config_default_has_no_config_toml() {
+        let cfg = WindowedConfig::default();
+        assert!(
+            cfg.config_toml.is_none(),
+            "default WindowedConfig must have config_toml = None"
+        );
     }
 }
