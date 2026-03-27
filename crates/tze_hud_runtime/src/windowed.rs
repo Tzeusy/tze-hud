@@ -365,7 +365,17 @@ impl ApplicationHandler for WinitApp {
         crate::threads::elevate_main_thread_priority();
 
         // ── Wire compositor thread ─────────────────────────────────────────
-        let shared_state = self.state.shared_state.clone();
+        // Pre-clone the scene Arc so the compositor thread can lock the scene
+        // directly without ever needing to acquire the SharedState lock.
+        // This avoids nested-lock inversion: the compositor only ever holds the
+        // scene lock; session handlers hold the SharedState lock then the scene lock.
+        let compositor_scene = {
+            let st = self.state.shared_state.try_lock().expect(
+                "windowed runtime: shared_state lock contended at compositor setup — \
+                 this should not happen during single-threaded initialisation"
+            );
+            Arc::clone(&st.scene)
+        };
         // Share the ArcSwap handle (not the FramePipeline itself) with the compositor thread.
         let hit_test_snapshot = self.state.pipeline.hit_test_snapshot.clone();
         let frame_ready_tx = self.state
@@ -448,26 +458,20 @@ impl ApplicationHandler for WinitApp {
                     // (placeholder — real mutations come via gRPC session)
 
                     // ── Stage 4: Scene Commit + HitTest Snapshot ──────────
-                    let state_guard = {
-                        // Use a lightweight approach: try to acquire lock without blocking
-                        // the compositor thread for too long.
-                        // In production this would use a dedicated mutation intake channel.
-                        match shared_state.try_lock() {
-                            Ok(g) => Some(g),
-                            Err(_) => None,
-                        }
-                    };
-
-                    if let Some(state) = state_guard {
-                        let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&state.scene);
+                    // Lock the scene directly (never lock SharedState here).
+                    // Using try_lock avoids blocking the compositor thread for
+                    // too long when a session handler or MCP handler holds the
+                    // scene lock momentarily.
+                    if let Ok(scene) = compositor_scene.try_lock() {
+                        let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
                         hit_test_snapshot.store(Arc::new(new_snap));
 
                         // ── Stage 5–7: Render Encode + GPU Submit ─────────
                         let compositor_telemetry = compositor.render_frame(
-                            &state.scene,
+                            &scene,
                             surface_for_compositor.as_ref(),
                         );
-                        drop(state); // Release lock before signalling main thread.
+                        drop(scene); // Release lock before signalling main thread.
 
                         // ── Signal main thread to present ─────────────────
                         // Per spec §Compositor Thread Ownership (line 55):
@@ -685,8 +689,13 @@ impl WinitApp {
             device_id: 0,
             timestamp: Some(Instant::now()),
         };
-        if let Ok(mut state) = self.state.shared_state.try_lock() {
-            let _result = self.state.input_processor.process(&pointer_event, &mut state.scene);
+        // Acquire the scene lock directly (without going through SharedState) so that
+        // the main-thread input path does not contend with session handlers that hold
+        // both the SharedState lock and the scene lock.
+        if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(mut scene) = state.scene.try_lock() {
+                let _result = self.state.input_processor.process(&pointer_event, &mut *scene);
+            }
             // Local feedback patch (_result.local_patch) would be sent to the
             // compositor via a local-patch channel in the full pipeline. For the
             // initial windowed runtime, the compositor reads the scene state
@@ -856,29 +865,32 @@ impl WindowedRuntime {
         // Build shared state (scene + sessions).
         let width = cfg.window.width as f32;
         let height = cfg.window.height as f32;
-        let mut scene = SceneGraph::new(width, height);
-        if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {
-            let samples = [
-                "Subtitle demo: systems online.",
-                "Subtitle demo: compositor stable.",
-                "Subtitle demo: overlay path verified.",
-            ];
-            for line in samples {
-                if let Err(e) = scene.publish_to_zone(
-                    "subtitle",
-                    ZoneContent::StreamText(line.to_string()),
-                    "hudbot-sim",
-                    None,
-                    None,
-                    None,
-                ) {
-                    tracing::warn!(error = %e, "failed to seed subtitle demo line");
+        let shared_scene = {
+            let mut scene = SceneGraph::new(width, height);
+            if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {
+                let samples = [
+                    "Subtitle demo: systems online.",
+                    "Subtitle demo: compositor stable.",
+                    "Subtitle demo: overlay path verified.",
+                ];
+                for line in samples {
+                    if let Err(e) = scene.publish_to_zone(
+                        "subtitle",
+                        ZoneContent::StreamText(line.to_string()),
+                        "hudbot-sim",
+                        None,
+                        None,
+                        None,
+                    ) {
+                        tracing::warn!(error = %e, "failed to seed subtitle demo line");
+                    }
                 }
             }
-        }
+            Arc::new(Mutex::new(scene))
+        };
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
         let shared_state = Arc::new(Mutex::new(SharedState {
-            scene,
+            scene: Arc::clone(&shared_scene),
             sessions,
             safe_mode_active: false,
             token_store: TokenStore::new(),
@@ -925,11 +937,9 @@ impl WindowedRuntime {
 
         // ── MCP HTTP server ────────────────────────────────────────────────────
         //
-        // MCP scene: the MCP server operates on a dedicated
-        // `Arc<Mutex<SceneGraph>>` initialised from the same genesis state as
-        // the gRPC `SharedState` scene.  Full scene coherence (a single shared
-        // `Arc<Mutex<SceneGraph>>` used by both gRPC and MCP) is deferred to a
-        // follow-up refactor of `SharedState`.
+        // Scene coherence: the MCP server and gRPC session server share the
+        // same `Arc<Mutex<SceneGraph>>` (`shared_scene`).  Mutations applied
+        // over gRPC are immediately visible to MCP queries and vice versa.
         if cfg.mcp_port > 0 {
             // Ensure we have a network runtime to host the MCP task. If gRPC
             // was disabled (grpc_port == 0), network_rt is None and we need
@@ -950,7 +960,6 @@ impl WindowedRuntime {
             }
 
             if let Some(ref rt) = network_rt {
-                let mcp_scene = Arc::new(Mutex::new(SceneGraph::new(width, height)));
                 let mcp_config = McpServerConfig {
                     bind_addr: format!("0.0.0.0:{}", cfg.mcp_port)
                         .parse()
@@ -959,7 +968,7 @@ impl WindowedRuntime {
                 };
                 let mcp_shutdown = shutdown.clone();
                 match rt.rt.block_on(start_mcp_http_server(
-                    mcp_scene,
+                    Arc::clone(&shared_scene),
                     mcp_config,
                     mcp_shutdown,
                 )) {
@@ -1484,7 +1493,7 @@ mod tests {
         use tze_hud_protocol::session::{SessionRegistry, RuntimeDegradationLevel};
         use tze_hud_protocol::token::TokenStore;
         use tze_hud_scene::graph::SceneGraph;
-        let scene = SceneGraph::new(1920.0, 1080.0);
+        let scene = Arc::new(TokioMutex::new(SceneGraph::new(1920.0, 1080.0)));
         let sessions = SessionRegistry::new("test-psk");
         Arc::new(TokioMutex::new(SharedState {
             scene,

@@ -484,15 +484,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     {
         use tze_hud_scene::mutation::{MutationBatch as DemoBatch, SceneMutation as DemoMutation};
 
-        let mut state = runtime.shared_state().lock().await;
-        let demo_tab = state.scene.create_tab("BudgetDemo", 1).unwrap();
-        let demo_lease = state.scene.grant_lease(
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let demo_tab = scene.create_tab("BudgetDemo", 1).unwrap();
+        let demo_lease = scene.grant_lease(
             "budget-demo-agent",
             5_000,
             vec![tze_hud_scene::types::Capability::CreateTiles],
         );
         // Shrink the budget to 2 tiles for demonstration purposes.
-        state.scene.leases.get_mut(&demo_lease).unwrap().resource_budget.max_tiles = 2;
+        scene.leases.get_mut(&demo_lease).unwrap().resource_budget.max_tiles = 2;
 
         // First two tiles succeed via apply_batch (within budget).
         for i in 0..2u32 {
@@ -509,7 +510,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 timing_hints: None,
                 lease_id: Some(demo_lease),
             };
-            let result = state.scene.apply_batch(&batch);
+            let result = scene.apply_batch(&batch);
             assert!(result.applied, "tile {} within budget should succeed", i);
         }
 
@@ -527,7 +528,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             timing_hints: None,
             lease_id: Some(demo_lease),
         };
-        let result = state.scene.apply_batch(&over_batch);
+        let result = scene.apply_batch(&over_batch);
         assert!(!result.applied, "third tile must be rejected (budget exceeded)");
         let err_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
         println!("  Budget exceeded (MUTATION_REJECTED):");
@@ -538,8 +539,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         // Clean up the demo tab and lease.
         // Use delete_tab (public API) rather than tabs.remove: it removes tiles
         // belonging to the tab, handles active_tab fallback, and bumps version.
-        state.scene.revoke_lease(demo_lease).ok();
-        state.scene.delete_tab(demo_tab).ok();
+        scene.revoke_lease(demo_lease).ok();
+        scene.delete_tab(demo_tab).ok();
         println!("  Budget enforcement validated: tile budget rejection confirmed.");
     }
 
@@ -553,17 +554,18 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Create a tab and register zones directly on the scene graph.
     // (The streaming session shares state via Arc<Mutex<SharedState>>.)
     let (tab_id, lease_id) = {
-        let mut state = runtime.shared_state().lock().await;
-        let tab_id = state.scene.create_tab("Main", 0).unwrap();
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab_id = scene.create_tab("Main", 0).unwrap();
         println!("  Tab created: id={}", tab_id);
 
         // Register the default zones
-        state.scene.zone_registry = ZoneRegistry::with_defaults();
-        let zone_count = state.scene.zone_registry.all_zones().len();
+        scene.zone_registry = ZoneRegistry::with_defaults();
+        let zone_count = scene.zone_registry.all_zones().len();
         println!("  Registered {} default zones (status-bar, notification-area, subtitle)", zone_count);
 
         // We already have a lease from Phase 1 -- find it by namespace
-        let lease_id = state.scene.leases.values()
+        let lease_id = scene.leases.values()
             .find(|l| l.namespace == namespace && l.is_active())
             .map(|l| l.id)
             .expect("should have an active lease from Phase 1");
@@ -574,8 +576,9 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // Create text tile via scene graph
     let _text_tile_id = {
-        let mut state = runtime.shared_state().lock().await;
-        let tile_id = state.scene.create_tile(
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tile_id = scene.create_tile(
             tab_id,
             &namespace,
             lease_id,
@@ -583,7 +586,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             1,
         ).unwrap();
 
-        state.scene.set_tile_root(
+        scene.set_tile_root(
             tile_id,
             Node {
                 id: SceneId::new(),
@@ -607,8 +610,9 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // Create hit region tile via scene graph
     let (_hit_tile_id, _hr_node_id) = {
-        let mut state = runtime.shared_state().lock().await;
-        let tile_id = state.scene.create_tile(
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tile_id = scene.create_tile(
             tab_id,
             &namespace,
             lease_id,
@@ -617,7 +621,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         ).unwrap();
 
         let node_id = SceneId::new();
-        state.scene.set_tile_root(
+        scene.set_tile_root(
             tile_id,
             Node {
                 id: node_id,
@@ -654,12 +658,13 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // Publish to status-bar zone (MergeByKey: same key replaces, does not accumulate)
     {
-        let mut state = runtime.shared_state().lock().await;
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
         let mut entries = std::collections::HashMap::new();
         entries.insert("agent".to_string(), "vertical-slice-agent".to_string());
         entries.insert("status".to_string(), "running".to_string());
 
-        state.scene.publish_to_zone(
+        scene.publish_to_zone(
             "status-bar",
             ZoneContent::StatusBar(StatusBarPayload { entries }),
             &namespace,
@@ -670,15 +675,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         println!("  Published to status-bar zone (MergeByKey, key=agent-status)");
 
         // Verify the publish is active — confirms zone routing is working.
-        let active = state.scene.zone_registry.active_for_zone("status-bar");
+        let active = scene.zone_registry.active_for_zone("status-bar");
         assert!(!active.is_empty(), "status-bar should have active publishes");
         println!("  status-bar active publishes: {}", active.len());
     }
 
     // Publish to notification-area zone (no merge key — each publish is independent)
     {
-        let mut state = runtime.shared_state().lock().await;
-        state.scene.publish_to_zone(
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        scene.publish_to_zone(
             "notification-area",
             ZoneContent::Notification(NotificationPayload {
                 text: "Vertical slice started".to_string(),
@@ -696,14 +702,15 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Verify scene state
     {
         let state = runtime.shared_state().lock().await;
-        assert_eq!(state.scene.tiles.len(), 2, "expected 2 tiles");
-        assert_eq!(state.scene.tabs.len(), 1, "expected 1 tab");
-        let active_leases: usize = state.scene.leases.values()
+        let scene = state.scene.lock().await;
+        assert_eq!(scene.tiles.len(), 2, "expected 2 tiles");
+        assert_eq!(scene.tabs.len(), 1, "expected 1 tab");
+        let active_leases: usize = scene.leases.values()
             .filter(|l| l.is_active())
             .count();
         assert!(active_leases >= 1, "expected at least 1 active lease");
         println!("  Scene verified: {} tabs, {} tiles, {} active leases",
-            state.scene.tabs.len(), state.scene.tiles.len(), active_leases);
+            scene.tabs.len(), scene.tiles.len(), active_leases);
     }
 
     println!("\n  Phase 2 PASSED: scene populated with tab, tiles, and zone content.\n");
@@ -716,7 +723,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Hover over the hit region
     let hover_result = {
         let state_arc = runtime.shared_state().clone();
-        let mut state = state_arc.lock().await;
+        let state = state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
         runtime.input_processor.process(
             &tze_hud_input::PointerEvent {
                 x: 550.0,
@@ -725,7 +733,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut state.scene,
+            &mut *scene,
         )
     };
     assert!(
@@ -742,7 +750,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Move within the hit region (should produce PointerMove)
     let move_result = {
         let state_arc = runtime.shared_state().clone();
-        let mut state = state_arc.lock().await;
+        let state = state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
         runtime.input_processor.process(
             &tze_hud_input::PointerEvent {
                 x: 560.0,
@@ -751,7 +760,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut state.scene,
+            &mut *scene,
         )
     };
     assert!(move_result.dispatch.is_some());
@@ -764,7 +773,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Press on hit region
     let press_result = {
         let state_arc = runtime.shared_state().clone();
-        let mut state = state_arc.lock().await;
+        let state = state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
         runtime.input_processor.process(
             &tze_hud_input::PointerEvent {
                 x: 550.0,
@@ -773,7 +783,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut state.scene,
+            &mut *scene,
         )
     };
     assert!(press_result.dispatch.is_some());
@@ -793,7 +803,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Release (activate)
     let release_result = {
         let state_arc = runtime.shared_state().clone();
-        let mut state = state_arc.lock().await;
+        let state = state_arc.lock().await;
+        let mut scene = state.scene.lock().await;
         runtime.input_processor.process(
             &tze_hud_input::PointerEvent {
                 x: 550.0,
@@ -802,7 +813,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut state.scene,
+            &mut *scene,
         )
     };
     assert!(release_result.activated, "press+release on same node should activate");
@@ -887,25 +898,27 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Verify the lease is active before suspension
     {
         let state = runtime.shared_state().lock().await;
-        let lease = state.scene.leases.get(&lease_id).unwrap();
+        let scene = state.scene.lock().await;
+        let lease = scene.leases.get(&lease_id).unwrap();
         assert_eq!(lease.state, LeaseState::Active, "lease should be Active before suspension");
         println!("  Pre-suspend: lease state={:?}", lease.state);
     }
 
     // Suspend all leases (safe mode entry)
     {
-        let mut state = runtime.shared_state().lock().await;
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
         let now = now_ms();
-        state.scene.suspend_all_leases(now);
+        scene.suspend_all_leases(now);
 
         // Verify all leases are suspended
-        let suspended_count = state.scene.leases.values()
+        let suspended_count = scene.leases.values()
             .filter(|l| l.state == LeaseState::Suspended)
             .count();
         println!("  Suspended {} lease(s) (safe mode entry)", suspended_count);
         assert!(suspended_count >= 1, "at least 1 lease should be suspended");
 
-        let lease = state.scene.leases.get(&lease_id).unwrap();
+        let lease = scene.leases.get(&lease_id).unwrap();
         assert_eq!(lease.state, LeaseState::Suspended);
         assert!(lease.suspended_at_ms.is_some(), "should track suspension time");
         assert!(lease.ttl_remaining_at_suspend_ms.is_some(), "should track remaining TTL");
@@ -915,7 +928,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // Attempt mutations during suspension -- should be rejected
     {
-        let mut state = runtime.shared_state().lock().await;
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
         let batch = SceneMutationBatch {
             batch_id: SceneId::new(),
             agent_namespace: namespace.clone(),
@@ -930,7 +944,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             lease_id: None,
         };
 
-        let result = state.scene.apply_batch(&batch);
+        let result = scene.apply_batch(&batch);
         assert!(!result.applied, "mutations should be rejected during suspension");
         let error_msg = result.error.as_ref().map(|e| e.to_string()).unwrap_or_default();
         println!("  Mutation during suspension: rejected=true");
@@ -941,8 +955,9 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Tiles should still be present (state preserved, only mutations blocked)
     {
         let state = runtime.shared_state().lock().await;
-        assert_eq!(state.scene.tiles.len(), 2, "tiles should be preserved during suspension");
-        println!("  Tiles preserved during suspension: count={}", state.scene.tiles.len());
+        let scene = state.scene.lock().await;
+        assert_eq!(scene.tiles.len(), 2, "tiles should be preserved during suspension");
+        println!("  Tiles preserved during suspension: count={}", scene.tiles.len());
     }
 
     // Render during suspension -- should still produce a frame (display frozen state)
@@ -953,17 +968,18 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // Resume all leases (safe mode exit)
     {
-        let mut state = runtime.shared_state().lock().await;
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
         let now = now_ms();
-        state.scene.resume_all_leases(now);
+        scene.resume_all_leases(now);
 
-        let active_count = state.scene.leases.values()
+        let active_count = scene.leases.values()
             .filter(|l| l.is_active())
             .count();
         println!("  Resumed {} lease(s) (safe mode exit)", active_count);
         assert!(active_count >= 1, "at least 1 lease should be active after resume");
 
-        let lease = state.scene.leases.get(&lease_id).unwrap();
+        let lease = scene.leases.get(&lease_id).unwrap();
         assert_eq!(lease.state, LeaseState::Active, "lease should be Active after resume");
         assert!(lease.suspended_at_ms.is_none(), "suspension timestamp should be cleared");
         println!("  Lease state after resume: {:?}", lease.state);
@@ -971,7 +987,8 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     // Verify mutations work again after resume
     {
-        let mut state = runtime.shared_state().lock().await;
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
         let batch = SceneMutationBatch {
             batch_id: SceneId::new(),
             agent_namespace: namespace.clone(),
@@ -986,7 +1003,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             lease_id: None,
         };
 
-        let result = state.scene.apply_batch(&batch);
+        let result = scene.apply_batch(&batch);
         assert!(result.applied, "mutations should succeed after resume");
         let new_tile = result.created_ids[0];
         println!("  Post-resume mutation: tile created id={}", new_tile);
@@ -999,7 +1016,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             timing_hints: None,
             lease_id: None,
         };
-        let del_result = state.scene.apply_batch(&delete_batch);
+        let del_result = scene.apply_batch(&delete_batch);
         assert!(del_result.applied, "delete tile should succeed");
         println!("  Cleanup: deleted post-resume tile");
     }
@@ -1043,16 +1060,17 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     // Final state verification
     {
         let state = runtime.shared_state().lock().await;
+        let scene = state.scene.lock().await;
         println!("  Final scene state:");
-        println!("    tabs   = {}", state.scene.tabs.len());
-        println!("    tiles  = {}", state.scene.tiles.len());
+        println!("    tabs   = {}", scene.tabs.len());
+        println!("    tiles  = {}", scene.tiles.len());
         println!("    leases = {} total ({} active)",
-            state.scene.leases.len(),
-            state.scene.leases.values().filter(|l| l.is_active()).count());
+            scene.leases.len(),
+            scene.leases.values().filter(|l| l.is_active()).count());
         println!("    zones  = {} registered, {} with active publishes",
-            state.scene.zone_registry.zones.len(),
-            state.scene.zone_registry.active_publishes.len());
-        println!("    version = {}", state.scene.version);
+            scene.zone_registry.zones.len(),
+            scene.zone_registry.active_publishes.len());
+        println!("    version = {}", scene.version);
     }
 
     println!("\n  Phase 6 PASSED: graceful shutdown complete.\n");

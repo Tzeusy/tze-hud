@@ -774,7 +774,7 @@ impl HudSessionImpl {
         let (capability_revocation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SharedState {
-                scene,
+                scene: Arc::new(Mutex::new(scene)),
                 sessions: crate::session::SessionRegistry::new(psk),
                 safe_mode_active: false,
                 token_store: TokenStore::new(),
@@ -1026,19 +1026,25 @@ impl HudSession for HudSessionImpl {
                 let st = state.lock().await;
                 let wall_us = now_wall_us();
                 let mono_us: u64 = now_mono_us();
-                let graph_snap = st.scene.take_snapshot(wall_us, mono_us);
-                let snap_json = graph_snap
-                    .to_json()
-                    .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
-                let checksum = graph_snap.checksum.clone();
+                let (snap_json, checksum, sequence_number) = {
+                    let mut scene = st.scene.lock().await;
+                    let graph_snap = scene.take_snapshot(wall_us, mono_us);
+                    let snap_json = graph_snap
+                        .to_json()
+                        .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"));
+                    let checksum = graph_snap.checksum.clone();
+                    let sequence_number = scene.sequence_number;
+                    (snap_json, checksum, sequence_number)
+                };
                 let seq = session.next_server_seq();
+                drop(st);
                 let _ = tx
                     .send(Ok(ServerMessage {
                         sequence: seq,
                         timestamp_wall_us: now_wall_us(),
                         payload: Some(ServerPayload::SceneSnapshot(SceneSnapshot {
                             snapshot_json: snap_json,
-                            sequence: st.scene.sequence_number,
+                            sequence: sequence_number,
                             snapshot_wall_us: wall_us,
                             snapshot_mono_us: mono_us,
                             blake3_checksum: checksum,
@@ -2058,8 +2064,10 @@ async fn handle_mutation_batch(
         }
     };
 
-    // Find the active tab
-    let tab_id = match st.scene.active_tab {
+    // Find the active tab (acquire scene lock in a nested block so the guard
+    // drops before we potentially drop `st` below).
+    let active_tab_opt = { st.scene.lock().await.active_tab };
+    let tab_id = match active_tab_opt {
         Some(id) => id,
         None => {
             let cached = CachedResult {
@@ -2181,7 +2189,7 @@ async fn handle_mutation_batch(
         lease_id: Some(lease_id),
     };
 
-    let result = st.scene.apply_batch(&scene_batch);
+    let result = st.scene.lock().await.apply_batch(&scene_batch);
 
     let seq = session.next_server_seq();
     if result.applied {
@@ -2272,14 +2280,15 @@ async fn apply_queued_batch_to_scene(
     session: &mut StreamSession,
     batch: MutationBatch,
 ) {
-    let mut st = state.lock().await;
+    let st = state.lock().await;
 
     let lease_id = match bytes_to_scene_id(&batch.lease_id) {
         Ok(id) => id,
         Err(_) => return, // invalid lease_id — silently skip (already acked)
     };
 
-    let tab_id = match st.scene.active_tab {
+    let active_tab_opt = { st.scene.lock().await.active_tab };
+    let tab_id = match active_tab_opt {
         Some(id) => id,
         None => return, // no active tab — skip silently
     };
@@ -2370,7 +2379,7 @@ async fn apply_queued_batch_to_scene(
     };
 
     // Apply to scene; result is intentionally discarded — response already sent.
-    let _ = st.scene.apply_batch(&scene_batch);
+    let _ = st.scene.lock().await.apply_batch(&scene_batch);
 }
 
 /// Map a canonical v1 capability wire name to the `Capability` enum variant.
@@ -2521,7 +2530,7 @@ async fn handle_lease_request(
     // `effective_priority` returns u32 (wire type); priority values are 0-4 so the
     // conversion to u8 is always lossless.
     let priority_u8 = granted_priority as u8;
-    let lease_id = st.scene.grant_lease_with_priority(&session.namespace, ttl, priority_u8, capabilities);
+    let lease_id = st.scene.lock().await.grant_lease_with_priority(&session.namespace, ttl, priority_u8, capabilities);
     session.lease_ids.push(lease_id);
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
@@ -2646,19 +2655,21 @@ async fn handle_lease_renew(
     };
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
-    match st.scene.renew_lease(lease_id, ttl) {
-        Ok(()) => {
+    let renew_result = {
+        let mut scene = st.scene.lock().await;
+        let result = scene.renew_lease(lease_id, ttl);
+        // Read the stored priority while we hold the scene lock.
+        let stored_priority = scene.leases.get(&lease_id).map(|l| l.priority as u32).unwrap_or(2);
+        result.map(|()| stored_priority)
+    };
+
+    match renew_result {
+        Ok(stored_priority) => {
             // Spec: "runtime SHALL respond with LeaseResponse" for lease operations.
             // For renewal success, return LeaseResponse(granted=true) with the updated TTL.
             // Read the stored priority from the scene graph so the renewal response reflects
             // the persisted value (lease-governance spec §Requirement: Priority Assignment,
             // lines 49-60: renewal preserves the priority set at grant time).
-            let stored_priority = st
-                .scene
-                .leases
-                .get(&lease_id)
-                .map(|l| l.priority as u32)
-                .unwrap_or(2);
             let seq = session.next_server_seq();
             let lease_response = LeaseResponse {
                 granted: true,
@@ -2806,7 +2817,7 @@ async fn handle_lease_release(
     let mut st = state.lock().await;
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
-    match st.scene.revoke_lease(lease_id) {
+    match st.scene.lock().await.revoke_lease(lease_id) {
         Ok(()) => {
             // Remove from session's tracked leases
             session.lease_ids.retain(|&id| id != lease_id);
@@ -3097,7 +3108,7 @@ async fn handle_capability_revocation(
     // Apply the revocation to the scene graph.
     let result = {
         let mut st = state.lock().await;
-        st.scene.revoke_capability(event.lease_id, &cap)
+        st.scene.lock().await.revoke_capability(event.lease_id, &cap)
     };
 
     match result {
@@ -3190,11 +3201,11 @@ async fn handle_zone_publish(
     // Apply the zone publish through the scene graph mutation path.
     // Also determine zone durability (ephemeral vs durable) for ack decision.
     let (accepted, error_code, error_message, is_ephemeral_zone) = {
-        let mut st = state.lock().await;
+        let st = state.lock().await;
+        let mut scene = st.scene.lock().await;
 
         // Check zone durability before applying the mutation
-        let zone_is_ephemeral = st
-            .scene
+        let zone_is_ephemeral = scene
             .zone_registry
             .get_by_name(&publish.zone_name)
             .map(|def| def.ephemeral)
@@ -3237,7 +3248,7 @@ async fn handle_zone_publish(
                 timing_hints: None,
                 lease_id: zone_publish_lease_id,
             };
-            let result = st.scene.apply_batch(&batch);
+            let result = scene.apply_batch(&batch);
             if result.applied {
                 (true, String::new(), String::new(), zone_is_ephemeral)
             } else {
@@ -3917,8 +3928,8 @@ mod tests {
 
         // Create an active tab so mutations can reach the scene-apply path.
         {
-            let mut st = shared_state.lock().await;
-            st.scene.create_tab("test-tab", 0).expect("create_tab");
+            let st = shared_state.lock().await;
+            st.scene.lock().await.create_tab("test-tab", 0).expect("create_tab");
         }
 
         // Acquire a lease.
@@ -3944,10 +3955,10 @@ mod tests {
         // The wire format encodes SceneId as uuid::Uuid::as_bytes() (big-endian UUID bytes),
         // matching bytes_to_scene_id in session_server.rs.
         {
-            let mut st = shared_state.lock().await;
+            let st = shared_state.lock().await;
             let arr: [u8; 16] = lease_id_bytes.as_slice().try_into().expect("16-byte lease_id");
             let lease_id = tze_hud_scene::SceneId::from_uuid(uuid::Uuid::from_bytes(arr));
-            let _ = st.scene.revoke_lease(lease_id);
+            let _ = st.scene.lock().await.revoke_lease(lease_id);
         }
 
         // Send a CreateTile mutation referencing the now-revoked lease.
@@ -6758,8 +6769,8 @@ mod tests {
 
         // Register an ephemeral zone in the scene
         {
-            let mut st = service.state.lock().await;
-            st.scene.zone_registry.register(ZoneDefinition {
+            let st = service.state.lock().await;
+            st.scene.lock().await.zone_registry.register(ZoneDefinition {
                 id: tze_hud_scene::SceneId::new(),
                 name: "live-caption".to_string(),
                 description: "Ephemeral caption zone".to_string(),
@@ -6859,8 +6870,8 @@ mod tests {
 
         // Register a durable zone
         {
-            let mut st = service.state.lock().await;
-            st.scene.zone_registry.register(ZoneDefinition {
+            let st = service.state.lock().await;
+            st.scene.lock().await.zone_registry.register(ZoneDefinition {
                 id: tze_hud_scene::SceneId::new(),
                 name: "status-text".to_string(),
                 description: "Durable status text zone".to_string(),
@@ -7877,7 +7888,8 @@ mod tests {
         // Before revocation: verify the capability is present
         {
             let st = state.lock().await;
-            let caps = st.scene.lease_capabilities(&lease_scene_id)
+            let scene = st.scene.lock().await;
+            let caps = scene.lease_capabilities(&lease_scene_id)
                 .expect("lease must exist");
             assert!(
                 caps.iter().any(|c| matches!(c, tze_hud_scene::types::Capability::PublishZone(z) if z == "subtitle")),
@@ -7898,7 +7910,8 @@ mod tests {
         // After revocation: the capability must be absent from the live scope
         {
             let st = state.lock().await;
-            let caps = st.scene.lease_capabilities(&lease_scene_id)
+            let scene = st.scene.lock().await;
+            let caps = scene.lease_capabilities(&lease_scene_id)
                 .expect("lease must still exist after capability revocation");
             assert!(
                 !caps.iter().any(|c| matches!(c, tze_hud_scene::types::Capability::PublishZone(z) if z == "subtitle")),
@@ -7926,7 +7939,8 @@ mod tests {
 
         // Lease must still be ACTIVE in the scene graph
         let st = state.lock().await;
-        let lease = st.scene.leases.get(&lease_scene_id)
+        let scene = st.scene.lock().await;
+        let lease = scene.leases.get(&lease_scene_id)
             .expect("lease must still exist");
         assert_eq!(
             lease.state,
@@ -7962,7 +7976,8 @@ mod tests {
 
         // Lease scope unchanged (still has both original capabilities)
         let st = state.lock().await;
-        let caps = st.scene.lease_capabilities(&lease_scene_id)
+        let scene = st.scene.lock().await;
+        let caps = scene.lease_capabilities(&lease_scene_id)
             .expect("lease must exist");
         assert_eq!(caps.len(), 2, "Lease scope must be unchanged after failed revocation");
     }

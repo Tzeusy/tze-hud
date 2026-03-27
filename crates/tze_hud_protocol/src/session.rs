@@ -6,7 +6,8 @@
 //! usage here is retained for compatibility until that migration completes.
 
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 use tonic::Status;
 use tze_hud_scene::SceneId;
 use tze_hud_scene::graph::SceneGraph;
@@ -39,8 +40,18 @@ impl RuntimeDegradationLevel {
 }
 
 /// Shared state between the gRPC server and the compositor.
+///
+/// # Scene coherence
+///
+/// `scene` is an `Arc<Mutex<SceneGraph>>` shared across both the gRPC session
+/// server and the MCP server.  Callers that already hold the `SharedState`
+/// mutex should acquire the inner scene lock by calling
+/// `st.scene.lock().await`.  The compositor thread pre-clones the `Arc` at
+/// startup and locks it independently (never holding the outer `SharedState`
+/// lock while waiting for the inner lock) to avoid nested-lock priority
+/// inversion.
 pub struct SharedState {
-    pub scene: SceneGraph,
+    pub scene: Arc<Mutex<SceneGraph>>,
     pub sessions: SessionRegistry,
     /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
     /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.

@@ -177,8 +177,8 @@ pub async fn render_scene_pixels(
     scene: tze_hud_scene::graph::SceneGraph,
 ) -> Vec<u8> {
     {
-        let mut state = runtime.shared_state().lock().await;
-        state.scene = scene;
+        let state = runtime.shared_state().lock().await;
+        *state.scene.lock().await = scene;
     }
     runtime.render_frame().await;
     runtime.read_pixels()

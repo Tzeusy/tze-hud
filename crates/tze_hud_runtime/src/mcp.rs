@@ -8,17 +8,12 @@
 //!
 //! ## Architecture note — scene coherence
 //!
-//! The MCP server holds an [`Arc<Mutex<SceneGraph>>`] that is a **dedicated**
-//! scene handle for MCP traffic.  The gRPC session server holds the full
-//! [`SharedState`] (which owns a separate `SceneGraph`).  In the current
-//! implementation both scenes start from the same initial state at runtime
-//! launch, but mutations applied over gRPC are not immediately visible to MCP
-//! queries and vice versa.
-//!
-//! Scene coherence unification (wiring MCP and gRPC to a single canonical
-//! `Arc<Mutex<SceneGraph>>`) is tracked as a follow-up issue; it requires
-//! refactoring `SharedState.scene` from an owned field to a shared Arc,
-//! touching all sites in `session_server.rs`.
+//! The MCP server and gRPC session server share a single canonical
+//! [`Arc<Mutex<SceneGraph>>`].  Mutations applied over gRPC are immediately
+//! visible to MCP queries and vice versa.  The `Arc` originates in
+//! `windowed.rs` where `shared_scene` is created, stored in
+//! [`SharedState::scene`], and also passed directly to
+//! [`start_mcp_http_server`].
 //!
 //! ## Shutdown
 //!

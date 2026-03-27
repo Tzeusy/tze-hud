@@ -83,17 +83,18 @@ async fn run_gpu_fill_calibration() {
 
     // Build an overlapping alpha-blended multi-tile scene.
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab = state.scene.create_tab("calib", 0).unwrap();
-        let lease = state.scene.grant_lease("calib", 60_000, vec![]);
-        if let Some(l) = state.scene.leases.get_mut(&lease) {
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = scene.create_tab("calib", 0).unwrap();
+        let lease = scene.grant_lease("calib", 60_000, vec![]);
+        if let Some(l) = scene.leases.get_mut(&lease) {
             l.resource_budget.max_tiles = (CALIB_TILES + 4) as u32;
         }
         for i in 0..CALIB_TILES {
             // Intentionally overlapping tiles at different z-levels.
             let x = (i as f32 * 60.0) % 700.0;
             let y = (i as f32 * 40.0) % 500.0;
-            let _ = state.scene.create_tile(
+            let _ = scene.create_tile(
                 tab,
                 "calib",
                 lease,
@@ -144,14 +145,15 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
     // Set up a reusable lease before the timed loop to avoid lease bookkeeping
     // accumulation skewing the per-round p50 measurement.
     let (calib_tab, calib_lease) = {
-        let mut state = runtime.shared_state().lock().await;
-        let tab = if let Some(t) = state.scene.active_tab {
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = if let Some(t) = scene.active_tab {
             t
         } else {
-            state.scene.create_tab("upload-calib", 0).unwrap()
+            scene.create_tab("upload-calib", 0).unwrap()
         };
-        let lease = state.scene.grant_lease("upload-calib", 60_000, vec![]);
-        if let Some(l) = state.scene.leases.get_mut(&lease) {
+        let lease = scene.grant_lease("upload-calib", 60_000, vec![]);
+        if let Some(l) = scene.leases.get_mut(&lease) {
             l.resource_budget.max_tiles = 4;
         }
         (tab, lease)
@@ -163,8 +165,9 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
         let start = std::time::Instant::now();
         {
             let state_arc = runtime.shared_state().clone();
-            let mut state = state_arc.lock().await;
-            let tile_result = state.scene.create_tile(
+            let state = state_arc.lock().await;
+            let mut scene = state.scene.lock().await;
+            let tile_result = scene.create_tile(
                 calib_tab,
                 "upload-calib",
                 calib_lease,
@@ -180,7 +183,7 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
                         bounds: Rect::new(0.0, 0.0, 64.0, 64.0),
                     }),
                 };
-                let _ = state.scene.set_tile_root(tile_id, node);
+                let _ = scene.set_tile_root(tile_id, node);
                 // Delete the tile immediately to exercise the upload lifecycle.
                 // Ignore apply_batch result in calibration: if delete is rejected,
                 // the round still gets timed and the factor degrades gracefully
@@ -192,7 +195,7 @@ async fn run_texture_upload_calibration_factor(runtime: &HeadlessRuntime) -> f64
                     timing_hints: None,
                     lease_id: None,
                 };
-                let _ = state.scene.apply_batch(&batch);
+                let _ = scene.apply_batch(&batch);
             }
         }
         bucket.record(start.elapsed().as_micros() as u64);
@@ -255,11 +258,11 @@ async fn test_frame_time_p99_within_budget() {
 
     // Create a simple scene with one tile.
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab = state.scene.create_tab("Main", 0).unwrap();
-        let lease = state.scene.grant_lease("test-agent", 60_000, vec![]);
-        state
-            .scene
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("test-agent", 60_000, vec![]);
+        scene
             .create_tile(tab, "test-agent", lease, Rect::new(10.0, 10.0, 200.0, 100.0), 1)
             .unwrap();
     }
@@ -328,15 +331,14 @@ async fn test_input_to_local_ack_p99_within_budget() {
 
     // Set up a scene with a hit region
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab = state.scene.create_tab("Main", 0).unwrap();
-        let lease = state.scene.grant_lease("test-agent", 60_000, vec![]);
-        let tile = state
-            .scene
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("test-agent", 60_000, vec![]);
+        let tile = scene
             .create_tile(tab, "test-agent", lease, Rect::new(100.0, 100.0, 200.0, 200.0), 1)
             .unwrap();
-        state
-            .scene
+        scene
             .set_tile_root(
                 tile,
                 Node {
@@ -357,7 +359,8 @@ async fn test_input_to_local_ack_p99_within_budget() {
     for _ in 0..EVENT_COUNT {
         let (local_ack_us, hit_test_us) = {
             let state_arc = runtime.shared_state().clone();
-            let mut state = state_arc.lock().await;
+            let state = state_arc.lock().await;
+            let mut scene = state.scene.lock().await;
             let result = runtime.input_processor.process(
                 &PointerEvent {
                     x: 150.0,
@@ -366,7 +369,7 @@ async fn test_input_to_local_ack_p99_within_budget() {
                     device_id: 0,
                     timestamp: None,
                 },
-                &mut state.scene,
+                &mut *scene,
             );
             (result.local_ack_us, result.hit_test_us)
         };
@@ -418,8 +421,8 @@ async fn test_input_to_scene_commit_p99_within_budget() {
 
     // Set up a minimal scene
     {
-        let mut state = runtime.shared_state().lock().await;
-        state.scene.create_tab("Main", 0).unwrap();
+        let state = runtime.shared_state().lock().await;
+        state.scene.lock().await.create_tab("Main", 0).unwrap();
     }
 
     let mut bucket = LatencyBucket::new("input_to_scene_commit");
@@ -479,11 +482,11 @@ async fn test_input_to_next_present_p99_within_budget() {
 
     // Create a scene with one tile to exercise the full render path
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab = state.scene.create_tab("Main", 0).unwrap();
-        let lease = state.scene.grant_lease("test-agent", 60_000, vec![]);
-        state
-            .scene
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("test-agent", 60_000, vec![]);
+        scene
             .create_tile(tab, "test-agent", lease, Rect::new(10.0, 10.0, 200.0, 100.0), 1)
             .unwrap();
     }
@@ -539,15 +542,14 @@ async fn test_hit_test_p99_within_budget() {
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
     {
-        let mut state = runtime.shared_state().lock().await;
-        let tab = state.scene.create_tab("Main", 0).unwrap();
-        let lease = state.scene.grant_lease("test-agent", 60_000, vec![]);
-        let tile = state
-            .scene
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = scene.create_tab("Main", 0).unwrap();
+        let lease = scene.grant_lease("test-agent", 60_000, vec![]);
+        let tile = scene
             .create_tile(tab, "test-agent", lease, Rect::new(50.0, 50.0, 400.0, 400.0), 1)
             .unwrap();
-        state
-            .scene
+        scene
             .set_tile_root(
                 tile,
                 Node {
@@ -568,7 +570,8 @@ async fn test_hit_test_p99_within_budget() {
     for _ in 0..EVENT_COUNT {
         let hit_test_us = {
             let state_arc = runtime.shared_state().clone();
-            let mut state = state_arc.lock().await;
+            let state = state_arc.lock().await;
+            let mut scene = state.scene.lock().await;
             let result = runtime.input_processor.process(
                 &PointerEvent {
                     x: 200.0,
@@ -577,7 +580,7 @@ async fn test_hit_test_p99_within_budget() {
                     device_id: 0,
                     timestamp: None,
                 },
-                &mut state.scene,
+                &mut *scene,
             );
             result.hit_test_us
         };
@@ -752,17 +755,18 @@ async fn test_texture_upload_p99_within_budget() {
 
     // Ensure there is an active tab for tile creation.
     {
-        let mut state = runtime.shared_state().lock().await;
-        state.scene.create_tab("upload-test", 0).unwrap();
+        let state = runtime.shared_state().lock().await;
+        state.scene.lock().await.create_tab("upload-test", 0).unwrap();
     }
 
     // Create one lease up-front and reuse it for all rounds to avoid lease
     // bookkeeping accumulation that would skew p99 over later iterations.
     let (tab, lease) = {
-        let mut state = runtime.shared_state().lock().await;
-        let tab = state.scene.active_tab.expect("active tab");
-        let lease = state.scene.grant_lease("upload-test", 60_000, vec![]);
-        if let Some(l) = state.scene.leases.get_mut(&lease) {
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = scene.active_tab.expect("active tab");
+        let lease = scene.grant_lease("upload-test", 60_000, vec![]);
+        if let Some(l) = scene.leases.get_mut(&lease) {
             l.resource_budget.max_tiles = 4;
         }
         (tab, lease)
@@ -774,8 +778,9 @@ async fn test_texture_upload_p99_within_budget() {
         let start = std::time::Instant::now();
         {
             let state_arc = runtime.shared_state().clone();
-            let mut state = state_arc.lock().await;
-            if let Ok(tile_id) = state.scene.create_tile(
+            let state = state_arc.lock().await;
+            let mut scene = state.scene.lock().await;
+            if let Ok(tile_id) = scene.create_tile(
                 tab,
                 "upload-test",
                 lease,
@@ -790,7 +795,7 @@ async fn test_texture_upload_p99_within_budget() {
                         bounds: Rect::new(0.0, 0.0, 64.0, 64.0),
                     }),
                 };
-                let _ = state.scene.set_tile_root(tile_id, node);
+                let _ = scene.set_tile_root(tile_id, node);
                 // Delete the tile to free up the slot for next round.
                 let batch = MutationBatch {
                     batch_id: SceneId::new(),
@@ -799,7 +804,7 @@ async fn test_texture_upload_p99_within_budget() {
                     timing_hints: None,
                     lease_id: None,
                 };
-                let result = state.scene.apply_batch(&batch);
+                let result = scene.apply_batch(&batch);
                 assert!(
                     result.applied,
                     "DeleteTile mutation was not applied during texture upload budget test (round {}): {:?}",
@@ -905,12 +910,12 @@ async fn test_layer1_pixel_readback_tile_color() {
 
     let (tile_x, tile_y, tile_w, tile_h) = (50u32, 50u32, 350u32, 250u32);
     {
-        let mut state = runtime.shared_state().lock().await;
-        state.scene.create_tab("Main", 0).unwrap();
-        let tab = state.scene.active_tab.unwrap();
-        let lease = state.scene.grant_lease("agent", 60_000, vec![]);
-        let tile = state
-            .scene
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        scene.create_tab("Main", 0).unwrap();
+        let tab = scene.active_tab.unwrap();
+        let lease = scene.grant_lease("agent", 60_000, vec![]);
+        let tile = scene
             .create_tile(
                 tab,
                 "agent",
@@ -919,8 +924,7 @@ async fn test_layer1_pixel_readback_tile_color() {
                 1,
             )
             .unwrap();
-        state
-            .scene
+        scene
             .set_tile_root(
                 tile,
                 Node {
@@ -980,18 +984,17 @@ async fn test_layer1_pixel_readback_z_order() {
     let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
 
     {
-        let mut state = runtime.shared_state().lock().await;
-        state.scene.create_tab("Main", 0).unwrap();
-        let tab = state.scene.active_tab.unwrap();
-        let lease = state.scene.grant_lease("agent", 60_000, vec![]);
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        scene.create_tab("Main", 0).unwrap();
+        let tab = scene.active_tab.unwrap();
+        let lease = scene.grant_lease("agent", 60_000, vec![]);
 
         // Tile A at z=1 (blue)
-        let tile_a = state
-            .scene
+        let tile_a = scene
             .create_tile(tab, "agent", lease, Rect::new(100.0, 100.0, 300.0, 200.0), 1)
             .unwrap();
-        state
-            .scene
+        scene
             .set_tile_root(
                 tile_a,
                 Node {
@@ -1006,12 +1009,10 @@ async fn test_layer1_pixel_readback_z_order() {
             .unwrap();
 
         // Tile B at z=2 (red) — overlaps the center of Tile A
-        let tile_b = state
-            .scene
+        let tile_b = scene
             .create_tile(tab, "agent", lease, Rect::new(150.0, 150.0, 100.0, 100.0), 2)
             .unwrap();
-        state
-            .scene
+        scene
             .set_tile_root(
                 tile_b,
                 Node {
@@ -1093,8 +1094,8 @@ async fn render_scene_pixels(
     scene: tze_hud_scene::graph::SceneGraph,
 ) -> Vec<u8> {
     {
-        let mut state = runtime.shared_state().lock().await;
-        state.scene = scene;
+        let state = runtime.shared_state().lock().await;
+        *state.scene.lock().await = scene;
     }
     runtime.render_frame().await;
     runtime.read_pixels()
