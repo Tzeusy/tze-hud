@@ -1106,7 +1106,7 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
                         "windowed runtime: config TOML parse error; \
                          falling back to headless_default"
                     );
-                    return (Arc::new(RuntimeContext::headless_default()), true);
+                    return (Arc::new(RuntimeContext::headless_default()), false);
                 }
             };
 
@@ -1129,7 +1129,7 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
                          falling back to headless_default",
                         errors.len()
                     );
-                    return (Arc::new(RuntimeContext::headless_default()), true);
+                    return (Arc::new(RuntimeContext::headless_default()), false);
                 }
             };
 
@@ -1684,10 +1684,11 @@ name = "Main"
             ..WindowedConfig::default()
         };
         let (ctx, fallback_unrestricted) = build_runtime_context(&cfg);
-        // Must fall back gracefully.
+        // Must fall back gracefully to headless, but NOT unrestricted.
+        // An operator who provided a config intended to restrict capabilities.
         assert!(
-            fallback_unrestricted,
-            "parse-error path must fall back to unrestricted"
+            !fallback_unrestricted,
+            "parse-error path must NOT fall back to unrestricted"
         );
         assert_eq!(
             ctx.profile.name, "headless",
@@ -1709,9 +1710,11 @@ profile = "full-display"
             ..WindowedConfig::default()
         };
         let (ctx, fallback_unrestricted) = build_runtime_context(&cfg);
+        // Must fall back gracefully to headless, but NOT unrestricted.
+        // An operator who provided a config intended to restrict capabilities.
         assert!(
-            fallback_unrestricted,
-            "validation-error path must fall back to unrestricted"
+            !fallback_unrestricted,
+            "validation-error path must NOT fall back to unrestricted"
         );
         assert_eq!(
             ctx.profile.name, "headless",
