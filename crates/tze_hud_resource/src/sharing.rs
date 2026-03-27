@@ -257,6 +257,7 @@ impl SharingContext {
     /// Intentionally `pub(crate)` — external callers must not be able to
     /// enumerate GC candidates via `candidates().snapshot()`, which would
     /// violate the no-enumeration invariant (spec lines 175-177).
+    #[allow(dead_code)] // used by GC integration path; not yet wired up end-to-end
     pub(crate) fn refcount_layer(&self) -> &RefcountLayer {
         &self.refcount
     }

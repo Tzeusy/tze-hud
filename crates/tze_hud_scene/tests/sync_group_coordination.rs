@@ -13,9 +13,9 @@
 //! These are **Layer 0** tests: pure scene-graph logic, no GPU, no async.
 
 use tze_hud_scene::{
-    CommitDecision, DEFAULT_SYNC_DRIFT_BUDGET_US, FrameSyncDriftRecord, ORPHAN_GRACE_PERIOD_US,
-    OrphanReason, SyncDriftHighAlert, SyncGroupArrival, SyncGroupCommitDecision, SyncGroupEvent,
-    SyncGroupOrphanState, TileArrival, ValidationError, evaluate_frame_drift,
+    CommitDecision, DEFAULT_SYNC_DRIFT_BUDGET_US, ORPHAN_GRACE_PERIOD_US, OrphanReason,
+    SyncGroupArrival, SyncGroupCommitDecision, SyncGroupEvent, SyncGroupOrphanState, TileArrival,
+    ValidationError, evaluate_frame_drift,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry, assert_layer0_invariants},
     timing::{DurationUs, WallUs},
@@ -167,7 +167,7 @@ fn all_or_defer_commits_when_all_members_ready() {
                 "all 3 members must be committed atomically"
             );
         }
-        other => panic!("expected Commit, got {:?}", other),
+        other => panic!("expected Commit, got {other:?}"),
     }
     assert_eq!(scene.sync_groups[&group_id].deferral_count, 0);
 }
@@ -225,7 +225,7 @@ fn available_members_applies_ready_subset_absent_unchanged() {
                 "tile[1] should NOT be committed (absent)"
             );
         }
-        other => panic!("expected Commit, got {:?}", other),
+        other => panic!("expected Commit, got {other:?}"),
     }
 }
 
@@ -252,12 +252,7 @@ fn all_or_defer_force_commits_after_max_defer_frames() {
         let d = scene
             .evaluate_sync_group_commit(group_id, &pending)
             .unwrap();
-        assert_eq!(
-            d,
-            SyncGroupCommitDecision::Defer,
-            "frame {}",
-            expected_count
-        );
+        assert_eq!(d, SyncGroupCommitDecision::Defer, "frame {expected_count}");
         assert_eq!(scene.sync_groups[&group_id].deferral_count, expected_count);
     }
 
@@ -276,7 +271,7 @@ fn all_or_defer_force_commits_after_max_defer_frames() {
                 "absent tile must NOT be committed"
             );
         }
-        other => panic!("expected ForceCommit, got {:?}", other),
+        other => panic!("expected ForceCommit, got {other:?}"),
     }
     assert_eq!(
         scene.sync_groups[&group_id].deferral_count, 0,
@@ -369,7 +364,7 @@ fn sync_group_namespace_limit_is_16() {
     for i in 0..16 {
         scene
             .create_sync_group(
-                Some(format!("group-{}", i)),
+                Some(format!("group-{i}")),
                 "agent",
                 SyncCommitPolicy::AllOrDefer,
                 3,
@@ -673,7 +668,7 @@ fn force_commit_decision_carries_event() {
                 "force-commit must carry SyncGroupForceCommitEvent"
             );
         }
-        other => panic!("expected ForceCommit, got {:?}", other),
+        other => panic!("expected ForceCommit, got {other:?}"),
     }
 }
 
@@ -690,8 +685,7 @@ fn sync_group_media_scene_passes_invariants() {
     let violations = assert_layer0_invariants(&graph);
     assert!(
         violations.is_empty(),
-        "sync_group_media must pass Layer 0 invariants, got: {:?}",
-        violations
+        "sync_group_media must pass Layer 0 invariants, got: {violations:?}"
     );
 }
 
@@ -724,7 +718,6 @@ fn disconnect_reclaim_multiagent_scene_passes_invariants() {
     let violations = assert_layer0_invariants(&graph);
     assert!(
         violations.is_empty(),
-        "disconnect_reclaim_multiagent must pass Layer 0 invariants, got: {:?}",
-        violations
+        "disconnect_reclaim_multiagent must pass Layer 0 invariants, got: {violations:?}"
     );
 }

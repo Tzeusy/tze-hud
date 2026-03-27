@@ -430,8 +430,7 @@ impl BudgetEnforcer {
                                 .duration_since(self.epoch)
                                 .as_micros() as u64,
                             detail: format!(
-                                "Agent '{}' has exceeded resource budget; 5s grace period before throttle",
-                                namespace
+                                "Agent '{namespace}' has exceeded resource budget; 5s grace period before throttle"
                             ),
                         });
                     }
@@ -451,8 +450,7 @@ impl BudgetEnforcer {
                             timestamp_us: throttled_since.duration_since(self.epoch).as_micros()
                                 as u64,
                             detail: format!(
-                                "Agent '{}' throttled after 5s warning grace; update rate halved",
-                                namespace
+                                "Agent '{namespace}' throttled after 5s warning grace; update rate halved"
                             ),
                         });
                     }
@@ -678,7 +676,7 @@ impl Default for BudgetEnforcer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
+
     use tze_hud_scene::types::ResourceBudget;
 
     fn make_enforcer() -> (BudgetEnforcer, CollectingTelemetrySink) {
@@ -906,7 +904,7 @@ mod tests {
     fn test_frame_guardian_no_shed_under_threshold() {
         let (mut enforcer, mut sink) = make_enforcer();
 
-        let tiles = vec![
+        let tiles = [
             ("ns", SceneId::new(), 0u32, 1u32),
             ("ns", SceneId::new(), 1u32, 0u32),
         ];
@@ -929,7 +927,7 @@ mod tests {
 
         // id_high: lease_priority=0 (most important), z_order=10
         // id_low: lease_priority=5 (least important), z_order=1
-        let tiles = vec![("ns", id_high, 0u32, 10u32), ("ns", id_low, 5u32, 1u32)];
+        let tiles = [("ns", id_high, 0u32, 10u32), ("ns", id_low, 5u32, 1u32)];
         let refs: Vec<(&str, SceneId, u32, u32)> = tiles
             .iter()
             .map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo))
@@ -954,7 +952,7 @@ mod tests {
     fn test_frame_guardian_consecutive_shed_tracking() {
         let (mut enforcer, mut sink) = make_enforcer();
 
-        let tiles = vec![
+        let tiles = [
             ("ns", SceneId::new(), 0u32, 1u32),
             ("ns", SceneId::new(), 1u32, 0u32),
             ("ns", SceneId::new(), 2u32, 0u32),
@@ -978,7 +976,7 @@ mod tests {
     fn test_frame_no_shed_resets_consecutive_count() {
         let (mut enforcer, mut sink) = make_enforcer();
 
-        let tiles = vec![("ns", SceneId::new(), 0u32, 1u32)];
+        let tiles = [("ns", SceneId::new(), 0u32, 1u32)];
         let refs: Vec<(&str, SceneId, u32, u32)> = tiles
             .iter()
             .map(|(ns, id, lp, zo)| (*ns, *id, *lp, *zo))

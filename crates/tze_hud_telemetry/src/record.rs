@@ -771,7 +771,7 @@ mod tests {
             CalibrationStatus::Uncalibrated { raw_p99 } => {
                 assert!(raw_p99 > 0, "raw_p99 should be populated");
             }
-            other => panic!("expected Uncalibrated, got {:?}", other),
+            other => panic!("expected Uncalibrated, got {other:?}"),
         }
     }
 
@@ -785,7 +785,7 @@ mod tests {
         assert!(result.is_ok());
         match result.unwrap() {
             CalibrationStatus::Pass(p99) => assert_eq!(p99, 5_000),
-            other => panic!("expected Pass, got {:?}", other),
+            other => panic!("expected Pass, got {other:?}"),
         }
     }
 

@@ -46,7 +46,7 @@ fn temp_dir(suffix: &str) -> PathBuf {
 }
 
 fn minimal_rgba8(w: u32, h: u32) -> Vec<u8> {
-    vec![128u8, 64, 32, 255].repeat((w * h) as usize)
+    [128u8, 64, 32, 255].repeat((w * h) as usize)
 }
 
 fn make_scene_desc(name: &str) -> SceneDescription {

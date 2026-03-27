@@ -289,7 +289,7 @@ impl MutationLatencyAccumulator {
         let n = self.samples.len();
         // Nearest-rank method: ceil(0.99 * n) using integer arithmetic.
         // rank = ceil(99 * n / 100) = (99 * n + 99) / 100
-        let rank = (99 * n + 99) / 100;
+        let rank = (99 * n).div_ceil(100);
         let idx = (rank - 1).min(n - 1);
         self.samples[idx]
     }

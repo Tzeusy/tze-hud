@@ -369,7 +369,7 @@ impl DegradationController {
                 // At Level 4, shed the lowest-priority quartile (at least 1).
                 // For v1, we shed 25% consistent with the frame-time guardian.
                 // Integer ceiling: ceil(len * 0.25) == (len + 3) / 4.
-                let shed_count = ((tiles.len() + 3) / 4).max(1);
+                let shed_count = tiles.len().div_ceil(4).max(1);
                 sorted.into_iter().take(shed_count).collect()
             }
             DegradationLevel::Emergency => {
@@ -592,8 +592,7 @@ mod tests {
             let ev = ctrl.record_frame(50_000);
             assert!(
                 ev.is_none(),
-                "Frame {}: must not trigger before 10-frame window is full",
-                i
+                "Frame {i}: must not trigger before 10-frame window is full"
             );
         }
         assert_eq!(ctrl.level(), DegradationLevel::Normal);

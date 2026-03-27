@@ -160,7 +160,7 @@ impl SceneGraph {
         // Scene-level tab count limit (RFC 0001 §2.1)
         if self.tabs.len() >= MAX_TABS {
             return Err(ValidationError::BudgetExceeded {
-                resource: format!("tabs (limit {})", MAX_TABS),
+                resource: format!("tabs (limit {MAX_TABS})"),
             });
         }
         // Check display_order uniqueness
@@ -379,7 +379,7 @@ impl SceneGraph {
         // Capability check before expiry: the spec says lease must be valid
         if !lease.has_capability(cap.clone()) {
             return Err(ValidationError::CapabilityMissing {
-                capability: format!("{:?}", cap),
+                capability: format!("{cap:?}"),
             });
         }
         // Check lease is not expired
@@ -742,10 +742,7 @@ impl SceneGraph {
             Err(CapabilityRevocationError::CapabilityNotPresent) => {
                 Err(ValidationError::InvalidField {
                     field: "capability_not_present".into(),
-                    reason: format!(
-                        "capability {:?} is not in the scope of lease {}",
-                        cap, lease_id
-                    ),
+                    reason: format!("capability {cap:?} is not in the scope of lease {lease_id}"),
                 })
             }
         }
@@ -1258,7 +1255,7 @@ impl SceneGraph {
         let tiles_in_tab = self.tiles.values().filter(|t| t.tab_id == tab_id).count();
         if tiles_in_tab >= MAX_TILES_PER_TAB {
             return Err(ValidationError::BudgetExceeded {
-                resource: format!("tiles_per_tab (limit {})", MAX_TILES_PER_TAB),
+                resource: format!("tiles_per_tab (limit {MAX_TILES_PER_TAB})"),
             });
         }
 
@@ -1294,8 +1291,7 @@ impl SceneGraph {
             return Err(ValidationError::InvalidField {
                 field: "z_order".into(),
                 reason: format!(
-                    "z_order 0x{:08X} is >= ZONE_TILE_Z_MIN (0x{:08X}); reserved for runtime zone tiles",
-                    z_order, ZONE_TILE_Z_MIN
+                    "z_order 0x{z_order:08X} is >= ZONE_TILE_Z_MIN (0x{ZONE_TILE_Z_MIN:08X}); reserved for runtime zone tiles"
                 ),
             });
         }
@@ -1379,8 +1375,7 @@ impl SceneGraph {
             return Err(ValidationError::InvalidField {
                 field: "z_order".into(),
                 reason: format!(
-                    "z_order 0x{:08X} is >= ZONE_TILE_Z_MIN (0x{:08X}); reserved for runtime zone tiles",
-                    z_order, ZONE_TILE_Z_MIN
+                    "z_order 0x{z_order:08X} is >= ZONE_TILE_Z_MIN (0x{ZONE_TILE_Z_MIN:08X}); reserved for runtime zone tiles"
                 ),
             });
         }
@@ -1407,7 +1402,7 @@ impl SceneGraph {
         if !(0.0..=1.0).contains(&opacity) {
             return Err(ValidationError::InvalidField {
                 field: "opacity".into(),
-                reason: format!("opacity {} is not in [0.0, 1.0]", opacity),
+                reason: format!("opacity {opacity} is not in [0.0, 1.0]"),
             });
         }
 
@@ -2067,7 +2062,8 @@ impl SceneGraph {
         // inserted directly into `self.nodes` (e.g. in multi-node trees whose
         // children were not routed through `set_tile_root`) still get their
         // local state initialised on first hit rather than silently failing.
-        let new_hover = if let HitResult::NodeHit { node_id, .. } = result {
+
+        if let HitResult::NodeHit { node_id, .. } = result {
             let state = self
                 .hit_region_states
                 .entry(*node_id)
@@ -2076,8 +2072,7 @@ impl SceneGraph {
             Some(*node_id)
         } else {
             None
-        };
-        new_hover
+        }
     }
 
     /// Update pressed state for a node.
@@ -2329,7 +2324,7 @@ impl SceneGraph {
                     ZonePublishResult::RejectedLeaseTerminal => {
                         return Err(ValidationError::ZonePublishLeaseNotActive {
                             namespace: publisher_namespace.to_string(),
-                            state: format!("{:?}", state),
+                            state: format!("{state:?}"),
                         });
                     }
                 }
@@ -3367,7 +3362,7 @@ mod tests {
             SyncGroupCommitDecision::Commit { tiles: committed } => {
                 assert_eq!(committed, vec![tiles[0]]);
             }
-            other => panic!("Expected Commit, got {:?}", other),
+            other => panic!("Expected Commit, got {other:?}"),
         }
     }
 
@@ -3677,7 +3672,7 @@ mod tests {
             SyncGroupCommitDecision::Commit { tiles: committed } => {
                 assert_eq!(committed.len(), 2);
             }
-            other => panic!("Expected Commit, got {:?}", other),
+            other => panic!("Expected Commit, got {other:?}"),
         }
         // Deferral counter should be reset to 0
         assert_eq!(scene.sync_groups[&group_id].deferral_count, 0);
@@ -3752,7 +3747,7 @@ mod tests {
                 // Only tile[0] should be committed (tile[1] has no pending)
                 assert_eq!(committed, vec![tiles[0]]);
             }
-            other => panic!("Expected ForceCommit, got {:?}", other),
+            other => panic!("Expected ForceCommit, got {other:?}"),
         }
         // Deferral counter reset after force-commit
         assert_eq!(scene.sync_groups[&group_id].deferral_count, 0);
@@ -3766,7 +3761,7 @@ mod tests {
         for i in 0..SceneGraph::MAX_SYNC_GROUPS_PER_NAMESPACE {
             scene
                 .create_sync_group(
-                    Some(format!("group-{}", i)),
+                    Some(format!("group-{i}")),
                     "agent",
                     SyncCommitPolicy::AllOrDefer,
                     3,
@@ -3929,7 +3924,7 @@ mod tests {
 
         assert_eq!(scene.node_count(), restored.node_count());
         // Verify the node data survived the roundtrip.
-        for (_id, n) in &restored.nodes {
+        for n in restored.nodes.values() {
             if let NodeData::StaticImage(si) = &n.data {
                 assert_eq!(
                     si.resource_id, resource_id,
@@ -4734,8 +4729,7 @@ mod tests {
             .collect();
         assert!(
             shed_priorities.iter().all(|&p| p == 3),
-            "only the lowest-priority (highest value) lease should shed first; got {:?}",
-            shed_priorities
+            "only the lowest-priority (highest value) lease should shed first; got {shed_priorities:?}"
         );
     }
 
@@ -4860,8 +4854,7 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::CapabilityMissing { .. }),
-            "expected CapabilityMissing after ManageTabs revocation, got {:?}",
-            err
+            "expected CapabilityMissing after ManageTabs revocation, got {err:?}"
         );
 
         // ModifyOwnTiles (not revoked) still works for tile mutations.
@@ -4881,8 +4874,7 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::LeaseNotFound { .. }),
-            "expected LeaseNotFound, got {:?}",
-            err
+            "expected LeaseNotFound, got {err:?}"
         );
     }
 
@@ -4901,8 +4893,7 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::InvalidField { ref field, .. } if field == "lease_terminal"),
-            "expected InvalidField(lease_terminal), got {:?}",
-            err
+            "expected InvalidField(lease_terminal), got {err:?}"
         );
     }
 
@@ -4917,8 +4908,7 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::InvalidField { ref field, .. } if field == "capability_not_present"),
-            "expected InvalidField(capability_not_present), got {:?}",
-            err
+            "expected InvalidField(capability_not_present), got {err:?}"
         );
     }
 
@@ -4997,14 +4987,12 @@ mod tests {
         // The name must identify the capability that was removed.
         assert!(
             cap_name.contains("CreateTile"),
-            "cap_name must identify CreateTiles, got: {:?}",
-            cap_name
+            "cap_name must identify CreateTiles, got: {cap_name:?}"
         );
         // The timestamp must be non-zero (clock was advanced before the call).
         assert!(
             revoked_at_us > 0,
-            "revoked_at_wall_us must be non-zero, got: {}",
-            revoked_at_us
+            "revoked_at_wall_us must be non-zero, got: {revoked_at_us}"
         );
     }
 
@@ -5065,15 +5053,14 @@ mod spec_scenarios {
         let mut scene = make_scene();
         for i in 0..MAX_TABS {
             scene
-                .create_tab(&format!("Tab {}", i), i as u32)
+                .create_tab(&format!("Tab {i}"), i as u32)
                 .expect("should create tab");
         }
         assert_eq!(scene.tabs.len(), MAX_TABS);
         let err = scene.create_tab("Overflow", MAX_TABS as u32).unwrap_err();
         assert!(
             matches!(err, ValidationError::BudgetExceeded { .. }),
-            "expected BudgetExceeded, got {:?}",
-            err
+            "expected BudgetExceeded, got {err:?}"
         );
     }
 
@@ -5132,8 +5119,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::BudgetExceeded { .. }),
-            "expected BudgetExceeded, got {:?}",
-            err
+            "expected BudgetExceeded, got {err:?}"
         );
     }
 
@@ -5186,15 +5172,14 @@ mod spec_scenarios {
             };
             scene
                 .add_node_to_tile(tile_id, Some(root_id), child)
-                .unwrap_or_else(|e| panic!("should add child {} ok: {:?}", i, e));
+                .unwrap_or_else(|e| panic!("should add child {i} ok: {e:?}"));
         }
 
         // Verify we have exactly MAX_NODES_PER_TILE nodes in the tile
         let count = scene.count_node_subtree(root_id);
         assert_eq!(
             count as usize, MAX_NODES_PER_TILE,
-            "should have exactly {} nodes",
-            MAX_NODES_PER_TILE
+            "should have exactly {MAX_NODES_PER_TILE} nodes"
         );
 
         // One more should be rejected
@@ -5211,8 +5196,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::NodeCountExceeded { .. }),
-            "expected NodeCountExceeded, got {:?}",
-            err
+            "expected NodeCountExceeded, got {err:?}"
         );
     }
 
@@ -5262,8 +5246,7 @@ mod spec_scenarios {
         let err = scene.add_node_to_tile(tile_id2, None, node).unwrap_err();
         assert!(
             matches!(err, ValidationError::DuplicateId { id } if id == node_id),
-            "expected DuplicateId, got {:?}",
-            err
+            "expected DuplicateId, got {err:?}"
         );
     }
 
@@ -5278,8 +5261,7 @@ mod spec_scenarios {
         let err = scene.create_tab(&long_name, 0).unwrap_err();
         assert!(
             matches!(err, ValidationError::InvalidField { ref field, .. } if field == "name"),
-            "expected InvalidField for name, got {:?}",
-            err
+            "expected InvalidField for name, got {err:?}"
         );
     }
 
@@ -5297,8 +5279,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::CapabilityMissing { ref capability } if capability.contains("ManageTabs")),
-            "expected CapabilityMissing(ManageTabs), got {:?}",
-            err
+            "expected CapabilityMissing(ManageTabs), got {err:?}"
         );
     }
 
@@ -5352,8 +5333,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::CapabilityMissing { .. }),
-            "got {:?}",
-            err
+            "got {err:?}"
         );
 
         // Only create_tiles (not modify_own_tiles) — should still fail
@@ -5369,8 +5349,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::CapabilityMissing { .. }),
-            "got {:?}",
-            err
+            "got {err:?}"
         );
 
         // Full capabilities — should succeed
@@ -5423,8 +5402,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::LeaseExpired { .. }),
-            "expected LeaseExpired, got {:?}",
-            err
+            "expected LeaseExpired, got {err:?}"
         );
     }
 
@@ -5505,8 +5483,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::InvalidField { ref field, .. } if field == "opacity"),
-            "expected InvalidField(opacity), got {:?}",
-            err
+            "expected InvalidField(opacity), got {err:?}"
         );
 
         let err2 = scene
@@ -5514,8 +5491,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err2, ValidationError::InvalidField { .. }),
-            "got {:?}",
-            err2
+            "got {err2:?}"
         );
     }
 
@@ -5547,8 +5523,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::BoundsOutOfRange { .. }),
-            "expected BoundsOutOfRange, got {:?}",
-            err
+            "expected BoundsOutOfRange, got {err:?}"
         );
 
         // Use the basic create_tile (no capability check) to also confirm bounds are rejected
@@ -5564,8 +5539,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err2, ValidationError::BoundsOutOfRange { .. }),
-            "expected BoundsOutOfRange, got {:?}",
-            err2
+            "expected BoundsOutOfRange, got {err2:?}"
         );
     }
 
@@ -5590,8 +5564,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::BoundsOutOfRange { .. }),
-            "expected BoundsOutOfRange, got {:?}",
-            err
+            "expected BoundsOutOfRange, got {err:?}"
         );
     }
 
@@ -5616,8 +5589,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::InvalidField { ref field, .. } if field == "z_order"),
-            "expected InvalidField(z_order), got {:?}",
-            err
+            "expected InvalidField(z_order), got {err:?}"
         );
 
         // Also reject z_order above the threshold
@@ -5632,8 +5604,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err2, ValidationError::InvalidField { .. }),
-            "got {:?}",
-            err2
+            "got {err2:?}"
         );
 
         // z_order just below threshold is fine
@@ -5706,8 +5677,7 @@ mod spec_scenarios {
             .unwrap_err();
         assert!(
             matches!(err, ValidationError::NamespaceMismatch { .. }),
-            "expected NamespaceMismatch, got {:?}",
-            err
+            "expected NamespaceMismatch, got {err:?}"
         );
     }
 
@@ -5720,8 +5690,7 @@ mod spec_scenarios {
         let tile_size = size_of::<Tile>();
         assert!(
             tile_size < 200,
-            "Tile struct is {} bytes, must be < 200 bytes per RFC 0001 §8",
-            tile_size
+            "Tile struct is {tile_size} bytes, must be < 200 bytes per RFC 0001 §8"
         );
     }
 
@@ -5731,8 +5700,7 @@ mod spec_scenarios {
         let node_size = size_of::<Node>();
         assert!(
             node_size < 150,
-            "Node struct is {} bytes, must be < 150 bytes per RFC 0001 §8",
-            node_size
+            "Node struct is {node_size} bytes, must be < 150 bytes per RFC 0001 §8"
         );
     }
 
@@ -5780,8 +5748,7 @@ mod spec_scenarios {
         let err = scene.reorder_tab(tab_a, 1).unwrap_err();
         assert!(
             matches!(err, ValidationError::DuplicateDisplayOrder { .. }),
-            "got {:?}",
-            err
+            "got {err:?}"
         );
     }
 
@@ -5834,13 +5801,11 @@ mod spec_scenarios {
         for name in names {
             let (graph, _spec) = registry
                 .build(name, ClockMs::FIXED)
-                .unwrap_or_else(|| panic!("scene '{}' failed to build", name));
+                .unwrap_or_else(|| panic!("scene '{name}' failed to build"));
             let violations = assert_layer0_invariants(&graph);
             assert!(
                 violations.is_empty(),
-                "scene '{}' has Layer 0 violations: {:?}",
-                name,
-                violations
+                "scene '{name}' has Layer 0 violations: {violations:?}"
             );
         }
     }

@@ -28,13 +28,13 @@
 //!   metric that exceeds the threshold is a test failure per:
 //!   > "resource utilization at hour N SHALL be within 5% of resource utilization
 //!   > at hour 1 for the same steady-state workload."
-//!   (validation-framework/spec.md line 299)
+//!   > (validation-framework/spec.md line 299)
 //!
 //! - **`assert_post_disconnect_zero`** — asserts that a named agent's resource
 //!   footprint has reached zero. Satisfies:
 //!   > "After an agent disconnects and leases expire, its resource footprint
 //!   > MUST be zero."
-//!   (validation-framework/spec.md line 299)
+//!   > (validation-framework/spec.md line 299)
 //!
 //! - **`growth_trend`** — returns the maximum percentage growth across all
 //!   tracked metrics relative to the first snapshot, useful for logging.

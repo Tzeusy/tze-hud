@@ -13,7 +13,7 @@
 //! - `source_lease_id`    — the lease that produced this event; empty for system events
 //! - `source_namespace`   — the agent namespace; empty for runtime events
 //! - `sequence`           — monotonically increasing per-session counter for
-//!                          gap detection on reconnect
+//!   gap detection on reconnect
 //! - `payload`            — typed event-specific data
 
 use serde::{Deserialize, Serialize};
@@ -480,7 +480,7 @@ mod tests {
     /// Gap detection helper — simulating spec line 276.
     #[test]
     fn gap_detection_in_sequence_numbers() {
-        let sequences = vec![10u64, 11, 14]; // gap at 12-13
+        let sequences = [10u64, 11, 14]; // gap at 12-13
         let mut gaps = Vec::new();
         for pair in sequences.windows(2) {
             if pair[1] != pair[0] + 1 {

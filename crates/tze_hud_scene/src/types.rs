@@ -143,7 +143,7 @@ impl ResourceId {
     ///
     /// MUST NOT be used on the wire or in storage.
     pub fn to_hex(&self) -> String {
-        self.0.iter().map(|b| format!("{:02x}", b)).collect()
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -234,9 +234,10 @@ impl Rgba {
 // ─── Enums ──────────────────────────────────────────────────────────────────
 
 /// How image content is fitted within the node's bounds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ImageFitMode {
     /// Scale uniformly so the entire image is visible; may leave letterbox bars.
+    #[default]
     Contain,
     /// Scale uniformly to cover the entire bounds; may crop the image.
     Cover,
@@ -244,12 +245,6 @@ pub enum ImageFitMode {
     Fill,
     /// Like Contain but never scale up; display at native size if smaller than bounds.
     ScaleDown,
-}
-
-impl Default for ImageFitMode {
-    fn default() -> Self {
-        ImageFitMode::Contain
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -823,20 +818,15 @@ impl LeaseState {
 }
 
 /// Renewal policy per RFC 0008 SS1.4.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RenewalPolicy {
     /// Agent must explicitly renew before TTL expires.
+    #[default]
     Manual,
     /// Runtime auto-renews at 75% TTL elapsed.
     AutoRenew,
     /// No renewal; expires at TTL.
     OneShot,
-}
-
-impl Default for RenewalPolicy {
-    fn default() -> Self {
-        RenewalPolicy::Manual
-    }
 }
 
 /// Lease caps violation error.
@@ -856,16 +846,16 @@ impl std::fmt::Display for CapsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CapsError::MaxRuntimeLeasesExceeded { current, limit } => {
-                write!(f, "MAX_RUNTIME_LEASES_EXCEEDED: {} / {}", current, limit)
+                write!(f, "MAX_RUNTIME_LEASES_EXCEEDED: {current} / {limit}")
             }
             CapsError::MaxSessionLeasesExceeded { current, limit } => {
-                write!(f, "MAX_SESSION_LEASES_EXCEEDED: {} / {}", current, limit)
+                write!(f, "MAX_SESSION_LEASES_EXCEEDED: {current} / {limit}")
             }
             CapsError::MaxTilesPerLeaseExceeded { current, limit } => {
-                write!(f, "MAX_TILES_PER_LEASE_EXCEEDED: {} / {}", current, limit)
+                write!(f, "MAX_TILES_PER_LEASE_EXCEEDED: {current} / {limit}")
             }
             CapsError::MaxNodesPerTileExceeded { current, limit } => {
-                write!(f, "MAX_NODES_PER_TILE_EXCEEDED: {} / {}", current, limit)
+                write!(f, "MAX_NODES_PER_TILE_EXCEEDED: {current} / {limit}")
             }
         }
     }
@@ -890,12 +880,12 @@ impl std::fmt::Display for LeaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LeaseError::InvalidTransition { from, to } => {
-                write!(f, "invalid lease transition: {:?} -> {:?}", from, to)
+                write!(f, "invalid lease transition: {from:?} -> {to:?}")
             }
-            LeaseError::LeaseNotFound(id) => write!(f, "lease not found: {}", id),
-            LeaseError::LeaseNotActive(id) => write!(f, "lease not active: {}", id),
-            LeaseError::BudgetExceeded(e) => write!(f, "budget exceeded: {}", e),
-            LeaseError::CapsExceeded(e) => write!(f, "caps exceeded: {}", e),
+            LeaseError::LeaseNotFound(id) => write!(f, "lease not found: {id}"),
+            LeaseError::LeaseNotActive(id) => write!(f, "lease not active: {id}"),
+            LeaseError::BudgetExceeded(e) => write!(f, "budget exceeded: {e}"),
+            LeaseError::CapsExceeded(e) => write!(f, "caps exceeded: {e}"),
         }
     }
 }
@@ -1318,21 +1308,16 @@ pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
 /// Per RFC 0001 §2.5 and scene-graph/spec.md line 241.
 ///
 /// The default is `Content` (within content-layer z-order space).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum LayerAttachment {
     /// Rendered behind all agent tiles (below content layer).
     Background,
     /// Rendered within the content layer z-order space at
     /// z_order >= [`ZONE_TILE_Z_MIN`].
+    #[default]
     Content,
     /// Rendered above all agent content; managed by runtime chrome rendering.
     Chrome,
-}
-
-impl Default for LayerAttachment {
-    fn default() -> Self {
-        LayerAttachment::Content
-    }
 }
 
 /// Display edge for edge-anchored zone geometry.
@@ -1893,7 +1878,7 @@ impl ZoneRegistry {
         let pubs = self
             .active_publishes
             .get(zone_name)
-            .map(|v| v.clone())
+            .cloned()
             .unwrap_or_default();
         let occupant_count = pubs.len() as u32;
         Some(ZoneOccupancy {
@@ -2125,8 +2110,7 @@ mod tests {
         let violations = assert_identity_invariants();
         assert!(
             violations.is_empty(),
-            "Layer 0 identity violations: {:?}",
-            violations
+            "Layer 0 identity violations: {violations:?}"
         );
     }
 }

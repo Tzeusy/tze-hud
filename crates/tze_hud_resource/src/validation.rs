@@ -324,6 +324,7 @@ fn validate_font(data: &[u8]) -> Result<DecodedMeta, ResourceError> {
 ///
 /// For the dedup-hit fast path (step 2 reveals the resource is already known),
 /// callers skip steps 3-6 entirely — no re-validation needed.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_upload(
     data: &[u8],
     expected_hash: &[u8; 32],
@@ -543,8 +544,8 @@ mod tests {
         // 9000 pixels wide exceeds MAX_TEXTURE_DIMENSION_PX (8192).
         let config = default_config();
         // data length doesn't matter here — dimension check fires first
-        let err = decode_and_validate(&vec![0u8; 4], ResourceType::ImageRgba8, &config, 9000, 1)
-            .unwrap_err();
+        let err =
+            decode_and_validate(&[0u8; 4], ResourceType::ImageRgba8, &config, 9000, 1).unwrap_err();
         assert!(matches!(err, ResourceError::SizeExceeded { .. }));
     }
 

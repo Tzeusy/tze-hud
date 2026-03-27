@@ -242,7 +242,7 @@ mod tests {
         let white = solid_rgba(16, 16, 255, 255, 255);
         let heatmap = generate_heatmap(&black, &white, 16, 16);
         let png = encode_heatmap_png(&heatmap, 16, 16).expect("PNG encoding must succeed");
-        assert!(png.len() > 0, "PNG must not be empty");
+        assert!(!png.is_empty(), "PNG must not be empty");
         // Verify it starts with PNG magic bytes.
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "must be a valid PNG");
     }

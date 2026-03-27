@@ -216,7 +216,7 @@ fn main() {
     eprintln!("  run dir     : {}", builder.run_dir().display());
 
     // Discover the golden store (best-effort; missing goldens → SKIP status).
-    let golden_store = find_golden_dir().map(|dir| GoldenStore::new(dir));
+    let golden_store = find_golden_dir().map(GoldenStore::new);
 
     // Walk every registered test scene.
     let registry = TestSceneRegistry::new();
@@ -274,16 +274,16 @@ fn main() {
                 // Best-effort parse frame count from telemetry.
                 serde_json::from_slice::<serde_json::Value>(j)
                     .ok()
-                    .and_then(|v| {
+                    .map(|v| {
                         let frames = v["total_frames"].as_u64();
                         let p99 = v["frame_time"]["p99"].as_u64();
-                        Some(SceneMetrics {
+                        SceneMetrics {
                             ssim_score: None,
                             frames_rendered: frames,
                             frame_time_p99_us: p99,
                             lease_violations: 0,
                             budget_overruns: 0,
-                        })
+                        }
                     })
                     .unwrap_or_default()
             });

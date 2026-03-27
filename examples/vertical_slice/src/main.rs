@@ -135,7 +135,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(600);
 
-    println!("Window mode: {mode}, size: {}x{}", width, height);
+    println!("Window mode: {mode}, size: {width}x{height}");
 
     let config = WindowedConfig {
         window: WindowConfig {
@@ -561,7 +561,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 lease_id: Some(demo_lease),
             };
             let result = scene.apply_batch(&batch);
-            assert!(result.applied, "tile {} within budget should succeed", i);
+            assert!(result.applied, "tile {i} within budget should succeed");
         }
 
         // Third tile exceeds budget — apply_batch returns a structured rejection.
@@ -589,11 +589,10 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             .map(|e| e.to_string())
             .unwrap_or_default();
         println!("  Budget exceeded (MUTATION_REJECTED):");
-        println!("    error: {}", err_msg);
+        println!("    error: {err_msg}");
         assert!(
             err_msg.contains("tiles") || err_msg.contains("budget"),
-            "error must reference tile budget: {}",
-            err_msg
+            "error must reference tile budget: {err_msg}"
         );
 
         // Clean up the demo tab and lease.
@@ -619,14 +618,13 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         let state = runtime.shared_state().lock().await;
         let mut scene = state.scene.lock().await;
         let tab_id = scene.create_tab("Main", 0).unwrap();
-        println!("  Tab created: id={}", tab_id);
+        println!("  Tab created: id={tab_id}");
 
         // Register the default zones
         scene.zone_registry = ZoneRegistry::with_defaults();
         let zone_count = scene.zone_registry.all_zones().len();
         println!(
-            "  Registered {} default zones (status-bar, notification-area, subtitle)",
-            zone_count
+            "  Registered {zone_count} default zones (status-bar, notification-area, subtitle)"
         );
 
         // We already have a lease from Phase 1 -- find it by namespace
@@ -636,7 +634,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             .find(|l| l.namespace == namespace && l.is_active())
             .map(|l| l.id)
             .expect("should have an active lease from Phase 1");
-        println!("  Using lease: {}", lease_id);
+        println!("  Using lease: {lease_id}");
 
         (tab_id, lease_id)
     };
@@ -675,7 +673,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             )
             .unwrap();
 
-        println!("  Text tile created: id={}", tile_id);
+        println!("  Text tile created: id={tile_id}");
         tile_id
     };
 
@@ -711,10 +709,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             )
             .unwrap();
 
-        println!(
-            "  Hit region tile created: id={}, node={}",
-            tile_id, node_id
-        );
+        println!("  Hit region tile created: id={tile_id}, node={node_id}");
         (tile_id, node_id)
     };
 
@@ -820,7 +815,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
     assert!(
@@ -853,7 +848,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
     assert!(move_result.dispatch.is_some());
@@ -880,7 +875,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
     assert!(press_result.dispatch.is_some());
@@ -917,7 +912,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                 device_id: 0,
                 timestamp: None,
             },
-            &mut *scene,
+            &mut scene,
         )
     };
     assert!(
@@ -1002,16 +997,16 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Session summary:");
     println!("    total_frames = {}", summary.total_frames);
     if let Some(p50) = summary.frame_time.p50() {
-        println!("    frame_time p50 = {}us", p50);
+        println!("    frame_time p50 = {p50}us");
     }
     if let Some(p99) = summary.frame_time.p99() {
-        println!("    frame_time p99 = {}us", p99);
+        println!("    frame_time p99 = {p99}us");
     }
     if let Some(ack) = summary.input_to_local_ack.p99() {
-        println!("    input_to_local_ack p99 = {}us (budget: 4000us)", ack);
+        println!("    input_to_local_ack p99 = {ack}us (budget: 4000us)");
     }
     if let Some(ht) = summary.hit_test_latency.p99() {
-        println!("    hit_test p99 = {}us (budget: 100us)", ht);
+        println!("    hit_test p99 = {ht}us (budget: 100us)");
     }
 
     let json = runtime.telemetry.emit_json()?;
@@ -1050,7 +1045,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             .values()
             .filter(|l| l.state == LeaseState::Suspended)
             .count();
-        println!("  Suspended {} lease(s) (safe mode entry)", suspended_count);
+        println!("  Suspended {suspended_count} lease(s) (safe mode entry)");
         assert!(suspended_count >= 1, "at least 1 lease should be suspended");
 
         let lease = scene.leases.get(&lease_id).unwrap();
@@ -1098,7 +1093,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             .map(|e| e.to_string())
             .unwrap_or_default();
         println!("  Mutation during suspension: rejected=true");
-        println!("    error: {}", error_msg);
+        println!("    error: {error_msg}");
         assert!(
             error_msg.contains("Suspended"),
             "error should mention Suspended state"
@@ -1139,7 +1134,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         scene.resume_all_leases(now);
 
         let active_count = scene.leases.values().filter(|l| l.is_active()).count();
-        println!("  Resumed {} lease(s) (safe mode exit)", active_count);
+        println!("  Resumed {active_count} lease(s) (safe mode exit)");
         assert!(
             active_count >= 1,
             "at least 1 lease should be active after resume"
@@ -1179,7 +1174,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         let result = scene.apply_batch(&batch);
         assert!(result.applied, "mutations should succeed after resume");
         let new_tile = result.created_ids[0];
-        println!("  Post-resume mutation: tile created id={}", new_tile);
+        println!("  Post-resume mutation: tile created id={new_tile}");
 
         // Clean up via DeleteTile mutation
         let delete_batch = SceneMutationBatch {
@@ -1681,8 +1676,7 @@ capabilities = ["create_tiles"]
             .unwrap_or_default();
         assert!(
             error_msg.contains("Suspended"),
-            "error should mention Suspended state, got: {}",
-            error_msg
+            "error should mention Suspended state, got: {error_msg}"
         );
     }
 
@@ -1737,7 +1731,7 @@ capabilities = ["create_tiles"]
                 lease_id: None,
             };
             let result = scene.apply_batch(&batch);
-            assert!(result.applied, "tile {} should be within budget", i);
+            assert!(result.applied, "tile {i} should be within budget");
         }
 
         // 9th tile should exceed budget
@@ -1764,8 +1758,7 @@ capabilities = ["create_tiles"]
             .unwrap_or_default();
         assert!(
             error_msg.contains("tiles") || error_msg.contains("budget"),
-            "error should reference tile budget, got: {}",
-            error_msg
+            "error should reference tile budget, got: {error_msg}"
         );
     }
 
@@ -1934,7 +1927,7 @@ capabilities = ["create_tiles"]
                 lease_id: Some(lease_id),
             };
             let result = scene.apply_batch(&batch);
-            assert!(result.applied, "tile {} within budget must succeed", i);
+            assert!(result.applied, "tile {i} within budget must succeed");
         }
 
         // Third batch exceeds budget — must return applied=false with a structured error.
@@ -1966,8 +1959,7 @@ capabilities = ["create_tiles"]
             .unwrap_or_default();
         assert!(
             err_msg.contains("tiles") || err_msg.contains("budget"),
-            "error must reference tile budget: {}",
-            err_msg
+            "error must reference tile budget: {err_msg}"
         );
     }
 

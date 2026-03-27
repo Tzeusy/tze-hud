@@ -202,8 +202,7 @@ impl ConfigLoader for TzeHudConfig {
                         expected: "empty string or <source>.<action> matching ^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$".into(),
                         got: format!("{event:?}"),
                         hint: format!(
-                            "use lowercase dotted format e.g. \"doorbell.ring\"; got {:?}",
-                            event
+                            "use lowercase dotted format e.g. \"doorbell.ring\"; got {event:?}"
                         ),
                     });
             }
@@ -404,8 +403,7 @@ fn validate_profile(profile: &str, errors: &mut Vec<ConfigError>) {
                 expected: "\"full-display\", \"headless\", \"auto\", \"custom\", or \"mobile\"".into(),
                 got: format!("{other:?}"),
                 hint: format!(
-                    "unknown profile {:?}; valid values: full-display, headless, auto, custom (mobile is schema-reserved)",
-                    other
+                    "unknown profile {other:?}; valid values: full-display, headless, auto, custom (mobile is schema-reserved)"
                 ),
             });
         }
@@ -451,7 +449,7 @@ fn validate_tabs(raw: &RawConfig, errors: &mut Vec<ConfigError>) {
             errors.push(ConfigError {
                 code: ConfigErrorCode::DuplicateTabName,
                 field_path: format!("tabs[{i}].name"),
-                expected: format!("unique name; \"{}\" already used at tabs[{}]", name, prev),
+                expected: format!("unique name; \"{name}\" already used at tabs[{prev}]"),
                 got: format!("{name:?}"),
                 hint: format!("rename the second tab (tabs[{i}]) to a unique name"),
             });
@@ -484,8 +482,7 @@ fn validate_tabs(raw: &RawConfig, errors: &mut Vec<ConfigError>) {
                         expected: "\"grid\", \"columns\", or \"freeform\"".into(),
                         got: format!("{other:?}"),
                         hint: format!(
-                            "unknown layout {:?}; valid values: grid, columns, freeform",
-                            other
+                            "unknown layout {other:?}; valid values: grid, columns, freeform"
                         ),
                     });
                 }
@@ -606,6 +603,7 @@ fn validate_degradation_order(deg: &RawDegradation, errors: &mut Vec<ConfigError
 /// - `max_tiles` MUST NOT exceed `profile.max_tiles`.
 /// - `max_texture_mb` MUST NOT exceed `profile.max_texture_mb`.
 /// - `max_update_hz` MUST NOT exceed `profile.max_agent_update_hz`.
+///
 /// Violations produce `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE`.
 fn validate_agents(raw: &RawConfig, errors: &mut Vec<ConfigError>) {
     let ceiling = match profile::profile_ceiling_for_validation(raw) {
@@ -780,11 +778,7 @@ mod unit_tests {
         for p in &["full-display", "headless", "auto", "custom"] {
             let mut errors = Vec::new();
             validate_profile(p, &mut errors);
-            assert!(
-                errors.is_empty(),
-                "profile {:?} should not produce errors",
-                p
-            );
+            assert!(errors.is_empty(), "profile {p:?} should not produce errors");
         }
     }
 

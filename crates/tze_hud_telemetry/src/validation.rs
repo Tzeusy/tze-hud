@@ -334,7 +334,7 @@ impl ValidationReport {
     /// - `budget_overruns` == 0
     /// - `sync_drift_violations` == 0
     pub fn run(summary: &SessionSummary, factors: &HardwareFactors) -> Self {
-        let assertions_to_run = vec![
+        let assertions_to_run = [
             BudgetAssertion::new("frame_time_p99", 16_600, CalibrationDimension::Gpu),
             BudgetAssertion::new("input_to_local_ack_p99", 4_000, CalibrationDimension::Cpu),
             BudgetAssertion::new(
@@ -475,7 +475,7 @@ mod tests {
         // 100 samples of 12ms — well within 16.6ms budget
         let bucket = make_bucket("frame_time", &vec![12_000u64; 100]);
         let outcome = assertion.check(&bucket, &factors);
-        assert!(outcome.is_pass(), "expected pass, got {:?}", outcome);
+        assert!(outcome.is_pass(), "expected pass, got {outcome:?}");
     }
 
     #[test]
@@ -485,7 +485,7 @@ mod tests {
         // 100 samples of 20ms — over the 16.6ms budget
         let bucket = make_bucket("frame_time", &vec![20_000u64; 100]);
         let outcome = assertion.check(&bucket, &factors);
-        assert!(outcome.is_fail(), "expected fail, got {:?}", outcome);
+        assert!(outcome.is_fail(), "expected fail, got {outcome:?}");
         if let AssertionOutcome::Fail {
             observed, budget, ..
         } = &outcome
@@ -504,8 +504,7 @@ mod tests {
         let outcome = assertion.check(&bucket, &factors);
         assert!(
             outcome.is_uncalibrated(),
-            "expected uncalibrated, got {:?}",
-            outcome
+            "expected uncalibrated, got {outcome:?}"
         );
         if let AssertionOutcome::Uncalibrated {
             raw_value, reason, ..
@@ -539,8 +538,7 @@ mod tests {
         let outcome = assertion.check(&bucket, &factors);
         assert!(
             outcome.is_pass(),
-            "on 2x slower machine 20ms should be within 33.2ms budget, got {:?}",
-            outcome
+            "on 2x slower machine 20ms should be within 33.2ms budget, got {outcome:?}"
         );
     }
 

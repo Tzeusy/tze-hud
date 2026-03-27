@@ -308,13 +308,12 @@ impl EventBus {
         // regardless of their InterruptionClass — the spec mandates they are
         // never dropped (spec lines 229-231, 264-265). CRITICAL-class events
         // also bypass since they represent urgent runtime conditions.
-        if !self.rate_limiter.allow() {
-            if event.class != InterruptionClass::Critical
-                && !event.event_type.starts_with("system.lease_")
-                && !event.event_type.starts_with("system.degradation_")
-            {
-                return false;
-            }
+        if !self.rate_limiter.allow()
+            && event.class != InterruptionClass::Critical
+            && !event.event_type.starts_with("system.lease_")
+            && !event.event_type.starts_with("system.degradation_")
+        {
+            return false;
         }
 
         // Blocked audit events are never delivered to agents.

@@ -336,6 +336,7 @@ where
 /// callback for that step to keep this module free of wgpu imports.
 ///
 /// Returns `0` for clean shutdown, `1` for error/GPU-lost shutdown.
+#[allow(clippy::too_many_arguments)]
 pub async fn graceful_shutdown(
     reason: ShutdownReason,
     config: &ShutdownConfig,

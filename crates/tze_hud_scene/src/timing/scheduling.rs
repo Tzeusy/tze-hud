@@ -139,10 +139,11 @@ pub fn validate_timing_hints(
     }
 
     // ── 4. expires_at validation ─────────────────────────────────────────────
-    if hints.expires_at_wall_us.is_set() && present_at.is_set() {
-        if hints.expires_at_wall_us.as_u64() <= present_at.as_u64() {
-            return Err(TimingError::TimestampExpiryBeforePresent);
-        }
+    if hints.expires_at_wall_us.is_set()
+        && present_at.is_set()
+        && hints.expires_at_wall_us.as_u64() <= present_at.as_u64()
+    {
+        return Err(TimingError::TimestampExpiryBeforePresent);
     }
     // Edge case: expires_at set, present_at = 0 ("immediate").  The
     // compositor will apply immediately, so expires_at must be in the future.

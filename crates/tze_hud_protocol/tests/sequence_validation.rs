@@ -58,9 +58,7 @@ fn normal_monotonic_sequence_accepted() {
         let result = validate_sequence(last, seq, max_gap);
         assert!(
             result.is_ok(),
-            "sequence {} must be accepted after {}",
-            seq,
-            last
+            "sequence {seq} must be accepted after {last}"
         );
         last = seq;
     }

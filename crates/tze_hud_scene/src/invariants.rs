@@ -187,10 +187,7 @@ pub fn check_tile_count_per_tab(graph: &SceneGraph) -> Vec<InvariantViolation> {
         .map(|(tab_id, c)| {
             InvariantViolation::new(
                 "tile_count_per_tab_exceeds_limit",
-                format!(
-                    "tab {} has {} tiles (limit is {})",
-                    tab_id, c, MAX_TILES_PER_TAB
-                ),
+                format!("tab {tab_id} has {c} tiles (limit is {MAX_TILES_PER_TAB})"),
             )
         })
         .collect()
@@ -272,10 +269,7 @@ pub fn check_node_acyclic(graph: &SceneGraph) -> Vec<InvariantViolation> {
         if has_cycle(node_id, graph, &mut path, &mut visited_global) {
             violations.push(InvariantViolation::new(
                 "node_cycle_detected",
-                format!(
-                    "cycle detected in node graph starting from node {}",
-                    node_id
-                ),
+                format!("cycle detected in node graph starting from node {node_id}"),
             ));
             // Only report once per cycle entry to keep output manageable.
         }
@@ -423,35 +417,29 @@ pub fn check_hit_region_state_consistency(graph: &SceneGraph) -> Vec<InvariantVi
     let mut violations = Vec::new();
 
     for node in graph.nodes.values() {
-        if matches!(node.data, NodeData::HitRegion(_)) {
-            if !graph.hit_region_states.contains_key(&node.id) {
-                violations.push(InvariantViolation::new(
-                    "missing_hit_region_state",
-                    format!(
-                        "hit region node {} has no entry in hit_region_states",
-                        node.id
-                    ),
-                ));
-            }
+        if matches!(node.data, NodeData::HitRegion(_))
+            && !graph.hit_region_states.contains_key(&node.id)
+        {
+            violations.push(InvariantViolation::new(
+                "missing_hit_region_state",
+                format!(
+                    "hit region node {} has no entry in hit_region_states",
+                    node.id
+                ),
+            ));
         }
     }
 
-    for (node_id, _state) in &graph.hit_region_states {
+    for node_id in graph.hit_region_states.keys() {
         match graph.nodes.get(node_id) {
             None => violations.push(InvariantViolation::new(
                 "orphan_hit_region_state",
-                format!(
-                    "hit_region_states entry {} has no corresponding node",
-                    node_id
-                ),
+                format!("hit_region_states entry {node_id} has no corresponding node"),
             )),
             Some(node) if !matches!(node.data, NodeData::HitRegion(_)) => {
                 violations.push(InvariantViolation::new(
                     "hit_region_state_type_mismatch",
-                    format!(
-                        "hit_region_states entry {} points to a non-HitRegion node",
-                        node_id
-                    ),
+                    format!("hit_region_states entry {node_id} points to a non-HitRegion node"),
                 ));
             }
             _ => {}
@@ -467,7 +455,7 @@ pub fn check_active_tab_exists(graph: &SceneGraph) -> Vec<InvariantViolation> {
         if !graph.tabs.contains_key(&active_id) {
             return vec![InvariantViolation::new(
                 "missing_active_tab",
-                format!("active_tab {} does not exist in tabs map", active_id),
+                format!("active_tab {active_id} does not exist in tabs map"),
             )];
         }
     }
@@ -647,7 +635,7 @@ pub fn check_max_batch_size_constant(_graph: &SceneGraph) -> Vec<InvariantViolat
     if MAX_BATCH_SIZE > 1_000 {
         vec![InvariantViolation::new(
             "max_batch_size_exceeds_spec",
-            format!("MAX_BATCH_SIZE={} but spec requires ≤1000", MAX_BATCH_SIZE),
+            format!("MAX_BATCH_SIZE={MAX_BATCH_SIZE} but spec requires ≤1000"),
         )]
     } else {
         vec![]
@@ -932,14 +920,11 @@ pub fn check_tile_count_within_lease_budget(graph: &SceneGraph) -> Vec<Invariant
     let mut violations = Vec::new();
     for (lease_id, count) in &lease_tile_counts {
         if let Some(lease) = graph.leases.get(lease_id) {
-            let limit = u32::from(lease.resource_budget.max_tiles);
+            let limit = lease.resource_budget.max_tiles;
             if *count > limit {
                 violations.push(InvariantViolation::new(
                     "tile_count_exceeds_lease_budget",
-                    format!(
-                        "lease {} owns {} tiles but budget allows max {}",
-                        lease_id, count, limit
-                    ),
+                    format!("lease {lease_id} owns {count} tiles but budget allows max {limit}"),
                 ));
             }
         }
@@ -1050,7 +1035,7 @@ pub fn check_focused_node_is_hit_region(graph: &SceneGraph) -> Vec<InvariantViol
             if !matches!(node.data, NodeData::HitRegion(_)) {
                 Some(InvariantViolation::new(
                     "focused_node_not_hit_region",
-                    format!("node {} is focused but is not a HitRegionNode", node_id),
+                    format!("node {node_id} is focused but is not a HitRegionNode"),
                 ))
             } else {
                 None
@@ -1074,8 +1059,7 @@ pub fn check_focused_node_accepts_focus(graph: &SceneGraph) -> Vec<InvariantViol
                     return Some(InvariantViolation::new(
                         "focused_node_does_not_accept_focus",
                         format!(
-                            "node {} is focused but HitRegionNode.accepts_focus is false",
-                            node_id
+                            "node {node_id} is focused but HitRegionNode.accepts_focus is false"
                         ),
                     ));
                 }
@@ -1332,10 +1316,7 @@ pub fn check_zone_active_publishes_reference_known_zones(
         .map(|zone_name| {
             InvariantViolation::new(
                 "active_publish_unknown_zone",
-                format!(
-                    "active_publishes entry '{}' does not reference a known zone",
-                    zone_name
-                ),
+                format!("active_publishes entry '{zone_name}' does not reference a known zone"),
             )
         })
         .collect()
@@ -1566,10 +1547,7 @@ pub fn check_sync_group_member_back_refs(graph: &SceneGraph) -> Vec<InvariantVio
             match graph.tiles.get(member_id) {
                 None => violations.push(InvariantViolation::new(
                     "sync_group_member_tile_missing",
-                    format!(
-                        "sync group {} member {} does not exist in tiles map",
-                        group_id, member_id
-                    ),
+                    format!("sync group {group_id} member {member_id} does not exist in tiles map"),
                 )),
                 Some(tile) if tile.sync_group != Some(*group_id) => {
                     violations.push(InvariantViolation::new(
@@ -1682,7 +1660,7 @@ mod tests {
         let mut graph = make_graph();
         graph.create_tab("Main", 0).unwrap();
         let v = check_all(&graph);
-        assert!(v.is_empty(), "single valid tab: {:?}", v);
+        assert!(v.is_empty(), "single valid tab: {v:?}");
     }
 
     /// WHEN two tiles on the same tab share z_order THEN duplicate_z_order fires.
@@ -2436,8 +2414,7 @@ mod tests {
         let v = check_node_count_per_tile(&graph);
         assert!(
             !v.is_empty(),
-            "expected node_count_per_tile_exceeds_limit, got {:?}",
-            v
+            "expected node_count_per_tile_exceeds_limit, got {v:?}"
         );
         assert_eq!(v[0].code, "node_count_per_tile_exceeds_limit");
     }
@@ -2617,7 +2594,7 @@ mod tests {
         };
         graph.set_tile_root(tile_id, root_node).expect("set root");
         let v = check_tile_node_count_within_lease_budget(&graph);
-        assert!(v.is_empty(), "1 node within budget must not fire: {:?}", v);
+        assert!(v.is_empty(), "1 node within budget must not fire: {v:?}");
     }
 
     // ── Timing — additional checks ─────────────────────────────────────────
@@ -2643,7 +2620,7 @@ mod tests {
             tile.expires_at = Some(2_000_000); // after present_at — valid
         }
         let v = check_tile_expires_at_after_present_at(&graph);
-        assert!(v.is_empty(), "valid expires_at must not fire: {:?}", v);
+        assert!(v.is_empty(), "valid expires_at must not fire: {v:?}");
     }
 
     // ── Zone registry — additional checks ──────────────────────────────────

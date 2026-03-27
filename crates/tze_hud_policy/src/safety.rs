@@ -264,8 +264,7 @@ mod tests {
                     reason: SafeModeEntryReason::GpuDeviceLost
                 }
             ),
-            "Expected SafeModeEntry(GpuDeviceLost), got {:?}",
-            signal
+            "Expected SafeModeEntry(GpuDeviceLost), got {signal:?}"
         );
         assert!(signal.should_short_circuit());
     }

@@ -392,7 +392,7 @@ mod tests {
 
     fn admit_resident(controller: &mut AdmissionController, name: &str) -> AdmissionOutcome {
         controller.admit_resident_default(
-            format!("session-{}", name),
+            format!("session-{name}"),
             name.to_string(),
             SceneId::new(),
         )
@@ -460,7 +460,7 @@ mod tests {
                     "should include a wait hint"
                 );
             }
-            other => panic!("expected ResourceExhausted, got {:?}", other),
+            other => panic!("expected ResourceExhausted, got {other:?}"),
         }
     }
 

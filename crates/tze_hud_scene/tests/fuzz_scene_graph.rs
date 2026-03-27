@@ -376,26 +376,25 @@ fn apply_fuzz_op(graph: &mut SceneGraph, oracle: &mut Oracle, op: &FuzzOp, idx: 
 
         FuzzOp::RevokeLease => {
             if let Some(lease_id) = oracle.random_lease(idx) {
-                if oracle.lease_ids.len() > 1 {
-                    if graph.revoke_lease(lease_id).is_ok() {
-                        oracle.lease_ids.retain(|&id| id != lease_id);
-                        // Revoking removes tiles owned by that lease.
-                        oracle
-                            .tile_ids
-                            .retain(|&tile_id| graph.tiles.contains_key(&tile_id));
-                        oracle
-                            .node_ids
-                            .retain(|&node_id| graph.nodes.contains_key(&node_id));
-                    }
+                if oracle.lease_ids.len() > 1 && graph.revoke_lease(lease_id).is_ok() {
+                    oracle.lease_ids.retain(|&id| id != lease_id);
+                    // Revoking removes tiles owned by that lease.
+                    oracle
+                        .tile_ids
+                        .retain(|&tile_id| graph.tiles.contains_key(&tile_id));
+                    oracle
+                        .node_ids
+                        .retain(|&node_id| graph.nodes.contains_key(&node_id));
                 }
             }
         }
 
         FuzzOp::CreateSyncGroup => {
             if oracle.sync_group_ids.len() < 4 {
-                match graph.create_sync_group(None, AGENT, SyncCommitPolicy::AvailableMembers, 0) {
-                    Ok(id) => oracle.sync_group_ids.push(id),
-                    Err(_) => {}
+                if let Ok(id) =
+                    graph.create_sync_group(None, AGENT, SyncCommitPolicy::AvailableMembers, 0)
+                {
+                    oracle.sync_group_ids.push(id)
                 }
             }
         }
@@ -748,9 +747,8 @@ fn test_100k_deterministic_tile_mutations() {
                         50.0,
                         50.0,
                     );
-                    match graph.create_tile(tab, "load.agent", lease, bounds, z) {
-                        Ok(id) => live_tiles.push_back(id),
-                        Err(_) => {}
+                    if let Ok(id) = graph.create_tile(tab, "load.agent", lease, bounds, z) {
+                        live_tiles.push_back(id)
                     }
                 }
             }

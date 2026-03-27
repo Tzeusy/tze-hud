@@ -1527,7 +1527,7 @@ fn make_stream_text_zone(name: &str) -> tze_hud_scene::types::ZoneDefinition {
     ZoneDefinition {
         id: SceneId::new(),
         name: name.to_string(),
-        description: format!("{} zone (test)", name),
+        description: format!("{name} zone (test)"),
         geometry_policy: GeometryPolicy::EdgeAnchored {
             edge: DisplayEdge::Bottom,
             height_pct: 0.10,
@@ -1759,8 +1759,7 @@ fn test_zone_publish_rejected_when_lease_orphaned() {
             result,
             Err(ValidationError::ZonePublishLeaseOrphaned { .. })
         ),
-        "zone publish from orphaned lease must return ZonePublishLeaseOrphaned, got: {:?}",
-        result
+        "zone publish from orphaned lease must return ZonePublishLeaseOrphaned, got: {result:?}"
     );
 
     // Existing publication must still be present (stale-badged)
@@ -1836,9 +1835,8 @@ fn test_budget_revocation_bypasses_grace_and_zero_footprint() {
 
     // Tiles still exist at t+0ms (pending 100ms free delay)
     // Note: initiate only marks for removal; finalize does the actual free.
-    assert_eq!(
+    assert!(
         specs[0].bypasses_grace_period(),
-        true,
         "budget policy revocation must bypass grace period"
     );
 
@@ -2022,7 +2020,7 @@ fn test_ttl_continues_during_orphan_state() {
     clock.advance(2_000);
     let ttl_at_2s = scene.leases[&lease_id].remaining_ms(clock.now_millis());
     assert!(
-        ttl_at_2s <= 8_100 && ttl_at_2s >= 7_900,
+        (7_900..=8_100).contains(&ttl_at_2s),
         "TTL ≈ 8,000ms at t=2s, got {ttl_at_2s}"
     );
 
@@ -2037,7 +2035,7 @@ fn test_ttl_continues_during_orphan_state() {
     let ttl_at_6s = scene.leases[&lease_id].remaining_ms(clock.now_millis());
     // TTL should be ≈ 4,000ms (10,000 - 6,000 elapsed)
     assert!(
-        ttl_at_6s <= 4_100 && ttl_at_6s >= 3_900,
+        (3_900..=4_100).contains(&ttl_at_6s),
         "TTL must continue running during orphan state: expected ≈4,000ms, got {ttl_at_6s}ms"
     );
 

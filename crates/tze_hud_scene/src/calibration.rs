@@ -463,13 +463,13 @@ static GPU_FACTORS: RwLock<(Option<f64>, Option<f64>)> = RwLock::new((None, None
 /// );
 /// ```
 pub fn test_budget(base_us: u64) -> u64 {
-    let cal = CALIBRATION.get_or_init(|| load_or_calibrate());
+    let cal = CALIBRATION.get_or_init(load_or_calibrate);
     scaled_budget(base_us, cal)
 }
 
 /// Get the current calibration result (runs calibration if needed).
 pub fn current_calibration() -> &'static CalibrationResult {
-    CALIBRATION.get_or_init(|| load_or_calibrate())
+    CALIBRATION.get_or_init(load_or_calibrate)
 }
 
 /// Get the current calibration result with GPU factors merged in.
@@ -481,10 +481,7 @@ pub fn current_calibration() -> &'static CalibrationResult {
 /// should treat as "uncalibrated" per the validation-framework spec.
 pub fn current_calibration_with_gpu() -> CalibrationResult {
     let base = current_calibration().clone();
-    let (gpu_fill, tex_upload) = GPU_FACTORS
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let (gpu_fill, tex_upload) = *GPU_FACTORS.read().unwrap_or_else(|e| e.into_inner());
     CalibrationResult {
         gpu_fill_factor: gpu_fill,
         texture_upload_factor: tex_upload,
@@ -634,8 +631,7 @@ mod tests {
 
         assert!(
             elapsed_ms < 500,
-            "calibration took {}ms, budget is 500ms",
-            elapsed_ms,
+            "calibration took {elapsed_ms}ms, budget is 500ms",
         );
     }
 

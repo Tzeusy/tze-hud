@@ -14,7 +14,7 @@
 use prost::Message;
 use tze_hud_protocol::proto::session::{
     BackpressureSignal, Heartbeat, LeaseResponse, MutationResult, RuntimeTelemetryFrame,
-    SceneSnapshot, SessionError, SessionEstablished, server_message::Payload as ServerPayload,
+    SceneSnapshot, SessionEstablished, server_message::Payload as ServerPayload,
 };
 use tze_hud_protocol::session_server::{SessionConfig, TrafficClass, classify_server_payload};
 

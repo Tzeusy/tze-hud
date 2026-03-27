@@ -226,7 +226,7 @@ pub fn build_redaction_cmds(bounds: Rect, style: RedactionStyle) -> Vec<ChromeDr
             // Pre-check: if the grid would exceed the cap, skip accent rects
             // entirely (the base fill above already covers the tile).
             let total_cells = cols as usize * rows as usize;
-            let accent_cells = (total_cells + 1) / 2; // ceil(total/2) worst-case
+            let accent_cells = total_cells.div_ceil(2); // ceil(total/2) worst-case
             if accent_cells <= MAX_PATTERN_ACCENT_RECTS {
                 for row in 0..rows {
                     for col in 0..cols {
@@ -354,8 +354,7 @@ mod tests {
         ] {
             assert!(
                 !is_tile_redacted(ViewerClass::Owner, cls),
-                "Owner must never be redacted (classification={:?})",
-                cls
+                "Owner must never be redacted (classification={cls:?})"
             );
         }
     }
@@ -391,8 +390,7 @@ mod tests {
         ] {
             assert!(
                 !is_tile_redacted(viewer, ContentClassification::Public),
-                "viewer {:?} must see Public",
-                viewer
+                "viewer {viewer:?} must see Public"
             );
             for cls in [
                 ContentClassification::Household,
@@ -401,9 +399,7 @@ mod tests {
             ] {
                 assert!(
                     is_tile_redacted(viewer, cls),
-                    "viewer {:?} must not see {:?}",
-                    viewer,
-                    cls
+                    "viewer {viewer:?} must not see {cls:?}"
                 );
             }
         }
@@ -634,8 +630,7 @@ mod tests {
         for i in 0..4 {
             assert!(
                 !frame.is_redacted(i),
-                "Owner must not have any tile redacted (tile {})",
-                i
+                "Owner must not have any tile redacted (tile {i})"
             );
         }
     }

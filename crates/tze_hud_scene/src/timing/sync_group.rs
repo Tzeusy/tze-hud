@@ -142,14 +142,12 @@ pub fn check_sync_group_ownership(
 ) -> Result<(), String> {
     if tile_namespace != agent_namespace {
         return Err(format!(
-            "agent '{}' is not permitted to add tile owned by '{}' to a sync group",
-            agent_namespace, tile_namespace
+            "agent '{agent_namespace}' is not permitted to add tile owned by '{tile_namespace}' to a sync group"
         ));
     }
     if group_namespace != agent_namespace {
         return Err(format!(
-            "agent '{}' is not permitted to modify sync group owned by '{}'",
-            agent_namespace, group_namespace
+            "agent '{agent_namespace}' is not permitted to modify sync group owned by '{group_namespace}'"
         ));
     }
     Ok(())

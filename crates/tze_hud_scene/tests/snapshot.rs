@@ -185,7 +185,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
     for name in all_names {
         let (graph, _spec) = registry
             .build(name, ClockMs::FIXED)
-            .unwrap_or_else(|| panic!("scene '{}' not found in registry", name));
+            .unwrap_or_else(|| panic!("scene '{name}' not found in registry"));
 
         // Should not panic
         let snap = graph.take_snapshot(WALL_US, MONO_US);
@@ -193,13 +193,11 @@ fn all_25_test_scenes_produce_valid_snapshots() {
         // Checksum must be populated and valid
         assert!(
             !snap.checksum.is_empty(),
-            "scene '{}': checksum must not be empty",
-            name
+            "scene '{name}': checksum must not be empty"
         );
         assert!(
             snap.verify_checksum(),
-            "scene '{}': checksum verification must pass",
-            name
+            "scene '{name}': checksum verification must pass"
         );
 
         // Sequence must be populated (u64, may be 0 for fresh scenes)
@@ -208,13 +206,11 @@ fn all_25_test_scenes_produce_valid_snapshots() {
         // Timestamps must be the values we passed
         assert_eq!(
             snap.snapshot_wall_us, WALL_US,
-            "scene '{}': wall_us mismatch",
-            name
+            "scene '{name}': wall_us mismatch"
         );
         assert_eq!(
             snap.snapshot_mono_us, MONO_US,
-            "scene '{}': mono_us mismatch",
-            name
+            "scene '{name}': mono_us mismatch"
         );
 
         // All tabs in the snapshot must match the graph's tabs (by ID)
@@ -224,8 +220,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
             graph.tabs.keys().copied().collect();
         assert_eq!(
             snap_tab_ids, graph_tab_ids,
-            "scene '{}': snapshot tabs must match graph tabs",
-            name
+            "scene '{name}': snapshot tabs must match graph tabs"
         );
 
         // All tiles in the snapshot must match the graph's tiles
@@ -235,8 +230,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
             graph.tiles.keys().copied().collect();
         assert_eq!(
             snap_tile_ids, graph_tile_ids,
-            "scene '{}': snapshot tiles must match graph tiles",
-            name
+            "scene '{name}': snapshot tiles must match graph tiles"
         );
 
         // All nodes in the snapshot must match the graph's nodes
@@ -246,8 +240,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
             graph.nodes.keys().copied().collect();
         assert_eq!(
             snap_node_ids, graph_node_ids,
-            "scene '{}': snapshot nodes must match graph nodes",
-            name
+            "scene '{name}': snapshot nodes must match graph nodes"
         );
 
         // Round-trip must be byte-identical
@@ -256,8 +249,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
         let json2 = deser.to_json().unwrap();
         assert_eq!(
             json1, json2,
-            "scene '{}': round-trip must produce byte-identical output",
-            name
+            "scene '{name}': round-trip must produce byte-identical output"
         );
 
         // Determinism: two snapshots of the same scene at the same timestamps must be identical
@@ -265,8 +257,7 @@ fn all_25_test_scenes_produce_valid_snapshots() {
         let json3 = snap2.to_json().unwrap();
         assert_eq!(
             json1, json3,
-            "scene '{}': two snapshots of the same scene must be byte-identical",
-            name
+            "scene '{name}': two snapshots of the same scene must be byte-identical"
         );
     }
 }

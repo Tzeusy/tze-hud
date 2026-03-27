@@ -1355,8 +1355,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(err, McpError::SceneError(_)),
-            "max_keys exceeded must return SceneError, got: {:?}",
-            err
+            "max_keys exceeded must return SceneError, got: {err:?}"
         );
     }
 
@@ -1414,8 +1413,7 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(err, McpError::SceneError(_)),
-            "StreamText publish to ShortTextWithIcon-only zone must return SceneError (media type mismatch), got: {:?}",
-            err
+            "StreamText publish to ShortTextWithIcon-only zone must return SceneError (media type mismatch), got: {err:?}"
         );
     }
 

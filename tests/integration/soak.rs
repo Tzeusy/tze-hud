@@ -216,7 +216,7 @@ async fn connect_soak_agent(
     lease_priority: u32,
     lease_ttl_ms: u64,
 ) -> Result<SoakAgentSession, Box<dyn std::error::Error>> {
-    let mut client = HudSessionClient::connect(format!("http://[::1]:{}", SOAK_GRPC_PORT)).await?;
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{SOAK_GRPC_PORT}")).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(128);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -230,7 +230,7 @@ async fn connect_soak_agent(
         payload: Some(session_proto::client_message::Payload::SessionInit(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
-                agent_display_name: format!("{} (soak test)", agent_id),
+                agent_display_name: format!("{agent_id} (soak test)"),
                 pre_shared_key: SOAK_PSK.to_string(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),
@@ -953,9 +953,8 @@ async fn test_post_disconnect_cleanup() -> Result<(), Box<dyn std::error::Error>
             fp.assert_zero()
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     format!(
-                        "post-disconnect cleanup failed: {}\n\
-                     If the lease TTL has not yet expired, increase CLEANUP_GRACE_MS.",
-                        e
+                        "post-disconnect cleanup failed: {e}\n\
+                     If the lease TTL has not yet expired, increase CLEANUP_GRACE_MS."
                     )
                     .into()
                 })?;
@@ -1079,9 +1078,8 @@ async fn test_lease_expiry_frees_resources() -> Result<(), Box<dyn std::error::E
         fp.assert_zero()
             .map_err(|e| -> Box<dyn std::error::Error> {
                 format!(
-                    "lease expiry cleanup failed: {}\n\
-                 Tiles/nodes/leases should reach zero after TTL expiry.",
-                    e
+                    "lease expiry cleanup failed: {e}\n\
+                 Tiles/nodes/leases should reach zero after TTL expiry."
                 )
                 .into()
             })?;
@@ -1105,7 +1103,7 @@ async fn connect_soak_agent_to(
     lease_ttl_ms: u64,
     grpc_port: u16,
 ) -> Result<SoakAgentSession, Box<dyn std::error::Error>> {
-    let mut client = HudSessionClient::connect(format!("http://[::1]:{}", grpc_port)).await?;
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{grpc_port}")).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(128);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -1118,7 +1116,7 @@ async fn connect_soak_agent_to(
         payload: Some(session_proto::client_message::Payload::SessionInit(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
-                agent_display_name: format!("{} (soak test)", agent_id),
+                agent_display_name: format!("{agent_id} (soak test)"),
                 pre_shared_key: SOAK_PSK.to_string(),
                 requested_capabilities: vec![
                     "create_tiles".to_string(),

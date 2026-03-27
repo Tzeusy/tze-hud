@@ -247,10 +247,7 @@ impl KeyboardProcessor {
     /// one targeting the tile (node_id = None). Returns `None` if the original
     /// dispatch was already tile-level.
     pub fn bubble_to_tile(&self, dispatch: KeyboardDispatch) -> Option<KeyboardDispatch> {
-        if dispatch.node_id.is_none() {
-            // Already at tile level; nothing to bubble to.
-            return None;
-        }
+        dispatch.node_id?;
         Some(KeyboardDispatch {
             namespace: dispatch.namespace,
             tile_id: dispatch.tile_id,

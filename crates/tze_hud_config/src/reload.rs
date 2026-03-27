@@ -297,8 +297,7 @@ redaction_style = "blank"
         let result = reload_config(toml);
         assert!(
             result.is_ok(),
-            "valid config should reload successfully, got: {:?}",
-            result
+            "valid config should reload successfully, got: {result:?}"
         );
         let hot = result.unwrap();
         // Privacy redaction_style should be reflected.
@@ -339,8 +338,7 @@ default_classification = "top_secret"
             errors
                 .iter()
                 .any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
-            "should return CONFIG_UNKNOWN_CLASSIFICATION, got: {:?}",
-            errors
+            "should return CONFIG_UNKNOWN_CLASSIFICATION, got: {errors:?}"
         );
     }
 

@@ -1217,8 +1217,7 @@ mod tests {
         // Allow up to 1 outlier (scheduler jitter).
         assert!(
             over_budget <= 1,
-            "{} of 100 iterations exceeded 100µs latency budget",
-            over_budget
+            "{over_budget} of 100 iterations exceeded 100µs latency budget"
         );
     }
 

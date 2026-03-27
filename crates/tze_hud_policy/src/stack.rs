@@ -290,8 +290,8 @@ impl ArbitrationStack {
                     code: ArbitrationErrorCode::CapabilityDenied,
                     agent_id: ctx.agent_namespace.clone(),
                     mutation_ref,
-                    message: format!("Missing required capability: '{}'", cap),
-                    hint: Some(format!("Required: '{}'", cap)),
+                    message: format!("Missing required capability: '{cap}'"),
+                    hint: Some(format!("Required: '{cap}'")),
                     level: ArbitrationLevel::Security.index(),
                 }));
             }

@@ -313,7 +313,7 @@ impl ResourceStore {
             .ok_or_else(|| ResourceError::InvalidChunk("no uploads in flight for agent".into()))?;
 
         let inflight = uploads.inflight.get_mut(&upload_id).ok_or_else(|| {
-            ResourceError::InvalidChunk(format!("unknown upload_id {:?}", upload_id))
+            ResourceError::InvalidChunk(format!("unknown upload_id {upload_id:?}"))
         })?;
 
         if chunk_index != inflight.next_chunk_index {
@@ -369,7 +369,7 @@ impl ResourceStore {
             })?;
 
             let inflight = uploads.inflight.remove(&upload_id).ok_or_else(|| {
-                ResourceError::InvalidChunk(format!("unknown upload_id {:?}", upload_id))
+                ResourceError::InvalidChunk(format!("unknown upload_id {upload_id:?}"))
             })?;
 
             let assembled = inflight.assemble();
@@ -422,6 +422,7 @@ impl ResourceStore {
 
     // ─── Internal: complete upload and store ──────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_upload(
         &self,
         data: Vec<u8>,

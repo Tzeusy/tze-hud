@@ -20,7 +20,7 @@
 //!    (same as `PointerDownEvent` in Stage 2).
 //! 2. Returns a `CommandDispatch` with `activate_pressed_state = true` so the
 //!    compositor thread can apply the `SceneLocalPatch`.
-//! Latency budget: `input_to_local_ack` p99 < 4ms (same as pointer).
+//!    Latency budget: `input_to_local_ack` p99 < 4ms (same as pointer).
 //!
 //! # NAVIGATE_NEXT with no focus (spec lines 323–326)
 //! When `action == CommandAction::NavigateNext` and focus is `FocusOwner::None`,
@@ -407,8 +407,7 @@ mod tests {
 
             assert!(
                 dispatch.is_some(),
-                "action {:?} should produce a CommandDispatch",
-                action
+                "action {action:?} should produce a CommandDispatch"
             );
             assert_eq!(dispatch.unwrap().event.action, action);
         }
@@ -596,8 +595,7 @@ mod tests {
 
             assert!(
                 result.is_some(),
-                "pointer-free equivalent '{}' must produce a dispatch",
-                label
+                "pointer-free equivalent '{label}' must produce a dispatch"
             );
         }
     }

@@ -425,13 +425,13 @@ mod tests {
         let limit = 2 * 1024 * 1024; // 2 MiB
         let mut cache = FontCache::new(limit);
 
-        cache.insert_agent(rid(0x01), 1 * 1024 * 1024);
-        cache.insert_agent(rid(0x02), 1 * 1024 * 1024);
+        cache.insert_agent(rid(0x01), 1024 * 1024);
+        cache.insert_agent(rid(0x02), 1024 * 1024);
         // Access rid(0x01) to make it more recent than rid(0x02) would be.
         cache.get(&FontCacheKey::Resource(rid(0x01)));
 
         // Insert a 3rd font: should evict rid(0x02) (least recently used).
-        cache.insert_agent(rid(0x03), 1 * 1024 * 1024);
+        cache.insert_agent(rid(0x03), 1024 * 1024);
 
         assert!(
             !cache.contains(&FontCacheKey::Resource(rid(0x02))),

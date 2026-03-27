@@ -196,7 +196,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert_eq!(tiles.len(), 2);
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -215,7 +215,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert_eq!(tiles, vec![t1]);
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -230,7 +230,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert!(tiles.is_empty());
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -253,7 +253,7 @@ mod tests {
                 assert!(tiles.contains(&t1));
                 assert!(tiles.contains(&t2));
             }
-            other => panic!("expected Commit, got {:?}", other),
+            other => panic!("expected Commit, got {other:?}"),
         }
     }
 
@@ -275,7 +275,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert!(tiles.is_empty(), "idle frame should produce empty Commit");
             }
-            other => panic!("expected empty Commit, got {:?}", other),
+            other => panic!("expected empty Commit, got {other:?}"),
         }
 
         // apply_decision should NOT increment deferral_count
@@ -336,7 +336,7 @@ mod tests {
                 assert!(committed_tiles.contains(&t1), "t1 should be committed");
                 assert!(discarded_tiles.contains(&t2), "t2 should be discarded");
             }
-            other => panic!("expected ForceCommit, got {:?}", other),
+            other => panic!("expected ForceCommit, got {other:?}"),
         }
         apply_decision(&mut group, &d3);
         assert_eq!(
@@ -375,7 +375,7 @@ mod tests {
             CommitDecision::Commit { tiles } => {
                 assert_eq!(tiles.len(), 2);
             }
-            other => panic!("expected Commit after recovery, got {:?}", other),
+            other => panic!("expected Commit after recovery, got {other:?}"),
         }
     }
 
@@ -402,7 +402,7 @@ mod tests {
                     "force-commit must emit SyncGroupForceCommitEvent"
                 );
             }
-            other => panic!("expected ForceCommit, got {:?}", other),
+            other => panic!("expected ForceCommit, got {other:?}"),
         }
     }
 

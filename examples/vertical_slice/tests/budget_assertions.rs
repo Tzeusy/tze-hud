@@ -304,10 +304,7 @@ async fn test_frame_time_p99_within_budget() {
         }
         CalibrationStatus::Uncalibrated { raw_p99 } => {
             // Already printed warning inside assert_p99_calibrated.
-            eprintln!(
-                "[UNCALIBRATED] frame_time raw_p99={}us; test is informational only",
-                raw_p99,
-            );
+            eprintln!("[UNCALIBRATED] frame_time raw_p99={raw_p99}us; test is informational only",);
         }
     }
 }
@@ -380,7 +377,7 @@ async fn test_input_to_local_ack_p99_within_budget() {
                     device_id: 0,
                     timestamp: None,
                 },
-                &mut *scene,
+                &mut scene,
             );
             (result.local_ack_us, result.hit_test_us)
         };
@@ -611,7 +608,7 @@ async fn test_hit_test_p99_within_budget() {
                     device_id: 0,
                     timestamp: None,
                 },
-                &mut *scene,
+                &mut scene,
             );
             result.hit_test_us
         };
@@ -871,8 +868,7 @@ async fn test_texture_upload_p99_within_budget() {
         }
         CalibrationStatus::Uncalibrated { raw_p99 } => {
             eprintln!(
-                "[UNCALIBRATED] texture_upload raw_p99={}us; test is informational only",
-                raw_p99,
+                "[UNCALIBRATED] texture_upload raw_p99={raw_p99}us; test is informational only",
             );
         }
     }

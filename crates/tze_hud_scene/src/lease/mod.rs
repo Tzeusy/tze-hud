@@ -393,7 +393,7 @@ pub mod tests {
         let remaining = lease.ttl_remaining_ms().expect("ttl after resume");
         // Should be ≈60_000ms remaining (suspension didn't count), within ±100ms
         assert!(
-            remaining >= 59_900 && remaining <= 60_100,
+            (59_900..=60_100).contains(&remaining),
             "expected ≈60_000ms remaining, got {remaining}"
         );
     }
@@ -485,7 +485,7 @@ pub mod tests {
         let remaining = lease.ttl_remaining_ms().expect("ttl after resume");
         // Should be ≈25_000ms (30_000 - 5_000 elapsed before suspension)
         assert!(
-            remaining >= 24_900 && remaining <= 25_100,
+            (24_900..=25_100).contains(&remaining),
             "ONE_SHOT: expected ≈25_000ms remaining, got {remaining}"
         );
     }
@@ -661,8 +661,7 @@ pub mod tests {
         ] {
             assert!(
                 !lease.can_transition_to(target),
-                "terminal lease should not transition to {:?}",
-                target
+                "terminal lease should not transition to {target:?}"
             );
         }
     }
@@ -684,7 +683,7 @@ pub mod tests {
         clock.advance(5_000);
         let dur = lease.suspension_duration_ms();
         assert!(
-            dur >= 4_900 && dur <= 5_100,
+            (4_900..=5_100).contains(&dur),
             "expected ≈5000ms, got {dur}ms"
         );
     }

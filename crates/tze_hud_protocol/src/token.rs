@@ -75,6 +75,7 @@ impl TokenStore {
     ///
     /// `token` must be cryptographically random and unique (e.g. UUIDv7 bytes).
     /// `grace_period_ms` is the duration from `now_ms` until the token expires.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &mut self,
         token: Vec<u8>,

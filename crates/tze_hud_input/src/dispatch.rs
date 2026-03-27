@@ -927,9 +927,7 @@ mod tests {
         // We use 1ms (1000µs) as the hard threshold
         assert!(
             stages_us < 1000,
-            "Stages 1+2 took {}µs, must be < 1ms (calibrated: {}µs)",
-            stages_us,
-            combined_budget_us,
+            "Stages 1+2 took {stages_us}µs, must be < 1ms (calibrated: {combined_budget_us}µs)",
         );
     }
 

@@ -382,8 +382,7 @@ mod tests {
         let errors = cfg.validate();
         assert!(
             errors.len() >= 2,
-            "expected at least 2 errors, got: {:?}",
-            errors
+            "expected at least 2 errors, got: {errors:?}"
         );
     }
 

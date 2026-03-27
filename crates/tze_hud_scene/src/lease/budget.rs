@@ -296,9 +296,7 @@ mod tests {
         };
         let warnings = check_budget_soft(&budget, &usage);
         assert!(
-            warnings
-                .iter()
-                .any(|w| *w == Some(BudgetDimension::TileCount)),
+            warnings.contains(&Some(BudgetDimension::TileCount)),
             "TileCount should be warned at 87.5%"
         );
     }
@@ -311,16 +309,14 @@ mod tests {
         let budget = default_budget(); // texture_bytes_total = 64 MiB
         // Use integer arithmetic: ceiling of (total * 4 / 5) ensures usage * 5 >= total * 4.
         let total = budget.texture_bytes_total;
-        let eighty_pct = (total * 4 + 4) / 5;
+        let eighty_pct = (total * 4).div_ceil(5);
         let usage = BudgetUsage {
             texture_bytes_used: eighty_pct,
             ..BudgetUsage::default()
         };
         let warnings = check_budget_soft(&budget, &usage);
         assert!(
-            warnings
-                .iter()
-                .any(|w| *w == Some(BudgetDimension::TextureBytes)),
+            warnings.contains(&Some(BudgetDimension::TextureBytes)),
             "TextureBytes should be warned at exactly 80% (used={eighty_pct}, total={total})"
         );
     }
@@ -377,8 +373,7 @@ mod tests {
         let result = check_budget_hard(&budget, &usage, &delta, u64::MAX);
         assert!(
             matches!(result, Err(BudgetHardViolation::TileCountExceeded { .. })),
-            "expected TileCountExceeded, got {:?}",
-            result
+            "expected TileCountExceeded, got {result:?}"
         );
     }
 
@@ -405,8 +400,7 @@ mod tests {
                     limit: 8
                 })
             ),
-            "9th tile must produce TileCountExceeded(current=9, limit=8): {:?}",
-            result
+            "9th tile must produce TileCountExceeded(current=9, limit=8): {result:?}"
         );
     }
 
@@ -429,8 +423,7 @@ mod tests {
                     limit: 32
                 })
             ),
-            "expected NodesPerTileExceeded(33, 32): {:?}",
-            result
+            "expected NodesPerTileExceeded(33, 32): {result:?}"
         );
     }
 
@@ -453,8 +446,7 @@ mod tests {
                 result,
                 Err(BudgetHardViolation::TextureBytesExceeded { .. })
             ),
-            "expected TextureBytesExceeded: {:?}",
-            result
+            "expected TextureBytesExceeded: {result:?}"
         );
     }
 
@@ -477,8 +469,7 @@ mod tests {
                 result,
                 Err(BudgetHardViolation::CriticalTextureOomAttempt { .. })
             ),
-            "expected CriticalTextureOomAttempt: {:?}",
-            result
+            "expected CriticalTextureOomAttempt: {result:?}"
         );
     }
 

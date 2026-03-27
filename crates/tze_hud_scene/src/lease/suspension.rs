@@ -506,7 +506,10 @@ mod tests {
 
         clock.advance(7_000);
         let dur = mgr.suspension_duration_ms(id);
-        assert!(dur >= 6_900 && dur <= 7_100, "expected ≈7_000ms, got {dur}");
+        assert!(
+            (6_900..=7_100).contains(&dur),
+            "expected ≈7_000ms, got {dur}"
+        );
     }
 
     #[test]

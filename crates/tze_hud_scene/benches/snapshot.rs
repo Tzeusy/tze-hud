@@ -51,7 +51,7 @@ fn build_dense_scene(tile_count: usize, nodes_per_tile: usize) -> SceneGraph {
         ],
     );
 
-    let cols = 10usize.max(1);
+    let cols = 10usize;
     for i in 0..tile_count {
         let col = (i % cols) as f32;
         let row = (i / cols) as f32;

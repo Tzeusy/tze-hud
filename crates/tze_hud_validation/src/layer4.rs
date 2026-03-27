@@ -132,7 +132,7 @@ pub struct SceneDescription {
 }
 
 /// Structured metrics for a single scene run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SceneMetrics {
     /// SSIM score vs golden (None if no golden was available).
     pub ssim_score: Option<f64>,
@@ -144,18 +144,6 @@ pub struct SceneMetrics {
     pub lease_violations: u32,
     /// Number of budget overruns.
     pub budget_overruns: u32,
-}
-
-impl Default for SceneMetrics {
-    fn default() -> Self {
-        Self {
-            ssim_score: None,
-            frames_rendered: None,
-            frame_time_p99_us: None,
-            lease_violations: 0,
-            budget_overruns: 0,
-        }
-    }
 }
 
 /// All inputs needed to generate a per-scene artifact directory.
@@ -351,7 +339,7 @@ impl ArtifactBuilder {
         let branch = branch.into();
         let timestamp = current_timestamp_str();
         let safe_branch = sanitise_branch_name(&branch);
-        let run_id = format!("{}-{}", timestamp, safe_branch);
+        let run_id = format!("{timestamp}-{safe_branch}");
         let run_dir = output_root.as_ref().join(&run_id);
 
         std::fs::create_dir_all(run_dir.join("scenes"))
@@ -1094,10 +1082,7 @@ fn current_timestamp_str() -> String {
     let days = secs / 86_400;
     let (year, month, day) = days_to_date(days);
 
-    format!(
-        "{:04}{:02}{:02}-{:02}{:02}{:02}",
-        year, month, day, hour, minute, second
-    )
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
 }
 
 /// Return the current UTC timestamp as an ISO-8601 string.
@@ -1113,10 +1098,7 @@ fn timestamp_iso8601() -> String {
     let second = sec_of_day % 60;
     let days = secs / 86_400;
     let (year, month, day) = days_to_date(days);
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, minute, second
-    )
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 /// Convert days since Unix epoch (1970-01-01) to (year, month, day).

@@ -48,6 +48,12 @@ pub struct WarnOnce {
     warned: bool,
 }
 
+impl Default for WarnOnce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WarnOnce {
     pub const fn new() -> Self {
         Self { warned: false }

@@ -441,8 +441,7 @@ mod tests {
                 // p95 of the mixed window drops below 12ms.
                 assert!(
                     i >= 28,
-                    "recovery should not happen before the window has mostly 10ms frames (i={})",
-                    i
+                    "recovery should not happen before the window has mostly 10ms frames (i={i})"
                 );
                 recovered = true;
                 break;

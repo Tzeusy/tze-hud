@@ -307,7 +307,7 @@ pub mod tests {
             let hash = make_hash(rt as u8);
             let result =
                 store.upload_inline("agent_a", hash, rt, b"data".to_vec(), &cap_with_upload());
-            assert!(result.is_ok(), "v1 type {:?} should be accepted", rt);
+            assert!(result.is_ok(), "v1 type {rt:?} should be accepted");
         }
     }
 
@@ -355,7 +355,7 @@ pub mod tests {
         for i in 0..4u8 {
             let token = store
                 .upload_start("agent_a", make_hash(i), ResourceType::ImagePng, 100, &caps)
-                .expect(&format!("upload {} should succeed", i));
+                .unwrap_or_else(|_| panic!("upload {i} should succeed"));
             tokens.push(token);
         }
         assert_eq!(store.in_flight_uploads("agent_a"), 4);

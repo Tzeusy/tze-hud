@@ -369,8 +369,7 @@ mod attention_eval_tests {
                     ..
                 }
             ),
-            "Agent budget exhausted must coalesce; got {:?}",
-            decision
+            "Agent budget exhausted must coalesce; got {decision:?}"
         );
     }
 
@@ -387,8 +386,7 @@ mod attention_eval_tests {
                 &decision,
                 AttentionDecision::Coalesce { per_zone: true, .. }
             ),
-            "Zone budget exhausted must coalesce; got {:?}",
-            decision
+            "Zone budget exhausted must coalesce; got {decision:?}"
         );
     }
 

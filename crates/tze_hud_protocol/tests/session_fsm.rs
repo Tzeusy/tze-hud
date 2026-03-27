@@ -156,7 +156,7 @@ fn all_states_have_labels() {
     ];
     for s in &states {
         let label = s.label();
-        assert!(!label.is_empty(), "State {:?} must have non-empty label", s);
+        assert!(!label.is_empty(), "State {s:?} must have non-empty label");
     }
 }
 

@@ -175,7 +175,7 @@ pub fn shedding_order(tiles: &[TileSheddingEntry], count: usize) -> Vec<usize> {
 
 /// Compute the shed count for ~25% of `total` tiles (rounded up, min 0).
 pub fn shed_count_for_level4(total: usize) -> usize {
-    (total + 3) / 4
+    total.div_ceil(4)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

@@ -117,14 +117,14 @@ fn build_valid_scene(params: &ValidSceneParams) -> SceneGraph {
     let mut graph = SceneGraph::new(1920.0, 1080.0);
 
     for tab_idx in 0..params.tab_count {
-        let tab_name = format!("Tab{}", tab_idx);
+        let tab_name = format!("Tab{tab_idx}");
         let tab_id = graph
             .create_tab(&tab_name, tab_idx as u32)
             .expect("create_tab failed in build_valid_scene");
 
         // Create a fresh lease per tab to avoid budget pressure from multiple tabs.
         let lease_id = graph.grant_lease(
-            &format!("agent.t{}", tab_idx),
+            &format!("agent.t{tab_idx}"),
             300_000,
             vec![Capability::CreateTile],
         );
@@ -140,7 +140,7 @@ fn build_valid_scene(params: &ValidSceneParams) -> SceneGraph {
             let tile_id = graph
                 .create_tile(
                     tab_id,
-                    &format!("agent.t{}", tab_idx),
+                    &format!("agent.t{tab_idx}"),
                     lease_id,
                     bounds,
                     z_order,

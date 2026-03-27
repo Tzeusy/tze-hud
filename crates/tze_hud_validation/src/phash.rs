@@ -174,13 +174,13 @@ fn dct1d_8(input: &[f64], output: &mut [f64]) {
     debug_assert_eq!(input.len(), 8);
     debug_assert_eq!(output.len(), 8);
 
-    for k in 0..8usize {
+    for (k, out) in output.iter_mut().enumerate() {
         let mut sum = 0.0f64;
-        for n in 0..8usize {
+        for (n, &inp) in input.iter().enumerate() {
             let angle = std::f64::consts::PI * k as f64 * (2 * n + 1) as f64 / 16.0;
-            sum += input[n] * angle.cos();
+            sum += inp * angle.cos();
         }
-        output[k] = sum;
+        *out = sum;
     }
 }
 

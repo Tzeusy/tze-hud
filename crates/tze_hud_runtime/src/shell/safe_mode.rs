@@ -593,7 +593,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, RwLock};
     use tokio::sync::Mutex;
-    use tze_hud_protocol::session::{RuntimeDegradationLevel, SessionRegistry, SharedState};
+    use tze_hud_protocol::session::{SessionRegistry, SharedState};
     use tze_hud_protocol::token::TokenStore;
     use tze_hud_scene::graph::SceneGraph;
     use tze_hud_scene::types::LeaseState;
@@ -988,8 +988,7 @@ mod tests {
             assert_eq!(
                 classify_safe_mode_input(input, false),
                 SafeModeInputResult::PassThrough,
-                "input {:?} must pass through when safe mode is inactive",
-                input
+                "input {input:?} must pass through when safe mode is inactive"
             );
         }
     }

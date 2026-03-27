@@ -10,9 +10,9 @@
 //! - `focus_tree` — per-tab focus tree data structure and history
 //! - `focus`      — focus manager (lifecycle, cycling, events, ring metadata)
 //! - `keyboard`   — keyboard event types and dispatch (KeyDownEvent, KeyUpEvent,
-//!                  CharacterEvent) per RFC 0004 §7.4
+//!   CharacterEvent) per RFC 0004 §7.4
 //! - `command`    — abstract command input model (NAVIGATE_NEXT … SCROLL_DOWN)
-//!                  per RFC 0004 §10
+//!   per RFC 0004 §10
 //! - [`pointer`] — rich pointer event types (PointerDownEvent, ClickEvent, etc.)
 //! - [`events`] — HitTestResult, RouteTarget, SceneLocalPatch, InputEnvelope, EventBatch
 //! - [`hit_test`] — headless-testable hit-test pipeline

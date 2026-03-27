@@ -372,10 +372,6 @@ pub fn frame_ready_channel() -> (FrameReadyTx, FrameReadyRx) {
 
 // ─── Convenience bundle ───────────────────────────────────────────────────────
 
-/// Placeholder types for the per-channel message payloads.
-/// Real message types come from `tze_hud_scene` and `tze_hud_telemetry`;
-/// the channel module just wires the topology.
-
 /// An OS input event drained from the winit event loop.
 #[derive(Debug, Clone)]
 pub struct InputEvent {

@@ -195,8 +195,7 @@ fn find_doctrine_hint(value: &str) -> String {
     for (doctrine, canonical) in DOCTRINE_TO_CANONICAL {
         if lower == *doctrine {
             return format!(
-                "use the canonical InterruptionClass name {:?} instead of doctrine name {:?}",
-                canonical, value
+                "use the canonical InterruptionClass name {canonical:?} instead of doctrine name {value:?}"
             );
         }
     }
@@ -313,8 +312,7 @@ mod tests {
                 .collect();
             assert!(
                 cls_errors.is_empty(),
-                "classification {:?} should be valid",
-                cls
+                "classification {cls:?} should be valid"
             );
         }
     }
@@ -348,11 +346,7 @@ mod tests {
                 .iter()
                 .filter(|e| matches!(e.code, ConfigErrorCode::UnknownViewerClass))
                 .collect();
-            assert!(
-                vc_errors.is_empty(),
-                "viewer class {:?} should be valid",
-                vc
-            );
+            assert!(vc_errors.is_empty(), "viewer class {vc:?} should be valid");
         }
     }
 
@@ -385,8 +379,7 @@ mod tests {
         let hint = &ptc_errors[0].hint;
         assert!(
             hint.contains("HIGH"),
-            "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {:?}",
-            hint
+            "hint for 'urgent' must suggest canonical name 'HIGH' (RFC 0010 §3.1), got: {hint:?}"
         );
     }
 
@@ -408,8 +401,7 @@ mod tests {
                 .collect();
             assert!(
                 ptc_errors.is_empty(),
-                "pass_through_class {:?} should be valid",
-                ptc
+                "pass_through_class {ptc:?} should be valid"
             );
         }
     }

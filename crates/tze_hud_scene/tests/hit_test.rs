@@ -196,15 +196,14 @@ fn chrome_layer_wins_over_content_tile() {
             // Both are valid per spec; assert it's not a content-layer node.
             let _ = element_id;
         }
-        other => panic!("expected Chrome, got {:?}", other),
+        other => panic!("expected Chrome, got {other:?}"),
     }
 
     // Point outside chrome tile — should return NodeHit from content tile.
     let result = scene.hit_test(100.0, 500.0);
     assert!(
         result.is_node_hit(),
-        "expected NodeHit outside chrome area, got {:?}",
-        result
+        "expected NodeHit outside chrome area, got {result:?}"
     );
 }
 
@@ -228,8 +227,7 @@ fn chrome_tile_at_low_z_still_wins() {
     let result = scene.hit_test(100.0, 25.0);
     assert!(
         result.is_chrome(),
-        "chrome must win regardless of z, got {:?}",
-        result
+        "chrome must win regardless of z, got {result:?}"
     );
 }
 
@@ -674,8 +672,7 @@ fn layer0_invariants_input_highlight() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "input_highlight: Layer 0 violations: {:?}",
-            violations
+            "input_highlight: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -687,8 +684,7 @@ fn layer0_invariants_overlay_passthrough_regions() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "overlay_passthrough_regions: Layer 0 violations: {:?}",
-            violations
+            "overlay_passthrough_regions: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -700,8 +696,7 @@ fn layer0_invariants_overlapping_tiles_zorder() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "overlapping_tiles_zorder: Layer 0 violations: {:?}",
-            violations
+            "overlapping_tiles_zorder: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -713,8 +708,7 @@ fn layer0_invariants_chatty_dashboard_touch() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "chatty_dashboard_touch: Layer 0 violations: {:?}",
-            violations
+            "chatty_dashboard_touch: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -726,8 +720,7 @@ fn layer0_invariants_three_agents_contention() {
         let violations = assert_layer0_invariants(&graph);
         assert!(
             violations.is_empty(),
-            "three_agents_contention: Layer 0 violations: {:?}",
-            violations
+            "three_agents_contention: Layer 0 violations: {violations:?}"
         );
     }
 }
@@ -747,8 +740,7 @@ fn input_highlight_hit_test_on_button() {
     let result = graph.hit_test(600.0, 350.0);
     assert!(
         result.is_node_hit(),
-        "expected NodeHit on button area, got {:?}",
-        result
+        "expected NodeHit on button area, got {result:?}"
     );
     if let HitResult::NodeHit { interaction_id, .. } = &result {
         assert_eq!(interaction_id, "primary-button");
@@ -772,8 +764,7 @@ fn overlay_passthrough_skips_passthrough_tile() {
     let result = graph.hit_test(500.0, 500.0);
     assert!(
         result.is_node_hit(),
-        "should hit content area through passthrough, got {:?}",
-        result
+        "should hit content area through passthrough, got {result:?}"
     );
     if let HitResult::NodeHit { interaction_id, .. } = &result {
         assert_eq!(interaction_id, "content-area", "expected content-area hit");

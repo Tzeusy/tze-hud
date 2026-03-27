@@ -466,20 +466,20 @@ impl<C: Clock> LeaseStateMachine<C> for LeaseImpl<C> {
         if self.state.is_terminal() {
             return false;
         }
-        match (self.state, target) {
-            (Requested, Active) => true,
-            (Requested, Denied) => true,
-            (Active, Suspended) => true,
-            (Active, Orphaned) => true,
-            (Active, Expired) => true,
-            (Active, Revoked) => true,
-            (Active, Released) => true,
-            (Suspended, Active) => true,
-            (Suspended, Revoked) => true,
-            (Orphaned, Active) => true,
-            (Orphaned, Expired) => true,
-            _ => false,
-        }
+        matches!(
+            (self.state, target),
+            (Requested, Active)
+                | (Requested, Denied)
+                | (Active, Suspended)
+                | (Active, Orphaned)
+                | (Active, Expired)
+                | (Active, Revoked)
+                | (Active, Released)
+                | (Suspended, Active)
+                | (Suspended, Revoked)
+                | (Orphaned, Active)
+                | (Orphaned, Expired)
+        )
     }
 
     fn budget_tier(&self) -> BudgetTier {

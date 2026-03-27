@@ -93,17 +93,11 @@ NOTES:
     layout. CLI flags override individual settings from the config file.
     Passing --config with a path that does not exist is an error.
 "#,
-        BIN_NAME = BIN_NAME,
-        VERSION = VERSION,
     );
 }
 
 fn print_version() {
-    println!(
-        "{BIN_NAME} {VERSION}",
-        BIN_NAME = BIN_NAME,
-        VERSION = VERSION
-    );
+    println!("{BIN_NAME} {VERSION}");
 }
 
 /// Parsed startup options.

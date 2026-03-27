@@ -319,7 +319,7 @@ mod tests {
         let mut assembler = EventBatchAssembler::new();
         // Simulate a dense frame: 50 agents × 8 events each
         for agent_idx in 0..50 {
-            let ns = format!("agent_{}", agent_idx);
+            let ns = format!("agent_{agent_idx}");
             for event_idx in 0..8u64 {
                 let ts = agent_idx as u64 * 1000 + event_idx * 100;
                 assembler.push(&ns, make_down(ts));
@@ -336,9 +336,7 @@ mod tests {
         let dispatch_budget = test_budget(budgets::EVENT_DISPATCH_BUDGET_US);
         assert!(
             elapsed_us < dispatch_budget,
-            "assemble_frame took {}µs, calibrated budget is {}µs",
-            elapsed_us,
-            dispatch_budget,
+            "assemble_frame took {elapsed_us}µs, calibrated budget is {dispatch_budget}µs",
         );
     }
 }

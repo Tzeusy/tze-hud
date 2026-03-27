@@ -193,7 +193,7 @@ async fn connect_agent(
     lease_priority: u32,
     capabilities: Vec<String>,
 ) -> Result<AgentSession, Box<dyn std::error::Error>> {
-    let mut client = HudSessionClient::connect(format!("http://[::1]:{}", GRPC_PORT)).await?;
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{GRPC_PORT}")).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -207,7 +207,7 @@ async fn connect_agent(
         payload: Some(session_proto::client_message::Payload::SessionInit(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
-                agent_display_name: format!("{} (integration test)", agent_id),
+                agent_display_name: format!("{agent_id} (integration test)"),
                 pre_shared_key: TEST_PSK.to_string(),
                 requested_capabilities: capabilities.clone(),
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
@@ -558,8 +558,7 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // Stack policy: both publishes must be present
     assert!(
         notification_count >= 2,
-        "notification-area (Stack) must have >= 2 active entries, got {}",
-        notification_count
+        "notification-area (Stack) must have >= 2 active entries, got {notification_count}"
     );
 
     // ── Phase 4: Zone contention — agent C publishes to subtitle (LatestWins) ─
@@ -602,13 +601,11 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
 
     assert_eq!(
         subtitle_count, 1,
-        "subtitle (LatestWins) must have exactly 1 active entry, got {}",
-        subtitle_count
+        "subtitle (LatestWins) must have exactly 1 active entry, got {subtitle_count}"
     );
     assert!(
         subtitle_text.contains("latest"),
-        "subtitle LatestWins must retain the most recent publish, got: '{}'",
-        subtitle_text
+        "subtitle LatestWins must retain the most recent publish, got: '{subtitle_text}'"
     );
 
     // ── Phase 5: Namespace isolation verification ───────────────────────────
@@ -645,13 +642,13 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
         let notif = scene
             .zone_registry
             .active_for_zone("notification-area")
-            .into_iter()
+            .iter()
             .filter(|r| r.publisher_namespace == agent_a.namespace)
             .count();
         let sub = scene
             .zone_registry
             .active_for_zone("subtitle")
-            .into_iter()
+            .iter()
             .filter(|r| r.publisher_namespace == agent_a.namespace)
             .count();
         notif + sub
@@ -714,16 +711,12 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
     // We assert the relative ordering holds regardless.
     assert!(
         prio_a <= prio_b,
-        "agent-weather priority ({}) must be <= agent-notifications priority ({}); \
-         lower number = higher priority",
-        prio_a,
-        prio_b
+        "agent-weather priority ({prio_a}) must be <= agent-notifications priority ({prio_b}); \
+         lower number = higher priority"
     );
     assert!(
         prio_b <= prio_c,
-        "agent-notifications priority ({}) must be <= agent-media priority ({})",
-        prio_b,
-        prio_c
+        "agent-notifications priority ({prio_b}) must be <= agent-media priority ({prio_c})"
     );
 
     // Verify priority-sorted tile shedding order: agent-media tiles shed first,
@@ -1004,12 +997,11 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
                 .leases
                 .values()
                 .find(|l| &l.namespace == ns)
-                .unwrap_or_else(|| panic!("lease for {} must exist", label));
+                .unwrap_or_else(|| panic!("lease for {label} must exist"));
             assert_eq!(
                 lease.state,
                 LeaseState::Active,
-                "{} lease must be Active at end of test",
-                label
+                "{label} lease must be Active at end of test"
             );
         }
 
@@ -1021,11 +1013,10 @@ async fn test_three_agents_contention() -> Result<(), Box<dyn std::error::Error>
         );
 
         // Scene graph invariants must hold
-        let violations = tze_hud_scene::test_scenes::assert_layer0_invariants(&*scene);
+        let violations = tze_hud_scene::test_scenes::assert_layer0_invariants(&scene);
         assert!(
             violations.is_empty(),
-            "Layer 0 invariants violated after multi-agent test: {:?}",
-            violations
+            "Layer 0 invariants violated after multi-agent test: {violations:?}"
         );
     }
 
@@ -1222,8 +1213,7 @@ fn test_three_agents_contention_scene_registry() {
     let violations = tze_hud_scene::test_scenes::assert_layer0_invariants(&graph);
     assert!(
         violations.is_empty(),
-        "Layer 0 invariants must hold for three_agents_contention: {:?}",
-        violations
+        "Layer 0 invariants must hold for three_agents_contention: {violations:?}"
     );
 }
 
@@ -1242,8 +1232,7 @@ fn test_zone_conflict_two_publishers_scene_registry() {
     let violations = tze_hud_scene::test_scenes::assert_layer0_invariants(&graph);
     assert!(
         violations.is_empty(),
-        "Layer 0 invariants must hold for zone_conflict_two_publishers: {:?}",
-        violations
+        "Layer 0 invariants must hold for zone_conflict_two_publishers: {violations:?}"
     );
 }
 
@@ -1262,7 +1251,6 @@ fn test_zone_publish_subtitle_scene_registry() {
     let violations = tze_hud_scene::test_scenes::assert_layer0_invariants(&graph);
     assert!(
         violations.is_empty(),
-        "Layer 0 invariants must hold for zone_publish_subtitle: {:?}",
-        violations
+        "Layer 0 invariants must hold for zone_publish_subtitle: {violations:?}"
     );
 }

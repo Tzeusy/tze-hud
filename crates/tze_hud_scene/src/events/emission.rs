@@ -84,6 +84,7 @@ impl AgentEventRateLimiter {
     ///
     /// Callers should pass `Instant::now()` for `now` in production code.
     /// For deterministic testing, pass a synthetic `Instant` value.
+    #[allow(clippy::result_unit_err)] // unit error is intentional: rate-limit is binary (ok/throttled)
     pub fn check_and_record(&mut self, now: Instant) -> Result<(), ()> {
         // Prune events that have left the 1-second window.
         while let Some(&front) = self.timestamps.front() {

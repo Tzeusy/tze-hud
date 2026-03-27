@@ -45,9 +45,10 @@ pub const GRACE_PRECISION_MS: u64 = 100;
 ///   (lines 231–233, adapted).
 /// - `BudgetWarning`: amber border for budget ≥ 80% (line 170).
 /// - `None`: normal rendering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum TileVisualHint {
     /// Tile renders normally.
+    #[default]
     None,
     /// Agent is disconnected; tile is frozen at last state.
     /// Displayed within 1 frame of `disconnect` (spec line 133).
@@ -57,12 +58,6 @@ pub enum TileVisualHint {
     StaleBadge,
     /// Budget soft limit (≥ 80%) reached; amber border.
     BudgetWarning,
-}
-
-impl Default for TileVisualHint {
-    fn default() -> Self {
-        TileVisualHint::None
-    }
 }
 
 // ─── GracePeriodTimer ────────────────────────────────────────────────────────
@@ -315,8 +310,7 @@ mod tests {
             assert_eq!(
                 check_zone_publish_allowed(state),
                 ZonePublishResult::RejectedLeaseTerminal,
-                "expected RejectedLeaseTerminal for {:?}",
-                state
+                "expected RejectedLeaseTerminal for {state:?}"
             );
         }
     }

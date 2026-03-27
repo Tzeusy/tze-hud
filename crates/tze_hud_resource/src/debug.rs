@@ -127,8 +127,7 @@ mod tests {
             .collect();
         assert!(
             invalid_chars.is_empty(),
-            "ResourceId hex contains invalid characters: {:?}; full: {s}",
-            invalid_chars
+            "ResourceId hex contains invalid characters: {invalid_chars:?}; full: {s}"
         );
     }
 

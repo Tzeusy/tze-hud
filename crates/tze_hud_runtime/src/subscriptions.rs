@@ -111,10 +111,7 @@ impl Subscription {
         if let Some(default_prefix) = category_prefix(&category) {
             assert!(
                 filter.starts_with(default_prefix),
-                "filter_prefix {:?} does not start with category {:?} default prefix {:?}",
-                filter,
-                category,
-                default_prefix,
+                "filter_prefix {filter:?} does not start with category {category:?} default prefix {default_prefix:?}",
             );
         }
         Self {

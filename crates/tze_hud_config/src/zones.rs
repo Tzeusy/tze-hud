@@ -160,8 +160,7 @@ mod tests {
         for zone_type in BUILTIN_ZONE_TYPES {
             assert!(
                 is_known_zone_type(zone_type, &[]),
-                "built-in zone type {:?} should be known",
-                zone_type
+                "built-in zone type {zone_type:?} should be known"
             );
         }
     }
@@ -221,8 +220,7 @@ mod tests {
         for zt in expected.iter() {
             assert!(
                 BUILTIN_ZONE_TYPES.contains(zt),
-                "expected built-in zone type {:?} to be in BUILTIN_ZONE_TYPES",
-                zt
+                "expected built-in zone type {zt:?} to be in BUILTIN_ZONE_TYPES"
             );
         }
         assert_eq!(
@@ -270,9 +268,7 @@ mod unit_tests {
             validate_tab_zone_references(&raw, &mut errors);
             assert!(
                 errors.is_empty(),
-                "built-in zone type {:?} should be accepted, got errors: {:?}",
-                builtin,
-                errors
+                "built-in zone type {builtin:?} should be accepted, got errors: {errors:?}"
             );
         }
     }
@@ -284,8 +280,7 @@ mod unit_tests {
         validate_tab_zone_references(&raw, &mut errors);
         assert!(
             errors.is_empty(),
-            "custom zone type defined in [zones] should be accepted, got errors: {:?}",
-            errors
+            "custom zone type defined in [zones] should be accepted, got errors: {errors:?}"
         );
     }
 
@@ -298,8 +293,7 @@ mod unit_tests {
             errors
                 .iter()
                 .any(|e| matches!(e.code, ConfigErrorCode::UnknownZoneType)),
-            "unknown zone type should produce CONFIG_UNKNOWN_ZONE_TYPE, got: {:?}",
-            errors
+            "unknown zone type should produce CONFIG_UNKNOWN_ZONE_TYPE, got: {errors:?}"
         );
     }
 
@@ -324,8 +318,7 @@ mod unit_tests {
         validate_tab_zone_references(&raw, &mut errors);
         assert!(
             errors.is_empty(),
-            "mix of builtin and defined custom zones should be accepted, got errors: {:?}",
-            errors
+            "mix of builtin and defined custom zones should be accepted, got errors: {errors:?}"
         );
     }
 
@@ -334,8 +327,7 @@ mod unit_tests {
         for builtin in BUILTIN_ZONE_TYPES {
             assert!(
                 is_builtin_zone_type(builtin),
-                "is_builtin_zone_type({:?}) should return true",
-                builtin
+                "is_builtin_zone_type({builtin:?}) should return true"
             );
         }
     }

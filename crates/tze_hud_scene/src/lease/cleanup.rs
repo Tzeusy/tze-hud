@@ -269,8 +269,7 @@ mod tests {
         ] {
             assert!(
                 !kind.bypasses_grace_period(),
-                "{:?} should not bypass grace period",
-                kind
+                "{kind:?} should not bypass grace period"
             );
         }
     }
@@ -355,7 +354,7 @@ mod tests {
             LeaseState::Denied,
         ] {
             let sweep = ZonePublicationSweep::new(dummy_lease(), "ns", state);
-            assert!(sweep.should_clear(), "{:?} must trigger zone clear", state);
+            assert!(sweep.should_clear(), "{state:?} must trigger zone clear");
         }
     }
 
@@ -372,8 +371,7 @@ mod tests {
             let sweep = ZonePublicationSweep::new(dummy_lease(), "ns", state);
             assert!(
                 !sweep.should_clear(),
-                "{:?} must NOT trigger zone clear",
-                state
+                "{state:?} must NOT trigger zone clear"
             );
         }
     }

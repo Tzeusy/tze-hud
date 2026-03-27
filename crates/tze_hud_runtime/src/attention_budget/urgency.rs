@@ -170,8 +170,7 @@ mod tests {
             assert_eq!(
                 result,
                 UrgencyRecord::Ok,
-                "event {} should be under threshold",
-                i
+                "event {i} should be under threshold"
             );
         }
         // 4 events, threshold is 4 — still Ok (needs > 4 to warn).

@@ -26,8 +26,8 @@
 //!     (window captures the event).
 //!   - When the cursor is **outside** all hit-regions → `set_cursor_hittest(false)`
 //!     (event passes through to the desktop).
-//!   This gives the same semantic as the XShape extension / wlr-layer-shell approach
-//!   while using winit's cross-platform API.
+//!     This gives the same semantic as the XShape extension / wlr-layer-shell approach
+//!     while using winit's cross-platform API.
 //!
 //! ## GNOME Wayland fallback (spec §Unsupported overlay fallback, line 185)
 //!
@@ -175,6 +175,7 @@ impl Default for WindowedConfig {
 ///
 /// All fields are `Arc`-wrapped or `Send` so the app handler can be moved into
 /// the winit event loop.
+#[allow(dead_code)] // several fields are read by the compositor/shutdown path; not all are used yet
 struct WindowedRuntimeState {
     config: WindowedConfig,
     /// Compositor thread handle (stored so it can be joined on shutdown).
@@ -686,7 +687,7 @@ impl WinitApp {
                 let _result = self
                     .state
                     .input_processor
-                    .process(&pointer_event, &mut *scene);
+                    .process(&pointer_event, &mut scene);
             }
             // Local feedback patch (_result.local_patch) would be sent to the
             // compositor via a local-patch channel in the full pipeline. For the
@@ -702,6 +703,7 @@ impl WinitApp {
     ///
     /// No-op in fullscreen mode (all events are always captured; hit-regions
     /// are not consulted).
+    #[allow(dead_code)] // public API; callers will be added as overlay integration lands
     pub fn set_hit_regions(&mut self, regions: Vec<HitRegion>) {
         if self.state.effective_mode == WindowMode::Fullscreen {
             return; // Hit-regions unused in fullscreen mode.
@@ -717,6 +719,7 @@ impl WinitApp {
     ///
     /// Per spec §Window Modes (line 173): "Runtime mode switching MUST be
     /// supported but is a disruptive operation requiring surface recreation."
+    #[allow(dead_code)] // public API; callers will be added as mode-switching UI lands
     pub fn request_mode_switch(&mut self, new_mode: WindowMode) {
         if new_mode == self.state.effective_mode {
             tracing::debug!(mode = %new_mode, "mode switch no-op: already in requested mode");
@@ -1142,14 +1145,7 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
             // Parse hot-reloadable sections from the same TOML so the initial
             // privacy/degradation/chrome/dynamic_policy settings take effect
             // immediately (before the first SIGHUP).
-            let hot = match tze_hud_config::reload_config(toml_src) {
-                Ok(h) => h,
-                Err(_) => {
-                    // Validation already passed above; this should not happen.
-                    // Fall back to defaults for hot sections if it does.
-                    tze_hud_config::HotReloadableConfig::default()
-                }
-            };
+            let hot = tze_hud_config::reload_config(toml_src).unwrap_or_default();
 
             tracing::info!(
                 profile = %resolved.profile.name,
@@ -1186,6 +1182,7 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
 ///
 /// Returns `Err` if the `NetworkRuntime` Tokio runtime cannot be created, or if
 /// the gRPC server address fails to parse.
+#[allow(clippy::type_complexity)] // return type is self-documenting in this internal helper
 fn start_network_services(
     grpc_port: u16,
     psk: &str,

@@ -200,7 +200,7 @@ fn now_iso8601() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let mo = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if mo <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, h, m, s)
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
 /// Agent session handle for thesis proof tests.
@@ -225,7 +225,7 @@ async fn connect_agent(
     lease_priority: u32,
     capabilities: Vec<String>,
 ) -> Result<AgentSession, Box<dyn std::error::Error>> {
-    let mut client = HudSessionClient::connect(format!("http://[::1]:{}", GRPC_PORT)).await?;
+    let mut client = HudSessionClient::connect(format!("http://[::1]:{GRPC_PORT}")).await?;
 
     let (tx, rx_chan) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_chan);
@@ -239,7 +239,7 @@ async fn connect_agent(
         payload: Some(session_proto::client_message::Payload::SessionInit(
             session_proto::SessionInit {
                 agent_id: agent_id.to_string(),
-                agent_display_name: format!("{} (v1-thesis-proof)", agent_id),
+                agent_display_name: format!("{agent_id} (v1-thesis-proof)"),
                 pre_shared_key: TEST_PSK.to_string(),
                 requested_capabilities: capabilities.clone(),
                 initial_subscriptions: vec!["SCENE_TOPOLOGY".to_string()],
@@ -679,9 +679,8 @@ fn collect_thesis7_evidence(
         title: "Headless mode fully functional".to_string(),
         passed,
         evidence_summary: format!(
-            "Headless runtime started: {}. {} frames rendered without display server. \
-             gRPC server operational: {}. No display server or physical GPU required.",
-            runtime_started, frames_rendered, grpc_operational,
+            "Headless runtime started: {runtime_started}. {frames_rendered} frames rendered without display server. \
+             gRPC server operational: {grpc_operational}. No display server or physical GPU required.",
         ),
         details: serde_json::json!({
             "headless_runtime_started": runtime_started,
@@ -711,7 +710,7 @@ fn run_all_scenes_layer0() -> SceneCoverageSummary {
             Some((graph, spec)) => {
                 let violations = assert_layer0_invariants(&graph);
                 let violation_strings: Vec<String> =
-                    violations.iter().map(|v| format!("{:?}", v)).collect();
+                    violations.iter().map(|v| format!("{v:?}")).collect();
                 let passed = violations.is_empty();
 
                 SceneResult {
@@ -856,10 +855,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
 
     // Emit scene coverage artifact
     let scene_coverage_json = serde_json::to_string_pretty(&scene_coverage)?;
-    println!(
-        "ARTIFACT:v1_scene_registry_coverage {}",
-        scene_coverage_json
-    );
+    println!("ARTIFACT:v1_scene_registry_coverage {scene_coverage_json}");
 
     // ─── Phase 1: Start headless runtime (Thesis 7) ─────────────────────────
 
@@ -887,7 +883,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
 
     let _server_handle = runtime.start_grpc_server().await?;
     let grpc_operational = true;
-    eprintln!("    gRPC server started on port {}", GRPC_PORT);
+    eprintln!("    gRPC server started on port {GRPC_PORT}");
 
     // ─── Phase 2: Connect 3 agents (Thesis 2: auth, Thesis 3: coexistence) ─
 
@@ -910,10 +906,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
         namespaces.iter().collect::<HashSet<_>>().len() == namespaces.len()
     };
 
-    eprintln!(
-        "    3 agents connected: {:?}. All distinct: {}",
-        namespaces, all_distinct
-    );
+    eprintln!("    3 agents connected: {namespaces:?}. All distinct: {all_distinct}");
 
     // ─── Phase 3: Create tiles (Thesis 1: tile on screen) ──────────────────
 
@@ -930,7 +923,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     let _tile_c1 = create_tile_via_grpc(&mut agent_c, [700.0, 400.0, 500.0, 250.0], 7).await?;
 
     let total_tiles_created = 4usize;
-    eprintln!("    {} tiles created across 3 agents", total_tiles_created);
+    eprintln!("    {total_tiles_created} tiles created across 3 agents");
 
     // Verify namespace isolation (no cross-agent tile access).
     // Group all tiles by namespace and verify:
@@ -950,7 +943,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
             && tiles_by_ns.get(&agent_b.namespace).copied().unwrap_or(0) == 1
             && tiles_by_ns.get(&agent_c.namespace).copied().unwrap_or(0) == 1
     };
-    eprintln!("    Namespace isolation verified: {}", no_cross_access);
+    eprintln!("    Namespace isolation verified: {no_cross_access}");
 
     // ─── Phase 4: Zone publish (Thesis 6: LLM-first surface) ───────────────
 
@@ -965,7 +958,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     .await;
     let zone_publish_success = zone_publish_result.is_ok();
     if let Err(ref e) = zone_publish_result {
-        eprintln!("    Zone publish error: {}", e);
+        eprintln!("    Zone publish error: {e}");
     }
 
     // Verify content is rendered in the zone
@@ -978,12 +971,11 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
             .zone_registry
             .active_publishes
             .get("subtitle")
-            .map_or(false, |pubs| !pubs.is_empty());
+            .is_some_and(|pubs| !pubs.is_empty());
         zone_exists && has_publishes
     };
     eprintln!(
-        "    Zone publish accepted: {}. Content rendered: {}.",
-        zone_publish_success, content_rendered
+        "    Zone publish accepted: {zone_publish_success}. Content rendered: {content_rendered}."
     );
 
     // ─── Phase 5: Render frames and collect telemetry (Thesis 1, 4, 7) ─────
@@ -1082,7 +1074,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
             l4.scenes_with_artifacts
         );
     } else if let Err(ref e) = layer4_result {
-        eprintln!("    Layer 4 artifact generation failed: {}", e);
+        eprintln!("    Layer 4 artifact generation failed: {e}");
     }
 
     // ─── Phase 8: Collect lease counts and per-agent lease presence ─────────
@@ -1185,7 +1177,7 @@ async fn test_v1_thesis_proof() -> Result<(), Box<dyn std::error::Error>> {
     // ─── Phase 10: Final assertions ─────────────────────────────────────────
 
     let proof_elapsed = proof_start.elapsed();
-    eprintln!("=== V1 Thesis Proof: Complete ({:?}) ===", proof_elapsed);
+    eprintln!("=== V1 Thesis Proof: Complete ({proof_elapsed:?}) ===");
     eprintln!(
         "    Overall: {}/{} thesis points demonstrated",
         passed_count, 7

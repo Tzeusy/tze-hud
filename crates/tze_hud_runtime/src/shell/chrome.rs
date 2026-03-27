@@ -138,7 +138,7 @@ impl ViewerClassTransition {
 /// Chrome state is NEVER exposed through any agent-facing API. Chrome elements
 /// do NOT appear in scene topology queries. Chrome elements are NOT addressable
 /// via SceneId.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChromeState {
     /// Current ordered tab list. These are runtime-managed, not agent-supplied.
     pub tabs: Vec<ChromeTab>,
@@ -160,23 +160,6 @@ pub struct ChromeState {
     pub health: SystemHealth,
     /// Capture surface active (v1-reserved: always false — overlay-only redaction).
     pub capture_surface_active: bool,
-}
-
-impl Default for ChromeState {
-    fn default() -> Self {
-        Self {
-            tabs: Vec::new(),
-            active_tab_index: 0,
-            tab_bar_position: TabBarPosition::default(),
-            viewer_class: ViewerClass::default(),
-            viewer_class_transition: None,
-            safe_mode_active: false,
-            mute_active: false,
-            connected_agent_count: 0,
-            health: SystemHealth::default(),
-            capture_surface_active: false,
-        }
-    }
 }
 
 impl ChromeState {
@@ -1266,7 +1249,7 @@ mod tests {
     fn ctrl_9_switches_to_last_tab() {
         let mut state = ChromeState::new();
         for i in 1..=5 {
-            state.add_tab(i, format!("Tab {}", i));
+            state.add_tab(i, format!("Tab {i}"));
         }
 
         let result = handle_shortcut(&mut state, ChromeShortcut::LastTab);
@@ -1416,13 +1399,11 @@ mod tests {
         for cmd in &cmds {
             assert!(
                 cmd.width > 0.0,
-                "draw command width must be positive: {:?}",
-                cmd
+                "draw command width must be positive: {cmd:?}"
             );
             assert!(
                 cmd.height > 0.0,
-                "draw command height must be positive: {:?}",
-                cmd
+                "draw command height must be positive: {cmd:?}"
             );
         }
     }
@@ -1484,7 +1465,7 @@ mod tests {
         let mut state = ChromeState::new();
         // Add many tabs — more than will fit in 1920px with MIN_TAB_WIDTH_PX=80.
         for i in 0..30 {
-            state.add_tab(i, format!("Tab {}", i));
+            state.add_tab(i, format!("Tab {i}"));
         }
 
         let chrome_state = Arc::new(RwLock::new(state));
@@ -1636,7 +1617,7 @@ mod tests {
     fn diagnostic_display_formats_correctly() {
         let state = ChromeState::new();
         let snap = collect_diagnostic(&state, 0, 0);
-        let output = format!("{}", snap);
+        let output = format!("{snap}");
         assert!(output.contains("tze_hud Chrome Diagnostic Snapshot"));
         assert!(output.contains("unknown"));
     }
@@ -1726,7 +1707,7 @@ mod tests {
         // rendering are separable passes. V1 ships overlay-only redaction
         // (capture_surface_active always false).
         let chrome_state = Arc::new(RwLock::new({
-            let mut state = ChromeState::new();
+            let state = ChromeState::new();
             assert!(
                 !state.capture_surface_active,
                 "v1 invariant: capture_surface_active must always be false"

@@ -516,7 +516,7 @@ mod tests {
         clock.advance(2_500);
         let dur = ladder.warning_duration_ms();
         assert!(
-            dur >= 2_400 && dur <= 2_600,
+            (2_400..=2_600).contains(&dur),
             "expected ≈2500ms warning duration, got {dur}"
         );
     }
@@ -538,7 +538,7 @@ mod tests {
         clock.advance(10_000);
         let dur = ladder.throttle_duration_ms();
         assert!(
-            dur >= 9_900 && dur <= 10_100,
+            (9_900..=10_100).contains(&dur),
             "expected ≈10000ms throttle duration, got {dur}"
         );
     }

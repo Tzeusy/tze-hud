@@ -128,7 +128,7 @@ impl HeadlessConfig {
             None => {
                 #[cfg(any(test, feature = "dev-mode"))]
                 {
-                    return Ok((RuntimeContext::headless_default(), true));
+                    Ok((RuntimeContext::headless_default(), true))
                 }
                 #[cfg(not(any(test, feature = "dev-mode")))]
                 {

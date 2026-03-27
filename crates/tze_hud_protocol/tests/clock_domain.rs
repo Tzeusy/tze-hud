@@ -16,16 +16,10 @@
 //! NOT use these types; use `InputEnvelope` / `EventBatch` (RFC 0004) instead.
 
 use tze_hud_protocol::proto::session::{
-    ClientMessage, Heartbeat, LeaseStateChange, MutationBatch, RuntimeTelemetryFrame,
-    SceneSnapshot, ServerMessage, SessionEstablished, SessionInit, SessionResumed,
-    SessionSuspended, TelemetryFrame, TimingHints, ZonePublish,
+    Heartbeat, LeaseStateChange, SceneSnapshot, SessionEstablished, SessionInit, TimingHints,
 };
 use tze_hud_protocol::proto::{
-    CaptureReleasedEvent, CharacterEvent, ClickEvent, CommandInputEvent, EventBatch,
-    FocusGainedEvent, FocusLostEvent, GestureEvent, ImeCompositionEndEvent,
-    ImeCompositionStartEvent, ImeCompositionUpdateEvent, KeyDownEvent, KeyUpEvent, LeaseEvent,
-    PointerCancelEvent, PointerDownEvent, PointerEnterEvent, PointerLeaveEvent, PointerMoveEvent,
-    PointerUpEvent, ScrollOffsetChangedEvent, TileCreatedEvent, TileDeletedEvent, TileUpdatedEvent,
+    EventBatch, FocusGainedEvent, KeyDownEvent, PointerDownEvent, PointerMoveEvent,
 };
 
 // ─── Naming convention helper ─────────────────────────────────────────────────

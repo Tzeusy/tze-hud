@@ -301,7 +301,7 @@ mod tests {
         // Progress at t=0 should be near 0
         let p = anim.progress();
         assert!(
-            p >= 0.0 && p <= 0.1,
+            (0.0..=0.1).contains(&p),
             "initial progress should be near 0, got {p}"
         );
     }

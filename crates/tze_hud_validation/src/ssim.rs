@@ -122,8 +122,8 @@ pub fn compute_ssim(src: &[u8], ref_img: &[u8], width: u32, height: u32) -> Ssim
         let regions = vec![RegionSsim {
             x: 0,
             y: 0,
-            width: width,
-            height: height,
+            width,
+            height,
             score,
         }];
         return SsimResult {

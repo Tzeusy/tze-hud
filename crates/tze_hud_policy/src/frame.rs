@@ -469,8 +469,7 @@ mod tests {
         // enforced by integration benchmarks (criterion). The production requirement
         // is < 200us (spec §9.1).
         eprintln!(
-            "per-frame evaluation average latency: {}us over 100 iterations (spec budget: 200us)",
-            per_call_us
+            "per-frame evaluation average latency: {per_call_us}us over 100 iterations (spec budget: 200us)"
         );
     }
 
@@ -507,8 +506,7 @@ mod tests {
         // Each transition must complete well within 33.2ms (2 frames)
         assert!(
             per_call_ms < 33.2,
-            "privacy transition took {:.2}ms, expected < 33.2ms",
-            per_call_ms
+            "privacy transition took {per_call_ms:.2}ms, expected < 33.2ms"
         );
     }
 }

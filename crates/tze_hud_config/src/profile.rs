@@ -249,8 +249,7 @@ pub fn validate_display_profile(raw: &RawConfig, errors: &mut Vec<ConfigError>) 
             expected: "\"full-display\" or \"mobile\"".into(),
             got: format!("{extends:?}"),
             hint: format!(
-                "unknown profile {:?} in extends; valid extendable built-ins: full-display, mobile",
-                extends
+                "unknown profile {extends:?} in extends; valid extendable built-ins: full-display, mobile"
             ),
         });
         return;
@@ -394,8 +393,7 @@ pub fn resolve_profile(
         other => {
             debug_assert!(
                 false,
-                "resolve_profile() called with unvalidated profile {:?}; run validate() first",
-                other
+                "resolve_profile() called with unvalidated profile {other:?}; run validate() first"
             );
             Err(vec![ConfigError {
                 code: ConfigErrorCode::Other("CONFIG_UNVALIDATED_PROFILE".into()),
@@ -585,8 +583,7 @@ mod tests {
             .collect();
         assert!(
             relevant_errors.is_empty(),
-            "extends=mobile with profile=custom should be accepted, got: {:?}",
-            relevant_errors
+            "extends=mobile with profile=custom should be accepted, got: {relevant_errors:?}"
         );
     }
 
@@ -822,8 +819,7 @@ mod tests {
             .collect();
         assert!(
             escalation_errors.is_empty(),
-            "budget within ceiling should not produce escalation errors, got: {:?}",
-            escalation_errors
+            "budget within ceiling should not produce escalation errors, got: {escalation_errors:?}"
         );
     }
 

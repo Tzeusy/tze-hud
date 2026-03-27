@@ -783,6 +783,7 @@ impl Compositor {
     }
 
     /// Render a node and its children within a tile.
+    #[allow(clippy::only_used_in_recursion)]
     fn render_node(
         &self,
         node_id: SceneId,
@@ -1135,14 +1136,12 @@ mod tests {
         let chrome_top_pixel = &pixels[0..4]; // first pixel (top-left)
         assert!(
             chrome_top_pixel[1] > 150, // green channel dominant
-            "chrome green channel should be dominant at top: {:?}",
-            chrome_top_pixel
+            "chrome green channel should be dominant at top: {chrome_top_pixel:?}"
         );
         // The tile red should NOT bleed through chrome.
         assert!(
             chrome_top_pixel[0] < 50,
-            "agent tile red must not show through chrome: {:?}",
-            chrome_top_pixel
+            "agent tile red must not show through chrome: {chrome_top_pixel:?}"
         );
     }
 
@@ -1202,13 +1201,11 @@ mod tests {
         let top_px = &pixels[0..4];
         assert!(
             top_px[0] > 150,
-            "top pixel should be red (chrome): {:?}",
-            top_px
+            "top pixel should be red (chrome): {top_px:?}"
         );
         assert!(
             top_px[2] < 50,
-            "top pixel blue (tile) must be suppressed by chrome: {:?}",
-            top_px
+            "top pixel blue (tile) must be suppressed by chrome: {top_px:?}"
         );
 
         // Bottom row: content (blue) should persist — chrome didn't cover it.
@@ -1217,13 +1214,11 @@ mod tests {
         let bottom_px = &pixels[bottom_row_offset..bottom_row_offset + 4];
         assert!(
             bottom_px[2] > 150,
-            "bottom pixel should be blue (tile content, no chrome): {:?}",
-            bottom_px
+            "bottom pixel should be blue (tile content, no chrome): {bottom_px:?}"
         );
         assert!(
             bottom_px[0] < 50,
-            "bottom pixel red should be absent (no chrome): {:?}",
-            bottom_px
+            "bottom pixel red should be absent (no chrome): {bottom_px:?}"
         );
     }
 

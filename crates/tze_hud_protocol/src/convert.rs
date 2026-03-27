@@ -132,9 +132,7 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
             };
             // RS-4: resource_id is 32 raw bytes on the wire (NOT hex-encoded).
             // Reject nodes with malformed resource_id (wrong length = protocol violation).
-            let Some(resource_id) = ResourceId::from_slice(&si.resource_id) else {
-                return None;
-            };
+            let resource_id = ResourceId::from_slice(&si.resource_id)?;
             // decoded_bytes is runtime-owned metadata for budget accounting.
             // Do not trust client-supplied values; the runtime populates this
             // from the resource store record when processing the mutation.
@@ -229,7 +227,7 @@ pub fn zone_definition_to_proto(z: &ZoneDefinition) -> proto::ZoneDefinitionProt
     let accepted_media_types = z
         .accepted_media_types
         .iter()
-        .map(|mt| format!("{:?}", mt))
+        .map(|mt| format!("{mt:?}"))
         .collect();
     let rendering_policy = Some(rendering_policy_to_proto(&z.rendering_policy));
 
@@ -403,7 +401,7 @@ pub fn scene_node_to_proto(n: &Node) -> proto::NodeProto {
                     resource_id: si.resource_id.as_bytes().to_vec(),
                     width: si.width,
                     height: si.height,
-                    decoded_bytes: si.decoded_bytes as u64,
+                    decoded_bytes: si.decoded_bytes,
                     fit_mode,
                     bounds: Some(proto::Rect {
                         x: si.bounds.x,
@@ -548,11 +546,11 @@ mod tests {
             let original = make_static_image_node(fit_mode);
             let proto = scene_node_to_proto(&original);
             let restored = proto_node_to_scene(&proto)
-                .unwrap_or_else(|| panic!("conversion failed for {}", label));
+                .unwrap_or_else(|| panic!("conversion failed for {label}"));
             if let NodeData::StaticImage(si) = &restored.data {
-                assert_eq!(si.fit_mode, fit_mode, "fit_mode mismatch for {}", label);
+                assert_eq!(si.fit_mode, fit_mode, "fit_mode mismatch for {label}");
             } else {
-                panic!("wrong variant for {}", label);
+                panic!("wrong variant for {label}");
             }
         }
     }
@@ -568,7 +566,7 @@ mod tests {
                 resource_id,
                 width: 4,
                 height: 1,
-                decoded_bytes: 4 * 1 * 4u64, // 4×1 RGBA8
+                decoded_bytes: 4 * 4u64, // 4×1 RGBA8
                 fit_mode: ImageFitMode::Fill,
                 bounds: Rect::new(0.0, 0.0, 100.0, 25.0),
             }),

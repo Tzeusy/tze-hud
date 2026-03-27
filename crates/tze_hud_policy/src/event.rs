@@ -330,8 +330,8 @@ fn evaluate_event_level3_security(
                 code: ArbitrationErrorCode::CapabilityDenied,
                 agent_id: ctx.agent_namespace.clone(),
                 mutation_ref: event_ref,
-                message: format!("Missing required capability: '{}'", cap),
-                hint: Some(format!("Required: '{}'", cap)),
+                message: format!("Missing required capability: '{cap}'"),
+                hint: Some(format!("Required: '{cap}'")),
                 level: ArbitrationLevel::Security.index(),
             }));
         }
@@ -696,8 +696,7 @@ mod tests {
 
         assert!(
             per_call_ms < 16.6,
-            "override response took {:.3}ms, expected < 16.6ms",
-            per_call_ms
+            "override response took {per_call_ms:.3}ms, expected < 16.6ms"
         );
     }
 

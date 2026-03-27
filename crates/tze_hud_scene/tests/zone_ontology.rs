@@ -66,9 +66,7 @@ fn assert_no_violations(graph: &SceneGraph, scene_name: &str) {
     let violations = assert_layer0_invariants(graph);
     assert!(
         violations.is_empty(),
-        "Layer 0 invariant violations in '{}': {:?}",
-        scene_name,
-        violations
+        "Layer 0 invariant violations in '{scene_name}': {violations:?}"
     );
 }
 
@@ -247,8 +245,7 @@ fn zone_orchestrate_then_publish_has_three_zones() {
     for name in &["alert_banner", "notification_area", "status_bar"] {
         assert!(
             graph.zone_registry.get_by_name(name).is_some(),
-            "zone '{}' must be registered",
-            name
+            "zone '{name}' must be registered"
         );
     }
 }
@@ -282,8 +279,7 @@ fn zone_geometry_adapts_profile_has_relative_zones() {
         if let Some(zone) = graph.zone_registry.get_by_name(name) {
             assert!(
                 matches!(zone.geometry_policy, GeometryPolicy::Relative { .. }),
-                "zone '{}' must use Relative geometry policy",
-                name
+                "zone '{name}' must use Relative geometry policy"
             );
             found_relative = true;
         }
@@ -565,9 +561,7 @@ fn content_layer_zone_z_order_must_be_ge_zone_tile_z_min() {
     let agent_max_z: u32 = u16::MAX as u32; // typical high agent z_order
     assert!(
         ZONE_TILE_Z_MIN > agent_max_z,
-        "ZONE_TILE_Z_MIN ({:#010x}) must be > typical max agent z_order ({:#010x})",
-        ZONE_TILE_Z_MIN,
-        agent_max_z
+        "ZONE_TILE_Z_MIN ({ZONE_TILE_Z_MIN:#010x}) must be > typical max agent z_order ({agent_max_z:#010x})"
     );
 }
 
@@ -593,8 +587,7 @@ fn default_zone_registry_contains_all_six_v1_zones() {
     ] {
         assert!(
             names.contains(expected),
-            "default registry missing zone '{}'",
-            expected
+            "default registry missing zone '{expected}'"
         );
     }
 }
@@ -607,11 +600,10 @@ fn default_zones_have_correct_layer_attachments() {
     let check = |name: &str, expected: LayerAttachment| {
         let zone = registry
             .get_by_name(name)
-            .unwrap_or_else(|| panic!("zone '{}' not found", name));
+            .unwrap_or_else(|| panic!("zone '{name}' not found"));
         assert_eq!(
             zone.layer_attachment, expected,
-            "zone '{}' must have layer attachment {:?}",
-            name, expected
+            "zone '{name}' must have layer attachment {expected:?}"
         );
     };
 
@@ -1000,7 +992,7 @@ mod proptests {
 
     /// Arbitrary StreamText content for proptest
     fn arb_stream_text() -> impl Strategy<Value = ZoneContent> {
-        "[a-z]{1,20}".prop_map(|s| ZoneContent::StreamText(s))
+        "[a-z]{1,20}".prop_map(ZoneContent::StreamText)
     }
 
     /// Publisher namespaces
@@ -1162,7 +1154,7 @@ mod proptests {
             });
 
             for (key, ns) in &publishes {
-                let _ = scene.publish_to_zone("mbk_zone", kv_content(key), &ns, Some(key.clone()), None, None);
+                let _ = scene.publish_to_zone("mbk_zone", kv_content(key), ns, Some(key.clone()), None, None);
             }
 
             let pubs = scene.zone_registry.active_for_zone("mbk_zone");

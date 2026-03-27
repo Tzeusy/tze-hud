@@ -49,7 +49,7 @@ impl GoldenStore {
     ///
     /// Format: `{dir}/{scene_name}_{backend}.png`
     pub fn path(&self, scene_name: &str, backend: &str) -> PathBuf {
-        self.dir.join(format!("{}_{}.png", scene_name, backend))
+        self.dir.join(format!("{scene_name}_{backend}.png"))
     }
 
     /// Load a golden reference image as RGBA8 bytes.

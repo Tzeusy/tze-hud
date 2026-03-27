@@ -236,8 +236,7 @@ impl RefcountLayer {
                 // Underflow: refcount was already 0.
                 debug_assert!(
                     false,
-                    "dec_ref called on resource {} already at refcount 0",
-                    id
+                    "dec_ref called on resource {id} already at refcount 0"
                 );
                 tracing::error!(
                     resource_id = %id,

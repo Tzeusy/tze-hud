@@ -450,8 +450,7 @@ name = "Main"
         .collect();
     assert!(
         fatal_errors.is_empty(),
-        "extends=mobile with profile=custom should be accepted, got errors: {:?}",
-        fatal_errors
+        "extends=mobile with profile=custom should be accepted, got errors: {fatal_errors:?}"
     );
 }
 
@@ -724,8 +723,7 @@ capabilities = ["create_tiles", "publish_zone:subtitle", "emit_scene_event:doorb
         .collect();
     assert!(
         cap_errors.is_empty(),
-        "canonical capability list should produce no errors, got: {:?}",
-        cap_errors
+        "canonical capability list should produce no errors, got: {cap_errors:?}"
     );
 }
 
@@ -876,7 +874,7 @@ fn spec_all_flat_canonical_capabilities_accepted() {
     ];
     let cap_list = caps
         .iter()
-        .map(|c| format!("{:?}", c))
+        .map(|c| format!("{c:?}"))
         .collect::<Vec<_>>()
         .join(", ");
     let toml = format!(
@@ -888,9 +886,8 @@ profile = "full-display"
 name = "Main"
 
 [agents.registered.agent_a]
-capabilities = [{}]
-"#,
-        cap_list
+capabilities = [{cap_list}]
+"#
     );
     let loader = parse_ok(&toml);
     let errors = loader.validate();
@@ -905,8 +902,7 @@ capabilities = [{}]
         .collect();
     assert!(
         cap_errors.is_empty(),
-        "all flat canonical capabilities should be accepted, got errors: {:?}",
-        cap_errors
+        "all flat canonical capabilities should be accepted, got errors: {cap_errors:?}"
     );
 }
 
@@ -988,8 +984,7 @@ zones = ["subtitle", "notification", "status_bar", "pip", "ambient_background", 
         .collect();
     assert!(
         zone_errors.is_empty(),
-        "all built-in zone types should be accepted, got errors: {:?}",
-        zone_errors
+        "all built-in zone types should be accepted, got errors: {zone_errors:?}"
     );
 }
 
@@ -1016,8 +1011,7 @@ layer = "content"
         .collect();
     assert!(
         zone_errors.is_empty(),
-        "custom zone type defined in [zones] should be accepted, got errors: {:?}",
-        zone_errors
+        "custom zone type defined in [zones] should be accepted, got errors: {zone_errors:?}"
     );
 }
 
@@ -1071,8 +1065,7 @@ name = "Main"
         .collect();
     assert!(
         zone_errors.is_empty(),
-        "tab with no zones field should produce no zone errors, got: {:?}",
-        zone_errors
+        "tab with no zones field should produce no zone errors, got: {zone_errors:?}"
     );
 }
 
@@ -1156,8 +1149,7 @@ multi_viewer_policy = "most_restrictive"
         .collect();
     assert!(
         privacy_errors.is_empty(),
-        "valid privacy section should not produce errors, got: {:?}",
-        privacy_errors
+        "valid privacy section should not produce errors, got: {privacy_errors:?}"
     );
 }
 
@@ -1220,8 +1212,7 @@ pass_through_class = "HIGH"
         .collect();
     assert!(
         qh_errors.is_empty(),
-        "HIGH is a valid pass_through_class, got errors: {:?}",
-        qh_errors
+        "HIGH is a valid pass_through_class, got errors: {qh_errors:?}"
     );
 }
 
@@ -1248,8 +1239,7 @@ redaction_style = "pattern"
         .collect();
     assert!(
         redaction_errors.is_empty(),
-        "redaction_style in [privacy] should be accepted, got: {:?}",
-        redaction_errors
+        "redaction_style in [privacy] should be accepted, got: {redaction_errors:?}"
     );
 }
 
@@ -1310,8 +1300,7 @@ max_tiles = 4
         .collect();
     assert!(
         budget_errors.is_empty(),
-        "max_tiles=4 within profile ceiling should be accepted, got: {:?}",
-        budget_errors
+        "max_tiles=4 within profile ceiling should be accepted, got: {budget_errors:?}"
     );
 }
 
@@ -1464,8 +1453,7 @@ default_classification = "top_secret"
         errors
             .iter()
             .any(|e| matches!(e.code, ConfigErrorCode::UnknownClassification)),
-        "should return validation error from reload, got: {:?}",
-        errors
+        "should return validation error from reload, got: {errors:?}"
     );
 }
 

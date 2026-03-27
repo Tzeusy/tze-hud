@@ -181,7 +181,7 @@ async fn handle_connection(
     let bearer_token = header_section
         .lines()
         .find(|l| l.to_lowercase().starts_with("authorization:"))
-        .and_then(|l| l.splitn(2, ':').nth(1))
+        .and_then(|l| l.split_once(':').map(|x| x.1))
         .map(|v| v.trim())
         .and_then(|v| {
             let mut parts = v.splitn(2, ' ');

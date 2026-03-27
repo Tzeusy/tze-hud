@@ -196,8 +196,7 @@ mod arbitration_stack_tests {
 
         assert!(
             matches!(&outcome, ArbitrationOutcome::CommitRedacted { .. }),
-            "Expected CommitRedacted, got {:?}",
-            outcome
+            "Expected CommitRedacted, got {outcome:?}"
         );
     }
 
@@ -251,8 +250,7 @@ mod arbitration_stack_tests {
         // Privacy must win: CommitRedacted (not Commit)
         assert!(
             matches!(&outcome, ArbitrationOutcome::CommitRedacted { .. }),
-            "Privacy must override Content: expected CommitRedacted, got {:?}",
-            outcome
+            "Privacy must override Content: expected CommitRedacted, got {outcome:?}"
         );
     }
 
@@ -313,8 +311,7 @@ mod arbitration_stack_tests {
                 err.code == crate::ArbitrationErrorCode::CapabilityDenied &&
                 err.level == ArbitrationLevel::Security.index()
             ),
-            "Security must short-circuit: expected Reject(CapabilityDenied), got {:?}",
-            outcome
+            "Security must short-circuit: expected Reject(CapabilityDenied), got {outcome:?}"
         );
     }
 
@@ -416,7 +413,7 @@ mod arbitration_stack_tests {
                     "Queue reason must be QuietHours"
                 );
             }
-            other => panic!("Expected Queue with redacted=true, got {:?}", other),
+            other => panic!("Expected Queue with redacted=true, got {other:?}"),
         }
     }
 
@@ -1106,8 +1103,7 @@ mod arbitration_stack_tests {
                     if err.code == ArbitrationErrorCode::TileBudgetExceeded
                     && err.level == ArbitrationLevel::Resource.index()
             ),
-            "Over-budget batch must be Reject(TileBudgetExceeded) at Level 5, got {:?}",
-            outcome
+            "Over-budget batch must be Reject(TileBudgetExceeded) at Level 5, got {outcome:?}"
         );
         // Explicitly confirm it is NOT Shed — agent must be informed.
         assert!(
@@ -1149,8 +1145,7 @@ mod arbitration_stack_tests {
                     ..
                 }
             ),
-            "HIGH must be queued when pass_through_class=Critical (threshold not met); got {:?}",
-            outcome
+            "HIGH must be queued when pass_through_class=Critical (threshold not met); got {outcome:?}"
         );
     }
 }

@@ -806,7 +806,7 @@ mod tests {
             disconnected: true,
             budget_warning: false,
         };
-        let frame = BadgeFrame::build(&[(id.clone(), badge.clone())]);
+        let frame = BadgeFrame::build(&[(id, badge.clone())]);
 
         let result = frame.badge_for(&id);
         assert_eq!(result, badge);

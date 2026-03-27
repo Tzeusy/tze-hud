@@ -434,7 +434,7 @@ impl McpServer {
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 65536];
                 let n = match stream.read(&mut buf).await {
-                    Ok(n) if n == 0 => return,
+                    Ok(0) => return,
                     Ok(n) => n,
                     Err(e) => {
                         error!(peer = %peer, error = %e, "MCP: read error");
@@ -460,7 +460,7 @@ impl McpServer {
                 let bearer_token = header_section
                     .lines()
                     .find(|l| l.to_lowercase().starts_with("authorization:"))
-                    .and_then(|l| l.splitn(2, ':').nth(1))
+                    .and_then(|l| l.split_once(':').map(|x| x.1))
                     .map(|v| v.trim())
                     .and_then(|v| {
                         // Split into scheme + credentials; accept any case of "Bearer".

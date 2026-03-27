@@ -3021,36 +3021,30 @@ pub fn check_hit_region_state_consistency(graph: &SceneGraph) -> Vec<InvariantVi
     let mut violations = Vec::new();
 
     for node in graph.nodes.values() {
-        if matches!(node.data, NodeData::HitRegion(_)) {
-            if !graph.hit_region_states.contains_key(&node.id) {
-                violations.push(InvariantViolation::new(
-                    "missing_hit_region_state",
-                    format!(
-                        "hit region node {} has no entry in hit_region_states",
-                        node.id
-                    ),
-                ));
-            }
+        if matches!(node.data, NodeData::HitRegion(_))
+            && !graph.hit_region_states.contains_key(&node.id)
+        {
+            violations.push(InvariantViolation::new(
+                "missing_hit_region_state",
+                format!(
+                    "hit region node {} has no entry in hit_region_states",
+                    node.id
+                ),
+            ));
         }
     }
 
     // Inverse: every entry in hit_region_states must point to an existing HitRegion node
-    for (node_id, _state) in &graph.hit_region_states {
+    for node_id in graph.hit_region_states.keys() {
         match graph.nodes.get(node_id) {
             None => violations.push(InvariantViolation::new(
                 "orphan_hit_region_state",
-                format!(
-                    "hit_region_states entry {} has no corresponding node",
-                    node_id
-                ),
+                format!("hit_region_states entry {node_id} has no corresponding node"),
             )),
             Some(node) if !matches!(node.data, NodeData::HitRegion(_)) => {
                 violations.push(InvariantViolation::new(
                     "hit_region_state_type_mismatch",
-                    format!(
-                        "hit_region_states entry {} points to a non-HitRegion node",
-                        node_id
-                    ),
+                    format!("hit_region_states entry {node_id} points to a non-HitRegion node"),
                 ));
             }
             _ => {}
@@ -3066,7 +3060,7 @@ pub fn check_active_tab_exists(graph: &SceneGraph) -> Vec<InvariantViolation> {
         if !graph.tabs.contains_key(&active_id) {
             return vec![InvariantViolation::new(
                 "missing_active_tab",
-                format!("active_tab {} does not exist in tabs map", active_id),
+                format!("active_tab {active_id} does not exist in tabs map"),
             )];
         }
     }
@@ -3195,10 +3189,7 @@ pub fn check_sync_group_member_back_refs(graph: &SceneGraph) -> Vec<InvariantVio
             match graph.tiles.get(member_id) {
                 None => violations.push(InvariantViolation::new(
                     "sync_group_member_tile_missing",
-                    format!(
-                        "sync group {} member {} does not exist in tiles map",
-                        group_id, member_id
-                    ),
+                    format!("sync group {group_id} member {member_id} does not exist in tiles map"),
                 )),
                 Some(tile) if tile.sync_group != Some(*group_id) => {
                     violations.push(InvariantViolation::new(
@@ -4691,8 +4682,7 @@ mod tests {
             let result = registry.build(name, ClockMs::FIXED);
             assert!(
                 result.is_some(),
-                "scene '{}' must build at 800×600 display",
-                name
+                "scene '{name}' must build at 800×600 display"
             );
         }
     }
@@ -4703,7 +4693,7 @@ mod tests {
         for name in TestSceneRegistry::scene_names() {
             let (graph, _spec) = registry
                 .build(name, ClockMs::FIXED)
-                .unwrap_or_else(|| panic!("scene '{}' must build", name));
+                .unwrap_or_else(|| panic!("scene '{name}' must build"));
             let out_of_bounds: Vec<_> = graph
                 .tiles
                 .values()

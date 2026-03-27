@@ -86,7 +86,7 @@ pub fn validate_agents(
                             "{} <= profile ceiling {}",
                             f.field_name, f.profile_ceiling
                         ),
-                        got: format!("{}", agent_val),
+                        got: format!("{agent_val}"),
                         hint: format!(
                             "agent {:?} sets {}={} which exceeds the active profile ceiling of {}; \
                                  reduce the agent's {} to at most {}",
@@ -305,8 +305,7 @@ mod tests {
                 matches!(e.code, ConfigErrorCode::AgentBudgetExceedsProfile)
                     && e.field_path.contains("max_texture_mb")
             }),
-            "max_texture_mb=4096 exceeding ceiling 2048 should produce error, got: {:?}",
-            errors
+            "max_texture_mb=4096 exceeding ceiling 2048 should produce error, got: {errors:?}"
         );
     }
 
@@ -390,8 +389,7 @@ mod tests {
         let warnings = check_agent_auth_env_vars_with_lookup(&agents, mock_lookup);
         assert!(
             warnings.is_empty(),
-            "set env var should produce no auth warnings, got: {:?}",
-            warnings
+            "set env var should produce no auth warnings, got: {warnings:?}"
         );
     }
 

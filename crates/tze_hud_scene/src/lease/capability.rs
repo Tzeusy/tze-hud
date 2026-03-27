@@ -210,7 +210,7 @@ pub fn revoke_capability_from_lease(
         None => Err(CapabilityRevocationError::CapabilityNotPresent),
         Some(idx) => {
             lease.capabilities.remove(idx);
-            Ok(format!("{:?}", cap))
+            Ok(format!("{cap:?}"))
         }
     }
 }
@@ -401,7 +401,7 @@ mod tests {
             vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let result = revoke_capability_from_lease(&mut lease, &Capability::CreateTiles);
-        assert!(result.is_ok(), "should succeed: {:?}", result);
+        assert!(result.is_ok(), "should succeed: {result:?}");
         assert!(
             !lease.capabilities.contains(&Capability::CreateTiles),
             "CreateTiles should be removed"
@@ -420,8 +420,7 @@ mod tests {
         let result = revoke_capability_from_lease(&mut lease, &Capability::ManageTabs);
         assert!(
             result.is_ok(),
-            "suspended lease is not terminal: {:?}",
-            result
+            "suspended lease is not terminal: {result:?}"
         );
         assert!(lease.capabilities.is_empty());
     }

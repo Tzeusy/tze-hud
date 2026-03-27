@@ -402,7 +402,7 @@ impl SceneGraph {
         for lid in &lease_ids {
             if let Err(budget_err) = self.check_budget(lid, batch) {
                 let err = ValidationError::BudgetExceeded {
-                    resource: format!("{}", budget_err),
+                    resource: format!("{budget_err}"),
                 };
                 let rejection = BatchRejected::batch_level(batch.batch_id, "batch", &err);
                 return MutationResult::rejected_with_error(batch.batch_id, rejection, err);
@@ -903,8 +903,7 @@ mod tests {
                     | ValidationErrorCode::LeaseExpired
                     | ValidationErrorCode::LeaseNotFound
             ),
-            "expected lease-stage error, got {:?}",
-            code
+            "expected lease-stage error, got {code:?}"
         );
     }
 

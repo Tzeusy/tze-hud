@@ -39,18 +39,13 @@ impl Modifiers {
 // ─── Pointer button ──────────────────────────────────────────────────────────
 
 /// Which pointer button triggered the event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PointerButton {
-    Primary,   // Left mouse button / main touch contact
+    #[default]
+    Primary, // Left mouse button / main touch contact
     Secondary, // Right mouse button / two-finger tap
     Middle,    // Middle mouse button / wheel press
     Other(u8), // X1, X2, additional buttons
-}
-
-impl Default for PointerButton {
-    fn default() -> Self {
-        PointerButton::Primary
-    }
 }
 
 // ─── Common pointer fields ────────────────────────────────────────────────────

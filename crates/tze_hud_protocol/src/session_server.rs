@@ -302,6 +302,7 @@ impl SessionFreezeQueue {
         }
     }
 
+    #[allow(dead_code)] // reserved for diagnostics/safe-mode drain path
     fn len(&self) -> usize {
         self.queue.len()
     }
@@ -448,6 +449,7 @@ impl SessionFreezeQueue {
     }
 
     /// Discard all queued mutations (used on safe mode cancellation).
+    #[allow(dead_code)] // reserved for safe-mode cancellation path
     fn discard(&mut self) {
         self.queue.clear();
     }
@@ -459,11 +461,13 @@ impl SessionFreezeQueue {
 ///
 /// When the buffer exceeds `capacity`, the oldest message is dropped, retaining
 /// only the latest `capacity` messages (RFC 0005 §2.5: oldest-first eviction).
+#[allow(dead_code)] // reserved for RFC 0005 §2.5 ephemeral eviction path; not yet wired
 struct EphemeralQueue {
     queue: VecDeque<Result<ServerMessage, Status>>,
     capacity: usize,
 }
 
+#[allow(dead_code)] // reserved for RFC 0005 §2.5 ephemeral eviction path; not yet wired
 impl EphemeralQueue {
     fn new(capacity: usize) -> Self {
         Self {
@@ -504,6 +508,7 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 =
 const DEFAULT_MAX_SEQUENCE_GAP: u64 = 100;
 
 /// Default per-session ephemeral message buffer quota (RFC 0005 §2.5).
+#[allow(dead_code)] // reserved for ephemeral buffer wiring
 const DEFAULT_EPHEMERAL_BUFFER_MAX: usize = 16;
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
@@ -546,6 +551,7 @@ fn scene_id_to_bytes(id: tze_hud_scene::SceneId) -> Vec<u8> {
     id.as_uuid().as_bytes().to_vec()
 }
 
+#[allow(clippy::result_large_err)] // tonic::Status is large by design; boxing it would add indirection on every call
 fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, Status> {
     if bytes.len() != 16 {
         return Err(Status::invalid_argument(format!(
@@ -888,10 +894,7 @@ impl HudSessionImpl {
 
         // Broadcast returns an error only when there are no active subscribers
         // (no sessions connected). That is not an error condition.
-        match self.degradation_tx.send(notice) {
-            Ok(n) => n,
-            Err(_) => 0,
-        }
+        self.degradation_tx.send(notice).unwrap_or_default()
     }
 
     /// Revoke a named capability from an active lease at runtime (RFC 0001 §3.3, GAP-G3-4).
@@ -910,7 +913,7 @@ impl HudSessionImpl {
     ///
     /// * `lease_id`        — The lease whose capability scope is being narrowed.
     /// * `capability_name` — Canonical name of the capability to remove
-    ///                       (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
+    ///   (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
     ///
     /// # Returns
     ///
@@ -925,10 +928,9 @@ impl HudSessionImpl {
             lease_id,
             capability_name: capability_name.into(),
         };
-        match self.capability_revocation_tx.send(event) {
-            Ok(n) => n,
-            Err(_) => 0, // No active subscribers (no sessions connected)
-        }
+        self.capability_revocation_tx
+            .send(event)
+            .unwrap_or_default()
     }
 }
 
@@ -1069,7 +1071,7 @@ impl HudSession for HudSessionImpl {
                 let wall_us = now_wall_us();
                 let mono_us: u64 = now_mono_us();
                 let (snap_json, checksum, sequence_number) = {
-                    let mut scene = st.scene.lock().await;
+                    let scene = st.scene.lock().await;
                     let graph_snap = scene.take_snapshot(wall_us, mono_us);
                     let snap_json = graph_snap
                         .to_json()
@@ -2067,7 +2069,7 @@ async fn handle_mutation_batch(
         }
     }
 
-    let mut st = state.lock().await;
+    let st = state.lock().await;
 
     let lease_id = match bytes_to_scene_id(&batch.lease_id) {
         Ok(id) => id,
@@ -2492,7 +2494,7 @@ async fn handle_lease_request(
         }
     }
 
-    let mut st = state.lock().await;
+    let st = state.lock().await;
 
     // Validate requested capabilities against the canonical v1 vocabulary.
     // Non-canonical names (including legacy names like create_tile, receive_input)
@@ -2709,7 +2711,7 @@ async fn handle_lease_renew(
         }
     };
 
-    let mut st = state.lock().await;
+    let st = state.lock().await;
     let ttl = if renew.new_ttl_ms > 0 {
         renew.new_ttl_ms
     } else {
@@ -2893,7 +2895,7 @@ async fn handle_lease_release(
         }
     };
 
-    let mut st = state.lock().await;
+    let st = state.lock().await;
     let lease_id_bytes = scene_id_to_bytes(lease_id);
 
     match st.scene.lock().await.revoke_lease(lease_id) {
@@ -3196,7 +3198,7 @@ async fn handle_capability_revocation(
 
     // Apply the revocation to the scene graph.
     let result = {
-        let mut st = state.lock().await;
+        let st = state.lock().await;
         st.scene
             .lock()
             .await
@@ -7767,7 +7769,7 @@ mod tests {
     /// acquire leases from the same runtime with unique lease IDs.
     #[tokio::test]
     async fn test_three_agents_lease_contention() {
-        let (mut client1, _server) = setup_test().await;
+        let (client1, _server) = setup_test().await;
 
         // Use a single shared server — connect 3 clients to the same port.
         let scene = SceneGraph::new(800.0, 600.0);
