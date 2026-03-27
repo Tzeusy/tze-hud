@@ -1055,4 +1055,604 @@ mod tests {
         let err = handle_list_zones(json!("unexpected-string"), &scene).unwrap_err();
         assert!(matches!(err, McpError::InvalidParams(_)));
     }
+
+    // ── Contention policy: Stack ─────────────────────────────────────────────
+
+    /// Build a scene with a Stack zone (max_depth=3).
+    fn scene_with_stack_zone() -> (SceneGraph, String) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone_name = "notif".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Stack zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.75,
+                    y_pct: 0.0,
+                    width_pct: 0.25,
+                    height_pct: 0.30,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Stack { max_depth: 3 },
+                max_publishers: 8,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+        (scene, zone_name)
+    }
+
+    #[test]
+    fn test_contention_stack_accumulates_records() {
+        let (mut scene, zone) = scene_with_stack_zone();
+        // Three publishes — all should accumulate in the stack.
+        for i in 1..=3u32 {
+            handle_publish_to_zone(
+                json!({"zone_name": zone, "content": format!("msg-{i}"), "namespace": format!("agent-{i}")}),
+                &mut scene,
+            )
+            .unwrap();
+        }
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 3, "Stack zone must accumulate all records up to max_depth");
+    }
+
+    #[test]
+    fn test_contention_stack_trims_oldest_when_max_depth_exceeded() {
+        let (mut scene, zone) = scene_with_stack_zone();
+        // Publish 4 items to a max_depth=3 stack (different namespaces to avoid publisher limit).
+        for i in 1..=4u32 {
+            handle_publish_to_zone(
+                json!({"zone_name": zone, "content": format!("msg-{i}"), "namespace": format!("agent-{i}")}),
+                &mut scene,
+            )
+            .unwrap();
+        }
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 3, "Stack must trim oldest when max_depth exceeded");
+        // Oldest (msg-1) should be gone; most recent (msg-4) should be present.
+        assert!(
+            publishes.iter().all(|r| r.content != tze_hud_scene::types::ZoneContent::StreamText("msg-1".to_string())),
+            "oldest record must be evicted when stack overflows"
+        );
+        assert!(
+            publishes.iter().any(|r| r.content == tze_hud_scene::types::ZoneContent::StreamText("msg-4".to_string())),
+            "newest record must survive stack trim"
+        );
+    }
+
+    #[test]
+    fn test_contention_stack_no_tiles_created() {
+        // Zone publishes must never create tiles directly — compositor handles rendering.
+        let (mut scene, zone) = scene_with_stack_zone();
+        for i in 1..=3u32 {
+            handle_publish_to_zone(
+                json!({"zone_name": zone, "content": format!("item-{i}"), "namespace": format!("ns-{i}")}),
+                &mut scene,
+            )
+            .unwrap();
+        }
+        assert_eq!(scene.tile_count(), 0, "Stack zone publishes must not create tiles");
+        assert_eq!(scene.node_count(), 0, "Stack zone publishes must not create nodes");
+    }
+
+    // ── Contention policy: Replace ───────────────────────────────────────────
+
+    /// Build a scene with a Replace zone (single occupant).
+    fn scene_with_replace_zone() -> (SceneGraph, String) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone_name = "pip".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Replace zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 0.5,
+                    height_pct: 0.5,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Replace,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+        (scene, zone_name)
+    }
+
+    #[test]
+    fn test_contention_replace_evicts_current_occupant() {
+        let (mut scene, zone) = scene_with_replace_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "first-occupant", "namespace": "agent-a"}),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "second-occupant", "namespace": "agent-b"}),
+            &mut scene,
+        )
+        .unwrap();
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1, "Replace zone must hold exactly one record");
+        assert!(
+            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "second-occupant"),
+            "Replace must evict first and install second occupant"
+        );
+    }
+
+    #[test]
+    fn test_contention_replace_no_tiles_created() {
+        let (mut scene, zone) = scene_with_replace_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "occupant", "namespace": "agent-x"}),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(scene.tile_count(), 0, "Replace zone publishes must not create tiles");
+    }
+
+    // ── Contention policy: MergeByKey ────────────────────────────────────────
+
+    /// Build a scene with a MergeByKey zone (max_keys=4).
+    fn scene_with_merge_zone() -> (SceneGraph, String) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone_name = "status".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "MergeByKey zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.95,
+                    width_pct: 1.0,
+                    height_pct: 0.05,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::MergeByKey { max_keys: 4 },
+                max_publishers: 16,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+        (scene, zone_name)
+    }
+
+    #[test]
+    fn test_contention_merge_by_key_same_key_replaces() {
+        let (mut scene, zone) = scene_with_merge_zone();
+        // Publish twice with the same merge_key — must stay at 1 record.
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "v1", "merge_key": "cpu", "namespace": "agent-a"}),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "v2", "merge_key": "cpu", "namespace": "agent-a"}),
+            &mut scene,
+        )
+        .unwrap();
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1, "Same merge_key must replace old record");
+        assert!(
+            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "v2"),
+            "latest content must win for same merge_key"
+        );
+    }
+
+    #[test]
+    fn test_contention_merge_by_key_different_keys_coexist() {
+        let (mut scene, zone) = scene_with_merge_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "cpu-data", "merge_key": "cpu", "namespace": "agent-a"}),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "mem-data", "merge_key": "mem", "namespace": "agent-b"}),
+            &mut scene,
+        )
+        .unwrap();
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 2, "Different merge_keys must coexist in zone");
+    }
+
+    #[test]
+    fn test_contention_merge_by_key_max_keys_exceeded_fails() {
+        let (mut scene, zone) = scene_with_merge_zone(); // max_keys = 4
+        // Fill all 4 key slots from different namespaces
+        for i in 0..4u32 {
+            handle_publish_to_zone(
+                json!({"zone_name": zone, "content": format!("val-{i}"), "merge_key": format!("key-{i}"), "namespace": format!("agent-{i}")}),
+                &mut scene,
+            )
+            .unwrap();
+        }
+        // 5th distinct key must fail
+        let err = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "overflow", "merge_key": "key-overflow", "namespace": "agent-x"}),
+            &mut scene,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, McpError::SceneError(_)),
+            "max_keys exceeded must return SceneError, got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_contention_merge_by_key_no_tiles_created() {
+        let (mut scene, zone) = scene_with_merge_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "data", "merge_key": "k1", "namespace": "agent-a"}),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(scene.tile_count(), 0, "MergeByKey zone publishes must not create tiles");
+    }
+
+    // ── Media-type rejection ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_media_type_rejected_for_wrong_type_zone() {
+        // Build a zone that only accepts ShortTextWithIcon (not StreamText).
+        // The MCP publish_to_zone tool always sends StreamText, so this must be rejected.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone_name = "notif-only".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Notification-only zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.75,
+                    y_pct: 0.0,
+                    width_pct: 0.25,
+                    height_pct: 0.20,
+                },
+                accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+                max_publishers: 16,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+        // MCP publish_to_zone always produces ZoneContent::StreamText.
+        // ShortTextWithIcon zone must reject it.
+        let err = handle_publish_to_zone(
+            json!({"zone_name": zone_name, "content": "hello"}),
+            &mut scene,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, McpError::SceneError(_)),
+            "StreamText publish to ShortTextWithIcon-only zone must return SceneError (media type mismatch), got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_media_type_accepted_for_matching_zone() {
+        // StreamText zone must accept StreamText content.
+        let (mut scene, _, zone) = scene_with_zone();
+        let result = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "valid stream text"}),
+            &mut scene,
+        );
+        assert!(result.is_ok(), "StreamText content must be accepted by StreamText zone");
+    }
+
+    // ── Occupancy reporting (list_zones has_content accuracy) ────────────────
+
+    #[test]
+    fn test_has_content_false_before_publish() {
+        let (scene, _, zone) = scene_with_zone();
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(!entry.has_content, "has_content must be false before any publish");
+    }
+
+    #[test]
+    fn test_has_content_true_after_publish() {
+        let (mut scene, _, zone) = scene_with_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone.clone(), "content": "occupying content"}),
+            &mut scene,
+        )
+        .unwrap();
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(entry.has_content, "has_content must be true after successful publish");
+    }
+
+    #[test]
+    fn test_has_content_after_replace_policy_publish() {
+        let (mut scene, zone) = scene_with_replace_zone();
+        // Two publishes with Replace policy — one record remains; has_content = true.
+        handle_publish_to_zone(
+            json!({"zone_name": zone.clone(), "content": "first", "namespace": "a"}),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({"zone_name": zone.clone(), "content": "second", "namespace": "b"}),
+            &mut scene,
+        )
+        .unwrap();
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(entry.has_content, "has_content must be true after Replace publish");
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1, "Replace must maintain exactly one record");
+    }
+
+    #[test]
+    fn test_has_content_false_after_zone_cleared() {
+        let (mut scene, _, zone) = scene_with_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone.clone(), "content": "something"}),
+            &mut scene,
+        )
+        .unwrap();
+        // Manually clear zone (as runtime would do on lease expiry / eviction).
+        scene.clear_zone(&zone).unwrap();
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(!entry.has_content, "has_content must be false after zone is cleared");
+    }
+
+    #[test]
+    fn test_has_content_stack_zone_reflects_occupancy() {
+        let (mut scene, zone) = scene_with_stack_zone();
+        // Stack with 2 items — has_content = true.
+        for i in 1..=2u32 {
+            handle_publish_to_zone(
+                json!({"zone_name": zone.clone(), "content": format!("item-{i}"), "namespace": format!("agent-{i}")}),
+                &mut scene,
+            )
+            .unwrap();
+        }
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(entry.has_content, "has_content must be true when Stack zone has entries");
+    }
+
+    #[test]
+    fn test_has_content_merge_zone_with_multiple_keys() {
+        let (mut scene, zone) = scene_with_merge_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone.clone(), "content": "data-a", "merge_key": "alpha", "namespace": "agent-a"}),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({"zone_name": zone.clone(), "content": "data-b", "merge_key": "beta", "namespace": "agent-b"}),
+            &mut scene,
+        )
+        .unwrap();
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(entry.has_content, "has_content must be true when MergeByKey zone has keyed records");
+    }
+
+    // ── Expiry/cleanup after lease loss ─────────────────────────────────────
+
+    #[test]
+    fn test_zone_publishes_cleared_on_lease_revoke() {
+        // Publish to a zone, then explicitly revoke the lease and verify that
+        // active_publishes for this namespace are cleaned up.
+        let (mut scene, _, zone) = scene_with_zone();
+
+        // publish_to_zone grants a lease internally; but we need the lease_id to revoke.
+        // Grant a lease manually, then use publish_to_zone (bypassing the MCP handler
+        // since we need direct SceneGraph access to revoke the lease by ID).
+        use tze_hud_scene::types::{Capability, ZoneContent};
+        let ns = "agent-expiry";
+        let lease_id = scene.grant_lease(ns, 60_000, vec![Capability::PublishZone(zone.clone())]);
+        scene
+            .publish_to_zone(&zone, ZoneContent::StreamText("expiring content".to_string()), ns, None, None, None)
+            .unwrap();
+
+        // Confirm content is present
+        assert!(
+            scene.zone_registry.active_publishes.get(&zone).is_some_and(|v| !v.is_empty()),
+            "zone must have content before lease revoke"
+        );
+
+        // Revoke the lease — spec §Requirement: Lease Revocation Clears Zone Publications
+        scene.revoke_lease(lease_id).unwrap();
+
+        // All publications for this namespace must be gone.
+        let remaining = scene.zone_registry.active_publishes.get(&zone);
+        assert!(
+            remaining.is_none_or(|v| v.is_empty()),
+            "zone publications must be cleared when lease is revoked"
+        );
+    }
+
+    #[test]
+    fn test_list_zones_has_content_false_after_lease_revoke() {
+        // After lease revoke, list_zones must report has_content = false.
+        let (mut scene, _, zone) = scene_with_zone();
+        use tze_hud_scene::types::{Capability, ZoneContent};
+        let ns = "agent-expiry-2";
+        let lease_id = scene.grant_lease(ns, 60_000, vec![Capability::PublishZone(zone.clone())]);
+        scene
+            .publish_to_zone(&zone, ZoneContent::StreamText("content".to_string()), ns, None, None, None)
+            .unwrap();
+        scene.revoke_lease(lease_id).unwrap();
+
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(
+            !entry.has_content,
+            "list_zones has_content must be false after lease revoke clears zone publications"
+        );
+    }
+
+    #[test]
+    fn test_zone_publish_fails_without_active_lease() {
+        // After lease revoke, publish_to_zone_with_lease must fail.
+        let (mut scene, _, zone) = scene_with_zone();
+        use tze_hud_scene::types::{Capability, ZoneContent};
+        let ns = "agent-gone";
+        let lease_id = scene.grant_lease(ns, 60_000, vec![Capability::PublishZone(zone.clone())]);
+        scene.revoke_lease(lease_id).unwrap();
+
+        // Now publish_to_zone_with_lease must reject (no active lease).
+        let result = scene.publish_to_zone_with_lease(
+            &zone,
+            ZoneContent::StreamText("should fail".to_string()),
+            ns,
+            None,
+        );
+        assert!(result.is_err(), "publish must be rejected after lease revoke");
+    }
+
+    // ── Guest vs resident capability gates (additional coverage) ────────────
+
+    #[test]
+    fn test_publish_to_zone_is_guest_accessible() {
+        // publish_to_zone is a guest tool; callers without resident_mcp must succeed.
+        let (mut scene, _, zone) = scene_with_zone();
+        let result = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "guest-publish"}),
+            &mut scene,
+        );
+        assert!(result.is_ok(), "publish_to_zone must be callable without resident_mcp capability");
+    }
+
+    #[test]
+    fn test_list_zones_is_guest_accessible() {
+        // list_zones is a guest tool.
+        let (scene, _, _) = scene_with_zone();
+        let result = handle_list_zones(json!(null), &scene);
+        assert!(result.is_ok(), "list_zones must be callable without resident_mcp capability");
+    }
+
+    #[test]
+    fn test_list_scene_is_guest_accessible() {
+        // list_scene is a guest tool.
+        let (scene, _, _) = scene_with_zone();
+        let result = handle_list_scene(json!(null), &scene);
+        assert!(result.is_ok(), "list_scene must be callable without resident_mcp capability");
+    }
+
+    // ── No shortcut tile-creation path for zone publishing ───────────────────
+
+    #[test]
+    fn test_publish_to_zone_latest_wins_no_tiles() {
+        // LatestWins zone must never create tiles or nodes.
+        let (mut scene, _, zone) = scene_with_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "# HUD content"}),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(scene.tile_count(), 0, "LatestWins publish must not create tiles");
+        assert_eq!(scene.node_count(), 0, "LatestWins publish must not create nodes");
+    }
+
+    #[test]
+    fn test_publish_to_zone_second_publish_no_additional_tiles() {
+        // Even repeated publishing must never accumulate tiles.
+        let (mut scene, _, zone) = scene_with_zone();
+        for i in 1..=5u32 {
+            handle_publish_to_zone(
+                json!({"zone_name": zone, "content": format!("update-{i}")}),
+                &mut scene,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            scene.tile_count(),
+            0,
+            "repeated publishes must never create tiles (compositor resolves zone → tile)"
+        );
+    }
+
+    #[test]
+    fn test_create_tile_does_not_bypass_zone_policy() {
+        // create_tile is a resident tool that creates a raw tile, NOT a zone publish.
+        // It should not interfere with zone occupancy: publishing to a zone after
+        // creating a raw tile must still see tile_count=1, zone publishes=1 separately.
+        let (mut scene, tab_id) = scene_with_tab();
+        let zone_name = "z2".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "test zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 0.1,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 4,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+
+        // Create a raw tile (resident operation — simulated here at SceneGraph level).
+        use tze_hud_scene::types::{Capability, Rect};
+        let lease_id = scene.grant_lease("resident-agent", 60_000, vec![Capability::CreateTile]);
+        scene
+            .create_tile(
+                tab_id,
+                "resident-agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                1,
+            )
+            .unwrap();
+        assert_eq!(scene.tile_count(), 1, "raw tile must exist after create_tile");
+
+        // Now publish to zone — must not add more tiles.
+        handle_publish_to_zone(
+            json!({"zone_name": zone_name, "content": "zone content"}),
+            &mut scene,
+        )
+        .unwrap();
+
+        assert_eq!(
+            scene.tile_count(),
+            1,
+            "zone publish must not add extra tiles on top of existing raw tiles"
+        );
+        // Zone must have a record, but it's distinct from the raw tile.
+        assert!(
+            scene.zone_registry.active_publishes.get(&zone_name).is_some_and(|v| !v.is_empty()),
+            "zone publish record must be created independently of raw tile"
+        );
+    }
 }
