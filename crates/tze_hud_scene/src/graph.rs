@@ -2779,11 +2779,10 @@ impl SceneGraph {
             if publishes.len() != before {
                 self.version += 1;
             }
+            if publishes.is_empty() {
+                self.widget_registry.active_publishes.remove(widget_name);
+            }
         }
-        // Remove empty publish lists for cleanliness
-        self.widget_registry
-            .active_publishes
-            .retain(|_, v| !v.is_empty());
         Ok(())
     }
 

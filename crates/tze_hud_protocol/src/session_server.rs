@@ -2224,11 +2224,7 @@ async fn handle_mutation_batch(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::ClearWidget(cw)) => {
-                let instance_id = if cw.instance_id.is_empty() {
-                    None
-                } else {
-                    Some(cw.instance_id.clone())
-                };
+                let instance_id = (!cw.instance_id.is_empty()).then_some(cw.instance_id.clone());
                 scene_mutations.push(SceneMutation::ClearWidget {
                     widget_name: cw.widget_name.clone(),
                     instance_id,
@@ -2425,11 +2421,7 @@ async fn apply_queued_batch_to_scene(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::ClearWidget(cw)) => {
-                let instance_id = if cw.instance_id.is_empty() {
-                    None
-                } else {
-                    Some(cw.instance_id.clone())
-                };
+                let instance_id = (!cw.instance_id.is_empty()).then_some(cw.instance_id.clone());
                 scene_mutations.push(SceneMutation::ClearWidget {
                     widget_name: cw.widget_name.clone(),
                     instance_id,
