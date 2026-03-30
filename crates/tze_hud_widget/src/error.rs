@@ -27,7 +27,9 @@ pub enum BundleError {
     /// A widget type name is declared in two different loaded bundles.
     ///
     /// Wire code: `WIDGET_BUNDLE_DUPLICATE_TYPE`
-    #[error("WIDGET_BUNDLE_DUPLICATE_TYPE: widget type '{name}' already registered (from {existing_path}), rejected from {new_path}")]
+    #[error(
+        "WIDGET_BUNDLE_DUPLICATE_TYPE: widget type '{name}' already registered (from {existing_path}), rejected from {new_path}"
+    )]
     DuplicateType {
         name: String,
         existing_path: String,

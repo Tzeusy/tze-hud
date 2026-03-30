@@ -37,12 +37,18 @@ fn gauge_fixture_loads_successfully() {
             let def = &bundle.definition;
             assert_eq!(def.id, "gauge", "widget id should be 'gauge'");
             assert_eq!(def.name, "gauge");
-            assert!(!def.description.is_empty(), "description should not be empty");
+            assert!(
+                !def.description.is_empty(),
+                "description should not be empty"
+            );
 
             // Parameter schema: level, label, fill_color, severity.
             assert_eq!(def.parameter_schema.len(), 4);
-            let param_names: Vec<&str> =
-                def.parameter_schema.iter().map(|p| p.name.as_str()).collect();
+            let param_names: Vec<&str> = def
+                .parameter_schema
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
             assert!(param_names.contains(&"level"));
             assert!(param_names.contains(&"label"));
             assert!(param_names.contains(&"fill_color"));
@@ -90,8 +96,7 @@ fn gauge_fixture_loads_successfully() {
             ));
 
             // Check text-content synthetic binding.
-            let label_binding =
-                fill_bindings.iter().find(|b| b.param == "label").unwrap();
+            let label_binding = fill_bindings.iter().find(|b| b.param == "label").unwrap();
             assert_eq!(label_binding.target_element, "label-text");
             assert_eq!(label_binding.target_attribute, "text-content");
             assert!(matches!(
@@ -100,15 +105,20 @@ fn gauge_fixture_loads_successfully() {
             ));
 
             // Check discrete binding.
-            let sev_binding =
-                fill_bindings.iter().find(|b| b.param == "severity").unwrap();
+            let sev_binding = fill_bindings
+                .iter()
+                .find(|b| b.param == "severity")
+                .unwrap();
             assert_eq!(sev_binding.target_element, "indicator");
             assert_eq!(sev_binding.target_attribute, "fill");
             if let tze_hud_scene::types::WidgetBindingMapping::Discrete { value_map } =
                 &sev_binding.mapping
             {
                 assert_eq!(value_map.get("info").map(String::as_str), Some("#00cc66"));
-                assert_eq!(value_map.get("warning").map(String::as_str), Some("#ffcc00"));
+                assert_eq!(
+                    value_map.get("warning").map(String::as_str),
+                    Some("#ffcc00")
+                );
                 assert_eq!(value_map.get("error").map(String::as_str), Some("#ff3300"));
             } else {
                 panic!("expected discrete mapping for severity binding");
@@ -145,7 +155,9 @@ fn no_manifest_error() {
 
 #[test]
 fn no_manifest_wire_code() {
-    let err = BundleError::NoManifest { path: "/tmp/test".to_string() };
+    let err = BundleError::NoManifest {
+        path: "/tmp/test".to_string(),
+    };
     assert_eq!(err.wire_code(), "WIDGET_BUNDLE_NO_MANIFEST");
 }
 
@@ -156,7 +168,11 @@ fn no_manifest_wire_code() {
 #[test]
 fn invalid_manifest_toml_syntax_error() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("widget.toml"), b"this is not [ valid toml >>>").unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        b"this is not [ valid toml >>>",
+    )
+    .unwrap();
 
     let result = load_bundle_dir(dir.path());
     match result {

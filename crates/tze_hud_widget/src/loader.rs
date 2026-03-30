@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 
 use tze_hud_resource::validation::parse_svg_dimensions;
 use tze_hud_scene::types::{
-    GeometryPolicy, ContentionPolicy, RenderingPolicy,
-    WidgetBinding, WidgetBindingMapping, WidgetDefinition, WidgetParamConstraints,
-    WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue, WidgetSvgLayer,
+    ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetBinding, WidgetBindingMapping,
+    WidgetDefinition, WidgetParamConstraints, WidgetParamType, WidgetParameterDeclaration,
+    WidgetParameterValue, WidgetSvgLayer,
 };
 
 use crate::error::BundleError;
@@ -100,11 +100,7 @@ pub fn scan_bundle_dirs(bundle_roots: &[PathBuf]) -> Vec<BundleScanResult> {
                             existing_path: existing.display().to_string(),
                             new_path: path.display().to_string(),
                         };
-                        tracing::warn!(
-                            wire_code = err.wire_code(),
-                            "{}",
-                            err
-                        );
+                        tracing::warn!(wire_code = err.wire_code(), "{}", err);
                         results.push(BundleScanResult::Err(err));
                         continue;
                     }
@@ -154,44 +150,43 @@ fn load_bundle_dir_inner(dir: &Path, path_str: &str) -> Result<LoadedBundle, Bun
     }
 
     // Step 2: Read and parse widget.toml.
-    let toml_str = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        BundleError::InvalidManifest {
+    let toml_str =
+        std::fs::read_to_string(&manifest_path).map_err(|e| BundleError::InvalidManifest {
             path: path_str.to_string(),
             detail: format!("cannot read widget.toml: {e}"),
-        }
-    })?;
+        })?;
 
-    let raw: RawManifest = toml::from_str(&toml_str).map_err(|e| {
-        BundleError::InvalidManifest {
-            path: path_str.to_string(),
-            detail: format!("TOML parse error: {e}"),
-        }
+    let raw: RawManifest = toml::from_str(&toml_str).map_err(|e| BundleError::InvalidManifest {
+        path: path_str.to_string(),
+        detail: format!("TOML parse error: {e}"),
     })?;
 
     // Step 3: Validate required manifest fields.
-    let name = raw.name.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-        BundleError::InvalidManifest {
+    let name = raw
+        .name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| BundleError::InvalidManifest {
             path: path_str.to_string(),
             detail: "missing required field 'name'".to_string(),
-        }
-    })?;
+        })?;
 
-    let version = raw.version.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-        BundleError::InvalidManifest {
+    let version = raw
+        .version
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| BundleError::InvalidManifest {
             path: path_str.to_string(),
             detail: "missing required field 'version'".to_string(),
-        }
-    })?;
+        })?;
 
     let description = raw.description.as_deref().unwrap_or("").to_string();
 
     // Step 4: Parse parameter schema.
-    let parameter_schema =
-        parse_parameter_schema(&raw.parameter_schema, path_str)?;
+    let parameter_schema = parse_parameter_schema(&raw.parameter_schema, path_str)?;
 
     // Build a set of parameter names for binding validation.
-    let param_names: HashSet<&str> =
-        parameter_schema.iter().map(|p| p.name.as_str()).collect();
+    let param_names: HashSet<&str> = parameter_schema.iter().map(|p| p.name.as_str()).collect();
     // Build a map from param name to type for mapping validation.
     let param_types: HashMap<&str, WidgetParamType> = parameter_schema
         .iter()
@@ -203,12 +198,14 @@ fn load_bundle_dir_inner(dir: &Path, path_str: &str) -> Result<LoadedBundle, Bun
     let mut layers: Vec<WidgetSvgLayer> = Vec::new();
 
     for raw_layer in &raw.layers {
-        let svg_file = raw_layer.svg_file.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-            BundleError::InvalidManifest {
+        let svg_file = raw_layer
+            .svg_file
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BundleError::InvalidManifest {
                 path: path_str.to_string(),
                 detail: "a layer entry is missing required field 'svg_file'".to_string(),
-            }
-        })?;
+            })?;
 
         // Step 5a: Verify SVG file exists.
         let svg_path = dir.join(svg_file);
@@ -312,19 +309,23 @@ fn parse_parameter_schema(
 ) -> Result<Vec<WidgetParameterDeclaration>, BundleError> {
     let mut params = Vec::new();
     for raw_param in raw {
-        let name = raw_param.name.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-            BundleError::InvalidManifest {
+        let name = raw_param
+            .name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BundleError::InvalidManifest {
                 path: path_str.to_string(),
                 detail: "parameter_schema entry missing required field 'name'".to_string(),
-            }
-        })?;
+            })?;
 
-        let type_str = raw_param.param_type.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-            BundleError::InvalidManifest {
+        let type_str = raw_param
+            .param_type
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BundleError::InvalidManifest {
                 path: path_str.to_string(),
                 detail: format!("parameter '{name}' missing required field 'type'"),
-            }
-        })?;
+            })?;
 
         let param_type = parse_param_type(type_str).ok_or_else(|| {
             BundleError::InvalidManifest {
@@ -335,12 +336,8 @@ fn parse_parameter_schema(
             }
         })?;
 
-        let default_value = parse_default_value(
-            raw_param.default.as_ref(),
-            param_type,
-            name,
-            path_str,
-        )?;
+        let default_value =
+            parse_default_value(raw_param.default.as_ref(), param_type, name, path_str)?;
 
         let constraints = raw_param.constraints.as_ref().map(|c| {
             let mut wc = WidgetParamConstraints::default();
@@ -416,7 +413,9 @@ fn parse_default_value(
             if arr.len() != 4 {
                 return Err(BundleError::InvalidManifest {
                     path: path_str.to_string(),
-                    detail: format!("parameter '{name}': color default must be [r, g, b, a] (4 integers)"),
+                    detail: format!(
+                        "parameter '{name}': color default must be [r, g, b, a] (4 integers)"
+                    ),
                 });
             }
             let mut components = [0u8; 4];
@@ -467,41 +466,47 @@ fn resolve_bindings(
     let mut bindings = Vec::new();
 
     for raw_b in raw_bindings {
-        let param = raw_b.param.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-            BundleError::InvalidManifest {
+        let param = raw_b
+            .param
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BundleError::InvalidManifest {
                 path: path_str.to_string(),
                 detail: format!("layer '{svg_file}': binding missing required field 'param'"),
-            }
-        })?;
-
-        let target_element =
-            raw_b.target_element.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-                BundleError::InvalidManifest {
-                    path: path_str.to_string(),
-                    detail: format!(
-                        "layer '{svg_file}': binding for param '{param}' missing 'target_element'"
-                    ),
-                }
             })?;
 
-        let target_attribute =
-            raw_b.target_attribute.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-                BundleError::InvalidManifest {
-                    path: path_str.to_string(),
-                    detail: format!(
-                        "layer '{svg_file}': binding for param '{param}' missing 'target_attribute'"
-                    ),
-                }
+        let target_element = raw_b
+            .target_element
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BundleError::InvalidManifest {
+                path: path_str.to_string(),
+                detail: format!(
+                    "layer '{svg_file}': binding for param '{param}' missing 'target_element'"
+                ),
             })?;
 
-        let mapping_str = raw_b.mapping.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
-            BundleError::InvalidManifest {
+        let target_attribute = raw_b
+            .target_attribute
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BundleError::InvalidManifest {
+                path: path_str.to_string(),
+                detail: format!(
+                    "layer '{svg_file}': binding for param '{param}' missing 'target_attribute'"
+                ),
+            })?;
+
+        let mapping_str = raw_b
+            .mapping
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| BundleError::InvalidManifest {
                 path: path_str.to_string(),
                 detail: format!(
                     "layer '{svg_file}': binding for param '{param}' missing 'mapping'"
                 ),
-            }
-        })?;
+            })?;
 
         // Validate: param name must exist in the parameter schema.
         if !param_names.contains(param) {
@@ -527,14 +532,8 @@ fn resolve_bindings(
         let param_type = *param_types.get(param).unwrap(); // checked above
 
         // Validate and parse the mapping.
-        let mapping = parse_binding_mapping(
-            mapping_str,
-            raw_b,
-            param,
-            param_type,
-            svg_file,
-            path_str,
-        )?;
+        let mapping =
+            parse_binding_mapping(mapping_str, raw_b, param, param_type, svg_file, path_str)?;
 
         bindings.push(WidgetBinding {
             param: param.to_string(),

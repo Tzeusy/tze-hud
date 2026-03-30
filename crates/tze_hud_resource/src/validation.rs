@@ -355,8 +355,7 @@ pub fn parse_svg_dimensions(text: &str) -> Result<(u32, u32), ResourceError> {
         match reader.read_event() {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let local = e.local_name();
-                let local_str = std::str::from_utf8(local.as_ref())
-                    .unwrap_or("");
+                let local_str = std::str::from_utf8(local.as_ref()).unwrap_or("");
                 if local_str != "svg" {
                     return Err(ResourceError::DecodeError(format!(
                         "IMAGE_SVG root element is <{local_str}>, expected <svg>"
@@ -387,9 +386,7 @@ pub fn parse_svg_dimensions(text: &str) -> Result<(u32, u32), ResourceError> {
 /// Priority: `viewBox` (third and fourth tokens) > `width`/`height` attributes.
 /// Values are clamped to `[1, SVG_MAX_DIMENSION_PX]`.
 /// Missing or unparseable dimensions fall back to `SVG_DEFAULT_DIMENSION_PX`.
-fn extract_svg_dimensions(
-    attrs: quick_xml::events::attributes::Attributes<'_>,
-) -> (u32, u32) {
+fn extract_svg_dimensions(attrs: quick_xml::events::attributes::Attributes<'_>) -> (u32, u32) {
     let mut view_box: Option<(u32, u32)> = None;
     let mut attr_width: Option<u32> = None;
     let mut attr_height: Option<u32> = None;
@@ -440,7 +437,10 @@ fn extract_svg_dimensions(
 /// Returns 0 on failure.
 fn parse_svg_dim(s: &str) -> u32 {
     // Strip any non-digit suffix (units like "px", "pt", "em", "%").
-    let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let digits: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     // Parse as f64 first to handle decimal values like "200.5".
     digits.parse::<f64>().map(|v| v as u32).unwrap_or(0)
 }
