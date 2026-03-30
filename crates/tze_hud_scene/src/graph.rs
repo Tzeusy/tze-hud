@@ -2526,7 +2526,6 @@ impl SceneGraph {
         // ── Step 3: Apply contention policy and record publication ────────────
         let contention_policy = instance
             .contention_override
-            .clone()
             .unwrap_or(definition.default_contention_policy);
 
         let now_us = self.clock.now_us();

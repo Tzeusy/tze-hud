@@ -171,8 +171,9 @@ enum ToolClass {
 fn classify_tool(method: &str) -> ToolClass {
     match method {
         // Guest tools — unconditionally accessible (auth still required)
-        "publish_to_zone" | "list_zones" | "list_scene" | "publish_to_widget"
-        | "list_widgets" => ToolClass::Guest,
+        "publish_to_zone" | "list_zones" | "list_scene" | "publish_to_widget" | "list_widgets" => {
+            ToolClass::Guest
+        }
         // Resident tools — require resident_mcp capability
         "create_tab" | "create_tile" | "set_content" | "dismiss" => ToolClass::Resident,
         _ => ToolClass::Unknown,
@@ -417,8 +418,7 @@ impl McpServer {
                 )
             }
             "publish_to_widget" => {
-                let r =
-                    tools::handle_publish_to_widget(params, &mut scene, caller_capabilities)?;
+                let r = tools::handle_publish_to_widget(params, &mut scene, caller_capabilities)?;
                 Ok(
                     serde_json::to_value(r)
                         .map_err(|e| crate::McpError::Internal(e.to_string()))?,

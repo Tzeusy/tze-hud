@@ -3475,9 +3475,7 @@ async fn handle_widget_publish(
                         accepted: false,
                         widget_name: widget_name.clone(),
                         error_code: "WIDGET_CAPABILITY_MISSING".to_string(),
-                        error_message: format!(
-                            "Missing capability: {required_cap}"
-                        ),
+                        error_message: format!("Missing capability: {required_cap}"),
                     })),
                 }))
                 .await;
@@ -3556,9 +3554,7 @@ async fn handle_widget_publish(
                 ),
                 tze_hud_scene::ValidationError::WidgetUnknownParameter { widget, param } => (
                     "WIDGET_UNKNOWN_PARAMETER".to_string(),
-                    format!(
-                        "parameter '{param}' is not declared in widget '{widget}' schema"
-                    ),
+                    format!("parameter '{param}' is not declared in widget '{widget}' schema"),
                 ),
                 tze_hud_scene::ValidationError::WidgetParameterTypeMismatch { widget, param } => (
                     "WIDGET_PARAMETER_TYPE_MISMATCH".to_string(),
@@ -3576,17 +3572,13 @@ async fn handle_widget_publish(
                     "WIDGET_CAPABILITY_MISSING".to_string(),
                     format!("Missing capability: publish_widget:{widget}"),
                 ),
-                other => (
-                    "WIDGET_PUBLISH_FAILED".to_string(),
-                    other.to_string(),
-                ),
+                other => ("WIDGET_PUBLISH_FAILED".to_string(), other.to_string()),
             };
 
             // Determine transactional state to decide whether to send WidgetPublishResult.
             // For WIDGET_NOT_FOUND, we can't look up the definition — helper defaults to
             // transactional=true so the error result is always delivered.
-            let transactional =
-                is_widget_transactional(state, resolved_widget_name.as_str()).await;
+            let transactional = is_widget_transactional(state, resolved_widget_name.as_str()).await;
 
             if transactional {
                 let seq = session.next_server_seq();
@@ -8546,8 +8538,8 @@ mod tests {
     /// Helper: create a test service with a durable widget registered.
     async fn setup_widget_service() -> HudSessionImpl {
         use tze_hud_scene::types::{
-            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition,
-            WidgetInstance, WidgetParameterDeclaration, WidgetParamType, WidgetParameterValue,
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetInstance,
+            WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
         };
 
         let scene = SceneGraph::new(800.0, 600.0);
@@ -8557,28 +8549,27 @@ mod tests {
             let mut s = st.scene.lock().await;
 
             // Register a durable widget type "gauge"
-            s.widget_registry
-                .register_definition(WidgetDefinition {
-                    id: "gauge".to_string(),
-                    name: "Gauge".to_string(),
-                    description: "A simple gauge widget".to_string(),
-                    parameter_schema: vec![WidgetParameterDeclaration {
-                        name: "level".to_string(),
-                        param_type: WidgetParamType::F32,
-                        default_value: WidgetParameterValue::F32(0.0),
-                        constraints: None,
-                    }],
-                    layers: vec![],
-                    default_geometry_policy: GeometryPolicy::Relative {
-                        x_pct: 0.0,
-                        y_pct: 0.0,
-                        width_pct: 0.1,
-                        height_pct: 0.1,
-                    },
-                    default_rendering_policy: RenderingPolicy::default(),
-                    default_contention_policy: ContentionPolicy::LatestWins,
-                    ephemeral: false, // durable
-                });
+            s.widget_registry.register_definition(WidgetDefinition {
+                id: "gauge".to_string(),
+                name: "Gauge".to_string(),
+                description: "A simple gauge widget".to_string(),
+                parameter_schema: vec![WidgetParameterDeclaration {
+                    name: "level".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: None,
+                }],
+                layers: vec![],
+                default_geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 0.1,
+                    height_pct: 0.1,
+                },
+                default_rendering_policy: RenderingPolicy::default(),
+                default_contention_policy: ContentionPolicy::LatestWins,
+                ephemeral: false, // durable
+            });
 
             // Create a tab and widget instance
             let tab_id = s.create_tab("main", 0).unwrap();
@@ -8627,14 +8618,13 @@ mod tests {
     async fn test_durable_widget_publish_receives_result() {
         let (mut client, _handle) = setup_widget_test().await;
 
-        let (tx, _init_msgs, mut stream) =
-            handshake_with_capabilities(
-                &mut client,
-                "widget-agent",
-                "test-key",
-                &["publish_widget:gauge"],
-            )
-            .await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-agent",
+            "test-key",
+            &["publish_widget:gauge"],
+        )
+        .await;
 
         // Send a WidgetPublish for the durable "gauge" widget
         tx.send(ClientMessage {
@@ -8645,9 +8635,9 @@ mod tests {
                 instance_id: String::new(),
                 params: vec![crate::proto::WidgetParameterValueProto {
                     param_name: "level".to_string(),
-                    value: Some(
-                        crate::proto::widget_parameter_value_proto::Value::F32Value(0.75),
-                    ),
+                    value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                        0.75,
+                    )),
                 }],
                 transition_ms: 0,
                 ttl_us: 0,
@@ -8719,14 +8709,13 @@ mod tests {
     async fn test_widget_publish_not_found() {
         let (mut client, _handle) = setup_widget_test().await;
 
-        let (tx, _init_msgs, mut stream) =
-            handshake_with_capabilities(
-                &mut client,
-                "widget-notfound-agent",
-                "test-key",
-                &["publish_widget:nonexistent"],
-            )
-            .await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-notfound-agent",
+            "test-key",
+            &["publish_widget:nonexistent"],
+        )
+        .await;
 
         tx.send(ClientMessage {
             sequence: 2,
@@ -8764,14 +8753,13 @@ mod tests {
     async fn test_widget_publish_unknown_parameter() {
         let (mut client, _handle) = setup_widget_test().await;
 
-        let (tx, _init_msgs, mut stream) =
-            handshake_with_capabilities(
-                &mut client,
-                "widget-badparam-agent",
-                "test-key",
-                &["publish_widget:gauge"],
-            )
-            .await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-badparam-agent",
+            "test-key",
+            &["publish_widget:gauge"],
+        )
+        .await;
 
         tx.send(ClientMessage {
             sequence: 2,
@@ -8781,9 +8769,9 @@ mod tests {
                 instance_id: String::new(),
                 params: vec![crate::proto::WidgetParameterValueProto {
                     param_name: "bogus_param".to_string(),
-                    value: Some(
-                        crate::proto::widget_parameter_value_proto::Value::F32Value(0.5),
-                    ),
+                    value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                        0.5,
+                    )),
                 }],
                 transition_ms: 0,
                 ttl_us: 0,
@@ -8815,8 +8803,8 @@ mod tests {
     #[tokio::test]
     async fn test_ephemeral_widget_no_publish_result() {
         use tze_hud_scene::types::{
-            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition,
-            WidgetInstance, WidgetParameterDeclaration, WidgetParamType, WidgetParameterValue,
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetInstance,
+            WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
         };
 
         let scene = SceneGraph::new(800.0, 600.0);
@@ -8826,28 +8814,27 @@ mod tests {
             let mut s = st.scene.lock().await;
 
             // Register an EPHEMERAL widget type
-            s.widget_registry
-                .register_definition(WidgetDefinition {
-                    id: "live-bar".to_string(),
-                    name: "LiveBar".to_string(),
-                    description: "Ephemeral bar widget".to_string(),
-                    parameter_schema: vec![WidgetParameterDeclaration {
-                        name: "value".to_string(),
-                        param_type: WidgetParamType::F32,
-                        default_value: WidgetParameterValue::F32(0.0),
-                        constraints: None,
-                    }],
-                    layers: vec![],
-                    default_geometry_policy: GeometryPolicy::Relative {
-                        x_pct: 0.0,
-                        y_pct: 0.8,
-                        width_pct: 1.0,
-                        height_pct: 0.05,
-                    },
-                    default_rendering_policy: RenderingPolicy::default(),
-                    default_contention_policy: ContentionPolicy::LatestWins,
-                    ephemeral: true, // ephemeral!
-                });
+            s.widget_registry.register_definition(WidgetDefinition {
+                id: "live-bar".to_string(),
+                name: "LiveBar".to_string(),
+                description: "Ephemeral bar widget".to_string(),
+                parameter_schema: vec![WidgetParameterDeclaration {
+                    name: "value".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: None,
+                }],
+                layers: vec![],
+                default_geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.8,
+                    width_pct: 1.0,
+                    height_pct: 0.05,
+                },
+                default_rendering_policy: RenderingPolicy::default(),
+                default_contention_policy: ContentionPolicy::LatestWins,
+                ephemeral: true, // ephemeral!
+            });
 
             let tab_id = s.create_tab("main", 0).unwrap();
             s.widget_registry.register_instance(WidgetInstance {
@@ -8875,14 +8862,13 @@ mod tests {
             .await
             .unwrap();
 
-        let (tx, _init_msgs, mut stream) =
-            handshake_with_capabilities(
-                &mut client,
-                "ephemeral-widget-agent",
-                "test-key",
-                &["publish_widget:live-bar"],
-            )
-            .await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "ephemeral-widget-agent",
+            "test-key",
+            &["publish_widget:live-bar"],
+        )
+        .await;
 
         // Publish to ephemeral widget
         tx.send(ClientMessage {
@@ -8893,9 +8879,9 @@ mod tests {
                 instance_id: String::new(),
                 params: vec![crate::proto::WidgetParameterValueProto {
                     param_name: "value".to_string(),
-                    value: Some(
-                        crate::proto::widget_parameter_value_proto::Value::F32Value(0.9),
-                    ),
+                    value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                        0.9,
+                    )),
                 }],
                 transition_ms: 0,
                 ttl_us: 0,

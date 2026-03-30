@@ -759,7 +759,12 @@ fn json_to_widget_param_value(
         .widget_registry
         .definitions
         .get(&instance.widget_type_name)
-        .ok_or_else(|| McpError::SceneError(format!("widget type not found: {}", instance.widget_type_name)))?;
+        .ok_or_else(|| {
+            McpError::SceneError(format!(
+                "widget type not found: {}",
+                instance.widget_type_name
+            ))
+        })?;
 
     let decl = definition
         .parameter_schema
@@ -774,17 +779,13 @@ fn json_to_widget_param_value(
     let typed_value = match decl.param_type {
         WidgetParamType::F32 => {
             let f = v.as_f64().ok_or_else(|| {
-                McpError::SceneError(format!(
-                    "parameter '{param_name}' must be a number (f32)"
-                ))
+                McpError::SceneError(format!("parameter '{param_name}' must be a number (f32)"))
             })? as f32;
             WidgetParameterValue::F32(f)
         }
         WidgetParamType::String => {
             let s = v.as_str().ok_or_else(|| {
-                McpError::SceneError(format!(
-                    "parameter '{param_name}' must be a string"
-                ))
+                McpError::SceneError(format!("parameter '{param_name}' must be a string"))
             })?;
             WidgetParameterValue::String(s.to_string())
         }
@@ -880,8 +881,7 @@ pub fn handle_publish_to_widget(
     // ── Convert JSON params to WidgetParameterValue map ───────────────────────
     let mut typed_params: HashMap<String, WidgetParameterValue> = HashMap::new();
     for (param_name, json_val) in &p.params {
-        let (name, value) =
-            json_to_widget_param_value(json_val, param_name, scene, resolved_name)?;
+        let (name, value) = json_to_widget_param_value(json_val, param_name, scene, resolved_name)?;
         typed_params.insert(name, value);
     }
 
@@ -901,7 +901,9 @@ pub fn handle_publish_to_widget(
             // Map ValidationErrors to WIDGET_* error codes in the message
             use tze_hud_scene::ValidationError;
             match &e {
-                ValidationError::WidgetNotFound { .. } => McpError::SceneError(format!("WIDGET_NOT_FOUND: {e}")),
+                ValidationError::WidgetNotFound { .. } => {
+                    McpError::SceneError(format!("WIDGET_NOT_FOUND: {e}"))
+                }
                 ValidationError::WidgetUnknownParameter { .. } => {
                     McpError::SceneError(format!("WIDGET_UNKNOWN_PARAMETER: {e}"))
                 }
@@ -2295,7 +2297,7 @@ mod tests {
     fn scene_with_widget() -> (SceneGraph, SceneId) {
         use tze_hud_scene::types::{
             ContentionPolicy as CP, GeometryPolicy, RenderingPolicy, WidgetDefinition,
-            WidgetInstance, WidgetParameterDeclaration, WidgetParamType, WidgetParameterValue,
+            WidgetInstance, WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
         };
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
@@ -2440,12 +2442,9 @@ mod tests {
     fn test_publish_to_widget_empty_widget_name_rejected() {
         let (mut scene, _) = scene_with_widget();
         let caps = vec!["publish_widget:gauge".to_string()];
-        let err = handle_publish_to_widget(
-            json!({"widget_name": "", "params": {}}),
-            &mut scene,
-            &caps,
-        )
-        .unwrap_err();
+        let err =
+            handle_publish_to_widget(json!({"widget_name": "", "params": {}}), &mut scene, &caps)
+                .unwrap_err();
         assert!(matches!(err, McpError::InvalidParams(_)));
     }
 

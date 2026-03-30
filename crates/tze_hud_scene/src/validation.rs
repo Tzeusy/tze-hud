@@ -540,7 +540,11 @@ fn build_context_and_hint(
             json!({ "field": "param_value", "param": param, "widget": widget, "constraint": "value type must match parameter schema type" }),
             None,
         ),
-        ValidationError::WidgetParameterInvalidValue { widget, param, reason } => (
+        ValidationError::WidgetParameterInvalidValue {
+            widget,
+            param,
+            reason,
+        } => (
             json!({ "field": "param_value", "param": param, "widget": widget, "constraint": reason }),
             None,
         ),
