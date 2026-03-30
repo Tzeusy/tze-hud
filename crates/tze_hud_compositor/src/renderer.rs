@@ -485,7 +485,7 @@ impl Compositor {
     }
 
     /// Collect `TextItem`s for all TextMarkdownNode tiles and zone StreamText
-    /// content in the scene.
+    /// and ShortTextWithIcon/Notification content in the scene.
     ///
     /// Returns a flat `Vec<TextItem>` ready for `TextRasterizer::prepare_text_items`.
     fn collect_text_items(&self, scene: &SceneGraph, sw: f32, sh: f32) -> Vec<TextItem> {
@@ -498,7 +498,7 @@ impl Compositor {
             }
         }
 
-        // ── Zone StreamText content ───────────────────────────────────────────
+        // ── Zone StreamText and Notification content ─────────────────────────
         for (zone_name, publishes) in &scene.zone_registry.active_publishes {
             if publishes.is_empty() {
                 continue;
@@ -544,16 +544,37 @@ impl Compositor {
 
             // Use the most-recent publish. For Stack contention policy, publishes
             // are sorted oldest-first, so we iterate in reverse to get the newest
-            // StreamText entry. For LatestWins/Replace there is at most one entry.
+            // StreamText or Notification entry. For LatestWins/Replace there is at
+            // most one entry.
             for record in publishes.iter().rev() {
-                if let ZoneContent::StreamText(text) = &record.content {
-                    // White text on the semi-transparent zone background.
-                    let color = [255u8, 255, 255, 220];
-                    items.push(TextItem::from_zone_stream_text(
-                        text, zx, zy, zw, zh, font_size, color,
-                    ));
-                    // Only render the most-recent StreamText publish.
-                    break;
+                match &record.content {
+                    ZoneContent::StreamText(text) => {
+                        // White text on the semi-transparent zone background.
+                        let color = [255u8, 255, 255, 220];
+                        items.push(TextItem::from_zone_stream_text(
+                            text, zx, zy, zw, zh, font_size, color,
+                        ));
+                        // Only render the most-recent publish.
+                        break;
+                    }
+                    ZoneContent::Notification(payload) => {
+                        // Render the notification text. Icon rendering is stubbed for
+                        // v1 — no texture pipeline yet (per hud-lh3w spec).
+                        // White text on zone background.
+                        let color = [255u8, 255, 255, 220];
+                        items.push(TextItem::from_zone_notification(
+                            &payload.text,
+                            zx,
+                            zy,
+                            zw,
+                            zh,
+                            font_size,
+                            color,
+                        ));
+                        // Only render the most-recent publish.
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2004,6 +2025,88 @@ mod tests {
         assert!(
             found_bright,
             "expected bright (text) pixels in zone subtitle area (rows 652..715)"
+        );
+    }
+
+    /// Zone ShortTextWithIcon/Notification publish renders visible text at zone geometry.
+    ///
+    /// Acceptance criterion for hud-lh3w: publish_to_zone with
+    /// `ZoneContent::Notification(NotificationPayload)` produces a `TextItem` in
+    /// `collect_text_items` and causes bright glyph pixels to appear in the zone
+    /// geometry area.
+    #[tokio::test]
+    async fn test_zone_notification_renders_visible_text() {
+        let (mut compositor, surface) = make_compositor_and_surface(1280, 720).await;
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+
+        // Register a notification zone (top edge, 8% height).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification".to_owned(),
+            description: "notification zone".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.08,
+                width_pct: 0.70,
+                margin_px: 12.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(20.0),
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.75)),
+                text_align: None,
+                margin_px: None,
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // Publish a notification to the zone.
+        scene
+            .publish_to_zone(
+                "notification",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Alert: system ready".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        compositor.render_frame_headless(&scene, &surface);
+        let pixels = surface.read_pixels(&compositor.device);
+        assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
+
+        // The zone is at the top edge: y ≈ 12..(12 + 720*0.08) ≈ 12..69.6,
+        // centered: x ≈ (1280-896)/2..896+192 = 192..1088.
+        // White text glyphs should appear as bright pixels (r,g,b > 180).
+        let mut found_bright = false;
+        for row in 12usize..70 {
+            for col in 200usize..1080 {
+                let offset = (row * 1280 + col) * 4;
+                let p = &pixels[offset..offset + 4];
+                if p[0] > 180 && p[1] > 180 && p[2] > 180 {
+                    found_bright = true;
+                    break;
+                }
+            }
+            if found_bright {
+                break;
+            }
+        }
+        assert!(
+            found_bright,
+            "expected bright (text) pixels in notification zone area (rows 12..70)"
         );
     }
 

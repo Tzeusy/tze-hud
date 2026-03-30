@@ -274,6 +274,38 @@ impl TextItem {
             overflow: TextOverflow::Clip,
         }
     }
+
+    /// Build a `TextItem` for zone `ShortTextWithIcon` / `Notification` content.
+    ///
+    /// For v1, only the `text` field of [`NotificationPayload`] is rendered. Icon
+    /// rendering is stubbed — there is no texture pipeline yet.
+    ///
+    /// `x`, `y`, `w`, `h` are the zone geometry in physical pixels.
+    ///
+    /// [`NotificationPayload`]: tze_hud_scene::types::NotificationPayload
+    pub fn from_zone_notification(
+        text: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        font_size_px: f32,
+        color: [u8; 4],
+    ) -> Self {
+        let margin = 8.0_f32;
+        TextItem {
+            text: text.to_owned(),
+            pixel_x: x + margin,
+            pixel_y: y + margin,
+            bounds_width: (w - margin * 2.0).max(1.0),
+            bounds_height: (h - margin * 2.0).max(1.0),
+            font_size_px: font_size_px.clamp(6.0, 200.0),
+            font_family: FontFamily::SystemSansSerif,
+            color,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+        }
+    }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -365,6 +397,27 @@ mod tests {
         assert_eq!(item.pixel_y, 208.0);
         assert_eq!(item.bounds_width, 384.0);
         assert_eq!(item.bounds_height, 84.0);
+    }
+
+    #[test]
+    fn text_item_from_zone_notification_insets_margin_and_uses_text() {
+        let item = TextItem::from_zone_notification(
+            "Alert: ready",
+            50.0,
+            10.0,
+            300.0,
+            60.0,
+            18.0,
+            [255, 255, 255, 220],
+        );
+        // margin = 8px on each side
+        assert_eq!(item.pixel_x, 58.0);
+        assert_eq!(item.pixel_y, 18.0);
+        assert_eq!(item.bounds_width, 284.0);
+        assert_eq!(item.bounds_height, 44.0);
+        assert_eq!(item.text, "Alert: ready");
+        assert_eq!(item.font_size_px, 18.0);
+        assert_eq!(item.color, [255, 255, 255, 220]);
     }
 
     #[test]
