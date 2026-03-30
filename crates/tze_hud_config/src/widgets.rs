@@ -260,7 +260,11 @@ pub fn build_widget_instance(
     // Apply initial_params overrides (already validated).
     let mut current_params = current_params;
     for (param_name, any_val) in &raw_widget.initial_params {
-        if let Some(decl) = loaded.parameter_schema.iter().find(|p| p.name == *param_name) {
+        if let Some(decl) = loaded
+            .parameter_schema
+            .iter()
+            .find(|p| p.name == *param_name)
+        {
             if let Some(value) = coerce_toml_to_widget_value(&any_val.0, decl.param_type) {
                 current_params.insert(param_name.clone(), value);
             }
@@ -325,7 +329,11 @@ fn validate_initial_params(
                     field_path,
                     expected: format!(
                         "a parameter defined in widget type {widget_type:?} schema ({})",
-                        schema.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+                        schema
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     ),
                     got: format!("unknown parameter {param_name:?}"),
                     hint: format!(
@@ -348,9 +356,7 @@ fn validate_initial_params(
             errors.push(ConfigError {
                 code: ConfigErrorCode::WidgetInvalidInitialParams,
                 field_path,
-                expected: format!(
-                    "a value of type {type_name} for parameter {param_name:?}"
-                ),
+                expected: format!("a value of type {type_name} for parameter {param_name:?}"),
                 got: format!("{raw_val:?}"),
                 hint: format!(
                     "tab {tab_name:?}, widget {widget_type:?}: \
@@ -370,10 +376,7 @@ fn validate_initial_params(
                             errors.push(ConfigError {
                                 code: ConfigErrorCode::WidgetInvalidInitialParams,
                                 field_path,
-                                expected: format!(
-                                    "one of {:?}",
-                                    constraints.enum_allowed_values
-                                ),
+                                expected: format!("one of {:?}", constraints.enum_allowed_values),
                                 got: format!("{s:?}"),
                                 hint: format!(
                                     "tab {tab_name:?}, widget {widget_type:?}: \
@@ -456,9 +459,7 @@ fn parse_geometry_override(raw: &RawWidgetGeometry) -> Option<GeometryPolicy> {
     // live display reference at config-parse time).
     // Note: GeometryPolicy only supports Relative and EdgeAnchored in v1.
     // Absolute pixel geometry is expressed as Relative fractions here.
-    if let (Some(x), Some(y), Some(w), Some(h)) =
-        (raw.x, raw.y, raw.width, raw.height)
-    {
+    if let (Some(x), Some(y), Some(w), Some(h)) = (raw.x, raw.y, raw.width, raw.height) {
         // Normalize against full-display reference (1920×1080).
         const REF_W: f32 = 1920.0;
         const REF_H: f32 = 1080.0;
@@ -550,7 +551,10 @@ mod tests {
         let raw = RawConfig::default();
         let mut errors = Vec::new();
         let known = validate_widget_bundles(&raw, None, &[], &mut errors);
-        assert!(errors.is_empty(), "absent [widget_bundles] should produce no errors");
+        assert!(
+            errors.is_empty(),
+            "absent [widget_bundles] should produce no errors"
+        );
         assert!(known.is_empty());
     }
 
@@ -612,7 +616,10 @@ mod tests {
     #[test]
     fn invalid_initial_params_type_mismatch_produces_error() {
         let mut params = HashMap::new();
-        params.insert("level".to_string(), AnyValue(toml::Value::String("not_a_number".into())));
+        params.insert(
+            "level".to_string(),
+            AnyValue(toml::Value::String("not_a_number".into())),
+        );
         let raw = make_config_with_tab_widgets(vec![RawTabWidget {
             widget_type: Some("gauge".into()),
             initial_params: params,
@@ -657,7 +664,10 @@ mod tests {
     fn valid_initial_params_accepted() {
         let mut params = HashMap::new();
         params.insert("level".to_string(), AnyValue(toml::Value::Float(0.75)));
-        params.insert("label".to_string(), AnyValue(toml::Value::String("CPU".into())));
+        params.insert(
+            "label".to_string(),
+            AnyValue(toml::Value::String("CPU".into())),
+        );
         let raw = make_config_with_tab_widgets(vec![RawTabWidget {
             widget_type: Some("gauge".into()),
             initial_params: params,
@@ -677,15 +687,24 @@ mod tests {
     #[test]
     fn duplicate_instance_name_without_instance_id_produces_error() {
         let raw = make_config_with_tab_widgets(vec![
-            RawTabWidget { widget_type: Some("gauge".into()), ..Default::default() },
-            RawTabWidget { widget_type: Some("gauge".into()), ..Default::default() },
+            RawTabWidget {
+                widget_type: Some("gauge".into()),
+                ..Default::default()
+            },
+            RawTabWidget {
+                widget_type: Some("gauge".into()),
+                ..Default::default()
+            },
         ]);
         let known: HashSet<String> = ["gauge".to_string()].into();
         let type_map = type_map_from(&[make_gauge_type()]);
         let mut errors = Vec::new();
         validate_widget_instances(&raw, &known, &type_map, &mut errors);
         // Should produce a duplicate instance name error.
-        assert!(!errors.is_empty(), "duplicate widget type without instance_id should produce error, got: {errors:?}");
+        assert!(
+            !errors.is_empty(),
+            "duplicate widget type without instance_id should produce error, got: {errors:?}"
+        );
     }
 
     /// WHEN two widget entries have same type with distinct instance_ids THEN no error.
@@ -737,7 +756,10 @@ mod tests {
             default_contention_policy: ContentionPolicy::LatestWins,
         };
         let mut params = HashMap::new();
-        params.insert("severity".to_string(), AnyValue(toml::Value::String("critical".into())));
+        params.insert(
+            "severity".to_string(),
+            AnyValue(toml::Value::String("critical".into())),
+        );
         let raw = make_config_with_tab_widgets(vec![RawTabWidget {
             widget_type: Some("alert".into()),
             initial_params: params,
@@ -792,10 +814,7 @@ mod tests {
 
     #[test]
     fn coerce_color_from_wrong_length_rejected() {
-        let val = toml::Value::Array(vec![
-            toml::Value::Integer(255),
-            toml::Value::Integer(128),
-        ]);
+        let val = toml::Value::Array(vec![toml::Value::Integer(255), toml::Value::Integer(128)]);
         let result = coerce_toml_to_widget_value(&val, WidgetParamType::Color);
         assert!(result.is_none());
     }

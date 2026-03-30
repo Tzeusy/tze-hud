@@ -160,7 +160,10 @@ pub fn init_widget_registry(
         let tab_id = if let Some(&id) = effective_tab_map.get(tab_name) {
             id
         } else if tab.widgets.iter().any(|w| {
-            w.widget_type.as_deref().map(|t| type_map.contains_key(t)).unwrap_or(false)
+            w.widget_type
+                .as_deref()
+                .map(|t| type_map.contains_key(t))
+                .unwrap_or(false)
         }) {
             // Pre-create the tab so widget instances can reference it.
             match scene.create_tab(tab_name, tab_idx as u32) {

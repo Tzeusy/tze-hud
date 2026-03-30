@@ -39,10 +39,10 @@ use tze_hud_scene::config::{
 use crate::agents;
 use crate::capability::{capability_hint, has_reserved_event_prefix};
 use crate::privacy;
-use crate::widgets;
 use crate::profile;
 use crate::raw::{RawConfig, RawDegradation};
 use crate::resolver;
+use crate::widgets;
 use crate::zones;
 
 // ─── Regex helper ────────────────────────────────────────────────────────────

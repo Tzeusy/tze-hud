@@ -87,6 +87,7 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
+use crate::widget_startup::init_widget_registry;
 use tze_hud_compositor::{Compositor, WindowSurface};
 use tze_hud_config::TzeHudConfig;
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
@@ -98,7 +99,6 @@ use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{ZoneContent, ZoneRegistry};
-use crate::widget_startup::init_widget_registry;
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -1001,10 +1001,10 @@ impl WindowedRuntime {
         // Parse the raw config once here so we can use it for both widget
         // registry initialization and the RuntimeContext build. Failure is
         // non-fatal — widget startup will just leave the registry empty.
-        let raw_config_for_widgets: Option<tze_hud_config::raw::RawConfig> =
-            cfg.config_toml.as_deref().and_then(|toml| {
-                toml::from_str(toml).ok()
-            });
+        let raw_config_for_widgets: Option<tze_hud_config::raw::RawConfig> = cfg
+            .config_toml
+            .as_deref()
+            .and_then(|toml| toml::from_str(toml).ok());
 
         let shared_scene = {
             let mut scene = SceneGraph::new(width, height);
@@ -1026,12 +1026,7 @@ impl WindowedRuntime {
                     .config_file_path
                     .as_deref()
                     .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_path_buf()));
-                init_widget_registry(
-                    &mut scene,
-                    raw,
-                    config_parent_buf.as_deref(),
-                    &tab_map,
-                );
+                init_widget_registry(&mut scene, raw, config_parent_buf.as_deref(), &tab_map);
             }
 
             if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {

@@ -152,9 +152,7 @@ fn parameterized_prefix_hint(name: &str) -> Option<String> {
         || norm.starts_with("publishwidget")
         || norm.starts_with("widget_publish")
     {
-        return Some(
-            "use \"publish_widget:<widget_name>\" or \"publish_widget:*\"".to_string(),
-        );
+        return Some("use \"publish_widget:<widget_name>\" or \"publish_widget:*\"".to_string());
     }
 
     // emit_scene_event variants.
