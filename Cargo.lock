@@ -3336,6 +3336,7 @@ name = "tze_hud_runtime"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "blake3",
  "libc",
  "serde_json",
  "thiserror 2.0.18",
@@ -3347,6 +3348,7 @@ dependencies = [
  "tze_hud_input",
  "tze_hud_mcp",
  "tze_hud_protocol",
+ "tze_hud_resource",
  "tze_hud_scene",
  "tze_hud_telemetry",
  "uuid",

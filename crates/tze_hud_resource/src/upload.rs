@@ -32,6 +32,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::dedup::{DedupIndex, ResourceRecord};
+use crate::font_bytes_store::FontBytesStore;
 use crate::types::{
     CHUNK_SIZE_LIMIT, INLINE_SIZE_LIMIT, MAX_CONCURRENT_UPLOADS_PER_AGENT, ResourceError,
     ResourceId, ResourceStoreConfig, ResourceStored, ResourceType,
@@ -131,6 +132,12 @@ pub struct ResourceStore {
     config: Arc<ResourceStoreConfig>,
     /// Per-agent upload state.  Keyed by agent namespace string.
     agent_uploads: Arc<Mutex<HashMap<String, AgentUploads>>>,
+    /// Raw bytes for font resources (FONT_TTF / FONT_OTF).
+    ///
+    /// Image resources are excluded — their raw bytes are not needed after
+    /// decode validation.  Font bytes are retained so the compositor can load
+    /// them into glyphon's `FontSystem` at any time after upload.
+    font_bytes: FontBytesStore,
 }
 
 impl ResourceStore {
@@ -140,12 +147,21 @@ impl ResourceStore {
             dedup: DedupIndex::new(),
             config: Arc::new(config),
             agent_uploads: Arc::new(Mutex::new(HashMap::new())),
+            font_bytes: FontBytesStore::new(),
         }
     }
 
     /// Reference to the underlying dedup index (for scene-graph refcount ops).
     pub fn dedup_index(&self) -> &DedupIndex {
         &self.dedup
+    }
+
+    /// Reference to the font bytes store.
+    ///
+    /// The compositor uses this to retrieve raw font bytes and load them into
+    /// glyphon's `FontSystem` after a `FONT_TTF` / `FONT_OTF` upload completes.
+    pub fn font_bytes(&self) -> &FontBytesStore {
+        &self.font_bytes
     }
 
     // ─── Handle upload start ─────────────────────────────────────────────────
@@ -488,6 +504,16 @@ impl ResourceStore {
                 (existing.resource_id, true)
             }
         };
+
+        // Retain raw bytes for font resources so the compositor can load them
+        // into glyphon's FontSystem.  Image resources do not need byte retention.
+        if matches!(resource_type, ResourceType::FontTtf | ResourceType::FontOtf) {
+            self.font_bytes.insert(resource_id, data.into());
+            tracing::debug!(
+                resource_id = %resource_id,
+                "font bytes stored for compositor consumption"
+            );
+        }
 
         Ok(ResourceStored {
             resource_id,
