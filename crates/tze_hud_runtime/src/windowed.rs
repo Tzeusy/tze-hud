@@ -2272,8 +2272,14 @@ redaction_style = "blank"
         } else {
             (1920u32, 1080u32) // fallback (unreachable in this test)
         };
-        assert_eq!(surface_w, 2560, "surface must match physical inner_size at 125% DPI");
-        assert_eq!(surface_h, 1440, "surface must match physical inner_size at 125% DPI");
+        assert_eq!(
+            surface_w, 2560,
+            "surface must match physical inner_size at 125% DPI"
+        );
+        assert_eq!(
+            surface_h, 1440,
+            "surface must match physical inner_size at 125% DPI"
+        );
 
         // Old code multiplied — would have produced 3200x1800.
         let old_surface_w = (inner_w as f64 * scale).round() as u32;
