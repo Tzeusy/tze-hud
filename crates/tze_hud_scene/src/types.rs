@@ -1770,6 +1770,14 @@ impl WidgetRegistry {
     /// Query occupancy for a widget instance (resolved state after contention policy).
     ///
     /// Returns `None` if the instance is not found.
+    ///
+    /// # effective_params stub
+    ///
+    /// `effective_params` is currently a simplified stub: when publications are
+    /// active it returns `instance.current_params` without applying
+    /// Stack/MergeByKey reduction semantics (e.g., no per-key merge, no depth
+    /// capping).  Correct per-policy reduction is deferred to the widget
+    /// registry runtime integration tracked in **hud-mim2.3**.
     pub fn get_occupancy(&self, instance_name: &str, tab_id: SceneId) -> Option<WidgetOccupancy> {
         let instance = self.instances.get(instance_name)?;
         let def = self.definitions.get(&instance.widget_type_name)?;
@@ -1781,6 +1789,8 @@ impl WidgetRegistry {
         let occupant_count = pubs.len() as u32;
 
         // Fall back to definition defaults when no publications are active.
+        // NOTE: when pubs is non-empty, current_params is returned as-is (stub
+        // — see doc comment above for the tracking issue).
         let effective_params = if pubs.is_empty() {
             def.parameter_schema
                 .iter()

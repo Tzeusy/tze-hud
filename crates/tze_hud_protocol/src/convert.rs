@@ -560,7 +560,9 @@ pub fn widget_param_constraints_to_proto(
 ) -> proto::WidgetParamConstraintsProto {
     proto::WidgetParamConstraintsProto {
         f32_min: c.f32_min.unwrap_or(0.0),
+        has_f32_min: c.f32_min.is_some(),
         f32_max: c.f32_max.unwrap_or(0.0),
+        has_f32_max: c.f32_max.is_some(),
         string_max_bytes: c.string_max_bytes.unwrap_or(0),
         enum_allowed_values: c.enum_allowed_values.clone(),
     }
@@ -571,16 +573,8 @@ pub fn proto_to_widget_param_constraints(
     p: &proto::WidgetParamConstraintsProto,
 ) -> WidgetParamConstraints {
     WidgetParamConstraints {
-        f32_min: if p.f32_min != 0.0 {
-            Some(p.f32_min)
-        } else {
-            None
-        },
-        f32_max: if p.f32_max != 0.0 {
-            Some(p.f32_max)
-        } else {
-            None
-        },
+        f32_min: if p.has_f32_min { Some(p.f32_min) } else { None },
+        f32_max: if p.has_f32_max { Some(p.f32_max) } else { None },
         string_max_bytes: if p.string_max_bytes != 0 {
             Some(p.string_max_bytes)
         } else {
@@ -723,18 +717,29 @@ pub fn widget_definition_to_proto(d: &WidgetDefinition) -> proto::WidgetDefiniti
     let default_geometry_policy = Some(geometry_policy_to_proto(&d.default_geometry_policy));
     let default_rendering_policy = Some(rendering_policy_to_proto(&d.default_rendering_policy));
 
-    let default_contention_policy = match d.default_contention_policy {
-        ContentionPolicy::LatestWins => {
-            proto::ContentionPolicyProto::ContentionPolicyLatestWins as i32
-        }
-        ContentionPolicy::Replace => proto::ContentionPolicyProto::ContentionPolicyReplace as i32,
-        ContentionPolicy::Stack { .. } => {
-            proto::ContentionPolicyProto::ContentionPolicyStack as i32
-        }
-        ContentionPolicy::MergeByKey { .. } => {
-            proto::ContentionPolicyProto::ContentionPolicyMergeByKey as i32
-        }
-    };
+    let (default_contention_policy, stack_max_depth, merge_max_keys) =
+        match d.default_contention_policy {
+            ContentionPolicy::LatestWins => (
+                proto::ContentionPolicyProto::ContentionPolicyLatestWins as i32,
+                0u32,
+                0u32,
+            ),
+            ContentionPolicy::Replace => (
+                proto::ContentionPolicyProto::ContentionPolicyReplace as i32,
+                0u32,
+                0u32,
+            ),
+            ContentionPolicy::Stack { max_depth } => (
+                proto::ContentionPolicyProto::ContentionPolicyStack as i32,
+                u32::from(max_depth),
+                0u32,
+            ),
+            ContentionPolicy::MergeByKey { max_keys } => (
+                proto::ContentionPolicyProto::ContentionPolicyMergeByKey as i32,
+                0u32,
+                u32::from(max_keys),
+            ),
+        };
 
     proto::WidgetDefinitionProto {
         id: d.id.clone(),
@@ -746,6 +751,8 @@ pub fn widget_definition_to_proto(d: &WidgetDefinition) -> proto::WidgetDefiniti
         default_rendering_policy,
         default_contention_policy,
         ephemeral: d.ephemeral,
+        stack_max_depth,
+        merge_max_keys,
     }
 }
 
@@ -790,11 +797,21 @@ pub fn proto_to_widget_definition(p: &proto::WidgetDefinitionProto) -> WidgetDef
                 ContentionPolicy::LatestWins
             }
             proto::ContentionPolicyProto::ContentionPolicyReplace => ContentionPolicy::Replace,
-            proto::ContentionPolicyProto::ContentionPolicyStack => {
-                ContentionPolicy::Stack { max_depth: 8 }
-            }
+            proto::ContentionPolicyProto::ContentionPolicyStack => ContentionPolicy::Stack {
+                max_depth: if p.stack_max_depth > 0 {
+                    p.stack_max_depth as u8
+                } else {
+                    8
+                },
+            },
             proto::ContentionPolicyProto::ContentionPolicyMergeByKey => {
-                ContentionPolicy::MergeByKey { max_keys: 16 }
+                ContentionPolicy::MergeByKey {
+                    max_keys: if p.merge_max_keys > 0 {
+                        p.merge_max_keys as u8
+                    } else {
+                        16
+                    },
+                }
             }
         };
 
@@ -1264,7 +1281,9 @@ mod tests {
             "parameter schema length must survive round-trip"
         );
 
-        // Check each parameter declaration
+        // Check each parameter declaration — including constraints.
+        // make_widget_definition sets f32_min: Some(0.0) on "level", which
+        // exercises the has_f32_min sentinel fix (0.0 must not be confused with None).
         for (orig_decl, rest_decl) in original
             .parameter_schema
             .iter()
@@ -1273,6 +1292,11 @@ mod tests {
             assert_eq!(rest_decl.name, orig_decl.name);
             assert_eq!(rest_decl.param_type, orig_decl.param_type);
             assert_eq!(rest_decl.default_value, orig_decl.default_value);
+            assert_eq!(
+                rest_decl.constraints, orig_decl.constraints,
+                "constraints for '{}' must survive round-trip (including Some(0.0))",
+                orig_decl.name
+            );
         }
 
         assert_eq!(restored.layers.len(), original.layers.len());
@@ -1280,6 +1304,74 @@ mod tests {
         assert_eq!(
             restored.layers[0].bindings.len(),
             original.layers[0].bindings.len()
+        );
+    }
+
+    #[test]
+    fn widget_constraints_f32_zero_round_trip() {
+        // Regression: Some(0.0) must not be confused with None after encode/decode.
+        // Without has_f32_min/has_f32_max booleans, 0.0 is indistinguishable
+        // from the proto default (also 0.0) and would be decoded as None.
+        let constraints = WidgetParamConstraints {
+            f32_min: Some(0.0),
+            f32_max: Some(0.0),
+            ..Default::default()
+        };
+        let proto = widget_param_constraints_to_proto(&constraints);
+        let restored = proto_to_widget_param_constraints(&proto);
+        assert_eq!(
+            restored.f32_min,
+            Some(0.0),
+            "f32_min: Some(0.0) must survive round-trip"
+        );
+        assert_eq!(
+            restored.f32_max,
+            Some(0.0),
+            "f32_max: Some(0.0) must survive round-trip"
+        );
+    }
+
+    #[test]
+    fn widget_constraints_none_f32_round_trip() {
+        // None f32 constraints must survive as None (not Some(0.0)).
+        let constraints = WidgetParamConstraints::default();
+        let proto = widget_param_constraints_to_proto(&constraints);
+        let restored = proto_to_widget_param_constraints(&proto);
+        assert_eq!(
+            restored.f32_min, None,
+            "None f32_min must survive round-trip"
+        );
+        assert_eq!(
+            restored.f32_max, None,
+            "None f32_max must survive round-trip"
+        );
+    }
+
+    #[test]
+    fn widget_definition_stack_contention_round_trip() {
+        // Verify stack_max_depth survives proto round-trip (previously hard-coded to 8).
+        let mut def = make_widget_definition();
+        def.default_contention_policy = ContentionPolicy::Stack { max_depth: 5 };
+        let proto = widget_definition_to_proto(&def);
+        let restored = proto_to_widget_definition(&proto);
+        assert_eq!(
+            restored.default_contention_policy,
+            ContentionPolicy::Stack { max_depth: 5 },
+            "Stack {{ max_depth }} must survive proto round-trip"
+        );
+    }
+
+    #[test]
+    fn widget_definition_merge_contention_round_trip() {
+        // Verify merge_max_keys survives proto round-trip (previously hard-coded to 16).
+        let mut def = make_widget_definition();
+        def.default_contention_policy = ContentionPolicy::MergeByKey { max_keys: 12 };
+        let proto = widget_definition_to_proto(&def);
+        let restored = proto_to_widget_definition(&proto);
+        assert_eq!(
+            restored.default_contention_policy,
+            ContentionPolicy::MergeByKey { max_keys: 12 },
+            "MergeByKey {{ max_keys }} must survive proto round-trip"
         );
     }
 
