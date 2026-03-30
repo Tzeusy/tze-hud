@@ -1021,6 +1021,8 @@ pub enum Capability {
     ReadTelemetry,
     /// `publish_zone:<zone_name>` or `publish_zone:*` — agent may publish to a zone.
     PublishZone(String),
+    /// `publish_widget:<widget_name>` — agent may publish parameter values to a widget.
+    PublishWidget(String),
     /// `emit_scene_event:<event_name>` — agent may emit a named scene event.
     EmitSceneEvent(String),
     /// `resident_mcp` — agent is a resident MCP agent.

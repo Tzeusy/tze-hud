@@ -336,6 +336,7 @@ pub const CANONICAL_FIXED_CAPS: &[&str] = &[
 /// Recognized forms:
 /// - Fixed names in `CANONICAL_FIXED_CAPS`
 /// - `publish_zone:<zone_name>` (non-empty zone name)
+/// - `publish_widget:<widget_name>` (non-empty widget name)
 /// - `emit_scene_event:<event_name>` (non-empty event name)
 ///
 /// Rejected forms include: pre-Round-14 names (`read_scene`, `receive_input`,
@@ -368,6 +369,10 @@ fn is_canonical_capability(cap: &str) -> bool {
     }
     // Parameterized: publish_zone:<non-empty>
     if let Some(rest) = cap.strip_prefix("publish_zone:") {
+        return !rest.is_empty();
+    }
+    // Parameterized: publish_widget:<non-empty>
+    if let Some(rest) = cap.strip_prefix("publish_widget:") {
         return !rest.is_empty();
     }
     // Parameterized: emit_scene_event:<non-empty>, but system. and scene. prefixes
@@ -866,6 +871,20 @@ mod tests {
     #[test]
     fn test_publish_zone_empty_suffix_invalid() {
         let caps = vec!["publish_zone:".to_string()];
+        assert!(validate_canonical_capabilities(&caps).is_err());
+    }
+
+    /// publish_widget with non-empty widget name is valid.
+    #[test]
+    fn test_publish_widget_valid() {
+        let caps = vec!["publish_widget:gauge".to_string()];
+        assert!(validate_canonical_capabilities(&caps).is_ok());
+    }
+
+    /// publish_widget with empty widget name is invalid.
+    #[test]
+    fn test_publish_widget_empty_suffix_invalid() {
+        let caps = vec!["publish_widget:".to_string()];
         assert!(validate_canonical_capabilities(&caps).is_err());
     }
 

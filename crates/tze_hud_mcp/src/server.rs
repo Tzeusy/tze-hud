@@ -170,8 +170,9 @@ enum ToolClass {
 
 fn classify_tool(method: &str) -> ToolClass {
     match method {
-        // Guest tools — unconditionally accessible
-        "publish_to_zone" | "list_zones" | "list_scene" => ToolClass::Guest,
+        // Guest tools — unconditionally accessible (auth still required)
+        "publish_to_zone" | "list_zones" | "list_scene" | "publish_to_widget"
+        | "list_widgets" => ToolClass::Guest,
         // Resident tools — require resident_mcp capability
         "create_tab" | "create_tile" | "set_content" | "dismiss" => ToolClass::Resident,
         _ => ToolClass::Unknown,
@@ -333,7 +334,9 @@ impl McpServer {
         }
 
         let id = request.id.clone();
-        let result = self.invoke_tool(&request.method, request.params).await;
+        let result = self
+            .invoke_tool(&request.method, request.params, &ctx.capabilities)
+            .await;
 
         let response = match result {
             Ok(value) => McpResponse::ok(id, value),
@@ -350,10 +353,16 @@ impl McpServer {
     }
 
     /// Invoke the named tool with the given parameters.
+    ///
+    /// `caller_capabilities` is the set of capability strings from the
+    /// [`CallerContext`] (e.g. `["publish_widget:gauge"]`).  Tools that
+    /// require specific capabilities (such as `publish_to_widget`) check this
+    /// slice before accessing the scene graph.
     async fn invoke_tool(
         &self,
         method: &str,
         params: serde_json::Value,
+        caller_capabilities: &[String],
     ) -> Result<serde_json::Value, crate::McpError> {
         let mut scene = self.scene.lock().await;
 
@@ -402,6 +411,21 @@ impl McpServer {
             }
             "list_scene" => {
                 let r = tools::handle_list_scene(params, &scene)?;
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
+            }
+            "publish_to_widget" => {
+                let r =
+                    tools::handle_publish_to_widget(params, &mut scene, caller_capabilities)?;
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
+            }
+            "list_widgets" => {
+                let r = tools::handle_list_widgets(params, &scene)?;
                 Ok(
                     serde_json::to_value(r)
                         .map_err(|e| crate::McpError::Internal(e.to_string()))?,

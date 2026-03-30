@@ -5,13 +5,15 @@
 //! response value.
 //!
 //! Tool naming follows the issue spec:
-//! - `create_tab`      → `handle_create_tab`
-//! - `create_tile`     → `handle_create_tile`
-//! - `set_content`     → `handle_set_content`
-//! - `dismiss`         → `handle_dismiss`
-//! - `publish_to_zone` → `handle_publish_to_zone`
-//! - `list_zones`      → `handle_list_zones`
-//! - `list_scene`      → `handle_list_scene`
+//! - `create_tab`        → `handle_create_tab`
+//! - `create_tile`       → `handle_create_tile`
+//! - `set_content`       → `handle_set_content`
+//! - `dismiss`           → `handle_dismiss`
+//! - `publish_to_zone`   → `handle_publish_to_zone`
+//! - `list_zones`        → `handle_list_zones`
+//! - `list_scene`        → `handle_list_scene`
+//! - `publish_to_widget` → `handle_publish_to_widget`
+//! - `list_widgets`      → `handle_list_widgets`
 
 use crate::{error::McpError, types::McpResult};
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,8 @@ use tze_hud_scene::{
     graph::SceneGraph,
     types::{
         Capability, FontFamily, Node, NodeData, NotificationPayload, Rect, Rgba, SceneId,
-        StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow, ZoneContent,
+        StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow, WidgetParameterValue,
+        ZoneContent,
     },
 };
 
@@ -689,6 +692,410 @@ pub fn handle_list_scene(params: Value, scene: &SceneGraph) -> McpResult<ListSce
     Ok(ListSceneResult {
         tabs,
         zones: zones_result.zones,
+    })
+}
+
+// ─── publish_to_widget ───────────────────────────────────────────────────────
+
+/// Parameters for `publish_to_widget`.
+#[derive(Debug, Deserialize)]
+pub struct PublishToWidgetParams {
+    /// Widget instance name (instance_id or widget_type_name for single-instance).
+    pub widget_name: String,
+    /// Optional disambiguation: explicit instance_id when multiple instances of
+    /// the same type exist on a tab. When provided, overrides `widget_name` for
+    /// instance resolution.
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    /// Parameter values to publish. Keys are parameter names, values are typed.
+    ///
+    /// JSON type mapping:
+    /// - f32 parameter → JSON number
+    /// - string parameter → JSON string
+    /// - color parameter → JSON object `{"r": u8, "g": u8, "b": u8, "a": u8}`
+    /// - enum parameter → JSON string
+    pub params: HashMap<String, Value>,
+    /// Transition duration in milliseconds (0 = instant). Defaults to 0.
+    #[serde(default)]
+    pub transition_ms: u32,
+    /// Optional namespace (auto-derived from "mcp" if omitted).
+    #[serde(default = "default_mcp_namespace")]
+    pub namespace: String,
+    /// TTL in microseconds (0 = use widget instance default). Defaults to 0.
+    #[serde(default)]
+    pub ttl_us: u64,
+}
+
+/// Response from `publish_to_widget`.
+#[derive(Debug, Serialize)]
+pub struct PublishToWidgetResult {
+    /// Widget instance name that was published to.
+    pub widget_name: String,
+    /// Whether the widget is durable (true) or ephemeral (false).
+    pub durable: bool,
+    /// Parameter names that were successfully applied.
+    pub applied_params: Vec<String>,
+}
+
+/// Convert a JSON `Value` to a `WidgetParameterValue` for a given param type.
+///
+/// Returns `None` if the value cannot be coerced to the expected type.
+fn json_to_widget_param_value(
+    v: &Value,
+    param_name: &str,
+    scene: &SceneGraph,
+    widget_name: &str,
+) -> Result<(String, WidgetParameterValue), McpError> {
+    use tze_hud_scene::types::WidgetParamType;
+
+    // Look up the parameter declaration from the widget schema.
+    let instance = scene
+        .widget_registry
+        .instances
+        .get(widget_name)
+        .ok_or_else(|| McpError::SceneError(format!("widget not found: {widget_name}")))?;
+
+    let definition = scene
+        .widget_registry
+        .definitions
+        .get(&instance.widget_type_name)
+        .ok_or_else(|| McpError::SceneError(format!("widget type not found: {}", instance.widget_type_name)))?;
+
+    let decl = definition
+        .parameter_schema
+        .iter()
+        .find(|d| d.name == param_name)
+        .ok_or_else(|| {
+            McpError::SceneError(format!(
+                "parameter '{param_name}' is not declared in widget '{widget_name}' schema (WIDGET_UNKNOWN_PARAMETER)"
+            ))
+        })?;
+
+    let typed_value = match decl.param_type {
+        WidgetParamType::F32 => {
+            let f = v.as_f64().ok_or_else(|| {
+                McpError::SceneError(format!(
+                    "parameter '{param_name}' must be a number (f32)"
+                ))
+            })? as f32;
+            WidgetParameterValue::F32(f)
+        }
+        WidgetParamType::String => {
+            let s = v.as_str().ok_or_else(|| {
+                McpError::SceneError(format!(
+                    "parameter '{param_name}' must be a string"
+                ))
+            })?;
+            WidgetParameterValue::String(s.to_string())
+        }
+        WidgetParamType::Color => {
+            let obj = v.as_object().ok_or_else(|| {
+                McpError::SceneError(format!(
+                    "parameter '{param_name}' must be a color object {{r, g, b, a}}"
+                ))
+            })?;
+            let r = obj.get("r").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+            let g = obj.get("g").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+            let b = obj.get("b").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+            let a = obj.get("a").and_then(|x| x.as_f64()).unwrap_or(255.0) as f32;
+            WidgetParameterValue::Color(Rgba { r, g, b, a })
+        }
+        WidgetParamType::Enum => {
+            let s = v.as_str().ok_or_else(|| {
+                McpError::SceneError(format!(
+                    "parameter '{param_name}' must be a string (enum value)"
+                ))
+            })?;
+            WidgetParameterValue::Enum(s.to_string())
+        }
+    };
+
+    Ok((param_name.to_string(), typed_value))
+}
+
+/// Publish parameter values to a named widget instance.
+///
+/// This is the primary widget interaction tool. It requires the
+/// `publish_widget:<widget_name>` capability on the calling session.
+///
+/// # Capability
+///
+/// The `publish_widget:<widget_name>` capability must be present in
+/// `caller_capabilities`. If absent, the call is rejected with
+/// `WIDGET_CAPABILITY_MISSING`.
+///
+/// # Parameter types
+///
+/// The `params` object maps parameter names to JSON values. The JSON type
+/// must match the parameter's declared type in the widget schema:
+/// - f32 → JSON number
+/// - string → JSON string
+/// - color → JSON object `{"r": u8, "g": u8, "b": u8, "a": u8}`
+/// - enum → JSON string
+///
+/// # Errors
+/// - `invalid_params` if `widget_name` is empty or params is missing.
+/// - `scene_error` with `WIDGET_CAPABILITY_MISSING` if capability absent.
+/// - `scene_error` with `WIDGET_NOT_FOUND` if widget instance unknown.
+/// - `scene_error` with `WIDGET_UNKNOWN_PARAMETER` if param name not in schema.
+/// - `scene_error` with `WIDGET_PARAMETER_TYPE_MISMATCH` if value type wrong.
+/// - `scene_error` with `WIDGET_PARAMETER_INVALID_VALUE` if value invalid.
+pub fn handle_publish_to_widget(
+    params: Value,
+    scene: &mut SceneGraph,
+    caller_capabilities: &[String],
+) -> McpResult<PublishToWidgetResult> {
+    let p: PublishToWidgetParams = parse_params(params)?;
+
+    if p.widget_name.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "widget_name must be non-empty".to_string(),
+        ));
+    }
+
+    // Resolve instance name: instance_id overrides widget_name when present.
+    let resolved_name = p
+        .instance_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&p.widget_name);
+
+    // ── Capability gate (spec §Requirement: Widget Publishing via MCP) ────────
+    let required_cap = format!("publish_widget:{}", p.widget_name);
+    let has_cap = caller_capabilities.iter().any(|c| c == &required_cap);
+
+    if !has_cap {
+        return Err(McpError::SceneError(format!(
+            "WIDGET_CAPABILITY_MISSING: missing capability '{required_cap}'"
+        )));
+    }
+
+    // ── Validate widget exists ────────────────────────────────────────────────
+    if !scene.widget_registry.instances.contains_key(resolved_name) {
+        return Err(McpError::SceneError(format!(
+            "WIDGET_NOT_FOUND: widget instance '{resolved_name}' not found"
+        )));
+    }
+
+    // ── Convert JSON params to WidgetParameterValue map ───────────────────────
+    let mut typed_params: HashMap<String, WidgetParameterValue> = HashMap::new();
+    for (param_name, json_val) in &p.params {
+        let (name, value) =
+            json_to_widget_param_value(json_val, param_name, scene, resolved_name)?;
+        typed_params.insert(name, value);
+    }
+
+    let applied_param_names: Vec<String> = typed_params.keys().cloned().collect();
+
+    // ── Apply via scene graph (validates schema + contention policy) ──────────
+    let is_durable = scene
+        .publish_to_widget(
+            resolved_name,
+            typed_params,
+            &p.namespace,
+            None, // merge_key not supported in MCP v1
+            p.transition_ms,
+            None, // expires_at_wall_us from ttl_us (TTL conversion deferred)
+        )
+        .map_err(|e| {
+            // Map ValidationErrors to WIDGET_* error codes in the message
+            use tze_hud_scene::ValidationError;
+            match &e {
+                ValidationError::WidgetNotFound { .. } => McpError::SceneError(format!("WIDGET_NOT_FOUND: {e}")),
+                ValidationError::WidgetUnknownParameter { .. } => {
+                    McpError::SceneError(format!("WIDGET_UNKNOWN_PARAMETER: {e}"))
+                }
+                ValidationError::WidgetParameterTypeMismatch { .. } => {
+                    McpError::SceneError(format!("WIDGET_PARAMETER_TYPE_MISMATCH: {e}"))
+                }
+                ValidationError::WidgetParameterInvalidValue { .. } => {
+                    McpError::SceneError(format!("WIDGET_PARAMETER_INVALID_VALUE: {e}"))
+                }
+                ValidationError::WidgetCapabilityMissing { .. } => {
+                    McpError::SceneError(format!("WIDGET_CAPABILITY_MISSING: {e}"))
+                }
+                _ => McpError::SceneError(e.to_string()),
+            }
+        })?;
+
+    Ok(PublishToWidgetResult {
+        widget_name: resolved_name.to_string(),
+        durable: is_durable,
+        applied_params: applied_param_names,
+    })
+}
+
+// ─── list_widgets ─────────────────────────────────────────────────────────────
+
+/// Parameters for `list_widgets` — no required fields.
+#[derive(Debug, Deserialize, Default)]
+pub struct ListWidgetsParams {}
+
+/// A parameter declaration entry in the list_widgets response.
+#[derive(Debug, Serialize)]
+pub struct WidgetParamEntry {
+    /// Parameter name.
+    pub name: String,
+    /// Parameter type: "f32", "string", "color", or "enum".
+    pub param_type: String,
+    /// Constraints (present when non-default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub f32_min: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub f32_max: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub string_max_bytes: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub enum_allowed_values: Vec<String>,
+}
+
+/// A widget type entry in the list_widgets response.
+#[derive(Debug, Serialize)]
+pub struct WidgetTypeEntry {
+    /// Unique widget type id (kebab-case).
+    pub id: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// Whether publishes to this widget type are fire-and-forget (no ack).
+    pub ephemeral: bool,
+    /// Parameter schema.
+    pub parameter_schema: Vec<WidgetParamEntry>,
+}
+
+/// A widget instance entry in the list_widgets response.
+#[derive(Debug, Serialize)]
+pub struct WidgetInstanceEntry {
+    /// Widget type name.
+    pub widget_type: String,
+    /// Instance addressing key.
+    pub instance_name: String,
+    /// Tab UUID this instance is bound to.
+    pub tab_id: String,
+    /// Current effective parameter values (from last publish or defaults).
+    pub current_params: HashMap<String, Value>,
+}
+
+/// Response from `list_widgets`.
+#[derive(Debug, Serialize)]
+pub struct ListWidgetsResult {
+    /// All registered widget types.
+    pub widget_types: Vec<WidgetTypeEntry>,
+    /// All widget instances with their current state.
+    pub widget_instances: Vec<WidgetInstanceEntry>,
+    /// Total widget type count.
+    pub type_count: usize,
+    /// Total instance count.
+    pub instance_count: usize,
+}
+
+/// Convert a `WidgetParameterValue` to a JSON `Value` for the list_widgets response.
+fn widget_param_value_to_json(v: &WidgetParameterValue) -> Value {
+    match v {
+        WidgetParameterValue::F32(f) => Value::from(*f as f64),
+        WidgetParameterValue::String(s) => Value::String(s.clone()),
+        WidgetParameterValue::Color(c) => serde_json::json!({
+            "r": c.r, "g": c.g, "b": c.b, "a": c.a
+        }),
+        WidgetParameterValue::Enum(e) => Value::String(e.clone()),
+    }
+}
+
+/// List all registered widget types and their instances with current parameter values.
+///
+/// Returns an empty result set if no widget bundles are configured. This tool
+/// is guest-accessible and requires no special capability.
+///
+/// # Errors
+/// - None (always succeeds; returns empty lists if registry is empty).
+pub fn handle_list_widgets(params: Value, scene: &SceneGraph) -> McpResult<ListWidgetsResult> {
+    let _: ListWidgetsParams = parse_params(params)?;
+
+    // ── Widget types ─────────────────────────────────────────────────────────
+    use tze_hud_scene::types::WidgetParamType;
+
+    let mut widget_types: Vec<WidgetTypeEntry> = scene
+        .widget_registry
+        .definitions
+        .values()
+        .map(|def| {
+            let parameter_schema = def
+                .parameter_schema
+                .iter()
+                .map(|decl| {
+                    let param_type = match decl.param_type {
+                        WidgetParamType::F32 => "f32",
+                        WidgetParamType::String => "string",
+                        WidgetParamType::Color => "color",
+                        WidgetParamType::Enum => "enum",
+                    }
+                    .to_string();
+                    let (f32_min, f32_max, string_max_bytes, enum_allowed_values) =
+                        if let Some(c) = &decl.constraints {
+                            (
+                                c.f32_min,
+                                c.f32_max,
+                                c.string_max_bytes,
+                                c.enum_allowed_values.clone(),
+                            )
+                        } else {
+                            (None, None, None, vec![])
+                        };
+                    WidgetParamEntry {
+                        name: decl.name.clone(),
+                        param_type,
+                        f32_min,
+                        f32_max,
+                        string_max_bytes,
+                        enum_allowed_values,
+                    }
+                })
+                .collect();
+            WidgetTypeEntry {
+                id: def.id.clone(),
+                name: def.name.clone(),
+                description: def.description.clone(),
+                ephemeral: def.ephemeral,
+                parameter_schema,
+            }
+        })
+        .collect();
+
+    // Stable ordering by id
+    widget_types.sort_by(|a, b| a.id.cmp(&b.id));
+
+    // ── Widget instances ──────────────────────────────────────────────────────
+    let mut widget_instances: Vec<WidgetInstanceEntry> = scene
+        .widget_registry
+        .instances
+        .values()
+        .map(|inst| {
+            let current_params: HashMap<String, Value> = inst
+                .current_params
+                .iter()
+                .map(|(k, v)| (k.clone(), widget_param_value_to_json(v)))
+                .collect();
+            WidgetInstanceEntry {
+                widget_type: inst.widget_type_name.clone(),
+                instance_name: inst.instance_name.clone(),
+                tab_id: inst.tab_id.to_string(),
+                current_params,
+            }
+        })
+        .collect();
+
+    // Stable ordering by instance_name
+    widget_instances.sort_by(|a, b| a.instance_name.cmp(&b.instance_name));
+
+    let type_count = widget_types.len();
+    let instance_count = widget_instances.len();
+
+    Ok(ListWidgetsResult {
+        widget_types,
+        widget_instances,
+        type_count,
+        instance_count,
     })
 }
 
@@ -1879,6 +2286,253 @@ mod tests {
                 .get(&zone_name)
                 .is_some_and(|v| !v.is_empty()),
             "zone publish record must be created independently of raw tile"
+        );
+    }
+
+    // ── publish_to_widget ─────────────────────────────────────────────────────
+
+    /// Build a scene pre-populated with a "gauge" widget type and instance.
+    fn scene_with_widget() -> (SceneGraph, SceneId) {
+        use tze_hud_scene::types::{
+            ContentionPolicy as CP, GeometryPolicy, RenderingPolicy, WidgetDefinition,
+            WidgetInstance, WidgetParameterDeclaration, WidgetParamType, WidgetParameterValue,
+        };
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).expect("create tab");
+
+        // Register "gauge" widget type with one f32 param "level".
+        scene.widget_registry.register_definition(WidgetDefinition {
+            id: "gauge".to_string(),
+            name: "Gauge".to_string(),
+            description: "Gauge widget".to_string(),
+            parameter_schema: vec![WidgetParameterDeclaration {
+                name: "level".to_string(),
+                param_type: WidgetParamType::F32,
+                default_value: WidgetParameterValue::F32(0.0),
+                constraints: None,
+            }],
+            layers: vec![],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.2,
+                height_pct: 0.1,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: CP::LatestWins,
+            ephemeral: false,
+        });
+
+        scene.widget_registry.register_instance(WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "gauge".to_string(),
+            current_params: std::collections::HashMap::new(),
+        });
+
+        (scene, tab_id)
+    }
+
+    #[test]
+    fn test_publish_to_widget_missing_capability_rejected() {
+        let (mut scene, _) = scene_with_widget();
+        // No capabilities granted.
+        let err = handle_publish_to_widget(
+            json!({"widget_name": "gauge", "params": {"level": 0.5}}),
+            &mut scene,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::SceneError(msg) if msg.contains("WIDGET_CAPABILITY_MISSING")),
+            "expected WIDGET_CAPABILITY_MISSING, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_publish_to_widget_not_found() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:nonexistent".to_string()];
+        let err = handle_publish_to_widget(
+            json!({"widget_name": "nonexistent", "params": {}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::SceneError(msg) if msg.contains("WIDGET_NOT_FOUND")),
+            "expected WIDGET_NOT_FOUND, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_publish_to_widget_unknown_parameter() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        let err = handle_publish_to_widget(
+            json!({"widget_name": "gauge", "params": {"bogus": 1.0}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap_err();
+        // json_to_widget_param_value reports unknown param in its own message format.
+        // handle_publish_to_widget does not run scene.publish_to_widget in this case
+        // because the schema lookup fails first in json_to_widget_param_value.
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("WIDGET_UNKNOWN_PARAMETER") || msg.contains("not declared"),
+            "expected unknown parameter error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_publish_to_widget_type_mismatch() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        // "level" is f32 but we pass a string.
+        let err = handle_publish_to_widget(
+            json!({"widget_name": "gauge", "params": {"level": "not-a-number"}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("f32") || msg.contains("number") || msg.contains("type"),
+            "expected type mismatch error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_publish_to_widget_durable_succeeds() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        let result = handle_publish_to_widget(
+            json!({"widget_name": "gauge", "params": {"level": 0.75}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap();
+        assert_eq!(result.widget_name, "gauge");
+        assert!(result.durable, "gauge is a durable widget type");
+        assert!(result.applied_params.contains(&"level".to_string()));
+    }
+
+    #[test]
+    fn test_publish_to_widget_empty_params_succeeds() {
+        // An empty params map is valid — zero fields to update is fine.
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        let result = handle_publish_to_widget(
+            json!({"widget_name": "gauge", "params": {}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap();
+        assert_eq!(result.widget_name, "gauge");
+        assert!(result.applied_params.is_empty());
+    }
+
+    #[test]
+    fn test_publish_to_widget_empty_widget_name_rejected() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        let err = handle_publish_to_widget(
+            json!({"widget_name": "", "params": {}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::InvalidParams(_)));
+    }
+
+    // ── list_widgets ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_list_widgets_empty_scene() {
+        let scene = SceneGraph::new(1920.0, 1080.0);
+        let result = handle_list_widgets(json!({}), &scene).unwrap();
+        assert_eq!(result.type_count, 0);
+        assert_eq!(result.instance_count, 0);
+        assert!(result.widget_types.is_empty());
+        assert!(result.widget_instances.is_empty());
+    }
+
+    #[test]
+    fn test_list_widgets_returns_registered_type_and_instance() {
+        let (scene, tab_id) = scene_with_widget();
+        let result = handle_list_widgets(json!({}), &scene).unwrap();
+
+        assert_eq!(result.type_count, 1);
+        assert_eq!(result.instance_count, 1);
+
+        let ty = &result.widget_types[0];
+        assert_eq!(ty.id, "gauge");
+        assert_eq!(ty.name, "Gauge");
+        assert!(!ty.ephemeral);
+        assert_eq!(ty.parameter_schema.len(), 1);
+        assert_eq!(ty.parameter_schema[0].name, "level");
+        assert_eq!(ty.parameter_schema[0].param_type, "f32");
+
+        let inst = &result.widget_instances[0];
+        assert_eq!(inst.instance_name, "gauge");
+        assert_eq!(inst.widget_type, "gauge");
+        assert_eq!(inst.tab_id, tab_id.to_string());
+        assert!(inst.current_params.is_empty(), "no params published yet");
+    }
+
+    #[test]
+    fn test_list_widgets_current_params_reflect_last_publish() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        handle_publish_to_widget(
+            json!({"widget_name": "gauge", "params": {"level": 0.5}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap();
+
+        let result = handle_list_widgets(json!({}), &scene).unwrap();
+        let inst = &result.widget_instances[0];
+        assert!(
+            inst.current_params.contains_key("level"),
+            "published param must appear in current_params"
+        );
+        // The f32 value 0.5 should be representable as a JSON number.
+        let level_val = inst.current_params.get("level").unwrap();
+        assert!(level_val.as_f64().is_some(), "level must be a JSON number");
+    }
+
+    #[test]
+    fn test_list_widgets_is_guest_accessible() {
+        // list_widgets must not require a resident capability — a guest-level
+        // caller (no capabilities) must be able to call it without error.
+        let (scene, _) = scene_with_widget();
+        // No caller_capabilities needed — list_widgets takes no caps param.
+        let result = handle_list_widgets(json!(null), &scene).unwrap();
+        // Succeeds and returns data — confirms guest access works.
+        assert_eq!(result.type_count, 1);
+    }
+
+    #[test]
+    fn test_publish_to_widget_is_capability_gated() {
+        // publish_to_widget without the right capability → WIDGET_CAPABILITY_MISSING.
+        // Confirms the tool performs its own gate and does not require a separate
+        // outer access check (i.e., the guest classification is correct: the tool
+        // handles its own capability gating internally).
+        let (mut scene, _) = scene_with_widget();
+        let err = handle_publish_to_widget(
+            json!({"widget_name": "gauge", "params": {"level": 0.5}}),
+            &mut scene,
+            &[], // no capabilities
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::SceneError(m) if m.contains("WIDGET_CAPABILITY_MISSING")),
+            "expected WIDGET_CAPABILITY_MISSING, got: {err:?}"
         );
     }
 }
