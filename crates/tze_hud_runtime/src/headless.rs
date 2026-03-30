@@ -282,7 +282,10 @@ impl HeadlessRuntime {
         // Clone the Arc so we can release the SharedState lock before rendering.
         let scene_arc = state.scene.clone();
         drop(state);
-        let scene_guard = scene_arc.lock().await;
+        let mut scene_guard = scene_arc.lock().await;
+        // Per timing-model/spec.md §Expiration Policy: expired zone
+        // publications MUST be cleared before the next frame.
+        scene_guard.drain_expired_zone_publications();
         let scene = &*scene_guard;
 
         // ── Capture compositor render work upfront ────────────────────────────

@@ -490,7 +490,12 @@ impl ApplicationHandler for WinitApp {
                     // Using try_lock avoids blocking the compositor thread for
                     // too long when a session handler or MCP handler holds the
                     // scene lock momentarily.
-                    if let Ok(scene) = compositor_scene.try_lock() {
+                    if let Ok(mut scene) = compositor_scene.try_lock() {
+                        // ── Zone publication expiry sweep ─────────────────
+                        // Per timing-model/spec.md §Expiration Policy: expired
+                        // publications MUST be cleared before the next frame.
+                        scene.drain_expired_zone_publications();
+
                         let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
                         hit_test_snapshot.store(Arc::new(new_snap));
 

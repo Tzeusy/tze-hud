@@ -892,6 +892,178 @@ fn publish_without_expiry_stores_none() {
     );
 }
 
+// ─── Zone publication expiry sweep ──────────────────────────────────────────
+
+#[test]
+fn drain_expired_zone_publications_removes_past_due() {
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let clock = Arc::new(SimulatedClock::new(1_000_000)); // t=1s
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.register_zone(make_subtitle_zone());
+
+    // Publish with expiry at t=2s
+    scene
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("will expire".to_string()),
+            "agent",
+            None,
+            Some(2_000_000),
+            None,
+        )
+        .unwrap();
+    assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
+
+    // Before expiry: nothing removed
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 0);
+    assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
+
+    // Advance past expiry
+    clock.set_us(2_000_001);
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 1);
+    assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 0);
+}
+
+#[test]
+fn drain_expired_leaves_no_expiry_publications() {
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let clock = Arc::new(SimulatedClock::new(1_000_000));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.register_zone(make_subtitle_zone());
+
+    // Publish without expiry
+    scene
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("permanent".to_string()),
+            "agent",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    clock.set_us(999_999_999_999);
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 0, "no-expiry publications must never be reaped");
+    assert_eq!(scene.zone_registry.active_for_zone("subtitle").len(), 1);
+}
+
+#[test]
+fn drain_expired_mixed_keeps_live_removes_dead() {
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let clock = Arc::new(SimulatedClock::new(1_000_000));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+    // Use a Stack zone so multiple publications coexist
+    scene.register_zone(ZoneDefinition {
+        id: SceneId::new(),
+        name: "notif".to_string(),
+        description: "test".to_string(),
+        geometry_policy: GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            width_pct: 0.5,
+            height_pct: 0.5,
+        },
+        accepted_media_types: vec![ZoneMediaType::StreamText],
+        rendering_policy: RenderingPolicy::default(),
+        contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+        max_publishers: 8,
+        transport_constraint: None,
+        auto_clear_ms: None,
+        ephemeral: false,
+        layer_attachment: LayerAttachment::Chrome,
+    });
+
+    // Three publications: expires soon, no expiry, expires later
+    scene
+        .publish_to_zone(
+            "notif",
+            ZoneContent::StreamText("dies at 2s".to_string()),
+            "a",
+            None,
+            Some(2_000_000),
+            None,
+        )
+        .unwrap();
+    scene
+        .publish_to_zone(
+            "notif",
+            ZoneContent::StreamText("permanent".to_string()),
+            "b",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    scene
+        .publish_to_zone(
+            "notif",
+            ZoneContent::StreamText("dies at 5s".to_string()),
+            "c",
+            None,
+            Some(5_000_000),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(scene.zone_registry.active_for_zone("notif").len(), 3);
+
+    // Advance to 3s — first publication expired, other two live
+    clock.set_us(3_000_000);
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 1);
+    let pubs = scene.zone_registry.active_for_zone("notif");
+    assert_eq!(pubs.len(), 2);
+    assert_eq!(pubs[0].publisher_namespace, "b");
+    assert_eq!(pubs[1].publisher_namespace, "c");
+}
+
+#[test]
+fn drain_expired_increments_version_only_when_changed() {
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let clock = Arc::new(SimulatedClock::new(1_000_000));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.register_zone(make_subtitle_zone());
+
+    scene
+        .publish_to_zone(
+            "subtitle",
+            ZoneContent::StreamText("temp".to_string()),
+            "agent",
+            None,
+            Some(2_000_000),
+            None,
+        )
+        .unwrap();
+
+    let v_before = scene.version;
+
+    // No expiry yet — version unchanged
+    scene.drain_expired_zone_publications();
+    assert_eq!(scene.version, v_before);
+
+    // Expire — version bumped
+    clock.set_us(3_000_000);
+    scene.drain_expired_zone_publications();
+    assert_eq!(scene.version, v_before + 1);
+
+    // Second drain — nothing to remove, version stable
+    scene.drain_expired_zone_publications();
+    assert_eq!(scene.version, v_before + 1);
+}
+
 // ─── Zone occupancy query API (v1: no effective_geometry) ────────────────────
 
 #[test]

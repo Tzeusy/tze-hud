@@ -2626,6 +2626,41 @@ impl SceneGraph {
     pub(crate) fn now_millis(&self) -> u64 {
         self.clock.now_millis()
     }
+
+    // ─── Zone publication expiry ─────────────────────────────────────────
+
+    /// Remove zone publications whose `expires_at_wall_us` has passed.
+    ///
+    /// Per timing-model/spec.md §Requirement: Expiration Policy and
+    /// `ZonePublishRecord` contract: "When present, the runtime MUST clear
+    /// this publication at or before this time."
+    ///
+    /// Returns the number of expired publications removed.
+    ///
+    /// Call this once per frame before rendering (Stage 4: Scene Commit).
+    pub fn drain_expired_zone_publications(&mut self) -> usize {
+        let now_us = self.clock.now_us();
+        let mut total_removed = 0usize;
+
+        for publishes in self.zone_registry.active_publishes.values_mut() {
+            let before = publishes.len();
+            publishes.retain(|r| match r.expires_at_wall_us {
+                Some(exp) => exp > now_us,
+                None => true,
+            });
+            total_removed += before - publishes.len();
+        }
+
+        // Clean up empty entries and bump version if anything changed.
+        if total_removed > 0 {
+            self.zone_registry
+                .active_publishes
+                .retain(|_, v| !v.is_empty());
+            self.version += 1;
+        }
+
+        total_removed
+    }
 }
 
 fn now_micros() -> u64 {
