@@ -634,6 +634,127 @@ reserved_top_fraction = 0.04     # for status_bar zone
 
 The zone registry. Built-in zone types (subtitle, notification, status_bar, pip, ambient_background, alert_banner) are always available. Custom zone types extend the registry.
 
+### 2.6 `[widget_bundles]` Section
+
+Widget asset bundle paths. Optional: absent section means no widget types are available and `list_widgets` returns an empty list. This is not an error — the runtime starts normally with an empty widget registry.
+
+```toml
+[widget_bundles]
+# Directories to scan for widget asset bundles.
+# Each path is resolved relative to the config file's parent directory.
+# The runtime scans each directory for subdirectories containing widget.toml manifests.
+# Default: [] (no bundles loaded)
+paths = ["./widgets", "/usr/share/tze_hud/widgets"]
+```
+
+**Bundle loading:** The runtime scans each configured path at startup. For each subdirectory containing a `widget.toml` manifest, the runtime:
+1. Parses the manifest (TOML).
+2. Validates the parameter schema.
+3. Loads and validates SVG files referenced in the manifest's layer entries using resvg.
+4. Registers the widget type in the widget registry.
+
+**Bundle error handling:** Errors in individual bundles are logged but do not halt startup. A bundle with an invalid manifest, missing SVG file, SVG parse failure, or duplicate widget type name is skipped. The runtime continues loading other valid bundles.
+
+**Validation rules:**
+- Each path in `paths` must exist as a directory relative to the config file. Non-existent path → `CONFIG_WIDGET_BUNDLE_PATH_NOT_FOUND` identifying the path.
+- If two bundles from any configured path declare the same widget type name, the second bundle is rejected with `CONFIG_WIDGET_BUNDLE_DUPLICATE_TYPE` identifying the type name and both conflicting bundle paths.
+- `[widget_bundles]` section is optional. Absent = empty widget registry (no error).
+
+**Bundle error codes** (emitted as structured warnings at startup, not fatal validation errors):
+
+| Code | Trigger |
+|------|---------|
+| `WIDGET_BUNDLE_NO_MANIFEST` | Bundle directory has no `widget.toml` |
+| `WIDGET_BUNDLE_INVALID_MANIFEST` | `widget.toml` has invalid TOML syntax or missing required fields |
+| `WIDGET_BUNDLE_DUPLICATE_TYPE` | Two bundles declare the same widget type name |
+| `WIDGET_BUNDLE_MISSING_SVG` | `widget.toml` references an SVG file not present in the bundle directory |
+| `WIDGET_BUNDLE_SVG_PARSE_ERROR` | An SVG file in the bundle fails resvg parse validation |
+
+### 2.7 `[[tabs.widgets]]` Section
+
+Per-tab widget instance declarations. Nested within `[[tabs]]` entries, parallel to `[tabs.zones]`.
+
+```toml
+[[tabs]]
+name = "Dashboard"
+display_name = "Dashboard"
+default_layout = "columns"
+
+[tabs.zones]
+subtitle     = { policy = "bottom_strip", layer = "content" }
+status_bar   = { policy = "full_width_bar", layer = "chrome" }
+
+# Widget instances for this tab.
+# Each [[tabs.widgets]] entry creates one widget instance.
+[[tabs.widgets]]
+# Widget type name (must reference a loaded widget type from [widget_bundles]).
+type = "gauge"
+
+# Optional: instance name for addressing in publish operations.
+# Required when multiple instances of the same widget type exist on this tab.
+# If absent, the instance is addressed by its type name.
+# instance_id = "cpu_gauge"
+
+# Widget layer attachment. One of: "background", "content", "chrome".
+# Default: "content"
+layer = "content"
+
+# Contention policy override. One of: "latest_wins", "stack", "merge_by_key", "replace".
+# If absent, uses the widget type's default_contention_policy.
+contention = "latest_wins"
+
+# Geometry override. If absent, uses the widget type's default_geometry_policy.
+[tabs.widgets.geometry]
+x_pct      = 0.70
+y_pct      = 0.10
+width_pct  = 0.25
+height_pct = 0.25
+
+# Initial parameter values. Override the widget type's schema defaults.
+# Validated against the widget type's parameter schema at startup.
+[tabs.widgets.initial_params]
+fill_level = 0.0
+label      = "CPU"
+fill_color = [66, 133, 244, 255]
+
+[[tabs.widgets]]
+type        = "gauge"
+instance_id = "mem_gauge"   # Disambiguates from the cpu_gauge above
+layer       = "content"
+
+[tabs.widgets.geometry]
+x_pct      = 0.70
+y_pct      = 0.40
+width_pct  = 0.25
+height_pct = 0.25
+
+[tabs.widgets.initial_params]
+fill_level = 0.0
+label      = "Memory"
+fill_color = [234, 67, 53, 255]
+```
+
+**Instance naming:** The instance name used in `publish_to_widget` / `WidgetPublish` is:
+- The `instance_id` value if provided, otherwise
+- The widget `type` name (valid only when exactly one instance of that type exists on the tab).
+
+Instance names must be unique within a tab.
+
+**Validation rules:**
+- `type` must reference a widget type loaded from `[widget_bundles]`. Unknown type → `CONFIG_UNKNOWN_WIDGET_TYPE` identifying the type name and the tab.
+- If two `[[tabs.widgets]]` entries on the same tab share a `type` without distinct `instance_id` values, the second entry → `CONFIG_DUPLICATE_WIDGET_NAME`.
+- `initial_params` values are validated against the widget type's parameter schema. Type mismatch → `CONFIG_WIDGET_INVALID_INITIAL_PARAMS` identifying parameter name, expected type, and actual value. Out-of-range f32 value → same error code.
+- Unknown parameter names in `initial_params` → `CONFIG_WIDGET_UNKNOWN_PARAM`.
+
+**Widget config error codes:**
+
+| Code | Trigger |
+|------|---------|
+| `CONFIG_UNKNOWN_WIDGET_TYPE` | `[[tabs.widgets]]` references a type not in the widget registry |
+| `CONFIG_DUPLICATE_WIDGET_NAME` | Two widget instances on the same tab share an effective instance name |
+| `CONFIG_WIDGET_INVALID_INITIAL_PARAMS` | `initial_params` value fails schema validation (type mismatch or out of range) |
+| `CONFIG_WIDGET_UNKNOWN_PARAM` | `initial_params` references a parameter name not in the widget type's schema |
+
 ```toml
 [zones]
 # Override a built-in zone type's rendering policy defaults.
@@ -1357,10 +1478,11 @@ The capability grant list in each agent entry uses structured capability identif
 | `exceed_default_budgets` | May request budget overrides at session time (requires user prompt). | RFC 0005 |
 | `read_telemetry` | May subscribe to `telemetry_frames` events (runtime performance samples). | RFC 0005 §7.1 |
 | `publish_zone:<zone_name>` | May publish to the named zone. One grant per zone. `publish_zone:*` grants all zones. | RFC 0005 §7.1 |
+| `publish_widget:<widget_name>` | May publish parameter values to the named widget instance. One grant per widget. `publish_widget:*` grants all widgets. The `<widget_name>` is the widget's instance name (explicit `instance_id` if set, otherwise the widget type name). | RFC 0005 §3.9 |
 | `emit_scene_event:<event_name>` | May fire the named scene event on the scene-event bus (e.g., `emit_scene_event:doorbell.ring`). The `<event_name>` must follow the `<source>.<action>` naming convention and must not use the `system.` or `scene.` reserved prefix (§5.5). | RFC 0005 |
 | `lease:priority:<N>` | May request lease priority N or lower (0=Critical, 4=Speculative). See RFC 0008 §2.1. | RFC 0008 §2.1 |
 
-Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene_topology` — these must be listed explicitly. Only `publish_zone:*` is supported as a wildcard form.
+Capabilities not listed are not granted. Tile and topology access is controlled by the individual capabilities `create_tiles`, `modify_own_tiles`, and `read_scene_topology` — these must be listed explicitly. `publish_zone:*` and `publish_widget:*` are supported as wildcard forms for their respective domains.
 
 > **Scene-event bus vs. input routing:** `subscribe_scene_events` / `emit_scene_event` operate on the scene-event bus defined in §5.5 (presence.md §"Inter-agent events" doctrine). They are distinct from input events (RFC 0004): `doorbell.ring` is a device/domain event, not a pointer or keyboard event. Granting an agent `access_input_events` does not give it access to scene events, and granting `subscribe_scene_events` does not forward any input.
 

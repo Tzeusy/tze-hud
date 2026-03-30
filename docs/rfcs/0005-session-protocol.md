@@ -309,6 +309,9 @@ message SessionMessage {
     InputCaptureRequest input_capture_request = 27;
     InputCaptureRelease input_capture_release = 28;
     SetImePosition      set_ime_position      = 29;
+    // Fields 30-33 occupied by agent operations above; preserved for zone extension buffer
+    // Field 34 reserved (zone extension buffer)
+    WidgetPublish       widget_publish        = 35;  // Parameterized visual publishing (§3.9)
 
     // Runtime → Agent
     MutationResult      mutation_result       = 30;
@@ -328,6 +331,7 @@ message SessionMessage {
     InputCaptureResponse input_capture_response = 44;  // Ack for InputCaptureRequest (RFC 0004 §2.3; §3.8)
     SessionSuspended    session_suspended     = 45;  // Safe mode entry (RFC 0007 §5.2; §3.7)
     SessionResumed      session_resumed       = 46;  // Safe mode exit (RFC 0007 §5.5; §3.7)
+    WidgetPublishResult widget_publish_result = 47;  // Ack for durable WidgetPublish (§3.9)
   }
 }
 ```
@@ -391,6 +395,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `InputCaptureRequest` | Transactional | Request exclusive pointer capture for a node (RFC 0004 §2.3); acked by `InputCaptureResponse` |
 | `InputCaptureRelease` | Transactional | Release pointer capture (RFC 0004 §2.3); confirmed by async `CaptureReleasedEvent` in `InputEvent` |
 | `SetImePosition` | Ephemeral | Advisory: update IME candidate window position (RFC 0004 §4.3); fire-and-forget |
+| `WidgetPublish` | State-stream (ephemeral widgets) or Transactional (durable widgets) | Publish typed parameter values to a named widget instance. Durable-widget publishes (field 35) receive a `WidgetPublishResult` ack; ephemeral-widget publishes are fire-and-forget. Requires `publish_widget:<widget_name>` capability. See §3.9. |
 
 ### 3.2 Server → Client Messages
 
@@ -413,6 +418,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `SessionResumed` | Transactional | Session resumed after suspension (safe mode exit, RFC 0007 §5.5); mutations accepted again. See §3.7. |
 | `InputFocusResponse` | Transactional | Ack/nack for `InputFocusRequest`; correlated by sequence number (RFC 0004 §1.2) |
 | `InputCaptureResponse` | Transactional | Ack/nack for `InputCaptureRequest`; correlated by sequence number (RFC 0004 §2.3) |
+| `WidgetPublishResult` | Transactional | Ack/nack for a durable-widget `WidgetPublish` (field 47); not sent for ephemeral widgets. See §3.9. |
 
 **Note on `InputEvent` batching (RFC 0004 §8.3):** RFC 0004 §8.3 specifies that multiple input events for the same agent within a single frame are assembled into an `EventBatch` (a `repeated InputEnvelope` with frame metadata) and delivered as a single `SessionMessage`. The current `input_event` field 34 carries a single `InputEnvelope`; the full `EventBatch` type defined in RFC 0004 §8.4 is the v1 delivery contract. Implementors must update field 34 to carry `EventBatch` per RFC 0004 §8.3.1.
 
@@ -564,6 +570,56 @@ The message schemas are defined in RFC 0004 (§1.2, §2.3, §4.3 for request typ
 ```
 
 **Dependency note:** RFC 0004 defines the request/response message schemas. Both RFCs must be read together for a complete picture. The field assignments above supersede the draft field numbers in RFC 0004 §8.3.1 (which proposed fields 39–40 for responses — those are now occupied by `SubscriptionChangeResult` and `ZonePublishResult`).
+
+### 3.9 Widget Publish (Agent → Runtime) and Widget Publish Result (Runtime → Agent)
+
+Widget publishing multiplexes onto the bidirectional session stream using the same pattern as zone publishing. `WidgetPublish` travels agent → runtime at ClientMessage field **35**. `WidgetPublishResult` travels runtime → agent at ServerMessage field **47**.
+
+**Field number rationale:** ClientMessage fields 10–33 are occupied by lifecycle and agent operations. Field 34 is a reserved buffer for future zone extensions. Field 35 is the first available field after the buffer — chosen to maintain a clean separation between zone-related fields and widget-related fields. ServerMessage fields 10–46 are occupied by existing messages. Field 47 is the next available field after `SessionResumed` (field 46).
+
+```protobuf
+// ─── Widget publish (client → server; field 35) ──────────────────────────────
+// Parameterized visual publishing to a named widget instance.
+// Requires publish_widget:<widget_name> capability (RFC 0006 §6.3).
+// Durable-widget publishes receive WidgetPublishResult; ephemeral are fire-and-forget.
+// The widget's ephemeral flag (WidgetDefinition.ephemeral) determines which path applies.
+// Traffic class: Transactional (durable widgets), State-stream (ephemeral widgets).
+
+message WidgetPublish {
+  string                                 widget_name   = 1;  // Widget instance name (instance_id or widget_type_name)
+  string                                 instance_id   = 2;  // Optional disambiguation for multiple instances of same type on tab
+  map<string, WidgetParameterValueProto> params        = 3;  // Parameter name → value
+  uint32                                 transition_ms = 4;  // Interpolation duration; 0 = snap immediately
+  uint64                                 ttl_us        = 5;  // TTL in μs (UTC); 0 = use widget instance default
+  string                                 merge_key     = 6;  // For MergeByKey contention; empty otherwise
+}
+
+// ─── Widget publish result (server → client; field 47) ───────────────────────
+// Sent only for durable-widget publishes. Ephemeral-widget publishes are fire-and-forget;
+// no WidgetPublishResult is sent regardless of success or failure.
+// Correlated by request_sequence matching the WidgetPublish envelope's sequence.
+
+message WidgetPublishResult {
+  uint64      request_sequence = 1;  // Sequence of the WidgetPublish that triggered this
+  bool        accepted         = 2;
+  string      widget_name      = 3;  // Echoed from the WidgetPublish
+  RuntimeError error           = 4;  // Populated if accepted = false
+}
+```
+
+**Error codes for WidgetPublishResult:**
+
+| Error Code | Meaning |
+|------------|---------|
+| `WIDGET_NOT_FOUND` | No widget instance with the given name exists on the agent's active tab |
+| `WIDGET_UNKNOWN_PARAMETER` | A published parameter name is not declared in the widget's schema |
+| `WIDGET_PARAMETER_TYPE_MISMATCH` | A parameter value's type does not match the schema declaration |
+| `WIDGET_PARAMETER_INVALID_VALUE` | A parameter value fails validation: NaN/infinity for f32, length exceeded for string, value not in allowed_values for enum |
+| `WIDGET_CAPABILITY_MISSING` | The agent does not hold the `publish_widget:<widget_name>` capability |
+
+**Traffic class assignment:** Widget publishes follow the same transactional/ephemeral split as zone publishes. A widget instance declared with `ephemeral = true` in its `WidgetDefinition` uses the state-stream (fire-and-forget) traffic class; durable widgets use the transactional class and always receive `WidgetPublishResult`.
+
+**MCP surface:** Widget publishing is also available to guest agents via the `publish_to_widget` MCP tool. The tool accepts `widget_name`, `params` (object), optional `transition_ms`, optional `ttl_us`, and optional `instance_id`. It requires `publish_widget:<widget_name>` capability. The `list_widgets` MCP tool returns all widget types and instances with their parameter schemas — no capability required, matching the `list_zones` pattern.
 
 ---
 
@@ -858,6 +914,15 @@ Zone publishing is available via both protocol planes (gRPC `ZonePublish` and MC
 - The guest does not acquire a lease. The zone's internal tile is runtime-owned (presence.md §"Guest agents and zone leases").
 - Content persists until the zone's `auto_clear_us` timeout, or until another publish replaces/extends it.
 - The guest receives a success/failure response for the tool call. No events are sent to the guest (it has no subscription stream).
+
+### 8.7 Widget Publishing via MCP
+
+Widget publishing is available via both protocol planes (gRPC `WidgetPublish` at field 35 and MCP `publish_to_widget`). The MCP surface mirrors the zone surface:
+
+- `publish_to_widget` — guest tool requiring `publish_widget:<widget_name>` capability. Accepts `widget_name` (string, required), `params` (object mapping parameter names to values, required), optional `transition_ms` (u32, default 0), optional `ttl_us` (u64), optional `instance_id` (string). Validates parameters against the widget's schema before publishing. Returns success or a structured error.
+- `list_widgets` — guest tool, no capability required. Returns all registered widget types (name, description, parameter_schema) and all widget instances on the agent's active tab (instance_name, tab, geometry, current parameter values).
+
+The guest does not acquire a lease. Widget tiles are runtime-owned. Guest publications persist until the TTL expires or the widget's contention policy replaces them.
 
 ---
 
@@ -1301,10 +1366,14 @@ session.proto
   ├── defines: RuntimeError (§3.5), SessionMessage envelope, all session lifecycle messages,
   │            StateDeltaComplete, HeartbeatPing/Pong, CapabilityRequest/Notice,
   │            SubscriptionChange/Result, MutationBatch/Result, ZonePublish/Result,
+  │            WidgetPublish/Result (§3.9),
   │            TelemetryFrame, SessionSuspended/Resumed, SessionInit/Established/Close/Error/Resume/ResumeResult
   ├── imports "scene_service.proto" (RFC 0001 scene_service.proto)
   │     └── provides: MutationProto, ZoneContent, SceneEvent, InputEvent,
   │                   LeaseRequest, LeaseResponse, SceneSnapshot (RFC 0001 §7.1)
+  ├── imports "types.proto" (RFC 0001 types.proto)
+  │     └── provides: WidgetParameterValueProto (used in WidgetPublish params map)
+  │                   and all other widget proto types (RFC 0001 §2.6)
   ├── imports "scene.proto" (RFC 0001 scene.proto)
   │     └── provides: SceneId (tze_hud.scene.v1 — 16-byte little-endian UUIDv7)
   │     (SceneId is used for batch_id, lease_id, and created_ids in MutationBatch/MutationResult)
@@ -1319,9 +1388,9 @@ session.proto
 
 Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
 
-**Currently allocated client→server fields:** 10–15 (lifecycle), 20–25 (original mutations/subscriptions), 26–29 (input control requests: `InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition` — added Round 12 per RFC 0004 §8.3.1).
+**Currently allocated client→server fields:** 10–15 (lifecycle), 20–25 (original mutations/subscriptions), 26–29 (input control requests: `InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition` — added Round 12 per RFC 0004 §8.3.1), 34 (reserved: zone extension buffer), 35 (`WidgetPublish` — widget parameter publishing, §3.9).
 
-**Currently allocated server→client fields:** 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`), 43 (`InputFocusResponse`), 44 (`InputCaptureResponse`), 45 (`SessionSuspended`), 46 (`SessionResumed`). Fields 47–49 are available for future server→client additions.
+**Currently allocated server→client fields:** 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`), 43 (`InputFocusResponse`), 44 (`InputCaptureResponse`), 45 (`SessionSuspended`), 46 (`SessionResumed`), 47 (`WidgetPublishResult` — ack for durable widget publishes, §3.9). Fields 48–49 are available for future server→client additions.
 
 ---
 

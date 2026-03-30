@@ -18,7 +18,7 @@ Trying to force one protocol to do everything will cripple the system. We need m
 
 ### 1. Compatibility plane: MCP
 
-MCP is the compatibility perimeter, not the hot path. JSON-RPC over stdio or Streamable HTTP. Use it for semantic control: create tab, split tile, mount widget, set markdown, request screenshot, dismiss overlay, subscribe to high-level state, and — critically — zone publishing (`publish_to_zone`, `list_zones`). Zone publishing via MCP is the primary LLM-first interaction surface: a single tool call, zero scene context required. Do not use MCP for high-rate deltas, touch loops, subtitle timing, media packets, or per-frame control.
+MCP is the compatibility perimeter, not the hot path. JSON-RPC over stdio or Streamable HTTP. Use it for semantic control: create tab, split tile, mount widget, set markdown, request screenshot, dismiss overlay, subscribe to high-level state, and — critically — zone and widget publishing (`publish_to_zone`, `list_zones`, `publish_to_widget`, `list_widgets`). Zone and widget publishing via MCP is the primary LLM-first interaction surface: a single tool call, zero scene context required. Do not use MCP for high-rate deltas, touch loops, subtitle timing, media packets, or per-frame control.
 
 ### 2. Resident control plane: gRPC
 
@@ -76,7 +76,8 @@ The scene model has several rectangular concepts. To keep them straight:
 
 - A **surface** is any rectangular region the compositor renders. This is the umbrella term.
 - A **tile** is a leased surface — an agent owns it directly via the lease system.
-- A **zone** is a managed surface — the runtime owns it and agents publish content into it.
+- A **zone** is a managed surface — the runtime owns it and agents publish raw content into it.
+- A **widget** is a parameterized managed surface — the runtime owns the visual template (SVG layers) and agents publish typed parameter values into it. The runtime binds parameter values to visual properties and rasterizes the result.
 - A **node** is content inside a surface (text, image, hit region, etc.).
 - A **layer** is where a surface attaches in the compositing stack.
 
@@ -102,9 +103,27 @@ Nodes within a tile do not have independent z-order relative to other tiles. The
 
 When the manifesto says "decode as surfaces, not as widgets," it means: a video feed should produce a GPU-resident texture that the compositor composites directly into the tile's region. The video is not "rendered into a widget" that gets laid out by a framework — it is a raw surface that the compositor owns and places. This avoids texture copies, enables zero-copy paths for local media producers, and keeps the compositor in control of timing and presentation.
 
+### Widget compositor pipeline
+
+Widgets extend the compositing model with a CPU-side SVG rasterization stage that sits between parameter publication and texture composition:
+
+1. **Registration (startup).** For each widget type loaded from an asset bundle, the compositor parses the `widget.toml` manifest, loads SVG layer files, and parses each SVG into a retained `usvg::Tree`. Parsing failures are fatal startup errors.
+
+2. **Instance binding (startup).** For each `[[tabs.widgets]]` entry in configuration, the compositor creates a `WidgetInstance` binding the widget type to a tab with configured geometry. The instance starts at schema default parameter values.
+
+3. **Publication (runtime).** A `WidgetPublish` message (gRPC field 35) or `publish_to_widget` MCP call arrives. The runtime validates parameter values against the widget type's schema and applies the contention policy to determine the effective publication.
+
+4. **Binding resolution (render).** When a widget's parameters have changed, the compositor applies each parameter binding to the retained SVG tree — substituting attribute values via linear mapping (f32), direct substitution (string/color), or discrete lookup (enum) — and rasterizes the modified SVG to an RGBA texture via resvg at the widget instance's pixel dimensions.
+
+5. **Caching.** The rasterized texture is cached and reused on subsequent frames until parameters change. Widgets whose parameters are unchanged skip stages 3–4 entirely. Re-rasterization must complete in less than 2ms for a 512×512 widget on reference hardware.
+
+Widget tiles use z-order `>= WIDGET_TILE_Z_MIN` (0x9000_0000), which is above the zone-reserved band (`ZONE_TILE_Z_MIN` = 0x8000_0000). Widgets therefore render above zones when they overlap spatially. Widget tiles default to `input_mode = Passthrough` — they are display-only visual indicators, not interactive surfaces.
+
+Under degradation level `RENDERING_SIMPLIFIED` or higher, the compositor may skip parameter interpolation and snap directly to final values, reducing re-rasterization to at most once per parameter change rather than once per frame during transitions.
+
 ### V1 compositing scope
 
-V1 ships: opaque tiles, alpha-blended transparent tiles, z-order compositing, chrome layer, and intra-tile node compositing (text over solid color, hit regions over content).
+V1 ships: opaque tiles, alpha-blended transparent tiles, z-order compositing, chrome layer, intra-tile node compositing (text over solid color, hit regions over content), and widget SVG layer rasterization with parameter binding and interpolation.
 
 V1 defers: blur, glass/frosted effects, tile drop shadows, animated opacity transitions, custom blend modes, and GPU-accelerated effects pipelines. These are valuable but not load-bearing for the v1 thesis.
 

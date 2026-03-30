@@ -87,16 +87,16 @@
 
 ## 10. Heart-and-Soul Doctrine Updates
 
-- [ ] 10.1 Update `heart-and-soul/architecture.md`: add widgets as third publishing abstraction in protocol planes section, add widget compositor pipeline description in compositing model section
-- [ ] 10.2 Update `heart-and-soul/presence.md`: add "Widgets: parameterized visual publishing" section after zones, covering widget anatomy, how agents use widgets, relationship to zones and raw tiles
-- [ ] 10.3 Update `heart-and-soul/v1.md`: add widgets to "V1 ships" scene model section, add widget-specific success criterion
+- [x] 10.1 Update `heart-and-soul/architecture.md`: add widgets as third publishing abstraction in protocol planes section, add widget compositor pipeline description in compositing model section
+- [x] 10.2 Update `heart-and-soul/presence.md`: add "Widgets: parameterized visual publishing" section after zones, covering widget anatomy, how agents use widgets, relationship to zones and raw tiles
+- [x] 10.3 Update `heart-and-soul/v1.md`: add widgets to "V1 ships" scene model section, add widget-specific success criterion
 
 ## 11. RFC / Law-and-Lore Updates
 
-- [ ] 11.1 Update `docs/rfcs/0001-scene-contract.md`: add widget ontology (type, instance, publication, occupancy) paralleling zone ontology, add WidgetRegistry to scene graph
-- [ ] 11.2 Update `docs/rfcs/0005-session-protocol.md`: add WidgetPublish/WidgetPublishResult message definitions, field allocations (35/47), traffic class assignment
-- [ ] 11.3 Update `docs/rfcs/0006-configuration.md`: add [widget_bundles] and [[tabs.widgets]] config sections, add publish_widget capability vocabulary
-- [ ] 11.4 Update `docs/rfcs/0011-resource-store.md`: add IMAGE_SVG resource type, SVG validation rules, budget accounting
+- [x] 11.1 Update `docs/rfcs/0001-scene-contract.md`: add widget ontology (type, instance, publication, occupancy) paralleling zone ontology, add WidgetRegistry to scene graph
+- [x] 11.2 Update `docs/rfcs/0005-session-protocol.md`: add WidgetPublish/WidgetPublishResult message definitions, field allocations (35/47), traffic class assignment
+- [x] 11.3 Update `docs/rfcs/0006-configuration.md`: add [widget_bundles] and [[tabs.widgets]] config sections, add publish_widget capability vocabulary
+- [x] 11.4 Update `docs/rfcs/0011-resource-store.md`: add IMAGE_SVG resource type, SVG validation rules, budget accounting
 
 ## 12. Tests
 
