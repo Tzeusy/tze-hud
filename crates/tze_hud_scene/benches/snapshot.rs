@@ -216,8 +216,14 @@ fn build_scene_with_widgets(tile_count: usize, widget_count: usize) -> SceneGrap
             contention_override: None,
             instance_name: instance_name.clone(),
             current_params: std::collections::HashMap::from([
-                ("level".to_string(), WidgetParameterValue::F32(i as f32 / widget_count as f32)),
-                ("label".to_string(), WidgetParameterValue::String(format!("Widget {i}"))),
+                (
+                    "level".to_string(),
+                    WidgetParameterValue::F32(i as f32 / widget_count as f32),
+                ),
+                (
+                    "label".to_string(),
+                    WidgetParameterValue::String(format!("Widget {i}")),
+                ),
             ]),
         });
 
@@ -226,8 +232,14 @@ fn build_scene_with_widgets(tile_count: usize, widget_count: usize) -> SceneGrap
             widget_name: instance_name.clone(),
             publisher_namespace: "bench.agent".to_string(),
             params: std::collections::HashMap::from([
-                ("level".to_string(), WidgetParameterValue::F32(i as f32 / widget_count as f32)),
-                ("label".to_string(), WidgetParameterValue::String(format!("W{i}"))),
+                (
+                    "level".to_string(),
+                    WidgetParameterValue::F32(i as f32 / widget_count as f32),
+                ),
+                (
+                    "label".to_string(),
+                    WidgetParameterValue::String(format!("W{i}")),
+                ),
             ]),
             published_at_wall_us: WALL_US,
             merge_key: None,

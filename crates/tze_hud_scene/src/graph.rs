@@ -6279,9 +6279,7 @@ mod spec_scenarios {
     }
 
     /// Register gauge definition + instance in a scene with one tab.
-    fn scene_with_gauge(
-        contention: ContentionPolicy,
-    ) -> (SceneGraph, SceneId /* tab_id */) {
+    fn scene_with_gauge(contention: ContentionPolicy) -> (SceneGraph, SceneId /* tab_id */) {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
 
@@ -6325,7 +6323,10 @@ mod spec_scenarios {
         )]);
         let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
         assert!(
-            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            matches!(
+                result,
+                Err(ValidationError::WidgetParameterInvalidValue { .. })
+            ),
             "NaN f32 should produce WidgetParameterInvalidValue, got: {result:?}"
         );
     }
@@ -6341,7 +6342,10 @@ mod spec_scenarios {
         )]);
         let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
         assert!(
-            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            matches!(
+                result,
+                Err(ValidationError::WidgetParameterInvalidValue { .. })
+            ),
             "positive infinity f32 should produce WidgetParameterInvalidValue, got: {result:?}"
         );
     }
@@ -6357,7 +6361,10 @@ mod spec_scenarios {
         )]);
         let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
         assert!(
-            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            matches!(
+                result,
+                Err(ValidationError::WidgetParameterInvalidValue { .. })
+            ),
             "negative infinity f32 should produce WidgetParameterInvalidValue, got: {result:?}"
         );
     }
@@ -6392,7 +6399,10 @@ mod spec_scenarios {
         )]);
         let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
         assert!(
-            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            matches!(
+                result,
+                Err(ValidationError::WidgetParameterInvalidValue { .. })
+            ),
             "enum value outside allowed_values should produce WidgetParameterInvalidValue, got: {result:?}"
         );
     }
@@ -6488,7 +6498,10 @@ mod spec_scenarios {
         scene.widget_registry.register_definition(def.clone());
 
         let retrieved = scene.widget_registry.get_definition("gauge");
-        assert!(retrieved.is_some(), "registered definition should be retrievable");
+        assert!(
+            retrieved.is_some(),
+            "registered definition should be retrievable"
+        );
         assert_eq!(retrieved.unwrap().id, "gauge");
         assert_eq!(retrieved.unwrap().parameter_schema.len(), 3);
     }
@@ -6499,7 +6512,9 @@ mod spec_scenarios {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let tab_id = scene.create_tab("Main", 0).unwrap();
 
-        scene.widget_registry.register_definition(make_gauge_definition());
+        scene
+            .widget_registry
+            .register_definition(make_gauge_definition());
         let instance = WidgetInstance {
             widget_type_name: "gauge".to_string(),
             tab_id,
@@ -6529,7 +6544,10 @@ mod spec_scenarios {
         scene.widget_registry.register_definition(def2);
 
         let retrieved = scene.widget_registry.get_definition("gauge").unwrap();
-        assert_eq!(retrieved.description, "second", "second registration should win");
+        assert_eq!(
+            retrieved.description, "second",
+            "second registration should win"
+        );
     }
 
     /// WHEN querying occupancy with no active publications THEN effective_params
@@ -6538,7 +6556,10 @@ mod spec_scenarios {
     fn widget_registry_occupancy_defaults_when_no_publications() {
         let (scene, tab_id) = scene_with_gauge(ContentionPolicy::LatestWins);
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
         assert_eq!(occ.occupant_count, 0);
         assert_eq!(occ.active_publications.len(), 0);
 
@@ -6743,8 +6764,7 @@ mod spec_scenarios {
     /// Source: widget-system/spec.md §Requirement: Widget Contention (MergeByKey).
     #[test]
     fn widget_contention_merge_by_key_replaces_same_key() {
-        let (mut scene, _tab) =
-            scene_with_gauge(ContentionPolicy::MergeByKey { max_keys: 8 });
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::MergeByKey { max_keys: 8 });
 
         scene
             .publish_to_widget(
