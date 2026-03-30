@@ -13,8 +13,8 @@
 //! - BTreeMap used for all map types (determinism guaranteed at compile time)
 
 use tze_hud_scene::{
-    Capability, Node, NodeData, Rect, ResourceId, SceneGraphSnapshot, SceneGraphZoneRegistry,
-    SceneId, StaticImageNode,
+    Capability, Node, NodeData, Rect, ResourceId, SceneGraphSnapshot, SceneGraphWidgetRegistry,
+    SceneGraphZoneRegistry, SceneId, StaticImageNode,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry},
     types::ImageFitMode,
@@ -540,6 +540,11 @@ fn snapshot_does_not_expose_incremental_diff() {
         zone_registry: SceneGraphZoneRegistry {
             zone_types: std::collections::BTreeMap::new(),
             zone_instances: vec![],
+            active_publications: std::collections::BTreeMap::new(),
+        },
+        widget_registry: SceneGraphWidgetRegistry {
+            widget_types: std::collections::BTreeMap::new(),
+            widget_instances: vec![],
             active_publications: std::collections::BTreeMap::new(),
         },
         active_tab: None,

@@ -43,6 +43,8 @@ pub struct SceneGraph {
     pub hit_region_states: HashMap<SceneId, HitRegionLocalState>,
     /// Zone registry.
     pub zone_registry: ZoneRegistry,
+    /// Widget registry.
+    pub widget_registry: WidgetRegistry,
     /// Sync groups, keyed by ID.
     pub sync_groups: HashMap<SceneId, SyncGroup>,
     /// Display area (the viewport dimensions).
@@ -96,6 +98,7 @@ impl SceneGraph {
             leases: HashMap::new(),
             hit_region_states: HashMap::new(),
             zone_registry: ZoneRegistry::new(),
+            widget_registry: WidgetRegistry::new(),
             sync_groups: HashMap::new(),
             display_area: Rect::new(0.0, 0.0, width, height),
             version: 0,
@@ -2581,6 +2584,46 @@ impl SceneGraph {
             active_publications,
         };
 
+        // Widget registry: BTreeMap for deterministic serialization.
+        let widget_types: std::collections::BTreeMap<String, WidgetDefinition> = self
+            .widget_registry
+            .definitions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        // Widget instances: sorted by instance_name for determinism.
+        let mut widget_instances: Vec<WidgetInstance> =
+            self.widget_registry.instances.values().cloned().collect();
+        widget_instances.sort_by(|a, b| a.instance_name.cmp(&b.instance_name));
+
+        // Widget active publications: BTreeMap keyed by instance_name; sort each Vec
+        // by published_at_wall_us → publisher_namespace → merge_key for determinism.
+        let widget_active_publications: std::collections::BTreeMap<
+            String,
+            Vec<WidgetPublishRecord>,
+        > = self
+            .widget_registry
+            .active_publishes
+            .iter()
+            .map(|(name, records)| {
+                let mut sorted = records.clone();
+                sorted.sort_by(|a, b| {
+                    a.published_at_wall_us
+                        .cmp(&b.published_at_wall_us)
+                        .then_with(|| a.publisher_namespace.cmp(&b.publisher_namespace))
+                        .then_with(|| a.merge_key.cmp(&b.merge_key))
+                });
+                (name.clone(), sorted)
+            })
+            .collect();
+
+        let widget_registry = SceneGraphWidgetRegistry {
+            widget_types,
+            widget_instances,
+            active_publications: widget_active_publications,
+        };
+
         // Build the snapshot with a placeholder checksum first.
         let mut snapshot = SceneGraphSnapshot {
             sequence: self.sequence_number,
@@ -2590,6 +2633,7 @@ impl SceneGraph {
             tiles,
             nodes,
             zone_registry,
+            widget_registry,
             active_tab: self.active_tab,
             checksum: String::new(),
         };
