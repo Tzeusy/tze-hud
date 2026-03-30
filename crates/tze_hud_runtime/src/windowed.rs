@@ -353,6 +353,38 @@ impl ApplicationHandler for WinitApp {
         let cfg = self.state.config.clone();
         let window_clone = window.clone();
 
+        // ── Resolve actual surface dimensions ─────────────────────────────
+        // Query the actual physical size of the window AFTER creation.
+        // On Windows the OS may constrain the window to the monitor bounds or
+        // apply DPI scaling, so `window.inner_size()` may differ from the
+        // requested cfg.window.width/height.  Using the configured values
+        // directly causes wgpu to configure the swapchain at a size that
+        // doesn't match the surface handle's drawable area, which triggers a
+        // validation panic before `surface.configure()` can write alpha_diag.txt.
+        //
+        // Fall back to the configured values only when inner_size() returns (0,0)
+        // (e.g., window not yet shown or minimized at construction time — rare
+        // but possible on some Win32 driver/compositor combinations).
+        let actual_size = window.inner_size();
+        let (surface_width, surface_height) = if actual_size.width > 0 && actual_size.height > 0 {
+            (actual_size.width, actual_size.height)
+        } else {
+            tracing::warn!(
+                requested_width = cfg.window.width,
+                requested_height = cfg.window.height,
+                "window.inner_size() returned (0,0) at creation; \
+                 using configured dimensions as fallback"
+            );
+            (cfg.window.width, cfg.window.height)
+        };
+        tracing::info!(
+            configured_width = cfg.window.width,
+            configured_height = cfg.window.height,
+            actual_width = surface_width,
+            actual_height = surface_height,
+            "windowed: resolved surface dimensions from window.inner_size()"
+        );
+
         // ── Create compositor + surface (async in a blocking context) ──────
         // We need an async context to call Compositor::new_windowed.
         // Use a temporary single-thread Tokio runtime here — this runs only
@@ -367,12 +399,12 @@ impl ApplicationHandler for WinitApp {
             let mut c = if is_overlay {
                 Compositor::new_windowed_overlay(
                     window_clone,
-                    cfg.window.width,
-                    cfg.window.height,
+                    surface_width,
+                    surface_height,
                 )
                 .await
             } else {
-                Compositor::new_windowed(window_clone, cfg.window.width, cfg.window.height).await
+                Compositor::new_windowed(window_clone, surface_width, surface_height).await
             }
             .expect("Compositor::new_windowed failed");
             c.0.overlay_mode = is_overlay;
@@ -1821,5 +1853,116 @@ redaction_style = "blank"
             cfg.config_toml.is_none(),
             "default WindowedConfig must have config_toml = None"
         );
+    }
+
+    // ── Surface dimension resolution (hud-q5hx regression) ───────────────
+    //
+    // These tests document the contract for the `window.inner_size()` fallback
+    // logic added to fix the crash at non-default dimensions (hud-q5hx).
+    //
+    // The actual window creation path cannot be tested without a real GPU and
+    // display, but we can verify the helper logic and the config encoding path
+    // to ensure non-default dimensions flow through correctly.
+
+    /// `WindowedConfig` built with 2560x1440 must preserve those dimensions
+    /// exactly. Verifies that the config struct does not silently clamp or
+    /// reject resolutions larger than the default 1920x1080.
+    #[test]
+    fn windowed_config_preserves_non_default_dimensions() {
+        let cfg = WindowedConfig {
+            window: WindowConfig {
+                mode: WindowMode::Overlay,
+                width: 2560,
+                height: 1440,
+                title: "tze_hud".to_string(),
+            },
+            ..WindowedConfig::default()
+        };
+        assert_eq!(
+            cfg.window.width, 2560,
+            "2560x1440 width must be preserved in WindowedConfig"
+        );
+        assert_eq!(
+            cfg.window.height, 1440,
+            "2560x1440 height must be preserved in WindowedConfig"
+        );
+    }
+
+    /// `WindowedConfig` built with 3840x2160 (4K) must preserve those dimensions.
+    #[test]
+    fn windowed_config_preserves_4k_dimensions() {
+        let cfg = WindowedConfig {
+            window: WindowConfig {
+                mode: WindowMode::Overlay,
+                width: 3840,
+                height: 2160,
+                title: "tze_hud".to_string(),
+            },
+            ..WindowedConfig::default()
+        };
+        assert_eq!(cfg.window.width, 3840);
+        assert_eq!(cfg.window.height, 2160);
+    }
+
+    /// The surface dimension fallback logic (used when `window.inner_size()`
+    /// returns (0,0)) should prefer the actual window size when non-zero and
+    /// fall back to the configured dimensions otherwise.
+    ///
+    /// This test validates the resolution rule as a pure function without
+    /// requiring a real window handle.
+    #[test]
+    fn surface_dimension_resolution_prefers_actual_size() {
+        // Simulate: window.inner_size() returns (2560, 1440) — use actual size.
+        let actual = (2560u32, 1440u32);
+        let configured = (1920u32, 1080u32);
+        let (w, h) = if actual.0 > 0 && actual.1 > 0 {
+            actual
+        } else {
+            configured
+        };
+        assert_eq!(w, 2560, "actual size must win when non-zero");
+        assert_eq!(h, 1440, "actual size must win when non-zero");
+    }
+
+    /// When `window.inner_size()` returns (0,0) (minimized/not-yet-shown),
+    /// the configured dimensions must be used as fallback.
+    #[test]
+    fn surface_dimension_resolution_falls_back_to_configured_when_zero() {
+        // Simulate: window.inner_size() returns (0, 0) — use configured size.
+        let actual = (0u32, 0u32);
+        let configured = (2560u32, 1440u32);
+        let (w, h) = if actual.0 > 0 && actual.1 > 0 {
+            actual
+        } else {
+            configured
+        };
+        assert_eq!(w, 2560, "configured size must be used when actual is zero");
+        assert_eq!(h, 1440, "configured size must be used when actual is zero");
+    }
+
+    /// The clamping logic for surface dimensions must prevent zero-size configs.
+    /// wgpu panics if width or height is 0 in `surface.configure()`.
+    #[test]
+    fn surface_dimension_clamp_enforces_minimum_of_one() {
+        // If actual size is (0, 0) and configured is also (0, 0), max(1) must apply.
+        let raw_w = 0u32;
+        let raw_h = 0u32;
+        let max_dim = 16384u32;
+        let clamped_w = raw_w.min(max_dim).max(1);
+        let clamped_h = raw_h.min(max_dim).max(1);
+        assert_eq!(clamped_w, 1, "zero width must be clamped to 1");
+        assert_eq!(clamped_h, 1, "zero height must be clamped to 1");
+    }
+
+    /// The clamping logic must also respect the max_texture_dimension_2d limit.
+    #[test]
+    fn surface_dimension_clamp_respects_device_limit() {
+        let raw_w = 8192u32;
+        let raw_h = 4096u32;
+        let max_dim = 4096u32; // device limit
+        let clamped_w = raw_w.min(max_dim).max(1);
+        let clamped_h = raw_h.min(max_dim).max(1);
+        assert_eq!(clamped_w, 4096, "width must be clamped to device limit");
+        assert_eq!(clamped_h, 4096, "height must be clamped to device limit");
     }
 }

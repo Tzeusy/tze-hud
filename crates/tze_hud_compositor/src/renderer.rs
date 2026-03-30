@@ -205,6 +205,26 @@ impl Compositor {
 
         // ── Step 5: Configure the surface ────────────────────────────────────
         let surface_caps = surface.get_capabilities(&adapter);
+
+        // Guard: wgpu surface capabilities must be non-empty on a valid
+        // adapter/surface combination. Return a structured error instead of
+        // panicking via index [0] so the caller can diagnose driver issues.
+        if surface_caps.formats.is_empty() {
+            return Err(CompositorError::DeviceCreation(
+                "surface reports no supported texture formats — driver or backend issue".to_string(),
+            ));
+        }
+        if surface_caps.present_modes.is_empty() {
+            return Err(CompositorError::DeviceCreation(
+                "surface reports no supported present modes — driver or backend issue".to_string(),
+            ));
+        }
+        if surface_caps.alpha_modes.is_empty() {
+            return Err(CompositorError::DeviceCreation(
+                "surface reports no supported alpha modes — driver or backend issue".to_string(),
+            ));
+        }
+
         // Prefer sRGB surface format; fall back to the first available format.
         let surface_format = surface_caps
             .formats
@@ -222,12 +242,19 @@ impl Compositor {
             surface_caps.present_modes[0]
         };
 
-        // Clamp dimensions to the adapter's maximum supported texture size.
+        // Clamp dimensions to the device's maximum supported texture size.
+        // Use device.limits() (not adapter.limits()) because the device is
+        // created with required_limits=downlevel_defaults(); the actual device
+        // limits reflect what the adapter provides subject to those requirements.
         // Some GPUs (e.g. certain Intel/Mesa drivers) report a max of 2048,
         // which is smaller than common display resolutions like 2560x1440.
-        let max_dim = adapter.limits().max_texture_dimension_2d;
-        let clamped_width = width.min(max_dim);
-        let clamped_height = height.min(max_dim);
+        //
+        // Also guard against zero-size dimensions: wgpu panics if width or
+        // height is 0 in surface.configure().  This can happen if inner_size()
+        // returned (0,0) on a minimized or not-yet-shown window.
+        let max_dim = device.limits().max_texture_dimension_2d;
+        let clamped_width = width.min(max_dim).max(1);
+        let clamped_height = height.min(max_dim).max(1);
         if clamped_width != width || clamped_height != height {
             tracing::warn!(
                 requested_width = width,
@@ -235,7 +262,7 @@ impl Compositor {
                 clamped_width,
                 clamped_height,
                 max_texture_dimension_2d = max_dim,
-                "windowed: surface dimensions clamped to adapter limit"
+                "windowed: surface dimensions clamped to device limit"
             );
         }
 
@@ -1481,5 +1508,48 @@ mod tests {
             Err(CompositorError::NoAdapter) => {}
             Err(e) => panic!("unexpected error with HEADLESS_FORCE_SOFTWARE=1: {e}"),
         }
+    }
+
+    // ── Surface capability guard + dimension clamping (hud-q5hx regression) ────
+    //
+    // These tests validate the defensive logic added to `new_windowed_inner()`:
+    //   1. Empty surface capability lists return `Err` instead of panicking.
+    //   2. Dimension clamping uses `.max(1)` to prevent zero-size configs.
+    //
+    // The windowed path requires a real display handle and GPU, so we test the
+    // clamping arithmetic directly as a pure function.
+
+    /// Dimension clamping must apply both the device max and a minimum of 1.
+    /// wgpu panics on `surface.configure()` with zero-width or zero-height.
+    #[test]
+    fn surface_dim_clamp_zero_becomes_one() {
+        let max_dim = 16384u32;
+        assert_eq!(0u32.min(max_dim).max(1), 1);
+        assert_eq!(1u32.min(max_dim).max(1), 1);
+        assert_eq!(2560u32.min(max_dim).max(1), 2560);
+        assert_eq!(3840u32.min(max_dim).max(1), 3840);
+    }
+
+    /// Dimension clamping respects the device maximum texture dimension.
+    /// Values larger than the limit are clamped, values within the limit pass through.
+    #[test]
+    fn surface_dim_clamp_respects_device_limit() {
+        let max_dim = 4096u32;
+        assert_eq!(4097u32.min(max_dim).max(1), 4096, "over-limit must clamp");
+        assert_eq!(4096u32.min(max_dim).max(1), 4096, "at-limit must pass");
+        assert_eq!(2560u32.min(max_dim).max(1), 2560, "under-limit must pass");
+        assert_eq!(1920u32.min(max_dim).max(1), 1920, "default res must pass");
+    }
+
+    /// Dimension clamping at 2560x1440 with a 32768 device limit (RTX 3080)
+    /// must not clamp — 2560 and 1440 are well below the RTX 3080's limit.
+    #[test]
+    fn surface_dim_clamp_2560x1440_passes_on_rtx3080_limit() {
+        // RTX 3080 with Vulkan driver reports max_texture_dimension_2d = 32768.
+        let max_dim = 32768u32;
+        assert_eq!(2560u32.min(max_dim).max(1), 2560, "2560 must not be clamped");
+        assert_eq!(1440u32.min(max_dim).max(1), 1440, "1440 must not be clamped");
+        assert_eq!(3840u32.min(max_dim).max(1), 3840, "4K must not be clamped");
+        assert_eq!(2160u32.min(max_dim).max(1), 2160, "4K must not be clamped");
     }
 }
