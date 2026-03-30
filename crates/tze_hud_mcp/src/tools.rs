@@ -16,11 +16,12 @@
 use crate::{error::McpError, types::McpResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use tze_hud_scene::{
     graph::SceneGraph,
     types::{
-        Capability, FontFamily, Node, NodeData, Rect, Rgba, SceneId, TextAlign, TextMarkdownNode,
-        TextOverflow, ZoneContent,
+        Capability, FontFamily, Node, NodeData, NotificationPayload, Rect, Rgba, SceneId,
+        StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow, ZoneContent,
     },
 };
 
@@ -364,8 +365,15 @@ pub fn handle_dismiss(params: Value, scene: &mut SceneGraph) -> McpResult<Dismis
 pub struct PublishToZoneParams {
     /// Name of the target zone (must exist in the zone registry).
     pub zone_name: String,
-    /// Markdown content to publish.
-    pub content: String,
+    /// Content to publish. Accepts either:
+    /// - A plain string → interpreted as `StreamText`
+    /// - A JSON object with a `"type"` field → dispatched to the matching
+    ///   `ZoneContent` variant:
+    ///   - `{"type":"stream_text","text":"..."}` → `StreamText`
+    ///   - `{"type":"notification","text":"...","icon":"","urgency":1}` → `Notification`
+    ///   - `{"type":"status_bar","entries":{"key":"val",...}}` → `StatusBar`
+    ///   - `{"type":"solid_color","r":1.0,"g":0.0,"b":0.0,"a":1.0}` → `SolidColor`
+    pub content: Value,
     /// Optional namespace for the lease. Defaults to "mcp".
     #[serde(default = "default_mcp_namespace")]
     pub namespace: String,
@@ -379,6 +387,87 @@ pub struct PublishToZoneParams {
     /// Merge key for idempotent zone publishes (optional).
     #[serde(default)]
     pub merge_key: Option<String>,
+}
+
+/// Parse the polymorphic `content` field into a `ZoneContent`.
+///
+/// - Plain string → `StreamText`
+/// - Object with `"type"` → dispatched by variant name
+fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
+    match content {
+        Value::String(s) => Ok(ZoneContent::StreamText(s.clone())),
+        Value::Object(obj) => {
+            let type_str = obj
+                .get("type")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    McpError::InvalidParams(
+                        "object content must have a \"type\" field (one of: stream_text, notification, status_bar, solid_color)".to_string(),
+                    )
+                })?;
+            match type_str {
+                "stream_text" => {
+                    let text = obj
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    Ok(ZoneContent::StreamText(text))
+                }
+                "notification" => {
+                    let text = obj
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let icon = obj
+                        .get("icon")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let urgency = obj
+                        .get("urgency")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1) as u32;
+                    Ok(ZoneContent::Notification(NotificationPayload {
+                        text,
+                        icon,
+                        urgency,
+                    }))
+                }
+                "status_bar" => {
+                    let entries: HashMap<String, String> = obj
+                        .get("entries")
+                        .and_then(|v| v.as_object())
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if entries.is_empty() {
+                        return Err(McpError::InvalidParams(
+                            "status_bar content must have a non-empty \"entries\" object".to_string(),
+                        ));
+                    }
+                    Ok(ZoneContent::StatusBar(StatusBarPayload { entries }))
+                }
+                "solid_color" => {
+                    let r = obj.get("r").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                    let g = obj.get("g").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                    let b = obj.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                    let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                    Ok(ZoneContent::SolidColor(Rgba { r, g, b, a }))
+                }
+                other => Err(McpError::InvalidParams(format!(
+                    "unknown content type \"{other}\"; expected one of: stream_text, notification, status_bar, solid_color"
+                ))),
+            }
+        }
+        _ => Err(McpError::InvalidParams(
+            "content must be a string or an object with a \"type\" field".to_string(),
+        )),
+    }
 }
 
 fn default_mcp_namespace() -> String {
@@ -425,7 +514,9 @@ pub fn handle_publish_to_zone(
             "zone_name must be non-empty".to_string(),
         ));
     }
-    if p.content.is_empty() {
+    if p.content.is_null()
+        || (p.content.is_string() && p.content.as_str().unwrap_or_default().is_empty())
+    {
         return Err(McpError::InvalidParams(
             "content must be non-empty".to_string(),
         ));
@@ -435,6 +526,9 @@ pub fn handle_publish_to_zone(
     if !scene.zone_registry.zones.contains_key(&p.zone_name) {
         return Err(McpError::ZoneNotFound(p.zone_name));
     }
+
+    // Parse the polymorphic content field into ZoneContent.
+    let content = parse_zone_content(&p.content)?;
 
     // Convert ttl_us to ttl_ms for lease grant; 0 means use a sensible default.
     // Use div_ceil to ensure any positive sub-millisecond TTL rounds up to at
@@ -461,7 +555,6 @@ pub fn handle_publish_to_zone(
     // Delegate to the real zone engine. This enforces contention policy
     // (LatestWins / Stack / MergeByKey), validates accepted_media_types,
     // and stores the record in zone_registry.active_publishes.
-    let content = ZoneContent::StreamText(p.content);
     scene.publish_to_zone_with_lease(&p.zone_name, content, &p.namespace, p.merge_key.clone())?;
 
     Ok(PublishToZoneResult {
@@ -1379,7 +1472,7 @@ mod tests {
     #[test]
     fn test_media_type_rejected_for_wrong_type_zone() {
         // Build a zone that only accepts ShortTextWithIcon (not StreamText).
-        // The MCP publish_to_zone tool always sends StreamText, so this must be rejected.
+        // A plain string content is parsed as StreamText, so this must be rejected.
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let zone_name = "notif-only".to_string();
         scene.zone_registry.zones.insert(
@@ -1404,7 +1497,7 @@ mod tests {
                 layer_attachment: LayerAttachment::Content,
             },
         );
-        // MCP publish_to_zone always produces ZoneContent::StreamText.
+        // A plain string produces ZoneContent::StreamText.
         // ShortTextWithIcon zone must reject it.
         let err = handle_publish_to_zone(
             json!({"zone_name": zone_name, "content": "hello"}),

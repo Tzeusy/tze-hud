@@ -23,24 +23,56 @@ Collect these before executing:
 - `win_user` (default: `hudbot`)
 - `win_host` (default: `tzehouse-windows.parrot-hen.ts.net`)
 - `ssh_key_path` (default in local environment: `~/.ssh/ecdsa_home`)
-- `task_name` (default: `TzeHudInteractive`)
+- `task_name` (default: `TzeHudOverlay`)
 - `mcp_http_url` (default: `http://tzehouse-windows.parrot-hen.ts.net:9090`)
 - `mcp_psk_env` (default: `MCP_TEST_PSK`)
 - `messages`: array of zone publishes
 
-Message shape:
+Message shape — `content` is either a plain string (StreamText) or a typed JSON object:
 
 ```json
 [
   {
-    "zone_name": "status-bar",
-    "content": "Build ok on Windows",
-    "merge_key": "build-status",
-    "ttl_us": 60000000,
+    "zone_name": "alert-banner",
+    "content": "Deploy v2.1.0 started",
+    "ttl_us": 30000000,
     "namespace": "butler-test"
+  },
+  {
+    "zone_name": "subtitle",
+    "content": "Running integration tests...",
+    "ttl_us": 60000000
+  },
+  {
+    "zone_name": "status-bar",
+    "content": {"type": "status_bar", "entries": {"build": "passing", "agent": "butler", "target": "windows"}},
+    "merge_key": "build-status",
+    "ttl_us": 120000000,
+    "namespace": "butler-test"
+  },
+  {
+    "zone_name": "notification-area",
+    "content": {"type": "notification", "text": "Build complete", "icon": "", "urgency": 1},
+    "ttl_us": 10000000
+  },
+  {
+    "zone_name": "ambient-background",
+    "content": {"type": "solid_color", "r": 0.05, "g": 0.1, "b": 0.2, "a": 1.0},
+    "ttl_us": 300000000
+  },
+  {
+    "zone_name": "pip",
+    "content": {"type": "solid_color", "r": 0.2, "g": 0.8, "b": 0.2, "a": 0.9},
+    "ttl_us": 60000000
   }
 ]
 ```
+
+**Content types by zone:**
+- `alert-banner`, `subtitle`: plain string (StreamText)
+- `status-bar`: `{"type":"status_bar","entries":{"key":"value",...}}` with `merge_key`
+- `notification-area`: `{"type":"notification","text":"...","icon":"","urgency":0-3}`
+- `ambient-background`, `pip`: `{"type":"solid_color","r":0-1,"g":0-1,"b":0-1,"a":0-1}`
 
 `merge_key`, `ttl_us`, and `namespace` are optional per message.
 

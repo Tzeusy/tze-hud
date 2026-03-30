@@ -62,8 +62,12 @@ def load_messages(path: str) -> list[dict[str, Any]]:
         content = item.get("content")
         if not isinstance(zone_name, str) or not zone_name.strip():
             raise ValueError(f"message[{idx}].zone_name must be a non-empty string")
-        if not isinstance(content, str) or not content:
-            raise ValueError(f"message[{idx}].content must be a non-empty string")
+        if content is None:
+            raise ValueError(f"message[{idx}].content is required")
+        if isinstance(content, str) and not content:
+            raise ValueError(f"message[{idx}].content must be non-empty")
+        if isinstance(content, dict) and "type" not in content:
+            raise ValueError(f"message[{idx}].content object must have a \"type\" field")
         out.append(item)
     return out
 

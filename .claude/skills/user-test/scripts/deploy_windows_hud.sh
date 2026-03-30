@@ -98,7 +98,8 @@ if [[ "$LAUNCH_MODE" != "auto" && "$LAUNCH_MODE" != "task" && "$LAUNCH_MODE" != 
   exit 2
 fi
 
-REMOTE_DIR_SCP="/${REMOTE_DIR_WIN//\\//}"
+# OpenSSH on Windows expects C:/path, not /C:/path — drop the leading slash.
+REMOTE_DIR_SCP="${REMOTE_DIR_WIN//\\//}"
 
 if [[ -n "$LOCAL_EXE_OVERRIDE" ]]; then
   LOCAL_EXE="$LOCAL_EXE_OVERRIDE"

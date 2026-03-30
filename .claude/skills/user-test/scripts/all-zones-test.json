@@ -1,0 +1,63 @@
+[
+  {
+    "zone_name": "alert-banner",
+    "content": "HUD test: alert-banner active",
+    "ttl_us": 30000000,
+    "namespace": "user-test"
+  },
+  {
+    "zone_name": "subtitle",
+    "content": "HUD test: subtitle zone rendering",
+    "ttl_us": 30000000,
+    "namespace": "user-test"
+  },
+  {
+    "zone_name": "status-bar",
+    "content": {
+      "type": "status_bar",
+      "entries": {
+        "agent": "user-test",
+        "status": "running",
+        "host": "windows"
+      }
+    },
+    "merge_key": "test-status",
+    "ttl_us": 60000000,
+    "namespace": "user-test"
+  },
+  {
+    "zone_name": "notification-area",
+    "content": {
+      "type": "notification",
+      "text": "HUD zone test complete",
+      "icon": "",
+      "urgency": 1
+    },
+    "ttl_us": 15000000,
+    "namespace": "user-test"
+  },
+  {
+    "zone_name": "ambient-background",
+    "content": {
+      "type": "solid_color",
+      "r": 0.05,
+      "g": 0.08,
+      "b": 0.15,
+      "a": 1.0
+    },
+    "ttl_us": 300000000,
+    "namespace": "user-test"
+  },
+  {
+    "zone_name": "pip",
+    "content": {
+      "type": "solid_color",
+      "r": 0.2,
+      "g": 0.6,
+      "b": 0.9,
+      "a": 0.85
+    },
+    "ttl_us": 60000000,
+    "namespace": "user-test"
+  }
+]
