@@ -89,7 +89,8 @@ impl Compositor {
             .map_err(|e| CompositorError::DeviceCreation(e.to_string()))?;
 
         let pipeline = Self::create_pipeline(&device);
-        let clear_pipeline = Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let clear_pipeline =
+            Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
 
         Ok(Self {
             device,
@@ -211,7 +212,8 @@ impl Compositor {
         // panicking via index [0] so the caller can diagnose driver issues.
         if surface_caps.formats.is_empty() {
             return Err(CompositorError::DeviceCreation(
-                "surface reports no supported texture formats — driver or backend issue".to_string(),
+                "surface reports no supported texture formats — driver or backend issue"
+                    .to_string(),
             ));
         }
         if surface_caps.present_modes.is_empty() {
@@ -276,7 +278,12 @@ impl Compositor {
                 .alpha_modes
                 .iter()
                 .find(|m| **m == wgpu::CompositeAlphaMode::PreMultiplied)
-                .or_else(|| surface_caps.alpha_modes.iter().find(|m| **m == wgpu::CompositeAlphaMode::PostMultiplied))
+                .or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .iter()
+                        .find(|m| **m == wgpu::CompositeAlphaMode::PostMultiplied)
+                })
                 .copied()
                 .unwrap_or(surface_caps.alpha_modes[0]),
             view_formats: vec![],
@@ -290,8 +297,14 @@ impl Compositor {
         // Write diagnostic to a known file for remote debugging.
         let diag = format!(
             "backend: {:?}\ndevice: {}\nrequested_backends: {:?}\noverlay: {}\navailable_alpha_modes: {:?}\nselected_alpha_mode: {:?}\nformat: {:?}\npresent_mode: {:?}\n",
-            adapter_info.backend, adapter_info.name, backends, overlay,
-            surface_caps.alpha_modes, config.alpha_mode, surface_format, present_mode,
+            adapter_info.backend,
+            adapter_info.name,
+            backends,
+            overlay,
+            surface_caps.alpha_modes,
+            config.alpha_mode,
+            surface_format,
+            present_mode,
         );
         let _ = std::fs::write("C:\\tze_hud\\logs\\alpha_diag.txt", &diag);
         surface.configure(&device, &config);
@@ -501,7 +514,12 @@ impl Compositor {
                 let _ = std::fs::write("C:\\tze_hud\\logs\\render_diag.txt", &diag);
             }
             vertices.extend_from_slice(&rect_vertices(
-                0.0, 0.0, sw, sh, sw, sh,
+                0.0,
+                0.0,
+                sw,
+                sh,
+                sw,
+                sh,
                 [0.0, 0.0, 0.0, 0.0],
             ));
         }
@@ -528,7 +546,6 @@ impl Compositor {
 
         // Render zone content.
         self.render_zone_content(scene, &mut vertices, sw, sh);
-
 
         let encode_start = std::time::Instant::now();
 
@@ -1547,8 +1564,16 @@ mod tests {
     fn surface_dim_clamp_2560x1440_passes_on_rtx3080_limit() {
         // RTX 3080 with Vulkan driver reports max_texture_dimension_2d = 32768.
         let max_dim = 32768u32;
-        assert_eq!(2560u32.min(max_dim).max(1), 2560, "2560 must not be clamped");
-        assert_eq!(1440u32.min(max_dim).max(1), 1440, "1440 must not be clamped");
+        assert_eq!(
+            2560u32.min(max_dim).max(1),
+            2560,
+            "2560 must not be clamped"
+        );
+        assert_eq!(
+            1440u32.min(max_dim).max(1),
+            1440,
+            "1440 must not be clamped"
+        );
         assert_eq!(3840u32.min(max_dim).max(1), 3840, "4K must not be clamped");
         assert_eq!(2160u32.min(max_dim).max(1), 2160, "4K must not be clamped");
     }

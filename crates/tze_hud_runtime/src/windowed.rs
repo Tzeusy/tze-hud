@@ -397,12 +397,7 @@ impl ApplicationHandler for WinitApp {
         let is_overlay = self.state.effective_mode == WindowMode::Overlay;
         let (compositor, window_surface) = rt.block_on(async {
             let mut c = if is_overlay {
-                Compositor::new_windowed_overlay(
-                    window_clone,
-                    surface_width,
-                    surface_height,
-                )
-                .await
+                Compositor::new_windowed_overlay(window_clone, surface_width, surface_height).await
             } else {
                 Compositor::new_windowed(window_clone, surface_width, surface_height).await
             }
@@ -1939,5 +1934,4 @@ redaction_style = "blank"
         assert_eq!(w, 2560, "configured size must be used when actual is zero");
         assert_eq!(h, 1440, "configured size must be used when actual is zero");
     }
-
 }
