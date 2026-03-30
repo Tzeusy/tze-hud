@@ -14,6 +14,7 @@
 //! - `list_scene`        → `handle_list_scene`
 //! - `publish_to_widget` → `handle_publish_to_widget`
 //! - `list_widgets`      → `handle_list_widgets`
+//! - `clear_widget`      → `handle_clear_widget`
 
 use crate::{error::McpError, types::McpResult};
 use serde::{Deserialize, Serialize};
@@ -1098,6 +1099,95 @@ pub fn handle_list_widgets(params: Value, scene: &SceneGraph) -> McpResult<ListW
         widget_instances,
         type_count,
         instance_count,
+    })
+}
+
+// ─── clear_widget ─────────────────────────────────────────────────────────────
+
+/// Parameters for `clear_widget`.
+#[derive(Debug, Deserialize)]
+pub struct ClearWidgetParams {
+    /// Widget instance name (addressing key).
+    pub widget_name: String,
+    /// Agent namespace performing the clear. Defaults to "" (cleared publications
+    /// belonging to the namespace are removed).
+    #[serde(default)]
+    pub namespace: String,
+    /// Optional disambiguation when multiple instances share the same name.
+    #[serde(default)]
+    pub instance_id: Option<String>,
+}
+
+/// Response from `clear_widget`.
+#[derive(Debug, Serialize)]
+pub struct ClearWidgetResult {
+    /// Resolved widget instance name.
+    pub widget_name: String,
+    /// True — the operation always succeeds or returns an error.
+    pub cleared: bool,
+}
+
+/// Clear all publications by the calling agent on the specified widget instance.
+///
+/// Mirrors `clear_zone` semantics: removes only the calling agent's publications.
+/// If no publications exist for the publisher this is a no-op (still succeeds).
+/// When all publishers have been cleared the widget reverts to its default params.
+///
+/// # Capability
+///
+/// The `publish_widget:<widget_name>` capability must be present in
+/// `caller_capabilities`. Agents may only clear their own publications.
+///
+/// # Errors
+/// - `invalid_params` if `widget_name` is empty.
+/// - `scene_error` with `WIDGET_CAPABILITY_MISSING` if capability absent.
+/// - `scene_error` with `WIDGET_NOT_FOUND` if widget instance unknown.
+pub fn handle_clear_widget(
+    params: Value,
+    scene: &mut SceneGraph,
+    caller_capabilities: &[String],
+) -> McpResult<ClearWidgetResult> {
+    let p: ClearWidgetParams = parse_params(params)?;
+
+    if p.widget_name.trim().is_empty() {
+        return Err(McpError::InvalidParams(
+            "widget_name must be non-empty".to_string(),
+        ));
+    }
+
+    // Resolve instance name: instance_id overrides widget_name when present.
+    let resolved_name = p
+        .instance_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&p.widget_name);
+
+    // ── Capability gate (mirrors publish_to_widget) ───────────────────────────
+    let required_cap = format!("publish_widget:{}", p.widget_name);
+    let has_cap = caller_capabilities.iter().any(|c| c == &required_cap);
+
+    if !has_cap {
+        return Err(McpError::SceneError(format!(
+            "WIDGET_CAPABILITY_MISSING: missing capability '{required_cap}'"
+        )));
+    }
+
+    // ── Delegate to scene graph ───────────────────────────────────────────────
+    scene
+        .clear_widget_for_publisher(resolved_name, &p.namespace)
+        .map_err(|e| {
+            use tze_hud_scene::ValidationError;
+            match &e {
+                ValidationError::WidgetNotFound { .. } => {
+                    McpError::SceneError(format!("WIDGET_NOT_FOUND: {e}"))
+                }
+                _ => McpError::SceneError(e.to_string()),
+            }
+        })?;
+
+    Ok(ClearWidgetResult {
+        widget_name: resolved_name.to_string(),
+        cleared: true,
     })
 }
 
@@ -2533,5 +2623,95 @@ mod tests {
             matches!(&err, McpError::SceneError(m) if m.contains("WIDGET_CAPABILITY_MISSING")),
             "expected WIDGET_CAPABILITY_MISSING, got: {err:?}"
         );
+    }
+
+    // ── clear_widget ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_clear_widget_removes_own_publications() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+
+        // Publish first
+        handle_publish_to_widget(
+            json!({"widget_name": "gauge", "namespace": "agent.a", "params": {"level": 0.8}}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap();
+        assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 1);
+
+        // Clear
+        let result = handle_clear_widget(
+            json!({"widget_name": "gauge", "namespace": "agent.a"}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap();
+        assert_eq!(result.widget_name, "gauge");
+        assert!(result.cleared);
+        assert_eq!(
+            scene.widget_registry.active_for_widget("gauge").len(),
+            0,
+            "agent.a's publication should be cleared"
+        );
+    }
+
+    #[test]
+    fn test_clear_widget_missing_capability_rejected() {
+        let (mut scene, _) = scene_with_widget();
+        let err = handle_clear_widget(
+            json!({"widget_name": "gauge", "namespace": "agent.a"}),
+            &mut scene,
+            &[], // no capabilities
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::SceneError(m) if m.contains("WIDGET_CAPABILITY_MISSING")),
+            "expected WIDGET_CAPABILITY_MISSING, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_clear_widget_not_found() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:nonexistent".to_string()];
+        let err = handle_clear_widget(
+            json!({"widget_name": "nonexistent", "namespace": "agent.a"}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::SceneError(m) if m.contains("WIDGET_NOT_FOUND")),
+            "expected WIDGET_NOT_FOUND, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_clear_widget_empty_name_rejected() {
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        let err = handle_clear_widget(
+            json!({"widget_name": "", "namespace": "agent.a"}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap_err();
+        assert!(matches!(err, McpError::InvalidParams(_)));
+    }
+
+    #[test]
+    fn test_clear_widget_noop_when_no_publications() {
+        // clear_widget with no prior publications should succeed silently.
+        let (mut scene, _) = scene_with_widget();
+        let caps = vec!["publish_widget:gauge".to_string()];
+        let result = handle_clear_widget(
+            json!({"widget_name": "gauge", "namespace": "agent.nobody"}),
+            &mut scene,
+            &caps,
+        )
+        .unwrap();
+        assert!(result.cleared);
     }
 }

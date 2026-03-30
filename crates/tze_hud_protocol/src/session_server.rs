@@ -242,6 +242,7 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
                 Mutation::SetTileRoot(_) => {}
                 Mutation::PublishToZone(_) => {}
                 Mutation::ClearZone(_) => {}
+                Mutation::ClearWidget(_) => {}
             }
         }
     }
@@ -2222,6 +2223,17 @@ async fn handle_mutation_batch(
                     publish_token: token,
                 });
             }
+            Some(crate::proto::mutation_proto::Mutation::ClearWidget(cw)) => {
+                let instance_id = if cw.instance_id.is_empty() {
+                    None
+                } else {
+                    Some(cw.instance_id.clone())
+                };
+                scene_mutations.push(SceneMutation::ClearWidget {
+                    widget_name: cw.widget_name.clone(),
+                    instance_id,
+                });
+            }
             None => {}
         }
     }
@@ -2410,6 +2422,17 @@ async fn apply_queued_batch_to_scene(
                 scene_mutations.push(SceneMutation::ClearZone {
                     zone_name: cz.zone_name.clone(),
                     publish_token: token,
+                });
+            }
+            Some(crate::proto::mutation_proto::Mutation::ClearWidget(cw)) => {
+                let instance_id = if cw.instance_id.is_empty() {
+                    None
+                } else {
+                    Some(cw.instance_id.clone())
+                };
+                scene_mutations.push(SceneMutation::ClearWidget {
+                    widget_name: cw.widget_name.clone(),
+                    instance_id,
                 });
             }
             None => {}

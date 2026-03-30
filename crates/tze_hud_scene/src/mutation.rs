@@ -185,6 +185,18 @@ pub enum SceneMutation {
         zone_name: String,
         publish_token: ZonePublishToken,
     },
+    /// Clear all publications by this agent on the specified widget instance.
+    ///
+    /// Mirrors ClearZone semantics for widgets: removes only the calling agent's
+    /// publications. If no publications exist for the publisher, this is a no-op
+    /// (but still succeeds). When no publishers remain the widget reverts to its
+    /// default parameter values.
+    ClearWidget {
+        /// Widget instance name (addressing key).
+        widget_name: String,
+        /// Optional disambiguation when multiple instances share the same name.
+        instance_id: Option<String>,
+    },
     // ── Sync group mutations ──────────────────────────────────────────────
     /// Create a new sync group.
     CreateSyncGroup {
@@ -233,6 +245,7 @@ impl SceneMutation {
             SceneMutation::AddNode { .. } => "AddNode",
             SceneMutation::PublishToZone { .. } => "PublishToZone",
             SceneMutation::ClearZone { .. } => "ClearZone",
+            SceneMutation::ClearWidget { .. } => "ClearWidget",
             SceneMutation::CreateSyncGroup { .. } => "CreateSyncGroup",
             SceneMutation::DeleteSyncGroup { .. } => "DeleteSyncGroup",
             SceneMutation::JoinSyncGroup { .. } => "JoinSyncGroup",
@@ -711,6 +724,19 @@ impl SceneGraph {
             } => {
                 // Per spec: ClearZone clears publications by THIS agent in the zone.
                 self.clear_zone_for_publisher(zone_name, namespace)?;
+                Ok(vec![])
+            }
+            SceneMutation::ClearWidget {
+                widget_name,
+                instance_id,
+            } => {
+                // ClearWidget clears publications by THIS agent on the widget.
+                // Resolves the instance name: instance_id overrides widget_name when present.
+                let resolved_name = instance_id
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(widget_name.as_str());
+                self.clear_widget_for_publisher(resolved_name, namespace)?;
                 Ok(vec![])
             }
             // ── Sync group mutations ──────────────────────────────────────────

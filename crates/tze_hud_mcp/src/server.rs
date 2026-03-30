@@ -27,6 +27,9 @@
 //! - `publish_to_zone`
 //! - `list_zones`
 //! - `list_scene`
+//! - `publish_to_widget`
+//! - `list_widgets`
+//! - `clear_widget`
 //!
 //! **Resident tools** (require the `resident_mcp` capability):
 //! - `create_tab`
@@ -171,9 +174,8 @@ enum ToolClass {
 fn classify_tool(method: &str) -> ToolClass {
     match method {
         // Guest tools — unconditionally accessible (auth still required)
-        "publish_to_zone" | "list_zones" | "list_scene" | "publish_to_widget" | "list_widgets" => {
-            ToolClass::Guest
-        }
+        "publish_to_zone" | "list_zones" | "list_scene" | "publish_to_widget" | "list_widgets"
+        | "clear_widget" => ToolClass::Guest,
         // Resident tools — require resident_mcp capability
         "create_tab" | "create_tile" | "set_content" | "dismiss" => ToolClass::Resident,
         _ => ToolClass::Unknown,
@@ -426,6 +428,13 @@ impl McpServer {
             }
             "list_widgets" => {
                 let r = tools::handle_list_widgets(params, &scene)?;
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
+            }
+            "clear_widget" => {
+                let r = tools::handle_clear_widget(params, &mut scene, caller_capabilities)?;
                 Ok(
                     serde_json::to_value(r)
                         .map_err(|e| crate::McpError::Internal(e.to_string()))?,
