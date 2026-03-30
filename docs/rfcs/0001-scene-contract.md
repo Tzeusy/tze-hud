@@ -558,6 +558,141 @@ Agent tiles cannot occlude Content-layer zone tiles because the reserved z-order
 
 ---
 
+### 2.6 Widget Registry
+
+The widget registry is runtime-owned and loaded from asset bundles + configuration at startup. It parallels the zone registry (§2.5) in structure and lifecycle. Agents cannot create widget types or instances in v1.
+
+Widgets have the same **four-level ontology** as zones (presence.md §"Widget anatomy"):
+
+1. **Widget type** — the schema and visual assets (parameter declarations, SVG layers with parameter bindings, default geometry/contention/rendering policies). Types are named identifiers loaded from asset bundles, e.g. `"gauge"`, `"progress-bar"`.
+2. **Widget instance** — a widget type bound into a specific tab with a geometry policy and layer attachment. Declared in configuration under `[[tabs.widgets]]`. Multiple instances of the same type may exist on different tabs or on the same tab when disambiguated by `instance_id`.
+3. **Publication** — one publish event into a widget instance: a set of typed parameter values (f32, string, color, or enum), TTL, optional merge key (for MergeByKey contention), and optional transition duration in milliseconds.
+4. **Occupancy** — the runtime's resolved render state: effective parameter values after contention policy application. The compositor reads `effective_params` to determine current visual property values and re-rasterizes only when effective parameters change.
+
+```rust
+pub struct WidgetRegistry {
+    pub definitions: BTreeMap<String, WidgetDefinition>,   // key = widget type id (e.g., "gauge")
+    pub instances: Vec<WidgetInstance>,                     // All instances across all tabs
+}
+
+/// Widget type definition — the schema and visual asset layer of the four-level ontology.
+pub struct WidgetDefinition {
+    pub id: String,                                         // Kebab-case identifier, e.g. "gauge"
+    pub name: String,                                       // Human-readable name
+    pub description: String,
+    pub parameter_schema: Vec<WidgetParameterDeclaration>,  // Ordered list of parameter declarations
+    pub layers: Vec<WidgetSvgLayer>,                        // SVG layers with parameter bindings
+    pub default_geometry_policy: GeometryPolicy,
+    pub default_rendering_policy: RenderingPolicy,
+    pub default_contention_policy: ContentionPolicy,
+    pub ephemeral: bool,                                    // If true, publishes are fire-and-forget (no WidgetPublishResult)
+}
+
+/// Parameter declaration in a widget type's schema.
+pub struct WidgetParameterDeclaration {
+    pub name: String,                                       // Snake-case parameter identifier
+    pub param_type: WidgetParamType,
+    pub default_value: WidgetParameterValue,
+    pub constraints: Option<WidgetParamConstraints>,        // Range (f32), max_length (string), allowed_values (enum)
+}
+
+pub enum WidgetParamType { F32, String, Color, Enum }
+
+pub enum WidgetParameterValue {
+    F32(f32),
+    String(String),
+    Color(Rgba),
+    Enum(String),
+}
+
+pub struct WidgetParamConstraints {
+    pub min: Option<f32>,               // f32 range lower bound
+    pub max: Option<f32>,               // f32 range upper bound
+    pub max_length: Option<u32>,        // String max byte length (default 1024)
+    pub allowed_values: Vec<String>,    // Enum allowed values
+}
+
+/// SVG layer with parameter bindings.
+pub struct WidgetSvgLayer {
+    pub svg_resource_id: ResourceId,    // Content-addressed SVG resource
+    pub bindings: Vec<WidgetBinding>,   // Parameter-to-attribute mappings
+}
+
+/// A single parameter binding within an SVG layer.
+pub struct WidgetBinding {
+    pub param: String,              // References WidgetParameterDeclaration.name
+    pub target_element: String,     // SVG element id attribute
+    pub target_attribute: String,   // SVG attribute name, or "text-content" for text node content
+    pub mapping: WidgetBindingMapping,
+}
+
+pub enum WidgetBindingMapping {
+    /// f32 parameter: linear map from [param.min, param.max] to [attr_min, attr_max]
+    Linear { attr_min: f32, attr_max: f32 },
+    /// string or color parameter: direct substitution into attribute value
+    Direct,
+    /// enum parameter: discrete lookup table from enum value to attribute value
+    Discrete { values: BTreeMap<String, String> },
+}
+
+/// Widget instance — a widget type bound into a specific tab.
+pub struct WidgetInstance {
+    pub instance_name: String,                          // Addressing key for publish ops (explicit instance_id or widget_type_name)
+    pub widget_type_name: String,                       // References WidgetDefinition.id
+    pub tab_id: SceneId,
+    pub geometry_override: Option<GeometryPolicy>,
+    pub contention_override: Option<ContentionPolicy>,
+    pub current_params: BTreeMap<String, WidgetParameterValue>,  // Current effective parameter values
+}
+
+/// Widget publish record — one publication into a widget instance.
+pub struct WidgetPublishRecord {
+    pub widget_name: String,            // Identifies the widget instance
+    pub publisher_namespace: String,
+    pub params: BTreeMap<String, WidgetParameterValue>,
+    pub published_at_wall_us: u64,
+    pub merge_key: Option<String>,      // For MergeByKey contention
+    pub expires_at_wall_us: Option<u64>,
+    pub transition_ms: u32,
+}
+
+/// Widget occupancy — resolved render state after contention policy application.
+pub struct WidgetOccupancy {
+    pub widget_name: String,
+    pub tab_id: SceneId,
+    pub active_publications: Vec<WidgetPublishRecord>,
+    pub occupant_count: u32,
+    pub effective_params: BTreeMap<String, WidgetParameterValue>,  // Compositor reads this for rendering
+}
+
+/// Minimum z_order value reserved for runtime-managed widget tiles in the content layer.
+/// Widget tiles use z_order >= WIDGET_TILE_Z_MIN, which is above ZONE_TILE_Z_MIN (0x8000_0000).
+/// This places widget tiles above zone tiles when they overlap spatially.
+pub const WIDGET_TILE_Z_MIN: u32 = 0x9000_0000;
+```
+
+**Widget parameter binding model:** Each SVG layer in a widget definition declares bindings that map parameter names to SVG attributes. Three mapping types are supported:
+- `Linear`: f32 parameters only. Maps the parameter's `[min, max]` range to an `[attr_min, attr_max]` SVG attribute value range via linear interpolation. Example: `fill_level` 0.0–1.0 maps to SVG `height` attribute 0–200 pixels.
+- `Direct`: string and color parameters. The parameter value is substituted directly as the SVG attribute value. Color is serialized as `#RRGGBBAA` hex. String is placed verbatim.
+- `Discrete`: enum parameters. A lookup table maps each allowed enum value to a specific SVG attribute value.
+
+The special target attribute `"text-content"` replaces the text node content of a `<text>` or `<tspan>` SVG element (the character data), not an XML attribute.
+
+**Widget parameter interpolation:** When `transition_ms > 0`, the compositor interpolates between old and new resolved SVG attribute values over the transition duration. f32 parameters use linear interpolation; color parameters use component-wise sRGB linear interpolation. String and enum parameters snap to the new value immediately at t=0 (no meaningful intermediate state). During interpolation, the compositor re-rasterizes at the display refresh rate (target_fps from the active display profile).
+
+**Widget-to-tile mapping:** The runtime creates and manages internal tiles for each widget instance. Widget tiles are in a runtime-owned namespace. Widget tiles default to `input_mode = Passthrough` — they do not contain `HitRegionNode` children and do not capture input events. Input events pass through widget tiles to tiles beneath them.
+- `Background` widget instances render behind all agent tiles.
+- `Content` widget instances are realized as runtime-managed tiles at `z_order >= WIDGET_TILE_Z_MIN = 0x9000_0000`, above zone tiles.
+- `Chrome` widget instances render above all agent content; the runtime renders them using the widget's visual assets.
+
+**Widget asset bundle format:** Widget type definitions are loaded from asset bundles — directories containing a `widget.toml` manifest and one or more SVG files. The manifest declares the widget type identifier, parameter schema, SVG layer references, and parameter bindings. The runtime scans all configured bundle directories at startup. Bundle errors (missing manifest, invalid TOML, duplicate type name, missing SVG file, SVG parse failure) are logged and the failing bundle is skipped without halting startup.
+
+**V1 scope note:** Widget instances are static in v1 — loaded from configuration at startup. The `WidgetOccupancy` struct is defined here for full ontological correctness. V1 snapshots include active widget publications per instance. Widget types are loaded from asset bundles; no built-in widget types ship with the runtime binary. An empty widget registry (no bundles configured) is valid.
+
+**Widget registry in SceneSnapshot:** The scene snapshot (§4.1) includes a `WidgetRegistrySnapshot` alongside the `ZoneRegistrySnapshot`. It captures all widget definitions, all widget instances across all tabs, and all active widget publish records. Serialization uses `BTreeMap` ordering for determinism.
+
+---
+
 ## 3. Transaction Model
 
 ### 3.1 Mutation Batch Format
@@ -822,6 +957,7 @@ pub struct SceneSnapshot {
     pub tiles: Vec<Tile>,                   // All tiles across all tabs
     pub nodes: Vec<Node>,                   // All nodes across all tiles
     pub zone_registry: ZoneRegistrySnapshot,
+    pub widget_registry: WidgetRegistrySnapshot,
     pub active_tab: Option<SceneId>,
     pub checksum: [u8; 32],                 // BLAKE3 of canonical serialization
 }
@@ -835,6 +971,16 @@ pub struct ZoneRegistrySnapshot {
     pub active_publishes: Vec<ZonePublishRecord>, // Active publications, keyed by instance_id
     // Note: ZoneOccupancy.effective_geometry is internal in v1; occupancy is reconstructable
     // from active_publishes grouped by instance_id.
+}
+
+/// Widget registry snapshot — captures all four levels of the widget ontology.
+/// Widget types (loaded from asset bundles) and instances (from config) are stable in v1.
+/// Active publications reflect live runtime state.
+/// Serialization uses BTreeMap ordering for checksum determinism.
+pub struct WidgetRegistrySnapshot {
+    pub definitions: Vec<WidgetDefinition>,         // All widget type definitions
+    pub instances: Vec<WidgetInstance>,             // All widget instances across all tabs
+    pub active_publishes: Vec<WidgetPublishRecord>, // Active publications, keyed by widget_name + publisher
 }
 
 pub struct ZonePublishRecord {
@@ -1419,14 +1565,15 @@ message BatchRejected {
 // indexing nodes by id and walking Node.children recursively from each tile's root_node.
 // See Rust SceneSnapshot doc comment in §4.1 for the canonical reconstruction algorithm.
 message SceneSnapshot {
-  uint64             sequence       = 1;
-  uint64             timestamp_us   = 2;   // UTC μs; snapshot wall clock (RFC 0003 §3.1)
-  repeated Tab       tabs           = 3;
-  repeated Tile      tiles          = 4;   // All tiles; use tile.tab_id to group by tab
-  repeated Node      nodes          = 5;   // All nodes; use Node.children for tree structure
-  ZoneRegistrySnapshot zone_registry = 6;
-  SceneId            active_tab     = 7;   // Zero = no active tab
-  bytes              checksum       = 8;   // BLAKE3, 32 bytes
+  uint64             sequence         = 1;
+  uint64             timestamp_us     = 2;   // UTC μs; snapshot wall clock (RFC 0003 §3.1)
+  repeated Tab       tabs             = 3;
+  repeated Tile      tiles            = 4;   // All tiles; use tile.tab_id to group by tab
+  repeated Node      nodes            = 5;   // All nodes; use Node.children for tree structure
+  ZoneRegistrySnapshot zone_registry  = 6;
+  SceneId            active_tab       = 7;   // Zero = no active tab
+  bytes              checksum         = 8;   // BLAKE3, 32 bytes
+  WidgetRegistrySnapshotProto widget_registry = 9;  // Widget types, instances, and active publications
 }
 
 // Geometry policy variants for zone placement.
@@ -1551,6 +1698,146 @@ message ZoneRegistrySnapshot {
   repeated ZoneTypeProto          zone_types       = 1;
   repeated ZoneInstanceProto      zone_instances   = 2;
   repeated ZonePublishRecordProto active_publishes = 3;
+}
+
+// ─── Widget registry proto types ────────────────────────────────────────────
+// Corresponds to §2.6 Widget Registry Rust types.
+// Defined in types.proto (tze_hud.protocol.v1) alongside zone types.
+
+enum WidgetParamTypeProto {
+  WIDGET_PARAM_TYPE_UNSPECIFIED = 0;
+  WIDGET_PARAM_TYPE_F32         = 1;
+  WIDGET_PARAM_TYPE_STRING      = 2;
+  WIDGET_PARAM_TYPE_COLOR       = 3;
+  WIDGET_PARAM_TYPE_ENUM        = 4;
+}
+
+message WidgetParamConstraintsProto {
+  float           min             = 1;   // f32 range lower bound; 0.0 = not set
+  float           max             = 2;   // f32 range upper bound; 0.0 = not set
+  uint32          max_length      = 3;   // String max byte length; 0 = use default (1024)
+  repeated string allowed_values  = 4;   // Enum allowed values
+}
+
+message WidgetParameterValueProto {
+  oneof value {
+    float  f32_value    = 1;
+    string string_value = 2;
+    Rgba   color_value  = 3;
+    string enum_value   = 4;
+  }
+}
+
+message WidgetParameterDeclarationProto {
+  string                       name          = 1;   // Snake-case parameter identifier
+  WidgetParamTypeProto         param_type    = 2;
+  WidgetParameterValueProto    default_value = 3;
+  WidgetParamConstraintsProto  constraints   = 4;   // Absent = no constraints beyond type
+}
+
+message WidgetBindingMappingProto {
+  oneof mapping {
+    LinearMappingProto   linear   = 1;
+    bool                 direct   = 2;   // true = direct substitution
+    DiscreteMappingProto discrete = 3;
+  }
+}
+
+message LinearMappingProto {
+  float attr_min = 1;
+  float attr_max = 2;
+}
+
+message DiscreteMappingProto {
+  map<string, string> values = 1;   // enum value → SVG attribute value
+}
+
+message WidgetBindingProto {
+  string                  param            = 1;   // References WidgetParameterDeclarationProto.name
+  string                  target_element   = 2;   // SVG element id attribute
+  string                  target_attribute = 3;   // SVG attribute name, or "text-content"
+  WidgetBindingMappingProto mapping         = 4;
+}
+
+message WidgetSvgLayerProto {
+  string                   svg_resource_id = 1;   // BLAKE3 hex ResourceId of the SVG asset
+  repeated WidgetBindingProto bindings     = 2;
+}
+
+message WidgetDefinitionProto {
+  string                            id                        = 1;   // Kebab-case type identifier
+  string                            name                      = 2;
+  string                            description               = 3;
+  repeated WidgetParameterDeclarationProto parameter_schema   = 4;
+  repeated WidgetSvgLayerProto      layers                    = 5;
+  GeometryPolicyProto               default_geometry_policy   = 6;
+  RenderingPolicyProto              default_rendering_policy  = 7;
+  ContentionPolicyProto             default_contention_policy = 8;
+  bool                              ephemeral                 = 9;
+}
+
+message WidgetInstanceProto {
+  string              instance_name      = 1;   // Addressing key (explicit instance_id or widget_type_name)
+  string              widget_type_name   = 2;   // References WidgetDefinitionProto.id
+  SceneId             tab_id             = 3;
+  GeometryPolicyProto geometry_override  = 4;   // Absent = use widget type default
+  ContentionPolicyProto contention_override = 5; // Absent = use widget type default
+  map<string, WidgetParameterValueProto> current_params = 6;
+}
+
+message WidgetPublishRecordProto {
+  string                                 widget_name          = 1;
+  string                                 publisher_namespace  = 2;
+  map<string, WidgetParameterValueProto> params               = 3;
+  uint64                                 published_at_wall_us = 4;
+  string                                 merge_key            = 5;   // Empty = not a MergeByKey publish
+  uint64                                 expires_at_wall_us   = 6;   // 0 = use widget default TTL
+  uint32                                 transition_ms        = 7;
+}
+
+message WidgetOccupancyProto {
+  string                                 widget_name        = 1;
+  SceneId                                tab_id             = 2;
+  repeated WidgetPublishRecordProto      active_publications = 3;
+  uint32                                 occupant_count     = 4;
+  map<string, WidgetParameterValueProto> effective_params   = 5;
+}
+
+// Widget registry snapshot — all four levels of the widget ontology.
+// Definitions (loaded from asset bundles) and instances (from config) are stable in v1.
+// Active publications reflect live runtime state.
+// All maps use BTreeMap ordering in the Rust implementation for checksum determinism.
+message WidgetRegistrySnapshotProto {
+  repeated WidgetDefinitionProto      definitions      = 1;
+  repeated WidgetInstanceProto        instances        = 2;
+  repeated WidgetPublishRecordProto   active_publishes = 3;
+}
+
+// Widget mutation types — used within MutationBatch (§3.1).
+// These parallel PublishToZoneMutation and ClearZoneMutation.
+message PublishToWidgetMutation {
+  string                                 widget_name   = 1;   // Widget instance name
+  string                                 instance_id   = 2;   // Disambiguation when multiple instances of same type exist on tab
+  map<string, WidgetParameterValueProto> params        = 3;
+  uint32                                 transition_ms = 4;   // 0 = snap immediately
+  uint64                                 ttl_us        = 5;   // 0 = use widget instance default
+  string                                 merge_key     = 6;   // For MergeByKey contention; empty otherwise
+}
+
+message ClearWidgetMutation {
+  string widget_name = 1;   // Widget instance name
+  string instance_id = 2;   // Optional disambiguation
+}
+
+// Widget registry query types — defined here for use in scene discovery.
+// Agents query the widget registry via SceneSnapshot.widget_registry at session establishment;
+// there is no separate widget registry query RPC in v1. MCP agents query via list_widgets.
+message WidgetRegistryRequest {
+  // No parameters in v1 — returns all widget definitions and instances.
+}
+
+message WidgetRegistryResponse {
+  WidgetRegistrySnapshotProto registry = 1;
 }
 
 // Typed partial-update messages for incremental diff ops.

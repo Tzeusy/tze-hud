@@ -162,6 +162,67 @@ These are illustrative, not exhaustive. The actual zone registry is defined per 
 
 **alert-banner** — Chrome layer. Full-width horizontal bar that pushes content down. Accepts text + severity level. Adjunct: critical alerts trigger haptic pulse if available. Used for system-level alerts, weather warnings, security events. Contention: stack by severity.
 
+## Widgets: parameterized visual publishing
+
+Zones accept raw content — text, key-value pairs, colors, images — and the runtime renders that content directly. This works well for information display, but it leaves a gap: there is no way for an agent to publish a *value* and have the runtime render a *visual interpretation* of that value.
+
+Consider a temperature gauge. Without widgets, an agent wanting to display "78% capacity" as a filling bar must drop to the full tile + node tree API: create a tile, compute a `SolidColorNode` at the right height, add a `TextMarkdownNode` for the label, manage z-order and bounds arithmetic, and keep it all alive with lease renewals. This is the exact "LLM in the frame loop" pattern the architecture forbids — the agent is computing geometry, not declaring intent.
+
+Widgets fill this gap by extending the zone pattern to parameterized visuals. A widget is a runtime-owned visual template (SVG layers with parameter bindings) that agents parameterize with simple typed values (numbers, strings, colors, enums). The runtime owns the visual assets, rasterizes at compositor frame rate, and smoothly interpolates between parameter states. The agent publishes `{ fill_level: 0.78, label: "Capacity" }` — the runtime renders a gauge.
+
+### Widget anatomy
+
+Widgets have the same **four-level ontology** as zones:
+
+1. **Widget type** — the schema and visual assets: parameter declarations (name, type, constraints, default), SVG layers with parameter bindings, default geometry policy, contention policy. Widget types are loaded from asset bundles at startup; agents cannot create widget types at runtime in v1.
+2. **Widget instance** — a widget type bound into a specific tab with geometry and layer attachment. Declared in configuration under `[[tabs.widgets]]`.
+3. **Publication** — one publish event into a widget instance: a set of typed parameter values (f32, string, color, or enum), TTL, optional merge key (for MergeByKey contention), and optional transition duration.
+4. **Occupancy** — the runtime's resolved render state: effective parameter values after contention policy application. The compositor reads occupancy to determine current visual property values and re-rasterizes only when effective parameters change.
+
+### How agents use widgets
+
+Publishing to a widget is a single call — the same pattern as zone publishing:
+
+```
+publish_to_widget("cpu_gauge", { fill_level: 0.72, label: "CPU", fill_color: [66, 133, 244, 255] })
+publish_to_widget("status_ring", { severity: "warning" })
+```
+
+No tile creation. No geometry. No z-order. No SVG knowledge required. The widget handles all visual rendering internally.
+
+Widget publishing is available on both protocol planes: via `WidgetPublish` (ClientMessage field 35) on the gRPC session stream for resident agents, and via the `publish_to_widget` MCP tool for guest agents. `list_widgets` (MCP) returns all available widget types and instances with their parameter schemas — agents use it for discovery without hardcoding widget names or parameter types.
+
+### Relationship to zones and raw tiles
+
+Widgets are the third publishing abstraction, sitting between zones (raw content rendering) and raw tiles (full compositor control):
+
+- **Zones** — for raw content where the zone's built-in rendering policy is sufficient: text, notifications, status values, images. The agent provides content; the zone provides the visual treatment.
+- **Widgets** — for parameterized visuals where the agent provides values and the runtime provides the visual template: gauges, progress bars, dials, severity indicators. The agent provides parameters; the widget's SVG layers provide the visual treatment.
+- **Raw tiles** — for genuinely custom layouts, unusual geometry, or content types that no zone or widget supports. Full compositor access; full agent responsibility.
+
+The expectation is that most display needs are covered by zones and widgets. Raw tiles are the escape hatch, not the default path.
+
+### Widget governance
+
+Widgets reuse the entire zone governance model without forking it:
+
+- **Contention:** LatestWins, Stack, MergeByKey, Replace — same four policies, same semantics.
+- **Geometry:** same `GeometryPolicy` types (relative or edge-anchored) and display-profile adaptation.
+- **Layer attachment:** Background, Content, or Chrome — same three layers. Widget tiles use z-order `>= WIDGET_TILE_Z_MIN` (0x9000_0000), which places them above zone tiles (0x8000_0000) when they overlap spatially.
+- **TTL and expiry:** publications carry `ttl_us` with the same semantics as zone publications.
+- **Capability:** publishing to a widget requires `publish_widget:<widget_name>` capability, structurally identical to `publish_zone:<zone_name>`. The `publish_widget:*` wildcard grants all widgets.
+- **Guest publishing:** guests do not acquire leases. Widget tiles are runtime-owned. Guest publications persist until the TTL expires or another publication replaces them.
+
+Widget tiles default to `input_mode = Passthrough` — they are visual indicators, not interactive surfaces. Input events pass through widget tiles to the tiles beneath them.
+
+### Widget asset bundles
+
+Widget visual assets are user-authorable directories on disk. Each bundle contains a `widget.toml` manifest (parameter schema, layer references, binding declarations) and one or more SVG files. The runtime scans configured bundle directories at startup, registers valid widget types, and logs errors for invalid or duplicate bundles without halting startup.
+
+Widget types are static in v1. There is no runtime widget creation, no widget upload by agents, and no hot-reload of bundles. Restart is required to pick up bundle changes. This is acceptable for v1: widget bundles are authored during development, not modified at runtime.
+
+---
+
 ## Presence levels
 
 Not every agent needs the same degree of embodiment. Presence level and agent role are orthogonal axes:

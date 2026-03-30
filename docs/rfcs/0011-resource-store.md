@@ -112,17 +112,46 @@ enum ResourceType {
   IMAGE_JPEG  = 3;        // JPEG-encoded image
   FONT_TTF    = 4;        // TrueType font
   FONT_OTF    = 5;        // OpenType font
+  IMAGE_SVG   = 6;        // Scalable vector graphics (widget asset bundles only)
 }
 ```
 
 ### 2.2 v1 Scope
 
-V1 supports two asset classes:
+V1 supports three asset classes:
 
 | Class | Types | Used By |
 |-------|-------|---------|
-| **Images** | `IMAGE_RGBA8`, `IMAGE_PNG`, `IMAGE_JPEG` | `StaticImageNode` (RFC 0001 §2.3) |
+| **Raster images** | `IMAGE_RGBA8`, `IMAGE_PNG`, `IMAGE_JPEG` | `StaticImageNode` (RFC 0001 §2.3) |
 | **Fonts** | `FONT_TTF`, `FONT_OTF` | `TextMarkdownNode` custom font references |
+| **Vector graphics** | `IMAGE_SVG` | Widget asset bundle system (RFC 0001 §2.6); **not** directly publishable to zones |
+
+### 2.2a IMAGE_SVG Resource Type
+
+`IMAGE_SVG` is a vector graphics resource type used exclusively by the widget asset bundle system. It is not a general-purpose resource type — agents cannot publish `IMAGE_SVG` resources directly to zones, and `IMAGE_SVG` is not accepted by any `ZoneMediaType`. Widget SVGs are loaded from the filesystem at startup by the bundle loader and registered internally; agents do not upload them directly.
+
+**Upload validation:** When an `IMAGE_SVG` resource is stored (by the bundle loader, not by agents directly), the runtime validates:
+1. **Well-formed XML:** Content must parse as valid XML.
+2. **SVG root element:** The root element must be `<svg>`. Non-SVG XML roots (e.g., `<html>`, `<div>`) are rejected with `RESOURCE_DECODE_ERROR`.
+3. **Retained SVG tree:** The SVG is parsed into a retained `usvg::Tree` for the widget compositor pipeline. Parse failure → `RESOURCE_DECODE_ERROR`.
+
+**Important:** Upload validation for `IMAGE_SVG` does **not** rasterize the SVG — parsing to a retained SVG tree is sufficient for validation. Rasterization occurs at render time in the compositor's widget pipeline.
+
+**Budget accounting:** `IMAGE_SVG` resources use an **estimated rasterized size** for budget accounting, not the raw SVG file size. This is because SVG is a vector format whose memory impact depends on the rasterization target dimensions. The estimated size is computed as:
+
+```
+estimated_bytes = width_px * height_px * 4   (RGBA8)
+```
+
+where `width_px` and `height_px` are taken from the SVG's `viewBox` or `width`/`height` attributes, clamped to a maximum of 2048×2048. If the SVG has no explicit dimensions, the runtime uses a default of 512×512 for budget estimation.
+
+| SVG attributes | Estimated size |
+|----------------|---------------|
+| `viewBox="0 0 800 600"` | `800 × 600 × 4 = 1,920,000 bytes` (~1.83 MiB) |
+| `width="4096" height="4096"` | clamped to `2048 × 2048 × 4 = 16,777,216 bytes` (16 MiB) |
+| No width/height/viewBox | `512 × 512 × 4 = 1,048,576 bytes` (1 MiB) |
+
+**Widget SVG budget ownership:** Widget SVG resources loaded from asset bundles at startup are **runtime-owned infrastructure**. Their texture budget is accounted as runtime overhead, not charged against any individual agent's per-agent texture budget. Agents never upload `IMAGE_SVG` resources directly via the session protocol — if they attempt to, the runtime rejects with `RESOURCE_UNSUPPORTED_TYPE` (agents may not use `IMAGE_SVG` type in `ResourceUploadStart`).
 
 ### 2.3 Post-v1 Types
 
@@ -130,7 +159,6 @@ Future resource types (not part of this RFC's v1 scope):
 
 - `VIDEO_H264`, `VIDEO_VP9` — video frames for media surface nodes
 - `AUDIO_OPUS`, `AUDIO_AAC` — audio clips
-- `IMAGE_SVG` — scalable vector graphics
 - `WASM_MODULE` — sandboxed compute modules
 
 These will be added as new `ResourceType` enum values in a future RFC when the corresponding node types ship.
@@ -572,6 +600,9 @@ enum ResourceType {
   IMAGE_JPEG  = 3;        // JPEG-encoded image
   FONT_TTF    = 4;        // TrueType font
   FONT_OTF    = 5;        // OpenType font
+  IMAGE_SVG   = 6;        // Scalable vector graphics; widget asset bundles only (§2.2a)
+                          // Not agent-uploadable via session protocol; runtime-internal only.
+                          // Budget estimated as width_px * height_px * 4 (see §2.2a).
 }
 
 // ─── Metadata ───────────────────────────────────────────────────────────────
