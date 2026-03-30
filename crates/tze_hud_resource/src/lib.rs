@@ -64,6 +64,7 @@
 pub mod budget;
 pub mod debug;
 pub mod dedup;
+pub mod font_bytes_store;
 pub mod font_cache;
 pub mod gc;
 pub mod refcount;
@@ -76,6 +77,7 @@ pub mod validation;
 pub use budget::{AgentResourceUsage, BudgetRegistry, BudgetViolation, TileBudgetChecker};
 pub use debug::{resource_id_hex, to_lowercase_hex};
 pub use dedup::{DedupIndex, ResourceRecord};
+pub use font_bytes_store::FontBytesStore;
 pub use font_cache::{CachedFontHandle, FontCache, FontCacheEntry, FontCacheKey, FontOrigin};
 pub use gc::{GcClock, GcConfig, GcResult, GcRunner, TestClockMs, WallClock};
 pub use refcount::{GcCandidateTable, RefcountError, RefcountLayer};

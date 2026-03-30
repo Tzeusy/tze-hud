@@ -83,6 +83,7 @@ pub mod budget;
 pub mod channels;
 pub mod degradation;
 pub mod event_bus;
+pub mod font_loader;
 pub mod headless;
 pub mod mcp;
 pub mod pipeline;
@@ -239,6 +240,9 @@ pub use window::{
 
 // ── Record/Replay Trace capture ───────────────────────────────────────────────
 pub use trace_capture::{TraceRecorder, build_regression_trace};
+
+// ── Font loader (resource store → compositor bridge) ─────────────────────────
+pub use font_loader::FontLoader;
 
 // ── Reload triggers (RFC 0006 §9) ─────────────────────────────────────────────
 pub use reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};

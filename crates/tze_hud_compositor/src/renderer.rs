@@ -484,6 +484,36 @@ impl Compositor {
         tracing::debug!(format = ?format, "text renderer initialized");
     }
 
+    /// Load raw font bytes (TTF or OTF) from an agent upload into glyphon's
+    /// `FontSystem`.
+    ///
+    /// After this call, the font is available for text layout in subsequent
+    /// frames.  The `resource_id` is the 32-byte BLAKE3 digest of `data`
+    /// (matches `tze_hud_resource::ResourceId::as_bytes()`); duplicate calls
+    /// with the same `resource_id` are no-ops.
+    ///
+    /// Silently skips if the text renderer is not yet initialized (e.g. if
+    /// `init_text_renderer` has not been called).  Callers in the runtime may
+    /// defer font uploads until the compositor is ready.
+    pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) {
+        if let Some(rasterizer) = &mut self.text_rasterizer {
+            rasterizer.load_font_bytes(resource_id, data);
+        } else {
+            tracing::debug!("load_font_bytes called before text renderer is initialized — skipped");
+        }
+    }
+
+    /// Returns `true` if the font with the given `resource_id` has been loaded
+    /// into the `FontSystem`.
+    ///
+    /// Returns `false` if the text renderer is not yet initialized.
+    pub fn has_font(&self, resource_id: &[u8; 32]) -> bool {
+        self.text_rasterizer
+            .as_ref()
+            .map(|r| r.has_font(resource_id))
+            .unwrap_or(false)
+    }
+
     /// Collect `TextItem`s for all TextMarkdownNode tiles and zone StreamText
     /// and ShortTextWithIcon/Notification content in the scene.
     ///

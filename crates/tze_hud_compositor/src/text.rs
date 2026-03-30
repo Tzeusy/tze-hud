@@ -31,6 +31,8 @@
 //!   visible line count to fit the bounds, appending "…" if truncation occurs.
 //!   Full ellipsis support is deferred to post-MVP.
 
+use std::collections::HashSet;
+
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
@@ -51,6 +53,13 @@ pub struct TextRasterizer {
     viewport: Viewport,
     atlas: TextAtlas,
     renderer: TextRenderer,
+    /// Content-addressed IDs of agent-uploaded fonts already loaded into
+    /// `font_system`.  Used to skip redundant `load_font_data` calls (which
+    /// would add duplicate entries to fontdb).
+    ///
+    /// The ID is the raw 32-byte BLAKE3 digest (`ResourceId` wire form) of
+    /// the font bytes, matching the key used by `tze_hud_resource::FontBytesStore`.
+    loaded_font_ids: HashSet<[u8; 32]>,
 }
 
 impl TextRasterizer {
@@ -72,7 +81,60 @@ impl TextRasterizer {
             viewport,
             atlas,
             renderer,
+            loaded_font_ids: HashSet::new(),
         }
+    }
+
+    /// Load raw font bytes (TTF or OTF) into glyphon's `FontSystem`.
+    ///
+    /// After this call the font is available for text layout via glyphon's
+    /// automatic family detection.  Subsequent `TextItem`s whose `font_family`
+    /// resolves to the family embedded in these bytes will use them.
+    ///
+    /// # Parameters
+    ///
+    /// - `resource_id` — the 32-byte BLAKE3 content hash of `data`
+    ///   (matches `ResourceId::as_bytes()` from `tze_hud_resource`).
+    ///   Used to deduplicate: calling this with the same `resource_id` twice
+    ///   is a no-op after the first call.
+    /// - `data` — raw TTF or OTF bytes.
+    ///
+    /// # Thread safety
+    ///
+    /// `TextRasterizer` is `!Send` — this must be called from the compositor
+    /// thread only (same thread that calls `prepare_text_items` and
+    /// `render_text_pass`).
+    pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) {
+        if self.loaded_font_ids.contains(&resource_id) {
+            tracing::debug!(
+                resource_id = %format_resource_id(&resource_id),
+                "font already loaded — skipping duplicate load_font_data"
+            );
+            return;
+        }
+
+        self.font_system.db_mut().load_font_data(data.to_vec());
+
+        self.loaded_font_ids.insert(resource_id);
+
+        tracing::info!(
+            resource_id = %format_resource_id(&resource_id),
+            bytes = data.len(),
+            "agent-uploaded font loaded into FontSystem"
+        );
+    }
+
+    /// Number of agent-uploaded fonts currently loaded into the `FontSystem`.
+    #[inline]
+    pub fn loaded_font_count(&self) -> usize {
+        self.loaded_font_ids.len()
+    }
+
+    /// Returns `true` if the font identified by `resource_id` has already been
+    /// loaded into the `FontSystem`.
+    #[inline]
+    pub fn has_font(&self, resource_id: &[u8; 32]) -> bool {
+        self.loaded_font_ids.contains(resource_id)
     }
 
     /// Update the viewport resolution before each frame.
@@ -309,6 +371,16 @@ impl TextItem {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Format a 32-byte resource ID as a lowercase hex string for logging.
+pub(crate) fn format_resource_id(id: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in id {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
 
 /// Minimal Markdown strip for v1: removes `#` heading prefixes and `*` emphasis
 /// markers. Does not parse nested Markdown, code blocks, or links.
