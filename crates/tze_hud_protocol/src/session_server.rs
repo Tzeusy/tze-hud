@@ -1761,11 +1761,10 @@ async fn handle_client_message(
             handle_emit_scene_event(state, session, tx, client_sequence, emit).await;
         }
         // Widget publishing (widget-system spec §Requirement: Widget Publishing via gRPC).
-        // Full implementation deferred to widget-publish bead; stub here to satisfy
-        // exhaustiveness and keep the protocol layer compilable.
-        ClientPayload::WidgetPublish(_publish) => {
-            // TODO(hud-mim2.x): route to handle_widget_publish() once the
-            // widget publish logic is implemented.
+        // Durable-widget publishes receive WidgetPublishResult (ServerMessage field 47).
+        // Ephemeral-widget publishes are fire-and-forget (no result).
+        ClientPayload::WidgetPublish(publish) => {
+            handle_widget_publish(state, session, tx, client_sequence, publish).await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
@@ -2458,6 +2457,10 @@ fn canonical_name_to_capability(name: &str) -> Option<Capability> {
         _ if name.starts_with("publish_zone:") => {
             let zone = name.strip_prefix("publish_zone:").unwrap_or("*");
             Some(Capability::PublishZone(zone.to_string()))
+        }
+        _ if name.starts_with("publish_widget:") => {
+            let widget = name.strip_prefix("publish_widget:").unwrap_or("*");
+            Some(Capability::PublishWidget(widget.to_string()))
         }
         _ if name.starts_with("emit_scene_event:") => {
             let event = name.strip_prefix("emit_scene_event:").unwrap_or("");
@@ -3411,6 +3414,189 @@ async fn handle_zone_publish(
             .await;
     }
     // Ephemeral zone: no ack sent (fire-and-forget per RFC 0005 §8.6), success or failure
+}
+
+/// Look up whether a widget instance is transactional (i.e., not ephemeral).
+///
+/// Returns `true` when the widget is durable (WidgetPublishResult should be sent),
+/// `false` when ephemeral (fire-and-forget, no result). Defaults to `true` when the
+/// widget instance or definition is not found, so unknown widgets still receive an
+/// error result (WIDGET_NOT_FOUND is always reportable).
+async fn is_widget_transactional(state: &Arc<Mutex<SharedState>>, widget_name: &str) -> bool {
+    let st = state.lock().await;
+    let scene = st.scene.lock().await;
+    let is_ephemeral = scene
+        .widget_registry
+        .instances
+        .get(widget_name)
+        .and_then(|inst| {
+            scene
+                .widget_registry
+                .definitions
+                .get(&inst.widget_type_name)
+        })
+        .map(|def| def.ephemeral)
+        .unwrap_or(false); // Unknown widget: treat as durable (WIDGET_NOT_FOUND reportable)
+    !is_ephemeral
+}
+
+/// Handle a WidgetPublish from the client (widget-system spec §Requirement: Widget Publishing via gRPC).
+///
+/// 1. Checks `publish_widget:<widget_name>` capability from session.capabilities.
+/// 2. Converts proto params to scene `WidgetParameterValue` map.
+/// 3. Calls `SceneGraph::publish_to_widget`, which validates params and applies the publication.
+/// 4. For durable widgets (ephemeral=false): sends WidgetPublishResult(accepted=true/false).
+/// 5. For ephemeral widgets (ephemeral=true): fire-and-forget, no WidgetPublishResult sent.
+async fn handle_widget_publish(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    _request_sequence: u64,
+    publish: WidgetPublish,
+) {
+    let widget_name = &publish.widget_name;
+
+    // ── Step 1: Capability check (string-based, matches session.capabilities) ──
+    let required_cap = format!("publish_widget:{widget_name}");
+    let has_cap = session.capabilities.iter().any(|c| c == &required_cap);
+
+    if !has_cap {
+        // Per spec: WIDGET_CAPABILITY_MISSING. For durable widgets we send a result;
+        // since we don't know if it's ephemeral without looking up the registry,
+        // we check ephemerality to decide whether to send a result.
+        let transactional = is_widget_transactional(state, widget_name.as_str()).await;
+        if transactional {
+            let seq = session.next_server_seq();
+            let _ = tx
+                .send(Ok(ServerMessage {
+                    sequence: seq,
+                    timestamp_wall_us: now_wall_us(),
+                    payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
+                        accepted: false,
+                        widget_name: widget_name.clone(),
+                        error_code: "WIDGET_CAPABILITY_MISSING".to_string(),
+                        error_message: format!("Missing capability: {required_cap}"),
+                    })),
+                }))
+                .await;
+        }
+        return;
+    }
+
+    // ── Step 2: Convert proto params to scene WidgetParameterValue map ─────────
+    let params: std::collections::HashMap<String, tze_hud_scene::types::WidgetParameterValue> =
+        publish
+            .params
+            .iter()
+            .filter_map(crate::convert::proto_to_widget_param_value)
+            .collect();
+
+    // ── Step 3: Resolve instance_id for disambiguation ────────────────────────
+    // widget_name is the instance addressing key. If an explicit instance_id
+    // override is set, use it; the proto's widget_name is already the instance key.
+    // (The instance_id field on WidgetPublish is for future disambiguation when
+    // the same widget type has multiple instances — the session layer uses widget_name.)
+    let resolved_widget_name = if !publish.instance_id.is_empty() {
+        // instance_id overrides widget_name for disambiguation
+        publish.instance_id.clone()
+    } else {
+        widget_name.clone()
+    };
+
+    // ── Step 4: Apply through the scene graph ─────────────────────────────────
+    let merge_key = if publish.merge_key.is_empty() {
+        None
+    } else {
+        Some(publish.merge_key.clone())
+    };
+
+    let result = {
+        let st = state.lock().await;
+        let mut scene = st.scene.lock().await;
+        scene.publish_to_widget(
+            &resolved_widget_name,
+            params,
+            &session.namespace,
+            merge_key,
+            publish.transition_ms,
+            None, // expires_at_wall_us not yet in proto
+        )
+    };
+
+    // ── Step 5: Send result or fire-and-forget ────────────────────────────────
+    match result {
+        Ok(is_durable) => {
+            // is_durable = true → durable widget, send WidgetPublishResult(accepted=true)
+            // is_durable = false → ephemeral widget, no result
+            if is_durable {
+                let seq = session.next_server_seq();
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
+                            accepted: true,
+                            widget_name: widget_name.clone(),
+                            error_code: String::new(),
+                            error_message: String::new(),
+                        })),
+                    }))
+                    .await;
+            }
+            // Ephemeral: no result sent (fire-and-forget per spec)
+        }
+        Err(err) => {
+            // Map validation errors to wire error codes
+            let (error_code, error_message) = match &err {
+                tze_hud_scene::ValidationError::WidgetNotFound { name } => (
+                    "WIDGET_NOT_FOUND".to_string(),
+                    format!("Widget not found: {name}"),
+                ),
+                tze_hud_scene::ValidationError::WidgetUnknownParameter { widget, param } => (
+                    "WIDGET_UNKNOWN_PARAMETER".to_string(),
+                    format!("parameter '{param}' is not declared in widget '{widget}' schema"),
+                ),
+                tze_hud_scene::ValidationError::WidgetParameterTypeMismatch { widget, param } => (
+                    "WIDGET_PARAMETER_TYPE_MISMATCH".to_string(),
+                    format!("parameter '{param}' type mismatch in widget '{widget}'"),
+                ),
+                tze_hud_scene::ValidationError::WidgetParameterInvalidValue {
+                    widget,
+                    param,
+                    reason,
+                } => (
+                    "WIDGET_PARAMETER_INVALID_VALUE".to_string(),
+                    format!("parameter '{param}' in widget '{widget}': {reason}"),
+                ),
+                tze_hud_scene::ValidationError::WidgetCapabilityMissing { widget } => (
+                    "WIDGET_CAPABILITY_MISSING".to_string(),
+                    format!("Missing capability: publish_widget:{widget}"),
+                ),
+                other => ("WIDGET_PUBLISH_FAILED".to_string(), other.to_string()),
+            };
+
+            // Determine transactional state to decide whether to send WidgetPublishResult.
+            // For WIDGET_NOT_FOUND, we can't look up the definition — helper defaults to
+            // transactional=true so the error result is always delivered.
+            let transactional = is_widget_transactional(state, resolved_widget_name.as_str()).await;
+
+            if transactional {
+                let seq = session.next_server_seq();
+                let _ = tx
+                    .send(Ok(ServerMessage {
+                        sequence: seq,
+                        timestamp_wall_us: now_wall_us(),
+                        payload: Some(ServerPayload::WidgetPublishResult(WidgetPublishResult {
+                            accepted: false,
+                            widget_name: widget_name.clone(),
+                            error_code,
+                            error_message,
+                        })),
+                    }))
+                    .await;
+            }
+        }
+    }
 }
 
 /// Handle an InputFocusRequest from the client (RFC 0005 §3.8, RFC 0004 §8.3.1).
@@ -8345,5 +8531,447 @@ mod tests {
         // No session is connected, so this should return 0 receivers
         let n = service.revoke_capability_on_lease(unknown_lease_id, "create_tiles");
         assert_eq!(n, 0, "No active sessions means 0 receivers");
+    }
+
+    // ─── Widget publish tests (widget-system spec §Requirement: Widget Publishing via gRPC) ──
+
+    /// Helper: create a test service with a durable widget registered.
+    async fn setup_widget_service() -> HudSessionImpl {
+        use tze_hud_scene::types::{
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetInstance,
+            WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
+        };
+
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        {
+            let st = service.state.lock().await;
+            let mut s = st.scene.lock().await;
+
+            // Register a durable widget type "gauge"
+            s.widget_registry.register_definition(WidgetDefinition {
+                id: "gauge".to_string(),
+                name: "Gauge".to_string(),
+                description: "A simple gauge widget".to_string(),
+                parameter_schema: vec![WidgetParameterDeclaration {
+                    name: "level".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: None,
+                }],
+                layers: vec![],
+                default_geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 0.1,
+                    height_pct: 0.1,
+                },
+                default_rendering_policy: RenderingPolicy::default(),
+                default_contention_policy: ContentionPolicy::LatestWins,
+                ephemeral: false, // durable
+            });
+
+            // Create a tab and widget instance
+            let tab_id = s.create_tab("main", 0).unwrap();
+            s.widget_registry.register_instance(WidgetInstance {
+                widget_type_name: "gauge".to_string(),
+                tab_id,
+                geometry_override: None,
+                contention_override: None,
+                instance_name: "gauge".to_string(),
+                current_params: std::collections::HashMap::new(),
+            });
+        }
+        service
+    }
+
+    /// Helper: start a server with a widget service and connect.
+    async fn setup_widget_test() -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let service = setup_widget_service().await;
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
+
+        (client, handle)
+    }
+
+    /// Scenario: Durable WidgetPublish with valid params receives WidgetPublishResult(accepted=true).
+    #[tokio::test]
+    async fn test_durable_widget_publish_receives_result() {
+        let (mut client, _handle) = setup_widget_test().await;
+
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-agent",
+            "test-key",
+            &["publish_widget:gauge"],
+        )
+        .await;
+
+        // Send a WidgetPublish for the durable "gauge" widget
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                widget_name: "gauge".to_string(),
+                instance_id: String::new(),
+                params: vec![crate::proto::WidgetParameterValueProto {
+                    param_name: "level".to_string(),
+                    value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                        0.75,
+                    )),
+                }],
+                transition_ms: 0,
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match &result_msg.payload {
+            Some(ServerPayload::WidgetPublishResult(result)) => {
+                assert!(
+                    result.accepted,
+                    "Durable widget publish must be accepted, got error: {}",
+                    result.error_code
+                );
+                assert_eq!(result.widget_name, "gauge");
+                assert!(result.error_code.is_empty(), "No error code on success");
+            }
+            other => panic!("Expected WidgetPublishResult, got: {other:?}"),
+        }
+
+        drop(tx);
+    }
+
+    /// Scenario: WidgetPublish with missing capability receives WIDGET_CAPABILITY_MISSING.
+    #[tokio::test]
+    async fn test_widget_publish_missing_capability_rejected() {
+        let (mut client, _handle) = setup_widget_test().await;
+
+        // Handshake WITHOUT publish_widget:gauge capability
+        let (tx, _init_msgs, mut stream) =
+            handshake(&mut client, "widget-no-cap-agent", "test-key").await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                widget_name: "gauge".to_string(),
+                instance_id: String::new(),
+                params: vec![],
+                transition_ms: 0,
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match &result_msg.payload {
+            Some(ServerPayload::WidgetPublishResult(result)) => {
+                assert!(!result.accepted, "Expected rejection");
+                assert_eq!(
+                    result.error_code, "WIDGET_CAPABILITY_MISSING",
+                    "Expected WIDGET_CAPABILITY_MISSING, got: {}",
+                    result.error_code
+                );
+            }
+            other => panic!("Expected WidgetPublishResult(rejected), got: {other:?}"),
+        }
+
+        drop(tx);
+    }
+
+    /// Scenario: WidgetPublish targeting unknown widget receives WIDGET_NOT_FOUND.
+    #[tokio::test]
+    async fn test_widget_publish_not_found() {
+        let (mut client, _handle) = setup_widget_test().await;
+
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-notfound-agent",
+            "test-key",
+            &["publish_widget:nonexistent"],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                widget_name: "nonexistent".to_string(),
+                instance_id: String::new(),
+                params: vec![],
+                transition_ms: 0,
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match &result_msg.payload {
+            Some(ServerPayload::WidgetPublishResult(result)) => {
+                assert!(!result.accepted, "Expected rejection");
+                assert_eq!(
+                    result.error_code, "WIDGET_NOT_FOUND",
+                    "Expected WIDGET_NOT_FOUND, got: {}",
+                    result.error_code
+                );
+            }
+            other => panic!("Expected WidgetPublishResult(WIDGET_NOT_FOUND), got: {other:?}"),
+        }
+
+        drop(tx);
+    }
+
+    /// Scenario: WidgetPublish with unknown parameter receives WIDGET_UNKNOWN_PARAMETER.
+    #[tokio::test]
+    async fn test_widget_publish_unknown_parameter() {
+        let (mut client, _handle) = setup_widget_test().await;
+
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "widget-badparam-agent",
+            "test-key",
+            &["publish_widget:gauge"],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                widget_name: "gauge".to_string(),
+                instance_id: String::new(),
+                params: vec![crate::proto::WidgetParameterValueProto {
+                    param_name: "bogus_param".to_string(),
+                    value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                        0.5,
+                    )),
+                }],
+                transition_ms: 0,
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let result_msg = next_non_state_change(&mut stream).await;
+        match &result_msg.payload {
+            Some(ServerPayload::WidgetPublishResult(result)) => {
+                assert!(!result.accepted, "Expected rejection");
+                assert_eq!(
+                    result.error_code, "WIDGET_UNKNOWN_PARAMETER",
+                    "Expected WIDGET_UNKNOWN_PARAMETER, got: {}",
+                    result.error_code
+                );
+            }
+            other => {
+                panic!("Expected WidgetPublishResult(WIDGET_UNKNOWN_PARAMETER), got: {other:?}")
+            }
+        }
+
+        drop(tx);
+    }
+
+    /// Scenario: Ephemeral WidgetPublish is fire-and-forget (no WidgetPublishResult).
+    #[tokio::test]
+    async fn test_ephemeral_widget_no_publish_result() {
+        use tze_hud_scene::types::{
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetInstance,
+            WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
+        };
+
+        let scene = SceneGraph::new(800.0, 600.0);
+        let service = HudSessionImpl::new(scene, "test-key");
+        {
+            let st = service.state.lock().await;
+            let mut s = st.scene.lock().await;
+
+            // Register an EPHEMERAL widget type
+            s.widget_registry.register_definition(WidgetDefinition {
+                id: "live-bar".to_string(),
+                name: "LiveBar".to_string(),
+                description: "Ephemeral bar widget".to_string(),
+                parameter_schema: vec![WidgetParameterDeclaration {
+                    name: "value".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: None,
+                }],
+                layers: vec![],
+                default_geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.8,
+                    width_pct: 1.0,
+                    height_pct: 0.05,
+                },
+                default_rendering_policy: RenderingPolicy::default(),
+                default_contention_policy: ContentionPolicy::LatestWins,
+                ephemeral: true, // ephemeral!
+            });
+
+            let tab_id = s.create_tab("main", 0).unwrap();
+            s.widget_registry.register_instance(WidgetInstance {
+                widget_type_name: "live-bar".to_string(),
+                tab_id,
+                geometry_override: None,
+                contention_override: None,
+                instance_name: "live-bar".to_string(),
+                current_params: std::collections::HashMap::new(),
+            });
+        }
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        let mut client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
+            .await
+            .unwrap();
+
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "ephemeral-widget-agent",
+            "test-key",
+            &["publish_widget:live-bar"],
+        )
+        .await;
+
+        // Publish to ephemeral widget
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                widget_name: "live-bar".to_string(),
+                instance_id: String::new(),
+                params: vec![crate::proto::WidgetParameterValueProto {
+                    param_name: "value".to_string(),
+                    value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                        0.9,
+                    )),
+                }],
+                transition_ms: 0,
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Send a heartbeat — the next response should be the echo (no WidgetPublishResult)
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::Heartbeat(Heartbeat {
+                timestamp_mono_us: 77777,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let next_msg = stream.next().await.unwrap().unwrap();
+        match &next_msg.payload {
+            Some(ServerPayload::WidgetPublishResult(_)) => {
+                panic!("Ephemeral widget publish must NOT produce a WidgetPublishResult")
+            }
+            Some(ServerPayload::Heartbeat(hb)) => {
+                assert_eq!(hb.timestamp_mono_us, 77777, "expected heartbeat echo");
+            }
+            other => panic!("Expected Heartbeat echo, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    /// Helper: handshake with specific capabilities in SessionInit.
+    ///
+    /// Widget capability checks use `session.capabilities` which is populated
+    /// from the SessionInit `requested_capabilities` list.
+    async fn handshake_with_capabilities(
+        client: &mut HudSessionClient<tonic::transport::Channel>,
+        agent_id: &str,
+        psk: &str,
+        extra_caps: &[&str],
+    ) -> (
+        tokio::sync::mpsc::Sender<ClientMessage>,
+        Vec<ServerMessage>,
+        tonic::Streaming<ServerMessage>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel::<ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        let mut caps = vec![
+            "create_tiles".to_string(),
+            "access_input_events".to_string(),
+            "read_scene_topology".to_string(),
+        ];
+        for c in extra_caps {
+            caps.push(c.to_string());
+        }
+
+        tx.send(ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::SessionInit(SessionInit {
+                agent_id: agent_id.to_string(),
+                agent_display_name: agent_id.to_string(),
+                pre_shared_key: psk.to_string(),
+                requested_capabilities: caps,
+                initial_subscriptions: vec![],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_wall_us(),
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut streaming = client.session(stream).await.unwrap().into_inner();
+
+        // Collect exactly 2 handshake messages: SessionEstablished + SceneSnapshot.
+        // This mirrors the existing `handshake` helper to avoid stream state issues.
+        let mut init_messages = Vec::new();
+        for _ in 0..2 {
+            if let Some(msg) = streaming.next().await {
+                init_messages.push(msg.unwrap());
+            }
+        }
+
+        (tx, init_messages, streaming)
     }
 }

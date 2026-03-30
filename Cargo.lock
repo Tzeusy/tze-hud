@@ -3414,7 +3414,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glyphon",
- "quick-xml 0.37.5",
  "resvg",
  "thiserror 2.0.18",
  "tiny-skia 0.12.0",

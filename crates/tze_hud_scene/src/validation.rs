@@ -157,6 +157,31 @@ pub enum ValidationError {
     /// visible with stale badge; new publishes are rejected.
     #[error("zone publish rejected: lease for '{namespace}' is orphaned (agent disconnected)")]
     ZonePublishLeaseOrphaned { namespace: String },
+
+    // ── Widget publish errors (widget-system spec) ─────────────────────────────
+    /// Widget publish rejected: widget instance not found in the registry.
+    #[error("widget not found: '{name}'")]
+    WidgetNotFound { name: String },
+
+    /// Widget publish rejected: parameter name not declared in the widget's schema.
+    #[error("widget unknown parameter '{param}' in widget '{widget}'")]
+    WidgetUnknownParameter { widget: String, param: String },
+
+    /// Widget publish rejected: published value type does not match schema type.
+    #[error("widget parameter type mismatch for '{param}' in widget '{widget}'")]
+    WidgetParameterTypeMismatch { widget: String, param: String },
+
+    /// Widget publish rejected: value is invalid (NaN, infinity, out-of-range string, bad enum).
+    #[error("widget parameter invalid value for '{param}' in widget '{widget}': {reason}")]
+    WidgetParameterInvalidValue {
+        widget: String,
+        param: String,
+        reason: String,
+    },
+
+    /// Widget publish rejected: calling agent lacks `publish_widget:<widget_name>` capability.
+    #[error("widget capability missing: publish_widget:{widget}")]
+    WidgetCapabilityMissing { widget: String },
 }
 
 // ─── Stable error codes (RFC 0001 §3.4) ─────────────────────────────────────
@@ -226,6 +251,13 @@ pub enum ValidationErrorCode {
     ZonePublishSafeModeActive,
     ZonePublishLeaseOrphaned,
 
+    // Widget publish errors
+    WidgetNotFound,
+    WidgetUnknownParameter,
+    WidgetParameterTypeMismatch,
+    WidgetParameterInvalidValue,
+    WidgetCapabilityMissing,
+
     // Unknown / future-proof catch-all
     Unknown,
 }
@@ -282,6 +314,15 @@ impl ValidationErrorCode {
             ValidationError::ZonePublishLeaseNotActive { .. } => Self::ZonePublishLeaseNotActive,
             ValidationError::ZonePublishSafeModeActive { .. } => Self::ZonePublishSafeModeActive,
             ValidationError::ZonePublishLeaseOrphaned { .. } => Self::ZonePublishLeaseOrphaned,
+            ValidationError::WidgetNotFound { .. } => Self::WidgetNotFound,
+            ValidationError::WidgetUnknownParameter { .. } => Self::WidgetUnknownParameter,
+            ValidationError::WidgetParameterTypeMismatch { .. } => {
+                Self::WidgetParameterTypeMismatch
+            }
+            ValidationError::WidgetParameterInvalidValue { .. } => {
+                Self::WidgetParameterInvalidValue
+            }
+            ValidationError::WidgetCapabilityMissing { .. } => Self::WidgetCapabilityMissing,
         }
     }
 }
@@ -485,6 +526,30 @@ fn build_context_and_hint(
         ),
         ValidationError::ZonePublishLeaseOrphaned { namespace } => (
             json!({ "field": "lease", "value": namespace, "constraint": "zone publish rejected: lease is orphaned (agent disconnected)" }),
+            None,
+        ),
+        ValidationError::WidgetNotFound { name } => (
+            json!({ "field": "widget_name", "value": name, "constraint": "widget instance must be registered" }),
+            None,
+        ),
+        ValidationError::WidgetUnknownParameter { widget, param } => (
+            json!({ "field": "param_name", "value": param, "widget": widget, "constraint": "parameter must be declared in widget schema" }),
+            None,
+        ),
+        ValidationError::WidgetParameterTypeMismatch { widget, param } => (
+            json!({ "field": "param_value", "param": param, "widget": widget, "constraint": "value type must match parameter schema type" }),
+            None,
+        ),
+        ValidationError::WidgetParameterInvalidValue {
+            widget,
+            param,
+            reason,
+        } => (
+            json!({ "field": "param_value", "param": param, "widget": widget, "constraint": reason }),
+            None,
+        ),
+        ValidationError::WidgetCapabilityMissing { widget } => (
+            json!({ "field": "capability", "value": format!("publish_widget:{widget}"), "constraint": "session must have publish_widget:<widget_name> capability" }),
             None,
         ),
     }

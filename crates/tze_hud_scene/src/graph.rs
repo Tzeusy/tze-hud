@@ -2345,6 +2345,261 @@ impl SceneGraph {
         )
     }
 
+    /// Publish parameter values to a named widget instance.
+    ///
+    /// This is the scene-level implementation for both gRPC WidgetPublish and the
+    /// MCP `publish_to_widget` tool. It validates all parameters against the widget
+    /// type's schema and applies the contention policy.
+    ///
+    /// # Capability
+    ///
+    /// This method does NOT check the `publish_widget:<widget_name>` capability —
+    /// that check MUST be performed by the transport layer (gRPC session handler or
+    /// MCP server) before calling this method.  The session layer checks capability
+    /// strings directly against `session.capabilities` for gRPC, or grants a
+    /// `PublishWidget` lease capability for MCP calls.
+    ///
+    /// # Parameter validation
+    ///
+    /// - Unknown parameter names → `WidgetUnknownParameter`
+    /// - Type mismatch → `WidgetParameterTypeMismatch`
+    /// - NaN/infinity (f32) → `WidgetParameterInvalidValue`
+    /// - String exceeds max_length → `WidgetParameterInvalidValue`
+    /// - Enum value not in allowed_values → `WidgetParameterInvalidValue`
+    /// - f32 out of [min, max] range → clamped (NOT rejected)
+    ///
+    /// # Contention
+    ///
+    /// Follows the widget instance's contention policy (LatestWins, Replace,
+    /// Stack, MergeByKey), parallel to zone publishing.
+    pub fn publish_to_widget(
+        &mut self,
+        widget_name: &str,
+        params: std::collections::HashMap<String, crate::types::WidgetParameterValue>,
+        publisher_namespace: &str,
+        merge_key: Option<String>,
+        transition_ms: u32,
+        expires_at_wall_us: Option<u64>,
+    ) -> Result<bool, ValidationError> {
+        use crate::types::{
+            ContentionPolicy, WidgetParamConstraints, WidgetParamType, WidgetParameterValue,
+        };
+
+        // ── Step 1: Resolve the widget instance ──────────────────────────────
+        let instance_name = widget_name;
+        let instance = self
+            .widget_registry
+            .instances
+            .get(instance_name)
+            .ok_or_else(|| ValidationError::WidgetNotFound {
+                name: widget_name.to_string(),
+            })?
+            .clone();
+
+        let definition = self
+            .widget_registry
+            .definitions
+            .get(&instance.widget_type_name)
+            .ok_or_else(|| ValidationError::WidgetNotFound {
+                name: widget_name.to_string(),
+            })?
+            .clone();
+
+        let is_ephemeral = definition.ephemeral;
+
+        // ── Step 2: Validate and coerce each submitted parameter ─────────────
+        let mut validated_params: std::collections::HashMap<String, WidgetParameterValue> =
+            std::collections::HashMap::new();
+
+        for (param_name, submitted_value) in &params {
+            // Look up declaration in schema
+            let decl = definition
+                .parameter_schema
+                .iter()
+                .find(|d| &d.name == param_name)
+                .ok_or_else(|| ValidationError::WidgetUnknownParameter {
+                    widget: widget_name.to_string(),
+                    param: param_name.clone(),
+                })?;
+
+            let empty_constraints = WidgetParamConstraints::default();
+            let constraints = decl.constraints.as_ref().unwrap_or(&empty_constraints);
+
+            // Type check and value validation
+            let coerced = match (&decl.param_type, submitted_value) {
+                (WidgetParamType::F32, WidgetParameterValue::F32(v)) => {
+                    if v.is_nan() {
+                        return Err(ValidationError::WidgetParameterInvalidValue {
+                            widget: widget_name.to_string(),
+                            param: param_name.clone(),
+                            reason: "NaN is not a valid f32 parameter value".to_string(),
+                        });
+                    }
+                    if v.is_infinite() {
+                        return Err(ValidationError::WidgetParameterInvalidValue {
+                            widget: widget_name.to_string(),
+                            param: param_name.clone(),
+                            reason: "infinity is not a valid f32 parameter value".to_string(),
+                        });
+                    }
+                    // Clamp to [min, max] (spec: f32 out of range is clamped, not rejected)
+                    let clamped = match (constraints.f32_min, constraints.f32_max) {
+                        (Some(mn), Some(mx)) => v.clamp(mn, mx),
+                        (Some(mn), None) => v.max(mn),
+                        (None, Some(mx)) => v.min(mx),
+                        (None, None) => *v,
+                    };
+                    WidgetParameterValue::F32(clamped)
+                }
+                (WidgetParamType::F32, _) => {
+                    return Err(ValidationError::WidgetParameterTypeMismatch {
+                        widget: widget_name.to_string(),
+                        param: param_name.clone(),
+                    });
+                }
+                (WidgetParamType::String, WidgetParameterValue::String(s)) => {
+                    let mut max_bytes = constraints.string_max_bytes.unwrap_or(1024) as usize;
+                    if max_bytes == 0 {
+                        // A max_bytes of 0 is interpreted as the default limit of 1024.
+                        max_bytes = 1024;
+                    }
+
+                    if s.len() > max_bytes {
+                        return Err(ValidationError::WidgetParameterInvalidValue {
+                            widget: widget_name.to_string(),
+                            param: param_name.clone(),
+                            reason: format!(
+                                "string value of {} bytes exceeds max_length of {}",
+                                s.len(),
+                                max_bytes
+                            ),
+                        });
+                    }
+                    WidgetParameterValue::String(s.clone())
+                }
+                (WidgetParamType::String, _) => {
+                    return Err(ValidationError::WidgetParameterTypeMismatch {
+                        widget: widget_name.to_string(),
+                        param: param_name.clone(),
+                    });
+                }
+                (WidgetParamType::Color, WidgetParameterValue::Color(c)) => {
+                    let clamped_color = Rgba {
+                        r: c.r.clamp(0.0, 1.0),
+                        g: c.g.clamp(0.0, 1.0),
+                        b: c.b.clamp(0.0, 1.0),
+                        a: c.a.clamp(0.0, 1.0),
+                    };
+                    WidgetParameterValue::Color(clamped_color)
+                }
+                (WidgetParamType::Color, _) => {
+                    return Err(ValidationError::WidgetParameterTypeMismatch {
+                        widget: widget_name.to_string(),
+                        param: param_name.clone(),
+                    });
+                }
+                (WidgetParamType::Enum, WidgetParameterValue::Enum(v)) => {
+                    if !constraints.enum_allowed_values.is_empty()
+                        && !constraints.enum_allowed_values.contains(v)
+                    {
+                        return Err(ValidationError::WidgetParameterInvalidValue {
+                            widget: widget_name.to_string(),
+                            param: param_name.clone(),
+                            reason: format!(
+                                "enum value '{}' not in allowed set {:?}",
+                                v, constraints.enum_allowed_values
+                            ),
+                        });
+                    }
+                    WidgetParameterValue::Enum(v.clone())
+                }
+                (WidgetParamType::Enum, _) => {
+                    return Err(ValidationError::WidgetParameterTypeMismatch {
+                        widget: widget_name.to_string(),
+                        param: param_name.clone(),
+                    });
+                }
+            };
+            validated_params.insert(param_name.clone(), coerced);
+        }
+
+        // ── Step 3: Apply contention policy and record publication ────────────
+        let contention_policy = instance
+            .contention_override
+            .unwrap_or(definition.default_contention_policy);
+
+        let now_us = self.clock.now_us();
+
+        let record = crate::types::WidgetPublishRecord {
+            widget_name: widget_name.to_string(),
+            publisher_namespace: publisher_namespace.to_string(),
+            params: validated_params.clone(),
+            published_at_wall_us: now_us,
+            merge_key: merge_key.clone(),
+            expires_at_wall_us,
+            transition_ms,
+        };
+
+        let publishes = self
+            .widget_registry
+            .active_publishes
+            .entry(widget_name.to_string())
+            .or_default();
+
+        match contention_policy {
+            ContentionPolicy::LatestWins => {
+                *publishes = vec![record];
+            }
+            ContentionPolicy::Replace => {
+                *publishes = vec![record];
+            }
+            ContentionPolicy::Stack { max_depth } => {
+                publishes.push(record);
+                let max = max_depth as usize;
+                if max > 0 && publishes.len() > max {
+                    let excess = publishes.len() - max;
+                    publishes.drain(0..excess);
+                }
+            }
+            ContentionPolicy::MergeByKey { max_keys } => {
+                let key = merge_key.clone().unwrap_or_default();
+                if let Some(pos) = publishes
+                    .iter()
+                    .position(|r| r.merge_key.as_deref().unwrap_or("") == key.as_str())
+                {
+                    publishes[pos] = record;
+                } else {
+                    let max = max_keys as usize;
+                    if max > 0 && publishes.len() >= max {
+                        // At max key capacity — replace the oldest entry (LRU approximation)
+                        if !publishes.is_empty() {
+                            publishes[0] = record;
+                        }
+                    } else {
+                        publishes.push(record);
+                    }
+                }
+            }
+        }
+
+        // ── Step 4: Update current_params on the instance ─────────────────────
+        // Merge new validated params over existing current_params.
+        {
+            let inst = self
+                .widget_registry
+                .instances
+                .get_mut(instance_name)
+                .unwrap(); // safe: we looked it up above
+            for (k, v) in &validated_params {
+                inst.current_params.insert(k.clone(), v.clone());
+            }
+        }
+
+        self.version += 1;
+        // Return true for durable, false for ephemeral (caller decides whether to send ack)
+        Ok(!is_ephemeral)
+    }
+
     /// Budget-driven revocation: transitions all non-terminal session leases to
     /// REVOKED, clears tiles, clears zone publications.
     ///
