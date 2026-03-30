@@ -76,6 +76,11 @@ message ClientMessage {
     // Agent scene event emission (scene-events/spec.md §5.1, §5.2).
     // Requires emit_scene_event:<event_name> capability.
     EmitSceneEvent emit_scene_event = 33;
+
+    // Widget publishing (widget-system spec §Requirement: Widget Publishing via gRPC).
+    // Durable-widget publishes receive WidgetPublishResult; ephemeral are fire-and-forget.
+    // Requires publish_widget:<widget_name> capability.
+    WidgetPublish widget_publish = 35;
   }
 }
 
@@ -149,6 +154,11 @@ message ServerMessage {
     // Transactional — never dropped. Delivered to ALL active sessions unconditionally
     // on degradation level change, regardless of subscription configuration.
     DegradationNotice     degradation_notice      = 46;
+
+    // Widget publish result (widget-system spec §Requirement: Widget Publish Result).
+    // Sent only for durable-widget publishes. Ephemeral-widget publishes are
+    // fire-and-forget; no WidgetPublishResult is sent.
+    WidgetPublishResult   widget_publish_result   = 47;
   }
 
   // Field 22 (lease_denial) was removed in the v1 vocabulary rename.
@@ -518,6 +528,31 @@ message ZonePublishResult {
   bool   accepted         = 2;  // true = published; false = rejected
   string error_code       = 3;  // Machine-readable error code (if accepted=false)
   string error_message    = 4;  // Human-readable reason (if accepted=false)
+}
+
+// ─── Widget publishing messages ───────────────────────────────────────────────
+
+// Client publishes parameter values to a named widget instance (widget-system spec).
+// Durable-widget publishes receive WidgetPublishResult; ephemeral are fire-and-forget.
+// Requires publish_widget:<widget_name> capability.
+// Encoded at ClientMessage field 35.
+message WidgetPublish {
+  string widget_name   = 1;  // Instance addressing key (instance_id or widget_type_name)
+  string instance_id   = 2;  // Optional disambiguation for multi-instance tabs
+  repeated tze_hud.protocol.v1.WidgetParameterValueProto params = 3;
+  uint32 transition_ms = 4;  // 0 = instant
+  uint64 ttl_us        = 5;  // 0 = use widget instance default
+  string merge_key     = 6;  // For MergeByKey contention policy; empty otherwise
+}
+
+// Server response to a durable-widget WidgetPublish (widget-system spec).
+// Correlated by widget_name. NOT sent for ephemeral-widget publishes.
+// Encoded at ServerMessage field 47.
+message WidgetPublishResult {
+  bool   accepted     = 1;   // true = applied; false = rejected
+  string widget_name  = 2;   // Echoed from WidgetPublish
+  string error_code   = 3;   // Machine-readable error code (if accepted=false)
+  string error_message = 4;  // Human-readable reason (if accepted=false)
 }
 
 // ─── Heartbeat ────────────────────────────────────────────────────────────────

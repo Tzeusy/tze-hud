@@ -188,6 +188,9 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         | ServerPayload::InputFocusResponse(_)
         | ServerPayload::InputCaptureResponse(_) => TrafficClass::Transactional,
 
+        // Widget publish result — transactional (only for durable widgets; ephemeral = no result)
+        ServerPayload::WidgetPublishResult(_) => TrafficClass::Transactional,
+
         // Backpressure signal — transactional (must not be dropped)
         ServerPayload::BackpressureSignal(_) => TrafficClass::Transactional,
 
@@ -1756,6 +1759,13 @@ async fn handle_client_message(
         // Agent scene event emission (scene-events/spec.md §5.1, §5.2).
         ClientPayload::EmitSceneEvent(emit) => {
             handle_emit_scene_event(state, session, tx, client_sequence, emit).await;
+        }
+        // Widget publishing (widget-system spec §Requirement: Widget Publishing via gRPC).
+        // Full implementation deferred to widget-publish bead; stub here to satisfy
+        // exhaustiveness and keep the protocol layer compilable.
+        ClientPayload::WidgetPublish(_publish) => {
+            // TODO(hud-mim2.x): route to handle_widget_publish() once the
+            // widget publish logic is implemented.
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {

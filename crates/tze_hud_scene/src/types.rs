@@ -1542,6 +1542,306 @@ pub struct ZoneRegistrySnapshot {
     pub active_publishes: Vec<ZonePublishRecord>,
 }
 
+// ─── Widget types ────────────────────────────────────────────────────────────
+
+/// Minimum z-order for widget tiles. Widget tiles appear above zone tiles when
+/// they overlap spatially. Per widget-system spec §Requirement: Widget Contention
+/// and Governance.
+pub const WIDGET_TILE_Z_MIN: u32 = 0x9000_0000;
+
+/// Parameter types supported by the widget system in v1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WidgetParamType {
+    /// IEEE 754 32-bit float, range-clamped to [min, max].
+    F32,
+    /// UTF-8 string, max 1024 bytes by default.
+    String,
+    /// RGBA color as 4x u8 in [0, 255].
+    Color,
+    /// Enumerated string value from a declared allowed-values set.
+    Enum,
+}
+
+/// A typed parameter value for a widget parameter.
+///
+/// Invariants:
+/// - `F32` values MUST be finite (no NaN, no infinity).
+/// - `String` values MUST be at most 1024 UTF-8 bytes.
+/// - `Enum` values MUST match one of the `allowed_values` in the
+///   corresponding `WidgetParamConstraints`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WidgetParameterValue {
+    F32(f32),
+    String(std::string::String),
+    /// RGBA color as 4x u8 in [0, 255].
+    Color(Rgba),
+    Enum(std::string::String),
+}
+
+/// Constraints for a widget parameter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct WidgetParamConstraints {
+    /// Minimum value (f32 parameters only). None = unconstrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f32_min: Option<f32>,
+    /// Maximum value (f32 parameters only). None = unconstrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub f32_max: Option<f32>,
+    /// Maximum UTF-8 byte length for string parameters. 0 / None = default 1024.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub string_max_bytes: Option<u32>,
+    /// Allowed values for enum parameters. Empty = unconstrained.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enum_allowed_values: Vec<std::string::String>,
+}
+
+/// A single parameter declaration in a widget's parameter schema.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetParameterDeclaration {
+    pub name: std::string::String,
+    pub param_type: WidgetParamType,
+    pub default_value: WidgetParameterValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<WidgetParamConstraints>,
+}
+
+/// How a parameter value is mapped to an SVG attribute.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WidgetBindingMapping {
+    /// f32 parameter: maps [min, max] range to [attr_min, attr_max] via linear interpolation.
+    Linear { attr_min: f32, attr_max: f32 },
+    /// String and Color parameters: use the value as-is.
+    Direct,
+    /// Enum parameters: maps each enum value to a specific attribute value.
+    Discrete { value_map: std::collections::BTreeMap<std::string::String, std::string::String> },
+}
+
+/// A single parameter-to-SVG-attribute binding.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetBinding {
+    /// Parameter name from the widget's parameter schema.
+    pub param: std::string::String,
+    /// SVG element ID within the layer's SVG file.
+    pub target_element: std::string::String,
+    /// SVG attribute name (or the synthetic target `"text-content"`).
+    pub target_attribute: std::string::String,
+    pub mapping: WidgetBindingMapping,
+}
+
+/// An SVG layer in a widget type definition.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetSvgLayer {
+    /// Filename within the bundle directory.
+    pub svg_file: std::string::String,
+    pub bindings: Vec<WidgetBinding>,
+}
+
+/// Full widget type definition (the first level of the widget ontology).
+///
+/// Widget types are registered at startup from asset bundles and are
+/// immutable after registration. Agents MUST NOT create widget types.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetDefinition {
+    /// Kebab-case unique id matching `[a-z][a-z0-9-]*`.
+    pub id: std::string::String,
+    pub name: std::string::String,
+    pub description: std::string::String,
+    pub parameter_schema: Vec<WidgetParameterDeclaration>,
+    pub layers: Vec<WidgetSvgLayer>,
+    pub default_geometry_policy: GeometryPolicy,
+    pub default_rendering_policy: RenderingPolicy,
+    pub default_contention_policy: ContentionPolicy,
+    /// When true, publishes to this widget are fire-and-forget (no WidgetPublishResult).
+    #[serde(default)]
+    pub ephemeral: bool,
+}
+
+/// A widget instance — a widget type bound to a specific tab.
+///
+/// Widget instances are static in v1 (loaded from config; not agent-created).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetInstance {
+    /// References `WidgetDefinition.id`.
+    pub widget_type_name: std::string::String,
+    /// The tab this instance is bound to.
+    pub tab_id: SceneId,
+    /// Instance-level geometry override (None = use type's default_geometry_policy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_override: Option<GeometryPolicy>,
+    /// Instance-level contention override (None = use type's default_contention_policy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contention_override: Option<ContentionPolicy>,
+    /// Addressing key: explicit instance_id from config, or widget_type_name if absent.
+    pub instance_name: std::string::String,
+    /// Current effective parameter values (HashMap for runtime use).
+    pub current_params: HashMap<std::string::String, WidgetParameterValue>,
+}
+
+/// A recorded widget publication (the third level of the widget ontology).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetPublishRecord {
+    /// Instance addressing key.
+    pub widget_name: std::string::String,
+    pub publisher_namespace: std::string::String,
+    pub params: HashMap<std::string::String, WidgetParameterValue>,
+    /// UTC wall-clock timestamp in microseconds since Unix epoch.
+    pub published_at_wall_us: u64,
+    /// For MergeByKey contention: the key under which this record is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_key: Option<std::string::String>,
+    /// Optional expiry timestamp (microseconds since epoch). None = no expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_wall_us: Option<u64>,
+    pub transition_ms: u32,
+}
+
+/// Resolved occupancy state for a widget instance after contention policy.
+///
+/// This is the fourth level of the widget ontology. The compositor reads
+/// `effective_params` to determine current visual property values.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetOccupancy {
+    /// Instance addressing key.
+    pub widget_name: std::string::String,
+    pub tab_id: SceneId,
+    pub active_publications: Vec<WidgetPublishRecord>,
+    pub occupant_count: u32,
+    /// Resolved parameters after contention policy; falls back to
+    /// `WidgetDefinition` defaults when no publications are active.
+    pub effective_params: HashMap<std::string::String, WidgetParameterValue>,
+}
+
+// ─── Widget registry ─────────────────────────────────────────────────────────
+
+/// Runtime-owned widget registry, parallel to ZoneRegistry.
+///
+/// Populated at startup from asset bundles (widget types) and
+/// configuration (widget instances). Read-only from the agent perspective.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WidgetRegistry {
+    /// Widget type definitions keyed by widget id.
+    pub definitions: HashMap<std::string::String, WidgetDefinition>,
+    /// Widget instances keyed by instance_name.
+    pub instances: HashMap<std::string::String, WidgetInstance>,
+    /// Active publishes per widget instance_name.
+    pub active_publishes: HashMap<std::string::String, Vec<WidgetPublishRecord>>,
+}
+
+impl WidgetRegistry {
+    pub fn new() -> Self {
+        Self {
+            definitions: HashMap::new(),
+            instances: HashMap::new(),
+            active_publishes: HashMap::new(),
+        }
+    }
+
+    /// Register a widget definition. Overwrites any existing definition with the same id.
+    pub fn register_definition(&mut self, def: WidgetDefinition) {
+        self.definitions.insert(def.id.clone(), def);
+    }
+
+    /// Register a widget instance. Overwrites any existing instance with the same instance_name.
+    pub fn register_instance(&mut self, instance: WidgetInstance) {
+        self.instances.insert(instance.instance_name.clone(), instance);
+    }
+
+    /// Look up a widget definition by id.
+    pub fn get_definition(&self, id: &str) -> Option<&WidgetDefinition> {
+        self.definitions.get(id)
+    }
+
+    /// Look up a widget instance by instance_name.
+    pub fn get_instance(&self, instance_name: &str) -> Option<&WidgetInstance> {
+        self.instances.get(instance_name)
+    }
+
+    /// Get the current active publish(es) for a widget instance.
+    pub fn active_for_widget(&self, instance_name: &str) -> &[WidgetPublishRecord] {
+        self.active_publishes
+            .get(instance_name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Query occupancy for a widget instance (resolved state after contention policy).
+    ///
+    /// Returns `None` if the instance is not found.
+    pub fn get_occupancy(
+        &self,
+        instance_name: &str,
+        tab_id: SceneId,
+    ) -> Option<WidgetOccupancy> {
+        let instance = self.instances.get(instance_name)?;
+        let def = self.definitions.get(&instance.widget_type_name)?;
+        let pubs = self
+            .active_publishes
+            .get(instance_name)
+            .cloned()
+            .unwrap_or_default();
+        let occupant_count = pubs.len() as u32;
+
+        // Fall back to definition defaults when no publications are active.
+        let effective_params = if pubs.is_empty() {
+            def.parameter_schema
+                .iter()
+                .map(|p| (p.name.clone(), p.default_value.clone()))
+                .collect()
+        } else {
+            instance.current_params.clone()
+        };
+
+        Some(WidgetOccupancy {
+            widget_name: instance_name.to_string(),
+            tab_id,
+            active_publications: pubs,
+            occupant_count,
+            effective_params,
+        })
+    }
+
+    /// Snapshot the registry (all definitions + instances + all active publishes).
+    pub fn snapshot(&self) -> WidgetRegistrySnapshot {
+        WidgetRegistrySnapshot {
+            widget_types: self.definitions.values().cloned().collect(),
+            widget_instances: self.instances.values().cloned().collect(),
+            active_publishes: self
+                .active_publishes
+                .values()
+                .flat_map(|v| v.iter().cloned())
+                .collect(),
+        }
+    }
+}
+
+impl Default for WidgetRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Snapshot of the widget registry (all types + instances + active publishes).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetRegistrySnapshot {
+    pub widget_types: Vec<WidgetDefinition>,
+    pub widget_instances: Vec<WidgetInstance>,
+    pub active_publishes: Vec<WidgetPublishRecord>,
+}
+
+/// Deterministic snapshot of the widget registry for inclusion in SceneGraphSnapshot.
+///
+/// Uses BTreeMap/sorted Vec for deterministic iteration order per RFC 0001 §4.1.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneGraphWidgetRegistry {
+    /// Widget definitions sorted by id for deterministic serialization.
+    pub widget_types: std::collections::BTreeMap<std::string::String, WidgetDefinition>,
+    /// Widget instances sorted by instance_name for determinism.
+    pub widget_instances: Vec<WidgetInstance>,
+    /// Active publications sorted by instance_name then publisher_namespace for determinism.
+    pub active_publications:
+        std::collections::BTreeMap<std::string::String, Vec<WidgetPublishRecord>>,
+}
+
 // ─── Scene Snapshot ──────────────────────────────────────────────────────────
 
 /// Deterministic snapshot of the zone registry for inclusion in SceneGraphSnapshot.
@@ -1606,6 +1906,10 @@ pub struct SceneGraphSnapshot {
     /// Zone registry snapshot: types, instances, active publications.
     /// Does NOT include effective_geometry (post-v1, spec line 360).
     pub zone_registry: SceneGraphZoneRegistry,
+
+    /// Widget registry snapshot: types, instances, active publications.
+    /// Populated from WidgetRegistry via deterministic BTreeMap ordering.
+    pub widget_registry: SceneGraphWidgetRegistry,
 
     /// The currently active tab, or None if no tab is active.
     pub active_tab: Option<SceneId>,

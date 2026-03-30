@@ -430,6 +430,516 @@ pub fn zone_publish_record_to_proto(r: &ZonePublishRecord) -> proto::ZonePublish
     }
 }
 
+/// Convert a protobuf GeometryPolicyProto to scene GeometryPolicy.
+///
+/// Returns `None` if the policy oneof is absent (empty proto).
+pub fn proto_to_geometry_policy(p: &proto::GeometryPolicyProto) -> Option<GeometryPolicy> {
+    use proto::geometry_policy_proto::Policy;
+    match p.policy.as_ref()? {
+        Policy::Relative(r) => Some(GeometryPolicy::Relative {
+            x_pct: r.x_pct,
+            y_pct: r.y_pct,
+            width_pct: r.width_pct,
+            height_pct: r.height_pct,
+        }),
+        Policy::EdgeAnchored(e) => {
+            let edge = match proto::DisplayEdge::try_from(e.edge)
+                .unwrap_or(proto::DisplayEdge::Unspecified)
+            {
+                proto::DisplayEdge::Top | proto::DisplayEdge::Unspecified => DisplayEdge::Top,
+                proto::DisplayEdge::Bottom => DisplayEdge::Bottom,
+                proto::DisplayEdge::Left => DisplayEdge::Left,
+                proto::DisplayEdge::Right => DisplayEdge::Right,
+            };
+            Some(GeometryPolicy::EdgeAnchored {
+                edge,
+                height_pct: e.height_pct,
+                width_pct: e.width_pct,
+                margin_px: e.margin_px,
+            })
+        }
+    }
+}
+
+/// Convert a protobuf RenderingPolicyProto to scene RenderingPolicy.
+pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPolicy {
+    let font_size_px = if p.font_size_px > 0.0 {
+        Some(p.font_size_px)
+    } else {
+        None
+    };
+    let backdrop = p.backdrop.as_ref().map(proto_rgba_to_scene);
+    let text_align = match proto::TextAlignProto::try_from(p.text_align)
+        .unwrap_or(proto::TextAlignProto::Unspecified)
+    {
+        proto::TextAlignProto::Unspecified => None,
+        proto::TextAlignProto::Start => Some(TextAlign::Start),
+        proto::TextAlignProto::Center => Some(TextAlign::Center),
+        proto::TextAlignProto::End => Some(TextAlign::End),
+    };
+    let margin_px = if p.margin_px > 0.0 {
+        Some(p.margin_px)
+    } else {
+        None
+    };
+    RenderingPolicy {
+        font_size_px,
+        backdrop,
+        text_align,
+        margin_px,
+    }
+}
+
+// ─── Widget conversions ───────────────────────────────────────────────────────
+
+/// Convert a scene WidgetParamType to a proto enum i32.
+pub fn widget_param_type_to_proto(t: WidgetParamType) -> i32 {
+    match t {
+        WidgetParamType::F32 => proto::WidgetParamTypeProto::WidgetParamTypeF32 as i32,
+        WidgetParamType::String => proto::WidgetParamTypeProto::WidgetParamTypeString as i32,
+        WidgetParamType::Color => proto::WidgetParamTypeProto::WidgetParamTypeColor as i32,
+        WidgetParamType::Enum => proto::WidgetParamTypeProto::WidgetParamTypeEnum as i32,
+    }
+}
+
+/// Convert a proto WidgetParamTypeProto i32 to scene WidgetParamType.
+pub fn proto_to_widget_param_type(v: i32) -> WidgetParamType {
+    match proto::WidgetParamTypeProto::try_from(v)
+        .unwrap_or(proto::WidgetParamTypeProto::WidgetParamTypeUnspecified)
+    {
+        proto::WidgetParamTypeProto::WidgetParamTypeF32 => WidgetParamType::F32,
+        proto::WidgetParamTypeProto::WidgetParamTypeString => WidgetParamType::String,
+        proto::WidgetParamTypeProto::WidgetParamTypeColor => WidgetParamType::Color,
+        proto::WidgetParamTypeProto::WidgetParamTypeEnum => WidgetParamType::Enum,
+        proto::WidgetParamTypeProto::WidgetParamTypeUnspecified => WidgetParamType::F32,
+    }
+}
+
+/// Convert a scene WidgetParameterValue to a proto WidgetParameterValueProto.
+pub fn widget_param_value_to_proto(
+    name: &str,
+    v: &WidgetParameterValue,
+) -> proto::WidgetParameterValueProto {
+    use proto::widget_parameter_value_proto::Value;
+    let value = match v {
+        WidgetParameterValue::F32(f) => Some(Value::F32Value(*f)),
+        WidgetParameterValue::String(s) => Some(Value::StringValue(s.clone())),
+        WidgetParameterValue::Color(c) => Some(Value::ColorValue(proto::Rgba {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        })),
+        WidgetParameterValue::Enum(e) => Some(Value::EnumValue(e.clone())),
+    };
+    proto::WidgetParameterValueProto {
+        param_name: name.to_string(),
+        value,
+    }
+}
+
+/// Convert a proto WidgetParameterValueProto to a scene (name, WidgetParameterValue) pair.
+///
+/// Returns `None` if the value variant is absent.
+pub fn proto_to_widget_param_value(
+    p: &proto::WidgetParameterValueProto,
+) -> Option<(String, WidgetParameterValue)> {
+    use proto::widget_parameter_value_proto::Value;
+    let value = match p.value.as_ref()? {
+        Value::F32Value(f) => WidgetParameterValue::F32(*f),
+        Value::StringValue(s) => WidgetParameterValue::String(s.clone()),
+        Value::ColorValue(c) => WidgetParameterValue::Color(Rgba::new(c.r, c.g, c.b, c.a)),
+        Value::EnumValue(e) => WidgetParameterValue::Enum(e.clone()),
+    };
+    Some((p.param_name.clone(), value))
+}
+
+/// Convert a scene WidgetParamConstraints to proto WidgetParamConstraintsProto.
+pub fn widget_param_constraints_to_proto(c: &WidgetParamConstraints) -> proto::WidgetParamConstraintsProto {
+    proto::WidgetParamConstraintsProto {
+        f32_min: c.f32_min.unwrap_or(0.0),
+        f32_max: c.f32_max.unwrap_or(0.0),
+        string_max_bytes: c.string_max_bytes.unwrap_or(0),
+        enum_allowed_values: c.enum_allowed_values.clone(),
+    }
+}
+
+/// Convert a proto WidgetParamConstraintsProto to scene WidgetParamConstraints.
+pub fn proto_to_widget_param_constraints(
+    p: &proto::WidgetParamConstraintsProto,
+) -> WidgetParamConstraints {
+    WidgetParamConstraints {
+        f32_min: if p.f32_min != 0.0 { Some(p.f32_min) } else { None },
+        f32_max: if p.f32_max != 0.0 { Some(p.f32_max) } else { None },
+        string_max_bytes: if p.string_max_bytes != 0 { Some(p.string_max_bytes) } else { None },
+        enum_allowed_values: p.enum_allowed_values.clone(),
+    }
+}
+
+/// Convert a scene WidgetParameterDeclaration to proto WidgetParameterDeclarationProto.
+pub fn widget_param_decl_to_proto(d: &WidgetParameterDeclaration) -> proto::WidgetParameterDeclarationProto {
+    proto::WidgetParameterDeclarationProto {
+        name: d.name.clone(),
+        param_type: widget_param_type_to_proto(d.param_type),
+        default_value: Some(widget_param_value_to_proto(&d.name, &d.default_value)),
+        constraints: d
+            .constraints
+            .as_ref()
+            .map(widget_param_constraints_to_proto),
+    }
+}
+
+/// Convert a proto WidgetParameterDeclarationProto to scene WidgetParameterDeclaration.
+pub fn proto_to_widget_param_decl(
+    p: &proto::WidgetParameterDeclarationProto,
+) -> Option<WidgetParameterDeclaration> {
+    let default_proto = p.default_value.as_ref()?;
+    let (_, default_value) = proto_to_widget_param_value(default_proto)?;
+    let constraints = p.constraints.as_ref().map(proto_to_widget_param_constraints);
+    Some(WidgetParameterDeclaration {
+        name: p.name.clone(),
+        param_type: proto_to_widget_param_type(p.param_type),
+        default_value,
+        constraints,
+    })
+}
+
+/// Convert a scene WidgetBindingMapping to proto WidgetBindingMappingProto.
+pub fn widget_binding_mapping_to_proto(m: &WidgetBindingMapping) -> proto::WidgetBindingMappingProto {
+    use proto::widget_binding_mapping_proto::Mapping;
+    let mapping = match m {
+        WidgetBindingMapping::Linear { attr_min, attr_max } => {
+            Some(Mapping::Linear(proto::WidgetLinearMappingProto {
+                attr_min: *attr_min,
+                attr_max: *attr_max,
+            }))
+        }
+        WidgetBindingMapping::Direct => Some(Mapping::Direct(true)),
+        WidgetBindingMapping::Discrete { value_map } => {
+            Some(Mapping::Discrete(proto::WidgetDiscreteMappingProto {
+                value_map: value_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            }))
+        }
+    };
+    proto::WidgetBindingMappingProto { mapping }
+}
+
+/// Convert a proto WidgetBindingMappingProto to scene WidgetBindingMapping.
+pub fn proto_to_widget_binding_mapping(
+    p: &proto::WidgetBindingMappingProto,
+) -> Option<WidgetBindingMapping> {
+    use proto::widget_binding_mapping_proto::Mapping;
+    match p.mapping.as_ref()? {
+        Mapping::Linear(l) => Some(WidgetBindingMapping::Linear {
+            attr_min: l.attr_min,
+            attr_max: l.attr_max,
+        }),
+        Mapping::Direct(_) => Some(WidgetBindingMapping::Direct),
+        Mapping::Discrete(d) => Some(WidgetBindingMapping::Discrete {
+            value_map: d
+                .value_map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        }),
+    }
+}
+
+/// Convert a scene WidgetBinding to proto WidgetBindingProto.
+pub fn widget_binding_to_proto(b: &WidgetBinding) -> proto::WidgetBindingProto {
+    proto::WidgetBindingProto {
+        param: b.param.clone(),
+        target_element: b.target_element.clone(),
+        target_attribute: b.target_attribute.clone(),
+        mapping: Some(widget_binding_mapping_to_proto(&b.mapping)),
+    }
+}
+
+/// Convert a proto WidgetBindingProto to scene WidgetBinding.
+pub fn proto_to_widget_binding(p: &proto::WidgetBindingProto) -> Option<WidgetBinding> {
+    let mapping = proto_to_widget_binding_mapping(p.mapping.as_ref()?)?;
+    Some(WidgetBinding {
+        param: p.param.clone(),
+        target_element: p.target_element.clone(),
+        target_attribute: p.target_attribute.clone(),
+        mapping,
+    })
+}
+
+/// Convert a scene WidgetSvgLayer to proto WidgetSvgLayerProto.
+pub fn widget_svg_layer_to_proto(l: &WidgetSvgLayer) -> proto::WidgetSvgLayerProto {
+    proto::WidgetSvgLayerProto {
+        svg_file: l.svg_file.clone(),
+        bindings: l.bindings.iter().map(widget_binding_to_proto).collect(),
+    }
+}
+
+/// Convert a proto WidgetSvgLayerProto to scene WidgetSvgLayer.
+pub fn proto_to_widget_svg_layer(p: &proto::WidgetSvgLayerProto) -> WidgetSvgLayer {
+    WidgetSvgLayer {
+        svg_file: p.svg_file.clone(),
+        bindings: p.bindings.iter().filter_map(proto_to_widget_binding).collect(),
+    }
+}
+
+/// Convert a scene WidgetDefinition to proto WidgetDefinitionProto.
+pub fn widget_definition_to_proto(d: &WidgetDefinition) -> proto::WidgetDefinitionProto {
+    let parameter_schema = Some(proto::WidgetParameterSchemaProto {
+        parameters: d
+            .parameter_schema
+            .iter()
+            .map(widget_param_decl_to_proto)
+            .collect(),
+    });
+    let layers = d.layers.iter().map(widget_svg_layer_to_proto).collect();
+    let default_geometry_policy = Some(geometry_policy_to_proto(&d.default_geometry_policy));
+    let default_rendering_policy = Some(rendering_policy_to_proto(&d.default_rendering_policy));
+
+    let default_contention_policy = match d.default_contention_policy {
+        ContentionPolicy::LatestWins => {
+            proto::ContentionPolicyProto::ContentionPolicyLatestWins as i32
+        }
+        ContentionPolicy::Replace => proto::ContentionPolicyProto::ContentionPolicyReplace as i32,
+        ContentionPolicy::Stack { .. } => proto::ContentionPolicyProto::ContentionPolicyStack as i32,
+        ContentionPolicy::MergeByKey { .. } => {
+            proto::ContentionPolicyProto::ContentionPolicyMergeByKey as i32
+        }
+    };
+
+    proto::WidgetDefinitionProto {
+        id: d.id.clone(),
+        name: d.name.clone(),
+        description: d.description.clone(),
+        parameter_schema,
+        layers,
+        default_geometry_policy,
+        default_rendering_policy,
+        default_contention_policy,
+        ephemeral: d.ephemeral,
+    }
+}
+
+/// Convert a proto WidgetDefinitionProto to scene WidgetDefinition.
+pub fn proto_to_widget_definition(p: &proto::WidgetDefinitionProto) -> WidgetDefinition {
+    let parameter_schema = p
+        .parameter_schema
+        .as_ref()
+        .map(|s| {
+            s.parameters
+                .iter()
+                .filter_map(proto_to_widget_param_decl)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let layers = p
+        .layers
+        .iter()
+        .map(proto_to_widget_svg_layer)
+        .collect();
+
+    let default_geometry_policy = p
+        .default_geometry_policy
+        .as_ref()
+        .and_then(proto_to_geometry_policy)
+        .unwrap_or(GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            width_pct: 0.1,
+            height_pct: 0.1,
+        });
+
+    let default_rendering_policy = p
+        .default_rendering_policy
+        .as_ref()
+        .map(proto_to_rendering_policy)
+        .unwrap_or_default();
+
+    let default_contention_policy = match proto::ContentionPolicyProto::try_from(p.default_contention_policy)
+        .unwrap_or(proto::ContentionPolicyProto::ContentionPolicyLatestWins)
+    {
+        proto::ContentionPolicyProto::ContentionPolicyLatestWins
+        | proto::ContentionPolicyProto::ContentionPolicyUnspecified => ContentionPolicy::LatestWins,
+        proto::ContentionPolicyProto::ContentionPolicyReplace => ContentionPolicy::Replace,
+        proto::ContentionPolicyProto::ContentionPolicyStack => {
+            ContentionPolicy::Stack { max_depth: 8 }
+        }
+        proto::ContentionPolicyProto::ContentionPolicyMergeByKey => {
+            ContentionPolicy::MergeByKey { max_keys: 16 }
+        }
+    };
+
+    WidgetDefinition {
+        id: p.id.clone(),
+        name: p.name.clone(),
+        description: p.description.clone(),
+        parameter_schema,
+        layers,
+        default_geometry_policy,
+        default_rendering_policy,
+        default_contention_policy,
+        ephemeral: p.ephemeral,
+    }
+}
+
+/// Convert a scene WidgetInstance to proto WidgetInstanceProto.
+pub fn widget_instance_to_proto(i: &WidgetInstance) -> proto::WidgetInstanceProto {
+    let geometry_override = i
+        .geometry_override
+        .as_ref()
+        .map(geometry_policy_to_proto);
+
+    let contention_override = i.contention_override.as_ref().map(|cp| match cp {
+        ContentionPolicy::LatestWins => {
+            proto::ContentionPolicyProto::ContentionPolicyLatestWins as i32
+        }
+        ContentionPolicy::Replace => proto::ContentionPolicyProto::ContentionPolicyReplace as i32,
+        ContentionPolicy::Stack { .. } => proto::ContentionPolicyProto::ContentionPolicyStack as i32,
+        ContentionPolicy::MergeByKey { .. } => {
+            proto::ContentionPolicyProto::ContentionPolicyMergeByKey as i32
+        }
+    });
+
+    let current_params = i
+        .current_params
+        .iter()
+        .map(|(name, val)| widget_param_value_to_proto(name, val))
+        .collect();
+
+    proto::WidgetInstanceProto {
+        widget_type_name: i.widget_type_name.clone(),
+        tab_id: i.tab_id.to_bytes_le().to_vec(),
+        geometry_override,
+        contention_override: contention_override.unwrap_or(
+            proto::ContentionPolicyProto::ContentionPolicyUnspecified as i32,
+        ),
+        instance_name: i.instance_name.clone(),
+        current_params,
+    }
+}
+
+/// Convert a proto WidgetInstanceProto to scene WidgetInstance.
+pub fn proto_to_widget_instance(p: &proto::WidgetInstanceProto) -> Option<WidgetInstance> {
+    let tab_id = if p.tab_id.is_empty() {
+        SceneId::null()
+    } else {
+        SceneId::from_bytes_le(&p.tab_id)?
+    };
+
+    let geometry_override = p
+        .geometry_override
+        .as_ref()
+        .and_then(proto_to_geometry_policy);
+
+    let contention_override =
+        if p.contention_override == proto::ContentionPolicyProto::ContentionPolicyUnspecified as i32 {
+            None
+        } else {
+            Some(
+                match proto::ContentionPolicyProto::try_from(p.contention_override)
+                    .unwrap_or(proto::ContentionPolicyProto::ContentionPolicyLatestWins)
+                {
+                    proto::ContentionPolicyProto::ContentionPolicyLatestWins
+                    | proto::ContentionPolicyProto::ContentionPolicyUnspecified => {
+                        ContentionPolicy::LatestWins
+                    }
+                    proto::ContentionPolicyProto::ContentionPolicyReplace => ContentionPolicy::Replace,
+                    proto::ContentionPolicyProto::ContentionPolicyStack => {
+                        ContentionPolicy::Stack { max_depth: 8 }
+                    }
+                    proto::ContentionPolicyProto::ContentionPolicyMergeByKey => {
+                        ContentionPolicy::MergeByKey { max_keys: 16 }
+                    }
+                },
+            )
+        };
+
+    let current_params = p
+        .current_params
+        .iter()
+        .filter_map(proto_to_widget_param_value)
+        .collect();
+
+    Some(WidgetInstance {
+        widget_type_name: p.widget_type_name.clone(),
+        tab_id,
+        geometry_override,
+        contention_override,
+        instance_name: p.instance_name.clone(),
+        current_params,
+    })
+}
+
+/// Convert a scene WidgetPublishRecord to proto WidgetPublishRecordProto.
+pub fn widget_publish_record_to_proto(r: &WidgetPublishRecord) -> proto::WidgetPublishRecordProto {
+    let params = r
+        .params
+        .iter()
+        .map(|(name, val)| widget_param_value_to_proto(name, val))
+        .collect();
+    proto::WidgetPublishRecordProto {
+        widget_name: r.widget_name.clone(),
+        publisher_namespace: r.publisher_namespace.clone(),
+        params,
+        published_at_wall_us: r.published_at_wall_us,
+        merge_key: r.merge_key.clone().unwrap_or_default(),
+        expires_at_wall_us: r.expires_at_wall_us.unwrap_or(0),
+        transition_ms: r.transition_ms,
+    }
+}
+
+/// Convert a proto WidgetPublishRecordProto to scene WidgetPublishRecord.
+pub fn proto_to_widget_publish_record(p: &proto::WidgetPublishRecordProto) -> WidgetPublishRecord {
+    let params = p
+        .params
+        .iter()
+        .filter_map(proto_to_widget_param_value)
+        .collect();
+    WidgetPublishRecord {
+        widget_name: p.widget_name.clone(),
+        publisher_namespace: p.publisher_namespace.clone(),
+        params,
+        published_at_wall_us: p.published_at_wall_us,
+        merge_key: if p.merge_key.is_empty() {
+            None
+        } else {
+            Some(p.merge_key.clone())
+        },
+        expires_at_wall_us: if p.expires_at_wall_us == 0 {
+            None
+        } else {
+            Some(p.expires_at_wall_us)
+        },
+        transition_ms: p.transition_ms,
+    }
+}
+
+/// Convert a scene WidgetRegistrySnapshot to proto WidgetRegistrySnapshotProto.
+pub fn widget_registry_snapshot_to_proto(
+    snap: &WidgetRegistrySnapshot,
+) -> proto::WidgetRegistrySnapshotProto {
+    proto::WidgetRegistrySnapshotProto {
+        widget_types: snap.widget_types.iter().map(widget_definition_to_proto).collect(),
+        widget_instances: snap.widget_instances.iter().map(widget_instance_to_proto).collect(),
+        active_publishes: snap.active_publishes.iter().map(widget_publish_record_to_proto).collect(),
+    }
+}
+
+/// Convert a proto WidgetRegistrySnapshotProto to scene WidgetRegistrySnapshot.
+pub fn proto_to_widget_registry_snapshot(
+    p: &proto::WidgetRegistrySnapshotProto,
+) -> WidgetRegistrySnapshot {
+    WidgetRegistrySnapshot {
+        widget_types: p.widget_types.iter().map(proto_to_widget_definition).collect(),
+        widget_instances: p
+            .widget_instances
+            .iter()
+            .filter_map(proto_to_widget_instance)
+            .collect(),
+        active_publishes: p.active_publishes.iter().map(proto_to_widget_publish_record).collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +1107,303 @@ mod tests {
         } else {
             panic!("wrong variant");
         }
+    }
+
+    // ── Widget proto round-trips ──────────────────────────────────────────────
+
+    fn make_widget_definition() -> WidgetDefinition {
+        WidgetDefinition {
+            id: "gauge".to_string(),
+            name: "Gauge".to_string(),
+            description: "A gauge widget".to_string(),
+            parameter_schema: vec![
+                WidgetParameterDeclaration {
+                    name: "level".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: Some(WidgetParamConstraints {
+                        f32_min: Some(0.0),
+                        f32_max: Some(1.0),
+                        ..Default::default()
+                    }),
+                },
+                WidgetParameterDeclaration {
+                    name: "label".to_string(),
+                    param_type: WidgetParamType::String,
+                    default_value: WidgetParameterValue::String("".to_string()),
+                    constraints: None,
+                },
+                WidgetParameterDeclaration {
+                    name: "fill_color".to_string(),
+                    param_type: WidgetParamType::Color,
+                    default_value: WidgetParameterValue::Color(Rgba::new(0.0, 1.0, 0.0, 1.0)),
+                    constraints: None,
+                },
+                WidgetParameterDeclaration {
+                    name: "severity".to_string(),
+                    param_type: WidgetParamType::Enum,
+                    default_value: WidgetParameterValue::Enum("info".to_string()),
+                    constraints: Some(WidgetParamConstraints {
+                        enum_allowed_values: vec![
+                            "info".to_string(),
+                            "warning".to_string(),
+                            "error".to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                },
+            ],
+            layers: vec![WidgetSvgLayer {
+                svg_file: "fill.svg".to_string(),
+                bindings: vec![
+                    WidgetBinding {
+                        param: "level".to_string(),
+                        target_element: "bar".to_string(),
+                        target_attribute: "height".to_string(),
+                        mapping: WidgetBindingMapping::Linear {
+                            attr_min: 0.0,
+                            attr_max: 200.0,
+                        },
+                    },
+                    WidgetBinding {
+                        param: "label".to_string(),
+                        target_element: "label-text".to_string(),
+                        target_attribute: "text-content".to_string(),
+                        mapping: WidgetBindingMapping::Direct,
+                    },
+                    WidgetBinding {
+                        param: "severity".to_string(),
+                        target_element: "indicator".to_string(),
+                        target_attribute: "fill".to_string(),
+                        mapping: WidgetBindingMapping::Discrete {
+                            value_map: [
+                                ("info".to_string(), "#00ff00".to_string()),
+                                ("warning".to_string(), "#ffff00".to_string()),
+                                ("error".to_string(), "#ff0000".to_string()),
+                            ]
+                            .iter()
+                            .cloned()
+                            .collect(),
+                        },
+                    },
+                ],
+            }],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.8,
+                y_pct: 0.1,
+                width_pct: 0.15,
+                height_pct: 0.25,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: ContentionPolicy::LatestWins,
+            ephemeral: false,
+        }
+    }
+
+    #[test]
+    fn widget_definition_proto_round_trip() {
+        let original = make_widget_definition();
+        let proto = widget_definition_to_proto(&original);
+        let restored = proto_to_widget_definition(&proto);
+
+        assert_eq!(restored.id, original.id);
+        assert_eq!(restored.name, original.name);
+        assert_eq!(restored.description, original.description);
+        assert_eq!(restored.ephemeral, original.ephemeral);
+        assert_eq!(
+            restored.parameter_schema.len(),
+            original.parameter_schema.len(),
+            "parameter schema length must survive round-trip"
+        );
+
+        // Check each parameter declaration
+        for (orig_decl, rest_decl) in original
+            .parameter_schema
+            .iter()
+            .zip(restored.parameter_schema.iter())
+        {
+            assert_eq!(rest_decl.name, orig_decl.name);
+            assert_eq!(rest_decl.param_type, orig_decl.param_type);
+            assert_eq!(rest_decl.default_value, orig_decl.default_value);
+        }
+
+        assert_eq!(restored.layers.len(), original.layers.len());
+        assert_eq!(
+            restored.layers[0].svg_file,
+            original.layers[0].svg_file
+        );
+        assert_eq!(
+            restored.layers[0].bindings.len(),
+            original.layers[0].bindings.len()
+        );
+    }
+
+    #[test]
+    fn widget_parameter_value_f32_round_trip() {
+        let val = WidgetParameterValue::F32(0.75);
+        let proto = widget_param_value_to_proto("level", &val);
+        let (name, restored) = proto_to_widget_param_value(&proto).unwrap();
+        assert_eq!(name, "level");
+        assert_eq!(restored, val);
+    }
+
+    #[test]
+    fn widget_parameter_value_string_round_trip() {
+        let val = WidgetParameterValue::String("hello world".to_string());
+        let proto = widget_param_value_to_proto("label", &val);
+        let (name, restored) = proto_to_widget_param_value(&proto).unwrap();
+        assert_eq!(name, "label");
+        assert_eq!(restored, val);
+    }
+
+    #[test]
+    fn widget_parameter_value_color_round_trip() {
+        let val = WidgetParameterValue::Color(Rgba::new(0.5, 0.25, 0.75, 1.0));
+        let proto = widget_param_value_to_proto("fill_color", &val);
+        let (name, restored) = proto_to_widget_param_value(&proto).unwrap();
+        assert_eq!(name, "fill_color");
+        assert_eq!(restored, val);
+    }
+
+    #[test]
+    fn widget_parameter_value_enum_round_trip() {
+        let val = WidgetParameterValue::Enum("warning".to_string());
+        let proto = widget_param_value_to_proto("severity", &val);
+        let (name, restored) = proto_to_widget_param_value(&proto).unwrap();
+        assert_eq!(name, "severity");
+        assert_eq!(restored, val);
+    }
+
+    #[test]
+    fn widget_binding_mapping_linear_round_trip() {
+        let mapping = WidgetBindingMapping::Linear {
+            attr_min: 0.0,
+            attr_max: 200.0,
+        };
+        let proto = widget_binding_mapping_to_proto(&mapping);
+        let restored = proto_to_widget_binding_mapping(&proto).unwrap();
+        assert_eq!(restored, mapping);
+    }
+
+    #[test]
+    fn widget_binding_mapping_direct_round_trip() {
+        let mapping = WidgetBindingMapping::Direct;
+        let proto = widget_binding_mapping_to_proto(&mapping);
+        let restored = proto_to_widget_binding_mapping(&proto).unwrap();
+        assert_eq!(restored, mapping);
+    }
+
+    #[test]
+    fn widget_binding_mapping_discrete_round_trip() {
+        let mapping = WidgetBindingMapping::Discrete {
+            value_map: [
+                ("info".to_string(), "#00ff00".to_string()),
+                ("error".to_string(), "#ff0000".to_string()),
+            ]
+            .iter()
+            .cloned()
+            .collect(),
+        };
+        let proto = widget_binding_mapping_to_proto(&mapping);
+        let restored = proto_to_widget_binding_mapping(&proto).unwrap();
+        assert_eq!(restored, mapping);
+    }
+
+    #[test]
+    fn widget_publish_record_proto_round_trip() {
+        let params: std::collections::HashMap<String, WidgetParameterValue> = [
+            ("level".to_string(), WidgetParameterValue::F32(0.8)),
+            (
+                "label".to_string(),
+                WidgetParameterValue::String("CPU".to_string()),
+            ),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        let record = WidgetPublishRecord {
+            widget_name: "gauge".to_string(),
+            publisher_namespace: "agent.test".to_string(),
+            params: params.clone(),
+            published_at_wall_us: 1_700_000_000_000_000,
+            merge_key: Some("cpu-key".to_string()),
+            expires_at_wall_us: Some(1_700_000_060_000_000),
+            transition_ms: 300,
+        };
+
+        let proto = widget_publish_record_to_proto(&record);
+        let restored = proto_to_widget_publish_record(&proto);
+
+        assert_eq!(restored.widget_name, record.widget_name);
+        assert_eq!(restored.publisher_namespace, record.publisher_namespace);
+        assert_eq!(restored.published_at_wall_us, record.published_at_wall_us);
+        assert_eq!(restored.merge_key, record.merge_key);
+        assert_eq!(restored.expires_at_wall_us, record.expires_at_wall_us);
+        assert_eq!(restored.transition_ms, record.transition_ms);
+        assert_eq!(restored.params.len(), record.params.len());
+    }
+
+    #[test]
+    fn widget_registry_snapshot_round_trip() {
+        let def = make_widget_definition();
+        let tab_id = SceneId::new();
+        let instance = WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "gauge".to_string(),
+            current_params: [("level".to_string(), WidgetParameterValue::F32(0.5))]
+                .iter()
+                .cloned()
+                .collect(),
+        };
+
+        let snapshot = WidgetRegistrySnapshot {
+            widget_types: vec![def],
+            widget_instances: vec![instance],
+            active_publishes: vec![],
+        };
+
+        let proto = widget_registry_snapshot_to_proto(&snapshot);
+        let restored = proto_to_widget_registry_snapshot(&proto);
+
+        assert_eq!(restored.widget_types.len(), 1);
+        assert_eq!(restored.widget_types[0].id, "gauge");
+        assert_eq!(restored.widget_instances.len(), 1);
+        assert_eq!(restored.widget_instances[0].instance_name, "gauge");
+        assert_eq!(restored.widget_instances[0].tab_id, tab_id);
+    }
+
+    #[test]
+    fn widget_registry_in_scene_graph() {
+        // Verify WidgetRegistry is accessible from SceneGraph root.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let def = make_widget_definition();
+        scene.widget_registry.register_definition(def);
+        assert!(
+            scene.widget_registry.get_definition("gauge").is_some(),
+            "widget definition must be retrievable from SceneGraph"
+        );
+    }
+
+    #[test]
+    fn widget_registry_in_scene_snapshot() {
+        // Verify SceneGraphSnapshot includes widget_registry field.
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let def = make_widget_definition();
+        scene.widget_registry.register_definition(def);
+
+        let snapshot = scene.take_snapshot(1_000_000, 1_000_000);
+        assert_eq!(
+            snapshot.widget_registry.widget_types.len(),
+            1,
+            "snapshot widget_registry must include all registered definitions"
+        );
+        assert!(
+            snapshot.widget_registry.widget_types.contains_key("gauge"),
+            "snapshot widget_registry must contain 'gauge' key"
+        );
     }
 }

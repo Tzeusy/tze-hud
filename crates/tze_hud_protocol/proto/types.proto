@@ -250,3 +250,158 @@ message ZoneRegistryResponse {
   ZoneRegistrySnapshotProto registry = 1;
   string error = 2;
 }
+
+// ─── Widget Types ─────────────────────────────────────────────────────────────
+
+// Parameter types supported by the widget system (v1: f32, string, color, enum).
+enum WidgetParamTypeProto {
+  WIDGET_PARAM_TYPE_UNSPECIFIED = 0;
+  WIDGET_PARAM_TYPE_F32         = 1;
+  WIDGET_PARAM_TYPE_STRING      = 2;
+  WIDGET_PARAM_TYPE_COLOR       = 3;
+  WIDGET_PARAM_TYPE_ENUM        = 4;
+}
+
+// Constraints for a widget parameter (bounds for f32, max length for string,
+// allowed values for enum; absent fields mean unconstrained).
+message WidgetParamConstraintsProto {
+  float  f32_min          = 1;  // f32 range minimum (0.0 = not set)
+  float  f32_max          = 2;  // f32 range maximum (0.0 = not set)
+  uint32 string_max_bytes = 3;  // String max length in UTF-8 bytes (0 = default 1024)
+  repeated string enum_allowed_values = 4;  // Allowed enum values
+}
+
+// A typed parameter value (oneof carries exactly one variant).
+message WidgetParameterValueProto {
+  string param_name = 1;
+  oneof value {
+    float  f32_value    = 2;
+    string string_value = 3;
+    Rgba   color_value  = 4;
+    string enum_value   = 5;
+  }
+}
+
+// A single parameter declaration in a widget's parameter schema.
+message WidgetParameterDeclarationProto {
+  string                    name          = 1;
+  WidgetParamTypeProto      param_type    = 2;
+  WidgetParameterValueProto default_value = 3;
+  WidgetParamConstraintsProto constraints = 4;
+}
+
+// The full parameter schema for a widget type (ordered list of declarations).
+message WidgetParameterSchemaProto {
+  repeated WidgetParameterDeclarationProto parameters = 1;
+}
+
+// How a parameter value is mapped to an SVG attribute.
+message WidgetBindingMappingProto {
+  oneof mapping {
+    WidgetLinearMappingProto   linear   = 1;
+    bool                       direct   = 2;  // true = direct (value as-is)
+    WidgetDiscreteMappingProto discrete = 3;
+  }
+}
+
+message WidgetLinearMappingProto {
+  float attr_min = 1;
+  float attr_max = 2;
+}
+
+message WidgetDiscreteMappingProto {
+  map<string, string> value_map = 1;  // enum value → SVG attribute value
+}
+
+// A single parameter-to-SVG-attribute binding.
+message WidgetBindingProto {
+  string                    param          = 1;  // Parameter name from schema
+  string                    target_element = 2;  // SVG element ID
+  string                    target_attribute = 3;  // SVG attribute name (or "text-content")
+  WidgetBindingMappingProto mapping        = 4;
+}
+
+// An SVG layer in a widget type definition.
+message WidgetSvgLayerProto {
+  string                   svg_file = 1;  // Filename within the bundle
+  repeated WidgetBindingProto bindings = 2;
+}
+
+// A full widget type definition.
+message WidgetDefinitionProto {
+  string                     id                        = 1;  // kebab-case unique id
+  string                     name                      = 2;  // human-readable name
+  string                     description               = 3;
+  WidgetParameterSchemaProto parameter_schema          = 4;
+  repeated WidgetSvgLayerProto layers                  = 5;
+  GeometryPolicyProto        default_geometry_policy   = 6;
+  RenderingPolicyProto       default_rendering_policy  = 7;
+  ContentionPolicyProto      default_contention_policy = 8;
+  bool                       ephemeral                 = 9;
+}
+
+// A widget instance — a widget type bound to a specific tab.
+message WidgetInstanceProto {
+  string              widget_type_name   = 1;  // References WidgetDefinitionProto.id
+  bytes               tab_id             = 2;  // 16-byte SceneId of the tab
+  GeometryPolicyProto geometry_override  = 3;  // Optional override; absent = use type default
+  ContentionPolicyProto contention_override = 4; // Optional override; absent = use type default
+  string              instance_name      = 5;  // Addressing key (instance_id or widget_type_name)
+  repeated WidgetParameterValueProto current_params = 6;
+}
+
+// A recorded widget publication.
+message WidgetPublishRecordProto {
+  string              widget_name          = 1;
+  string              publisher_namespace  = 2;
+  repeated WidgetParameterValueProto params = 3;
+  uint64              published_at_wall_us = 4;
+  string              merge_key           = 5;  // Empty if not MergeByKey
+  uint64              expires_at_wall_us  = 6;  // 0 = no expiry
+  uint32              transition_ms       = 7;
+}
+
+// Resolved occupancy state for a widget instance after contention policy.
+message WidgetOccupancyProto {
+  string              widget_name         = 1;
+  bytes               tab_id              = 2;  // 16-byte SceneId
+  repeated WidgetPublishRecordProto active_publications = 3;
+  uint32              occupant_count      = 4;
+  repeated WidgetParameterValueProto effective_params = 5;
+}
+
+// Snapshot of the widget registry (all types + instances + active publishes).
+message WidgetRegistrySnapshotProto {
+  repeated WidgetDefinitionProto     widget_types     = 1;
+  repeated WidgetInstanceProto       widget_instances = 2;
+  repeated WidgetPublishRecordProto  active_publishes = 3;
+}
+
+// ─── Widget Mutation Messages ─────────────────────────────────────────────────
+
+// Publish parameter values to a widget instance.
+message PublishToWidgetMutation {
+  string widget_name   = 1;  // Instance addressing key (instance_id or widget_type_name)
+  string instance_id   = 2;  // Optional disambiguation for multi-instance tabs
+  repeated WidgetParameterValueProto params = 3;
+  uint32 transition_ms = 4;  // 0 = instant
+  uint64 ttl_us        = 5;  // 0 = use widget default
+  string merge_key     = 6;  // For MergeByKey contention policy
+}
+
+// Clear all publications by the calling agent on the given widget instance.
+message ClearWidgetMutation {
+  string widget_name = 1;  // Instance addressing key
+  string instance_id = 2;  // Optional disambiguation
+}
+
+// ─── Widget Query Messages ────────────────────────────────────────────────────
+
+message WidgetRegistryRequest {
+  string session_id = 1;
+}
+
+message WidgetRegistryResponse {
+  WidgetRegistrySnapshotProto registry = 1;
+  string error = 2;
+}
