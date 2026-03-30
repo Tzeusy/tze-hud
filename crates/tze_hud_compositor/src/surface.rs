@@ -159,6 +159,13 @@ impl WindowSurface {
             // Zero-size surface is invalid — skip reconfiguration.
             return;
         }
+        // Ensure the GPU has finished processing any command buffers that
+        // reference the current surface texture before we drop it.  Without
+        // this, queue::submit() may still be reading the texture asynchronously
+        // when we destroy it below, causing a wgpu validation error:
+        //   "Texture with '<Surface Texture>' label has been destroyed"
+        device.poll(wgpu::Maintain::Wait);
+
         // wgpu requires all acquired SurfaceTexture images to be dropped before
         // calling Surface::configure(). During resize races the main thread may
         // not have presented the last pending image yet; clear it here to avoid:

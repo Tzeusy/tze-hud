@@ -33,9 +33,15 @@ pub struct Compositor {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    /// Pipeline with no blending — writes RGBA directly. Used to clear
+    /// the framebuffer to transparent in overlay mode (LoadOp::Clear
+    /// doesn't write alpha correctly on some GPUs).
+    clear_pipeline: wgpu::RenderPipeline,
     pub width: u32,
     pub height: u32,
     frame_number: u64,
+    /// When true, the clear color uses alpha=0 for transparent overlay mode.
+    pub overlay_mode: bool,
 }
 
 impl Compositor {
@@ -83,14 +89,17 @@ impl Compositor {
             .map_err(|e| CompositorError::DeviceCreation(e.to_string()))?;
 
         let pipeline = Self::create_pipeline(&device);
+        let clear_pipeline = Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
 
         Ok(Self {
             device,
             queue,
             pipeline,
+            clear_pipeline,
             width,
             height,
             frame_number: 0,
+            overlay_mode: false,
         })
     }
 
@@ -117,14 +126,41 @@ impl Compositor {
         width: u32,
         height: u32,
     ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
+        Self::new_windowed_inner(window, width, height, false).await
+    }
+
+    /// Create a windowed compositor, optionally forcing Vulkan for overlay
+    /// transparency (DX12 only supports Opaque swapchain alpha mode).
+    pub async fn new_windowed_overlay(
+        window: std::sync::Arc<winit::window::Window>,
+        width: u32,
+        height: u32,
+    ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
+        Self::new_windowed_inner(window, width, height, true).await
+    }
+
+    async fn new_windowed_inner(
+        window: std::sync::Arc<winit::window::Window>,
+        width: u32,
+        height: u32,
+        overlay: bool,
+    ) -> Result<(Self, crate::surface::WindowSurface), CompositorError> {
         use crate::surface::WindowSurface;
 
         // ── Step 1: Create instance with platform-mandated backends ──────────
         // We need the surface before adapter selection so we can pass it as
         // `compatible_surface`. Create a temporary instance first, create the
         // surface, then select the adapter with that surface constraint.
+        // On Windows in overlay mode, force Vulkan — DX12 only supports Opaque
+        // swapchain alpha mode, which prevents per-pixel transparency.
+        let backends = if overlay && cfg!(target_os = "windows") {
+            tracing::info!("overlay mode: forcing Vulkan backend for transparent swapchain");
+            wgpu::Backends::VULKAN
+        } else {
+            crate::adapter::platform_backends().flags
+        };
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: crate::adapter::platform_backends().flags,
+            backends,
             ..Default::default()
         });
 
@@ -209,30 +245,51 @@ impl Compositor {
             width: clamped_width,
             height: clamped_height,
             present_mode,
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode: surface_caps
+                .alpha_modes
+                .iter()
+                .find(|m| **m == wgpu::CompositeAlphaMode::PreMultiplied)
+                .or_else(|| surface_caps.alpha_modes.iter().find(|m| **m == wgpu::CompositeAlphaMode::PostMultiplied))
+                .copied()
+                .unwrap_or(surface_caps.alpha_modes[0]),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        tracing::info!(
+            available_alpha_modes = ?surface_caps.alpha_modes,
+            selected_alpha_mode = ?config.alpha_mode,
+            "windowed: alpha mode selection"
+        );
+        // Write diagnostic to a known file for remote debugging.
+        let diag = format!(
+            "backend: {:?}\ndevice: {}\nrequested_backends: {:?}\noverlay: {}\navailable_alpha_modes: {:?}\nselected_alpha_mode: {:?}\nformat: {:?}\npresent_mode: {:?}\n",
+            adapter_info.backend, adapter_info.name, backends, overlay,
+            surface_caps.alpha_modes, config.alpha_mode, surface_format, present_mode,
+        );
+        let _ = std::fs::write("C:\\tze_hud\\logs\\alpha_diag.txt", &diag);
         surface.configure(&device, &config);
         tracing::info!(
             format = ?surface_format,
             present_mode = ?present_mode,
+            alpha_mode = ?config.alpha_mode,
             width = clamped_width,
             height = clamped_height,
             "windowed: surface configured"
         );
 
-        // ── Step 6: Create render pipeline (format-aware) ─────────────────────
-        // The windowed pipeline must use the surface format, not Rgba8UnormSrgb.
+        // ── Step 6: Create render pipelines (format-aware) ────────────────────
         let pipeline = Self::create_pipeline_with_format(&device, surface_format);
+        let clear_pipeline = Self::create_clear_pipeline(&device, surface_format);
 
         let compositor = Self {
             device,
             queue,
             pipeline,
+            clear_pipeline,
             width: clamped_width,
             height: clamped_height,
             frame_number: 0,
+            overlay_mode: false,
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -316,6 +373,52 @@ impl Compositor {
         Self::create_pipeline_inner(device, format, "windowed_")
     }
 
+    /// Create a pipeline with no blending — writes RGBA directly.
+    /// Used to clear the framebuffer to transparent in overlay mode.
+    fn create_clear_pipeline(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        use crate::pipeline::{RECT_SHADER, RectVertex};
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("clear_shader"),
+            source: wgpu::ShaderSource::Wgsl(RECT_SHADER.into()),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("clear_pipeline_layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("clear_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[RectVertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None, // No blending — direct RGBA write
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    }
+
     /// Create a render pipeline for headless mode (`Rgba8UnormSrgb`).
     fn create_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
         Self::create_pipeline_inner(device, wgpu::TextureFormat::Rgba8UnormSrgb, "")
@@ -360,6 +463,22 @@ impl Compositor {
             (w as f32, h as f32)
         };
 
+        // In overlay mode, prepend a full-screen quad to zero out alpha.
+        if self.overlay_mode {
+            // One-shot diagnostic: log surface dimensions on first frame.
+            if self.frame_number == 1 {
+                let diag = format!(
+                    "render_frame: sw={sw}, sh={sh}, compositor_w={}, compositor_h={}\n",
+                    self.width, self.height,
+                );
+                let _ = std::fs::write("C:\\tze_hud\\logs\\render_diag.txt", &diag);
+            }
+            vertices.extend_from_slice(&rect_vertices(
+                0.0, 0.0, sw, sh, sw, sh,
+                [0.0, 0.0, 0.0, 0.0],
+            ));
+        }
+
         for tile in &tiles {
             // Render tile background
             let bg_color = self.tile_background_color(tile, scene);
@@ -379,6 +498,10 @@ impl Compositor {
                 self.render_node(root_id, tile, scene, &mut vertices, sw, sh);
             }
         }
+
+        // Render zone content.
+        self.render_zone_content(scene, &mut vertices, sw, sh);
+
 
         let encode_start = std::time::Instant::now();
 
@@ -414,12 +537,7 @@ impl Compositor {
                     view: &frame.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.1,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.clear_color()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -428,7 +546,15 @@ impl Compositor {
                 occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.pipeline);
+            // In overlay mode, use the clear_pipeline (no blending) for ALL
+            // rendering. The first 6 vertices are a full-screen transparent
+            // quad that zeros out every pixel's alpha. Subsequent content
+            // (zone bars) overwrites specific regions with their own alpha.
+            if self.overlay_mode {
+                render_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                render_pass.set_pipeline(&self.pipeline);
+            }
 
             if let Some(ref buffer) = vertex_buffer {
                 render_pass.set_vertex_buffer(0, buffer.slice(..));
@@ -541,12 +667,7 @@ impl Compositor {
                     view: &frame.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.1,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.clear_color()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -690,12 +811,7 @@ impl Compositor {
                     view: &surface.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.1,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.clear_color()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -747,6 +863,85 @@ impl Compositor {
 
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
         telemetry
+    }
+
+    /// Return the clear color for render passes. Transparent in overlay mode,
+    /// dark background in fullscreen mode.
+    fn clear_color(&self) -> wgpu::Color {
+        if self.overlay_mode {
+            wgpu::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }
+        } else {
+            wgpu::Color {
+                r: 0.05,
+                g: 0.05,
+                b: 0.1,
+                a: 1.0,
+            }
+        }
+    }
+
+    /// Render zone content as colored rectangles at zone geometry positions.
+    ///
+    /// Zones with active publishes get a visible indicator. Text rendering is
+    /// deferred; for now the content text is not drawn, but the zone region is
+    /// made visible so the user can confirm zone publishing works end-to-end.
+    fn render_zone_content(
+        &self,
+        scene: &SceneGraph,
+        vertices: &mut Vec<RectVertex>,
+        sw: f32,
+        sh: f32,
+    ) {
+        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            if publishes.is_empty() {
+                continue;
+            }
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+            // Resolve zone geometry to pixel bounds.
+            let (x, y, w, h) = match &zone_def.geometry_policy {
+                GeometryPolicy::EdgeAnchored {
+                    edge,
+                    height_pct,
+                    width_pct,
+                    margin_px,
+                } => {
+                    let zw = sw * width_pct;
+                    let zh = sh * height_pct;
+                    let zx = (sw - zw) / 2.0;
+                    let zy = match edge {
+                        DisplayEdge::Top => *margin_px,
+                        DisplayEdge::Bottom => sh - zh - margin_px,
+                        _ => 0.0,
+                    };
+                    (zx, zy, zw, zh)
+                }
+                GeometryPolicy::Relative {
+                    x_pct,
+                    y_pct,
+                    width_pct,
+                    height_pct,
+                } => {
+                    let zx = sw * x_pct;
+                    let zy = sh * y_pct;
+                    let zw = sw * width_pct;
+                    let zh = sh * height_pct;
+                    (zx, zy, zw, zh)
+                }
+                _ => continue,
+            };
+
+            // Semi-transparent background for zone content.
+            let bg_color = [0.1, 0.1, 0.15, 0.85];
+            vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, bg_color));
+        }
     }
 
     /// Determine the background color for a tile based on its content.

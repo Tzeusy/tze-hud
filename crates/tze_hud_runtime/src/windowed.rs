@@ -97,7 +97,7 @@ use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::ZoneContent;
+use tze_hud_scene::types::{ZoneContent, ZoneRegistry};
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -296,15 +296,29 @@ impl ApplicationHandler for WinitApp {
             }
             WindowMode::Overlay => {
                 tracing::info!("window mode: overlay/HUD — transparent borderless always-on-top");
-                WindowAttributes::default()
-                    .with_title(cfg.title.clone())
-                    .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
-                    // Transparent so the desktop shows through non-opaque pixels.
-                    .with_transparent(true)
-                    // No title bar / frame — pure overlay surface.
-                    .with_decorations(false)
-                    // Always on top of other windows, including normal desktop windows.
-                    .with_window_level(WindowLevel::AlwaysOnTop)
+                #[cfg(target_os = "windows")]
+                {
+                    use winit::platform::windows::WindowAttributesExtWindows;
+                    WindowAttributes::default()
+                        .with_title(cfg.title.clone())
+                        .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
+                        .with_transparent(true)
+                        .with_decorations(false)
+                        .with_window_level(WindowLevel::AlwaysOnTop)
+                        // Set WS_EX_NOREDIRECTIONBITMAP at creation time —
+                        // DWM will present the swapchain directly with
+                        // per-pixel alpha from PreMultiplied mode.
+                        .with_no_redirection_bitmap(true)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    WindowAttributes::default()
+                        .with_title(cfg.title.clone())
+                        .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
+                        .with_transparent(true)
+                        .with_decorations(false)
+                        .with_window_level(WindowLevel::AlwaysOnTop)
+                }
             }
         };
 
@@ -329,6 +343,9 @@ impl ApplicationHandler for WinitApp {
                      may not work on this platform/compositor"
                 );
             }
+            // WS_EX_NOREDIRECTIONBITMAP is set at creation time via
+            // with_no_redirection_bitmap(true) above. No post-creation
+            // flag manipulation needed.
         }
 
         self.state.window = Some(window.clone());
@@ -345,10 +362,21 @@ impl ApplicationHandler for WinitApp {
             .build()
             .expect("failed to build startup tokio runtime");
 
+        let is_overlay = self.state.effective_mode == WindowMode::Overlay;
         let (compositor, window_surface) = rt.block_on(async {
-            Compositor::new_windowed(window_clone, cfg.window.width, cfg.window.height)
+            let mut c = if is_overlay {
+                Compositor::new_windowed_overlay(
+                    window_clone,
+                    cfg.window.width,
+                    cfg.window.height,
+                )
                 .await
-                .expect("Compositor::new_windowed failed")
+            } else {
+                Compositor::new_windowed(window_clone, cfg.window.width, cfg.window.height).await
+            }
+            .expect("Compositor::new_windowed failed");
+            c.0.overlay_mode = is_overlay;
+            c
         });
 
         let window_surface = Arc::new(window_surface);
@@ -864,6 +892,10 @@ impl WindowedRuntime {
         let height = cfg.window.height as f32;
         let shared_scene = {
             let mut scene = SceneGraph::new(width, height);
+            // Bootstrap the canonical zone definitions (status-bar, subtitle,
+            // notification-area, etc.) so that MCP publish_to_zone works
+            // immediately without requiring a gRPC session handshake first.
+            scene.zone_registry = ZoneRegistry::with_defaults();
             if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {
                 let samples = [
                     "Subtitle demo: systems online.",
