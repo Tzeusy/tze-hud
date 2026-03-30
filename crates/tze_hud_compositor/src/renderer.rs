@@ -1249,8 +1249,23 @@ impl Compositor {
                 }
             };
 
-            // Semi-transparent background for zone content.
-            let bg_color = [0.1, 0.1, 0.15, 0.85];
+            // Render based on the most recent publication's content type.
+            let latest = &publishes[publishes.len() - 1];
+            let bg_color = match &latest.content {
+                ZoneContent::SolidColor(rgba) => rgba.to_array(),
+                ZoneContent::Notification(n) => {
+                    // Urgency-tinted background: higher urgency → more red.
+                    match n.urgency {
+                        3 => [0.6, 0.1, 0.1, 0.9],  // critical — red
+                        2 => [0.5, 0.3, 0.1, 0.9],  // urgent — amber
+                        1 => [0.15, 0.15, 0.25, 0.9], // normal — dark blue
+                        _ => [0.1, 0.1, 0.15, 0.85],  // low — default
+                    }
+                }
+                ZoneContent::StatusBar(_) => [0.08, 0.08, 0.12, 0.9],
+                ZoneContent::StreamText(_) => [0.1, 0.1, 0.18, 0.85],
+                _ => [0.1, 0.1, 0.15, 0.85],
+            };
             vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, bg_color));
         }
     }

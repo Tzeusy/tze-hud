@@ -412,8 +412,15 @@ impl ApplicationHandler for WinitApp {
         // (e.g., window not yet shown or minimized at construction time — rare
         // but possible on some Win32 driver/compositor combinations).
         let actual_size = window.inner_size();
-        let (surface_width, surface_height) = if actual_size.width > 0 && actual_size.height > 0 {
-            (actual_size.width, actual_size.height)
+        let scale = window.scale_factor();
+        // On Windows with DPI scaling > 100%, inner_size() may return the
+        // DPI-virtualized (logical) resolution rather than true physical pixels.
+        // Multiply by the window's scale_factor to recover the real pixel count.
+        // At 100% scaling (scale=1.0) this is a no-op.
+        let scaled_w = (actual_size.width as f64 * scale).round() as u32;
+        let scaled_h = (actual_size.height as f64 * scale).round() as u32;
+        let (surface_width, surface_height) = if scaled_w > 0 && scaled_h > 0 {
+            (scaled_w, scaled_h)
         } else {
             tracing::warn!(
                 requested_width = cfg.window.width,
@@ -426,9 +433,22 @@ impl ApplicationHandler for WinitApp {
         tracing::info!(
             configured_width = cfg.window.width,
             configured_height = cfg.window.height,
-            actual_width = surface_width,
-            actual_height = surface_height,
-            "windowed: resolved surface dimensions from window.inner_size()"
+            inner_width = actual_size.width,
+            inner_height = actual_size.height,
+            scale_factor = scale,
+            surface_width,
+            surface_height,
+            "windowed: resolved surface dimensions (inner_size * scale_factor)"
+        );
+        // Diagnostic: write surface resolution so remote operators can verify.
+        let _ = std::fs::write(
+            "C:\\tze_hud\\logs\\surface_diag.txt",
+            format!(
+                "configured={}x{} inner={}x{} scale={} surface={}x{}\n",
+                cfg.window.width, cfg.window.height,
+                actual_size.width, actual_size.height,
+                scale, surface_width, surface_height,
+            ),
         );
 
         // ── Create compositor + surface (async in a blocking context) ──────
@@ -1448,14 +1468,24 @@ fn detect_primary_monitor_size(
     match monitor {
         Some(m) => {
             let size = m.size();
-            if size.width > 0 && size.height > 0 {
+            let scale = m.scale_factor();
+            // On Windows with DPI scaling > 100%, MonitorHandle::size() may
+            // return the DPI-virtualized (logical) resolution instead of the
+            // true physical resolution. Multiply by scale_factor to get the
+            // real pixel dimensions. At 100% (scale=1.0) this is a no-op.
+            let phys_w = (size.width as f64 * scale).round() as u32;
+            let phys_h = (size.height as f64 * scale).round() as u32;
+            if phys_w > 0 && phys_h > 0 {
                 tracing::info!(
                     monitor_name = m.name().as_deref().unwrap_or("<unnamed>"),
-                    physical_width = size.width,
-                    physical_height = size.height,
+                    reported_width = size.width,
+                    reported_height = size.height,
+                    scale_factor = scale,
+                    physical_width = phys_w,
+                    physical_height = phys_h,
                     "overlay auto-size: detected primary monitor resolution"
                 );
-                (size.width, size.height)
+                (phys_w, phys_h)
             } else {
                 tracing::warn!(
                     fallback_width,

@@ -28,6 +28,18 @@ use std::any::Any;
 
 // ─── CompositorFrame ─────────────────────────────────────────────────────────
 
+/// Guard that clears `WindowSurface::encoding_in_progress` on drop. Stored
+/// inside `CompositorFrame._guard` so the flag is held for the entire
+/// encode+submit lifecycle and released when the frame is dropped.
+struct EncodingGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for EncodingGuard {
+    fn drop(&mut self) {
+        self.0
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// A frame ready for rendering: a `TextureView` plus an ownership guard.
 ///
 /// The `_guard` holds a heap-allocated value that keeps the underlying GPU
@@ -117,6 +129,11 @@ pub struct WindowSurface {
     /// thread can retrieve it via `take_pending_texture()` and call
     /// `SurfaceTexture::present()` without a second swapchain acquire.
     pub pending_texture: std::sync::Mutex<Option<wgpu::SurfaceTexture>>,
+    /// Flag set by `acquire_frame()` and cleared when the `CompositorFrame` is
+    /// dropped (after `queue.submit()`). While set, `present_pending_texture()`
+    /// spins briefly to avoid presenting (and destroying) the `SurfaceTexture`
+    /// while the compositor thread still holds a `TextureView` referencing it.
+    pub encoding_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Pending resize dimensions signalled from the main thread to the
     /// compositor thread. `(0, 0)` means no resize pending.
     ///
@@ -145,6 +162,7 @@ impl WindowSurface {
             width: std::sync::atomic::AtomicU32::new(width),
             height: std::sync::atomic::AtomicU32::new(height),
             pending_texture: std::sync::Mutex::new(None),
+            encoding_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_resize_width: std::sync::atomic::AtomicU32::new(0),
             pending_resize_height: std::sync::atomic::AtomicU32::new(0),
         }
@@ -221,6 +239,27 @@ impl WindowSurface {
     /// Returns `true` if a texture was presented, `false` if no texture was
     /// pending.
     pub fn present_pending_texture(&self) -> bool {
+        // Wait for the compositor thread to finish encoding + submitting before
+        // we take (and destroy) the SurfaceTexture. Without this, the main
+        // thread can present the texture while the compositor's TextureView
+        // still references it, causing "Texture has been destroyed" on submit.
+        //
+        // The spin is bounded: the compositor clears the flag right after
+        // queue.submit() + device.poll(), which is typically < 1ms.
+        let mut spins = 0u32;
+        while self
+            .encoding_in_progress
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            spins += 1;
+            if spins > 10_000 {
+                // Safety valve — don't spin forever if the compositor thread died.
+                tracing::warn!("present_pending_texture: encoding_in_progress stuck after {spins} spins");
+                break;
+            }
+            std::hint::spin_loop();
+        }
+
         let mut pending = self
             .pending_texture
             .lock()
@@ -257,13 +296,20 @@ impl CompositorSurface for WindowSurface {
             .lock()
             .expect("pending_texture lock poisoned");
 
+        // Set the encoding flag BEFORE creating the TextureView. This prevents
+        // present_pending_texture() from destroying the SurfaceTexture while the
+        // compositor is encoding render passes that reference the view.
+        self.encoding_in_progress
+            .store(true, std::sync::atomic::Ordering::Release);
+        let guard = EncodingGuard(self.encoding_in_progress.clone());
+
         if let Some(existing) = pending.as_ref() {
             let view = existing
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default());
             return CompositorFrame {
                 view,
-                _guard: Box::new(()),
+                _guard: Box::new(guard),
             };
         }
 
@@ -279,7 +325,7 @@ impl CompositorSurface for WindowSurface {
                 *pending = Some(surface_texture);
                 CompositorFrame {
                     view,
-                    _guard: Box::new(()), // no-op — ownership is in pending_texture
+                    _guard: Box::new(guard),
                 }
             }
             Err(e) => {
@@ -329,7 +375,7 @@ impl CompositorSurface for WindowSurface {
                 };
                 CompositorFrame {
                     view: dummy_view,
-                    _guard: Box::new(()),
+                    _guard: Box::new(guard),
                 }
             }
         }
