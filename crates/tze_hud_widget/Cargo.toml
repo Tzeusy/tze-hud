@@ -1,0 +1,23 @@
+[package]
+name = "tze_hud_widget"
+description = "Widget asset bundle loader and IMAGE_SVG resource support for tze_hud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Scene types: WidgetDefinition, WidgetParameterDeclaration, WidgetSvgLayer, etc.
+tze_hud_scene = { path = "../tze_hud_scene" }
+# Resource types: ResourceType::ImageSvg, SVG validation
+tze_hud_resource = { path = "../tze_hud_resource" }
+
+serde = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+# XML parsing for SVG element ID resolution at bundle load time
+quick-xml = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

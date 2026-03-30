@@ -16,6 +16,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 # Font parsing for validation (FONT_TTF, FONT_OTF)
 ttf-parser = "0.25"
 
+# XML parsing for IMAGE_SVG upload validation (well-formedness + root element check)
+quick-xml = "0.37"
+
 # Concurrent dedup index — lock-free reads on the hot path
 dashmap = "6"
 
