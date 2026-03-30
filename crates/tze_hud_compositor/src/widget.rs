@@ -1312,7 +1312,12 @@ mod tests {
     /// return the modified SVG string.
     ///
     /// Used to test the SVG binding pipeline for the reference gauge fixture.
-    fn apply_gauge_params(level_height: &str, fill_color: &str, label: &str, indicator_fill: &str) -> String {
+    fn apply_gauge_params(
+        level_height: &str,
+        fill_color: &str,
+        label: &str,
+        indicator_fill: &str,
+    ) -> String {
         let svg = reference_gauge_fill_svg();
         let svg = apply_svg_attribute(svg, "bar", "height", level_height);
         let svg = apply_svg_attribute(&svg, "bar", "fill", fill_color);
@@ -1337,7 +1342,11 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap creation");
         let sx = w as f32 / tree.size().width();
         let sy = h as f32 / tree.size().height();
-        resvg::render(&tree, tiny_skia::Transform::from_scale(sx, sy), &mut pixmap.as_mut());
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(sx, sy),
+            &mut pixmap.as_mut(),
+        );
 
         // Output must be 100×220×4 bytes.
         assert_eq!(pixmap.data().len(), (w * h * 4) as usize);
@@ -1372,7 +1381,11 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
         let sx = w as f32 / tree.size().width();
         let sy = h as f32 / tree.size().height();
-        resvg::render(&tree, tiny_skia::Transform::from_scale(sx, sy), &mut pixmap.as_mut());
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(sx, sy),
+            &mut pixmap.as_mut(),
+        );
 
         // Bar at x=30..70, y=10..110. Sample pixel at (50, 60): inside the filled bar.
         // The bar fill is #00b4ff (R=0, G=180, B=255). Allow ±20 for anti-aliasing.
@@ -1454,18 +1467,23 @@ mod tests {
 
         // Indicator circle center at (85, 15) in the 100×220 SVG coordinate space.
         // With scale 1.0, the center maps to pixel (85, 15).
-        let px = pixmap.pixel(85, 15).expect("pixel access at indicator center");
+        let px = pixmap
+            .pixel(85, 15)
+            .expect("pixel access at indicator center");
         assert!(
             px.red() > 180,
-            "warning indicator should be yellow (high red), got: r={}", px.red()
+            "warning indicator should be yellow (high red), got: r={}",
+            px.red()
         );
         assert!(
             px.green() > 150,
-            "warning indicator should be yellow (high green), got: g={}", px.green()
+            "warning indicator should be yellow (high green), got: g={}",
+            px.green()
         );
         assert!(
             px.blue() < 50,
-            "warning indicator should be yellow (low blue), got: b={}", px.blue()
+            "warning indicator should be yellow (low blue), got: b={}",
+            px.blue()
         );
     }
 
