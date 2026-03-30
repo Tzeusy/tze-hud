@@ -1325,6 +1325,28 @@ mod tests {
         apply_svg_attribute(&svg, "indicator", "fill", indicator_fill)
     }
 
+    /// Parse and rasterize an SVG string into a Pixmap of the given dimensions.
+    ///
+    /// Shared helper to avoid repeating SVG parse + rasterize setup across pixel
+    /// assertion tests. Panics (via `.expect`) if the SVG is malformed or pixmap
+    /// allocation fails — test failures are the expected signal.
+    fn rasterize_svg(svg_data: &str, width: u32, height: u32) -> tiny_skia::Pixmap {
+        let opts = resvg::usvg::Options::default();
+        let tree =
+            resvg::usvg::Tree::from_str(svg_data, &opts).expect("SVG must parse without error");
+
+        let mut pixmap =
+            tiny_skia::Pixmap::new(width, height).expect("pixmap creation must not fail");
+
+        let transform = tiny_skia::Transform::from_scale(
+            width as f32 / tree.size().width(),
+            height as f32 / tree.size().height(),
+        );
+
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+        pixmap
+    }
+
     /// WHEN the reference gauge fill.svg is parsed with default parameters
     /// THEN resvg parses it without error and produces non-trivial pixel output.
     ///
@@ -1333,20 +1355,9 @@ mod tests {
     fn reference_gauge_fill_svg_parses_and_rasterizes() {
         let svg = reference_gauge_fill_svg();
 
-        let opts = resvg::usvg::Options::default();
-        let tree = resvg::usvg::Tree::from_str(svg, &opts)
-            .expect("reference gauge fill.svg must parse without error");
-
         let w = 100u32;
         let h = 220u32;
-        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap creation");
-        let sx = w as f32 / tree.size().width();
-        let sy = h as f32 / tree.size().height();
-        resvg::render(
-            &tree,
-            tiny_skia::Transform::from_scale(sx, sy),
-            &mut pixmap.as_mut(),
-        );
+        let pixmap = rasterize_svg(svg, w, h);
 
         // Output must be 100×220×4 bytes.
         assert_eq!(pixmap.data().len(), (w * h * 4) as usize);
@@ -1372,20 +1383,9 @@ mod tests {
         // Apply level=100 (50% fill height), blue fill, empty label, info indicator.
         let modified_svg = apply_gauge_params("100", "#00b4ff", "", "#00cc66");
 
-        let opts = resvg::usvg::Options::default();
-        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts)
-            .expect("modified gauge SVG must parse");
-
         let w = 100u32;
         let h = 220u32;
-        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
-        let sx = w as f32 / tree.size().width();
-        let sy = h as f32 / tree.size().height();
-        resvg::render(
-            &tree,
-            tiny_skia::Transform::from_scale(sx, sy),
-            &mut pixmap.as_mut(),
-        );
+        let pixmap = rasterize_svg(&modified_svg, w, h);
 
         // Bar at x=30..70, y=10..110. Sample pixel at (50, 60): inside the filled bar.
         // The bar fill is #00b4ff (R=0, G=180, B=255). Allow ±20 for anti-aliasing.
@@ -1409,21 +1409,9 @@ mod tests {
     fn reference_gauge_bar_red_fill_renders_red() {
         let modified_svg = apply_gauge_params("100", "#ff0000", "", "#00cc66");
 
-        let opts = resvg::usvg::Options::default();
-        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts)
-            .expect("modified gauge SVG with red fill must parse");
-
         let w = 100u32;
         let h = 220u32;
-        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
-        resvg::render(
-            &tree,
-            tiny_skia::Transform::from_scale(
-                w as f32 / tree.size().width(),
-                h as f32 / tree.size().height(),
-            ),
-            &mut pixmap.as_mut(),
-        );
+        let pixmap = rasterize_svg(&modified_svg, w, h);
 
         // Bar center at (50, 60): should be red (#ff0000).
         let px = pixmap.pixel(50, 60).expect("pixel access");
@@ -1449,21 +1437,9 @@ mod tests {
         // Warning severity maps to #ffcc00 (yellow-gold).
         let modified_svg = apply_gauge_params("0", "#00b4ff", "", "#ffcc00");
 
-        let opts = resvg::usvg::Options::default();
-        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts)
-            .expect("modified gauge SVG with warning indicator must parse");
-
         let w = 100u32;
         let h = 220u32;
-        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
-        resvg::render(
-            &tree,
-            tiny_skia::Transform::from_scale(
-                w as f32 / tree.size().width(),
-                h as f32 / tree.size().height(),
-            ),
-            &mut pixmap.as_mut(),
-        );
+        let pixmap = rasterize_svg(&modified_svg, w, h);
 
         // Indicator circle center at (85, 15) in the 100×220 SVG coordinate space.
         // With scale 1.0, the center maps to pixel (85, 15).
@@ -1496,19 +1472,7 @@ mod tests {
         let modified_svg = apply_gauge_params("200", "#00b4ff", "CPU", "#00cc66");
 
         let start = std::time::Instant::now();
-
-        let opts = resvg::usvg::Options::default();
-        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts).expect("parse");
-        let mut pixmap = tiny_skia::Pixmap::new(512, 512).expect("pixmap");
-        resvg::render(
-            &tree,
-            tiny_skia::Transform::from_scale(
-                512.0 / tree.size().width(),
-                512.0 / tree.size().height(),
-            ),
-            &mut pixmap.as_mut(),
-        );
-
+        let pixmap = rasterize_svg(&modified_svg, 512, 512);
         let elapsed_us = start.elapsed().as_micros();
 
         // Soft budget check: warn on CI if over budget; do not fail the build.

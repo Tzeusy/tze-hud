@@ -6563,11 +6563,21 @@ mod spec_scenarios {
         assert_eq!(occ.occupant_count, 0);
         assert_eq!(occ.active_publications.len(), 0);
 
-        // Should fall back to definition defaults
+        // Should fall back to definition defaults for all three declared parameters.
         let level = occ.effective_params.get("level");
         assert!(
             matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.0).abs() < 1e-6),
             "default level should be 0.0, got: {level:?}"
+        );
+        let label = occ.effective_params.get("label");
+        assert!(
+            matches!(label, Some(WidgetParameterValue::String(s)) if s.is_empty()),
+            "default label should be empty string, got: {label:?}"
+        );
+        let severity = occ.effective_params.get("severity");
+        assert!(
+            matches!(severity, Some(WidgetParameterValue::Enum(s)) if s == "info"),
+            "default severity should be 'info', got: {severity:?}"
         );
     }
 
@@ -6728,10 +6738,27 @@ mod spec_scenarios {
         assert_eq!(active.len(), 3, "Stack(3) should keep at most 3 records");
 
         // The oldest (i=0, level=0.0) should have been evicted.
-        let has_zero = active
-            .iter()
-            .any(|r| matches!(r.params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v).abs() < 1e-6));
+        let has_zero = active.iter().any(|r| {
+            matches!(r.params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v).abs() < 1e-6)
+        });
         assert!(!has_zero, "oldest publish (level=0.0) should be evicted");
+
+        // The correct items (i=1,2,3) should all be present.
+        let levels: std::collections::BTreeSet<u32> = active
+            .iter()
+            .filter_map(|r| {
+                if let Some(WidgetParameterValue::F32(v)) = r.params.get("level") {
+                    Some((v * 4.0).round() as u32)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let expected_levels: std::collections::BTreeSet<u32> = [1, 2, 3].into();
+        assert_eq!(
+            levels, expected_levels,
+            "Stack(3) should contain levels for i=1, 2, 3"
+        );
     }
 
     /// Stack: WHEN max_depth=0 THEN publishes stack without limit.
@@ -6817,6 +6844,16 @@ mod spec_scenarios {
         assert!(
             matches!(cpu_pub.params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v - 0.2).abs() < 1e-6),
             "cpu key should have updated to 0.2"
+        );
+
+        // The mem key must remain unaffected at its original value (0.6).
+        let mem_pub = active
+            .iter()
+            .find(|r| r.merge_key.as_deref() == Some("mem"))
+            .unwrap();
+        assert!(
+            matches!(mem_pub.params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v - 0.6).abs() < 1e-6),
+            "mem key should be unaffected and still be 0.6"
         );
     }
 }
