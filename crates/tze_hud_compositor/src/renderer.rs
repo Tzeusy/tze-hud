@@ -935,7 +935,6 @@ impl Compositor {
                     let zh = sh * height_pct;
                     (zx, zy, zw, zh)
                 }
-                _ => continue,
             };
 
             // Semi-transparent background for zone content.
