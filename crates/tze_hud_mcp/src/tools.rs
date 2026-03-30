@@ -712,7 +712,7 @@ pub struct PublishToWidgetParams {
     /// JSON type mapping:
     /// - f32 parameter → JSON number
     /// - string parameter → JSON string
-    /// - color parameter → JSON object `{"r": u8, "g": u8, "b": u8, "a": u8}`
+    /// - color parameter → JSON object `{"r": number, "g": number, "b": number, "a": number}` (Note: currently parsed as f32 [0.0, 1.0], alignment to u8 planned)
     /// - enum parameter → JSON string
     pub params: HashMap<String, Value>,
     /// Transition duration in milliseconds (0 = instant). Defaults to 0.
@@ -797,7 +797,7 @@ fn json_to_widget_param_value(
             let r = obj.get("r").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
             let g = obj.get("g").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
             let b = obj.get("b").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
-            let a = obj.get("a").and_then(|x| x.as_f64()).unwrap_or(255.0) as f32;
+            let a = obj.get("a").and_then(|x| x.as_f64()).unwrap_or(1.0) as f32;
             WidgetParameterValue::Color(Rgba { r, g, b, a })
         }
         WidgetParamType::Enum => {

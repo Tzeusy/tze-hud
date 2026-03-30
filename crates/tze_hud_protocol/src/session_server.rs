@@ -3416,6 +3416,30 @@ async fn handle_zone_publish(
     // Ephemeral zone: no ack sent (fire-and-forget per RFC 0005 §8.6), success or failure
 }
 
+/// Look up whether a widget instance is transactional (i.e., not ephemeral).
+///
+/// Returns `true` when the widget is durable (WidgetPublishResult should be sent),
+/// `false` when ephemeral (fire-and-forget, no result). Defaults to `true` when the
+/// widget instance or definition is not found, so unknown widgets still receive an
+/// error result (WIDGET_NOT_FOUND is always reportable).
+async fn is_widget_transactional(state: &Arc<Mutex<SharedState>>, widget_name: &str) -> bool {
+    let st = state.lock().await;
+    let scene = st.scene.lock().await;
+    let is_ephemeral = scene
+        .widget_registry
+        .instances
+        .get(widget_name)
+        .and_then(|inst| {
+            scene
+                .widget_registry
+                .definitions
+                .get(&inst.widget_type_name)
+        })
+        .map(|def| def.ephemeral)
+        .unwrap_or(false); // Unknown widget: treat as durable (WIDGET_NOT_FOUND reportable)
+    !is_ephemeral
+}
+
 /// Handle a WidgetPublish from the client (widget-system spec §Requirement: Widget Publishing via gRPC).
 ///
 /// 1. Checks `publish_widget:<widget_name>` capability from session.capabilities.
@@ -3440,24 +3464,8 @@ async fn handle_widget_publish(
         // Per spec: WIDGET_CAPABILITY_MISSING. For durable widgets we send a result;
         // since we don't know if it's ephemeral without looking up the registry,
         // we check ephemerality to decide whether to send a result.
-        // Look up ephemerality from the registry for the send-or-not decision.
-        let is_ephemeral = {
-            let st = state.lock().await;
-            let scene = st.scene.lock().await;
-            scene
-                .widget_registry
-                .instances
-                .get(widget_name.as_str())
-                .and_then(|inst| {
-                    scene
-                        .widget_registry
-                        .definitions
-                        .get(&inst.widget_type_name)
-                })
-                .map(|def| def.ephemeral)
-                .unwrap_or(false)
-        };
-        if !is_ephemeral {
+        let transactional = is_widget_transactional(state, widget_name.as_str()).await;
+        if transactional {
             let seq = session.next_server_seq();
             let _ = tx
                 .send(Ok(ServerMessage {
@@ -3574,27 +3582,13 @@ async fn handle_widget_publish(
                 ),
             };
 
-            // Determine ephemerality to decide whether to send WidgetPublishResult.
-            // For WIDGET_NOT_FOUND, we can't look up ephemerality — send result (durable assumption).
-            // For all other errors on a known widget, check ephemerality.
-            let is_ephemeral = {
-                let st = state.lock().await;
-                let scene = st.scene.lock().await;
-                scene
-                    .widget_registry
-                    .instances
-                    .get(resolved_widget_name.as_str())
-                    .and_then(|inst| {
-                        scene
-                            .widget_registry
-                            .definitions
-                            .get(&inst.widget_type_name)
-                    })
-                    .map(|def| def.ephemeral)
-                    .unwrap_or(false) // Unknown widget: treat as durable (will report NOT_FOUND)
-            };
+            // Determine transactional state to decide whether to send WidgetPublishResult.
+            // For WIDGET_NOT_FOUND, we can't look up the definition — helper defaults to
+            // transactional=true so the error result is always delivered.
+            let transactional =
+                is_widget_transactional(state, resolved_widget_name.as_str()).await;
 
-            if !is_ephemeral {
+            if transactional {
                 let seq = session.next_server_seq();
                 let _ = tx
                     .send(Ok(ServerMessage {

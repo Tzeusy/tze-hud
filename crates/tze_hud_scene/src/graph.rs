@@ -2458,21 +2458,13 @@ impl SceneGraph {
                     });
                 }
                 (WidgetParamType::String, WidgetParameterValue::String(s)) => {
-                    let max_bytes = constraints.string_max_bytes.unwrap_or(1024) as usize;
+                    let mut max_bytes = constraints.string_max_bytes.unwrap_or(1024) as usize;
                     if max_bytes == 0 {
-                        let max_bytes = 1024;
-                        if s.len() > max_bytes {
-                            return Err(ValidationError::WidgetParameterInvalidValue {
-                                widget: widget_name.to_string(),
-                                param: param_name.clone(),
-                                reason: format!(
-                                    "string value of {} bytes exceeds max_length of {}",
-                                    s.len(),
-                                    max_bytes
-                                ),
-                            });
-                        }
-                    } else if s.len() > max_bytes {
+                        // A max_bytes of 0 is interpreted as the default limit of 1024.
+                        max_bytes = 1024;
+                    }
+
+                    if s.len() > max_bytes {
                         return Err(ValidationError::WidgetParameterInvalidValue {
                             widget: widget_name.to_string(),
                             param: param_name.clone(),
@@ -2492,7 +2484,13 @@ impl SceneGraph {
                     });
                 }
                 (WidgetParamType::Color, WidgetParameterValue::Color(c)) => {
-                    WidgetParameterValue::Color(c.clone())
+                    let clamped_color = Rgba {
+                        r: c.r.clamp(0.0, 1.0),
+                        g: c.g.clamp(0.0, 1.0),
+                        b: c.b.clamp(0.0, 1.0),
+                        a: c.a.clamp(0.0, 1.0),
+                    };
+                    WidgetParameterValue::Color(clamped_color)
                 }
                 (WidgetParamType::Color, _) => {
                     return Err(ValidationError::WidgetParameterTypeMismatch {
