@@ -22,6 +22,13 @@
 //! | `--help`            | —                      | —            | Print this help and exit.                |
 //! | `--version`         | —                      | —            | Print version and exit.                  |
 //!
+//! ¹ In overlay mode, the primary monitor resolution is auto-detected at startup
+//!   via winit. Falls back to `1920` (width) / `1080` (height) if detection fails
+//!   (headless environment, no display server). Explicit `--width`/`--height` flags
+//!   or `TZE_HUD_WINDOW_WIDTH`/`TZE_HUD_WINDOW_HEIGHT` env vars override
+//!   auto-detection. In fullscreen mode, `1920×1080` is the default (the compositor
+//!   uses `Fullscreen::Borderless`, which always uses the monitor's native resolution).
+//!
 //! ## Config file resolution order
 //!
 //! 1. `--config <path>` CLI flag
@@ -702,9 +709,13 @@ mod tests {
         assert!(!opts.explicit_width, "width must not be marked explicit");
         assert!(!opts.explicit_height, "height must not be marked explicit");
         // Derived: overlay_auto_size would be true
-        let overlay_auto_size =
-            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
-        assert!(overlay_auto_size, "overlay without explicit dims must enable auto-size");
+        let overlay_auto_size = opts.window_mode == WindowMode::Overlay
+            && !opts.explicit_width
+            && !opts.explicit_height;
+        assert!(
+            overlay_auto_size,
+            "overlay without explicit dims must enable auto-size"
+        );
     }
 
     /// In overlay mode with explicit --width AND --height, auto-detection must be
@@ -727,11 +738,21 @@ mod tests {
             "1440".to_string(),
         ];
         let opts = parse_options(&args).expect("must parse");
-        assert!(opts.explicit_width, "width must be marked explicit when --width is given");
-        assert!(opts.explicit_height, "height must be marked explicit when --height is given");
-        let overlay_auto_size =
-            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
-        assert!(!overlay_auto_size, "explicit --width/--height must disable auto-size");
+        assert!(
+            opts.explicit_width,
+            "width must be marked explicit when --width is given"
+        );
+        assert!(
+            opts.explicit_height,
+            "height must be marked explicit when --height is given"
+        );
+        let overlay_auto_size = opts.window_mode == WindowMode::Overlay
+            && !opts.explicit_width
+            && !opts.explicit_height;
+        assert!(
+            !overlay_auto_size,
+            "explicit --width/--height must disable auto-size"
+        );
     }
 
     /// In overlay mode with only --width set, auto-detection is disabled
@@ -754,9 +775,13 @@ mod tests {
         let opts = parse_options(&args).expect("must parse");
         assert!(opts.explicit_width, "explicit_width must be set");
         assert!(!opts.explicit_height, "explicit_height must not be set");
-        let overlay_auto_size =
-            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
-        assert!(!overlay_auto_size, "any explicit dimension must disable auto-size");
+        let overlay_auto_size = opts.window_mode == WindowMode::Overlay
+            && !opts.explicit_width
+            && !opts.explicit_height;
+        assert!(
+            !overlay_auto_size,
+            "any explicit dimension must disable auto-size"
+        );
     }
 
     /// In fullscreen mode, auto-size is always disabled regardless of explicit dims
@@ -772,9 +797,13 @@ mod tests {
         }
         let opts = parse_options(&[]).expect("must parse");
         assert_eq!(opts.window_mode, WindowMode::Fullscreen);
-        let overlay_auto_size =
-            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
-        assert!(!overlay_auto_size, "fullscreen mode must never enable overlay auto-size");
+        let overlay_auto_size = opts.window_mode == WindowMode::Overlay
+            && !opts.explicit_width
+            && !opts.explicit_height;
+        assert!(
+            !overlay_auto_size,
+            "fullscreen mode must never enable overlay auto-size"
+        );
     }
 
     /// Explicit width/height via environment variables also disables auto-size.
@@ -792,10 +821,17 @@ mod tests {
         assert_eq!(opts.width, 3840);
         assert_eq!(opts.height, 2160);
         assert!(opts.explicit_width, "env-var width must count as explicit");
-        assert!(opts.explicit_height, "env-var height must count as explicit");
-        let overlay_auto_size =
-            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
-        assert!(!overlay_auto_size, "env-var explicit dims must disable auto-size");
+        assert!(
+            opts.explicit_height,
+            "env-var height must count as explicit"
+        );
+        let overlay_auto_size = opts.window_mode == WindowMode::Overlay
+            && !opts.explicit_width
+            && !opts.explicit_height;
+        assert!(
+            !overlay_auto_size,
+            "env-var explicit dims must disable auto-size"
+        );
         // Clean up.
         unsafe {
             std::env::remove_var("TZE_HUD_WINDOW_MODE");
