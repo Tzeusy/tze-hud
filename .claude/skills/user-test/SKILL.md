@@ -80,58 +80,63 @@ Message shape — `content` is either a plain string (StreamText) or a typed JSO
 
 ### Step 0: SSH Connectivity Gate
 
-Verify key auth first (Linux):
+Verify key auth for **both** users (Linux):
 
 ```bash
 ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
   hudbot@tzehouse-windows.parrot-hen.ts.net "whoami"
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/ecdsa_home \
+  tzeus@tzehouse-windows.parrot-hen.ts.net "whoami"
 ```
 
-Do not continue until this exact check succeeds for `hudbot`.
+Both must succeed. `hudbot` is used for file deployment (SCP). `tzeus` is used for process control (kill, scheduled task trigger) because `tzeus` owns the interactive desktop session.
 
-### Step 1: Deploy + Launch Full App (Linux)
+### Step 1: Deploy (SCP via hudbot)
 
-Preferred: deploy a prebuilt full app `.exe`:
+Copy the prebuilt `.exe` to the Windows host:
 
 ```bash
-WIN_USER=hudbot \
-SSH_OPTS='-i ~/.ssh/ecdsa_home -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null' \
-.claude/skills/user-test/scripts/deploy_windows_hud.sh \
-  --win-host tzehouse-windows.parrot-hen.ts.net \
-  --full-app-exe /path/to/full-app.exe \
-  --launch-mode auto \
-  --tail
+# Kill any running instance first (must use tzeus — hudbot can't kill it)
+ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
+  tzeus@tzehouse-windows.parrot-hen.ts.net "taskkill /F /IM tze_hud.exe"
+sleep 2
+
+# SCP the exe (via hudbot)
+scp -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
+  /path/to/tze_hud.exe \
+  hudbot@tzehouse-windows.parrot-hen.ts.net:C:/tze_hud/tze_hud.exe
 ```
 
-Fallback only when explicitly requested:
+Report: file size, checksum (`sha256sum`), remote path.
+
+### Step 2: Register + Launch (via tzeus)
+
+The HUD **must** be launched via a scheduled task as `tzeus` with `--window-mode overlay`. This is critical for transparency — SSH-launched processes cannot access the desktop GPU, and `run_hud.ps1` wrappers interfere with window creation.
 
 ```bash
-.claude/skills/user-test/scripts/deploy_windows_hud.sh --package <pkg> ...
+# Register the overlay task (idempotent — safe to re-run)
+ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
+  tzeus@tzehouse-windows.parrot-hen.ts.net \
+  "powershell -NoProfile -Command \"Register-ScheduledTask -TaskName 'TzeHudOverlay' \
+    -Action (New-ScheduledTaskAction \
+      -Execute 'C:\\tze_hud\\tze_hud.exe' \
+      -Argument '--window-mode overlay' \
+      -WorkingDirectory 'C:\\tze_hud') \
+    -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries) \
+    -Force\""
+
+# Launch it
+ssh -i ~/.ssh/ecdsa_home -o BatchMode=yes -o StrictHostKeyChecking=no \
+  tzeus@tzehouse-windows.parrot-hen.ts.net \
+  "schtasks /Run /TN TzeHudOverlay"
 ```
 
-`deploy_windows_hud.sh` defaults to `WIN_USER=hudbot` and `--launch-mode auto`.
-In `auto`, it tries scheduled-task launch first, then falls back to direct `run_hud.ps1` launch if task APIs are unavailable in the `hudbot` SSH context.
-
-If needed, force/skip task bootstrap:
-
-```bash
-# force bootstrap behavior (default)
-.claude/skills/user-test/scripts/deploy_windows_hud.sh --bootstrap-task ...
-
-# fail if task trigger fails
-.claude/skills/user-test/scripts/deploy_windows_hud.sh --no-bootstrap-task ...
-
-# launch mode override
-.claude/skills/user-test/scripts/deploy_windows_hud.sh --launch-mode direct ...
-```
-
-Then report:
-
-- artifact path
-- file type (`file ...`)
-- checksum (`sha256sum ...`)
-- remote path (`C:\tze_hud\<exe-name>.exe`)
-- latest launcher/stdout/stderr log lines
+**Transparency requirements** (if the window is grey/opaque, one of these is wrong):
+- `--window-mode overlay` — fullscreen mode is intentionally opaque
+- Task runs as `tzeus` (the user logged into the console desktop)
+- Exe runs directly (no PowerShell/bat wrapper — wrapper windows break transparency)
+- NVIDIA driver 595.97+ on the Windows host
+- Commit must include `with_no_redirection_bitmap(true)`, Vulkan forcing, PreMultiplied alpha
 
 ### Step 2: MCP Reachability Gate
 
@@ -165,11 +170,12 @@ python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
-- Default to full app deployment via `--full-app-exe`.
-- Use `--package` only when explicitly requested.
+- Default to full app deployment via SCP + scheduled task.
+- Use `--package` / cargo build only when explicitly requested.
 - Always pass non-interactive SSH/SCP flags (`BatchMode`, `IdentitiesOnly`) for automation safety.
-- Default the automation account to `hudbot`; do not route through `tzeus` unless explicitly requested.
-- Prefer `--launch-mode auto` so `hudbot` can continue via direct launch when scheduled-task APIs are denied.
+- Use `hudbot` for file operations (SCP, mkdir). Use `tzeus` for process control (taskkill, schtasks).
+- **Always launch via `TzeHudOverlay` scheduled task with `--window-mode overlay`.** Never launch via `run_hud.ps1` or direct SSH exec — both produce grey opaque windows.
+- **Never use `Start-Process -RedirectStandardOutput`** — it sets `CREATE_NO_WINDOW` which breaks `WS_EX_NOREDIRECTIONBITMAP` transparency.
 - Require real MCP HTTP reachability before claiming publish-path success.
 - Never invent zone names or endpoint values; require user-provided values.
 - Treat any publish error as actionable; include exact response payload.
