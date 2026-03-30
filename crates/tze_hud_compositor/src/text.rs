@@ -107,20 +107,18 @@ impl TextRasterizer {
     pub fn load_font_bytes(&mut self, resource_id: [u8; 32], data: &[u8]) {
         if self.loaded_font_ids.contains(&resource_id) {
             tracing::debug!(
-                resource_id = %crate::text::format_resource_id(&resource_id),
+                resource_id = %format_resource_id(&resource_id),
                 "font already loaded — skipping duplicate load_font_data"
             );
             return;
         }
 
-        self.font_system
-            .db_mut()
-            .load_font_data(data.to_vec());
+        self.font_system.db_mut().load_font_data(data.to_vec());
 
         self.loaded_font_ids.insert(resource_id);
 
         tracing::info!(
-            resource_id = %crate::text::format_resource_id(&resource_id),
+            resource_id = %format_resource_id(&resource_id),
             bytes = data.len(),
             "agent-uploaded font loaded into FontSystem"
         );

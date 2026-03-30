@@ -499,9 +499,7 @@ impl Compositor {
         if let Some(rasterizer) = &mut self.text_rasterizer {
             rasterizer.load_font_bytes(resource_id, data);
         } else {
-            tracing::debug!(
-                "load_font_bytes called before text renderer is initialized — skipped"
-            );
+            tracing::debug!("load_font_bytes called before text renderer is initialized — skipped");
         }
     }
 

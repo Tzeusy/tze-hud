@@ -50,18 +50,14 @@ impl FontLoader {
     ///
     /// # Returns
     ///
-    /// - `Ok(true)` — font was found and loaded (or was already loaded).
-    /// - `Ok(false)` — no bytes found in the resource store for this ID
+    /// - `true` — font was found and loaded (or was already loaded).
+    /// - `false` — no bytes found in the resource store for this ID
     ///   (font not yet uploaded, or resource type is not a font).
     ///   The compositor is left unchanged.
     /// - Font bytes are retrieved atomically from `FontBytesStore` via an
     ///   `Arc<[u8]>` — no copy is made unless `load_font_data` copies
     ///   internally.
-    pub fn load_into_compositor(
-        &self,
-        resource_id: [u8; 32],
-        compositor: &mut Compositor,
-    ) -> bool {
+    pub fn load_into_compositor(&self, resource_id: [u8; 32], compositor: &mut Compositor) -> bool {
         use tze_hud_resource::ResourceId;
 
         let id = ResourceId::from_bytes(resource_id);
@@ -86,10 +82,10 @@ impl FontLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tze_hud_resource::{ResourceId, ResourceStore, ResourceStoreConfig, ResourceType};
+    use tze_hud_resource::upload::UploadId;
     use tze_hud_resource::upload::UploadStartRequest;
     use tze_hud_resource::validation::AgentBudget;
-    use tze_hud_resource::upload::UploadId;
+    use tze_hud_resource::{ResourceId, ResourceStore, ResourceStoreConfig, ResourceType};
 
     fn caps() -> Vec<String> {
         vec!["upload_resource".to_string()]

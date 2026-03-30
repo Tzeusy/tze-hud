@@ -163,11 +163,17 @@ mod tests {
 
         // Cloning shares the inner Arc<DashMap>.
         let clone = store.clone();
-        assert!(clone.get(&id).is_some(), "clone must see entries from original");
+        assert!(
+            clone.get(&id).is_some(),
+            "clone must see entries from original"
+        );
 
         // Insert via clone — original must also see it.
         let id2 = rid(5);
         clone.insert(id2, Arc::from(b"via-clone".as_ref()));
-        assert!(store.get(&id2).is_some(), "original must see entries from clone");
+        assert!(
+            store.get(&id2).is_some(),
+            "original must see entries from clone"
+        );
     }
 }
