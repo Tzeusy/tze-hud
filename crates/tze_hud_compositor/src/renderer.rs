@@ -2187,16 +2187,10 @@ mod tests {
             "expected exactly one TextItem for StatusBar"
         );
         let item = &items[0];
-        // Entries are sorted by key: "battery" < "time".
-        assert!(
-            item.text.contains("battery: 95%"),
-            "expected 'battery: 95%' in rendered text, got: {:?}",
-            item.text
-        );
-        assert!(
-            item.text.contains("time: 12:34"),
-            "expected 'time: 12:34' in rendered text, got: {:?}",
-            item.text
+        // Entries are sorted by key ("battery" < "time") and separated by newlines.
+        assert_eq!(
+            item.text, "battery: 95%\ntime: 12:34",
+            "Entries should be sorted by key and formatted correctly"
         );
         // The TextItem position should be within the zone geometry.
         // Zone top-edge: y = 8.0 (margin_px), height = 720*0.05 = 36, width = 1280*0.8 = 1024.
