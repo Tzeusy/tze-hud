@@ -544,24 +544,23 @@ impl Compositor {
 
             // Use the most-recent publish. For Stack contention policy, publishes
             // are sorted oldest-first, so we iterate in reverse to get the newest
-            // StreamText or Notification entry. For LatestWins/Replace there is at
-            // most one entry.
+            // StreamText, Notification, or StatusBar entry. For LatestWins/Replace
+            // there is at most one entry.
             for record in publishes.iter().rev() {
+                let color = [255u8, 255, 255, 220];
                 match &record.content {
                     ZoneContent::StreamText(text) => {
                         // White text on the semi-transparent zone background.
-                        let color = [255u8, 255, 255, 220];
                         items.push(TextItem::from_zone_stream_text(
                             text, zx, zy, zw, zh, font_size, color,
                         ));
-                        // Only render the most-recent publish.
+                        // Only render the most-recent StreamText publish.
                         break;
                     }
                     ZoneContent::Notification(payload) => {
                         // Render the notification text. Icon rendering is stubbed for
                         // v1 — no texture pipeline yet (per hud-lh3w spec).
                         // White text on zone background.
-                        let color = [255u8, 255, 255, 220];
                         items.push(TextItem::from_zone_notification(
                             &payload.text,
                             zx,
@@ -572,6 +571,23 @@ impl Compositor {
                             color,
                         ));
                         // Only render the most-recent publish.
+                        break;
+                    }
+                    ZoneContent::StatusBar(payload) => {
+                        // Format key-value pairs as "key: value" lines, sorted by key
+                        // for deterministic output.
+                        let mut sorted: Vec<(&String, &String)> =
+                            payload.entries.iter().collect();
+                        sorted.sort_by_key(|(k, _)| k.as_str());
+                        let text = sorted
+                            .iter()
+                            .map(|(k, v)| format!("{k}: {v}"))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        items.push(TextItem::from_zone_stream_text(
+                            &text, zx, zy, zw, zh, font_size, color,
+                        ));
+                        // Only render the most-recent StatusBar publish.
                         break;
                     }
                     _ => {}
@@ -2107,6 +2123,107 @@ mod tests {
         assert!(
             found_bright,
             "expected bright (text) pixels in notification zone area (rows 12..70)"
+        );
+    }
+
+    /// Zone StatusBar (KeyValuePairs) publish renders visible text at zone geometry.
+    ///
+    /// Acceptance criteria for hud-6at1:
+    ///   1. `publish_to_zone` with `ZoneContent::StatusBar` produces a `TextItem` in
+    ///      `collect_text_items`.
+    ///   2. The key-value pairs are rendered as text at the zone geometry position.
+    #[tokio::test]
+    async fn test_zone_status_bar_renders_visible_text() {
+        let (mut compositor, surface) = make_compositor_and_surface(1280, 720).await;
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+
+        // Register a status-bar zone (top edge, 5% height).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "statusbar".to_owned(),
+            description: "status bar zone".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.05,
+                width_pct: 0.80,
+                margin_px: 8.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(16.0),
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
+                text_align: None,
+                margin_px: None,
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // Publish StatusBar content with key-value pairs.
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("battery".to_owned(), "95%".to_owned());
+        entries.insert("time".to_owned(), "12:34".to_owned());
+        scene
+            .publish_to_zone(
+                "statusbar",
+                ZoneContent::StatusBar(StatusBarPayload { entries }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Verify collect_text_items produces a TextItem with the formatted pairs.
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 1, "expected exactly one TextItem for StatusBar");
+        let item = &items[0];
+        // Entries are sorted by key: "battery" < "time".
+        assert!(
+            item.text.contains("battery: 95%"),
+            "expected 'battery: 95%' in rendered text, got: {:?}",
+            item.text
+        );
+        assert!(
+            item.text.contains("time: 12:34"),
+            "expected 'time: 12:34' in rendered text, got: {:?}",
+            item.text
+        );
+        // The TextItem position should be within the zone geometry.
+        // Zone top-edge: y = 8.0 (margin_px), height = 720*0.05 = 36, width = 1280*0.8 = 1024.
+        assert!(item.pixel_y >= 8.0, "text y should be at or below zone top margin");
+        assert!(item.pixel_y < 720.0 * 0.10, "text y should be within top zone area");
+
+        // Render to pixels and verify bright text appears in the top zone area.
+        compositor.render_frame_headless(&scene, &surface);
+        let pixels = surface.read_pixels(&compositor.device);
+        assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
+
+        // The zone is at the top ~8..44px, centered horizontally.
+        // White text glyphs should show as bright pixels.
+        let mut found_bright = false;
+        for row in 10usize..42 {
+            for col in 150usize..1130 {
+                let offset = (row * 1280 + col) * 4;
+                let p = &pixels[offset..offset + 4];
+                if p[0] > 180 && p[1] > 180 && p[2] > 180 {
+                    found_bright = true;
+                    break;
+                }
+            }
+            if found_bright {
+                break;
+            }
+        }
+        assert!(
+            found_bright,
+            "expected bright (text) pixels in status bar zone area (rows 10..42)"
         );
     }
 
