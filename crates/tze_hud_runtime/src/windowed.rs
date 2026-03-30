@@ -441,7 +441,7 @@ impl ApplicationHandler for WinitApp {
             .expect("failed to build startup tokio runtime");
 
         let is_overlay = self.state.effective_mode == WindowMode::Overlay;
-        let (compositor, window_surface) = rt.block_on(async {
+        let (mut compositor, window_surface) = rt.block_on(async {
             let mut c = if is_overlay {
                 Compositor::new_windowed_overlay(window_clone, surface_width, surface_height).await
             } else {
@@ -451,6 +451,17 @@ impl ApplicationHandler for WinitApp {
             c.0.overlay_mode = is_overlay;
             c
         });
+
+        // ── Initialize text renderer ──────────────────────────────────────
+        // Must be called after surface configuration so we know the negotiated
+        // swapchain format. glyphon text rendering is inert until this runs.
+        let surface_format = window_surface
+            .config
+            .lock()
+            .expect("WindowSurface config lock poisoned at text renderer init")
+            .format;
+        compositor.init_text_renderer(surface_format);
+        tracing::info!(format = ?surface_format, "windowed: text renderer initialized");
 
         let window_surface = Arc::new(window_surface);
         self.state.window_surface = Some(window_surface.clone());
