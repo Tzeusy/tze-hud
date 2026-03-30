@@ -425,10 +425,7 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    let urgency = obj
-                        .get("urgency")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(1) as u32;
+                    let urgency = obj.get("urgency").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
                     Ok(ZoneContent::Notification(NotificationPayload {
                         text,
                         icon,
@@ -447,7 +444,8 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                         .unwrap_or_default();
                     if entries.is_empty() {
                         return Err(McpError::InvalidParams(
-                            "status_bar content must have a non-empty \"entries\" object".to_string(),
+                            "status_bar content must have a non-empty \"entries\" object"
+                                .to_string(),
                         ));
                     }
                     Ok(ZoneContent::StatusBar(StatusBarPayload { entries }))

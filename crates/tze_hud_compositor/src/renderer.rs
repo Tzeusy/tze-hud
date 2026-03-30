@@ -806,8 +806,14 @@ impl Compositor {
         // The CompositorFrame._guard keeps the backing resource alive until drop.
         let frame = surface.acquire_frame();
 
-        let (encoder, encode_us) =
-            self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, self.overlay_mode);
+        let (encoder, encode_us) = self.encode_frame(
+            &vertices,
+            &frame.view,
+            scene,
+            surf_w,
+            surf_h,
+            self.overlay_mode,
+        );
         telemetry.render_encode_us = encode_us;
 
         let submit_start = std::time::Instant::now();

@@ -1613,7 +1613,9 @@ pub enum WidgetBindingMapping {
     /// String and Color parameters: use the value as-is.
     Direct,
     /// Enum parameters: maps each enum value to a specific attribute value.
-    Discrete { value_map: std::collections::BTreeMap<std::string::String, std::string::String> },
+    Discrete {
+        value_map: std::collections::BTreeMap<std::string::String, std::string::String>,
+    },
 }
 
 /// A single parameter-to-SVG-attribute binding.
@@ -1743,7 +1745,8 @@ impl WidgetRegistry {
 
     /// Register a widget instance. Overwrites any existing instance with the same instance_name.
     pub fn register_instance(&mut self, instance: WidgetInstance) {
-        self.instances.insert(instance.instance_name.clone(), instance);
+        self.instances
+            .insert(instance.instance_name.clone(), instance);
     }
 
     /// Look up a widget definition by id.
@@ -1767,11 +1770,7 @@ impl WidgetRegistry {
     /// Query occupancy for a widget instance (resolved state after contention policy).
     ///
     /// Returns `None` if the instance is not found.
-    pub fn get_occupancy(
-        &self,
-        instance_name: &str,
-        tab_id: SceneId,
-    ) -> Option<WidgetOccupancy> {
+    pub fn get_occupancy(&self, instance_name: &str, tab_id: SceneId) -> Option<WidgetOccupancy> {
         let instance = self.instances.get(instance_name)?;
         let def = self.definitions.get(&instance.widget_type_name)?;
         let pubs = self

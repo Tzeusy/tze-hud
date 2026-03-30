@@ -555,7 +555,9 @@ pub fn proto_to_widget_param_value(
 }
 
 /// Convert a scene WidgetParamConstraints to proto WidgetParamConstraintsProto.
-pub fn widget_param_constraints_to_proto(c: &WidgetParamConstraints) -> proto::WidgetParamConstraintsProto {
+pub fn widget_param_constraints_to_proto(
+    c: &WidgetParamConstraints,
+) -> proto::WidgetParamConstraintsProto {
     proto::WidgetParamConstraintsProto {
         f32_min: c.f32_min.unwrap_or(0.0),
         f32_max: c.f32_max.unwrap_or(0.0),
@@ -569,15 +571,29 @@ pub fn proto_to_widget_param_constraints(
     p: &proto::WidgetParamConstraintsProto,
 ) -> WidgetParamConstraints {
     WidgetParamConstraints {
-        f32_min: if p.f32_min != 0.0 { Some(p.f32_min) } else { None },
-        f32_max: if p.f32_max != 0.0 { Some(p.f32_max) } else { None },
-        string_max_bytes: if p.string_max_bytes != 0 { Some(p.string_max_bytes) } else { None },
+        f32_min: if p.f32_min != 0.0 {
+            Some(p.f32_min)
+        } else {
+            None
+        },
+        f32_max: if p.f32_max != 0.0 {
+            Some(p.f32_max)
+        } else {
+            None
+        },
+        string_max_bytes: if p.string_max_bytes != 0 {
+            Some(p.string_max_bytes)
+        } else {
+            None
+        },
         enum_allowed_values: p.enum_allowed_values.clone(),
     }
 }
 
 /// Convert a scene WidgetParameterDeclaration to proto WidgetParameterDeclarationProto.
-pub fn widget_param_decl_to_proto(d: &WidgetParameterDeclaration) -> proto::WidgetParameterDeclarationProto {
+pub fn widget_param_decl_to_proto(
+    d: &WidgetParameterDeclaration,
+) -> proto::WidgetParameterDeclarationProto {
     proto::WidgetParameterDeclarationProto {
         name: d.name.clone(),
         param_type: widget_param_type_to_proto(d.param_type),
@@ -595,7 +611,10 @@ pub fn proto_to_widget_param_decl(
 ) -> Option<WidgetParameterDeclaration> {
     let default_proto = p.default_value.as_ref()?;
     let (_, default_value) = proto_to_widget_param_value(default_proto)?;
-    let constraints = p.constraints.as_ref().map(proto_to_widget_param_constraints);
+    let constraints = p
+        .constraints
+        .as_ref()
+        .map(proto_to_widget_param_constraints);
     Some(WidgetParameterDeclaration {
         name: p.name.clone(),
         param_type: proto_to_widget_param_type(p.param_type),
@@ -605,7 +624,9 @@ pub fn proto_to_widget_param_decl(
 }
 
 /// Convert a scene WidgetBindingMapping to proto WidgetBindingMappingProto.
-pub fn widget_binding_mapping_to_proto(m: &WidgetBindingMapping) -> proto::WidgetBindingMappingProto {
+pub fn widget_binding_mapping_to_proto(
+    m: &WidgetBindingMapping,
+) -> proto::WidgetBindingMappingProto {
     use proto::widget_binding_mapping_proto::Mapping;
     let mapping = match m {
         WidgetBindingMapping::Linear { attr_min, attr_max } => {
@@ -617,7 +638,10 @@ pub fn widget_binding_mapping_to_proto(m: &WidgetBindingMapping) -> proto::Widge
         WidgetBindingMapping::Direct => Some(Mapping::Direct(true)),
         WidgetBindingMapping::Discrete { value_map } => {
             Some(Mapping::Discrete(proto::WidgetDiscreteMappingProto {
-                value_map: value_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                value_map: value_map
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
             }))
         }
     };
@@ -678,7 +702,11 @@ pub fn widget_svg_layer_to_proto(l: &WidgetSvgLayer) -> proto::WidgetSvgLayerPro
 pub fn proto_to_widget_svg_layer(p: &proto::WidgetSvgLayerProto) -> WidgetSvgLayer {
     WidgetSvgLayer {
         svg_file: p.svg_file.clone(),
-        bindings: p.bindings.iter().filter_map(proto_to_widget_binding).collect(),
+        bindings: p
+            .bindings
+            .iter()
+            .filter_map(proto_to_widget_binding)
+            .collect(),
     }
 }
 
@@ -700,7 +728,9 @@ pub fn widget_definition_to_proto(d: &WidgetDefinition) -> proto::WidgetDefiniti
             proto::ContentionPolicyProto::ContentionPolicyLatestWins as i32
         }
         ContentionPolicy::Replace => proto::ContentionPolicyProto::ContentionPolicyReplace as i32,
-        ContentionPolicy::Stack { .. } => proto::ContentionPolicyProto::ContentionPolicyStack as i32,
+        ContentionPolicy::Stack { .. } => {
+            proto::ContentionPolicyProto::ContentionPolicyStack as i32
+        }
         ContentionPolicy::MergeByKey { .. } => {
             proto::ContentionPolicyProto::ContentionPolicyMergeByKey as i32
         }
@@ -732,11 +762,7 @@ pub fn proto_to_widget_definition(p: &proto::WidgetDefinitionProto) -> WidgetDef
         })
         .unwrap_or_default();
 
-    let layers = p
-        .layers
-        .iter()
-        .map(proto_to_widget_svg_layer)
-        .collect();
+    let layers = p.layers.iter().map(proto_to_widget_svg_layer).collect();
 
     let default_geometry_policy = p
         .default_geometry_policy
@@ -755,19 +781,22 @@ pub fn proto_to_widget_definition(p: &proto::WidgetDefinitionProto) -> WidgetDef
         .map(proto_to_rendering_policy)
         .unwrap_or_default();
 
-    let default_contention_policy = match proto::ContentionPolicyProto::try_from(p.default_contention_policy)
-        .unwrap_or(proto::ContentionPolicyProto::ContentionPolicyLatestWins)
-    {
-        proto::ContentionPolicyProto::ContentionPolicyLatestWins
-        | proto::ContentionPolicyProto::ContentionPolicyUnspecified => ContentionPolicy::LatestWins,
-        proto::ContentionPolicyProto::ContentionPolicyReplace => ContentionPolicy::Replace,
-        proto::ContentionPolicyProto::ContentionPolicyStack => {
-            ContentionPolicy::Stack { max_depth: 8 }
-        }
-        proto::ContentionPolicyProto::ContentionPolicyMergeByKey => {
-            ContentionPolicy::MergeByKey { max_keys: 16 }
-        }
-    };
+    let default_contention_policy =
+        match proto::ContentionPolicyProto::try_from(p.default_contention_policy)
+            .unwrap_or(proto::ContentionPolicyProto::ContentionPolicyLatestWins)
+        {
+            proto::ContentionPolicyProto::ContentionPolicyLatestWins
+            | proto::ContentionPolicyProto::ContentionPolicyUnspecified => {
+                ContentionPolicy::LatestWins
+            }
+            proto::ContentionPolicyProto::ContentionPolicyReplace => ContentionPolicy::Replace,
+            proto::ContentionPolicyProto::ContentionPolicyStack => {
+                ContentionPolicy::Stack { max_depth: 8 }
+            }
+            proto::ContentionPolicyProto::ContentionPolicyMergeByKey => {
+                ContentionPolicy::MergeByKey { max_keys: 16 }
+            }
+        };
 
     WidgetDefinition {
         id: p.id.clone(),
@@ -784,17 +813,16 @@ pub fn proto_to_widget_definition(p: &proto::WidgetDefinitionProto) -> WidgetDef
 
 /// Convert a scene WidgetInstance to proto WidgetInstanceProto.
 pub fn widget_instance_to_proto(i: &WidgetInstance) -> proto::WidgetInstanceProto {
-    let geometry_override = i
-        .geometry_override
-        .as_ref()
-        .map(geometry_policy_to_proto);
+    let geometry_override = i.geometry_override.as_ref().map(geometry_policy_to_proto);
 
     let contention_override = i.contention_override.as_ref().map(|cp| match cp {
         ContentionPolicy::LatestWins => {
             proto::ContentionPolicyProto::ContentionPolicyLatestWins as i32
         }
         ContentionPolicy::Replace => proto::ContentionPolicyProto::ContentionPolicyReplace as i32,
-        ContentionPolicy::Stack { .. } => proto::ContentionPolicyProto::ContentionPolicyStack as i32,
+        ContentionPolicy::Stack { .. } => {
+            proto::ContentionPolicyProto::ContentionPolicyStack as i32
+        }
         ContentionPolicy::MergeByKey { .. } => {
             proto::ContentionPolicyProto::ContentionPolicyMergeByKey as i32
         }
@@ -810,9 +838,8 @@ pub fn widget_instance_to_proto(i: &WidgetInstance) -> proto::WidgetInstanceProt
         widget_type_name: i.widget_type_name.clone(),
         tab_id: i.tab_id.to_bytes_le().to_vec(),
         geometry_override,
-        contention_override: contention_override.unwrap_or(
-            proto::ContentionPolicyProto::ContentionPolicyUnspecified as i32,
-        ),
+        contention_override: contention_override
+            .unwrap_or(proto::ContentionPolicyProto::ContentionPolicyUnspecified as i32),
         instance_name: i.instance_name.clone(),
         current_params,
     }
@@ -831,28 +858,29 @@ pub fn proto_to_widget_instance(p: &proto::WidgetInstanceProto) -> Option<Widget
         .as_ref()
         .and_then(proto_to_geometry_policy);
 
-    let contention_override =
-        if p.contention_override == proto::ContentionPolicyProto::ContentionPolicyUnspecified as i32 {
-            None
-        } else {
-            Some(
-                match proto::ContentionPolicyProto::try_from(p.contention_override)
-                    .unwrap_or(proto::ContentionPolicyProto::ContentionPolicyLatestWins)
-                {
-                    proto::ContentionPolicyProto::ContentionPolicyLatestWins
-                    | proto::ContentionPolicyProto::ContentionPolicyUnspecified => {
-                        ContentionPolicy::LatestWins
-                    }
-                    proto::ContentionPolicyProto::ContentionPolicyReplace => ContentionPolicy::Replace,
-                    proto::ContentionPolicyProto::ContentionPolicyStack => {
-                        ContentionPolicy::Stack { max_depth: 8 }
-                    }
-                    proto::ContentionPolicyProto::ContentionPolicyMergeByKey => {
-                        ContentionPolicy::MergeByKey { max_keys: 16 }
-                    }
-                },
-            )
-        };
+    let contention_override = if p.contention_override
+        == proto::ContentionPolicyProto::ContentionPolicyUnspecified as i32
+    {
+        None
+    } else {
+        Some(
+            match proto::ContentionPolicyProto::try_from(p.contention_override)
+                .unwrap_or(proto::ContentionPolicyProto::ContentionPolicyLatestWins)
+            {
+                proto::ContentionPolicyProto::ContentionPolicyLatestWins
+                | proto::ContentionPolicyProto::ContentionPolicyUnspecified => {
+                    ContentionPolicy::LatestWins
+                }
+                proto::ContentionPolicyProto::ContentionPolicyReplace => ContentionPolicy::Replace,
+                proto::ContentionPolicyProto::ContentionPolicyStack => {
+                    ContentionPolicy::Stack { max_depth: 8 }
+                }
+                proto::ContentionPolicyProto::ContentionPolicyMergeByKey => {
+                    ContentionPolicy::MergeByKey { max_keys: 16 }
+                }
+            },
+        )
+    };
 
     let current_params = p
         .current_params
@@ -919,9 +947,21 @@ pub fn widget_registry_snapshot_to_proto(
     snap: &WidgetRegistrySnapshot,
 ) -> proto::WidgetRegistrySnapshotProto {
     proto::WidgetRegistrySnapshotProto {
-        widget_types: snap.widget_types.iter().map(widget_definition_to_proto).collect(),
-        widget_instances: snap.widget_instances.iter().map(widget_instance_to_proto).collect(),
-        active_publishes: snap.active_publishes.iter().map(widget_publish_record_to_proto).collect(),
+        widget_types: snap
+            .widget_types
+            .iter()
+            .map(widget_definition_to_proto)
+            .collect(),
+        widget_instances: snap
+            .widget_instances
+            .iter()
+            .map(widget_instance_to_proto)
+            .collect(),
+        active_publishes: snap
+            .active_publishes
+            .iter()
+            .map(widget_publish_record_to_proto)
+            .collect(),
     }
 }
 
@@ -930,13 +970,21 @@ pub fn proto_to_widget_registry_snapshot(
     p: &proto::WidgetRegistrySnapshotProto,
 ) -> WidgetRegistrySnapshot {
     WidgetRegistrySnapshot {
-        widget_types: p.widget_types.iter().map(proto_to_widget_definition).collect(),
+        widget_types: p
+            .widget_types
+            .iter()
+            .map(proto_to_widget_definition)
+            .collect(),
         widget_instances: p
             .widget_instances
             .iter()
             .filter_map(proto_to_widget_instance)
             .collect(),
-        active_publishes: p.active_publishes.iter().map(proto_to_widget_publish_record).collect(),
+        active_publishes: p
+            .active_publishes
+            .iter()
+            .map(proto_to_widget_publish_record)
+            .collect(),
     }
 }
 
@@ -1228,10 +1276,7 @@ mod tests {
         }
 
         assert_eq!(restored.layers.len(), original.layers.len());
-        assert_eq!(
-            restored.layers[0].svg_file,
-            original.layers[0].svg_file
-        );
+        assert_eq!(restored.layers[0].svg_file, original.layers[0].svg_file);
         assert_eq!(
             restored.layers[0].bindings.len(),
             original.layers[0].bindings.len()
