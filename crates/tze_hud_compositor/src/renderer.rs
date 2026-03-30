@@ -25,6 +25,7 @@
 use crate::pipeline::{ChromeDrawCmd, RectVertex, rect_vertices};
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
+use crate::widget::WidgetRenderer;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::FrameTelemetry;
@@ -47,6 +48,9 @@ pub struct Compositor {
     /// is called. When `None`, TextMarkdownNode and zone StreamText content
     /// renders as solid-color rectangles only (no glyph output).
     pub(crate) text_rasterizer: Option<TextRasterizer>,
+    /// Optional widget renderer. Absent until `init_widget_renderer` is called.
+    /// When `None`, widget instances in the scene graph are not composited.
+    pub(crate) widget_renderer: Option<WidgetRenderer>,
 }
 
 impl Compositor {
@@ -107,6 +111,7 @@ impl Compositor {
             frame_number: 0,
             overlay_mode: false,
             text_rasterizer: None,
+            widget_renderer: None,
         })
     }
 
@@ -337,6 +342,7 @@ impl Compositor {
             frame_number: 0,
             overlay_mode: false,
             text_rasterizer: None,
+            widget_renderer: None,
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -512,6 +518,97 @@ impl Compositor {
             .as_ref()
             .map(|r| r.has_font(resource_id))
             .unwrap_or(false)
+    }
+
+    // ─── Widget renderer ─────────────────────────────────────────────────────
+
+    /// Initialize (or re-initialize) the widget renderer for the given surface format.
+    ///
+    /// Must be called once before widget textures can be composited. For headless
+    /// compositors, `format` should be `Rgba8UnormSrgb`. For windowed compositors,
+    /// use the negotiated swapchain format.
+    ///
+    /// Calling this multiple times replaces the existing renderer (e.g. on surface
+    /// reconfiguration or format change). Any cached textures are discarded.
+    pub fn init_widget_renderer(&mut self, format: wgpu::TextureFormat) {
+        self.widget_renderer = Some(WidgetRenderer::new(&self.device, format));
+        tracing::debug!(format = ?format, "widget renderer initialized");
+    }
+
+    /// Get a mutable reference to the widget renderer, if initialized.
+    pub fn widget_renderer_mut(&mut self) -> Option<&mut WidgetRenderer> {
+        self.widget_renderer.as_mut()
+    }
+
+    /// Get a reference to the widget renderer, if initialized.
+    pub fn widget_renderer(&self) -> Option<&WidgetRenderer> {
+        self.widget_renderer.as_ref()
+    }
+
+    /// Ensure widget instances have up-to-date cached textures for all widget
+    /// instances in the registry.
+    ///
+    /// For each widget instance:
+    /// - If no texture entry exists (first frame), rasterizes with default params.
+    /// - If the instance has a `dirty` flag set, re-rasterizes with current params.
+    /// - If an animation is active, resolves interpolated params and re-rasterizes.
+    ///
+    /// This should be called once per frame before `render_frame`.
+    pub fn sync_widget_textures(&mut self, scene: &SceneGraph) {
+        let wr = match &mut self.widget_renderer {
+            Some(r) => r,
+            None => return,
+        };
+
+        let registry = &scene.widget_registry;
+
+        // Collect instances that need texture updates.
+        let instance_names: Vec<String> = registry.instances.keys().cloned().collect();
+
+        for instance_name in instance_names {
+            let instance = match registry.instances.get(&instance_name) {
+                Some(i) => i.clone(),
+                None => continue,
+            };
+            let def = match registry.definitions.get(&instance.widget_type_name) {
+                Some(d) => d.clone(),
+                None => continue,
+            };
+
+            // Determine pixel geometry from the instance's geometry policy.
+            // Fall back to a sensible default if not set.
+            let (pw, ph) = resolve_widget_pixel_size(&instance, &def, self.width, self.height);
+            if pw == 0 || ph == 0 {
+                continue;
+            }
+
+            // Check if this instance needs an initial texture (no entry yet).
+            let needs_initial = wr.texture_entry(&instance_name).is_none();
+
+            // Resolve animated or static params.
+            let current_params = &instance.current_params;
+            let (effective_params, still_animating) =
+                wr.resolve_animated_params(&instance_name, current_params);
+
+            let dirty = needs_initial
+                || still_animating
+                || wr
+                    .texture_entry(&instance_name)
+                    .map(|e| e.dirty)
+                    .unwrap_or(false);
+
+            if dirty {
+                wr.rasterize_and_upload(
+                    &self.device,
+                    &self.queue,
+                    &instance_name,
+                    &def,
+                    &effective_params,
+                    pw,
+                    ph,
+                );
+            }
+        }
     }
 
     /// Collect `TextItem`s for all TextMarkdownNode tiles and zone StreamText
@@ -872,7 +969,7 @@ impl Compositor {
         // The CompositorFrame._guard keeps the backing resource alive until drop.
         let frame = surface.acquire_frame();
 
-        let (encoder, encode_us) = self.encode_frame(
+        let (mut encoder, encode_us) = self.encode_frame(
             &vertices,
             &frame.view,
             scene,
@@ -881,6 +978,9 @@ impl Compositor {
             self.overlay_mode,
         );
         telemetry.render_encode_us = encode_us;
+
+        // ── Widget pass: composite widget textures above zone content ─────────
+        self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
 
         let submit_start = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -958,8 +1058,11 @@ impl Compositor {
             self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false);
         telemetry.render_encode_us = encode_us;
 
+        // ── Widget pass: composite widget textures above zone content ─────────
+        self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
+
         // Headless-specific: copy rendered texture to readback buffer.
-        // Must happen after encode_frame (text pass complete) and before submit.
+        // Must happen after all render passes and before submit.
         surface.copy_to_buffer(&mut encoder);
 
         let submit_start = std::time::Instant::now();
@@ -1138,6 +1241,9 @@ impl Compositor {
             tr.trim_atlas();
         }
 
+        // ── Widget pass: above content + text, below chrome ───────────────────
+        self.encode_widget_pass(&mut encoder, &surface.view, &scene.widget_registry, sw, sh);
+
         // Chrome render pass — uses LoadOp::Load to preserve content pixels.
         // Chrome commands are drawn ON TOP of content by construction.
         // No agent tile can occlude chrome regardless of z-order.
@@ -1195,6 +1301,59 @@ impl Compositor {
                 a: 1.0,
             }
         }
+    }
+
+    /// Encode a widget render pass that composites all widget textures into the frame.
+    ///
+    /// Widget tiles use z_order >= WIDGET_TILE_Z_MIN (0x9000_0000), placing them
+    /// above zone tiles but below chrome (spec §Requirement: Widget Contention and
+    /// Governance, §Requirement: Widget Input Mode).
+    ///
+    /// This is a no-op when the widget renderer is not initialized or the registry
+    /// has no instances with cached textures.
+    fn encode_widget_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_view: &wgpu::TextureView,
+        registry: &WidgetRegistry,
+        surf_w: f32,
+        surf_h: f32,
+    ) {
+        let wr = match &self.widget_renderer {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Check if there are any instances with cached textures.
+        if registry.instances.is_empty() {
+            return;
+        }
+
+        let any_textured = registry
+            .instances
+            .keys()
+            .any(|name| wr.texture_entry(name).is_some());
+        if !any_textured {
+            return;
+        }
+
+        // Begin a LoadOp::Load render pass — widgets composite on top of scene content.
+        let mut widget_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("widget_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: frame_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // preserve content pixels under widgets
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        wr.composite_widgets(&mut widget_pass, registry, surf_w, surf_h, &self.device);
     }
 
     /// Render zone content as colored rectangles at zone geometry positions.
@@ -1256,8 +1415,8 @@ impl Compositor {
                 ZoneContent::Notification(n) => {
                     // Urgency-tinted background: higher urgency → more red.
                     match n.urgency {
-                        3 => [0.6, 0.1, 0.1, 0.9],  // critical — red
-                        2 => [0.5, 0.3, 0.1, 0.9],  // urgent — amber
+                        3 => [0.6, 0.1, 0.1, 0.9],    // critical — red
+                        2 => [0.5, 0.3, 0.1, 0.9],    // urgent — amber
                         1 => [0.15, 0.15, 0.25, 0.9], // normal — dark blue
                         _ => [0.1, 0.1, 0.15, 0.85],  // low — default
                     }
@@ -1431,6 +1590,39 @@ impl Compositor {
             self.render_node(*child_id, tile, scene, vertices, sw, sh);
         }
     }
+}
+
+/// Resolve the pixel dimensions for a widget instance.
+///
+/// Returns (width, height) in pixels. Returns (0, 0) if the geometry cannot be
+/// resolved (e.g., zero-sized surface or unrecognized policy).
+fn resolve_widget_pixel_size(
+    instance: &WidgetInstance,
+    def: &WidgetDefinition,
+    surf_w: u32,
+    surf_h: u32,
+) -> (u32, u32) {
+    let geo = instance
+        .geometry_override
+        .as_ref()
+        .unwrap_or(&def.default_geometry_policy);
+    let sw = surf_w as f32;
+    let sh = surf_h as f32;
+    let (w, h) = match geo {
+        GeometryPolicy::Relative {
+            width_pct,
+            height_pct,
+            ..
+        } => (sw * width_pct, sh * height_pct),
+        GeometryPolicy::EdgeAnchored {
+            width_pct,
+            height_pct,
+            ..
+        } => (sw * width_pct, sh * height_pct),
+    };
+    let w = (w.max(1.0) as u32).min(surf_w.max(1));
+    let h = (h.max(1.0) as u32).min(surf_h.max(1));
+    (w, h)
 }
 
 #[derive(Debug, thiserror::Error)]

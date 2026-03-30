@@ -16,6 +16,8 @@ bytemuck = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 glyphon = { workspace = true }
+resvg = { workspace = true }
+tiny-skia = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

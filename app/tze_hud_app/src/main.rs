@@ -397,8 +397,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Diagnostic: write resolved config to disk so we can verify args were parsed.
     let diag = format!(
         "mode={} width={} height={} auto_size={} grpc={} mcp={}\nargs={:?}\n",
-        opts.window_mode, opts.width, opts.height, overlay_auto_size,
-        opts.grpc_port, opts.mcp_port, std::env::args().collect::<Vec<_>>(),
+        opts.window_mode,
+        opts.width,
+        opts.height,
+        overlay_auto_size,
+        opts.grpc_port,
+        opts.mcp_port,
+        std::env::args().collect::<Vec<_>>(),
     );
     let _ = std::fs::write("C:\\tze_hud\\logs\\startup_diag.txt", &diag);
 

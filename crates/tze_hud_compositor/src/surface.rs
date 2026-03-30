@@ -35,8 +35,7 @@ struct EncodingGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for EncodingGuard {
     fn drop(&mut self) {
-        self.0
-            .store(false, std::sync::atomic::Ordering::Release);
+        self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -254,7 +253,9 @@ impl WindowSurface {
             spins += 1;
             if spins > 10_000 {
                 // Safety valve — don't spin forever if the compositor thread died.
-                tracing::warn!("present_pending_texture: encoding_in_progress stuck after {spins} spins");
+                tracing::warn!(
+                    "present_pending_texture: encoding_in_progress stuck after {spins} spins"
+                );
                 break;
             }
             std::hint::spin_loop();

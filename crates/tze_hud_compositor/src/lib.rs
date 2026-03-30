@@ -25,9 +25,11 @@ pub mod pipeline;
 pub mod renderer;
 pub mod surface;
 pub mod text;
+pub mod widget;
 
 pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
 pub use pipeline::ChromeDrawCmd;
 pub use renderer::{Compositor, CompositorError};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use text::{TextItem, TextRasterizer};
+pub use widget::{WidgetRenderer, interpolate_param};

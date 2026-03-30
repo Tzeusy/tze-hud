@@ -464,9 +464,13 @@ impl ApplicationHandler for WinitApp {
             "C:\\tze_hud\\logs\\surface_diag.txt",
             format!(
                 "configured={}x{} inner={}x{} scale={} surface={}x{}\n",
-                cfg.window.width, cfg.window.height,
-                actual_size.width, actual_size.height,
-                scale, surface_width, surface_height,
+                cfg.window.width,
+                cfg.window.height,
+                actual_size.width,
+                actual_size.height,
+                scale,
+                surface_width,
+                surface_height,
             ),
         );
 
