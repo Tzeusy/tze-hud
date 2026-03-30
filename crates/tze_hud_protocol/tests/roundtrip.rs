@@ -59,6 +59,7 @@ use tze_hud_protocol::proto::zone_content::Payload as ZonePayload;
 use tze_hud_protocol::proto::{
     CaptureReleasedEvent,
     CaptureReleasedReason,
+    ClearWidgetMutation,
     ClearZoneMutation,
     CommandAction,
     CommandInputEvent,
@@ -367,6 +368,19 @@ fn roundtrip_mutation_proto_all_variants() {
     };
     let d4 = round_trip(&m4);
     assert!(matches!(d4.mutation, Some(Mutation::ClearZone(_))));
+
+    // ClearWidget
+    let m5 = MutationProto {
+        mutation: Some(Mutation::ClearWidget(ClearWidgetMutation {
+            widget_name: "gauge".to_string(),
+            instance_id: String::new(),
+        })),
+    };
+    let d5 = round_trip(&m5);
+    assert!(matches!(d5.mutation, Some(Mutation::ClearWidget(_))));
+    if let Some(Mutation::ClearWidget(cw)) = d5.mutation {
+        assert_eq!(cw.widget_name, "gauge");
+    }
 }
 
 #[test]

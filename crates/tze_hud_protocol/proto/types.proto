@@ -111,6 +111,7 @@ message MutationProto {
     SetTileRootMutation   set_tile_root    = 2;
     PublishToZoneMutation publish_to_zone  = 3;
     ClearZoneMutation     clear_zone       = 4;
+    ClearWidgetMutation   clear_widget     = 5;
   }
 }
 

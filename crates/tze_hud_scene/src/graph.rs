@@ -943,9 +943,11 @@ impl SceneGraph {
             // Spec §Requirement: Lease Revocation Clears Zone Publications
             // (lines 235–242): When a lease is REVOKED or EXPIRED, all zone
             // publications made under that lease MUST be immediately cleared.
+            // Widget publications are also cleared on lease expiry/revocation.
             if terminal_state.is_terminal() {
                 if let Some(ns) = namespace {
                     self.clear_zone_publications_for_namespace(&ns);
+                    self.clear_widget_publications_for_namespace(&ns);
                 }
             }
 
@@ -2637,13 +2639,15 @@ impl SceneGraph {
             // pending removal (visual_hint remains None; compositor will not render
             // them once removed by finalize_budget_revocation).
 
-            // Clear zone publications immediately on REVOKED transition.
+            // Clear zone and widget publications immediately on REVOKED transition.
             // Spec §Requirement: Lease Revocation Clears Zone Publications
             // (lines 235–242): zone pubs must be cleared when lease is REVOKED/EXPIRED.
-            // Tile/node resources are deferred by the 100ms delay; zone pubs are not.
+            // Widget publications are similarly cleared immediately.
+            // Tile/node resources are deferred by the 100ms delay; zone/widget pubs are not.
             if let Some(lease) = self.leases.get(&lease_id) {
                 let ns = lease.namespace.clone();
                 self.clear_zone_publications_for_namespace(&ns);
+                self.clear_widget_publications_for_namespace(&ns);
             }
             specs.push(PostRevocationCleanupSpec::new(
                 lease_id,
@@ -2688,8 +2692,9 @@ impl SceneGraph {
                 for tid in tile_ids {
                     self.remove_tile_and_nodes(tid);
                 }
-                // Clear zone publications
+                // Clear zone and widget publications
                 self.clear_zone_publications_for_namespace(&spec.session_namespace);
+                self.clear_widget_publications_for_namespace(&spec.session_namespace);
                 finalized += 1;
             }
         }
@@ -2733,6 +2738,49 @@ impl SceneGraph {
             publishes.retain(|r| r.publisher_namespace != publisher_namespace);
             if publishes.len() != before {
                 self.version += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear all widget publications from a given agent namespace across all widgets.
+    ///
+    /// Called on lease expiry/revocation to satisfy spec §Requirement: Lease
+    /// Revocation Clears Widget Publications. Mirrors
+    /// [`clear_zone_publications_for_namespace`] for the widget registry.
+    pub fn clear_widget_publications_for_namespace(&mut self, namespace: &str) {
+        for publishes in self.widget_registry.active_publishes.values_mut() {
+            publishes.retain(|r| r.publisher_namespace != namespace);
+        }
+        // Remove empty entries for cleanliness
+        self.widget_registry
+            .active_publishes
+            .retain(|_, v| !v.is_empty());
+    }
+
+    /// Per spec: "ClearWidget clears all publications by the agent in the specified widget."
+    /// If no publications exist for the publisher, this is a no-op (but still succeeds).
+    /// When all publishers have been cleared the widget reverts to its default params.
+    ///
+    /// Returns `Err(WidgetNotFound)` if the widget instance is not registered.
+    pub fn clear_widget_for_publisher(
+        &mut self,
+        widget_name: &str,
+        publisher_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        if !self.widget_registry.instances.contains_key(widget_name) {
+            return Err(ValidationError::WidgetNotFound {
+                name: widget_name.to_string(),
+            });
+        }
+        if let Some(publishes) = self.widget_registry.active_publishes.get_mut(widget_name) {
+            let before = publishes.len();
+            publishes.retain(|r| r.publisher_namespace != publisher_namespace);
+            if publishes.len() != before {
+                self.version += 1;
+            }
+            if publishes.is_empty() {
+                self.widget_registry.active_publishes.remove(widget_name);
             }
         }
         Ok(())
@@ -7137,6 +7185,239 @@ mod spec_scenarios {
 
         let removed = scene.drain_expired_widget_publications();
         assert_eq!(removed, 0, "draining an empty registry must return 0");
+    }
+
+    // ── clear_widget_for_publisher tests ──────────────────────────────────────
+
+    /// WHEN clear_widget_for_publisher is called with the publishing namespace
+    /// THEN that agent's publications are removed and the widget reverts to defaults.
+    #[test]
+    fn clear_widget_for_publisher_removes_own_publications() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        // Publish as "agent.a"
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.9),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 1);
+
+        // Clear as "agent.a" — should remove the publication
+        scene.clear_widget_for_publisher("gauge", "agent.a").unwrap();
+        assert_eq!(
+            scene.widget_registry.active_for_widget("gauge").len(),
+            0,
+            "agent.a's publication should be cleared"
+        );
+    }
+
+    /// WHEN clear_widget_for_publisher is called with a different namespace
+    /// THEN only the matching publisher's records are removed.
+    #[test]
+    fn clear_widget_for_publisher_only_affects_own_publications() {
+        let (mut scene, _tab) =
+            scene_with_gauge(ContentionPolicy::Stack { max_depth: 4 });
+
+        // Publish as "agent.a" and "agent.b"
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.3),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.7),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 2);
+
+        // Clear as "agent.a" — only "agent.a"'s publication should be removed
+        scene.clear_widget_for_publisher("gauge", "agent.a").unwrap();
+        let remaining = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(remaining.len(), 1, "only agent.a's publication should be cleared");
+        assert_eq!(
+            remaining[0].publisher_namespace, "agent.b",
+            "agent.b's publication should remain"
+        );
+    }
+
+    /// WHEN clear_widget_for_publisher is called for a namespace with no publications
+    /// THEN it succeeds as a no-op.
+    #[test]
+    fn clear_widget_for_publisher_noop_when_no_publications() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        // No publications yet — clear should succeed silently
+        let result = scene.clear_widget_for_publisher("gauge", "agent.nobody");
+        assert!(result.is_ok(), "should succeed even when no publications exist");
+        assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 0);
+    }
+
+    /// WHEN clear_widget_for_publisher is called with an unknown widget name
+    /// THEN it returns WidgetNotFound.
+    #[test]
+    fn clear_widget_for_publisher_widget_not_found() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        let result = scene.clear_widget_for_publisher("nonexistent", "agent.a");
+        assert!(
+            matches!(result, Err(ValidationError::WidgetNotFound { .. })),
+            "unknown widget should produce WidgetNotFound, got: {result:?}"
+        );
+    }
+
+    /// WHEN clear_widget_publications_for_namespace is called
+    /// THEN ALL widget publications for that namespace are removed across all widgets.
+    #[test]
+    fn clear_widget_publications_for_namespace_removes_all_for_namespace() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        // Register a second widget instance using the same definition
+        scene.widget_registry.register_instance(WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "mem-gauge".to_string(),
+            current_params: Default::default(),
+        });
+
+        // Publish as "agent.a" to both widgets
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.5),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "mem-gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.8),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        // Publish as "agent.b" to "gauge" only
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.9),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        // Clear ALL of "agent.a" publications
+        scene.clear_widget_publications_for_namespace("agent.a");
+
+        // "agent.a"'s publication on "gauge" is gone; "agent.b"'s remains
+        let gauge_pubs = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(gauge_pubs.len(), 1, "only agent.b's gauge pub should remain");
+        assert_eq!(gauge_pubs[0].publisher_namespace, "agent.b");
+
+        // "agent.a"'s publication on "mem-gauge" is gone
+        let mem_pubs = scene.widget_registry.active_for_widget("mem-gauge");
+        assert_eq!(mem_pubs.len(), 0, "agent.a's mem-gauge pub should be cleared");
+    }
+
+    /// WHEN ClearWidget is sent as a scene mutation batch
+    /// THEN it removes the agent's publications via the standard pipeline.
+    #[test]
+    fn clear_widget_via_mutation_batch() {
+        use crate::mutation::{MutationBatch, SceneMutation};
+
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 4 });
+
+        // Publish as two agents
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.5),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.3),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 2);
+
+        // Send ClearWidget from "agent.a"
+        let batch = MutationBatch {
+            batch_id: SceneId::new(),
+            agent_namespace: "agent.a".to_string(),
+            mutations: vec![SceneMutation::ClearWidget {
+                widget_name: "gauge".to_string(),
+                instance_id: None,
+            }],
+            timing_hints: None,
+            lease_id: None,
+        };
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied, "ClearWidget batch should be accepted");
+
+        // Only "agent.b"'s publication should remain
+        let remaining = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(remaining.len(), 1, "agent.a's publication should be cleared");
+        assert_eq!(remaining[0].publisher_namespace, "agent.b");
     }
 }
 
