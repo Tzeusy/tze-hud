@@ -7027,10 +7027,7 @@ mod spec_scenarios {
 
         // The HashMap entry itself must be gone (no empty Vec).
         assert!(
-            !scene
-                .widget_registry
-                .active_publishes
-                .contains_key("gauge"),
+            !scene.widget_registry.active_publishes.contains_key("gauge"),
             "empty widget publication entry must be removed after expiry"
         );
     }
@@ -7041,9 +7038,8 @@ mod spec_scenarios {
     /// Source: widget-system/spec.md §Requirement: Expiration Policy.
     #[test]
     fn widget_ttl_only_expired_publication_removed_when_mixed() {
-        let (mut scene, _tab, clock) = scene_with_gauge_and_clock(ContentionPolicy::Stack {
-            max_depth: 10,
-        });
+        let (mut scene, _tab, clock) =
+            scene_with_gauge_and_clock(ContentionPolicy::Stack { max_depth: 10 });
 
         let now_us = 1_000_000u64; // clock starts at t=1 000 ms
         let expires_soon = now_us + 500_000u64; // expires in 500 ms
