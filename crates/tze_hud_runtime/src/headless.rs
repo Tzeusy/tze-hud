@@ -47,7 +47,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tze_hud_compositor::{Compositor, HeadlessSurface};
-use wgpu::TextureFormat;
 use tze_hud_config::TzeHudConfig;
 use tze_hud_input::InputProcessor;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
@@ -57,6 +56,7 @@ use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_telemetry::{FrameTelemetry, TelemetryCollector};
+use wgpu::TextureFormat;
 
 /// Configuration for the headless runtime.
 pub struct HeadlessConfig {
