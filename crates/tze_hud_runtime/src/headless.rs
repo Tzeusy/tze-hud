@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tze_hud_compositor::{Compositor, HeadlessSurface};
-use wgpu;
+use wgpu::TextureFormat;
 use tze_hud_config::TzeHudConfig;
 use tze_hud_input::InputProcessor;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
@@ -239,7 +239,7 @@ impl HeadlessRuntime {
         // ── Initialize text renderer ──────────────────────────────────────
         // HeadlessSurface always uses Rgba8UnormSrgb. Must be called here so
         // glyphon text rendering is active for all runtime paths (not just tests).
-        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+        compositor.init_text_renderer(TextureFormat::Rgba8UnormSrgb);
         tracing::debug!("headless: text renderer initialized");
 
         let scene = Arc::new(Mutex::new(SceneGraph::new(
