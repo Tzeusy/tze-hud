@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"
+          xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+
+  <assemblyIdentity version="1.0.0.0" processorArchitecture="*"
+                    name="tze_hud" type="win32"/>
+
+  <description>tze_hud — agent-native presence engine overlay</description>
+
+  <!-- DPI awareness: Per-Monitor V2 (requires Windows 10 1703+).
+       This declaration is processed by the OS loader BEFORE any code runs,
+       including the task scheduler's DPI context. It ensures that:
+         - MonitorHandle::size() returns physical pixels
+         - window.inner_size() returns physical pixels
+         - GetDpiForMonitor(MDT_EFFECTIVE_DPI) returns the real monitor DPI
+       Without this manifest, a process launched from the task scheduler (without
+       a console window) may start DPI-unaware, causing virtualized/logical pixel
+       dimensions to be reported. This manifest prevents that regardless of launch
+       context. See: hud-22by, docs/design/windows-dpi.md -->
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">
+        true/PM
+      </dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+        PerMonitorV2
+      </dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
+
+  <!-- Windows compatibility: declare support for Windows 10+ -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+
+</assembly>
