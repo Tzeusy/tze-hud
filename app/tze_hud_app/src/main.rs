@@ -13,8 +13,8 @@
 //! |---------------------|------------------------|--------------|------------------------------------------|
 //! | `--config <path>`   | `TZE_HUD_CONFIG`       | (auto-resolved) | Path to TOML config file.             |
 //! | `--window-mode <m>` | `TZE_HUD_WINDOW_MODE`  | `fullscreen` | Window mode: `fullscreen` or `overlay`.  |
-//! | `--width <px>`      | `TZE_HUD_WINDOW_WIDTH` | `1920`       | Window width in pixels.                  |
-//! | `--height <px>`     | `TZE_HUD_WINDOW_HEIGHT`| `1080`       | Window height in pixels.                 |
+//! | `--width <px>`      | `TZE_HUD_WINDOW_WIDTH` | auto¹        | Window width in pixels.                  |
+//! | `--height <px>`     | `TZE_HUD_WINDOW_HEIGHT`| auto¹        | Window height in pixels.                 |
 //! | `--grpc-port <port>`| `TZE_HUD_GRPC_PORT`    | `50051`      | gRPC listen port (0 to disable).         |
 //! | `--mcp-port <port>` | `TZE_HUD_MCP_PORT`     | `9090`       | MCP HTTP listen port (0 to disable).     |
 //! | `--psk <key>`       | `TZE_HUD_PSK`          | `tze-hud-key`| Pre-shared key for session authentication.|
@@ -68,9 +68,9 @@ OPTIONS:
                            (env: TZE_HUD_CONFIG; auto-resolved if omitted)
     --window-mode <mode>   Window mode: fullscreen | overlay  [default: fullscreen]
                            (env: TZE_HUD_WINDOW_MODE)
-    --width <px>           Window width in pixels  [default: 1920]
+    --width <px>           Window width in pixels  [default: auto-detect in overlay mode, 1920 otherwise]
                            (env: TZE_HUD_WINDOW_WIDTH)
-    --height <px>          Window height in pixels  [default: 1080]
+    --height <px>          Window height in pixels  [default: auto-detect in overlay mode, 1080 otherwise]
                            (env: TZE_HUD_WINDOW_HEIGHT)
     --grpc-port <port>     gRPC listen port; 0 to disable  [default: 50051]
                            (env: TZE_HUD_GRPC_PORT)
@@ -107,6 +107,16 @@ struct StartupOptions {
     window_mode: WindowMode,
     width: u32,
     height: u32,
+    /// Whether `width` was explicitly set via `--width` or `TZE_HUD_WINDOW_WIDTH`.
+    ///
+    /// When `false` (the default), overlay mode auto-detects the primary monitor
+    /// resolution at startup and ignores the default `width` value.
+    explicit_width: bool,
+    /// Whether `height` was explicitly set via `--height` or `TZE_HUD_WINDOW_HEIGHT`.
+    ///
+    /// When `false` (the default), overlay mode auto-detects the primary monitor
+    /// resolution at startup and ignores the default `height` value.
+    explicit_height: bool,
     grpc_port: u16,
     mcp_port: u16,
     psk: String,
@@ -120,6 +130,8 @@ impl Default for StartupOptions {
             window_mode: WindowMode::Fullscreen,
             width: 1920,
             height: 1080,
+            explicit_width: false,
+            explicit_height: false,
             grpc_port: 50051,
             mcp_port: 9090,
             psk: "tze-hud-key".to_string(),
@@ -142,11 +154,13 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
         opts.width = v
             .parse::<u32>()
             .map_err(|_| format!("TZE_HUD_WINDOW_WIDTH: invalid integer: {v:?}"))?;
+        opts.explicit_width = true;
     }
     if let Ok(v) = std::env::var("TZE_HUD_WINDOW_HEIGHT") {
         opts.height = v
             .parse::<u32>()
             .map_err(|_| format!("TZE_HUD_WINDOW_HEIGHT: invalid integer: {v:?}"))?;
+        opts.explicit_height = true;
     }
     if let Ok(v) = std::env::var("TZE_HUD_GRPC_PORT") {
         opts.grpc_port = v
@@ -202,6 +216,7 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                 opts.width = val
                     .parse::<u32>()
                     .map_err(|_| format!("--width: invalid integer: {val:?}"))?;
+                opts.explicit_width = true;
             }
             "--height" => {
                 i += 1;
@@ -211,6 +226,7 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                 opts.height = val
                     .parse::<u32>()
                     .map_err(|_| format!("--height: invalid integer: {val:?}"))?;
+                opts.explicit_height = true;
             }
             "--grpc-port" => {
                 i += 1;
@@ -333,11 +349,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    // Auto-size is enabled for overlay mode when neither --width nor --height
+    // was explicitly set (env var or CLI flag).  If either dimension was given
+    // explicitly, auto-detection is disabled so the user's intent is honoured.
+    let overlay_auto_size =
+        opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
+
     tracing::info!(
         version = VERSION,
         window_mode = %opts.window_mode,
         width = opts.width,
         height = opts.height,
+        overlay_auto_size,
         grpc_port = opts.grpc_port,
         mcp_port = opts.mcp_port,
         fps = opts.fps,
@@ -351,6 +374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             height: opts.height,
             title: "tze_hud".to_string(),
         },
+        overlay_auto_size,
         grpc_port: opts.grpc_port,
         mcp_port: opts.mcp_port,
         psk: opts.psk,
@@ -651,5 +675,132 @@ mod tests {
         assert_eq!(opts.window_mode, WindowMode::Overlay);
         assert_eq!(opts.width, 3840);
         assert_eq!(opts.height, 2160);
+    }
+
+    // ── overlay_auto_size flag computation (hud-48ml) ─────────────────────────
+    //
+    // These tests verify the three-way interaction that controls whether the
+    // windowed runtime should auto-detect the primary monitor resolution:
+    // 1. overlay mode + no explicit dimensions → auto_size=true
+    // 2. overlay mode + explicit --width/--height → auto_size=false (user intent)
+    // 3. fullscreen mode → auto_size=false (fullscreen always uses monitor native)
+
+    /// In overlay mode with no explicit dimensions, auto-detection must be enabled
+    /// (acceptance criterion 1: overlay auto-sizes to primary monitor).
+    #[test]
+    fn overlay_mode_no_explicit_dims_enables_auto_size() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
+        }
+        let args: Vec<String> = vec!["--window-mode".to_string(), "overlay".to_string()];
+        let opts = parse_options(&args).expect("must parse");
+        assert_eq!(opts.window_mode, WindowMode::Overlay);
+        assert!(!opts.explicit_width, "width must not be marked explicit");
+        assert!(!opts.explicit_height, "height must not be marked explicit");
+        // Derived: overlay_auto_size would be true
+        let overlay_auto_size =
+            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
+        assert!(overlay_auto_size, "overlay without explicit dims must enable auto-size");
+    }
+
+    /// In overlay mode with explicit --width AND --height, auto-detection must be
+    /// disabled (acceptance criterion 2: explicit flags override auto-detection).
+    #[test]
+    fn overlay_mode_with_explicit_dims_disables_auto_size() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
+        }
+        let args: Vec<String> = vec![
+            "--window-mode".to_string(),
+            "overlay".to_string(),
+            "--width".to_string(),
+            "2560".to_string(),
+            "--height".to_string(),
+            "1440".to_string(),
+        ];
+        let opts = parse_options(&args).expect("must parse");
+        assert!(opts.explicit_width, "width must be marked explicit when --width is given");
+        assert!(opts.explicit_height, "height must be marked explicit when --height is given");
+        let overlay_auto_size =
+            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
+        assert!(!overlay_auto_size, "explicit --width/--height must disable auto-size");
+    }
+
+    /// In overlay mode with only --width set, auto-detection is disabled
+    /// (either dimension being explicit disables auto-size for consistency).
+    #[test]
+    fn overlay_mode_with_explicit_width_only_disables_auto_size() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
+        }
+        let args: Vec<String> = vec![
+            "--window-mode".to_string(),
+            "overlay".to_string(),
+            "--width".to_string(),
+            "1280".to_string(),
+        ];
+        let opts = parse_options(&args).expect("must parse");
+        assert!(opts.explicit_width, "explicit_width must be set");
+        assert!(!opts.explicit_height, "explicit_height must not be set");
+        let overlay_auto_size =
+            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
+        assert!(!overlay_auto_size, "any explicit dimension must disable auto-size");
+    }
+
+    /// In fullscreen mode, auto-size is always disabled regardless of explicit dims
+    /// (fullscreen handles sizing via Fullscreen::Borderless, not overlay path).
+    #[test]
+    fn fullscreen_mode_never_enables_auto_size() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
+        }
+        let opts = parse_options(&[]).expect("must parse");
+        assert_eq!(opts.window_mode, WindowMode::Fullscreen);
+        let overlay_auto_size =
+            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
+        assert!(!overlay_auto_size, "fullscreen mode must never enable overlay auto-size");
+    }
+
+    /// Explicit width/height via environment variables also disables auto-size.
+    #[test]
+    fn overlay_mode_with_env_var_dims_disables_auto_size() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::set_var("TZE_HUD_WINDOW_MODE", "overlay");
+            std::env::set_var("TZE_HUD_WINDOW_WIDTH", "3840");
+            std::env::set_var("TZE_HUD_WINDOW_HEIGHT", "2160");
+        }
+        let opts = parse_options(&[]).expect("must parse");
+        assert_eq!(opts.window_mode, WindowMode::Overlay);
+        assert_eq!(opts.width, 3840);
+        assert_eq!(opts.height, 2160);
+        assert!(opts.explicit_width, "env-var width must count as explicit");
+        assert!(opts.explicit_height, "env-var height must count as explicit");
+        let overlay_auto_size =
+            opts.window_mode == WindowMode::Overlay && !opts.explicit_width && !opts.explicit_height;
+        assert!(!overlay_auto_size, "env-var explicit dims must disable auto-size");
+        // Clean up.
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
+        }
     }
 }

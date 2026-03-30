@@ -125,6 +125,18 @@ pub struct WindowedConfig {
     /// transparent, borderless, always-on-top window with per-region input
     /// passthrough.
     pub window: WindowConfig,
+    /// When `true` and the window mode is `Overlay`, auto-detect the primary
+    /// monitor resolution at startup and use it as the window dimensions.
+    ///
+    /// Explicit `--width`/`--height` flags (or `TZE_HUD_WINDOW_WIDTH` /
+    /// `TZE_HUD_WINDOW_HEIGHT` env vars) set this to `false`, causing the
+    /// configured `window.width`/`window.height` values to be used instead.
+    ///
+    /// Has no effect in fullscreen mode (fullscreen always uses the monitor's
+    /// native resolution via `Fullscreen::Borderless`).
+    ///
+    /// Default: `true`.
+    pub overlay_auto_size: bool,
     /// gRPC server port.  Set to `0` to disable the gRPC server.
     pub grpc_port: u16,
     /// MCP HTTP server port.  Set to `0` to disable the MCP server.
@@ -160,6 +172,7 @@ impl Default for WindowedConfig {
     fn default() -> Self {
         Self {
             window: WindowConfig::default(),
+            overlay_auto_size: true,
             grpc_port: 50051,
             mcp_port: 9090,
             psk: "tze-hud-key".to_string(),
@@ -272,7 +285,12 @@ impl ApplicationHandler for WinitApp {
         }
 
         // ── Create winit window ────────────────────────────────────────────
-        let cfg = &self.state.config.window;
+        // Clone the title and snapshot configured dimensions before any mutation
+        // to avoid borrow conflicts when we later update the config in-place for
+        // overlay auto-sizing.
+        let window_title = self.state.config.window.title.clone();
+        let cfg_width = self.state.config.window.width;
+        let cfg_height = self.state.config.window.height;
 
         // Build window attributes based on the effective window mode.
         //
@@ -289,19 +307,46 @@ impl ApplicationHandler for WinitApp {
                     "window mode: fullscreen (borderless) — compositor owns display, all input captured"
                 );
                 WindowAttributes::default()
-                    .with_title(cfg.title.clone())
+                    .with_title(window_title)
                     // Borderless fullscreen on the current monitor.
                     .with_fullscreen(Some(Fullscreen::Borderless(None)))
                     .with_decorations(false)
             }
             WindowMode::Overlay => {
-                tracing::info!("window mode: overlay/HUD — transparent borderless always-on-top");
+                // Determine overlay window dimensions.
+                //
+                // When `overlay_auto_size` is true (the default), query the primary
+                // monitor's physical size via the event loop and use it as the window
+                // dimensions.  This ensures the overlay covers the full display on any
+                // monitor (1080p, 1440p, 4K, etc.) without requiring explicit
+                // --width/--height flags.
+                //
+                // Fall back to the configured width/height if monitor detection fails
+                // (headless environments, missing display server, etc.).
+                let (overlay_w, overlay_h) = if self.state.config.overlay_auto_size {
+                    detect_primary_monitor_size(event_loop, cfg_width, cfg_height)
+                } else {
+                    (cfg_width, cfg_height)
+                };
+
+                // Update the config so that downstream code (surface init, logging)
+                // sees the resolved dimensions rather than the stale defaults.
+                self.state.config.window.width = overlay_w;
+                self.state.config.window.height = overlay_h;
+
+                tracing::info!(
+                    width = overlay_w,
+                    height = overlay_h,
+                    auto_size = self.state.config.overlay_auto_size,
+                    "window mode: overlay/HUD — transparent borderless always-on-top"
+                );
                 #[cfg(target_os = "windows")]
                 {
                     use winit::platform::windows::WindowAttributesExtWindows;
                     WindowAttributes::default()
-                        .with_title(cfg.title.clone())
-                        .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
+                        .with_title(window_title)
+                        .with_inner_size(winit::dpi::PhysicalSize::new(overlay_w, overlay_h))
+                        .with_position(winit::dpi::PhysicalPosition::new(0i32, 0i32))
                         .with_transparent(true)
                         .with_decorations(false)
                         .with_window_level(WindowLevel::AlwaysOnTop)
@@ -313,8 +358,9 @@ impl ApplicationHandler for WinitApp {
                 #[cfg(not(target_os = "windows"))]
                 {
                     WindowAttributes::default()
-                        .with_title(cfg.title.clone())
-                        .with_inner_size(winit::dpi::PhysicalSize::new(cfg.width, cfg.height))
+                        .with_title(window_title)
+                        .with_inner_size(winit::dpi::PhysicalSize::new(overlay_w, overlay_h))
+                        .with_position(winit::dpi::PhysicalPosition::new(0i32, 0i32))
                         .with_transparent(true)
                         .with_decorations(false)
                         .with_window_level(WindowLevel::AlwaysOnTop)
@@ -1353,6 +1399,74 @@ fn winit_logical_to_str(key: &winit::keyboard::Key) -> String {
     }
 }
 
+// ─── Monitor resolution detection ────────────────────────────────────────────
+
+/// Detect the physical size of the primary monitor via the winit event loop.
+///
+/// Used exclusively for overlay auto-sizing: when `overlay_auto_size` is true
+/// and the window mode is `Overlay`, this function is called in `resumed()`
+/// before window creation so the overlay covers the full display area.
+///
+/// ## Resolution order
+///
+/// 1. `event_loop.primary_monitor()` — the OS-designated primary display.
+/// 2. `event_loop.available_monitors().next()` — first enumerated monitor, if
+///    no primary is designated (common on some Wayland compositors).
+/// 3. `(fallback_width, fallback_height)` — the configured dimensions.
+///
+/// ## DPI scaling
+///
+/// `MonitorHandle::size()` returns the physical pixel size. DPI scaling is
+/// already applied at the OS level; the overlay window sized to physical pixels
+/// will cover the full display regardless of scale factor.
+///
+/// ## Errors
+///
+/// Failures (no monitors detected, headless environment) are logged as warnings
+/// and cause a graceful fall back to the configured fallback dimensions.
+fn detect_primary_monitor_size(
+    event_loop: &ActiveEventLoop,
+    fallback_width: u32,
+    fallback_height: u32,
+) -> (u32, u32) {
+    // Try primary_monitor() first, then fall back to the first available monitor.
+    let monitor = event_loop
+        .primary_monitor()
+        .or_else(|| event_loop.available_monitors().next());
+
+    match monitor {
+        Some(m) => {
+            let size = m.size();
+            if size.width > 0 && size.height > 0 {
+                tracing::info!(
+                    monitor_name = m.name().as_deref().unwrap_or("<unnamed>"),
+                    physical_width = size.width,
+                    physical_height = size.height,
+                    "overlay auto-size: detected primary monitor resolution"
+                );
+                (size.width, size.height)
+            } else {
+                tracing::warn!(
+                    fallback_width,
+                    fallback_height,
+                    "overlay auto-size: monitor size returned (0,0); \
+                     using configured fallback dimensions"
+                );
+                (fallback_width, fallback_height)
+            }
+        }
+        None => {
+            tracing::warn!(
+                fallback_width,
+                fallback_height,
+                "overlay auto-size: no monitors detected (headless?); \
+                 using configured fallback dimensions"
+            );
+            (fallback_width, fallback_height)
+        }
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1366,6 +1480,49 @@ mod tests {
         assert_eq!(cfg.grpc_port, 50051);
         assert_eq!(cfg.mcp_port, 9090);
         assert!(!cfg.psk.is_empty());
+    }
+
+    // ── overlay_auto_size field (hud-48ml) ────────────────────────────────────
+
+    /// Default `WindowedConfig` must have `overlay_auto_size = true` so that
+    /// overlay mode auto-detects the primary monitor resolution out-of-the-box.
+    #[test]
+    fn windowed_config_default_overlay_auto_size_is_true() {
+        let cfg = WindowedConfig::default();
+        assert!(
+            cfg.overlay_auto_size,
+            "overlay_auto_size must default to true so overlay covers the full monitor"
+        );
+    }
+
+    /// `overlay_auto_size` can be explicitly disabled to respect user-provided
+    /// `--width`/`--height` flags.
+    #[test]
+    fn windowed_config_overlay_auto_size_can_be_disabled() {
+        let cfg = WindowedConfig {
+            overlay_auto_size: false,
+            ..WindowedConfig::default()
+        };
+        assert!(!cfg.overlay_auto_size);
+    }
+
+    /// When `overlay_auto_size` is false and mode is Overlay, the configured
+    /// width/height values are respected (no monitor detection).
+    #[test]
+    fn windowed_config_overlay_explicit_dims_preserved() {
+        let cfg = WindowedConfig {
+            window: WindowConfig {
+                mode: WindowMode::Overlay,
+                width: 2560,
+                height: 1440,
+                title: "test".to_string(),
+            },
+            overlay_auto_size: false,
+            ..WindowedConfig::default()
+        };
+        assert_eq!(cfg.window.width, 2560);
+        assert_eq!(cfg.window.height, 1440);
+        assert!(!cfg.overlay_auto_size);
     }
 
     #[test]
