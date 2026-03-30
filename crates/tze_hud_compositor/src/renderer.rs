@@ -588,6 +588,138 @@ impl Compositor {
         }
     }
 
+    /// Shared encode pipeline used by `render_frame` and `render_frame_headless`.
+    ///
+    /// Encodes the geometry pass (clear + vertex draw) and the text pass into a
+    /// single `CommandEncoder`.  The encoder is returned to the caller **before**
+    /// `queue.submit` so that headless callers can append a `copy_to_buffer`
+    /// command (which must precede submit).
+    ///
+    /// # Parameters
+    ///
+    /// - `vertices` — pre-built vertex list (caller is responsible for overlay
+    ///   quads, zone content, etc.)
+    /// - `frame_view` — render target view for this frame
+    /// - `scene` — used only for the text pass (`collect_text_items`)
+    /// - `surf_w` / `surf_h` — surface dimensions used for the text viewport
+    /// - `use_overlay_pipeline` — when `true`, selects `clear_pipeline` (no
+    ///   blending) instead of the standard `pipeline`
+    ///
+    /// # Returns
+    ///
+    /// `(encoder, encode_us)` — the ready-to-submit encoder and the wall-clock
+    /// microseconds spent encoding (for `FrameTelemetry::render_encode_us`).
+    fn encode_frame(
+        &mut self,
+        vertices: &[RectVertex],
+        frame_view: &wgpu::TextureView,
+        scene: &SceneGraph,
+        surf_w: u32,
+        surf_h: u32,
+        use_overlay_pipeline: bool,
+    ) -> (wgpu::CommandEncoder, u64) {
+        let encode_start = std::time::Instant::now();
+
+        // ── Geometry pass ─────────────────────────────────────────────────────
+        let vertex_buffer = if vertices.is_empty() {
+            None
+        } else {
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("vertex_buffer"),
+                    contents: bytemuck::cast_slice(vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            Some(buffer)
+        };
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame_encoder"),
+            });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: frame_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_color()),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // In overlay mode, use the clear_pipeline (no blending) for ALL
+            // rendering. The first 6 vertices are a full-screen transparent
+            // quad that zeros out every pixel's alpha. Subsequent content
+            // (zone bars) overwrites specific regions with their own alpha.
+            if use_overlay_pipeline {
+                render_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                render_pass.set_pipeline(&self.pipeline);
+            }
+
+            if let Some(ref buffer) = vertex_buffer {
+                render_pass.set_vertex_buffer(0, buffer.slice(..));
+                render_pass.draw(0..vertices.len() as u32, 0..1);
+            }
+        }
+
+        // ── Text pass (Stage 6) ───────────────────────────────────────────────
+        // Collect text items before borrowing the rasterizer mutably, to avoid
+        // simultaneous mutable + immutable borrow of `self`.
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
+        let text_items: Vec<TextItem> = if self.text_rasterizer.is_some() {
+            self.collect_text_items(scene, sw, sh)
+        } else {
+            vec![]
+        };
+
+        // If a text rasterizer is present, prepare glyphon buffers and run a
+        // LoadOp::Load text pass on top of the geometry written above.
+        if let Some(ref mut tr) = self.text_rasterizer {
+            tr.update_viewport(&self.queue, surf_w, surf_h);
+            if !text_items.is_empty() {
+                if let Err(e) = tr.prepare_text_items(&self.device, &self.queue, &text_items) {
+                    tracing::warn!(error = %e, "text prepare failed — frame continues without text");
+                } else {
+                    let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("text_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: frame_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                // LoadOp::Load: preserve geometry pixels under the text.
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    if let Err(e) = tr.render_text_pass(&mut text_pass) {
+                        tracing::warn!(error = %e, "text render failed — frame continues without text");
+                    }
+                }
+            }
+            // Trim every frame regardless of item count — glyphs from prior frames
+            // must be evicted even when the current frame has no text.
+            tr.trim_atlas();
+        }
+
+        let encode_us = encode_start.elapsed().as_micros() as u64;
+        (encoder, encode_us)
+    }
+
     /// Render one frame of the scene to the surface.
     ///
     /// This method is surface-agnostic: it works with any type implementing
@@ -620,12 +752,11 @@ impl Compositor {
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
 
-        // Build vertex buffer from scene
+        // Build vertex list from scene.
+        let (surf_w, surf_h) = surface.size();
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
         let mut vertices: Vec<RectVertex> = Vec::new();
-        let (sw, sh) = {
-            let (w, h) = surface.size();
-            (w as f32, h as f32)
-        };
 
         // In overlay mode, prepend a full-screen quad to zero out alpha.
         if self.overlay_mode {
@@ -671,103 +802,13 @@ impl Compositor {
         // Render zone content.
         self.render_zone_content(scene, &mut vertices, sw, sh);
 
-        let encode_start = std::time::Instant::now();
-
-        // Create vertex buffer
-        let vertex_buffer = if vertices.is_empty() {
-            None
-        } else {
-            let buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("vertex_buffer"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            Some(buffer)
-        };
-
         // Acquire frame through the surface trait (surface-agnostic).
         // The CompositorFrame._guard keeps the backing resource alive until drop.
         let frame = surface.acquire_frame();
 
-        // Encode render pass
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame_encoder"),
-            });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            // In overlay mode, use the clear_pipeline (no blending) for ALL
-            // rendering. The first 6 vertices are a full-screen transparent
-            // quad that zeros out every pixel's alpha. Subsequent content
-            // (zone bars) overwrites specific regions with their own alpha.
-            if self.overlay_mode {
-                render_pass.set_pipeline(&self.clear_pipeline);
-            } else {
-                render_pass.set_pipeline(&self.pipeline);
-            }
-
-            if let Some(ref buffer) = vertex_buffer {
-                render_pass.set_vertex_buffer(0, buffer.slice(..));
-                render_pass.draw(0..vertices.len() as u32, 0..1);
-            }
-        }
-
-        // ── Stage 6: Text pass ────────────────────────────────────────────────
-        let text_items: Vec<TextItem> = if self.text_rasterizer.is_some() {
-            self.collect_text_items(scene, sw, sh)
-        } else {
-            vec![]
-        };
-        if let Some(ref mut tr) = self.text_rasterizer {
-            let (surf_w, surf_h) = surface.size();
-            tr.update_viewport(&self.queue, surf_w, surf_h);
-            if !text_items.is_empty() {
-                if let Err(e) = tr.prepare_text_items(&self.device, &self.queue, &text_items) {
-                    tracing::warn!(error = %e, "text prepare failed — frame continues without text");
-                } else {
-                    let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("text_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &frame.view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                    if let Err(e) = tr.render_text_pass(&mut text_pass) {
-                        tracing::warn!(error = %e, "text render failed — frame continues without text");
-                    }
-                }
-            }
-            // Trim every frame regardless of item count — glyphs from prior frames
-            // must be evicted even when the current frame has no text.
-            tr.trim_atlas();
-        }
-
-        telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
+        let (encoder, encode_us) =
+            self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, self.overlay_mode);
+        telemetry.render_encode_us = encode_us;
 
         let submit_start = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -789,12 +830,9 @@ impl Compositor {
     /// This is a convenience method for testing/CI that handles the extra
     /// `copy_to_buffer` step required for headless pixel readback.
     ///
-    /// The `copy_to_buffer` call must happen before `queue.submit()`, which
-    /// means it cannot be cleanly extracted into a post-render callback without
-    /// breaking the submit boundary.  This method intentionally duplicates the
-    /// render pipeline for that reason.  A follow-up refactor should extract a
-    /// shared internal `encode_frame` helper that accepts an optional readback
-    /// callback, eliminating this duplication.
+    /// `copy_to_buffer` is appended to the encoder before `queue.submit()` via
+    /// the shared `encode_frame` helper, which returns the encoder prior to
+    /// submission so that this headless-specific step can be inserted cleanly.
     ///
     /// Returns telemetry for this frame.
     pub fn render_frame_headless(
@@ -813,15 +851,14 @@ impl Compositor {
         telemetry.node_count = scene.node_count() as u32;
         telemetry.active_leases = scene.leases.len() as u32;
 
-        // Build vertex buffer from scene.
+        // Build vertex list from scene.
         // Use surface.size() — not self.width/self.height — so that vertex
         // normalization is correct even if the HeadlessSurface was created with
         // different dimensions than the compositor's stored width/height.
+        let (surf_w, surf_h) = surface.size();
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
         let mut vertices: Vec<RectVertex> = Vec::new();
-        let (sw, sh) = {
-            let (w, h) = surface.size();
-            (w as f32, h as f32)
-        };
 
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
@@ -841,100 +878,16 @@ impl Compositor {
             }
         }
 
-        let encode_start = std::time::Instant::now();
-
-        let vertex_buffer = if vertices.is_empty() {
-            None
-        } else {
-            let buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("vertex_buffer"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            Some(buffer)
-        };
-
         // Acquire frame via trait — same code path as render_frame().
         let frame = surface.acquire_frame();
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame_encoder"),
-            });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color()),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            render_pass.set_pipeline(&self.pipeline);
-
-            if let Some(ref buffer) = vertex_buffer {
-                render_pass.set_vertex_buffer(0, buffer.slice(..));
-                render_pass.draw(0..vertices.len() as u32, 0..1);
-            }
-        }
-
-        // ── Stage 6: Text pass ────────────────────────────────────────────────
-        // Collect text items before borrowing the rasterizer mutably, to avoid
-        // simultaneous mutable + immutable borrow of `self`.
-        let text_items: Vec<TextItem> = if self.text_rasterizer.is_some() {
-            self.collect_text_items(scene, sw, sh)
-        } else {
-            vec![]
-        };
-
-        // If a text rasterizer is present, prepare glyphon buffers and run a
-        // LoadOp::Load text pass on top of the geometry written above.
-        if let Some(ref mut tr) = self.text_rasterizer {
-            let (surf_w, surf_h) = surface.size();
-            tr.update_viewport(&self.queue, surf_w, surf_h);
-            if !text_items.is_empty() {
-                if let Err(e) = tr.prepare_text_items(&self.device, &self.queue, &text_items) {
-                    tracing::warn!(error = %e, "text prepare failed — frame continues without text");
-                } else {
-                    let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("text_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &frame.view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                // LoadOp::Load: preserve geometry pixels under the text.
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-                    if let Err(e) = tr.render_text_pass(&mut text_pass) {
-                        tracing::warn!(error = %e, "text render failed — frame continues without text");
-                    }
-                }
-            }
-            // Trim every frame regardless of item count — glyphs from prior frames
-            // must be evicted even when the current frame has no text.
-            tr.trim_atlas();
-        }
-
-        telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
+        // Headless never uses overlay mode — pass false for the pipeline selector.
+        let (mut encoder, encode_us) =
+            self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false);
+        telemetry.render_encode_us = encode_us;
 
         // Headless-specific: copy rendered texture to readback buffer.
+        // Must happen after encode_frame (text pass complete) and before submit.
         surface.copy_to_buffer(&mut encoder);
 
         let submit_start = std::time::Instant::now();
