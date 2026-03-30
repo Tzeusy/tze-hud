@@ -576,8 +576,7 @@ impl Compositor {
                     ZoneContent::StatusBar(payload) => {
                         // Format key-value pairs as "key: value" lines, sorted by key
                         // for deterministic output.
-                        let mut sorted: Vec<(&String, &String)> =
-                            payload.entries.iter().collect();
+                        let mut sorted: Vec<(&String, &String)> = payload.entries.iter().collect();
                         sorted.sort_by_key(|(k, _)| k.as_str());
                         let text = sorted
                             .iter()
@@ -2182,7 +2181,11 @@ mod tests {
 
         // Verify collect_text_items produces a TextItem with the formatted pairs.
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
-        assert_eq!(items.len(), 1, "expected exactly one TextItem for StatusBar");
+        assert_eq!(
+            items.len(),
+            1,
+            "expected exactly one TextItem for StatusBar"
+        );
         let item = &items[0];
         // Entries are sorted by key: "battery" < "time".
         assert!(
@@ -2197,8 +2200,14 @@ mod tests {
         );
         // The TextItem position should be within the zone geometry.
         // Zone top-edge: y = 8.0 (margin_px), height = 720*0.05 = 36, width = 1280*0.8 = 1024.
-        assert!(item.pixel_y >= 8.0, "text y should be at or below zone top margin");
-        assert!(item.pixel_y < 720.0 * 0.10, "text y should be within top zone area");
+        assert!(
+            item.pixel_y >= 8.0,
+            "text y should be at or below zone top margin"
+        );
+        assert!(
+            item.pixel_y < 720.0 * 0.10,
+            "text y should be within top zone area"
+        );
 
         // Render to pixels and verify bright text appears in the top zone area.
         compositor.render_frame_headless(&scene, &surface);
