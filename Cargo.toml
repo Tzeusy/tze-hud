@@ -41,6 +41,7 @@ prost-types = "0.13"
 # GPU / windowing
 wgpu = "24"
 winit = "0.30"
+glyphon = "0.8"
 
 # Telemetry / timing
 tracing = "0.1"
