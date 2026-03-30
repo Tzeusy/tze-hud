@@ -111,6 +111,14 @@ pub struct RawTab {
     /// `[zones]` section.  An unknown name produces `CONFIG_UNKNOWN_ZONE_TYPE`.
     #[serde(default)]
     pub zones: Vec<String>,
+
+    /// Widget instances declared on this tab.
+    ///
+    /// Each entry must reference a widget type loaded from a bundle in
+    /// `[widget_bundles].paths`. Unknown widget types produce
+    /// `CONFIG_UNKNOWN_WIDGET_TYPE`.
+    #[serde(default)]
+    pub widgets: Vec<RawTabWidget>,
 }
 
 /// Layout fractions within a tab.
@@ -230,6 +238,75 @@ fn default_true() -> bool {
     true
 }
 
+// ─── [widget_bundles] ────────────────────────────────────────────────────────
+
+/// `[widget_bundles]` table — optional.
+///
+/// Specifies directories to scan for widget asset bundles. Each directory is
+/// scanned for immediate subdirectories containing `widget.toml` manifests.
+/// Paths are resolved relative to the configuration file's parent directory.
+///
+/// Absence of this section means no widget types are loaded (empty registry).
+/// This is valid — the runtime starts with an empty widget registry.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct RawWidgetBundles {
+    /// Array of directory paths to scan for widget bundles.
+    /// Each path is resolved relative to the config file's parent directory.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+/// A `[[tabs.widgets]]` entry declaring a widget instance on a tab.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct RawTabWidget {
+    /// Widget type name (must match a loaded bundle's widget type name).
+    pub widget_type: Option<String>,
+
+    /// Optional instance ID. When multiple instances of the same widget type
+    /// exist on a tab, `instance_id` disambiguates them. When absent, the
+    /// `widget_type` name is used as the instance name.
+    pub instance_id: Option<String>,
+
+    /// Optional geometry override (overrides the widget type's default_geometry_policy).
+    pub geometry: Option<RawWidgetGeometry>,
+
+    /// Optional initial parameter values. Validated against the widget type's
+    /// parameter schema at startup.
+    ///
+    /// Uses `AnyValue` wrappers to satisfy `JsonSchema` (same approach as `includes`).
+    #[serde(default)]
+    pub initial_params: HashMap<String, AnyValue>,
+
+    /// Contention policy override. When absent, the widget type's
+    /// default_contention_policy is used.
+    pub contention: Option<String>,
+
+    /// Auto-clear TTL in milliseconds. When set, the widget occupancy is
+    /// automatically cleared after this duration.
+    pub auto_clear_ms: Option<u64>,
+}
+
+/// Inline geometry override for a widget instance.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct RawWidgetGeometry {
+    /// Absolute pixel x-coordinate (top-left origin).
+    pub x: Option<f32>,
+    /// Absolute pixel y-coordinate.
+    pub y: Option<f32>,
+    /// Width in pixels.
+    pub width: Option<f32>,
+    /// Height in pixels.
+    pub height: Option<f32>,
+    /// Fractional x-position (0.0–1.0, relative to display width).
+    pub x_pct: Option<f32>,
+    /// Fractional y-position.
+    pub y_pct: Option<f32>,
+    /// Fractional width.
+    pub width_pct: Option<f32>,
+    /// Fractional height.
+    pub height_pct: Option<f32>,
+}
+
 // ─── Top-level document ──────────────────────────────────────────────────────
 
 /// The top-level TOML document.
@@ -253,4 +330,6 @@ pub struct RawConfig {
     pub chrome: Option<RawChrome>,
     pub zones: Option<RawZones>,
     pub agents: Option<RawAgents>,
+    /// Optional widget bundle directories to scan at startup.
+    pub widget_bundles: Option<RawWidgetBundles>,
 }

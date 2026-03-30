@@ -96,6 +96,7 @@ pub mod subscriptions;
 pub mod tab_switch_trigger;
 pub mod threads;
 pub mod trace_capture;
+pub mod widget_startup;
 pub mod window;
 pub mod windowed;
 
@@ -246,3 +247,6 @@ pub use font_loader::FontLoader;
 
 // ── Reload triggers (RFC 0006 §9) ─────────────────────────────────────────────
 pub use reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
+
+// ── Widget startup integration ────────────────────────────────────────────────
+pub use widget_startup::{collect_tab_name_to_id, init_widget_registry};

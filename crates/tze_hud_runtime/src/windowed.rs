@@ -98,6 +98,7 @@ use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{ZoneContent, ZoneRegistry};
+use crate::widget_startup::init_widget_registry;
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -979,12 +980,29 @@ impl WindowedRuntime {
         // Build shared state (scene + sessions).
         let width = cfg.window.width as f32;
         let height = cfg.window.height as f32;
+        // Parse the raw config once here so we can use it for both widget
+        // registry initialization and the RuntimeContext build. Failure is
+        // non-fatal — widget startup will just leave the registry empty.
+        let raw_config_for_widgets: Option<tze_hud_config::raw::RawConfig> =
+            cfg.config_toml.as_deref().and_then(|toml| {
+                toml::from_str(toml).ok()
+            });
+
         let shared_scene = {
             let mut scene = SceneGraph::new(width, height);
             // Bootstrap the canonical zone definitions (status-bar, subtitle,
             // notification-area, etc.) so that MCP publish_to_zone works
             // immediately without requiring a gRPC session handshake first.
             scene.zone_registry = ZoneRegistry::with_defaults();
+
+            // Bootstrap the widget registry from [widget_bundles] and [[tabs.widgets]]
+            // configuration. This is a no-op when no [widget_bundles] section exists.
+            // Tabs are pre-created as needed to bind widget instances to tab IDs.
+            if let Some(raw) = &raw_config_for_widgets {
+                let tab_map = std::collections::HashMap::new();
+                init_widget_registry(&mut scene, raw, /*config_parent=*/ None, &tab_map);
+            }
+
             if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {
                 let samples = [
                     "Subtitle demo: systems online.",

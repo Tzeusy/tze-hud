@@ -39,6 +39,7 @@ use tze_hud_scene::config::{
 use crate::agents;
 use crate::capability::{capability_hint, has_reserved_event_prefix};
 use crate::privacy;
+use crate::widgets;
 use crate::profile;
 use crate::raw::{RawConfig, RawDegradation};
 use crate::resolver;
@@ -275,6 +276,26 @@ impl ConfigLoader for TzeHudConfig {
 
         // ── (10) Per-agent budget ceiling validation ───────────────────────────
         validate_agents(&self.raw, &mut errors);
+
+        // ── (13) Widget bundle path existence validation ───────────────────────
+        // We validate bundle path existence and per-tab widget instance references
+        // here during config validation. The actual bundle content is validated at
+        // runtime startup by the tze_hud_widget crate.
+        //
+        // During config-only validation (no runtime loaded yet), we have no
+        // LoadedWidgetType entries — known_types will be empty and type reference
+        // checks are skipped (they will be enforced at runtime startup).
+        widgets::validate_widget_bundles(
+            &self.raw,
+            /*config_parent=*/ None,
+            /*loaded_types=*/ &[],
+            &mut errors,
+        );
+        {
+            let known = std::collections::HashSet::new();
+            let type_map = std::collections::HashMap::new();
+            widgets::validate_widget_instances(&self.raw, &known, &type_map, &mut errors);
+        }
 
         errors
     }
