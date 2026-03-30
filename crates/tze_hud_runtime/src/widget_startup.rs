@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use tze_hud_config::raw::RawConfig;
-use tze_hud_config::widgets::{LoadedWidgetType, build_widget_instance};
+use tze_hud_config::widgets::{LoadedWidgetType, build_widget_instance, resolve_bundle_path};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::SceneId;
 use tze_hud_widget::loader::{BundleScanResult, scan_bundle_dirs};
@@ -83,18 +83,12 @@ pub fn init_widget_registry(
 
     let base = config_parent.unwrap_or_else(|| Path::new("."));
 
-    // Step 1: Resolve all bundle root paths.
+    // Step 1: Resolve all bundle root paths relative to `config_parent`
+    // (uses the shared helper from tze_hud_config::widgets to avoid duplication).
     let bundle_roots: Vec<std::path::PathBuf> = wb
         .paths
         .iter()
-        .map(|p| {
-            let path = Path::new(p);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                base.join(path)
-            }
-        })
+        .map(|p| resolve_bundle_path(p, base))
         .collect();
 
     // Step 2: Scan all bundle directories.

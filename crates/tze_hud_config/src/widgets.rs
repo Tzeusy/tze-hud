@@ -187,7 +187,7 @@ pub fn validate_widget_instances(
 
             if seen_instance_names.contains(&instance_name) {
                 errors.push(ConfigError {
-                    code: ConfigErrorCode::UnknownWidgetType,
+                    code: ConfigErrorCode::Other("CONFIG_DUPLICATE_WIDGET_INSTANCE_NAME".into()),
                     field_path: format!("{field_prefix}.instance_id"),
                     expected: "unique instance name within the tab".into(),
                     got: format!("{instance_name:?}"),
@@ -279,7 +279,14 @@ pub fn build_widget_instance(
 
 // ─── Private helpers ───────────────────────────────────────────────────────────
 
-fn resolve_bundle_path(path_str: &str, config_parent: &Path) -> PathBuf {
+/// Resolve a widget bundle path string to an absolute `PathBuf`.
+///
+/// Absolute paths are returned unchanged. Relative paths are joined to
+/// `config_parent` (typically the parent directory of the config file).
+///
+/// Exposed as `pub` so that `tze_hud_runtime::widget_startup` can reuse this
+/// logic for step-1 path resolution without duplicating the implementation.
+pub fn resolve_bundle_path(path_str: &str, config_parent: &Path) -> PathBuf {
     let p = Path::new(path_str);
     if p.is_absolute() {
         p.to_path_buf()
