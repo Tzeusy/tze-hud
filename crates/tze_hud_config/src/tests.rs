@@ -343,6 +343,98 @@ tab_switch_on_event = ""
     );
 }
 
+// ── Spec §Widget Bundle Configuration (CONFIG_WIDGET_* error codes) ──────────
+//
+// These tests verify that the TOML-level config validator produces the correct
+// CONFIG_WIDGET_* error codes for each error case when config is parsed via
+// TzeHudConfig::parse/validate.
+//
+// Source: configuration/spec.md §Widget Bundle Configuration,
+//         §Widget Instance Configuration (hud-mim2.7 acceptance criterion 11).
+
+/// WHEN [widget_bundles].paths contains a non-existent directory THEN
+/// CONFIG_WIDGET_BUNDLE_PATH_NOT_FOUND is produced.
+#[test]
+fn spec_widget_bundle_path_not_found_error() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[widget_bundles]
+paths = ["/tmp/tze_hud_nonexistent_widget_bundle_dir_mim2_7_test"]
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::WidgetBundlePathNotFound)),
+        "non-existent bundle path should produce CONFIG_WIDGET_BUNDLE_PATH_NOT_FOUND, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
+/// WHEN [widget_bundles] is absent THEN no CONFIG_WIDGET_* errors are produced.
+/// An empty registry is a valid configuration.
+#[test]
+fn spec_absent_widget_bundles_no_error() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    let widget_errors: Vec<_> = errors
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.code,
+                ConfigErrorCode::WidgetBundlePathNotFound
+                    | ConfigErrorCode::UnknownWidgetType
+                    | ConfigErrorCode::WidgetInvalidInitialParams
+            )
+        })
+        .collect();
+    assert!(
+        widget_errors.is_empty(),
+        "absent [widget_bundles] should produce no widget errors, got: {widget_errors:?}"
+    );
+}
+
+/// WHEN [[tabs.widgets]] widget_type is missing THEN CONFIG_UNKNOWN_WIDGET_TYPE.
+///
+/// During config-only validation (no loaded types), a missing/empty widget_type
+/// field still produces an error because widget_type is required.
+#[test]
+fn spec_widget_instance_missing_type_produces_error() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[[tabs.widgets]]
+# widget_type is intentionally omitted
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    // Missing widget_type produces CONFIG_UNKNOWN_WIDGET_TYPE (empty type name).
+    assert!(
+        errors
+            .iter()
+            .any(|e| matches!(e.code, ConfigErrorCode::UnknownWidgetType)),
+        "missing widget_type should produce CONFIG_UNKNOWN_WIDGET_TYPE, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
 // ── Spec §Schema Export ───────────────────────────────────────────────────────
 
 /// WHEN schema_value() is called THEN valid JSON Schema returned.
