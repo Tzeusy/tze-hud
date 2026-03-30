@@ -1940,29 +1940,4 @@ redaction_style = "blank"
         assert_eq!(h, 1440, "configured size must be used when actual is zero");
     }
 
-    /// The clamping logic for surface dimensions must prevent zero-size configs.
-    /// wgpu panics if width or height is 0 in `surface.configure()`.
-    #[test]
-    fn surface_dimension_clamp_enforces_minimum_of_one() {
-        // If actual size is (0, 0) and configured is also (0, 0), max(1) must apply.
-        let raw_w = 0u32;
-        let raw_h = 0u32;
-        let max_dim = 16384u32;
-        let clamped_w = raw_w.min(max_dim).max(1);
-        let clamped_h = raw_h.min(max_dim).max(1);
-        assert_eq!(clamped_w, 1, "zero width must be clamped to 1");
-        assert_eq!(clamped_h, 1, "zero height must be clamped to 1");
-    }
-
-    /// The clamping logic must also respect the max_texture_dimension_2d limit.
-    #[test]
-    fn surface_dimension_clamp_respects_device_limit() {
-        let raw_w = 8192u32;
-        let raw_h = 4096u32;
-        let max_dim = 4096u32; // device limit
-        let clamped_w = raw_w.min(max_dim).max(1);
-        let clamped_h = raw_h.min(max_dim).max(1);
-        assert_eq!(clamped_w, 4096, "width must be clamped to device limit");
-        assert_eq!(clamped_h, 4096, "height must be clamped to device limit");
-    }
 }
