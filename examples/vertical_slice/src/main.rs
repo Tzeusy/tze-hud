@@ -137,6 +137,13 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Window mode: {mode}, size: {width}x{height}");
 
+    // overlay_auto_size: true when in overlay mode and no explicit dimensions
+    // were given (env vars default to explicit fallbacks, so we detect the
+    // "default" case by checking if the env vars are absent).
+    let overlay_auto_size = mode == WindowMode::Overlay
+        && std::env::var("TZE_HUD_WINDOW_WIDTH").is_err()
+        && std::env::var("TZE_HUD_WINDOW_HEIGHT").is_err();
+
     let config = WindowedConfig {
         window: WindowConfig {
             mode,
@@ -144,6 +151,7 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
             height,
             title: "tze_hud — vertical slice".to_string(),
         },
+        overlay_auto_size,
         grpc_port: 0, // Disabled for the standalone windowed demo.
         mcp_port: 0,  // Disabled for the standalone windowed demo.
         psk: "vertical-slice-key".to_string(),
