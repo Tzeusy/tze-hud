@@ -46,11 +46,11 @@ use wgpu::{Device, MultisampleState, Queue};
 /// font system, glyph atlas, and renderer. Not `Send` — must stay on the
 /// compositor thread.
 pub struct TextRasterizer {
-    pub font_system: FontSystem,
-    pub swash_cache: SwashCache,
-    pub viewport: Viewport,
-    pub atlas: TextAtlas,
-    pub renderer: TextRenderer,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    renderer: TextRenderer,
 }
 
 impl TextRasterizer {

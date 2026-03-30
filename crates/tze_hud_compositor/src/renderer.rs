@@ -542,9 +542,10 @@ impl Compositor {
 
             let font_size = zone_def.rendering_policy.font_size_px.unwrap_or(16.0);
 
-            // Use the most-recent publish (publishes is sorted oldest-first for Stack;
-            // LatestWins/Replace has at most one entry).
-            for record in publishes.iter() {
+            // Use the most-recent publish. For Stack contention policy, publishes
+            // are sorted oldest-first, so we iterate in reverse to get the newest
+            // StreamText entry. For LatestWins/Replace there is at most one entry.
+            for record in publishes.iter().rev() {
                 if let ZoneContent::StreamText(text) = &record.content {
                     // White text on the semi-transparent zone background.
                     let color = [255u8, 255, 255, 220];
@@ -760,8 +761,10 @@ impl Compositor {
                         tracing::warn!(error = %e, "text render failed — frame continues without text");
                     }
                 }
-                tr.trim_atlas();
             }
+            // Trim every frame regardless of item count — glyphs from prior frames
+            // must be evicted even when the current frame has no text.
+            tr.trim_atlas();
         }
 
         telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
@@ -923,8 +926,10 @@ impl Compositor {
                         tracing::warn!(error = %e, "text render failed — frame continues without text");
                     }
                 }
-                tr.trim_atlas();
             }
+            // Trim every frame regardless of item count — glyphs from prior frames
+            // must be evicted even when the current frame has no text.
+            tr.trim_atlas();
         }
 
         telemetry.render_encode_us = encode_start.elapsed().as_micros() as u64;
@@ -1102,8 +1107,10 @@ impl Compositor {
                         tracing::warn!(error = %e, "text render failed in chrome path");
                     }
                 }
-                tr.trim_atlas();
             }
+            // Trim every frame regardless of item count — glyphs from prior frames
+            // must be evicted even when the current frame has no text.
+            tr.trim_atlas();
         }
 
         // Chrome render pass — uses LoadOp::Load to preserve content pixels.
