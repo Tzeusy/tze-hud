@@ -2153,6 +2153,15 @@ checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
 
 [[package]]
 name = "quick-xml"
+version = "0.37.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
 version = "0.39.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "958f21e8e7ceb5a1aa7fa87fab28e7c75976e0bfe7e23ff069e0a260f894067d"
@@ -3313,6 +3322,7 @@ dependencies = [
  "dashmap",
  "image",
  "proptest",
+ "quick-xml 0.37.5",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
@@ -3377,6 +3387,20 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tze_hud_compositor",
+ "tze_hud_scene",
+]
+
+[[package]]
+name = "tze_hud_widget"
+version = "0.1.0"
+dependencies = [
+ "quick-xml 0.37.5",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+ "tracing",
+ "tze_hud_resource",
  "tze_hud_scene",
 ]
 
@@ -3726,7 +3750,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c86287151a309799b821ca709b7345a048a2956af05957c89cb824ab919fa4e3"
 dependencies = [
  "proc-macro2",
- "quick-xml",
+ "quick-xml 0.39.2",
  "quote",
 ]
 

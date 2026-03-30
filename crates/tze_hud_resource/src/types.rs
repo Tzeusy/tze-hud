@@ -79,8 +79,11 @@ impl std::fmt::Display for ResourceId {
 
 /// V1 resource types supported by the runtime.
 ///
-/// Exactly five types are supported in v1 (spec lines 31-34).  Uploads of any
-/// other type are rejected with `ResourceError::UnsupportedType`.
+/// Six types are supported in v1: five raster/font types and one vector type
+/// (IMAGE_SVG).  Uploads of any other type are rejected with
+/// `ResourceError::UnsupportedType`.
+///
+/// Source: resource-store/spec.md §Requirement: V1 Resource Type Enumeration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ResourceType {
     /// Raw RGBA8 pixel data (width × height × 4 bytes, row-major, top-left origin).
@@ -93,12 +96,27 @@ pub enum ResourceType {
     FontTtf,
     /// OpenType font.
     FontOtf,
+    /// SVG vector image.
+    ///
+    /// Used exclusively by the widget asset bundle system.  IMAGE_SVG resources
+    /// SHALL NOT be publishable directly to zones.
+    ///
+    /// Upload validation MUST verify well-formed XML with an `<svg>` root element.
+    /// No rasterization occurs at upload time.
+    ///
+    /// Budget accounting uses an estimated rasterized size:
+    /// `width_px * height_px * 4` where dimensions come from `viewBox` or
+    /// `width`/`height` attributes, with a 512×512 default and 2048×2048 clamp.
+    ///
+    /// Source: resource-store/spec.md §Requirement: V1 Resource Type Enumeration,
+    ///         §Requirement: SVG Resource Budget Accounting.
+    ImageSvg,
 }
 
 impl ResourceType {
     /// Return `true` iff this type is part of the v1 supported set.
     ///
-    /// All five variants are v1-supported; the method exists so callers can
+    /// All six variants are v1-supported; the method exists so callers can
     /// express intent clearly and so future post-v1 variants (VIDEO_H264, etc.)
     /// can be added without changing call sites.
     #[inline]
@@ -112,6 +130,7 @@ impl ResourceType {
                 | ResourceType::ImageJpeg
                 | ResourceType::FontTtf
                 | ResourceType::FontOtf
+                | ResourceType::ImageSvg
         )
     }
 }
@@ -124,10 +143,24 @@ impl std::fmt::Display for ResourceType {
             ResourceType::ImageJpeg => "IMAGE_JPEG",
             ResourceType::FontTtf => "FONT_TTF",
             ResourceType::FontOtf => "FONT_OTF",
+            ResourceType::ImageSvg => "IMAGE_SVG",
         };
         f.write_str(s)
     }
 }
+
+// ─── SVG budget constants ──────────────────────────────────────────────────────
+
+/// Default SVG rasterized dimension when no explicit `viewBox`/`width`/`height`
+/// is present (512 × 512 pixels).
+///
+/// Source: resource-store/spec.md §Requirement: SVG Resource Budget Accounting.
+pub const SVG_DEFAULT_DIMENSION_PX: u32 = 512;
+
+/// Maximum SVG rasterized dimension for budget clamping (2048 × 2048).
+///
+/// Source: resource-store/spec.md §Requirement: SVG Resource Budget Accounting.
+pub const SVG_MAX_DIMENSION_PX: u32 = 2048;
 
 // ─── Resource size limits (configurable via ResourceStoreConfig) ──────────────
 
@@ -361,16 +394,23 @@ mod tests {
 
     #[test]
     fn all_v1_types_are_supported() {
-        // Acceptance: IMAGE_PNG accepted (spec lines 37-38).
+        // Acceptance: all six v1 types must be supported.
+        // Source: resource-store/spec.md §Requirement: V1 Resource Type Enumeration.
         for rt in [
             ResourceType::ImageRgba8,
             ResourceType::ImagePng,
             ResourceType::ImageJpeg,
             ResourceType::FontTtf,
             ResourceType::FontOtf,
+            ResourceType::ImageSvg,
         ] {
             assert!(rt.is_v1_supported(), "{rt} should be v1-supported");
         }
+    }
+
+    #[test]
+    fn image_svg_display_name() {
+        assert_eq!(ResourceType::ImageSvg.to_string(), "IMAGE_SVG");
     }
 
     #[test]

@@ -83,8 +83,12 @@ pub use sharing::{RefResult, SharingContext, check_reference_policy};
 pub use store::EphemeralStore;
 pub use types::{
     CHUNK_SIZE_LIMIT, DEFAULT_MAX_DECODED_TEXTURE_BYTES, DEFAULT_MAX_RESOURCE_BYTES,
-    DEFAULT_MAX_TOTAL_TEXTURE_BYTES, DecodedMeta, INLINE_SIZE_LIMIT,
-    MAX_CONCURRENT_UPLOADS_PER_AGENT, MAX_TEXTURE_DIMENSION_PX, ResourceError, ResourceId,
+    DEFAULT_MAX_TOTAL_TEXTURE_BYTES, DEFAULT_MAX_FONT_CACHE_BYTES,
+    DEFAULT_MAX_CONCURRENT_RESOURCES, DEFAULT_UPLOAD_RATE_LIMIT_BYTES_PER_SEC,
+    DecodedMeta, INLINE_SIZE_LIMIT,
+    MAX_CONCURRENT_UPLOADS_PER_AGENT, MAX_TEXTURE_DIMENSION_PX,
+    SVG_DEFAULT_DIMENSION_PX, SVG_MAX_DIMENSION_PX,
+    ResourceError, ResourceId,
     ResourceStoreConfig, ResourceStored, ResourceType,
 };
 pub use upload::{ResourceStore, UploadId, UploadStartRequest};
