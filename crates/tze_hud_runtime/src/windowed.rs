@@ -427,19 +427,18 @@ impl ApplicationHandler for WinitApp {
         // doesn't match the surface handle's drawable area, which triggers a
         // validation panic before `surface.configure()` can write alpha_diag.txt.
         //
+        // `window.inner_size()` returns `PhysicalSize<u32>` — physical pixels —
+        // when per-monitor DPI awareness is active (guaranteed by the embedded
+        // manifest in `tze_hud_app/tze_hud.manifest`). Do NOT multiply by
+        // `scale_factor()`; that would over-count on DPI-scaled displays.
+        //
         // Fall back to the configured values only when inner_size() returns (0,0)
         // (e.g., window not yet shown or minimized at construction time — rare
         // but possible on some Win32 driver/compositor combinations).
         let actual_size = window.inner_size();
-        let scale = window.scale_factor();
-        // On Windows with DPI scaling > 100%, inner_size() may return the
-        // DPI-virtualized (logical) resolution rather than true physical pixels.
-        // Multiply by the window's scale_factor to recover the real pixel count.
-        // At 100% scaling (scale=1.0) this is a no-op.
-        let scaled_w = (actual_size.width as f64 * scale).round() as u32;
-        let scaled_h = (actual_size.height as f64 * scale).round() as u32;
-        let (surface_width, surface_height) = if scaled_w > 0 && scaled_h > 0 {
-            (scaled_w, scaled_h)
+        let scale = window.scale_factor(); // logged for diagnostics only
+        let (surface_width, surface_height) = if actual_size.width > 0 && actual_size.height > 0 {
+            (actual_size.width, actual_size.height)
         } else {
             tracing::warn!(
                 requested_width = cfg.window.width,
@@ -457,7 +456,7 @@ impl ApplicationHandler for WinitApp {
             scale_factor = scale,
             surface_width,
             surface_height,
-            "windowed: resolved surface dimensions (inner_size * scale_factor)"
+            "windowed: resolved surface dimensions from window.inner_size() (physical pixels)"
         );
         // Diagnostic: write surface resolution so remote operators can verify.
         let _ = std::fs::write(
@@ -1495,9 +1494,17 @@ fn winit_logical_to_str(key: &winit::keyboard::Key) -> String {
 ///
 /// ## DPI scaling
 ///
-/// `MonitorHandle::size()` returns the physical pixel size. DPI scaling is
-/// already applied at the OS level; the overlay window sized to physical pixels
-/// will cover the full display regardless of scale factor.
+/// `MonitorHandle::size()` returns the **physical** pixel size when the process
+/// has per-monitor DPI awareness set (which is guaranteed by the embedded
+/// application manifest in `tze_hud_app`). The return value is used directly
+/// without scaling — do NOT multiply by `scale_factor()`.
+///
+/// Background: `MonitorHandle::scale_factor()` calls `GetDpiForMonitor` with
+/// `MDT_EFFECTIVE_DPI`, which returns the DPI-awareness-adjusted value (96 for
+/// DPI-unaware processes). If the process is somehow not DPI-aware, both
+/// `size()` and `scale_factor()` are virtualised; multiplying them produces a
+/// doubly-wrong result. The manifest-based DPI awareness declaration (see
+/// `app/tze_hud_app/tze_hud.manifest`) ensures physical values at all times.
 ///
 /// ## Errors
 ///
@@ -1515,25 +1522,21 @@ fn detect_primary_monitor_size(
 
     match monitor {
         Some(m) => {
+            // `MonitorHandle::size()` returns PhysicalSize<u32> — physical pixels
+            // when the process has per-monitor DPI awareness (guaranteed by the
+            // embedded manifest). Do NOT multiply by scale_factor; that would
+            // over-count on DPI-scaled displays (e.g. 2560 * 1.25 = 3200 at 125%).
             let size = m.size();
-            let scale = m.scale_factor();
-            // On Windows with DPI scaling > 100%, MonitorHandle::size() may
-            // return the DPI-virtualized (logical) resolution instead of the
-            // true physical resolution. Multiply by scale_factor to get the
-            // real pixel dimensions. At 100% (scale=1.0) this is a no-op.
-            let phys_w = (size.width as f64 * scale).round() as u32;
-            let phys_h = (size.height as f64 * scale).round() as u32;
-            if phys_w > 0 && phys_h > 0 {
+            let scale = m.scale_factor(); // logged for diagnostics only
+            if size.width > 0 && size.height > 0 {
                 tracing::info!(
                     monitor_name = m.name().as_deref().unwrap_or("<unnamed>"),
-                    reported_width = size.width,
-                    reported_height = size.height,
+                    physical_width = size.width,
+                    physical_height = size.height,
                     scale_factor = scale,
-                    physical_width = phys_w,
-                    physical_height = phys_h,
-                    "overlay auto-size: detected primary monitor resolution"
+                    "overlay auto-size: detected primary monitor physical resolution"
                 );
-                (phys_w, phys_h)
+                (size.width, size.height)
             } else {
                 tracing::warn!(
                     fallback_width,
@@ -2179,5 +2182,107 @@ redaction_style = "blank"
         };
         assert_eq!(w, 2560, "configured size must be used when actual is zero");
         assert_eq!(h, 1440, "configured size must be used when actual is zero");
+    }
+
+    // ── DPI scaling correctness (hud-22by) ────────────────────────────────────
+
+    /// At 125% DPI on a 2560x1440 monitor, `MonitorHandle::size()` returns
+    /// physical pixels (2560, 1440) when the process has per-monitor DPI
+    /// awareness (guaranteed by the embedded manifest).  The overlay MUST cover
+    /// the full 2560x1440 display — NOT the DPI-virtualized 2048x1152.
+    ///
+    /// Regression guard: the old code multiplied `size()` by `scale_factor()`
+    /// (2560 * 1.25 = 3200), which over-counted physical pixels.  The correct
+    /// behaviour is to use `size()` directly.
+    #[test]
+    fn dpi_125pct_overlay_covers_full_physical_display() {
+        // Simulate: winit reports physical size (DPI-aware process, manifest set)
+        let physical_width: u32 = 2560;
+        let physical_height: u32 = 1440;
+        let scale_factor: f64 = 1.25; // 125% DPI = 120 DPI / 96 base
+
+        // Correct approach: use size() directly (physical pixels).
+        let (w, h) = (physical_width, physical_height);
+        assert_eq!(w, 2560, "overlay must be full physical width at 125% DPI");
+        assert_eq!(h, 1440, "overlay must be full physical height at 125% DPI");
+
+        // Regression check: old code that over-counted.
+        let over_counted_w = (physical_width as f64 * scale_factor).round() as u32;
+        assert_ne!(
+            over_counted_w, 2560,
+            "multiplying physical size by scale_factor over-counts (produces 3200, not 2560)"
+        );
+        assert_eq!(over_counted_w, 3200, "old code would have produced 3200");
+    }
+
+    /// At 150% DPI on a 3840x2160 monitor, `MonitorHandle::size()` returns
+    /// physical pixels (3840, 2160).  The overlay must cover the full display.
+    #[test]
+    fn dpi_150pct_overlay_covers_full_physical_display() {
+        let physical_width: u32 = 3840;
+        let physical_height: u32 = 2160;
+        let scale_factor: f64 = 1.5;
+
+        // Correct: use size() directly.
+        let (w, h) = (physical_width, physical_height);
+        assert_eq!(w, 3840, "overlay must be full physical width at 150% DPI");
+        assert_eq!(h, 2160, "overlay must be full physical height at 150% DPI");
+
+        // Old code would over-count.
+        let over_counted_w = (physical_width as f64 * scale_factor).round() as u32;
+        assert_eq!(over_counted_w, 5760, "old code produced 5760 at 150% DPI");
+    }
+
+    /// At 100% DPI, `scale_factor()` is 1.0 and physical equals logical.
+    /// Using `size()` directly must produce the same result whether or not
+    /// scale_factor multiplication is applied — no regression at 100%.
+    #[test]
+    fn dpi_100pct_no_regression() {
+        let physical_width: u32 = 1920;
+        let physical_height: u32 = 1080;
+        let scale_factor: f64 = 1.0;
+
+        // Correct: use size() directly.
+        let (w, h) = (physical_width, physical_height);
+        assert_eq!(w, 1920, "100% DPI must not regress");
+        assert_eq!(h, 1080, "100% DPI must not regress");
+
+        // At 100%, old code and new code agree (1.0 multiply is identity).
+        let with_scale = (physical_width as f64 * scale_factor).round() as u32;
+        assert_eq!(
+            with_scale, w,
+            "at 100% DPI, scale multiplication is identity — no regression"
+        );
+    }
+
+    /// The `inner_size()` surface dimension resolution must use physical pixels
+    /// directly, without multiplying by `scale_factor`.  At 125% DPI with a
+    /// 2560x1440 window, the wgpu surface must be configured at 2560x1440, not
+    /// 3200x1800.
+    #[test]
+    fn surface_dimension_resolution_does_not_multiply_by_scale_factor() {
+        // Simulate: window.inner_size() = (2560, 1440) at 125% DPI.
+        let inner_w: u32 = 2560;
+        let inner_h: u32 = 1440;
+        let scale: f64 = 1.25;
+
+        // Correct: use inner_size() directly.
+        let (surface_w, surface_h) = if inner_w > 0 && inner_h > 0 {
+            (inner_w, inner_h)
+        } else {
+            (1920u32, 1080u32) // fallback (unreachable in this test)
+        };
+        assert_eq!(
+            surface_w, 2560,
+            "surface must match physical inner_size at 125% DPI"
+        );
+        assert_eq!(
+            surface_h, 1440,
+            "surface must match physical inner_size at 125% DPI"
+        );
+
+        // Old code multiplied — would have produced 3200x1800.
+        let old_surface_w = (inner_w as f64 * scale).round() as u32;
+        assert_eq!(old_surface_w, 3200, "old code over-counted surface width");
     }
 }

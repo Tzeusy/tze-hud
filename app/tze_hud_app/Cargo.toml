@@ -15,3 +15,11 @@ tze_hud_config = { path = "../../crates/tze_hud_config" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# Windows: embed the application manifest (tze_hud.manifest) at build time.
+# The manifest declares PerMonitorV2 DPI awareness, ensuring that winit's
+# MonitorHandle::size() and window.inner_size() always return physical pixels
+# regardless of launch context (interactive session or scheduled task).
+# Only active on Windows; ignored on other platforms.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
