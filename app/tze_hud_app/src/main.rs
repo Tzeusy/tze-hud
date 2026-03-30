@@ -589,4 +589,67 @@ mod tests {
             "error should explain positional arg"
         );
     }
+
+    // ── Non-default dimension regression tests (hud-q5hx) ────────────────────
+    //
+    // Verify that the exact CLI invocation reported in hud-q5hx parses correctly.
+    // The crash was triggered by `--window-mode overlay --width 2560 --height 1440`;
+    // the root cause was in the windowed runtime's surface initialization, not
+    // argument parsing, but these tests document the contract end-to-end.
+
+    /// The exact command line from the bug report must parse without error and
+    /// produce the correct overlay mode and 2560x1440 dimensions.
+    #[test]
+    fn parse_options_overlay_2560x1440_bug_repro_command() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
+        }
+
+        // Mirrors: tze_hud.exe --window-mode overlay --width 2560 --height 1440
+        let args: Vec<String> = vec![
+            "--window-mode".to_string(),
+            "overlay".to_string(),
+            "--width".to_string(),
+            "2560".to_string(),
+            "--height".to_string(),
+            "1440".to_string(),
+        ];
+        let opts = parse_options(&args).expect("must parse without error");
+        assert_eq!(
+            opts.window_mode,
+            WindowMode::Overlay,
+            "window mode must be Overlay"
+        );
+        assert_eq!(opts.width, 2560, "width must be 2560");
+        assert_eq!(opts.height, 1440, "height must be 1440");
+    }
+
+    /// Verify 4K (3840x2160) dimensions also parse correctly.
+    #[test]
+    fn parse_options_overlay_4k_dimensions() {
+        let _guard = ENV_VAR_MUTEX.lock().unwrap();
+        // Safety: single-threaded within ENV_VAR_MUTEX guard.
+        unsafe {
+            std::env::remove_var("TZE_HUD_WINDOW_MODE");
+            std::env::remove_var("TZE_HUD_WINDOW_WIDTH");
+            std::env::remove_var("TZE_HUD_WINDOW_HEIGHT");
+        }
+
+        let args: Vec<String> = vec![
+            "--window-mode".to_string(),
+            "overlay".to_string(),
+            "--width".to_string(),
+            "3840".to_string(),
+            "--height".to_string(),
+            "2160".to_string(),
+        ];
+        let opts = parse_options(&args).expect("must parse without error");
+        assert_eq!(opts.window_mode, WindowMode::Overlay);
+        assert_eq!(opts.width, 3840);
+        assert_eq!(opts.height, 2160);
+    }
 }
