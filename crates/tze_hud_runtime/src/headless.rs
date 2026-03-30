@@ -290,9 +290,10 @@ impl HeadlessRuntime {
         let scene_arc = state.scene.clone();
         drop(state);
         let mut scene_guard = scene_arc.lock().await;
-        // Per timing-model/spec.md §Expiration Policy: expired zone
+        // Per timing-model/spec.md §Expiration Policy: expired zone and widget
         // publications MUST be cleared before the next frame.
         scene_guard.drain_expired_zone_publications();
+        scene_guard.drain_expired_widget_publications();
         let scene = &*scene_guard;
 
         // ── Capture compositor render work upfront ────────────────────────────

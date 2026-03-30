@@ -617,10 +617,11 @@ impl ApplicationHandler for WinitApp {
                     // too long when a session handler or MCP handler holds the
                     // scene lock momentarily.
                     if let Ok(mut scene) = compositor_scene.try_lock() {
-                        // ── Zone publication expiry sweep ─────────────────
+                        // ── Zone and widget publication expiry sweep ──────
                         // Per timing-model/spec.md §Expiration Policy: expired
                         // publications MUST be cleared before the next frame.
                         scene.drain_expired_zone_publications();
+                        scene.drain_expired_widget_publications();
 
                         let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
                         hit_test_snapshot.store(Arc::new(new_snap));

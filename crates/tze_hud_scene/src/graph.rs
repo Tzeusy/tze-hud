@@ -2960,6 +2960,43 @@ impl SceneGraph {
 
         total_removed
     }
+
+    // ─── Widget publication expiry ───────────────────────────────────────
+
+    /// Remove widget publications whose `expires_at_wall_us` has passed.
+    ///
+    /// Mirrors `drain_expired_zone_publications` for the widget registry.
+    /// Per timing-model/spec.md §Requirement: Expiration Policy and the
+    /// `WidgetPublishRecord` contract: "When present, the runtime MUST clear
+    /// this publication at or before this time."
+    ///
+    /// Returns the number of expired publications removed.
+    ///
+    /// Call this once per frame before rendering (Stage 4: Scene Commit),
+    /// alongside `drain_expired_zone_publications`.
+    pub fn drain_expired_widget_publications(&mut self) -> usize {
+        let now_us = self.clock.now_us();
+        let mut total_removed = 0usize;
+
+        for publishes in self.widget_registry.active_publishes.values_mut() {
+            let before = publishes.len();
+            publishes.retain(|r| match r.expires_at_wall_us {
+                Some(exp) => exp > now_us,
+                None => true,
+            });
+            total_removed += before - publishes.len();
+        }
+
+        // Clean up empty entries and bump version if anything changed.
+        if total_removed > 0 {
+            self.widget_registry
+                .active_publishes
+                .retain(|_, v| !v.is_empty());
+            self.version += 1;
+        }
+
+        total_removed
+    }
 }
 
 fn now_micros() -> u64 {
@@ -6855,6 +6892,251 @@ mod spec_scenarios {
             matches!(mem_pub.params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v - 0.6).abs() < 1e-6),
             "mem key should be unaffected and still be 0.6"
         );
+    }
+
+    // ── Widget publication TTL / expiry tests ─────────────────────────────────
+
+    /// Helper: scene with a gauge backed by a controllable TestClock.
+    fn scene_with_gauge_and_clock(
+        contention: ContentionPolicy,
+    ) -> (SceneGraph, SceneId, TestClock) {
+        let clock = TestClock::new(1_000); // t=1 000 ms = 1 000 000 µs
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        let mut def = make_gauge_definition();
+        def.default_contention_policy = contention;
+        scene.widget_registry.register_definition(def);
+        scene.widget_registry.register_instance(WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "gauge".to_string(),
+            current_params: std::collections::HashMap::from([
+                ("level".to_string(), WidgetParameterValue::F32(0.0)),
+                (
+                    "label".to_string(),
+                    WidgetParameterValue::String(String::new()),
+                ),
+                (
+                    "severity".to_string(),
+                    WidgetParameterValue::Enum("info".to_string()),
+                ),
+            ]),
+        });
+
+        (scene, tab_id, clock)
+    }
+
+    /// WHEN drain_expired_widget_publications is called before any expiry time
+    /// has elapsed THEN no publications are removed.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Expiration Policy.
+    #[test]
+    fn widget_ttl_publication_not_expired_before_deadline() {
+        let (mut scene, _tab, _clock) = scene_with_gauge_and_clock(ContentionPolicy::LatestWins);
+
+        // Publish with an expiry 10 s in the future (clock is at 1 000 ms = 1 000 000 µs).
+        let expires_at = 1_000_000u64 + 10_000_000u64; // +10 s
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.5),
+                )]),
+                "agent.test",
+                None,
+                0,
+                Some(expires_at),
+            )
+            .unwrap();
+
+        // Drain without advancing the clock — publication must survive.
+        let removed = scene.drain_expired_widget_publications();
+        assert_eq!(removed, 0, "no publications should expire before deadline");
+        assert_eq!(
+            scene.widget_registry.active_for_widget("gauge").len(),
+            1,
+            "publication must still be present"
+        );
+    }
+
+    /// WHEN drain_expired_widget_publications is called after the expiry time
+    /// has elapsed THEN the publication is removed.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Expiration Policy.
+    #[test]
+    fn widget_ttl_publication_expires_after_deadline() {
+        let (mut scene, _tab, clock) = scene_with_gauge_and_clock(ContentionPolicy::LatestWins);
+
+        // Publish with a 1 s TTL (expires 1 s after t=1 000 ms).
+        let expires_at = 1_000_000u64 + 1_000_000u64; // expires at t=2 000 ms
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.5),
+                )]),
+                "agent.test",
+                None,
+                0,
+                Some(expires_at),
+            )
+            .unwrap();
+
+        // Advance clock past the expiry point.
+        clock.advance(1_001); // now at t=2 001 ms = 2 001 000 µs
+
+        let removed = scene.drain_expired_widget_publications();
+        assert_eq!(removed, 1, "one publication should have expired");
+        assert_eq!(
+            scene.widget_registry.active_for_widget("gauge").len(),
+            0,
+            "expired publication must be removed"
+        );
+    }
+
+    /// WHEN drain_expired_widget_publications removes all publications from a
+    /// widget THEN the active_publishes entry is cleaned up (no empty Vec left).
+    ///
+    /// Source: widget-system/spec.md §Requirement: Expiration Policy.
+    #[test]
+    fn widget_ttl_empty_entry_cleaned_up_after_expiry() {
+        let (mut scene, _tab, clock) = scene_with_gauge_and_clock(ContentionPolicy::LatestWins);
+
+        let expires_at = 1_000_000u64 + 500_000u64; // +500 ms
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.75),
+                )]),
+                "agent.test",
+                None,
+                0,
+                Some(expires_at),
+            )
+            .unwrap();
+
+        clock.advance(600); // advance 600 ms past expiry
+        scene.drain_expired_widget_publications();
+
+        // The HashMap entry itself must be gone (no empty Vec).
+        assert!(
+            !scene.widget_registry.active_publishes.contains_key("gauge"),
+            "empty widget publication entry must be removed after expiry"
+        );
+    }
+
+    /// WHEN a publication with no expiry and one with an expiry coexist (Stack
+    /// policy) THEN only the expired publication is removed.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Expiration Policy.
+    #[test]
+    fn widget_ttl_only_expired_publication_removed_when_mixed() {
+        let (mut scene, _tab, clock) =
+            scene_with_gauge_and_clock(ContentionPolicy::Stack { max_depth: 10 });
+
+        let now_us = 1_000_000u64; // clock starts at t=1 000 ms
+        let expires_soon = now_us + 500_000u64; // expires in 500 ms
+
+        // Publish the soon-to-expire record first.
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.1),
+                )]),
+                "agent.short",
+                None,
+                0,
+                Some(expires_soon),
+            )
+            .unwrap();
+
+        // Publish a permanent record (no expiry).
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.9),
+                )]),
+                "agent.permanent",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(
+            scene.widget_registry.active_for_widget("gauge").len(),
+            2,
+            "both publications should be present before expiry"
+        );
+
+        // Advance clock past the short expiry.
+        clock.advance(600);
+
+        let removed = scene.drain_expired_widget_publications();
+        assert_eq!(removed, 1, "only the TTL publication should expire");
+
+        let remaining = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(remaining.len(), 1, "one publication should remain");
+        assert_eq!(
+            remaining[0].publisher_namespace, "agent.permanent",
+            "the permanent publication should survive"
+        );
+    }
+
+    /// WHEN drain_expired_widget_publications removes a publication THEN the
+    /// scene version is incremented.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Expiration Policy.
+    #[test]
+    fn widget_ttl_expiry_bumps_scene_version() {
+        let (mut scene, _tab, clock) = scene_with_gauge_and_clock(ContentionPolicy::LatestWins);
+
+        let expires_at = 1_000_000u64 + 200_000u64;
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.3),
+                )]),
+                "agent.test",
+                None,
+                0,
+                Some(expires_at),
+            )
+            .unwrap();
+
+        let version_before = scene.version;
+        clock.advance(300);
+        scene.drain_expired_widget_publications();
+
+        assert!(
+            scene.version > version_before,
+            "scene version must be incremented when a widget publication expires"
+        );
+    }
+
+    /// WHEN drain_expired_widget_publications is called with no publications
+    /// THEN it returns 0 and does not panic.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Expiration Policy.
+    #[test]
+    fn widget_ttl_drain_with_no_publications_is_noop() {
+        let (mut scene, _tab, _clock) = scene_with_gauge_and_clock(ContentionPolicy::LatestWins);
+
+        let removed = scene.drain_expired_widget_publications();
+        assert_eq!(removed, 0, "draining an empty registry must return 0");
     }
 }
 
