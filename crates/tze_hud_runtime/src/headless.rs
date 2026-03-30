@@ -56,6 +56,7 @@ use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_telemetry::{FrameTelemetry, TelemetryCollector};
+use wgpu::TextureFormat;
 
 /// Configuration for the headless runtime.
 pub struct HeadlessConfig {
@@ -232,8 +233,14 @@ impl HeadlessRuntime {
         let (runtime_ctx, fallback_unrestricted) = config.build_runtime_context()?;
         let runtime_context = Arc::new(runtime_ctx);
 
-        let compositor = Compositor::new_headless(config.width, config.height).await?;
+        let mut compositor = Compositor::new_headless(config.width, config.height).await?;
         let surface = HeadlessSurface::new(&compositor.device, config.width, config.height);
+
+        // ── Initialize text renderer ──────────────────────────────────────
+        // HeadlessSurface always uses Rgba8UnormSrgb. Must be called here so
+        // glyphon text rendering is active for all runtime paths (not just tests).
+        compositor.init_text_renderer(TextureFormat::Rgba8UnormSrgb);
+        tracing::debug!("headless: text renderer initialized");
 
         let scene = Arc::new(Mutex::new(SceneGraph::new(
             config.width as f32,
