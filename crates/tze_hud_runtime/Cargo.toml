@@ -18,6 +18,7 @@ tze_hud_protocol = { path = "../tze_hud_protocol" }
 tze_hud_input = { path = "../tze_hud_input" }
 tze_hud_telemetry = { path = "../tze_hud_telemetry" }
 tze_hud_config = { path = "../tze_hud_config" }
+tze_hud_widget = { path = "../tze_hud_widget" }
 tze_hud_mcp = { path = "../tze_hud_mcp", features = ["http"] }
 tze_hud_resource = { path = "../tze_hud_resource" }
 tokio = { workspace = true }
@@ -27,6 +28,7 @@ winit = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
 uuid = { workspace = true }
 arc-swap = { workspace = true }
 

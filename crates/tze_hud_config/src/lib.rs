@@ -53,6 +53,7 @@ pub mod resolver;
 pub mod schema;
 #[cfg(test)]
 mod tests;
+pub mod widgets;
 pub mod zones;
 
 pub use agents::{
@@ -70,4 +71,7 @@ pub use reload::{
 };
 pub use resolver::resolve_config_path;
 pub use schema::print_schema;
+pub use widgets::{
+    LoadedWidgetType, build_widget_instance, validate_widget_bundles, validate_widget_instances,
+};
 pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};

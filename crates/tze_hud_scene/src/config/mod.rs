@@ -35,6 +35,14 @@ pub enum ConfigErrorCode {
     InvalidFpsRange,
     DegradationThresholdOrder,
     ConfigIncludesNotSupported,
+    /// `[widget_bundles].paths` entry does not exist on disk.
+    WidgetBundlePathNotFound,
+    /// `[[tabs.widgets]]` entry references a widget type not loaded from any bundle.
+    UnknownWidgetType,
+    /// `[[tabs.widgets]]` `initial_params` fails schema validation.
+    WidgetInvalidInitialParams,
+    /// Two bundles declare the same widget type name.
+    WidgetBundleDuplicateType,
     Other(String),
 }
 
@@ -199,7 +207,10 @@ pub const CANONICAL_CAPABILITIES: &[&str] = &[
     "resident_mcp",
     // Parameterized — wildcard or specific zone.
     "publish_zone:*",
-    // "publish_zone:<zone_name>" and "emit_scene_event:<name>" and "lease:priority:<N>"
+    // Parameterized — wildcard or specific widget.
+    "publish_widget:*",
+    // "publish_zone:<zone_name>", "publish_widget:<widget_name>",
+    // "emit_scene_event:<name>", and "lease:priority:<N>"
     // are validated by prefix pattern, not exact match.
 ];
 
@@ -218,6 +229,9 @@ pub fn is_canonical_capability(name: &str) -> bool {
     // Parameterized forms with validation.
     if let Some(zone_name) = name.strip_prefix("publish_zone:") {
         return !zone_name.is_empty();
+    }
+    if let Some(widget_name) = name.strip_prefix("publish_widget:") {
+        return !widget_name.is_empty();
     }
     if let Some(event_name) = name.strip_prefix("emit_scene_event:") {
         if event_name.is_empty() {

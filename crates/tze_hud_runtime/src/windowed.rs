@@ -87,6 +87,7 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
+use crate::widget_startup::init_widget_registry;
 use tze_hud_compositor::{Compositor, WindowSurface};
 use tze_hud_config::TzeHudConfig;
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
@@ -166,6 +167,23 @@ pub struct WindowedConfig {
     /// let config_toml = config_path.ok().and_then(|p| std::fs::read_to_string(&p).ok());
     /// ```
     pub config_toml: Option<String>,
+    /// Filesystem path of the loaded configuration file, if known.
+    ///
+    /// Used to resolve relative `[widget_bundles].paths` entries relative to the
+    /// config file's parent directory (per spec §Widget Bundle Configuration).
+    /// When `None`, relative paths are resolved from the current working directory.
+    ///
+    /// ## Source
+    ///
+    /// Populated by the application binary alongside `config_toml`:
+    /// ```rust,ignore
+    /// let config_path = resolve_config_path(opts.config_path.as_deref());
+    /// if let Ok(ref p) = config_path {
+    ///     config.config_file_path = Some(p.clone());
+    ///     config.config_toml = std::fs::read_to_string(p).ok();
+    /// }
+    /// ```
+    pub config_file_path: Option<String>,
 }
 
 impl Default for WindowedConfig {
@@ -178,6 +196,7 @@ impl Default for WindowedConfig {
             psk: "tze-hud-key".to_string(),
             target_fps: 60,
             config_toml: None,
+            config_file_path: None,
         }
     }
 }
@@ -999,12 +1018,37 @@ impl WindowedRuntime {
         // Build shared state (scene + sessions).
         let width = cfg.window.width as f32;
         let height = cfg.window.height as f32;
+        // Parse the raw config once here so we can use it for both widget
+        // registry initialization and the RuntimeContext build. Failure is
+        // non-fatal — widget startup will just leave the registry empty.
+        let raw_config_for_widgets: Option<tze_hud_config::raw::RawConfig> = cfg
+            .config_toml
+            .as_deref()
+            .and_then(|toml| toml::from_str(toml).ok());
+
         let shared_scene = {
             let mut scene = SceneGraph::new(width, height);
             // Bootstrap the canonical zone definitions (status-bar, subtitle,
             // notification-area, etc.) so that MCP publish_to_zone works
             // immediately without requiring a gRPC session handshake first.
             scene.zone_registry = ZoneRegistry::with_defaults();
+
+            // Bootstrap the widget registry from [widget_bundles] and [[tabs.widgets]]
+            // configuration. This is a no-op when no [widget_bundles] section exists.
+            // Tabs are pre-created as needed to bind widget instances to tab IDs.
+            if let Some(raw) = &raw_config_for_widgets {
+                let tab_map = std::collections::HashMap::new();
+                // Resolve widget bundle paths relative to the config file's parent
+                // directory (spec §Widget Bundle Configuration). Fall back to CWD
+                // when the config file path is unknown (e.g. in tests or when TOML
+                // was supplied as a raw string without a file path).
+                let config_parent_buf: Option<std::path::PathBuf> = cfg
+                    .config_file_path
+                    .as_deref()
+                    .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_path_buf()));
+                init_widget_registry(&mut scene, raw, config_parent_buf.as_deref(), &tab_map);
+            }
+
             if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {
                 let samples = [
                     "Subtitle demo: systems online.",

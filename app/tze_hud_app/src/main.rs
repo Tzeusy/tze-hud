@@ -321,40 +321,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve config file path and read its contents.
     // The resolved path is logged so operators can confirm which file is in use.
-    let config_toml: Option<String> = match resolve_config_path(opts.config_path.as_deref()) {
-        Ok(path) => {
-            match std::fs::read_to_string(&path) {
-                Ok(toml_src) => {
-                    tracing::info!(config_path = %path, "config file loaded");
-                    Some(toml_src)
-                }
-                Err(io_err) => {
-                    // If a path was explicitly given via --config, this is a hard error.
-                    // If it was auto-resolved, treat it as a warning and continue.
-                    if opts.config_path.is_some() {
-                        eprintln!("error: failed to read config file {path:?}: {io_err}");
-                        std::process::exit(1);
+    // We track both the TOML content and the file path so that relative
+    // [widget_bundles].paths entries can be resolved relative to the config file's
+    // parent directory (spec §Widget Bundle Configuration).
+    let (config_toml, config_file_path): (Option<String>, Option<String>) =
+        match resolve_config_path(opts.config_path.as_deref()) {
+            Ok(path) => {
+                match std::fs::read_to_string(&path) {
+                    Ok(toml_src) => {
+                        tracing::info!(config_path = %path, "config file loaded");
+                        (Some(toml_src), Some(path))
                     }
-                    tracing::warn!(
-                        config_path = %path,
-                        error = %io_err,
-                        "config file found but not readable; using flag/env-var defaults"
-                    );
-                    None
+                    Err(io_err) => {
+                        // If a path was explicitly given via --config, this is a hard error.
+                        // If it was auto-resolved, treat it as a warning and continue.
+                        if opts.config_path.is_some() {
+                            eprintln!("error: failed to read config file {path:?}: {io_err}");
+                            std::process::exit(1);
+                        }
+                        tracing::warn!(
+                            config_path = %path,
+                            error = %io_err,
+                            "config file found but not readable; using flag/env-var defaults"
+                        );
+                        (None, None)
+                    }
                 }
             }
-        }
-        Err(searched) => {
-            // No config file found — run with flag/env-var defaults.
-            // This is not an error; config files are optional when all required
-            // settings are supplied via flags or defaults.
-            tracing::debug!(
-                searched = ?searched,
-                "no config file found; using flag/env-var defaults"
-            );
-            None
-        }
-    };
+            Err(searched) => {
+                // No config file found — run with flag/env-var defaults.
+                // This is not an error; config files are optional when all required
+                // settings are supplied via flags or defaults.
+                tracing::debug!(
+                    searched = ?searched,
+                    "no config file found; using flag/env-var defaults"
+                );
+                (None, None)
+            }
+        };
 
     // Auto-size is enabled for overlay mode when neither --width nor --height
     // was explicitly set (env var or CLI flag).  If either dimension was given
@@ -387,6 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         psk: opts.psk,
         target_fps: opts.fps,
         config_toml,
+        config_file_path,
     };
 
     // Diagnostic: write resolved config to disk so we can verify args were parsed.

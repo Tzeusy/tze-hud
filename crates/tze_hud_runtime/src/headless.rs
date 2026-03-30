@@ -133,14 +133,14 @@ impl HeadlessConfig {
                 }
                 #[cfg(not(any(test, feature = "dev-mode")))]
                 {
-                    return Err(
+                    Err(
                         "HeadlessConfig: config_toml is None but the `dev-mode` feature is not \
                          enabled. Production builds require an explicit config to enforce \
                          capability governance. Supply a TOML config string via \
                          `HeadlessConfig { config_toml: Some(toml), .. }` or enable the \
                          `dev-mode` feature for development use."
                             .into(),
-                    );
+                    )
                 }
             }
             Some(toml) => match TzeHudConfig::parse(toml) {

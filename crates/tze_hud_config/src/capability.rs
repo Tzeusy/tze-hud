@@ -147,6 +147,14 @@ fn parameterized_prefix_hint(name: &str) -> Option<String> {
         return Some("use \"publish_zone:<zone>\" or \"publish_zone:*\"".to_string());
     }
 
+    // publish_widget variants.
+    if norm.starts_with("publish_widget")
+        || norm.starts_with("publishwidget")
+        || norm.starts_with("widget_publish")
+    {
+        return Some("use \"publish_widget:<widget_name>\" or \"publish_widget:*\"".to_string());
+    }
+
     // emit_scene_event variants.
     if norm.starts_with("emit_scene_event") || norm.starts_with("emitsceneevent") {
         return Some("use \"emit_scene_event:<event_name>\"".to_string());
