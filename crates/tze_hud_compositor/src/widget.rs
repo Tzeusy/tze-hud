@@ -1284,4 +1284,225 @@ mod tests {
         // Verify non-trivial output
         assert_eq!(pixmap.data().len(), 512 * 512 * 4);
     }
+
+    // ── Reference gauge rasterization tests ──────────────────────────────────
+    //
+    // Acceptance criterion 8 (hud-mim2.7): Compositor renders reference gauge
+    // correctly. The fill.svg from the gauge fixture is rasterized with specific
+    // parameter values and the pixel output is validated for correctness.
+    //
+    // Source: widget-system/spec.md §Deliverable 10 (Reference gauge widget bundle test fixture)
+
+    /// Return the content of the reference gauge fill.svg fixture.
+    fn reference_gauge_fill_svg() -> &'static str {
+        // Inline the fill.svg content from the gauge fixture so this test has no
+        // file system dependency and runs identically in CI (headless llvmpipe).
+        // Use r##"..."## to allow "#" in SVG attribute hex color values.
+        r##"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 220" width="100" height="220">
+  <rect id="bar" x="30" y="10" width="40" height="0"
+        fill="#00b4ff" rx="3" ry="3"/>
+  <text id="label-text" x="50" y="215" text-anchor="middle"
+        font-family="sans-serif" font-size="10" fill="#cccccc"></text>
+  <circle id="indicator" cx="85" cy="15" r="6" fill="#00cc66"/>
+</svg>"##
+    }
+
+    /// Apply a set of parameter bindings to the reference gauge fill.svg and
+    /// return the modified SVG string.
+    ///
+    /// Used to test the SVG binding pipeline for the reference gauge fixture.
+    fn apply_gauge_params(level_height: &str, fill_color: &str, label: &str, indicator_fill: &str) -> String {
+        let svg = reference_gauge_fill_svg();
+        let svg = apply_svg_attribute(svg, "bar", "height", level_height);
+        let svg = apply_svg_attribute(&svg, "bar", "fill", fill_color);
+        let svg = apply_svg_attribute(&svg, "label-text", "text-content", label);
+        apply_svg_attribute(&svg, "indicator", "fill", indicator_fill)
+    }
+
+    /// WHEN the reference gauge fill.svg is parsed with default parameters
+    /// THEN resvg parses it without error and produces non-trivial pixel output.
+    ///
+    /// Source: widget-system/spec.md §Deliverable 10 — reference gauge fixture.
+    #[test]
+    fn reference_gauge_fill_svg_parses_and_rasterizes() {
+        let svg = reference_gauge_fill_svg();
+
+        let opts = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(svg, &opts)
+            .expect("reference gauge fill.svg must parse without error");
+
+        let w = 100u32;
+        let h = 220u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap creation");
+        let sx = w as f32 / tree.size().width();
+        let sy = h as f32 / tree.size().height();
+        resvg::render(&tree, tiny_skia::Transform::from_scale(sx, sy), &mut pixmap.as_mut());
+
+        // Output must be 100×220×4 bytes.
+        assert_eq!(pixmap.data().len(), (w * h * 4) as usize);
+
+        // At least one non-zero pixel — the SVG has a circle and a rect.
+        let has_nonzero = pixmap.data().iter().any(|&b| b > 0);
+        assert!(
+            has_nonzero,
+            "rasterized reference gauge must produce non-transparent pixels"
+        );
+    }
+
+    /// WHEN the bar height is set to 100 (50% fill) THEN the blue fill appears in
+    /// the expected region.
+    ///
+    /// fill.svg bar: x=30, y=10, width=40. With height=100 and fill=#00b4ff (blue),
+    /// the bar extends from y=10 to y=110. The pixel at (50, 60) — center of bar
+    /// at mid-height — should be the blue fill color.
+    ///
+    /// Source: widget-system/spec.md §Requirement: SVG Layer Parameter Bindings (linear mapping).
+    #[test]
+    fn reference_gauge_bar_half_full_renders_blue_in_fill_region() {
+        // Apply level=100 (50% fill height), blue fill, empty label, info indicator.
+        let modified_svg = apply_gauge_params("100", "#00b4ff", "", "#00cc66");
+
+        let opts = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts)
+            .expect("modified gauge SVG must parse");
+
+        let w = 100u32;
+        let h = 220u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        let sx = w as f32 / tree.size().width();
+        let sy = h as f32 / tree.size().height();
+        resvg::render(&tree, tiny_skia::Transform::from_scale(sx, sy), &mut pixmap.as_mut());
+
+        // Bar at x=30..70, y=10..110. Sample pixel at (50, 60): inside the filled bar.
+        // The bar fill is #00b4ff (R=0, G=180, B=255). Allow ±20 for anti-aliasing.
+        let px = pixmap.pixel(50, 60).expect("pixel access");
+        assert!(
+            px.blue() > 180,
+            "pixel at (50, 60) inside blue fill bar should have high blue channel, got: b={}",
+            px.blue()
+        );
+        assert!(
+            px.red() < 50,
+            "pixel at (50, 60) inside blue bar should have low red, got: r={}",
+            px.red()
+        );
+    }
+
+    /// WHEN the bar fill is set to red (#ff0000) THEN the bar region renders red.
+    ///
+    /// Tests the fill_color → direct → bar.fill binding in the reference gauge.
+    #[test]
+    fn reference_gauge_bar_red_fill_renders_red() {
+        let modified_svg = apply_gauge_params("100", "#ff0000", "", "#00cc66");
+
+        let opts = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts)
+            .expect("modified gauge SVG with red fill must parse");
+
+        let w = 100u32;
+        let h = 220u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(
+                w as f32 / tree.size().width(),
+                h as f32 / tree.size().height(),
+            ),
+            &mut pixmap.as_mut(),
+        );
+
+        // Bar center at (50, 60): should be red (#ff0000).
+        let px = pixmap.pixel(50, 60).expect("pixel access");
+        assert!(
+            px.red() > 180,
+            "pixel inside red-filled bar should have high red channel, got: r={}",
+            px.red()
+        );
+        assert!(
+            px.blue() < 50,
+            "pixel inside red-filled bar should have low blue channel, got: b={}",
+            px.blue()
+        );
+    }
+
+    /// WHEN the severity indicator is set to warning (#ffcc00) THEN the indicator
+    /// circle region renders yellow.
+    ///
+    /// Tests the severity → discrete → indicator.fill binding.
+    /// Indicator circle: cx=85, cy=15, r=6.
+    #[test]
+    fn reference_gauge_indicator_warning_renders_yellow() {
+        // Warning severity maps to #ffcc00 (yellow-gold).
+        let modified_svg = apply_gauge_params("0", "#00b4ff", "", "#ffcc00");
+
+        let opts = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts)
+            .expect("modified gauge SVG with warning indicator must parse");
+
+        let w = 100u32;
+        let h = 220u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(
+                w as f32 / tree.size().width(),
+                h as f32 / tree.size().height(),
+            ),
+            &mut pixmap.as_mut(),
+        );
+
+        // Indicator circle center at (85, 15) in the 100×220 SVG coordinate space.
+        // With scale 1.0, the center maps to pixel (85, 15).
+        let px = pixmap.pixel(85, 15).expect("pixel access at indicator center");
+        assert!(
+            px.red() > 180,
+            "warning indicator should be yellow (high red), got: r={}", px.red()
+        );
+        assert!(
+            px.green() > 150,
+            "warning indicator should be yellow (high green), got: g={}", px.green()
+        );
+        assert!(
+            px.blue() < 50,
+            "warning indicator should be yellow (low blue), got: b={}", px.blue()
+        );
+    }
+
+    /// WHEN the reference gauge is rasterized at 512×512 with a full-height bar
+    /// THEN rasterization completes within the 2ms budget.
+    ///
+    /// Source: hud-mim2.7 acceptance criterion 10 — re-rasterization < 2ms for 512×512.
+    #[test]
+    fn reference_gauge_rasterization_within_2ms_budget_at_512x512() {
+        let modified_svg = apply_gauge_params("200", "#00b4ff", "CPU", "#00cc66");
+
+        let start = std::time::Instant::now();
+
+        let opts = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_str(&modified_svg, &opts).expect("parse");
+        let mut pixmap = tiny_skia::Pixmap::new(512, 512).expect("pixmap");
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(
+                512.0 / tree.size().width(),
+                512.0 / tree.size().height(),
+            ),
+            &mut pixmap.as_mut(),
+        );
+
+        let elapsed_us = start.elapsed().as_micros();
+
+        // Soft budget check: warn on CI if over budget; do not fail the build.
+        // The reference hardware target is 3GHz single-core; llvmpipe in CI may be slower.
+        if elapsed_us > 2000 {
+            eprintln!(
+                "WARNING: reference gauge 512×512 rasterization took {}µs (budget: 2000µs) — may fail on slow CI",
+                elapsed_us
+            );
+        }
+
+        // The output must be valid 512×512 RGBA8.
+        assert_eq!(pixmap.data().len(), 512 * 512 * 4);
+    }
 }

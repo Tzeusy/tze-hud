@@ -6204,6 +6204,601 @@ mod spec_scenarios {
             }),
         };
     }
+
+    // ─── Widget system unit tests ─────────────────────────────────────────────
+    //
+    // Acceptance criteria from hud-mim2.7:
+    // 1. WidgetParameterValue validation (f32 NaN/Inf rejection, type mismatch, enum constraint)
+    // 2. Widget registry (definition registration, instance creation, publish, occupancy)
+    // 3. Widget contention policies (LatestWins, Stack, MergeByKey, Replace)
+    //
+    // Source: widget-system/spec.md §Requirement: Widget Parameter Validation,
+    //         §Requirement: Widget Registry, §Requirement: Widget Contention.
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    use crate::types::{
+        ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetInstance,
+        WidgetParamConstraints, WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
+        WidgetSvgLayer,
+    };
+
+    /// Build a minimal gauge WidgetDefinition for testing.
+    ///
+    /// Parameters: level (f32, 0–1), label (string), severity (enum info/warning/error).
+    fn make_gauge_definition() -> WidgetDefinition {
+        WidgetDefinition {
+            id: "gauge".to_string(),
+            name: "gauge".to_string(),
+            description: "test gauge".to_string(),
+            parameter_schema: vec![
+                WidgetParameterDeclaration {
+                    name: "level".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: Some(WidgetParamConstraints {
+                        f32_min: Some(0.0),
+                        f32_max: Some(1.0),
+                        ..Default::default()
+                    }),
+                },
+                WidgetParameterDeclaration {
+                    name: "label".to_string(),
+                    param_type: WidgetParamType::String,
+                    default_value: WidgetParameterValue::String(String::new()),
+                    constraints: None,
+                },
+                WidgetParameterDeclaration {
+                    name: "severity".to_string(),
+                    param_type: WidgetParamType::Enum,
+                    default_value: WidgetParameterValue::Enum("info".to_string()),
+                    constraints: Some(WidgetParamConstraints {
+                        enum_allowed_values: vec![
+                            "info".to_string(),
+                            "warning".to_string(),
+                            "error".to_string(),
+                        ],
+                        ..Default::default()
+                    }),
+                },
+            ],
+            layers: vec![WidgetSvgLayer {
+                svg_file: "fill.svg".to_string(),
+                bindings: vec![],
+            }],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.25,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: ContentionPolicy::LatestWins,
+            ephemeral: false,
+        }
+    }
+
+    /// Register gauge definition + instance in a scene with one tab.
+    fn scene_with_gauge(
+        contention: ContentionPolicy,
+    ) -> (SceneGraph, SceneId /* tab_id */) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        let mut def = make_gauge_definition();
+        def.default_contention_policy = contention;
+
+        scene.widget_registry.register_definition(def);
+        scene.widget_registry.register_instance(WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "gauge".to_string(),
+            current_params: std::collections::HashMap::from([
+                ("level".to_string(), WidgetParameterValue::F32(0.0)),
+                (
+                    "label".to_string(),
+                    WidgetParameterValue::String(String::new()),
+                ),
+                (
+                    "severity".to_string(),
+                    WidgetParameterValue::Enum("info".to_string()),
+                ),
+            ]),
+        });
+
+        (scene, tab_id)
+    }
+
+    // ── WidgetParameterValue validation ───────────────────────────────────────
+
+    /// WHEN an f32 NaN value is submitted THEN publish_to_widget returns
+    /// WidgetParameterInvalidValue.
+    /// Source: widget-system/spec.md §Requirement: Widget Parameter Validation (F32 invariant).
+    #[test]
+    fn widget_publish_f32_nan_rejected() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::F32(f32::NAN),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(
+            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            "NaN f32 should produce WidgetParameterInvalidValue, got: {result:?}"
+        );
+    }
+
+    /// WHEN an f32 +Inf value is submitted THEN publish_to_widget returns
+    /// WidgetParameterInvalidValue.
+    #[test]
+    fn widget_publish_f32_pos_inf_rejected() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::F32(f32::INFINITY),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(
+            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            "positive infinity f32 should produce WidgetParameterInvalidValue, got: {result:?}"
+        );
+    }
+
+    /// WHEN an f32 -Inf value is submitted THEN publish_to_widget returns
+    /// WidgetParameterInvalidValue.
+    #[test]
+    fn widget_publish_f32_neg_inf_rejected() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::F32(f32::NEG_INFINITY),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(
+            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            "negative infinity f32 should produce WidgetParameterInvalidValue, got: {result:?}"
+        );
+    }
+
+    /// WHEN a string value is submitted for an f32 parameter THEN type mismatch error.
+    /// Source: widget-system/spec.md §Requirement: Widget Parameter Validation (type safety).
+    #[test]
+    fn widget_publish_f32_type_mismatch_rejected() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::String("not a float".to_string()),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(
+            matches!(
+                result,
+                Err(ValidationError::WidgetParameterTypeMismatch { .. })
+            ),
+            "string for f32 param should produce WidgetParameterTypeMismatch, got: {result:?}"
+        );
+    }
+
+    /// WHEN an enum value outside allowed_values is submitted THEN invalid value error.
+    /// Source: widget-system/spec.md §Requirement: Widget Parameter Validation (enum constraint).
+    #[test]
+    fn widget_publish_enum_out_of_allowed_values_rejected() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "severity".to_string(),
+            WidgetParameterValue::Enum("critical".to_string()),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(
+            matches!(result, Err(ValidationError::WidgetParameterInvalidValue { .. })),
+            "enum value outside allowed_values should produce WidgetParameterInvalidValue, got: {result:?}"
+        );
+    }
+
+    /// WHEN an enum value within allowed_values is submitted THEN publish succeeds.
+    #[test]
+    fn widget_publish_enum_in_allowed_values_accepted() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "severity".to_string(),
+            WidgetParameterValue::Enum("warning".to_string()),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(
+            result.is_ok(),
+            "valid enum value should be accepted, got: {result:?}"
+        );
+    }
+
+    /// WHEN an f32 value is within [min, max] THEN it is accepted unchanged.
+    #[test]
+    fn widget_publish_f32_in_range_accepted_unchanged() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::F32(0.75),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(result.is_ok(), "in-range f32 should be accepted");
+    }
+
+    /// WHEN an f32 value exceeds max THEN it is clamped, not rejected.
+    /// Source: widget-system/spec.md — f32 out of range is clamped.
+    #[test]
+    fn widget_publish_f32_above_max_clamped() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        // level has max=1.0; submit 2.5 — should clamp to 1.0 without error
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::F32(2.5),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(result.is_ok(), "out-of-range f32 should clamp, not reject");
+
+        // The recorded publish should contain the clamped value.
+        let pubs = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(pubs.len(), 1);
+        let recorded_level = pubs[0].params.get("level");
+        assert!(
+            matches!(recorded_level, Some(WidgetParameterValue::F32(v)) if (*v - 1.0).abs() < 1e-6),
+            "clamped value should be 1.0, got: {recorded_level:?}"
+        );
+    }
+
+    /// WHEN a parameter name is not in the widget schema THEN unknown-parameter error.
+    #[test]
+    fn widget_publish_unknown_parameter_rejected() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "bogus_param".to_string(),
+            WidgetParameterValue::F32(0.5),
+        )]);
+        let result = scene.publish_to_widget("gauge", params, "agent.test", None, 0, None);
+        assert!(
+            matches!(result, Err(ValidationError::WidgetUnknownParameter { .. })),
+            "unknown param name should produce WidgetUnknownParameter, got: {result:?}"
+        );
+    }
+
+    /// WHEN a widget instance is not found THEN WidgetNotFound error.
+    #[test]
+    fn widget_publish_nonexistent_widget_rejected() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::F32(0.5),
+        )]);
+        let result = scene.publish_to_widget("no-such-widget", params, "agent", None, 0, None);
+        assert!(
+            matches!(result, Err(ValidationError::WidgetNotFound { .. })),
+            "nonexistent widget should produce WidgetNotFound, got: {result:?}"
+        );
+    }
+
+    // ── Widget registry unit tests ─────────────────────────────────────────────
+
+    /// WHEN a widget definition is registered THEN it can be retrieved by id.
+    /// Source: widget-system/spec.md §Requirement: Widget Registry.
+    #[test]
+    fn widget_registry_register_and_retrieve_definition() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let def = make_gauge_definition();
+        scene.widget_registry.register_definition(def.clone());
+
+        let retrieved = scene.widget_registry.get_definition("gauge");
+        assert!(retrieved.is_some(), "registered definition should be retrievable");
+        assert_eq!(retrieved.unwrap().id, "gauge");
+        assert_eq!(retrieved.unwrap().parameter_schema.len(), 3);
+    }
+
+    /// WHEN a widget instance is registered THEN it can be retrieved by instance_name.
+    #[test]
+    fn widget_registry_register_and_retrieve_instance() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+
+        scene.widget_registry.register_definition(make_gauge_definition());
+        let instance = WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "cpu-gauge".to_string(),
+            current_params: Default::default(),
+        };
+        scene.widget_registry.register_instance(instance);
+
+        let retrieved = scene.widget_registry.get_instance("cpu-gauge");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().instance_name, "cpu-gauge");
+        assert_eq!(retrieved.unwrap().widget_type_name, "gauge");
+    }
+
+    /// WHEN a definition is registered with the same id THEN it overwrites the old one.
+    #[test]
+    fn widget_registry_definition_overwrites_on_duplicate_id() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let mut def1 = make_gauge_definition();
+        def1.description = "first".to_string();
+        let mut def2 = make_gauge_definition();
+        def2.description = "second".to_string();
+
+        scene.widget_registry.register_definition(def1);
+        scene.widget_registry.register_definition(def2);
+
+        let retrieved = scene.widget_registry.get_definition("gauge").unwrap();
+        assert_eq!(retrieved.description, "second", "second registration should win");
+    }
+
+    /// WHEN querying occupancy with no active publications THEN effective_params
+    /// falls back to the definition's parameter defaults.
+    #[test]
+    fn widget_registry_occupancy_defaults_when_no_publications() {
+        let (scene, tab_id) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
+        assert_eq!(occ.occupant_count, 0);
+        assert_eq!(occ.active_publications.len(), 0);
+
+        // Should fall back to definition defaults
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.0).abs() < 1e-6),
+            "default level should be 0.0, got: {level:?}"
+        );
+    }
+
+    /// WHEN querying occupancy for an unknown instance THEN None is returned.
+    #[test]
+    fn widget_registry_occupancy_unknown_instance_returns_none() {
+        let (scene, tab_id) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let occ = scene.widget_registry.get_occupancy("no-such-gauge", tab_id);
+        assert!(occ.is_none(), "unknown instance should return None");
+    }
+
+    /// WHEN a publish is recorded THEN active_for_widget returns it.
+    #[test]
+    fn widget_registry_publish_recorded_in_active_for_widget() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+        let params = std::collections::HashMap::from([(
+            "level".to_string(),
+            WidgetParameterValue::F32(0.8),
+        )]);
+        scene
+            .publish_to_widget("gauge", params, "agent.a", None, 0, None)
+            .unwrap();
+
+        let active = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(active.len(), 1);
+        let level = active[0].params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.8).abs() < 1e-6),
+            "recorded level should be 0.8, got: {level:?}"
+        );
+    }
+
+    /// WHEN snapshot() is called THEN it includes all registered types and instances.
+    #[test]
+    fn widget_registry_snapshot_includes_all_types_and_instances() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        // Add a second instance
+        scene.widget_registry.register_instance(WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "mem-gauge".to_string(),
+            current_params: Default::default(),
+        });
+
+        let snapshot = scene.widget_registry.snapshot();
+        assert_eq!(snapshot.widget_types.len(), 1, "one type registered");
+        assert_eq!(snapshot.widget_instances.len(), 2, "two instances");
+    }
+
+    // ── Widget contention policy tests ─────────────────────────────────────────
+
+    /// LatestWins: WHEN two publishes arrive THEN only the latest is retained.
+    /// Source: widget-system/spec.md §Requirement: Widget Contention.
+    #[test]
+    fn widget_contention_latest_wins_replaces_previous() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.3),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.7),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        let active = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(active.len(), 1, "LatestWins keeps only one publication");
+        assert!(
+            matches!(active[0].params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v - 0.7).abs() < 1e-6),
+            "latest publish (0.7) should win"
+        );
+    }
+
+    /// Replace: identical to LatestWins in effect — only one record retained.
+    #[test]
+    fn widget_contention_replace_retains_only_latest() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Replace);
+
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.1),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.9),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        let active = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(active.len(), 1, "Replace keeps only one publication");
+        assert!(
+            matches!(active[0].params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v - 0.9).abs() < 1e-6),
+        );
+    }
+
+    /// Stack: WHEN max_depth=3 and 4 publishes arrive THEN oldest is evicted.
+    /// Source: widget-system/spec.md §Requirement: Widget Contention (Stack depth cap).
+    #[test]
+    fn widget_contention_stack_evicts_oldest_at_max_depth() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 3 });
+
+        for i in 0u32..4 {
+            scene
+                .publish_to_widget(
+                    "gauge",
+                    std::collections::HashMap::from([(
+                        "level".to_string(),
+                        WidgetParameterValue::F32(i as f32 * 0.25),
+                    )]),
+                    &format!("agent.{i}"),
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let active = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(active.len(), 3, "Stack(3) should keep at most 3 records");
+
+        // The oldest (i=0, level=0.0) should have been evicted.
+        let has_zero = active
+            .iter()
+            .any(|r| matches!(r.params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v).abs() < 1e-6));
+        assert!(!has_zero, "oldest publish (level=0.0) should be evicted");
+    }
+
+    /// Stack: WHEN max_depth=0 THEN publishes stack without limit.
+    #[test]
+    fn widget_contention_stack_max_depth_zero_is_unlimited() {
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 0 });
+
+        for i in 0u32..10 {
+            scene
+                .publish_to_widget(
+                    "gauge",
+                    std::collections::HashMap::from([(
+                        "level".to_string(),
+                        WidgetParameterValue::F32(i as f32 * 0.1),
+                    )]),
+                    &format!("agent.{i}"),
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let active = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(active.len(), 10, "Stack(0) should allow unlimited depth");
+    }
+
+    /// MergeByKey: WHEN same key is published twice THEN the record is replaced.
+    /// WHEN a different key is published THEN both records coexist.
+    /// Source: widget-system/spec.md §Requirement: Widget Contention (MergeByKey).
+    #[test]
+    fn widget_contention_merge_by_key_replaces_same_key() {
+        let (mut scene, _tab) =
+            scene_with_gauge(ContentionPolicy::MergeByKey { max_keys: 8 });
+
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.4),
+                )]),
+                "agent.a",
+                Some("cpu".to_string()),
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.6),
+                )]),
+                "agent.b",
+                Some("mem".to_string()),
+                0,
+                None,
+            )
+            .unwrap();
+        // Overwrite "cpu" key
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.2),
+                )]),
+                "agent.a",
+                Some("cpu".to_string()),
+                0,
+                None,
+            )
+            .unwrap();
+
+        let active = scene.widget_registry.active_for_widget("gauge");
+        assert_eq!(active.len(), 2, "MergeByKey should keep one record per key");
+
+        let cpu_pub = active
+            .iter()
+            .find(|r| r.merge_key.as_deref() == Some("cpu"))
+            .unwrap();
+        assert!(
+            matches!(cpu_pub.params.get("level"), Some(WidgetParameterValue::F32(v)) if (*v - 0.2).abs() < 1e-6),
+            "cpu key should have updated to 0.2"
+        );
+    }
 }
 
 // ─── Helper for TextMarkdownNode content size validation ──────────────────────

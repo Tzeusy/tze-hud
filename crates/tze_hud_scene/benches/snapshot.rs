@@ -26,6 +26,11 @@ use tze_hud_scene::{
     Capability, Node, NodeData, Rect, Rgba, SceneId, SolidColorNode,
     graph::SceneGraph,
     test_scenes::{ClockMs, TestSceneRegistry},
+    types::{
+        ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetInstance,
+        WidgetParamConstraints, WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
+        WidgetSvgLayer,
+    },
 };
 
 const WALL_US: u64 = 1_735_689_600_000_000;
@@ -154,11 +159,117 @@ fn bench_snapshot_with_zones(c: &mut Criterion) {
     group.finish();
 }
 
+/// Build a scene populated with widget definitions and instances.
+///
+/// Registers `widget_count` gauge widget instances each with an active publication.
+/// Used to benchmark SceneSnapshot < 1ms with widgets (hud-mim2.7 acceptance criterion 10).
+fn build_scene_with_widgets(tile_count: usize, widget_count: usize) -> SceneGraph {
+    let mut scene = build_dense_scene(tile_count, 1);
+    let tab_id = *scene.tabs.keys().next().expect("scene has a tab");
+
+    // Register gauge definition once.
+    let def = WidgetDefinition {
+        id: "gauge".to_string(),
+        name: "gauge".to_string(),
+        description: "bench gauge".to_string(),
+        parameter_schema: vec![
+            WidgetParameterDeclaration {
+                name: "level".to_string(),
+                param_type: WidgetParamType::F32,
+                default_value: WidgetParameterValue::F32(0.0),
+                constraints: Some(WidgetParamConstraints {
+                    f32_min: Some(0.0),
+                    f32_max: Some(1.0),
+                    ..Default::default()
+                }),
+            },
+            WidgetParameterDeclaration {
+                name: "label".to_string(),
+                param_type: WidgetParamType::String,
+                default_value: WidgetParameterValue::String(String::new()),
+                constraints: None,
+            },
+        ],
+        layers: vec![WidgetSvgLayer {
+            svg_file: "fill.svg".to_string(),
+            bindings: vec![],
+        }],
+        default_geometry_policy: GeometryPolicy::Relative {
+            x_pct: 0.0,
+            y_pct: 0.0,
+            width_pct: 0.1,
+            height_pct: 0.1,
+        },
+        default_rendering_policy: RenderingPolicy::default(),
+        default_contention_policy: ContentionPolicy::LatestWins,
+        ephemeral: false,
+    };
+    scene.widget_registry.register_definition(def);
+
+    // Register `widget_count` instances and publish one record to each.
+    for i in 0..widget_count {
+        let instance_name = format!("gauge-{i}");
+        scene.widget_registry.register_instance(WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: instance_name.clone(),
+            current_params: std::collections::HashMap::from([
+                ("level".to_string(), WidgetParameterValue::F32(i as f32 / widget_count as f32)),
+                ("label".to_string(), WidgetParameterValue::String(format!("Widget {i}"))),
+            ]),
+        });
+
+        // Directly insert an active publish record so the snapshot includes widget publications.
+        let record = tze_hud_scene::types::WidgetPublishRecord {
+            widget_name: instance_name.clone(),
+            publisher_namespace: "bench.agent".to_string(),
+            params: std::collections::HashMap::from([
+                ("level".to_string(), WidgetParameterValue::F32(i as f32 / widget_count as f32)),
+                ("label".to_string(), WidgetParameterValue::String(format!("W{i}"))),
+            ]),
+            published_at_wall_us: WALL_US,
+            merge_key: None,
+            expires_at_wall_us: None,
+            transition_ms: 0,
+        };
+        scene
+            .widget_registry
+            .active_publishes
+            .entry(instance_name)
+            .or_default()
+            .push(record);
+    }
+
+    scene
+}
+
+/// Benchmark: SceneSnapshot < 1ms with widget registry populated.
+///
+/// Spec: hud-mim2.7 acceptance criterion 10 — "SceneSnapshot < 1ms with widgets".
+/// This exercises the same < 1ms budget as the zone snapshot benchmark but with
+/// 10 widget instances and 10 active publications included in the snapshot payload.
+fn bench_snapshot_with_widgets(c: &mut Criterion) {
+    // 50 tiles + 10 widget instances with active publications.
+    let scene = build_scene_with_widgets(50, 10);
+
+    let mut group = c.benchmark_group("snapshot");
+    group.bench_function(
+        BenchmarkId::new("50_tiles_10_widgets", "take_snapshot"),
+        |b| {
+            b.iter(|| black_box(scene.take_snapshot(black_box(WALL_US), black_box(MONO_US))));
+        },
+    );
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_snapshot_100_tiles_1000_nodes,
     bench_snapshot_empty_scene,
     bench_snapshot_max_tiles_stress,
     bench_snapshot_with_zones,
+    bench_snapshot_with_widgets,
 );
 criterion_main!(benches);
