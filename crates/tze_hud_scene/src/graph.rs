@@ -6699,7 +6699,10 @@ mod spec_scenarios {
             )
             .unwrap();
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
         assert_eq!(occ.occupant_count, 1);
 
         // Published param should reflect the publication value.
@@ -6755,8 +6758,14 @@ mod spec_scenarios {
             )
             .unwrap();
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
-        assert_eq!(occ.occupant_count, 1, "LatestWins retains only 1 publication");
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 1,
+            "LatestWins retains only 1 publication"
+        );
         let level = occ.effective_params.get("level");
         assert!(
             matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.9).abs() < 1e-6),
@@ -6788,8 +6797,14 @@ mod spec_scenarios {
                 .unwrap();
         }
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
-        assert_eq!(occ.occupant_count, 3, "Stack should have 3 active publications");
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 3,
+            "Stack should have 3 active publications"
+        );
 
         // Top-of-stack = most recent = last pushed = 0.8.
         let level = occ.effective_params.get("level");
@@ -6829,8 +6844,14 @@ mod spec_scenarios {
                 .unwrap();
         }
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
-        assert_eq!(occ.occupant_count, 3, "Stack(3) should cap at 3 publications");
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 3,
+            "Stack(3) should cap at 3 publications"
+        );
 
         // Top-of-stack is the most recent surviving publication (0.4).
         let level = occ.effective_params.get("level");
@@ -6880,8 +6901,14 @@ mod spec_scenarios {
             )
             .unwrap();
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
-        assert_eq!(occ.occupant_count, 2, "MergeByKey should have 2 active publications");
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 2,
+            "MergeByKey should have 2 active publications"
+        );
 
         // "mem" was pushed after "cpu", so its level (0.6) wins for "level".
         let level = occ.effective_params.get("level");
@@ -6939,8 +6966,14 @@ mod spec_scenarios {
             )
             .unwrap();
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
-        assert_eq!(occ.occupant_count, 1, "Same-key update should not add a second record");
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 1,
+            "Same-key update should not add a second record"
+        );
 
         let level = occ.effective_params.get("level");
         assert!(
@@ -6972,7 +7005,10 @@ mod spec_scenarios {
             )
             .unwrap();
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
         assert_eq!(occ.occupant_count, 1);
 
         let level = occ.effective_params.get("level");
@@ -7027,7 +7063,10 @@ mod spec_scenarios {
             )
             .unwrap();
 
-        let occ = scene.widget_registry.get_occupancy("gauge", tab_id).unwrap();
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
         assert_eq!(occ.occupant_count, 1, "Replace retains only 1 publication");
 
         // Second publish only set "label"; "level" must NOT appear (not in params,
@@ -7582,7 +7621,9 @@ mod spec_scenarios {
         assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 1);
 
         // Clear as "agent.a" — should remove the publication
-        scene.clear_widget_for_publisher("gauge", "agent.a").unwrap();
+        scene
+            .clear_widget_for_publisher("gauge", "agent.a")
+            .unwrap();
         assert_eq!(
             scene.widget_registry.active_for_widget("gauge").len(),
             0,
@@ -7594,8 +7635,7 @@ mod spec_scenarios {
     /// THEN only the matching publisher's records are removed.
     #[test]
     fn clear_widget_for_publisher_only_affects_own_publications() {
-        let (mut scene, _tab) =
-            scene_with_gauge(ContentionPolicy::Stack { max_depth: 4 });
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 4 });
 
         // Publish as "agent.a" and "agent.b"
         scene
@@ -7627,9 +7667,15 @@ mod spec_scenarios {
         assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 2);
 
         // Clear as "agent.a" — only "agent.a"'s publication should be removed
-        scene.clear_widget_for_publisher("gauge", "agent.a").unwrap();
+        scene
+            .clear_widget_for_publisher("gauge", "agent.a")
+            .unwrap();
         let remaining = scene.widget_registry.active_for_widget("gauge");
-        assert_eq!(remaining.len(), 1, "only agent.a's publication should be cleared");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only agent.a's publication should be cleared"
+        );
         assert_eq!(
             remaining[0].publisher_namespace, "agent.b",
             "agent.b's publication should remain"
@@ -7644,7 +7690,10 @@ mod spec_scenarios {
 
         // No publications yet — clear should succeed silently
         let result = scene.clear_widget_for_publisher("gauge", "agent.nobody");
-        assert!(result.is_ok(), "should succeed even when no publications exist");
+        assert!(
+            result.is_ok(),
+            "should succeed even when no publications exist"
+        );
         assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 0);
     }
 
@@ -7725,12 +7774,20 @@ mod spec_scenarios {
 
         // "agent.a"'s publication on "gauge" is gone; "agent.b"'s remains
         let gauge_pubs = scene.widget_registry.active_for_widget("gauge");
-        assert_eq!(gauge_pubs.len(), 1, "only agent.b's gauge pub should remain");
+        assert_eq!(
+            gauge_pubs.len(),
+            1,
+            "only agent.b's gauge pub should remain"
+        );
         assert_eq!(gauge_pubs[0].publisher_namespace, "agent.b");
 
         // "agent.a"'s publication on "mem-gauge" is gone
         let mem_pubs = scene.widget_registry.active_for_widget("mem-gauge");
-        assert_eq!(mem_pubs.len(), 0, "agent.a's mem-gauge pub should be cleared");
+        assert_eq!(
+            mem_pubs.len(),
+            0,
+            "agent.a's mem-gauge pub should be cleared"
+        );
     }
 
     /// WHEN ClearWidget is sent as a scene mutation batch
@@ -7786,7 +7843,11 @@ mod spec_scenarios {
 
         // Only "agent.b"'s publication should remain
         let remaining = scene.widget_registry.active_for_widget("gauge");
-        assert_eq!(remaining.len(), 1, "agent.a's publication should be cleared");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "agent.a's publication should be cleared"
+        );
         assert_eq!(remaining[0].publisher_namespace, "agent.b");
     }
 }
