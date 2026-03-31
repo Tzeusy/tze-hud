@@ -29,7 +29,7 @@ use tze_hud_resource::{
     UploadId, UploadStartRequest,
 };
 use tze_hud_scene::{
-    Capability, SceneId,
+    Capability, SceneId, ZONE_TILE_Z_MIN,
     graph::SceneGraph,
     mutation::{MutationBatch, SceneMutation},
     types::{
@@ -371,7 +371,6 @@ fn presence_card_bounds_no_overlap() {
 /// THEN they are sequential (100, 101, 102) and all below ZONE_TILE_Z_MIN.
 #[test]
 fn presence_card_z_orders_sequential_and_below_zone_min() {
-    const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
     for i in 0..3u32 {
         let z = Z_ORDER_BASE + i;
         assert_eq!(z, 100 + i, "z_order for agent {i} must be {}", 100 + i);
