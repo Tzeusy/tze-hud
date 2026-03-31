@@ -1779,4 +1779,124 @@ component_type = "subtitle"
         check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop)
             .expect("OpaqueBackdrop check must pass for exemplar-status-bar (opacity >= 0.8)");
     }
+
+    // ── exemplar-subtitle profile integration tests ────────────────────────────
+    //
+    // These tests load the actual `profiles/exemplar-subtitle/` directory from
+    // the repository root and verify:
+    //   1. Profile loads without validation errors.
+    //   2. DualLayer readability passes (backdrop_opacity >= 0.3, outline_width >= 1.0).
+    //
+    // Source: tasks.md §hud-hzub.1
+
+    /// Returns the path to `profiles/exemplar-subtitle/` relative to the
+    /// workspace root.  `CARGO_MANIFEST_DIR` points to `crates/tze_hud_config/`,
+    /// so we go up two levels to reach the workspace root, then into `profiles/`.
+    fn exemplar_subtitle_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("profiles")
+            .join("exemplar-subtitle")
+    }
+
+    /// Build the token map that the exemplar-subtitle profile expects to resolve against.
+    ///
+    /// These are the canonical fallback values the profile overrides; supplying
+    /// them here mimics what the runtime injects from global tokens + canonical
+    /// fallbacks during startup.
+    fn exemplar_subtitle_tokens() -> DesignTokenMap {
+        let mut tokens = DesignTokenMap::new();
+        // Required by subtitle component type contract (component_types.rs)
+        tokens.insert("color.text.primary".to_string(), "#FFFFFF".to_string());
+        tokens.insert("color.backdrop.default".to_string(), "#000000".to_string());
+        tokens.insert("opacity.backdrop.default".to_string(), "0.6".to_string());
+        tokens.insert("color.outline.default".to_string(), "#000000".to_string());
+        tokens.insert("stroke.outline.width".to_string(), "2".to_string());
+        tokens.insert(
+            "typography.subtitle.family".to_string(),
+            "system-ui".to_string(),
+        );
+        tokens.insert("typography.subtitle.size".to_string(), "28".to_string());
+        tokens.insert("typography.subtitle.weight".to_string(), "600".to_string());
+        tokens
+    }
+
+    /// tasks.md §hud-hzub.1 — profile loads without errors.
+    ///
+    /// WHEN the runtime scans `profiles/exemplar-subtitle/`
+    /// THEN the profile SHALL load successfully with `component_type = "subtitle"`.
+    #[test]
+    fn exemplar_subtitle_profile_loads_without_errors() {
+        let path = exemplar_subtitle_dir();
+        let tokens = exemplar_subtitle_tokens();
+
+        let result = load_profile_dir(&path, &tokens);
+        let profile = result.expect("exemplar-subtitle profile should load without errors");
+
+        assert_eq!(profile.name, "exemplar-subtitle");
+        assert_eq!(profile.version, "1.0.0");
+        assert_eq!(profile.component_type, ComponentType::Subtitle);
+        assert!(
+            profile.zone_overrides.contains_key("subtitle"),
+            "zone override keyed 'subtitle' should be present"
+        );
+    }
+
+    /// tasks.md §hud-hzub.1 — DualLayer readability passes.
+    ///
+    /// WHEN the exemplar profile is loaded and its effective zone override is
+    /// inspected THEN backdrop_opacity >= 0.3 and outline_width >= 1.0, satisfying
+    /// the DualLayer readability technique required by the subtitle component type.
+    #[test]
+    fn exemplar_subtitle_dual_layer_readability_passes() {
+        use crate::component_types::ReadabilityTechnique;
+        use crate::readability::check_zone_readability;
+        use tze_hud_scene::types::{RenderingPolicy, Rgba};
+
+        let path = exemplar_subtitle_dir();
+        let tokens = exemplar_subtitle_tokens();
+
+        let profile =
+            load_profile_dir(&path, &tokens).expect("exemplar-subtitle should load");
+
+        let zone_override = profile
+            .zone_overrides
+            .get("subtitle")
+            .expect("subtitle zone override must be present");
+
+        // Confirm backdrop_opacity >= 0.3 (DualLayer minimum).
+        let opacity = zone_override
+            .backdrop_opacity
+            .expect("backdrop_opacity must be Some");
+        assert!(
+            opacity >= 0.3,
+            "DualLayer requires backdrop_opacity >= 0.3, got {opacity}"
+        );
+
+        // Confirm outline_width >= 1.0 (DualLayer minimum).
+        let outline_width = zone_override
+            .outline_width
+            .expect("outline_width must be Some");
+        assert!(
+            outline_width >= 1.0,
+            "DualLayer requires outline_width >= 1.0, got {outline_width}"
+        );
+
+        // Build a RenderingPolicy that mirrors what the compositor would assemble
+        // from the zone override, then run the full readability check.
+        let policy = RenderingPolicy {
+            backdrop: Some(Rgba::BLACK),
+            backdrop_opacity: Some(opacity),
+            outline_color: Some(Rgba::BLACK),
+            outline_width: Some(outline_width),
+            ..RenderingPolicy::default()
+        };
+
+        check_zone_readability(&policy, ReadabilityTechnique::DualLayer)
+            .expect(
+                "DualLayer check must pass for exemplar-subtitle \
+                 (backdrop_opacity >= 0.3, outline_width >= 1.0)",
+            );
+    }
 }
