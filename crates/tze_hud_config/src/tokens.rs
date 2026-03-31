@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 
 use tze_hud_scene::config::{ConfigError, ConfigErrorCode};
+use tze_hud_scene::types::FontFamily;
 
 use crate::raw::RawConfig;
 
@@ -92,26 +93,23 @@ pub struct Rgba {
     pub a: f32,
 }
 
-/// Font family value parsed from the three canonical keywords.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FontFamily {
-    /// `sans-serif`
-    SansSerif,
-    /// `serif`
-    Serif,
-    /// `monospace`
-    Monospace,
-}
-
-impl FontFamily {
-    /// Parse from a canonical keyword string.
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "sans-serif" => Some(FontFamily::SansSerif),
-            "serif" => Some(FontFamily::Serif),
-            "monospace" => Some(FontFamily::Monospace),
-            _ => None,
-        }
+/// Parse a font family from a canonical v1 keyword string.
+///
+/// Supported keywords (per spec):
+/// - `"system-ui"` → `FontFamily::SystemSansSerif`
+/// - `"sans-serif"` → `FontFamily::SystemSansSerif`
+/// - `"monospace"` → `FontFamily::SystemMonospace`
+/// - `"serif"` → `FontFamily::SystemSerif`
+///
+/// Any other value returns `None`. This is intentionally a free function
+/// (not a method on `FontFamily`) because `FontFamily` is defined in
+/// `tze_hud_scene::types` and we use it directly.
+pub fn font_family_from_keyword(s: &str) -> Option<FontFamily> {
+    match s {
+        "system-ui" | "sans-serif" => Some(FontFamily::SystemSansSerif),
+        "monospace" => Some(FontFamily::SystemMonospace),
+        "serif" => Some(FontFamily::SystemSerif),
+        _ => None,
     }
 }
 
@@ -130,14 +128,16 @@ pub enum TokenValue {
     Literal(String),
 }
 
+
 // ─── Value parsers ────────────────────────────────────────────────────────────
 
 /// Parse a `#RRGGBB` or `#RRGGBBAA` hex color string into `Rgba`.
 ///
 /// Returns `None` if the string does not match either form.
+/// Hex digits are case-insensitive. Non-ASCII input is always rejected.
 pub fn parse_color_hex(s: &str) -> Option<Rgba> {
     let s = s.trim();
-    if !s.starts_with('#') {
+    if !s.starts_with('#') || !s.is_ascii() {
         return None;
     }
     let hex = &s[1..];
@@ -170,13 +170,22 @@ pub fn parse_color_hex(s: &str) -> Option<Rgba> {
 }
 
 /// Parse a decimal numeric string into `f32`.
+///
+/// Leading/trailing whitespace is NOT permitted (per spec).
+/// NaN and infinity strings (`"nan"`, `"inf"`, `"infinity"`, etc.) are rejected.
 pub fn parse_numeric(s: &str) -> Option<f32> {
-    s.trim().parse::<f32>().ok()
+    let n = s.parse::<f32>().ok()?;
+    if n.is_nan() || n.is_infinite() {
+        return None;
+    }
+    Some(n)
 }
 
 /// Parse a font family keyword.
+///
+/// Whitespace trimming is not performed; the input must match exactly.
 pub fn parse_font_family(s: &str) -> Option<FontFamily> {
-    FontFamily::from_str(s.trim())
+    font_family_from_keyword(s)
 }
 
 /// Parse a token value string into a `TokenValue`.
@@ -208,10 +217,12 @@ pub struct CanonicalToken {
     pub default_value: &'static str,
 }
 
-/// The ~28 canonical token keys with their fallback defaults.
+/// The canonical token keys with their fallback defaults.
 ///
 /// These are always present in the resolved token map even if the config
-/// does not specify them.
+/// does not specify them. The schema is defined by the component-shape-language
+/// specification (`openspec/changes/component-shape-language/specs/
+/// component-shape-language/spec.md`, §Requirement: Canonical Token Schema).
 pub static CANONICAL_TOKENS: &[CanonicalToken] = &[
     // Color — text
     CanonicalToken {
@@ -221,146 +232,143 @@ pub static CANONICAL_TOKENS: &[CanonicalToken] = &[
     },
     CanonicalToken {
         key: "color.text.secondary",
-        description: "Secondary text color",
-        default_value: "#CCCCCC",
-    },
-    CanonicalToken {
-        key: "color.text.disabled",
-        description: "Disabled text color",
-        default_value: "#666666",
+        description: "Secondary/muted text color",
+        default_value: "#B0B0B0",
     },
     CanonicalToken {
         key: "color.text.accent",
-        description: "Accent text color",
-        default_value: "#4DA6FF",
+        description: "Accent/highlight text color",
+        default_value: "#4A9EFF",
     },
-    // Color — background
+    // Color — backdrop
     CanonicalToken {
-        key: "color.bg.primary",
-        description: "Primary background color",
+        key: "color.backdrop.default",
+        description: "Default backdrop fill color",
         default_value: "#000000",
     },
+    // Color — outline
     CanonicalToken {
-        key: "color.bg.secondary",
-        description: "Secondary background color",
-        default_value: "#111111",
-    },
-    CanonicalToken {
-        key: "color.bg.overlay",
-        description: "Overlay background color (semi-transparent)",
-        default_value: "#00000099",
-    },
-    CanonicalToken {
-        key: "color.bg.accent",
-        description: "Accent background color",
-        default_value: "#1A3A5C",
+        key: "color.outline.default",
+        description: "Default text outline/stroke color",
+        default_value: "#000000",
     },
     // Color — border
     CanonicalToken {
-        key: "color.border.primary",
-        description: "Primary border color",
+        key: "color.border.default",
+        description: "Default border/frame color",
         default_value: "#333333",
     },
+    // Color — severity
     CanonicalToken {
-        key: "color.border.accent",
-        description: "Accent border color",
-        default_value: "#4DA6FF",
-    },
-    // Color — status
-    CanonicalToken {
-        key: "color.status.success",
-        description: "Success state color",
-        default_value: "#22C55E",
+        key: "color.severity.info",
+        description: "Info severity indicator color",
+        default_value: "#4A9EFF",
     },
     CanonicalToken {
-        key: "color.status.warning",
-        description: "Warning state color",
-        default_value: "#F59E0B",
+        key: "color.severity.warning",
+        description: "Warning severity indicator color",
+        default_value: "#FFB800",
     },
     CanonicalToken {
-        key: "color.status.error",
-        description: "Error state color",
-        default_value: "#EF4444",
+        key: "color.severity.error",
+        description: "Error severity indicator color",
+        default_value: "#FF4444",
     },
     CanonicalToken {
-        key: "color.status.info",
-        description: "Info state color",
-        default_value: "#3B82F6",
+        key: "color.severity.critical",
+        description: "Critical severity indicator color",
+        default_value: "#FF0000",
+    },
+    // Opacity
+    CanonicalToken {
+        key: "opacity.backdrop.default",
+        description: "Default backdrop opacity (0.0–1.0)",
+        default_value: "0.6",
+    },
+    CanonicalToken {
+        key: "opacity.backdrop.opaque",
+        description: "Opaque backdrop opacity threshold (0.0–1.0)",
+        default_value: "0.9",
     },
     // Typography — body
     CanonicalToken {
+        key: "typography.body.family",
+        description: "Body text font family",
+        default_value: "system-ui",
+    },
+    CanonicalToken {
         key: "typography.body.size",
-        description: "Body text size in display-independent pixels",
+        description: "Body text size in pixels",
         default_value: "16",
     },
     CanonicalToken {
-        key: "typography.body.family",
-        description: "Body font family",
-        default_value: "sans-serif",
-    },
-    CanonicalToken {
-        key: "typography.body.line_height",
-        description: "Body line height multiplier",
-        default_value: "1.5",
+        key: "typography.body.weight",
+        description: "Body text weight (CSS numeric)",
+        default_value: "400",
     },
     // Typography — heading
     CanonicalToken {
+        key: "typography.heading.family",
+        description: "Heading font family",
+        default_value: "system-ui",
+    },
+    CanonicalToken {
         key: "typography.heading.size",
-        description: "Heading text size in display-independent pixels",
+        description: "Heading text size in pixels",
         default_value: "24",
     },
     CanonicalToken {
-        key: "typography.heading.family",
-        description: "Heading font family",
-        default_value: "sans-serif",
+        key: "typography.heading.weight",
+        description: "Heading font weight (CSS numeric)",
+        default_value: "700",
     },
-    // Typography — caption / label
+    // Typography — subtitle
     CanonicalToken {
-        key: "typography.caption.size",
-        description: "Caption text size in display-independent pixels",
-        default_value: "12",
+        key: "typography.subtitle.family",
+        description: "Subtitle font family",
+        default_value: "system-ui",
     },
     CanonicalToken {
-        key: "typography.label.size",
-        description: "Label text size in display-independent pixels",
-        default_value: "14",
+        key: "typography.subtitle.size",
+        description: "Subtitle text size in pixels",
+        default_value: "28",
+    },
+    CanonicalToken {
+        key: "typography.subtitle.weight",
+        description: "Subtitle font weight (CSS numeric)",
+        default_value: "600",
     },
     // Spacing
     CanonicalToken {
-        key: "spacing.xs",
-        description: "Extra-small spacing unit in pixels",
-        default_value: "4",
-    },
-    CanonicalToken {
-        key: "spacing.sm",
-        description: "Small spacing unit in pixels",
+        key: "spacing.unit",
+        description: "Base spacing unit in pixels",
         default_value: "8",
     },
     CanonicalToken {
-        key: "spacing.md",
-        description: "Medium spacing unit in pixels",
+        key: "spacing.padding.small",
+        description: "Small internal padding in pixels",
+        default_value: "4",
+    },
+    CanonicalToken {
+        key: "spacing.padding.medium",
+        description: "Medium internal padding in pixels",
+        default_value: "8",
+    },
+    CanonicalToken {
+        key: "spacing.padding.large",
+        description: "Large internal padding in pixels",
         default_value: "16",
     },
+    // Stroke
     CanonicalToken {
-        key: "spacing.lg",
-        description: "Large spacing unit in pixels",
-        default_value: "24",
+        key: "stroke.outline.width",
+        description: "Text outline stroke width in pixels",
+        default_value: "2",
     },
     CanonicalToken {
-        key: "spacing.xl",
-        description: "Extra-large spacing unit in pixels",
-        default_value: "32",
-    },
-    // Border radius
-    CanonicalToken {
-        key: "radius.sm",
-        description: "Small border radius in pixels",
-        default_value: "4",
-    },
-    CanonicalToken {
-        key: "radius.md",
-        description: "Medium border radius in pixels",
-        default_value: "8",
+        key: "stroke.border.width",
+        description: "Border/frame stroke width in pixels",
+        default_value: "1",
     },
 ];
 
@@ -382,7 +390,9 @@ pub fn resolve_tokens(
     config_tokens: &DesignTokenMap,
     profile_tokens: &DesignTokenMap,
 ) -> DesignTokenMap {
-    let mut resolved = DesignTokenMap::new();
+    let mut resolved = DesignTokenMap::with_capacity(
+        CANONICAL_TOKENS.len() + config_tokens.len() + profile_tokens.len(),
+    );
 
     // Layer 3 (lowest priority): canonical fallback defaults
     for token in CANONICAL_TOKENS {
@@ -440,9 +450,9 @@ mod tests {
     fn test_valid_token_keys() {
         assert!(is_valid_token_key("color.text.primary"));
         assert!(is_valid_token_key("typography.body.size"));
-        assert!(is_valid_token_key("spacing.xs"));
-        assert!(is_valid_token_key("radius.sm"));
-        assert!(is_valid_token_key("color.bg.overlay"));
+        assert!(is_valid_token_key("spacing.unit"));
+        assert!(is_valid_token_key("stroke.outline.width"));
+        assert!(is_valid_token_key("color.backdrop.default"));
         assert!(is_valid_token_key("a.b"));
         assert!(is_valid_token_key("a1.b2_c"));
         assert!(is_valid_token_key("abc123.def_ghi"));
@@ -513,6 +523,16 @@ mod tests {
         assert!(parse_color_hex("not-a-color").is_none());
     }
 
+    #[test]
+    fn test_parse_color_hex_rejects_non_ascii() {
+        // Multi-byte UTF-8 inputs must not panic — they must return None.
+        // A naïve byte-length check (e.g. `hex.len() == 6`) can produce a
+        // valid length match with multi-byte chars while the byte offsets
+        // don't align with character boundaries, causing a panic.
+        assert!(parse_color_hex("#你好").is_none());
+        assert!(parse_color_hex("#\u{1F600}\u{1F600}").is_none());
+    }
+
     // ── Numeric parsing ───────────────────────────────────────────────────────
 
     #[test]
@@ -534,21 +554,50 @@ mod tests {
         assert!(parse_numeric("1.2.3").is_none());
     }
 
+    #[test]
+    fn test_parse_numeric_rejects_nan_and_infinity() {
+        // Spec: NaN and infinity strings MUST be rejected
+        assert!(parse_numeric("nan").is_none());
+        assert!(parse_numeric("NaN").is_none());
+        assert!(parse_numeric("inf").is_none());
+        assert!(parse_numeric("infinity").is_none());
+        assert!(parse_numeric("-inf").is_none());
+    }
+
+    #[test]
+    fn test_parse_numeric_rejects_whitespace() {
+        // Spec: leading/trailing whitespace MUST NOT be permitted
+        assert!(parse_numeric(" 16").is_none());
+        assert!(parse_numeric("16 ").is_none());
+        assert!(parse_numeric(" 1.5 ").is_none());
+    }
+
     // ── Font family parsing ───────────────────────────────────────────────────
 
     #[test]
     fn test_parse_font_family_keywords() {
+        use tze_hud_scene::types::FontFamily;
+        // Both "system-ui" and "sans-serif" map to SystemSansSerif
+        assert_eq!(
+            parse_font_family("system-ui"),
+            Some(FontFamily::SystemSansSerif)
+        );
         assert_eq!(
             parse_font_family("sans-serif"),
-            Some(FontFamily::SansSerif)
+            Some(FontFamily::SystemSansSerif)
         );
-        assert_eq!(parse_font_family("serif"), Some(FontFamily::Serif));
+        assert_eq!(
+            parse_font_family("serif"),
+            Some(FontFamily::SystemSerif)
+        );
         assert_eq!(
             parse_font_family("monospace"),
-            Some(FontFamily::Monospace)
+            Some(FontFamily::SystemMonospace)
         );
         assert!(parse_font_family("Arial").is_none());
         assert!(parse_font_family("").is_none());
+        // Whitespace is NOT trimmed — must match exactly
+        assert!(parse_font_family(" sans-serif").is_none());
     }
 
     // ── parse_token_value dispatch ────────────────────────────────────────────
@@ -567,8 +616,9 @@ mod tests {
 
     #[test]
     fn test_parse_token_value_font() {
+        use tze_hud_scene::types::FontFamily;
         let tv = parse_token_value("monospace");
-        assert_eq!(tv, TokenValue::Font(FontFamily::Monospace));
+        assert_eq!(tv, TokenValue::Font(FontFamily::SystemMonospace));
     }
 
     #[test]
@@ -647,7 +697,7 @@ mod tests {
         use crate::raw::RawDesignTokens;
         let mut tokens = HashMap::new();
         tokens.insert("color.text.primary".to_string(), "#FFFFFF".to_string());
-        tokens.insert("spacing.md".to_string(), "16".to_string());
+        tokens.insert("spacing.unit".to_string(), "8".to_string());
         let mut raw = RawConfig::default();
         raw.design_tokens = Some(RawDesignTokens(tokens));
         let mut errors = Vec::new();
