@@ -387,9 +387,17 @@ impl TextItem {
         policy: &RenderingPolicy,
         opacity: f32,
     ) -> Self {
-        // Margin: prefer policy.margin_horizontal/margin_vertical, fall back to 8px.
-        let margin_h = policy.margin_horizontal.unwrap_or(8.0);
-        let margin_v = policy.margin_vertical.unwrap_or(8.0);
+        // Margin: prefer margin_horizontal/margin_vertical; fall back to margin_px;
+        // then fall back to 8px.  Per spec §Extended RenderingPolicy: margin_horizontal
+        // "overrides margin_px for the horizontal axis. When None, falls back to margin_px."
+        let margin_h = policy
+            .margin_horizontal
+            .or(policy.margin_px)
+            .unwrap_or(8.0);
+        let margin_v = policy
+            .margin_vertical
+            .or(policy.margin_px)
+            .unwrap_or(8.0);
 
         let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
         let font_family = policy.font_family.unwrap_or(FontFamily::SystemSansSerif);
@@ -753,6 +761,21 @@ mod tests {
         assert_eq!(black, [0, 0, 0, 255]);
         let white = rgba_to_srgb_u8(Rgba::WHITE);
         assert_eq!(white, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn from_zone_policy_margin_px_fallback() {
+        // When margin_horizontal/vertical are None but margin_px is set,
+        // margin_px should be used (spec §Extended RenderingPolicy).
+        use tze_hud_scene::types::RenderingPolicy;
+        let policy = RenderingPolicy {
+            margin_px: Some(20.0),
+            // margin_horizontal/margin_vertical intentionally None
+            ..Default::default()
+        };
+        let item = TextItem::from_zone_policy("text", 0.0, 0.0, 400.0, 100.0, &policy, 1.0);
+        assert_eq!(item.pixel_x, 20.0, "margin_px fallback should apply to horizontal margin");
+        assert_eq!(item.pixel_y, 20.0, "margin_px fallback should apply to vertical margin");
     }
 
     #[test]
