@@ -3413,6 +3413,7 @@ name = "tze_hud_compositor"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "criterion",
  "glyphon",
  "resvg",
  "thiserror 2.0.18",
