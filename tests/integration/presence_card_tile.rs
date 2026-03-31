@@ -34,7 +34,7 @@ use tze_hud_scene::{
     mutation::{MutationBatch, SceneMutation},
     types::{
         FontFamily, ImageFitMode, InputMode, Node, NodeData, Rect, Rgba, SolidColorNode,
-        StaticImageNode, TextMarkdownNode, TextAlign, TextOverflow,
+        StaticImageNode, TextAlign, TextMarkdownNode, TextOverflow,
     },
 };
 
@@ -95,9 +95,8 @@ const ORANGE: [u8; 3] = [251, 188, 4];
 /// can decode and validate. The resulting bytes are a canonical representation
 /// of a solid-color 32x32 avatar placeholder per the exemplar spec.
 fn make_avatar_png(rgb: [u8; 3]) -> Vec<u8> {
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(AVATAR_W, AVATAR_H, |_, _| {
-        Rgb([rgb[0], rgb[1], rgb[2]])
-    });
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_fn(AVATAR_W, AVATAR_H, |_, _| Rgb([rgb[0], rgb[1], rgb[2]]));
     let mut buf = Vec::new();
     img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
         .expect("PNG encoding must not fail for a solid-color image");
@@ -263,7 +262,10 @@ fn avatar_fixtures_are_non_empty() {
 
     // Distinct colors must produce distinct bytes (no accidental collision)
     assert_ne!(blue_png, green_png, "blue and green avatars must differ");
-    assert_ne!(green_png, orange_png, "green and orange avatars must differ");
+    assert_ne!(
+        green_png, orange_png,
+        "green and orange avatars must differ"
+    );
     assert_ne!(blue_png, orange_png, "blue and orange avatars must differ");
 }
 
@@ -310,9 +312,18 @@ async fn three_avatar_uploads_distinct_resource_ids() {
     let id1 = upload_avatar_png(&store, "agent-1", make_avatar_png(GREEN)).await;
     let id2 = upload_avatar_png(&store, "agent-2", make_avatar_png(ORANGE)).await;
 
-    assert_ne!(id0, id1, "blue and green avatars must have different ResourceIds");
-    assert_ne!(id1, id2, "green and orange avatars must have different ResourceIds");
-    assert_ne!(id0, id2, "blue and orange avatars must have different ResourceIds");
+    assert_ne!(
+        id0, id1,
+        "blue and green avatars must have different ResourceIds"
+    );
+    assert_ne!(
+        id1, id2,
+        "green and orange avatars must have different ResourceIds"
+    );
+    assert_ne!(
+        id0, id2,
+        "blue and orange avatars must have different ResourceIds"
+    );
 }
 
 // ── 2. Tile geometry (Task 2.1) ───────────────────────────────────────────────
@@ -323,11 +334,7 @@ async fn three_avatar_uploads_distinct_resource_ids() {
 fn presence_card_y_offsets_match_spec() {
     let h = DISPLAY_H;
 
-    assert_eq!(
-        card_y_offset(0, h),
-        h - 96.0,
-        "agent 0 y = tab_height - 96"
-    );
+    assert_eq!(card_y_offset(0, h), h - 96.0, "agent 0 y = tab_height - 96");
     assert_eq!(
         card_y_offset(1, h),
         h - 184.0,
@@ -358,10 +365,7 @@ fn presence_card_bounds_no_overlap() {
             assert!(
                 !overlaps,
                 "agent {i} card [{}, {}] overlaps agent {j} card [{}, {}]",
-                a.y,
-                a_bottom,
-                b.y,
-                b_bottom
+                a.y, a_bottom, b.y, b_bottom
             );
         }
     }
@@ -459,12 +463,12 @@ fn create_tile_batch_accepted_with_opacity_and_input_mode() {
         InputMode::Passthrough,
         "tile input_mode must be Passthrough"
     );
-    assert_eq!(tile.bounds, bounds, "tile bounds must match specified geometry");
-    assert_eq!(tile.z_order, z_order, "tile z_order must be {z_order}");
     assert_eq!(
-        tile.namespace, "agent-0",
-        "tile namespace must match agent"
+        tile.bounds, bounds,
+        "tile bounds must match specified geometry"
     );
+    assert_eq!(tile.z_order, z_order, "tile z_order must be {z_order}");
+    assert_eq!(tile.namespace, "agent-0", "tile namespace must match agent");
 }
 
 // ── 4. Node tree builder (Task 2.2) ──────────────────────────────────────────
@@ -478,8 +482,7 @@ async fn node_tree_builder_three_nodes() {
     let store = ResourceStore::new(ResourceStoreConfig::default());
     let resource_id_raw = upload_avatar_png(&store, "agent-0", make_avatar_png(BLUE)).await;
     // Convert from tze_hud_resource::ResourceId to tze_hud_scene::ResourceId
-    let resource_id =
-        tze_hud_scene::ResourceId::from_bytes(*resource_id_raw.as_bytes());
+    let resource_id = tze_hud_scene::ResourceId::from_bytes(*resource_id_raw.as_bytes());
 
     // Set up scene
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
@@ -553,11 +556,17 @@ async fn node_tree_builder_three_nodes() {
 
     // Verify tile root
     let tile = scene.tiles.get(&tile_id).expect("tile must exist");
-    assert!(tile.root_node.is_some(), "tile must have a root node after AddNode");
+    assert!(
+        tile.root_node.is_some(),
+        "tile must have a root node after AddNode"
+    );
     let root_id = tile.root_node.unwrap();
 
     // Verify root is SolidColorNode
-    let root_node = scene.nodes.get(&root_id).expect("root node must be in graph");
+    let root_node = scene
+        .nodes
+        .get(&root_id)
+        .expect("root node must be in graph");
     assert!(
         matches!(root_node.data, NodeData::SolidColor(_)),
         "root node must be SolidColorNode, got {:?}",
@@ -592,7 +601,11 @@ async fn node_tree_builder_three_nodes() {
 
     // Verify SolidColorNode properties (background)
     if let NodeData::SolidColor(bg) = &root_node.data {
-        assert_eq!(bg.bounds, Rect::new(0.0, 0.0, CARD_W, CARD_H), "bg bounds must cover full tile");
+        assert_eq!(
+            bg.bounds,
+            Rect::new(0.0, 0.0, CARD_W, CARD_H),
+            "bg bounds must cover full tile"
+        );
         assert!(
             (bg.color.r - 0.08).abs() < 1e-5,
             "bg color.r must be ~0.08, got {}",
@@ -607,10 +620,17 @@ async fn node_tree_builder_three_nodes() {
 
     // Verify StaticImageNode properties
     if let NodeData::StaticImage(img) = &child0.data {
-        assert_eq!(img.resource_id, resource_id, "avatar must reference uploaded ResourceId");
+        assert_eq!(
+            img.resource_id, resource_id,
+            "avatar must reference uploaded ResourceId"
+        );
         assert_eq!(img.width, AVATAR_W, "avatar width must be 32");
         assert_eq!(img.height, AVATAR_H, "avatar height must be 32");
-        assert_eq!(img.fit_mode, ImageFitMode::Cover, "avatar fit mode must be Cover");
+        assert_eq!(
+            img.fit_mode,
+            ImageFitMode::Cover,
+            "avatar fit mode must be Cover"
+        );
         assert_eq!(
             img.bounds,
             Rect::new(AVATAR_X, AVATAR_Y, AVATAR_W as f32, AVATAR_H as f32),
@@ -633,11 +653,12 @@ async fn node_tree_builder_three_nodes() {
             (txt.color.r - 0.94).abs() < 1e-5,
             "text color.r must be ~0.94"
         );
-        assert!(
-            (txt.color.a - 1.0).abs() < 1e-5,
-            "text color.a must be 1.0"
+        assert!((txt.color.a - 1.0).abs() < 1e-5, "text color.a must be 1.0");
+        assert_eq!(
+            txt.overflow,
+            TextOverflow::Ellipsis,
+            "overflow must be Ellipsis"
         );
-        assert_eq!(txt.overflow, TextOverflow::Ellipsis, "overflow must be Ellipsis");
         assert_eq!(
             txt.bounds,
             Rect::new(TEXT_X, TEXT_Y, TEXT_W, TEXT_H),
@@ -646,7 +667,11 @@ async fn node_tree_builder_three_nodes() {
     }
 
     // Verify total node count
-    assert_eq!(scene.node_count(), 3, "scene must have exactly 3 nodes total");
+    assert_eq!(
+        scene.node_count(),
+        3,
+        "scene must have exactly 3 nodes total"
+    );
 }
 
 // ── 5. Full batch submission visible in SceneSnapshot (Task 2.3) ──────────────
@@ -660,8 +685,7 @@ async fn full_presence_card_batch_visible_in_snapshot() {
     // Set up resource store and upload avatar
     let store = ResourceStore::new(ResourceStoreConfig::default());
     let resource_id_raw = upload_avatar_png(&store, "agent-0", make_avatar_png(BLUE)).await;
-    let resource_id =
-        tze_hud_scene::ResourceId::from_bytes(*resource_id_raw.as_bytes());
+    let resource_id = tze_hud_scene::ResourceId::from_bytes(*resource_id_raw.as_bytes());
 
     // Set up scene
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
@@ -745,8 +769,14 @@ async fn full_presence_card_batch_visible_in_snapshot() {
         .find(|t| t.id == tile_id)
         .expect("tile must appear in SceneSnapshot after creation and node tree assembly");
 
-    assert_eq!(snap_tile.bounds, expected_bounds, "snapshot tile bounds must match spec geometry");
-    assert_eq!(snap_tile.z_order, expected_z, "snapshot tile z_order must be {expected_z}");
+    assert_eq!(
+        snap_tile.bounds, expected_bounds,
+        "snapshot tile bounds must match spec geometry"
+    );
+    assert_eq!(
+        snap_tile.z_order, expected_z,
+        "snapshot tile z_order must be {expected_z}"
+    );
     assert_eq!(snap_tile.opacity, 1.0, "snapshot tile opacity must be 1.0");
     assert_eq!(
         snap_tile.input_mode,
@@ -785,9 +815,18 @@ async fn full_presence_card_batch_visible_in_snapshot() {
         .values()
         .any(|n| matches!(n.data, NodeData::TextMarkdown(_)));
 
-    assert!(has_bg, "SceneSnapshot must contain SolidColorNode (background)");
-    assert!(has_avatar, "SceneSnapshot must contain StaticImageNode (avatar)");
-    assert!(has_text, "SceneSnapshot must contain TextMarkdownNode (identity text)");
+    assert!(
+        has_bg,
+        "SceneSnapshot must contain SolidColorNode (background)"
+    );
+    assert!(
+        has_avatar,
+        "SceneSnapshot must contain StaticImageNode (avatar)"
+    );
+    assert!(
+        has_text,
+        "SceneSnapshot must contain TextMarkdownNode (identity text)"
+    );
 }
 
 // ── 6. Three agents: non-overlapping presence cards (Tasks 2.1, 5.x) ─────────
@@ -836,13 +875,7 @@ fn three_agents_non_overlapping_presence_cards() {
     // Verify all 3 tiles present with distinct bounds
     let bounds: Vec<Rect> = tile_ids
         .iter()
-        .map(|id| {
-            scene
-                .tiles
-                .get(id)
-                .expect("tile must exist")
-                .bounds
-        })
+        .map(|id| scene.tiles.get(id).expect("tile must exist").bounds)
         .collect();
 
     // Check non-overlap
@@ -856,10 +889,7 @@ fn three_agents_non_overlapping_presence_cards() {
             assert!(
                 !overlaps,
                 "tile {i} [{}, {}] must not overlap tile {j} [{}, {}]",
-                a.y,
-                a_bottom,
-                b.y,
-                b_bottom
+                a.y, a_bottom, b.y, b_bottom
             );
         }
     }
@@ -867,10 +897,7 @@ fn three_agents_non_overlapping_presence_cards() {
     // Verify each agent owns only its own tile (namespace isolation)
     for (i, &agent) in agents.iter().enumerate() {
         let tile = scene.tiles.get(&tile_ids[i]).unwrap();
-        assert_eq!(
-            tile.namespace, agent,
-            "tile {i} must be owned by {agent}"
-        );
+        assert_eq!(tile.namespace, agent, "tile {i} must be owned by {agent}");
     }
 }
 
@@ -882,8 +909,7 @@ fn three_agents_non_overlapping_presence_cards() {
 async fn snapshot_is_deterministic_after_presence_card_assembly() {
     let store = ResourceStore::new(ResourceStoreConfig::default());
     let resource_id_raw = upload_avatar_png(&store, "agent-0", make_avatar_png(ORANGE)).await;
-    let resource_id =
-        tze_hud_scene::ResourceId::from_bytes(*resource_id_raw.as_bytes());
+    let resource_id = tze_hud_scene::ResourceId::from_bytes(*resource_id_raw.as_bytes());
 
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
@@ -920,9 +946,21 @@ async fn snapshot_is_deterministic_after_presence_card_assembly() {
         "agent-det",
         Some(lease_id),
         vec![
-            SceneMutation::AddNode { tile_id, parent_id: None, node: bg_node },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: avatar_node },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: text_node },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: bg_node,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: avatar_node,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: text_node,
+            },
         ],
     );
     assert!(scene.apply_batch(&b2).applied, "AddNode batch must succeed");
