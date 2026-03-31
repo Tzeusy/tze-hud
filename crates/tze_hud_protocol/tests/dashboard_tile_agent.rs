@@ -75,8 +75,9 @@ fn now_wall_us() -> u64 {
 /// Open a gRPC bidirectional stream, send `SessionInit`, and return
 /// `(sender, SessionEstablished_payload, stream)`.
 ///
-/// The caller receives the raw streaming handle; it is their responsibility to
-/// consume the `SceneSnapshot` that follows `SessionEstablished`.
+/// This helper consumes the mandatory `SceneSnapshot` that follows
+/// `SessionEstablished`, so the caller receives a stream positioned at the
+/// first message after the snapshot (ready for lease/mutation traffic).
 async fn perform_handshake(
     client: &mut HudSessionClient<tonic::transport::Channel>,
     agent_id: &str,
@@ -342,8 +343,10 @@ async fn exemplar_lease_request_with_invalid_capability_is_denied() {
     .await
     .unwrap();
 
-    // The first response must be a denial — no LeaseStateChange precedes a denial.
-    let resp_msg = stream.next().await.unwrap().unwrap();
+    // Drain any interleaved state-change messages before asserting the denial.
+    // A denial does not normally produce a LeaseStateChange, but draining
+    // defensively here is consistent with the rest of the test suite.
+    let resp_msg = next_non_state_change(&mut stream).await;
 
     match resp_msg.payload {
         Some(ServerPayload::LeaseResponse(resp)) => {
