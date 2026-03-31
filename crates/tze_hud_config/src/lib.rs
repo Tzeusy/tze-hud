@@ -59,6 +59,7 @@ pub mod capability;
 pub mod component_profiles;
 pub mod component_types;
 pub mod loader;
+pub mod policy_builder;
 pub mod privacy;
 pub mod profile;
 pub mod raw;
@@ -86,7 +87,8 @@ pub use profile::{
 };
 pub use readability::{PolicySnapshot, ReadabilityViolation, check_zone_readability, is_dev_mode};
 pub use reload::{
-    FieldClassification, HotReloadableConfig, SighupHandler, reload_config, section_classification,
+    FieldClassification, FROZEN_SECTIONS, HotReloadableConfig, SighupHandler,
+    check_frozen_section_changes, reload_config, section_classification,
 };
 pub use resolver::resolve_config_path;
 pub use schema::print_schema;
@@ -94,3 +96,11 @@ pub use widgets::{
     LoadedWidgetType, build_widget_instance, validate_widget_bundles, validate_widget_instances,
 };
 pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};
+pub use policy_builder::{
+    ProfileSelection,
+    apply_token_defaults_for_zone,
+    build_effective_policy,
+    build_all_effective_policies,
+    merge_zone_override,
+    resolve_profile_selection,
+};

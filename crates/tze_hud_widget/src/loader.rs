@@ -34,7 +34,7 @@ use crate::svg_ids::collect_svg_element_ids;
 // ─── Bundle loader ─────────────────────────────────────────────────────────────
 
 /// Result of loading a single widget asset bundle.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LoadedBundle {
     /// The widget type definition, ready to register into WidgetRegistry.
     pub definition: WidgetDefinition,

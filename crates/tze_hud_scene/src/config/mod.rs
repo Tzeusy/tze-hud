@@ -63,6 +63,12 @@ pub enum ConfigErrorCode {
     ///
     /// Wire code: `PROFILE_READABILITY_VIOLATION`
     ProfileReadabilityViolation,
+    /// A `[component_profiles]` key is not a recognized v1 component type name.
+    ConfigUnknownComponentType,
+    /// A `[component_profiles]` value does not match any loaded profile.
+    ConfigUnknownComponentProfile,
+    /// A `[component_profiles]` entry maps a component type to a profile of a different type.
+    ConfigProfileTypeMismatch,
     Other(String),
 }
 

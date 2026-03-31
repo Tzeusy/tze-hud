@@ -11,17 +11,27 @@
 //!   On reload: entire config re-validated; validation errors returned without
 //!   applying new config.
 //!
+//! - **Hot-Reload Classification for component-shape-language** (hud-sc0a.7)
+//!   `[design_tokens]`, `[component_profile_bundles]`, and `[component_profiles]`
+//!   are **frozen** — they are resolved at startup and baked into RenderingPolicy
+//!   fields, SVG templates, and zone/widget registries. Changing them requires a
+//!   restart. A SIGHUP that detects changes in these frozen sections MUST log a
+//!   WARN and MUST NOT apply partial updates.
+//!
 //! ## Field Classification
 //!
-//! | Section                 | Reload behaviour |
-//! |-------------------------|-----------------|
-//! | `[runtime]`             | Frozen (restart required) |
-//! | `[[tabs]]`              | Frozen (restart required) |
-//! | `[agents.registered]`   | Frozen (restart required) |
-//! | `[privacy]`             | Hot-reloadable |
-//! | `[degradation]`         | Hot-reloadable |
-//! | `[chrome]`              | Hot-reloadable |
-//! | `[agents.dynamic_policy]` | Hot-reloadable |
+//! | Section                         | Reload behaviour |
+//! |---------------------------------|-----------------|
+//! | `[runtime]`                     | Frozen (restart required) |
+//! | `[[tabs]]`                      | Frozen (restart required) |
+//! | `[agents.registered]`           | Frozen (restart required) |
+//! | `[design_tokens]`               | Frozen (restart required) |
+//! | `[component_profile_bundles]`   | Frozen (restart required) |
+//! | `[component_profiles]`          | Frozen (restart required) |
+//! | `[privacy]`                     | Hot-reloadable |
+//! | `[degradation]`                 | Hot-reloadable |
+//! | `[chrome]`                      | Hot-reloadable |
+//! | `[agents.dynamic_policy]`       | Hot-reloadable |
 //!
 //! ## Design Note
 //!
@@ -67,6 +77,67 @@ pub fn section_classification(section_path: &str) -> FieldClassification {
         // Everything else is frozen at startup.
         _ => FieldClassification::Frozen,
     }
+}
+
+/// The names of config sections that are frozen for startup (require restart).
+///
+/// Includes the component-shape-language sections added by hud-sc0a.7.
+pub const FROZEN_SECTIONS: &[&str] = &[
+    "runtime",
+    "tabs",
+    "agents.registered",
+    "display_profile",
+    "includes",
+    "design_tokens",
+    "component_profile_bundles",
+    "component_profiles",
+];
+
+/// Check whether the new TOML introduces changes to frozen sections and emit
+/// `tracing::warn!` for each frozen section that has changed.
+///
+/// This function compares the serialized form of each frozen section between
+/// the currently-running config and the new parsed config. When a frozen section
+/// differs, a WARN is emitted stating that a restart is required.
+///
+/// # Arguments
+///
+/// * `current_raw` — the raw config currently in use (from startup).
+/// * `new_raw` — the newly parsed raw config (from the reload TOML).
+///
+/// Returns `true` if any frozen section changed (informational; callers may use
+/// this to decide whether to log a summary).
+pub fn check_frozen_section_changes(
+    current_raw: &crate::raw::RawConfig,
+    new_raw: &crate::raw::RawConfig,
+) -> bool {
+    // Compare serialized representations of the frozen sections.
+    // We use serde_json for a canonical, diff-friendly comparison.
+    let mut any_changed = false;
+
+    macro_rules! check_frozen_field {
+        ($field:ident, $section_name:expr) => {
+            let current_json = serde_json::to_string(&current_raw.$field).unwrap_or_default();
+            let new_json = serde_json::to_string(&new_raw.$field).unwrap_or_default();
+            if current_json != new_json {
+                tracing::warn!(
+                    section = $section_name,
+                    "SIGHUP detected change in frozen config section '{}'; \
+                     a restart is required for this change to take effect",
+                    $section_name
+                );
+                any_changed = true;
+            }
+        };
+    }
+
+    check_frozen_field!(runtime, "runtime");
+    check_frozen_field!(tabs, "tabs");
+    check_frozen_field!(design_tokens, "design_tokens");
+    check_frozen_field!(component_profile_bundles, "component_profile_bundles");
+    check_frozen_field!(component_profiles, "component_profiles");
+
+    any_changed
 }
 
 // ─── Hot-reloadable config subset ─────────────────────────────────────────────
@@ -258,6 +329,22 @@ name = "Main"
             section_classification("includes"),
             FieldClassification::Frozen
         );
+        // hud-sc0a.7: component-shape-language sections are frozen
+        assert_eq!(
+            section_classification("design_tokens"),
+            FieldClassification::Frozen,
+            "[design_tokens] must be frozen (requires restart)"
+        );
+        assert_eq!(
+            section_classification("component_profile_bundles"),
+            FieldClassification::Frozen,
+            "[component_profile_bundles] must be frozen (requires restart)"
+        );
+        assert_eq!(
+            section_classification("component_profiles"),
+            FieldClassification::Frozen,
+            "[component_profiles] must be frozen (requires restart)"
+        );
     }
 
     #[test]
@@ -402,5 +489,66 @@ redaction_style = "blank"
         let raw = loader.into_raw();
         assert!(raw.runtime.is_some(), "runtime should be present");
         assert!(!raw.tabs.is_empty(), "tabs should be present");
+    }
+
+    // ── FROZEN_SECTIONS list ──────────────────────────────────────────────────
+
+    /// Verify the FROZEN_SECTIONS list includes the three component-shape-language sections.
+    #[test]
+    fn test_frozen_sections_list_includes_component_shape_language() {
+        assert!(
+            FROZEN_SECTIONS.contains(&"design_tokens"),
+            "design_tokens must be in FROZEN_SECTIONS"
+        );
+        assert!(
+            FROZEN_SECTIONS.contains(&"component_profile_bundles"),
+            "component_profile_bundles must be in FROZEN_SECTIONS"
+        );
+        assert!(
+            FROZEN_SECTIONS.contains(&"component_profiles"),
+            "component_profiles must be in FROZEN_SECTIONS"
+        );
+    }
+
+    // ── check_frozen_section_changes ──────────────────────────────────────────
+
+    /// When no changes to frozen sections, returns false.
+    #[test]
+    fn test_check_frozen_section_changes_no_changes_returns_false() {
+        let raw = TzeHudConfig::parse(minimal_valid_toml()).unwrap().into_raw();
+        let changed = check_frozen_section_changes(&raw, &raw.clone());
+        assert!(!changed, "no changes should return false");
+    }
+
+    /// When design_tokens section changes, returns true.
+    #[test]
+    fn test_check_frozen_section_changes_design_tokens_changed() {
+        use crate::raw::RawDesignTokens;
+        let current = TzeHudConfig::parse(minimal_valid_toml()).unwrap().into_raw();
+        let mut new_raw = current.clone();
+        let mut tokens = std::collections::HashMap::new();
+        tokens.insert("color.text.primary".to_string(), "#FF0000".to_string());
+        new_raw.design_tokens = Some(RawDesignTokens(tokens));
+        let changed = check_frozen_section_changes(&current, &new_raw);
+        assert!(
+            changed,
+            "changed design_tokens should return true and emit WARN"
+        );
+    }
+
+    /// When component_profiles section changes, returns true.
+    #[test]
+    fn test_check_frozen_section_changes_component_profiles_changed() {
+        use crate::raw::RawComponentProfiles;
+        let current = TzeHudConfig::parse(minimal_valid_toml()).unwrap().into_raw();
+        let mut new_raw = current.clone();
+        let mut profiles = std::collections::HashMap::new();
+        profiles.insert("subtitle".to_string(), "my-profile".to_string());
+        new_raw.component_profiles = Some(RawComponentProfiles(profiles));
+        let changed = check_frozen_section_changes(&current, &new_raw);
+        assert!(
+            changed,
+            "changed component_profiles should return true and emit WARN"
+        );
     }
 }
