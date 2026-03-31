@@ -5,7 +5,7 @@
 //! - Four token value parsers: color hex, numeric, font family, literal string
 //! - Canonical token schema (~28 required keys with fallback defaults)
 //! - Three-layer profile-scoped token resolution:
-//!     profile overrides → global config → canonical fallbacks
+//!   profile overrides → global config → canonical fallbacks
 //!
 //! ## Error codes produced
 //!
@@ -127,7 +127,6 @@ pub enum TokenValue {
     Font(FontFamily),
     Literal(String),
 }
-
 
 // ─── Value parsers ────────────────────────────────────────────────────────────
 
@@ -586,10 +585,7 @@ mod tests {
             parse_font_family("sans-serif"),
             Some(FontFamily::SystemSansSerif)
         );
-        assert_eq!(
-            parse_font_family("serif"),
-            Some(FontFamily::SystemSerif)
-        );
+        assert_eq!(parse_font_family("serif"), Some(FontFamily::SystemSerif));
         assert_eq!(
             parse_font_family("monospace"),
             Some(FontFamily::SystemMonospace)
@@ -650,10 +646,7 @@ mod tests {
     #[test]
     fn test_resolve_tokens_config_overrides_fallback() {
         let mut config_tokens = DesignTokenMap::new();
-        config_tokens.insert(
-            "color.text.primary".to_string(),
-            "#FF0000".to_string(),
-        );
+        config_tokens.insert("color.text.primary".to_string(), "#FF0000".to_string());
         let map = resolve_tokens(&config_tokens, &DesignTokenMap::new());
         assert_eq!(map["color.text.primary"], "#FF0000");
     }
@@ -661,15 +654,9 @@ mod tests {
     #[test]
     fn test_resolve_tokens_profile_overrides_config() {
         let mut config_tokens = DesignTokenMap::new();
-        config_tokens.insert(
-            "color.text.primary".to_string(),
-            "#FF0000".to_string(),
-        );
+        config_tokens.insert("color.text.primary".to_string(), "#FF0000".to_string());
         let mut profile_tokens = DesignTokenMap::new();
-        profile_tokens.insert(
-            "color.text.primary".to_string(),
-            "#00FF00".to_string(),
-        );
+        profile_tokens.insert("color.text.primary".to_string(), "#00FF00".to_string());
         let map = resolve_tokens(&config_tokens, &profile_tokens);
         assert_eq!(map["color.text.primary"], "#00FF00");
     }
@@ -715,10 +702,7 @@ mod tests {
         let mut errors = Vec::new();
         validate_design_tokens(&raw, &mut errors);
         assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            errors[0].code,
-            ConfigErrorCode::InvalidTokenKey
-        ));
+        assert!(matches!(errors[0].code, ConfigErrorCode::InvalidTokenKey));
     }
 
     #[test]

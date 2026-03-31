@@ -218,10 +218,7 @@ impl ComponentType {
                 name: "pip",
                 zone_type_name: "pip",
                 readability: ReadabilityTechnique::None,
-                required_tokens: &[
-                    "color.border.default",
-                    "stroke.border.width",
-                ],
+                required_tokens: &["color.border.default", "stroke.border.width"],
                 geometry_note: "corner-anchored, resizable within bounds; border tokens reserved for post-v1 border rendering",
             },
         }
@@ -299,8 +296,7 @@ mod tests {
     fn notification_contract_zone_type_name_is_registry_name() {
         let c = ComponentType::Notification.contract();
         assert_eq!(
-            c.zone_type_name,
-            "notification-area",
+            c.zone_type_name, "notification-area",
             "notification zone_type_name must be the registry name 'notification-area', \
              not the config constant 'notification'"
         );
@@ -343,8 +339,7 @@ mod tests {
     fn status_bar_contract_zone_type_name_is_registry_name() {
         let c = ComponentType::StatusBar.contract();
         assert_eq!(
-            c.zone_type_name,
-            "status-bar",
+            c.zone_type_name, "status-bar",
             "status-bar zone_type_name must be the registry name 'status-bar', \
              not the config constant 'status_bar'"
         );
@@ -383,8 +378,7 @@ mod tests {
     fn alert_banner_contract_zone_type_name_is_registry_name() {
         let c = ComponentType::AlertBanner.contract();
         assert_eq!(
-            c.zone_type_name,
-            "alert-banner",
+            c.zone_type_name, "alert-banner",
             "alert-banner zone_type_name must be the registry name 'alert-banner', \
              not the config constant 'alert_banner'"
         );
@@ -450,8 +444,7 @@ mod tests {
     fn ambient_background_contract_zone_type_name_is_registry_name() {
         let c = ComponentType::AmbientBackground.contract();
         assert_eq!(
-            c.zone_type_name,
-            "ambient-background",
+            c.zone_type_name, "ambient-background",
             "ambient-background zone_type_name must be the registry name 'ambient-background', \
              not the config constant 'ambient_background'"
         );
@@ -566,9 +559,9 @@ mod tests {
         // Registry names are defined in ZoneRegistry::with_defaults().
         let expected_registry_names = [
             ("subtitle", "subtitle"),
-            ("notification", "notification-area"),     // NOT "notification"
-            ("status-bar", "status-bar"),              // NOT "status_bar"
-            ("alert-banner", "alert-banner"),          // NOT "alert_banner"
+            ("notification", "notification-area"), // NOT "notification"
+            ("status-bar", "status-bar"),          // NOT "status_bar"
+            ("alert-banner", "alert-banner"),      // NOT "alert_banner"
             ("ambient-background", "ambient-background"), // NOT "ambient_background"
             ("pip", "pip"),
         ];

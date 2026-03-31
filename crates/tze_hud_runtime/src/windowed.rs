@@ -783,8 +783,10 @@ impl ApplicationHandler for WinitApp {
                 if event.state == ElementState::Pressed && !event.repeat {
                     use winit::keyboard::{KeyCode, PhysicalKey};
                     let mods = self.state.modifiers;
-                    let ctrl_shift = mods.control_key() && mods.shift_key()
-                        && !mods.alt_key() && !mods.super_key();
+                    let ctrl_shift = mods.control_key()
+                        && mods.shift_key()
+                        && !mods.alt_key()
+                        && !mods.super_key();
                     if ctrl_shift {
                         match event.physical_key {
                             PhysicalKey::Code(KeyCode::F9) => {
@@ -1033,10 +1035,8 @@ impl WinitApp {
 
         if let Some(window) = &self.state.window {
             window.set_outer_position(winit::dpi::PhysicalPosition::new(pos.x, pos.y));
-            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
-                size.width,
-                size.height,
-            ));
+            let _ =
+                window.request_inner_size(winit::dpi::PhysicalSize::new(size.width, size.height));
         }
     }
 
@@ -1631,11 +1631,13 @@ fn detect_monitor_size(
                 available = monitors.len(),
                 "overlay: monitor index out of range, falling back to primary"
             );
-            event_loop.primary_monitor()
+            event_loop
+                .primary_monitor()
                 .or_else(|| monitors.into_iter().next())
         })
     } else {
-        event_loop.primary_monitor()
+        event_loop
+            .primary_monitor()
             .or_else(|| monitors.into_iter().next())
     };
 

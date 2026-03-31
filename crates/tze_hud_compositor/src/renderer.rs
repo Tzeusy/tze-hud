@@ -113,7 +113,7 @@ impl Compositor {
             height,
             frame_number: 0,
             overlay_mode: false,
-            debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").map_or(false, |v| v == "1"),
+            debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             text_rasterizer: None,
             widget_renderer: None,
         })
@@ -213,8 +213,7 @@ impl Compositor {
         // the GPU's true limit; requesting it ensures the surface can be
         // configured at the monitor's native resolution.
         let mut required_limits = wgpu::Limits::downlevel_defaults();
-        required_limits.max_texture_dimension_2d =
-            adapter.limits().max_texture_dimension_2d;
+        required_limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
 
         let (device, queue) = adapter
             .request_device(
@@ -355,7 +354,7 @@ impl Compositor {
             height: clamped_height,
             frame_number: 0,
             overlay_mode: false,
-            debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").map_or(false, |v| v == "1"),
+            debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
             text_rasterizer: None,
             widget_renderer: None,
         };
@@ -1437,7 +1436,12 @@ impl Compositor {
             // values must be pre-multiplied by alpha.
             const A: f32 = 0.001;
             vertices.extend_from_slice(&rect_vertices(
-                0.0, 0.0, sw, sh, sw, sh,
+                0.0,
+                0.0,
+                sw,
+                sh,
+                sw,
+                sh,
                 [0.0, 0.0, 0.0, A],
             ));
 
