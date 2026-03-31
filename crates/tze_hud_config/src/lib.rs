@@ -80,6 +80,10 @@ pub use agents::{
 pub use component_profiles::{ComponentProfile, ZoneRenderingOverride, scan_profile_dirs};
 pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};
 pub use loader::TzeHudConfig;
+pub use policy_builder::{
+    ProfileSelection, apply_token_defaults_for_zone, build_all_effective_policies,
+    build_effective_policy, merge_zone_override, resolve_profile_selection,
+};
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{
     AutoDetectResult, HeadlessSignal, auto_detect_profile, resolve_headless_dimensions,
@@ -87,7 +91,7 @@ pub use profile::{
 };
 pub use readability::{PolicySnapshot, ReadabilityViolation, check_zone_readability, is_dev_mode};
 pub use reload::{
-    FieldClassification, FROZEN_SECTIONS, HotReloadableConfig, SighupHandler,
+    FROZEN_SECTIONS, FieldClassification, HotReloadableConfig, SighupHandler,
     check_frozen_section_changes, reload_config, section_classification,
 };
 pub use resolver::resolve_config_path;
@@ -96,11 +100,3 @@ pub use widgets::{
     LoadedWidgetType, build_widget_instance, validate_widget_bundles, validate_widget_instances,
 };
 pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};
-pub use policy_builder::{
-    ProfileSelection,
-    apply_token_defaults_for_zone,
-    build_effective_policy,
-    build_all_effective_policies,
-    merge_zone_override,
-    resolve_profile_selection,
-};

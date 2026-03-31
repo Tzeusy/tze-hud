@@ -144,7 +144,10 @@ pub fn check_frozen_section_changes(
     // agents.registered is frozen; agents.dynamic_policy is hot-reloadable.
     // Compare only the registered sub-field to avoid false positives from
     // dynamic_policy changes being flagged as requiring a restart.
-    let current_registered = current_raw.agents.as_ref().and_then(|a| a.registered.as_ref());
+    let current_registered = current_raw
+        .agents
+        .as_ref()
+        .and_then(|a| a.registered.as_ref());
     let new_registered = new_raw.agents.as_ref().and_then(|a| a.registered.as_ref());
     let current_reg_val = serde_json::to_value(&current_registered).ok();
     let new_reg_val = serde_json::to_value(&new_registered).ok();
@@ -535,7 +538,9 @@ redaction_style = "blank"
     /// When no changes to frozen sections, returns false.
     #[test]
     fn test_check_frozen_section_changes_no_changes_returns_false() {
-        let raw = TzeHudConfig::parse(minimal_valid_toml()).unwrap().into_raw();
+        let raw = TzeHudConfig::parse(minimal_valid_toml())
+            .unwrap()
+            .into_raw();
         let changed = check_frozen_section_changes(&raw, &raw.clone());
         assert!(!changed, "no changes should return false");
     }
@@ -544,7 +549,9 @@ redaction_style = "blank"
     #[test]
     fn test_check_frozen_section_changes_design_tokens_changed() {
         use crate::raw::RawDesignTokens;
-        let current = TzeHudConfig::parse(minimal_valid_toml()).unwrap().into_raw();
+        let current = TzeHudConfig::parse(minimal_valid_toml())
+            .unwrap()
+            .into_raw();
         let mut new_raw = current.clone();
         let mut tokens = std::collections::HashMap::new();
         tokens.insert("color.text.primary".to_string(), "#FF0000".to_string());
@@ -560,7 +567,9 @@ redaction_style = "blank"
     #[test]
     fn test_check_frozen_section_changes_component_profiles_changed() {
         use crate::raw::RawComponentProfiles;
-        let current = TzeHudConfig::parse(minimal_valid_toml()).unwrap().into_raw();
+        let current = TzeHudConfig::parse(minimal_valid_toml())
+            .unwrap()
+            .into_raw();
         let mut new_raw = current.clone();
         let mut profiles = std::collections::HashMap::new();
         profiles.insert("subtitle".to_string(), "my-profile".to_string());

@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use tze_hud_scene::config::{ConfigError, ConfigErrorCode};
-use tze_hud_scene::types::{FontFamily, Rgba, RenderingPolicy, TextAlign};
+use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba, TextAlign};
 
 use crate::component_profiles::ComponentProfile;
 use crate::component_types::ComponentType;
@@ -377,9 +377,7 @@ pub fn resolve_profile_selection(
                 code: ConfigErrorCode::ConfigProfileTypeMismatch,
                 field_path: format!("component_profiles.{ct_name}"),
                 expected: format!("a profile with component_type = '{expected_type_name}'"),
-                got: format!(
-                    "profile '{profile_name}' has component_type = '{actual_type_name}'"
-                ),
+                got: format!("profile '{profile_name}' has component_type = '{actual_type_name}'"),
                 hint: format!(
                     "component_profiles.{ct_name} = '{profile_name}' is invalid because \
                      profile '{profile_name}' implements '{actual_type_name}', not \
@@ -634,8 +632,7 @@ mod tests {
     fn test_build_effective_policy_absent_zone_type_is_noop() {
         let tokens = default_tokens();
         let zone_default = RenderingPolicy::default();
-        let policy =
-            build_effective_policy("ambient-background", &zone_default, &tokens, None);
+        let policy = build_effective_policy("ambient-background", &zone_default, &tokens, None);
 
         // ambient-background gets no token defaults
         assert_eq!(policy, RenderingPolicy::default());
@@ -646,8 +643,7 @@ mod tests {
     #[test]
     fn test_resolve_profile_selection_empty_config() {
         let mut errors = Vec::new();
-        let selection =
-            resolve_profile_selection(&HashMap::new(), &[], &mut errors);
+        let selection = resolve_profile_selection(&HashMap::new(), &[], &mut errors);
         assert!(errors.is_empty());
         assert!(selection.is_empty());
     }
@@ -675,7 +671,10 @@ mod tests {
         let selection = resolve_profile_selection(&raw, &[], &mut errors);
         assert_eq!(errors.len(), 1);
         assert!(
-            matches!(errors[0].code, ConfigErrorCode::ConfigUnknownComponentProfile),
+            matches!(
+                errors[0].code,
+                ConfigErrorCode::ConfigUnknownComponentProfile
+            ),
             "expected ConfigUnknownComponentProfile, got {:?}",
             errors[0].code
         );
