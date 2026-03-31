@@ -1567,8 +1567,8 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
     // and then decoding as the current type.
     let mut buf = Vec::new();
     pre_extension.encode(&mut buf).unwrap();
-    let decoded = RenderingPolicyProto::decode(buf.as_slice())
-        .expect("backward-compat decode must succeed");
+    let decoded =
+        RenderingPolicyProto::decode(buf.as_slice()).expect("backward-compat decode must succeed");
 
     // Original fields must be preserved.
     assert_eq!(decoded.font_size_px, 16.0);
@@ -1577,14 +1577,35 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
     assert_eq!(decoded.backdrop.as_ref().map(|c| c.a), Some(0.5));
 
     // Extended fields must be at their proto3 zero defaults.
-    assert_eq!(decoded.font_family, 0, "font_family must default to Unspecified");
-    assert_eq!(decoded.font_weight, 0, "font_weight must default to not-set");
+    assert_eq!(
+        decoded.font_family, 0,
+        "font_family must default to Unspecified"
+    );
+    assert_eq!(
+        decoded.font_weight, 0,
+        "font_weight must default to not-set"
+    );
     assert!(decoded.text_color.is_none(), "text_color must be absent");
-    assert_eq!(decoded.backdrop_opacity, 0.0, "backdrop_opacity must default to 0.0");
-    assert!(decoded.outline_color.is_none(), "outline_color must be absent");
-    assert_eq!(decoded.outline_width, 0.0, "outline_width must default to 0.0");
-    assert_eq!(decoded.transition_in_ms, 0, "transition_in_ms must default to 0");
-    assert_eq!(decoded.transition_out_ms, 0, "transition_out_ms must default to 0");
+    assert_eq!(
+        decoded.backdrop_opacity, 0.0,
+        "backdrop_opacity must default to 0.0"
+    );
+    assert!(
+        decoded.outline_color.is_none(),
+        "outline_color must be absent"
+    );
+    assert_eq!(
+        decoded.outline_width, 0.0,
+        "outline_width must default to 0.0"
+    );
+    assert_eq!(
+        decoded.transition_in_ms, 0,
+        "transition_in_ms must default to 0"
+    );
+    assert_eq!(
+        decoded.transition_out_ms, 0,
+        "transition_out_ms must default to 0"
+    );
 }
 
 /// Round-trip: convert::rendering_policy_to_proto then proto_to_rendering_policy
@@ -1592,18 +1613,33 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
 #[test]
 fn roundtrip_rendering_policy_convert_all_fields_populated() {
     use tze_hud_protocol::convert::{proto_to_rendering_policy, rendering_policy_to_proto};
-    use tze_hud_scene::types::{FontFamily, Rgba as SceneRgba, RenderingPolicy, TextAlign};
+    use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba as SceneRgba, TextAlign};
 
     let original = RenderingPolicy {
         font_size_px: Some(20.0),
-        backdrop: Some(SceneRgba { r: 0.1, g: 0.1, b: 0.1, a: 0.8 }),
+        backdrop: Some(SceneRgba {
+            r: 0.1,
+            g: 0.1,
+            b: 0.1,
+            a: 0.8,
+        }),
         text_align: Some(TextAlign::End),
         margin_px: Some(10.0),
         font_family: Some(FontFamily::SystemSerif),
         font_weight: Some(600),
-        text_color: Some(SceneRgba { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }),
+        text_color: Some(SceneRgba {
+            r: 1.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        }),
         backdrop_opacity: Some(0.5),
-        outline_color: Some(SceneRgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+        outline_color: Some(SceneRgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }),
         outline_width: Some(3.0),
         margin_horizontal: Some(12.0),
         margin_vertical: Some(6.0),
@@ -1617,12 +1653,21 @@ fn roundtrip_rendering_policy_convert_all_fields_populated() {
     assert_eq!(recovered.font_size_px, original.font_size_px);
     assert_eq!(recovered.text_align, original.text_align);
     assert_eq!(recovered.margin_px, original.margin_px);
-    assert_eq!(recovered.backdrop.map(|c| c.a), original.backdrop.map(|c| c.a));
+    assert_eq!(
+        recovered.backdrop.map(|c| c.a),
+        original.backdrop.map(|c| c.a)
+    );
     assert_eq!(recovered.font_family, original.font_family);
     assert_eq!(recovered.font_weight, original.font_weight);
-    assert_eq!(recovered.text_color.map(|c| c.r), original.text_color.map(|c| c.r));
+    assert_eq!(
+        recovered.text_color.map(|c| c.r),
+        original.text_color.map(|c| c.r)
+    );
     assert_eq!(recovered.backdrop_opacity, original.backdrop_opacity);
-    assert_eq!(recovered.outline_color.map(|c| c.r), original.outline_color.map(|c| c.r));
+    assert_eq!(
+        recovered.outline_color.map(|c| c.r),
+        original.outline_color.map(|c| c.r)
+    );
     assert_eq!(recovered.outline_width, original.outline_width);
     assert_eq!(recovered.margin_horizontal, original.margin_horizontal);
     assert_eq!(recovered.margin_vertical, original.margin_vertical);
@@ -1634,11 +1679,16 @@ fn roundtrip_rendering_policy_convert_all_fields_populated() {
 #[test]
 fn roundtrip_rendering_policy_convert_all_new_fields_none() {
     use tze_hud_protocol::convert::{proto_to_rendering_policy, rendering_policy_to_proto};
-    use tze_hud_scene::types::{Rgba as SceneRgba, RenderingPolicy, TextAlign};
+    use tze_hud_scene::types::{RenderingPolicy, Rgba as SceneRgba, TextAlign};
 
     let original = RenderingPolicy {
         font_size_px: Some(14.0),
-        backdrop: Some(SceneRgba { r: 0.0, g: 0.0, b: 0.0, a: 0.5 }),
+        backdrop: Some(SceneRgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        }),
         text_align: Some(TextAlign::Center),
         margin_px: Some(4.0),
         font_family: None,
@@ -1687,20 +1737,50 @@ fn roundtrip_rendering_policy_json_backward_compat_pre_extension() {
         "margin_px": 8.0
     }"#;
 
-    let rp: RenderingPolicy = serde_json::from_str(old_json)
-        .expect("backward-compat JSON deserialization must succeed");
+    let rp: RenderingPolicy =
+        serde_json::from_str(old_json).expect("backward-compat JSON deserialization must succeed");
 
     assert_eq!(rp.font_size_px, Some(16.0));
     assert_eq!(rp.margin_px, Some(8.0));
     // All extended fields must be None when absent in the JSON
-    assert!(rp.font_family.is_none(), "font_family must be None for pre-extension JSON");
-    assert!(rp.font_weight.is_none(), "font_weight must be None for pre-extension JSON");
-    assert!(rp.text_color.is_none(), "text_color must be None for pre-extension JSON");
-    assert!(rp.backdrop_opacity.is_none(), "backdrop_opacity must be None for pre-extension JSON");
-    assert!(rp.outline_color.is_none(), "outline_color must be None for pre-extension JSON");
-    assert!(rp.outline_width.is_none(), "outline_width must be None for pre-extension JSON");
-    assert!(rp.margin_horizontal.is_none(), "margin_horizontal must be None for pre-extension JSON");
-    assert!(rp.margin_vertical.is_none(), "margin_vertical must be None for pre-extension JSON");
-    assert!(rp.transition_in_ms.is_none(), "transition_in_ms must be None for pre-extension JSON");
-    assert!(rp.transition_out_ms.is_none(), "transition_out_ms must be None for pre-extension JSON");
+    assert!(
+        rp.font_family.is_none(),
+        "font_family must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.font_weight.is_none(),
+        "font_weight must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.text_color.is_none(),
+        "text_color must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.backdrop_opacity.is_none(),
+        "backdrop_opacity must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.outline_color.is_none(),
+        "outline_color must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.outline_width.is_none(),
+        "outline_width must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.margin_horizontal.is_none(),
+        "margin_horizontal must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.margin_vertical.is_none(),
+        "margin_vertical must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.transition_in_ms.is_none(),
+        "transition_in_ms must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.transition_out_ms.is_none(),
+        "transition_out_ms must be None for pre-extension JSON"
+    );
 }
