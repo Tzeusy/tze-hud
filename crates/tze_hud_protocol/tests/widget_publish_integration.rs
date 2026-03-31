@@ -9,11 +9,11 @@
 //! §Widget Publish Result, and RFC 0005 SS2.2/SS9.2 (field allocation).
 
 use prost::Message;
+use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
+use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
 use tze_hud_protocol::proto::session::{
     ClientMessage, ServerMessage, WidgetPublish, WidgetPublishResult,
 };
-use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
-use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
 use tze_hud_protocol::proto::{Rgba, WidgetParameterValueProto};
 
 // ─── Fixture: round-trip helper ──────────────────────────────────────────────
@@ -36,7 +36,7 @@ fn widget_publish_roundtrip_preserves_all_fields() {
             WidgetParameterValueProto {
                 param_name: "value".to_string(),
                 value: Some(
-                    tze_hud_protocol::proto::widget_parameter_value_proto::Value::F32Value(75.5)
+                    tze_hud_protocol::proto::widget_parameter_value_proto::Value::F32Value(75.5),
                 ),
             },
             WidgetParameterValueProto {
@@ -48,8 +48,8 @@ fn widget_publish_roundtrip_preserves_all_fields() {
                             g: 0.5,
                             b: 0.0,
                             a: 1.0,
-                        }
-                    )
+                        },
+                    ),
                 ),
             },
         ],
@@ -76,9 +76,7 @@ fn widget_publish_roundtrip_preserves_all_fields() {
 fn widget_parameter_value_f32_roundtrip() {
     let param = WidgetParameterValueProto {
         param_name: "level".to_string(),
-        value: Some(
-            tze_hud_protocol::proto::widget_parameter_value_proto::Value::F32Value(0.75)
-        ),
+        value: Some(tze_hud_protocol::proto::widget_parameter_value_proto::Value::F32Value(0.75)),
     };
 
     let decoded = round_trip(&param);
@@ -98,7 +96,9 @@ fn widget_parameter_value_string_roundtrip() {
     let param = WidgetParameterValueProto {
         param_name: "label".to_string(),
         value: Some(
-            tze_hud_protocol::proto::widget_parameter_value_proto::Value::StringValue("test".to_string())
+            tze_hud_protocol::proto::widget_parameter_value_proto::Value::StringValue(
+                "test".to_string(),
+            ),
         ),
     };
 
@@ -124,7 +124,7 @@ fn widget_parameter_value_color_roundtrip() {
                 g: 0.5,
                 b: 0.0,
                 a: 1.0,
-            })
+            }),
         ),
     };
 
@@ -264,7 +264,10 @@ fn server_message_widget_publish_result_envelope_roundtrip() {
             assert_eq!(result.accepted, true);
             assert_eq!(result.widget_name, "test_widget");
         }
-        other => panic!("Expected WidgetPublishResult in ServerMessage, got: {:?}", other),
+        other => panic!(
+            "Expected WidgetPublishResult in ServerMessage, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -293,7 +296,10 @@ fn server_message_widget_publish_result_error_roundtrip() {
             assert_eq!(result.error_code, "WIDGET_NOT_FOUND");
             assert_eq!(result.error_message, "Widget not found: missing_widget");
         }
-        other => panic!("Expected WidgetPublishResult in ServerMessage, got: {:?}", other),
+        other => panic!(
+            "Expected WidgetPublishResult in ServerMessage, got: {:?}",
+            other
+        ),
     }
 }
 

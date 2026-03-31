@@ -62,6 +62,7 @@ pub mod loader;
 pub mod privacy;
 pub mod profile;
 pub mod raw;
+pub mod readability;
 pub mod reload;
 pub mod resolver;
 pub mod schema;
@@ -83,6 +84,7 @@ pub use profile::{
     AutoDetectResult, HeadlessSignal, auto_detect_profile, resolve_headless_dimensions,
     resolve_profile, validate_display_profile,
 };
+pub use readability::{PolicySnapshot, ReadabilityViolation, check_zone_readability, is_dev_mode};
 pub use reload::{
     FieldClassification, HotReloadableConfig, SighupHandler, reload_config, section_classification,
 };

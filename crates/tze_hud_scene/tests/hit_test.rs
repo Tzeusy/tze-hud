@@ -246,16 +246,18 @@ fn widget_passthrough_skips_to_agent_tile_below() {
         60_000,
         vec![Capability::CreateTile, Capability::CreateNode],
     );
-    let widget_lease = scene.grant_lease(
-        "widget.renderer",
-        60_000,
-        vec![Capability::CreateTile],
-    );
+    let widget_lease = scene.grant_lease("widget.renderer", 60_000, vec![Capability::CreateTile]);
 
     // Agent-owned content tile: covers central region, z=10, Capture (default).
     // Bounds: (300, 200, 600×400).
     let agent_tile = scene
-        .create_tile(tab_id, "agent.test", agent_lease, Rect::new(300.0, 200.0, 600.0, 400.0), 10)
+        .create_tile(
+            tab_id,
+            "agent.test",
+            agent_lease,
+            Rect::new(300.0, 200.0, 600.0, 400.0),
+            10,
+        )
         .unwrap();
     let agent_node_id = SceneId::new();
     scene
@@ -279,7 +281,13 @@ fn widget_passthrough_skips_to_agent_tile_below() {
     // Bounds: (250, 150, 700×500) — extends beyond agent tile.
     // No interactive nodes (per spec, widgets are display-only).
     let widget_tile = scene
-        .create_tile(tab_id, "widget.renderer", widget_lease, Rect::new(250.0, 150.0, 700.0, 500.0), 20)
+        .create_tile(
+            tab_id,
+            "widget.renderer",
+            widget_lease,
+            Rect::new(250.0, 150.0, 700.0, 500.0),
+            20,
+        )
         .unwrap();
     // Explicitly set widget tile to Passthrough (should be default for widgets).
     scene.tiles.get_mut(&widget_tile).unwrap().input_mode = InputMode::Passthrough;

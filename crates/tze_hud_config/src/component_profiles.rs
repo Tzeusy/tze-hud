@@ -327,8 +327,7 @@ fn load_profile_dir(
             expected: "a readable profile.toml file".into(),
             got: format!("I/O error: {e}"),
             hint: format!(
-                "profile directory {:?} must contain a readable profile.toml manifest",
-                path_str
+                "profile directory {path_str:?} must contain a readable profile.toml manifest"
             ),
         }]
     })?;
@@ -340,9 +339,8 @@ fn load_profile_dir(
             expected: "valid TOML matching the profile.toml schema".into(),
             got: format!("TOML parse error: {e}"),
             hint: format!(
-                "profile.toml at {:?} failed to parse; \
-                 check for syntax errors",
-                path_str
+                "profile.toml at {path_str:?} failed to parse; \
+                 check for syntax errors"
             ),
         }]
     })?;
@@ -468,10 +466,7 @@ fn load_profile_dir(
     // ── Step 6: Load zone overrides from zones/ subdirectory ──────────────────
     let zones_dir = dir.join("zones");
     let zone_overrides = if zones_dir.is_dir() {
-        match load_zone_overrides(&zones_dir, &name, component_type, &scoped_tokens) {
-            Ok(overrides) => overrides,
-            Err(zone_errors) => return Err(zone_errors),
-        }
+        load_zone_overrides(&zones_dir, &name, component_type, &scoped_tokens)?
     } else {
         HashMap::new()
     };
@@ -676,9 +671,8 @@ fn validate_zone_override(
                 expected: "a v1 font family keyword (\"system-ui\", \"sans-serif\", \"monospace\", or \"serif\")".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
-                    "profile {:?}: font_family value {:?} is not a recognized font family keyword; \
-                     v1 supports only \"system-ui\", \"sans-serif\", \"monospace\", and \"serif\"",
-                    profile_name, resolved
+                    "profile {profile_name:?}: font_family value {resolved:?} is not a recognized font family keyword; \
+                     v1 supports only \"system-ui\", \"sans-serif\", \"monospace\", and \"serif\""
                 ),
             });
         }
@@ -711,9 +705,8 @@ fn validate_zone_override(
                 expected: "color hex string (#RRGGBB or #RRGGBBAA)".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
-                    "profile {:?}: text_color value {:?} is not a valid color hex; \
-                     use a format like #FF0000 or #FF0000FF",
-                    profile_name, resolved
+                    "profile {profile_name:?}: text_color value {resolved:?} is not a valid color hex; \
+                     use a format like #FF0000 or #FF0000FF"
                 ),
             });
         }
@@ -739,9 +732,8 @@ fn validate_zone_override(
                 expected: "one of \"start\", \"center\", \"end\"".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
-                    "profile {:?}: text_align value {:?} is invalid; \
-                     use \"start\", \"center\", or \"end\"",
-                    profile_name, resolved
+                    "profile {profile_name:?}: text_align value {resolved:?} is invalid; \
+                     use \"start\", \"center\", or \"end\""
                 ),
             });
         }
@@ -767,8 +759,7 @@ fn validate_zone_override(
                 expected: "color hex string (#RRGGBB or #RRGGBBAA)".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
-                    "profile {:?}: backdrop_color value {:?} is not a valid color hex",
-                    profile_name, resolved
+                    "profile {profile_name:?}: backdrop_color value {resolved:?} is not a valid color hex"
                 ),
             });
         }
@@ -793,9 +784,8 @@ fn validate_zone_override(
                 expected: "a float in [0.0, 1.0]".into(),
                 got: format!("{n}"),
                 hint: format!(
-                    "profile {:?}: backdrop_opacity {n} is out of range; \
-                     use a value between 0.0 and 1.0",
-                    profile_name
+                    "profile {profile_name:?}: backdrop_opacity {n} is out of range; \
+                     use a value between 0.0 and 1.0"
                 ),
             });
         }
@@ -821,8 +811,7 @@ fn validate_zone_override(
                 expected: "color hex string (#RRGGBB or #RRGGBBAA)".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
-                    "profile {:?}: outline_color value {:?} is not a valid color hex",
-                    profile_name, resolved
+                    "profile {profile_name:?}: outline_color value {resolved:?} is not a valid color hex"
                 ),
             });
         }
@@ -878,9 +867,8 @@ fn extract_string_value(
             expected: "a TOML string (possibly with {{token.key}} reference)".into(),
             got: format!("{val:?}"),
             hint: format!(
-                "profile {:?}: zone override field \"{field_name}\" must be a string, \
-                 e.g., \"{field_name} = \\\"value\\\"\" or \"{field_name} = \\\"{{{{token.key}}}}\\\"\"",
-                profile_name
+                "profile {profile_name:?}: zone override field \"{field_name}\" must be a string, \
+                 e.g., \"{field_name} = \\\"value\\\"\" or \"{field_name} = \\\"{{{{token.key}}}}\\\"\""
             ),
         }),
     }
@@ -911,10 +899,9 @@ fn resolve_token_ref(
                 expected: format!("token key {inner:?} to be present in the resolved token map"),
                 got: format!("{{{{token.{inner}}}}} not found in profile-scoped token map"),
                 hint: format!(
-                    "profile {:?}: zone override field \"{field_name}\" references \
-                     token {:?} which is not defined; add it to [design_tokens] \
-                     or [token_overrides] in the profile",
-                    profile_name, inner
+                    "profile {profile_name:?}: zone override field \"{field_name}\" references \
+                     token {inner:?} which is not defined; add it to [design_tokens] \
+                     or [token_overrides] in the profile"
                 ),
             }),
         }
@@ -965,8 +952,7 @@ fn resolve_numeric_value(
                     expected: "a finite numeric value".into(),
                     got: format!("{n}"),
                     hint: format!(
-                        "profile {:?}: field \"{field_name}\" must be a finite number",
-                        profile_name
+                        "profile {profile_name:?}: field \"{field_name}\" must be a finite number"
                     ),
                 });
             }
@@ -985,9 +971,8 @@ fn resolve_numeric_value(
                 expected: "a numeric value or {{token.key}} reference resolving to a number".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
-                    "profile {:?}: field \"{field_name}\" value {:?} (resolved from token) \
-                     is not a valid number",
-                    profile_name, resolved
+                    "profile {profile_name:?}: field \"{field_name}\" value {resolved:?} (resolved from token) \
+                     is not a valid number"
                 ),
             })
         }
@@ -997,8 +982,7 @@ fn resolve_numeric_value(
             expected: "a TOML float, integer, or string with {{token.key}} reference".into(),
             got: format!("{val:?}"),
             hint: format!(
-                "profile {:?}: field \"{field_name}\" must be numeric or a token reference string",
-                profile_name
+                "profile {profile_name:?}: field \"{field_name}\" must be numeric or a token reference string"
             ),
         }),
     }
@@ -1022,8 +1006,7 @@ fn resolve_u32_value(
                     expected: "a non-negative integer (u32)".into(),
                     got: format!("{i}"),
                     hint: format!(
-                        "profile {:?}: field \"{field_name}\" must be a non-negative integer",
-                        profile_name
+                        "profile {profile_name:?}: field \"{field_name}\" must be a non-negative integer"
                     ),
                 });
             }
@@ -1035,9 +1018,8 @@ fn resolve_u32_value(
             expected: "a TOML integer (e.g., transition_in_ms = 200)".into(),
             got: format!("{val:?}"),
             hint: format!(
-                "profile {:?}: field \"{field_name}\" must be a TOML integer, not a float; \
-                 write e.g., `{field_name} = 200` (no decimal point)",
-                profile_name
+                "profile {profile_name:?}: field \"{field_name}\" must be a TOML integer, not a float; \
+                 write e.g., `{field_name} = 200` (no decimal point)"
             ),
         }),
     }
