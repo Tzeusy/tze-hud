@@ -171,7 +171,7 @@ async fn upload_png(
     width: u32,
     height: u32,
 ) -> tze_hud_resource::types::ResourceId {
-    let hash = *blake3::hash(&png_bytes).as_bytes();
+    let resource_id = tze_hud_resource::types::ResourceId::from_content(&png_bytes);
     let upload_id = UploadId::from_bytes(uuid::Uuid::now_v7().into_bytes());
     let result = store
         .handle_upload_start(UploadStartRequest {
@@ -180,7 +180,7 @@ async fn upload_png(
             agent_budget: unlimited_budget(),
             upload_id,
             resource_type: ResourceType::ImagePng,
-            expected_hash: hash,
+            expected_hash: *resource_id.as_bytes(),
             total_size: png_bytes.len(),
             inline_data: png_bytes,
             width,
@@ -517,18 +517,18 @@ fn apply_content_update_batch(
 async fn resource_upload_48x48_png_returns_blake3_resource_id() {
     let store = ResourceStore::new(ResourceStoreConfig::default());
     let png = make_icon_png();
-    let expected_hash = *blake3::hash(&png).as_bytes();
+    let expected_id = tze_hud_resource::types::ResourceId::from_content(&png);
 
     let resource_id = upload_png(&store, "dashboard-agent", png, ICON_W, ICON_H).await;
 
     assert_eq!(
-        resource_id.as_bytes(),
-        &expected_hash,
+        resource_id,
+        expected_id,
         "ResourceId must equal the BLAKE3 hash of the raw PNG bytes"
     );
     assert_eq!(
         resource_id.as_bytes().len(),
-        32,
+        blake3::OUT_LEN,
         "ResourceId must be exactly 32 bytes (BLAKE3 digest)"
     );
 }
@@ -868,8 +868,9 @@ async fn content_update_with_active_lease_accepted() {
     // Periodic content update — full tree swap (spec: no ReplaceNode; use SetTileRoot)
     let updated_body = "**Status**: online\nUptime: 5s\nConnections: 3";
     assert!(
-        updated_body.len() < 65535,
-        "content must be under 65535 UTF-8 bytes"
+        updated_body.len() < tze_hud_scene::MAX_MARKDOWN_BYTES,
+        "content must be under {} UTF-8 bytes",
+        tze_hud_scene::MAX_MARKDOWN_BYTES,
     );
 
     let update_result = apply_content_update_batch(
@@ -975,7 +976,7 @@ async fn content_update_with_expired_lease_rejected() {
 }
 
 /// WHEN the body content is built for a content update
-/// THEN it is under 65535 UTF-8 bytes per the TextMarkdownNode limit.
+/// THEN it is under MAX_MARKDOWN_BYTES UTF-8 bytes per the TextMarkdownNode limit.
 ///
 /// spec.md §Periodic Content Update — Scenario: Content does not exceed limit
 /// tasks.md §6.2
@@ -983,9 +984,10 @@ async fn content_update_with_expired_lease_rejected() {
 fn body_content_within_65535_utf8_byte_limit() {
     let content = "**Status**: operational\nUptime: 42s\nConnections: 7";
     assert!(
-        content.len() < 65535,
-        "body content ({} bytes) must be under 65535 UTF-8 bytes",
-        content.len()
+        content.len() < tze_hud_scene::MAX_MARKDOWN_BYTES,
+        "body content ({} bytes) must be under {} UTF-8 bytes",
+        content.len(),
+        tze_hud_scene::MAX_MARKDOWN_BYTES,
     );
 }
 
