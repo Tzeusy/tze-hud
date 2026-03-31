@@ -21,3 +21,6 @@ quick-xml = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# SVG attribute / binding resolution utilities used by status-indicator tests.
+tze_hud_compositor = { path = "../tze_hud_compositor" }
+tze_hud_scene = { path = "../tze_hud_scene" }
