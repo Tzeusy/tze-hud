@@ -1,13 +1,13 @@
 ## ADDED Requirements
 
 ### Requirement: Alert-Banner Exemplar Component Profile
-The exemplar-alert-banner component profile MUST be a valid component profile directory containing a `profile.toml` manifest and a `zones/alert_banner.toml` rendering override. The profile MUST declare `component_type = "alert-banner"` and MUST pass OpaqueBackdrop readability validation at startup.
+The exemplar-alert-banner component profile MUST be a valid component profile directory containing a `profile.toml` manifest and a `zones/alert-banner.toml` rendering override. The profile MUST declare `component_type = "alert-banner"` and MUST pass OpaqueBackdrop readability validation at startup.
 
 The `profile.toml` manifest MUST contain:
 - `name = "exemplar-alert-banner"`
 - `version = "1.0.0"`
 - `component_type = "alert-banner"`
-- `[token_overrides]` with severity color tokens matching canonical defaults: `color.severity.info = "#4A9EFF"`, `color.severity.warning = "#FFB800"`, `color.severity.critical = "#FF0000"`
+- `[token_overrides]` with severity color tokens matching canonical defaults: `color.severity.info = "#4A9EFF"`, `color.severity.warning = "#FFB800"`, `color.severity.error = "#FF4444"`, `color.severity.critical = "#FF0000"`
 - `[token_overrides]` with heading typography tokens: `typography.heading.size = "24"`, `typography.heading.weight = "700"`
 Scope: v1-mandatory
 
@@ -20,8 +20,8 @@ Scope: v1-mandatory
 - **THEN** the `component_type` field MUST be `"alert-banner"` and MUST match the v1 component type registry
 
 #### Scenario: Zone override file uses registry name
-- **WHEN** the exemplar-alert-banner profile contains `zones/alert_banner.toml`
-- **THEN** the override MUST be matched to the `"alert_banner"` zone definition (registry name form with underscore)
+- **WHEN** the exemplar-alert-banner profile contains `zones/alert-banner.toml`
+- **THEN** the override MUST be matched to the `"alert-banner"` zone definition (registry name form with hyphen)
 
 ----
 
@@ -147,6 +147,10 @@ Scope: v1-mandatory
 #### Scenario: Test urgency 0 backdrop color
 - **WHEN** an integration test publishes a `NotificationPayload` with `urgency = 0` to the alert-banner zone and reads back the rendered frame pixels at the banner region
 - **THEN** the backdrop pixel RGB values MUST match `color.severity.info` resolved color (#4A9EFF: R=74, G=158, B=255, within tolerance of +/-5 per channel)
+
+#### Scenario: Test urgency 1 backdrop color
+- **WHEN** an integration test publishes a `NotificationPayload` with `urgency = 1` to the alert-banner zone and reads back the rendered frame pixels at the banner region
+- **THEN** the backdrop pixel RGB values MUST match `color.severity.info` resolved color (#4A9EFF: R=74, G=158, B=255, within tolerance of +/-5 per channel), proving that urgency 1 maps to the same severity token as urgency 0
 
 #### Scenario: Test urgency 2 backdrop color
 - **WHEN** an integration test publishes a `NotificationPayload` with `urgency = 2` to the alert-banner zone and reads back the rendered frame pixels

@@ -29,6 +29,8 @@ The progress bar widget MUST declare exactly three parameters in its `parameter_
 2. `label` — type: string, max_length: 32, default: "" (empty string). Represents optional text centered on the bar (e.g., "75%", "Loading...", or empty for no label).
 3. `fill_color` — type: color, default: [74, 158, 255, 255] (the RGBA equivalent of the canonical `color.text.accent` fallback `#4A9EFF`). Represents the fill bar color, overriding the token-derived default when published.
 
+**Note on `fill_color` default interaction:** The `fill_color` parameter's schema default `[74, 158, 255, 255]` serves as the initial parameter value before any publication. However, the SVG template's `fill` attribute is set to `{{color.text.accent}}` which is resolved at bundle load time. Since the direct binding only activates when `fill_color` is explicitly included in a publication, the token-resolved SVG value is the effective visual default until a publish overrides it. If an operator changes `color.text.accent` in `[design_tokens]`, the visual default changes accordingly — the schema default is only used when the parameter is explicitly published without a value.
+
 The runtime MUST validate all publications against this schema using the standard Widget Parameter Schema requirement from widget-system.
 Scope: v1-mandatory
 

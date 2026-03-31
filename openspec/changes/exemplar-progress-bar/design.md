@@ -49,9 +49,9 @@ Existing infrastructure:
 
 ### Rounded end-caps via SVG rx/ry on rect elements
 
-**Decision:** Both track and fill bar `<rect>` elements use `rx="10"` `ry="10"` for rounded end-caps. The fill bar inherits the same radius so it matches the track curvature.
+**Decision:** Both track and fill bar `<rect>` elements use `rx`/`ry` for rounded end-caps. The fill bar uses rx=8/ry=8 (half its 16px height, producing semicircle end-caps) while the track uses rx=10/ry=10 (half the 20px track height). The radii are proportional to their respective heights, producing visually complementary curves rather than identical curvature.
 
-**Rationale:** SVG `rx`/`ry` attributes on `<rect>` produce rounded corners natively without path commands. A 10px radius on a 20px-tall bar produces a half-circle end-cap, giving a capsule/pill shape.
+**Rationale:** SVG `rx`/`ry` attributes on `<rect>` produce rounded corners natively without path commands. Setting the radius to half the element height produces a half-circle end-cap, giving a capsule/pill shape. Each rect uses its own proportional radius: 10px for the 20px track, 8px for the 16px fill bar.
 
 ### Label as text-content binding
 

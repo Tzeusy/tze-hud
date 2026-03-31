@@ -1,7 +1,7 @@
 ## 1. Component Profile Setup
 
-- [ ] 1.1 Create exemplar profile directory `profiles/exemplar-alert-banner/` with `profile.toml` manifest: `name = "exemplar-alert-banner"`, `version = "1.0.0"`, `component_type = "alert-banner"`, `[token_overrides]` with `color.severity.info = "#4A9EFF"`, `color.severity.warning = "#FFB800"`, `color.severity.critical = "#FF0000"`, `typography.heading.size = "24"`, `typography.heading.weight = "700"`
-- [ ] 1.2 Create `profiles/exemplar-alert-banner/zones/alert_banner.toml` rendering override with `backdrop_opacity = 0.9`, `margin_horizontal` for horizontal padding, and heading typography fields
+- [ ] 1.1 Create exemplar profile directory `profiles/exemplar-alert-banner/` with `profile.toml` manifest: `name = "exemplar-alert-banner"`, `version = "1.0.0"`, `component_type = "alert-banner"`, `[token_overrides]` with `color.severity.info = "#4A9EFF"`, `color.severity.warning = "#FFB800"`, `color.severity.error = "#FF4444"`, `color.severity.critical = "#FF0000"`, `typography.heading.size = "24"`, `typography.heading.weight = "700"`
+- [ ] 1.2 Create `profiles/exemplar-alert-banner/zones/alert-banner.toml` rendering override with `backdrop_opacity = 0.9`, `margin_horizontal` for horizontal padding, and heading typography fields
 - [ ] 1.3 Add `profiles/exemplar-alert-banner/` to `[component_profile_bundles].paths` in the default/example config
 - [ ] 1.4 Verify profile loads at startup without errors and passes OpaqueBackdrop readability validation
 
@@ -33,10 +33,11 @@
 ## 6. Integration Tests
 
 - [ ] 6.1 Write integration test: publish urgency 0 to alert-banner zone, render headless frame, assert backdrop pixel RGB values match #4A9EFF (R=74, G=158, B=255) within +/-5 tolerance
-- [ ] 6.2 Write integration test: publish urgency 2 to alert-banner zone, render headless frame, assert backdrop pixel RGB values match #FFB800 (R=255, G=184, B=0) within +/-5 tolerance
-- [ ] 6.3 Write integration test: publish urgency 3 to alert-banner zone, render headless frame, assert backdrop pixel RGB values match #FF0000 (R=255, G=0, B=0) within +/-5 tolerance
-- [ ] 6.4 Write integration test: publish info (urgency 1), warning (urgency 2), and critical (urgency 3) simultaneously, render headless frame, assert critical (red) backdrop is at top, warning (amber) in middle, info (blue) at bottom by sampling pixel colors at each vertical position
-- [ ] 6.5 Write integration test: publish non-notification content (`StreamText`) to alert-banner zone, verify backdrop uses default RenderingPolicy color (not severity mapping)
+- [ ] 6.2 Write integration test: publish urgency 1 to alert-banner zone, render headless frame, assert backdrop pixel RGB values match #4A9EFF (R=74, G=158, B=255) within +/-5 tolerance — explicitly proves urgency 1 maps to `color.severity.info` same as urgency 0
+- [ ] 6.3 Write integration test: publish urgency 2 to alert-banner zone, render headless frame, assert backdrop pixel RGB values match #FFB800 (R=255, G=184, B=0) within +/-5 tolerance
+- [ ] 6.4 Write integration test: publish urgency 3 to alert-banner zone, render headless frame, assert backdrop pixel RGB values match #FF0000 (R=255, G=0, B=0) within +/-5 tolerance
+- [ ] 6.5 Write integration test: publish info (urgency 1), warning (urgency 2), and critical (urgency 3) simultaneously, render headless frame, assert critical (red) backdrop is at top, warning (amber) in middle, info (blue) at bottom by sampling pixel colors at each vertical position
+- [ ] 6.6 Write integration test: publish non-notification content (`StreamText`) to alert-banner zone, verify backdrop uses default RenderingPolicy color (not severity mapping)
 
 ## 7. User-Test Scenario
 

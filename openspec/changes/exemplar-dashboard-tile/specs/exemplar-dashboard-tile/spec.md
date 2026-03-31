@@ -3,12 +3,14 @@
 ### Requirement: Dashboard Tile Composition
 The exemplar dashboard tile SHALL be a single agent-owned tile of 400x300 logical pixels positioned at (50, 50) within the active tab's content layer with z_order = 100 and opacity = 1.0. The tile SHALL contain exactly 6 nodes arranged as a flat tree (all children of the root) composited in tree order (painter's model, first child rendered first):
 
-1. SolidColorNode — background fill, Rgba(18, 18, 18, 230), bounds covering the full tile (0, 0, 400, 300)
+1. SolidColorNode — background fill, Rgba { r: 0.07, g: 0.07, b: 0.07, a: 0.90 }, bounds covering the full tile (0, 0, 400, 300)
 2. StaticImageNode — agent icon, 48x48, positioned at (16, 16), fit mode = Contain, referencing a previously-uploaded PNG resource
-3. TextMarkdownNode — header, content = agent name in bold markdown (e.g., `"**Dashboard Agent**"`), font_size_px = 18.0, color = Rgba(255, 255, 255, 255), positioned at (76, 20, 308, 32), alignment = Left, overflow = Ellipsis
-4. TextMarkdownNode — body, content = markdown-formatted live info (e.g., stats, uptime, timestamp), font_size_px = 14.0, color = Rgba(200, 200, 200, 255), positioned at (16, 72, 368, 180), alignment = Left, overflow = Scroll
+3. TextMarkdownNode — header, content = agent name in bold markdown (e.g., `"**Dashboard Agent**"`), font_size_px = 18.0, color = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, positioned at (76, 20, 308, 32), alignment = Left, overflow = Ellipsis
+4. TextMarkdownNode — body, content = markdown-formatted live info (e.g., stats, uptime, timestamp), font_size_px = 14.0, color = Rgba { r: 0.78, g: 0.78, b: 0.78, a: 1.0 }, positioned at (16, 72, 368, 180), alignment = Left, overflow = Ellipsis
 5. HitRegionNode — "Refresh" button, bounds (16, 256, 176, 36), interaction_id = "refresh-button", accepts_focus = true, accepts_pointer = true, auto_capture = true, release_on_up = true, cursor_style = Pointer, tooltip = "Refresh dashboard content"
 6. HitRegionNode — "Dismiss" button, bounds (208, 256, 176, 36), interaction_id = "dismiss-button", accepts_focus = true, accepts_pointer = true, auto_capture = true, release_on_up = true, cursor_style = Pointer, tooltip = "Dismiss this tile"
+
+> **Note:** Tile-level scrolling via `ScrollConfig` is a separate post-v1 feature. The body node uses `Ellipsis` overflow; content that exceeds the node bounds is truncated with an ellipsis indicator.
 
 Source: scene-graph spec (V1 Node Types, Scene Graph Hierarchy, Tile Field Invariants); architecture.md (Intra-tile compositing)
 Scope: v1-mandatory
@@ -19,7 +21,7 @@ Scope: v1-mandatory
 
 #### Scenario: Background node covers full tile bounds
 - **WHEN** the SolidColorNode is rendered
-- **THEN** it SHALL fill the entire tile area (0, 0, 400, 300) with Rgba(18, 18, 18, 230), providing a dark semi-transparent background
+- **THEN** it SHALL fill the entire tile area (0, 0, 400, 300) with Rgba { r: 0.07, g: 0.07, b: 0.07, a: 0.90 }, providing a dark semi-transparent background
 
 #### Scenario: Icon image references uploaded resource
 - **WHEN** the StaticImageNode is created
@@ -156,7 +158,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Focus Cycling Between Buttons
-The dashboard tile's two HitRegionNodes (Refresh and Dismiss) SHALL participate in focus cycling. Pressing Tab (NAVIGATE_NEXT) SHALL cycle focus between the two buttons in tree order: Refresh first, then Dismiss, then wrap. Pressing Shift+Tab (NAVIGATE_PREV) SHALL cycle in reverse. The tile itself SHALL be focusable at the tile level as a step in the cross-tile focus cycle.
+The dashboard tile's two HitRegionNodes (Refresh and Dismiss) SHALL participate in focus cycling. Pressing Tab (NAVIGATE_NEXT) SHALL cycle focus between the two buttons in tree order: Refresh first, then Dismiss, then wrap. Pressing Shift+Tab (NAVIGATE_PREV) SHALL cycle in reverse. Focus cycles through the tile's two HitRegionNodes (Refresh then Dismiss). Cross-tile Tab navigation moves focus to the next tile's first focusable HitRegionNode.
 
 Source: input-model spec (Focus Cycling, Focus Tree Structure, Click-to-Focus Acquisition, Pointer-Free Navigation)
 Scope: v1-mandatory

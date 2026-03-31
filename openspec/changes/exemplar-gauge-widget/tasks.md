@@ -1,21 +1,21 @@
 ## 1. Asset Bundle: widget.toml Manifest
 
 - [ ] 1.1 Create production gauge widget bundle directory (location TBD — either `assets/widgets/gauge/` or alongside existing bundles)
-- [ ] 1.2 Write `widget.toml` manifest with full parameter schema: `level` (f32, 0.0-1.0), `label` (string), `fill_color` (color, default [0,180,255,255]), `severity` (enum: info/warning/error)
+- [ ] 1.2 Write `widget.toml` manifest with full parameter schema: `level` (f32, 0.0-1.0), `label` (string), `fill_color` (color, default [74,158,255,255]), `severity` (enum: info/warning/error)
 - [ ] 1.3 Declare two layers in order: `background.svg` (zero bindings), `fill.svg` (four bindings)
 - [ ] 1.4 Configure fill layer bindings: `level` -> `bar.height` (linear, 0.0-200.0), `fill_color` -> `bar.fill` (direct), `label` -> `label-text.text-content` (direct), `severity` -> `indicator.fill` (discrete with value_map matching canonical `color.severity.*` fallbacks)
 
 ## 2. Asset Bundle: background.svg
 
 - [ ] 2.1 Create `background.svg` with 100x240 viewBox, outer frame `<rect>` using `fill="{{color.backdrop.default}}"`, `stroke="{{color.border.default}}"`, `data-role="backdrop"`
-- [ ] 2.2 Add inner track `<rect id="track">` with a slightly lighter fill (e.g., `{{color.backdrop.default}}` with reduced opacity or a differentiated token) — no `data-role` attribute
+- [ ] 2.2 Add inner track `<rect id="track">` with `fill="{{color.backdrop.default}}"` and `fill-opacity="0.3"` (30% opacity for a lighter appearance) — no `data-role` attribute
 - [ ] 2.3 Verify zero hardcoded hex colors in the SVG markup — all colors use `{{token.key}}` placeholders
 
 ## 3. Asset Bundle: fill.svg
 
 - [ ] 3.1 Create `fill.svg` with 100x240 viewBox, `<clipPath id="track-clip">` constraining fill bar to the track area (x=30, y=10, width=40, height=200)
 - [ ] 3.2 Add `<rect id="bar">` fill bar with `clip-path="url(#track-clip)"`, positioned at track bottom (y=210), height=0 (default), `fill="{{color.text.accent}}"` — grows upward via linear binding
-- [ ] 3.3 Add `<text id="label-text">` with `fill="{{color.text.primary}}"`, `data-role="text"`, centered below the track, `font-family="sans-serif"`, `font-size="10"`
+- [ ] 3.3 Add `<text id="label-text">` with `fill="{{color.text.primary}}"`, `stroke="{{color.outline.default}}"`, `stroke-width="{{stroke.outline.width}}"`, `data-role="text"`, centered below the track, `font-family="sans-serif"`, `font-size="10"` — stroke attributes make the gauge compatible with DualLayer readability profiles even though it ships as a global bundle
 - [ ] 3.4 Add `<circle id="indicator">` severity indicator with `fill="{{color.severity.info}}"`, positioned top-right of the gauge
 - [ ] 3.5 Verify zero hardcoded hex colors — all colors use `{{token.key}}` placeholders
 - [ ] 3.6 Verify `data-role="text"` on label-text, no `data-role` on bar or indicator
@@ -32,7 +32,7 @@
 - [ ] 5.2 Test `level` NaN/infinity rejection: publish `level=NaN` -> `WIDGET_PARAMETER_INVALID_VALUE`
 - [ ] 5.3 Test unknown parameter rejection: publish `{"temperature": 72}` -> `WIDGET_UNKNOWN_PARAMETER`
 - [ ] 5.4 Test `severity` enum validation: publish `severity="critical"` -> `WIDGET_PARAMETER_INVALID_VALUE`
-- [ ] 5.5 Test default values at startup: `level=0.0, label="", fill_color=[0,180,255,255], severity="info"`
+- [ ] 5.5 Test default values at startup: `level=0.0, label="", fill_color=[74,158,255,255], severity="info"`
 
 ## 6. Binding and Rendering Tests
 

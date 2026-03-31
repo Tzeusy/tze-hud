@@ -10,13 +10,13 @@ The status-bar zone exemplar SHALL render as a full-width thin strip at the bott
 - **Geometry:** `EdgeAnchored { edge: Bottom, height_pct: 0.04, width_pct: 1.0, margin_px: 0.0 }` (full-width, 4% screen height, bottom edge)
 - **Backdrop:** opaque dark background using `color.backdrop.default` token at 90% opacity (`backdrop_opacity = 0.9`). This satisfies the `OpaqueBackdrop` readability requirement (opacity >= 0.8).
 - **Text:** secondary text color using `color.text.secondary` token (#B0B0B0 canonical fallback) for readability without being visually distracting
-- **Typography:** monospace font family (`font_family = "monospace"`), 16px body size (`font_size_px = 16.0`)
+- **Typography:** monospace font family (`font_family = "monospace"`), body size via token (`font_size_px = "{{typography.body.size}}"`)
 - **Layout:** key-value pairs rendered as a horizontal row with `spacing.padding.medium` between pairs
 - **Layer:** chrome layer — always visible, never occluded by agent content tiles
 
 #### Scenario: Status bar renders at bottom edge with opaque backdrop
 - **WHEN** the status-bar zone has one or more active publications
-- **THEN** the compositor SHALL render a full-width strip at the display's bottom edge with a dark backdrop at 90% opacity, and all active key-value pairs SHALL be visible in secondary text color using monospace 16px font
+- **THEN** the compositor SHALL render a full-width strip at the display's bottom edge with a dark backdrop at 90% opacity, and all active key-value pairs SHALL be visible in secondary text color using monospace font at the resolved body size
 
 #### Scenario: Status bar readability passes OpaqueBackdrop check
 - **WHEN** the exemplar component profile is loaded and its effective RenderingPolicy is validated
@@ -50,7 +50,7 @@ component_type = "status-bar"
 ```toml
 # Typography — monospace for aligned key-value display
 font_family = "monospace"
-font_size_px = 16.0
+font_size_px = "{{typography.body.size}}"
 
 # Text — secondary color for non-distracting readability
 text_color = "{{color.text.secondary}}"
@@ -127,7 +127,7 @@ The status-bar zone SHALL support simultaneous publishing from multiple independ
 ---
 
 ### Requirement: Coalesced Update Delivery
-Status-bar publications use the state-stream delivery class. When multiple updates arrive for the same merge key within a single frame, the runtime SHALL coalesce them to the latest value. The compositor reads the zone's resolved occupancy (post-contention) at render time, not individual publish events.
+Status-bar publications use the state-stream delivery class. Coalescing is achieved through the MergeByKey contention policy at the scene graph level — when multiple publishes for the same key arrive between compositor frames, the scene graph retains only the latest value per key. This is not a separate coalescing mechanism; it is an inherent property of MergeByKey replacement semantics. The compositor reads the zone's resolved occupancy (post-contention) at render time, not individual publish events.
 
 #### Scenario: Rapid updates within one frame coalesce
 - **WHEN** agent A publishes `merge_key: "weather"` with value `"70F"` then `"71F"` then `"72F"` within the same compositor frame

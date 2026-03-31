@@ -31,6 +31,8 @@ Each notification's backdrop quad MUST be tinted according to the publication's 
 
 The backdrop MUST be rendered as an opaque quad at 90% opacity (0.9 alpha). When a component profile overrides `color.notification.urgency.low`, `color.notification.urgency.normal`, `color.notification.urgency.urgent`, or `color.notification.urgency.critical`, the profile values MUST take precedence over the defaults. Urgency values outside 0-3 MUST be clamped to 3 (critical).
 
+**Implementation note — dynamic urgency color resolution:** At render time, the compositor resolves urgency backdrop colors by looking up `color.notification.urgency.{level}` (where level is `low`, `normal`, `urgent`, or `critical`) from the profile's scoped token map. The scoped token map is resolved at startup (profile overrides -> global -> canonical fallbacks) and stored alongside the profile. The `RenderingPolicy.backdrop` field is NOT used for per-notification urgency coloring; it provides the fallback color when no urgency-specific token is found (e.g., for non-notification content rendered in the same zone type).
+
 This is distinct from the alert-banner urgency-to-severity token mapping. The notification-area zone MUST NOT use `color.severity.*` tokens for backdrop coloring.
 Scope: v1-mandatory
 
@@ -112,6 +114,8 @@ Scope: v1-mandatory
 Each notification MUST auto-dismiss after a per-publish TTL. The default TTL MUST be 8000ms (8 seconds). When a notification's TTL expires, the compositor MUST initiate a 150ms fade-out transition by interpolating the notification's opacity from 1.0 to 0.0 over 150ms. When the fade-out completes (opacity reaches 0.0), the publication MUST be removed from `active_publishes`. The per-publish TTL MAY be overridden via the `ttl_ms` field in the publish call (if provided); otherwise the zone's `auto_clear_ms` value (8000) is used.
 
 The fade-out MUST be per-notification (each notification fades independently). Multiple notifications MAY fade simultaneously if their TTLs expire within 150ms of each other.
+
+**Implementation note — per-publication animation state:** Per-notification fade-out requires a `PublicationAnimationState` per active publication, extending the zone-level `ZoneAnimationState` pattern from hud-sc0a (Extended RenderingPolicy). Fields: `opacity: f32` (current opacity), `target_opacity: f32` (0.0 when fading out), `transition_start: Instant` (when fade began), `duration_ms: u32` (150 for notification fade-out). This is distinct from the zone-level `ZoneAnimationState` which tracks zone-wide transitions; `PublicationAnimationState` tracks individual publication fade lifecycle within the zone.
 Scope: v1-mandatory
 
 #### Scenario: Notification auto-dismisses after 8 seconds
@@ -135,6 +139,8 @@ Scope: v1-mandatory
 #### Scenario: Multiple notifications fade simultaneously
 - **WHEN** two notifications have TTLs that expire within 100ms of each other
 - **THEN** both MUST fade independently and simultaneously, each with its own 150ms transition
+
+**Implementation note — `transition_out_ms` vs per-notification fade:** `RenderingPolicy.transition_out_ms` (from hud-sc0a) controls zone-level fade — the entire zone fading when its content is cleared or replaced. Per-notification fade-out uses `PublicationAnimationState` (see above) and operates independently within the zone. The zone override TOML (`zones/notification-area.toml`) SHOULD NOT set `transition_out_ms` for per-notification auto-dismiss behavior; setting it would add an unintended zone-wide fade on top of the per-publication fades.
 
 ---
 

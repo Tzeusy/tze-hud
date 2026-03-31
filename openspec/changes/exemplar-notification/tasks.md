@@ -40,7 +40,7 @@
 ## 7. Component Profile
 
 - [ ] 7.1 Create `profiles/notification-stack-exemplar/profile.toml` with `name = "notification-stack-exemplar"`, `version = "1.0.0"`, `component_type = "notification"`, and `token_overrides` for the four urgency backdrop colors
-- [ ] 7.2 Create `profiles/notification-stack-exemplar/zones/notification-area.toml` with rendering policy overrides: `backdrop_opacity = 0.9`, `font_size_px = 16.0`, `text_align = "Start"`, `margin_horizontal = 8.0`, `margin_vertical = 8.0`
+- [ ] 7.2 Create `profiles/notification-stack-exemplar/zones/notification-area.toml` with rendering policy overrides: `backdrop_opacity = 0.9`, `font_size_px = 16.0`, `text_align = "start"`, `margin_horizontal = 8.0`, `margin_vertical = 8.0`
 - [ ] 7.3 Verify profile passes OpaqueBackdrop readability validation at startup (backdrop present, opacity >= 0.8)
 
 ## 8. Integration Tests

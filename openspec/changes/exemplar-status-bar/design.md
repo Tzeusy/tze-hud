@@ -47,8 +47,8 @@ What does not yet exist is a cohesive exemplar document that ties visual renderi
 **Rationale:** The component-shape-language infrastructure is fully implemented. A real profile directory is the canonical way to define visual treatment for a zone type. The profile's `zones/status-bar.toml` overrides set the exemplar's visual parameters (monospace font, secondary text color, 90% backdrop opacity) while referencing design tokens. Integration tests and user-test scripts exercise the behavioral contract.
 
 ### Status-bar profile uses token references, not hardcoded values
-**Decision:** The `zones/status-bar.toml` file references design tokens via `{{token.key}}` syntax rather than hardcoding hex colors or pixel sizes. The only literal values are font_size_px (16.0), backdrop_opacity (0.9), and font_family ("monospace") since these are exemplar-specific choices that intentionally differ from the canonical defaults.
-**Rationale:** Token references enable the profile to inherit global theme changes. Hardcoded values are used only where the exemplar intentionally overrides the token default (e.g., 16px instead of the canonical body size, monospace instead of the canonical body family).
+**Decision:** The `zones/status-bar.toml` file references design tokens via `{{token.key}}` syntax rather than hardcoding hex colors or pixel sizes. The only literal values are backdrop_opacity (0.9) and font_family ("monospace") since these are exemplar-specific choices that intentionally differ from the canonical defaults. Font size uses the `{{typography.body.size}}` token reference.
+**Rationale:** Token references enable the profile to inherit global theme changes. The font_family literal ("monospace") is an intentional departure from the canonical body family. The backdrop_opacity literal (0.9) is an exemplar-specific choice. Font size references the body token to stay consistent with global theme changes.
 
 ## Risks / Trade-offs
 

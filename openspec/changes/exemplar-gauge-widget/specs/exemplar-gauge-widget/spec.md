@@ -14,11 +14,11 @@ Scope: v1-mandatory
 
 #### Scenario: Background layer structure
 - **WHEN** the gauge widget bundle is loaded and token placeholders are resolved
-- **THEN** `background.svg` MUST contain a `<rect>` outer frame with `fill="{{color.backdrop.default}}"`, `stroke="{{color.border.default}}"`, `data-role="backdrop"`, and an inner track `<rect>` with a slightly lighter fill derived from `{{color.backdrop.default}}`
+- **THEN** `background.svg` MUST contain a `<rect>` outer frame with `fill="{{color.backdrop.default}}"`, `stroke="{{color.border.default}}"`, `data-role="backdrop"`, and an inner track `<rect>` with `fill="{{color.backdrop.default}}"` and `fill-opacity="0.3"` (track uses `{{color.backdrop.default}}` at 30% opacity for a lighter appearance)
 
 #### Scenario: Fill layer structure
 - **WHEN** the gauge widget bundle is loaded and token placeholders are resolved
-- **THEN** `fill.svg` MUST contain a `<rect id="bar">` for the fill bar with `fill="{{color.text.accent}}"`, a `<text id="label-text">` with `fill="{{color.text.primary}}"` and `data-role="text"`, and a `<circle id="indicator">` with `fill="{{color.severity.info}}"`
+- **THEN** `fill.svg` MUST contain a `<rect id="bar">` for the fill bar with `fill="{{color.text.accent}}"`, a `<text id="label-text">` with `fill="{{color.text.primary}}"`, `stroke="{{color.outline.default}}"`, `stroke-width="{{stroke.outline.width}}"`, and `data-role="text"`, and a `<circle id="indicator">` with `fill="{{color.severity.info}}"`
 
 #### Scenario: Fill bar grows upward from track bottom
 - **WHEN** the `level` parameter changes from 0.0 to 1.0
@@ -31,7 +31,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Gauge Widget Parameter Schema
-The gauge widget MUST declare exactly four parameters in its `widget.toml` parameter schema. The `level` parameter MUST be type `f32` with default `0.0` and constraints `f32_min=0.0`, `f32_max=1.0`. The `label` parameter MUST be type `string` with default `""`. The `fill_color` parameter MUST be type `color` with default `[0, 180, 255, 255]` (a blue matching the `color.text.accent` canonical fallback `#4A9EFF` approximation). The `severity` parameter MUST be type `enum` with default `"info"` and allowed values `["info", "warning", "error"]`. The parameter order in the manifest MUST be: level, label, fill_color, severity.
+The gauge widget MUST declare exactly four parameters in its `widget.toml` parameter schema. The `level` parameter MUST be type `f32` with default `0.0` and constraints `f32_min=0.0`, `f32_max=1.0`. The `label` parameter MUST be type `string` with default `""`. The `fill_color` parameter MUST be type `color` with default `[74, 158, 255, 255]` (matching the `color.text.accent` canonical fallback `#4A9EFF`). The `severity` parameter MUST be type `enum` with default `"info"` and allowed values `["info", "warning", "error"]`. The parameter order in the manifest MUST be: level, label, fill_color, severity.
 Scope: v1-mandatory
 
 #### Scenario: Level parameter validated and clamped
@@ -52,7 +52,7 @@ Scope: v1-mandatory
 
 #### Scenario: Default parameter values at startup
 - **WHEN** the gauge widget instance is created with no initial parameter overrides
-- **THEN** the effective parameters MUST be `level=0.0`, `label=""`, `fill_color=[0,180,255,255]`, `severity="info"`
+- **THEN** the effective parameters MUST be `level=0.0`, `label=""`, `fill_color=[74,158,255,255]`, `severity="info"`
 
 ---
 
@@ -217,7 +217,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Gauge Widget SVG Markup Specification
-The exemplar gauge MUST define exact SVG markup for both layers. The `background.svg` MUST use the following token placeholders: `{{color.backdrop.default}}` for the frame fill, `{{color.border.default}}` for the frame stroke, and a track fill using `{{color.backdrop.default}}` (the track is a slightly differentiated area within the backdrop). The `fill.svg` MUST use: `{{color.text.accent}}` for the default fill bar color (overridden at runtime by the `fill_color` direct binding), `{{color.text.primary}}` for the label text fill, and `{{color.severity.info}}` for the default indicator fill (overridden at runtime by the `severity` discrete binding). The fill layer MUST define a `<clipPath>` element constraining the fill bar to the track area so the bar grows upward naturally.
+The exemplar gauge MUST define exact SVG markup for both layers. The `background.svg` MUST use the following token placeholders: `{{color.backdrop.default}}` for the frame fill, `{{color.border.default}}` for the frame stroke, and a track fill using `{{color.backdrop.default}}` with `fill-opacity="0.3"` (track uses the backdrop token at 30% opacity for a lighter appearance). The `fill.svg` MUST use: `{{color.text.accent}}` for the default fill bar color (overridden at runtime by the `fill_color` direct binding), `{{color.text.primary}}` for the label text fill with `stroke="{{color.outline.default}}"` and `stroke-width="{{stroke.outline.width}}"` for DualLayer readability, and `{{color.severity.info}}` for the default indicator fill (overridden at runtime by the `severity` discrete binding). Note: The stroke attributes on the label text element make the gauge compatible with DualLayer readability profiles even though it ships as a global bundle. The fill layer MUST define a `<clipPath>` element constraining the fill bar to the track area so the bar grows upward naturally.
 Scope: v1-mandatory
 
 #### Scenario: background.svg token resolution

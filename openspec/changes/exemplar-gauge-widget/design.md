@@ -58,6 +58,12 @@ A minimal gauge test fixture exists at `crates/tze_hud_widget/tests/fixtures/gau
 
 **Rationale:** This matches the widget-system spec's performance budget (spec.md line 251). The gauge SVG is intentionally simple (two layers, ~10 elements total) to stay well within this budget. resvg rasterizes simple SVGs of this complexity in < 1ms on modern hardware.
 
+### D6: viewBox changed from 100x220 to 100x240
+
+**Choice:** The exemplar gauge uses a 100x240 viewBox, whereas the existing test fixture at `crates/tze_hud_widget/tests/fixtures/gauge/` uses 100x220.
+
+**Rationale:** The extra 20px of height accommodates the label text below the gauge track. The label element is positioned at approximately y=210 to y=230, below the track which ends at y=210. The existing 100x220 fixture had insufficient vertical space for the label text without clipping. The 100x240 viewBox provides 30px of clearance below the track for the label and any descenders.
+
 ## Risks / Trade-offs
 
 - **[Risk] Discrete value_map drifts from design tokens** — The `value_map` in `widget.toml` uses concrete hex values that should match the canonical token fallbacks. If an operator overrides `color.severity.*` tokens but does not update the gauge's `value_map`, the indicator colors will be inconsistent with other severity-colored UI elements. **Mitigation:** Document this coupling in the exemplar spec. A future enhancement could support token references in value_map, but that is out of scope for v1.

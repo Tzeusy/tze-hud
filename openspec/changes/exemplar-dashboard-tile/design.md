@@ -33,7 +33,7 @@ The component-shape-language system (zones, widgets, design tokens, component pr
 
 The exemplar uses a single tile with a flat list of child nodes under the tile root. All four node types are direct children of the root, composited in tree order:
 
-1. SolidColorNode (background — dark semi-transparent, e.g., `Rgba(18, 18, 18, 230)`)
+1. SolidColorNode (background — dark semi-transparent, e.g., `Rgba { r: 0.07, g: 0.07, b: 0.07, a: 0.90 }`)
 2. StaticImageNode (agent icon/logo — top-left corner, 48x48)
 3. TextMarkdownNode (header — agent name, bold, positioned top alongside icon)
 4. TextMarkdownNode (body — markdown-formatted live stats/info, positioned below header)

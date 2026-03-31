@@ -25,7 +25,7 @@ Source: proposal (multi-agent coexistence), scene-graph spec (tile field invaria
 
 #### Scenario: Three agents create non-overlapping presence cards
 - **WHEN** agents A, B, and C each create a presence card tile with the specified y-offsets and z_orders
-- **THEN** three tiles MUST be visible in the bottom-left corner, vertically stacked with 8px gaps, and no ZOrderConflict or BoundsOutOfRange validation error MUST occur
+- **THEN** three tiles MUST be visible in the bottom-left corner, vertically stacked with 8px gaps, and no BoundsOutOfRange validation error MUST occur. Unique z_order values are assigned as a best practice for deterministic rendering order, even though the runtime's ZOrderConflict validation does not apply to Passthrough tiles.
 
 #### Scenario: Z-order values below zone minimum
 - **WHEN** presence card tiles are created with z_order values 100, 101, 102
@@ -168,7 +168,7 @@ The exemplar SHALL define a user-test scenario with the following steps:
 2. Visually verify: 3 stacked cards in bottom-left, each with colored avatar and agent name
 3. Wait 30s, verify: "Last active" text updates on all 3 cards
 4. Disconnect agent 2 (drop connection or close stream)
-5. Verify within 1s: disconnection badge appears on agent 2's card
+5. Verify within 1s (human-observable tolerance; the runtime requirement is 1 frame / 16.6ms): disconnection badge appears on agent 2's card
 6. Wait 30s: agent 2's card is removed; agents 0 and 1 remain unchanged
 7. Pass criteria: all visual states observed in sequence
 

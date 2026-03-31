@@ -7,7 +7,7 @@
 
 - [ ] 2.1 Implement presence card tile builder: constructs CreateTile mutation with 200x80 bounds, computed y-offset for agent index (0/1/2), z_order (100+index), opacity 1.0, input_mode Passthrough
 - [ ] 2.2 Implement node tree builder: constructs 3 InsertNode mutations — SolidColorNode (RGBA 20,20,20,200, full-tile bounds), StaticImageNode (32x32 at (8,24), ResourceId reference), TextMarkdownNode ("**AgentName**\nLast active: now", 14px, RGBA 240,240,240,255, at (48,8), 144x64, Ellipsis overflow)
-- [ ] 2.3 Combine tile creation and node insertion into a single atomic MutationBatch and verify batch acceptance
+- [ ] 2.3 Submit two sequential MutationBatches — first batch: CreateTile + SetTileRoot; second batch: 3× InsertNode (SolidColorNode, StaticImageNode, TextMarkdownNode) — and verify both batches are accepted
 
 ## 3. Lease Lifecycle
 

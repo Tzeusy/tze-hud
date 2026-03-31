@@ -75,6 +75,8 @@ Scope: v1-mandatory
 - **WHEN** an agent publishes `"Message A"` to the subtitle zone and publishes `"Message B"` within 50ms
 - **THEN** the transition from A to B MUST be visually clean — no frame where neither A nor B is visible (no blank/flicker frame between replacements)
 
+**Note — Transition interrupt semantics:** When a new publish arrives during an active transition_out_ms fade-out, the fade-out MUST be cancelled immediately and the new content MUST begin its transition_in_ms fade-in from the current composite opacity (not from zero). This prevents blank frames during rapid replacement.
+
 #### Scenario: Different agents — latest wins regardless of source
 - **WHEN** agent "transcriber" publishes `"transcription text"` and agent "narrator" publishes `"narration text"` 100ms later
 - **THEN** the subtitle zone MUST display only `"narration text"` — latest-wins is source-agnostic

@@ -3,7 +3,7 @@
 ## 1. Component Profile
 
 - [ ] 1.1 Create `profiles/exemplar-status-bar/profile.toml` with `name = "exemplar-status-bar"`, `version = "1.0.0"`, `component_type = "status-bar"`, and description
-- [ ] 1.2 Create `profiles/exemplar-status-bar/zones/status-bar.toml` with rendering overrides: `font_family = "monospace"`, `font_size_px = 16.0`, `text_color = "{{color.text.secondary}}"`, `backdrop_color = "{{color.backdrop.default}}"`, `backdrop_opacity = 0.9`, `margin_horizontal = "{{spacing.padding.medium}}"`, `margin_vertical = 0.0`
+- [ ] 1.2 Create `profiles/exemplar-status-bar/zones/status-bar.toml` with rendering overrides: `font_family = "monospace"`, `font_size_px = "{{typography.body.size}}"`, `text_color = "{{color.text.secondary}}"`, `backdrop_color = "{{color.backdrop.default}}"`, `backdrop_opacity = 0.9`, `margin_horizontal = "{{spacing.padding.medium}}"`, `margin_vertical = 0.0`
 - [ ] 1.3 Verify profile loads: add `profiles/exemplar-status-bar/` to a test config's `[component_profile_bundles].paths` and confirm the runtime loads it without validation errors
 - [ ] 1.4 Verify OpaqueBackdrop readability: confirm the effective RenderingPolicy for status-bar passes the OpaqueBackdrop check (backdrop present, opacity 0.9 >= 0.8)
 

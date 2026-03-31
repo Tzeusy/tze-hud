@@ -14,7 +14,7 @@ Scope: v1-mandatory
 
 #### Scenario: Default render with no publication
 - **WHEN** the status indicator widget instance is created and no agent has published to it
-- **THEN** the widget MUST render with the default parameter values: status="offline" (fill #666666), label="" (no label text visible), border ring in `{{color.border.default}}`
+- **THEN** the widget MUST render with the default parameter values: status="offline" (fill #666666), label="" (no label text visible), border ring in the color resolved from token `color.border.default` (default: `#333333`)
 
 #### Scenario: Online status renders green
 - **WHEN** an agent publishes status="online" to the status indicator widget
@@ -34,7 +34,7 @@ Scope: v1-mandatory
 
 #### Scenario: Label text displayed below circle
 - **WHEN** an agent publishes status="online" and label="Butler" to the status indicator widget
-- **THEN** the widget MUST render the circle with fill #00CC66 and the text "Butler" centered below the circle in `{{color.text.secondary}}`
+- **THEN** the widget MUST render the circle with fill #00CC66 and the text "Butler" centered below the circle in the color resolved from token `color.text.secondary` (default: `#B0B0B0`)
 
 #### Scenario: Empty label renders no text
 - **WHEN** an agent publishes status="online" and label="" to the status indicator widget

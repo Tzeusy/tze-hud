@@ -59,6 +59,8 @@ The effective rendering for default tokens:
 
 **Rationale:** Reusing the existing batch publish infrastructure avoids new tooling. The delay between messages (for rapid replacement testing) is handled by the `--delay-ms` argument to `publish_zone_batch.py`.
 
+**Note:** The streaming fixture extends the base publish schema with an optional `breakpoints` field (array of u32 byte offsets). The `publish_zone_batch.py` script MUST be updated to forward this field to the MCP `publish_to_zone` call when present.
+
 ### 3. Transition defaults are exemplar-recommended, not token-driven
 
 **Decision:** `transition_in_ms` (200) and `transition_out_ms` (150) are not in the canonical token schema. They are RenderingPolicy field defaults that the exemplar recommends for the subtitle zone type definition in configuration. These values are set in the zone type config, not derived from tokens.
