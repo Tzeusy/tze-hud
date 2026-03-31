@@ -41,9 +41,15 @@
 //!
 //! ## Does NOT include
 //! - Capability vocabulary validation (rig-9yfh)
+//!
+//! ### hud-sc0a.4 (Component type contracts)
+//! - Component Type Contract (v1-mandatory)
+//! - V1 Component Type Definitions (v1-mandatory)
+//! - Zone Name Reconciliation (v1-mandatory)
 
 pub mod agents;
 pub mod capability;
+pub mod component_types;
 pub mod loader;
 pub mod privacy;
 pub mod profile;
@@ -75,3 +81,4 @@ pub use widgets::{
     LoadedWidgetType, build_widget_instance, validate_widget_bundles, validate_widget_instances,
 };
 pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};
+pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};
