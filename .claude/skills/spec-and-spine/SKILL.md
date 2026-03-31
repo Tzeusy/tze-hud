@@ -15,13 +15,14 @@ description: >
 
 OpenSpec capability specifications are the backbone of tze_hud. Every feature, every implementation task, every test traces back to a normative requirement in a spec. No code without spec coverage. Stale specs are worse than no specs.
 
-## Three-Tier Model
+## Four-Pillar Model
 
 | Layer | Location | Role |
 |-------|----------|------|
-| Doctrine | `heart-and-soul/` | WHY — philosophical foundations, seven non-negotiable rules |
-| Design Contracts | `docs/rfcs/0001–0011` | HOW — wire-level protobuf schemas, state machines, field numbers, latency budgets |
+| Doctrine | `about/heart-and-soul/` | WHY — philosophical foundations, seven non-negotiable rules |
+| Design Contracts | `about/law-and-lore/rfcs/0001–0011` | HOW — wire-level protobuf schemas, state machines, field numbers, latency budgets |
 | Capability Specs | `openspec/changes/v1-mvp-standards/specs/` | WHAT — normative requirements with testable scenarios, RFC traceability, v1 scope tags |
+| Topology | `about/lay-and-land/` | WHERE — component boundaries, data flow, deployment topology |
 
 Specs bridge doctrine and RFCs to implementation. Traceability chain: **spec requirement → RFC section → doctrine principle**.
 
@@ -132,7 +133,7 @@ When planning what to build next:
 
 1. **Check task coverage** — Read `openspec/changes/v1-mvp-standards/tasks.md` for the 156 existing tasks
 2. **Check spec dependency order** — Foundation specs (scene-graph, runtime-kernel, timing) must be implemented before governance specs. See the dependency graph in [references/spec-map.md](references/spec-map.md).
-3. **Evaluate against eight dimensions** — Alignment, user value, leverage, tractability, timing, dependencies, implementation risk, churn likelihood (from `heart-and-soul/development.md`)
+3. **Evaluate against eight dimensions** — Alignment, user value, leverage, tractability, timing, dependencies, implementation risk, churn likelihood (from `about/heart-and-soul/development.md`)
 4. **No spec = no plan** — If the proposed work has no spec coverage, the first task is writing the spec
 
 ## Quick Reference: Related Skills
@@ -141,6 +142,7 @@ When planning what to build next:
 |------|-------|
 | Underlying wire-level contracts | `/law-and-lore` (loads relevant RFCs) |
 | Philosophical foundations | `/heart-and-soul` (loads relevant doctrine) |
+| System topology and boundaries | `/lay-and-land` (loads component maps) |
 | Create/continue spec changes | `/opsx:new`, `/opsx:continue`, `/opsx:ff` |
 | Implement from spec | `/opsx:apply` |
 | Verify before archiving | `/opsx:verify` |

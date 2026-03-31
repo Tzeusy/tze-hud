@@ -2,8 +2,8 @@
 
 tze_hud is a greenfield agent-native presence engine following a doctrine-first development model. The project has:
 
-- **Doctrine** (`heart-and-soul/`, 11 files) — philosophical and architectural foundations defining what the system is, what it is not, and seven non-negotiable rules
-- **Design contracts** (`docs/rfcs/0001–0011`) — wire-level specifications with protobuf schemas, state machines, field allocations, latency budgets, and cross-subsystem integration contracts
+- **Doctrine** (`about/heart-and-soul/`, 11 files) — philosophical and architectural foundations defining what the system is, what it is not, and seven non-negotiable rules
+- **Design contracts** (`about/law-and-lore/rfcs/0001–0011`) — wire-level specifications with protobuf schemas, state machines, field allocations, latency budgets, and cross-subsystem integration contracts
 - **Existing protocol code** (`crates/tze_hud_protocol/proto/session.proto`) — partial implementation of RFC 0005's bidirectional streaming protocol
 
 What's missing is a **normative specification layer** that bridges doctrine/RFCs to implementation. The RFCs define contracts (HOW subsystems behave at the wire level); specifications define requirements (WHAT the system SHALL do, with testable scenarios). This change creates that layer.
@@ -72,7 +72,7 @@ validation-framework (cross-cutting, references all specs)
 ## Risks / Trade-offs
 
 - **[Spec drift from RFCs]** → Mitigation: Every requirement includes `Source: RFC NNNN §X.Y` traceability. Three-pass review validates adherence to law-and-lore contracts.
-- **[Scope creep beyond v1]** → Mitigation: Requirements tagged with v1 scope. Post-v1 items documented as deferred but generate no tasks. Review pass validates against `heart-and-soul/v1.md`.
+- **[Scope creep beyond v1]** → Mitigation: Requirements tagged with v1 scope. Post-v1 items documented as deferred but generate no tasks. Review pass validates against `about/heart-and-soul/v1.md`.
 - **[Over-specification]** → Mitigation: Specs define WHAT, not HOW. Implementation flexibility preserved within contract boundaries. If a requirement constrains implementation unnecessarily, it's a spec bug.
 - **[Cross-spec inconsistency]** → Mitigation: Cross-RFC integration map (`.claude/skills/law-and-lore/references/cross-rfc-map.md`) used as consistency checklist. Known resolved inconsistencies from RFC review rounds documented.
 - **[Context window pressure for LLM implementers]** → Mitigation: Specs are self-contained per subsystem. Implementers load only the spec(s) relevant to their task, same as the selective-loading pattern in heart-and-soul and law-and-lore skills.

@@ -10,10 +10,10 @@
 
 ## Doctrine Files Loaded
 
-- `heart-and-soul/architecture.md` (Session model, protocol planes, message classes, error model, versioning)
-- `heart-and-soul/v1.md` (V1 scope, protocol deliverables, deferred items)
-- `heart-and-soul/failure.md` (Reconnection contract, degradation axes)
-- `heart-and-soul/security.md` (Authentication, capability scopes, resource governance)
+- `about/heart-and-soul/architecture.md` (Session model, protocol planes, message classes, error model, versioning)
+- `about/heart-and-soul/v1.md` (V1 scope, protocol deliverables, deferred items)
+- `about/heart-and-soul/failure.md` (Reconnection contract, degradation axes)
+- `about/heart-and-soul/security.md` (Authentication, capability scopes, resource governance)
 
 Round 1 findings reviewed and confirmed as merged via PR #24.
 
@@ -259,7 +259,7 @@ The filtering rule is: inspect the `InputMessage.event` oneof variant before app
 
 ## Changes Made to RFC 0005
 
-All MUST-FIX and SHOULD-FIX items above have been applied directly to `docs/rfcs/0005-session-protocol.md`:
+All MUST-FIX and SHOULD-FIX items above have been applied directly to `about/law-and-lore/rfcs/0005-session-protocol.md`:
 
 1. **`SessionInit` dead resume fields removed:** fields 9 (`resume_session_token`) and 10 (`resume_last_seen_server_seq`) removed from `SessionInit` proto definition and prose in §1.2. The resume path is fully served by `SessionResume` (§6.2).
 

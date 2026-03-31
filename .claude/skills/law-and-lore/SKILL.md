@@ -1,20 +1,21 @@
 ---
 name: law-and-lore
 description: >
-  Load tze_hud RFC design contracts to contextualize implementation work. The docs/rfcs/
-  directory contains 11 RFCs that define the wire-level contracts, data models, state machines,
-  protobuf schemas, and quantitative budgets for the tze_hud presence engine. Consult relevant
-  RFCs before implementing features, writing protobuf definitions, designing state machines,
-  choosing field numbers, setting performance budgets, or resolving cross-subsystem integration
-  questions. Use this skill proactively when the task touches: scene graph, runtime kernel,
-  timing/clocks, input handling, session protocol, configuration, system shell/chrome, leases,
-  policy arbitration, events, or resource storage. Selectively load ONLY the RFCs relevant to
-  your current task — do not load all 11 at once.
+  Load tze_hud RFC design contracts to contextualize implementation work. The
+  about/law-and-lore/ directory contains 11 RFCs that define the wire-level contracts,
+  data models, state machines, protobuf schemas, and quantitative budgets for the tze_hud
+  presence engine. Consult relevant RFCs before implementing features, writing protobuf
+  definitions, designing state machines, choosing field numbers, setting performance
+  budgets, or resolving cross-subsystem integration questions. Use this skill proactively
+  when the task touches: scene graph, runtime kernel, timing/clocks, input handling,
+  session protocol, configuration, system shell/chrome, leases, policy arbitration,
+  events, or resource storage. Selectively load ONLY the RFCs relevant to your current
+  task — do not load all 11 at once.
 ---
 
 # tze_hud Law and Lore — Design Contracts
 
-The `docs/rfcs/` directory contains the authoritative design contracts for tze_hud. These are not aspirational docs — they are the wire-level specifications that code must conform to: protobuf schemas, state machines, field allocations, latency budgets, and integration contracts.
+The `about/law-and-lore/rfcs/` directory contains the authoritative design contracts for tze_hud. These are not aspirational docs — they are the wire-level specifications that code must conform to: protobuf schemas, state machines, field allocations, latency budgets, and integration contracts.
 
 **Consult relevant RFCs before:**
 - Implementing any subsystem or feature
@@ -32,41 +33,41 @@ The `docs/rfcs/` directory contains the authoritative design contracts for tze_h
 
 | RFC | File | Read when... | Key content |
 |-----|------|-------------|-------------|
-| **0001** | `docs/rfcs/0001-scene-contract.md` | Touching scene graph, mutations, node types, identity model | SceneId/ResourceId types, mutation pipeline, zone registry, tile/tab/node hierarchy, protobuf schema |
-| **0002** | `docs/rfcs/0002-runtime-kernel.md` | Touching process architecture, frame pipeline, budgets, degradation | Thread model, 8-stage frame pipeline, admission control, budget enforcement, degradation ladder, window management |
+| **0001** | `about/law-and-lore/rfcs/0001-scene-contract.md` | Touching scene graph, mutations, node types, identity model | SceneId/ResourceId types, mutation pipeline, zone registry, tile/tab/node hierarchy, protobuf schema |
+| **0002** | `about/law-and-lore/rfcs/0002-runtime-kernel.md` | Touching process architecture, frame pipeline, budgets, degradation | Thread model, 8-stage frame pipeline, admission control, budget enforcement, degradation ladder, window management |
 
 ### Timing, Input, Protocol (the hot path)
 
 | RFC | File | Read when... | Key content |
 |-----|------|-------------|-------------|
-| **0003** | `docs/rfcs/0003-timing.md` | Touching clocks, sync groups, presentation scheduling, frame deadlines | Clock domains (`_wall_us`/`_mono_us`), sync groups, frame deadline semantics, relative scheduling |
-| **0004** | `docs/rfcs/0004-input.md` | Touching focus, pointer capture, gestures, keyboard, accessibility | Focus tree, pointer capture protocol, gesture pipeline, IME, local feedback contract, event dispatch |
-| **0005** | `docs/rfcs/0005-session-protocol.md` | Touching wire protocol, session lifecycle, message envelope, reconnection | Session state machine, multiplexed oneof envelope (47+ fields), traffic classes, version negotiation, MCP bridge, subscription management |
+| **0003** | `about/law-and-lore/rfcs/0003-timing.md` | Touching clocks, sync groups, presentation scheduling, frame deadlines | Clock domains (`_wall_us`/`_mono_us`), sync groups, frame deadline semantics, relative scheduling |
+| **0004** | `about/law-and-lore/rfcs/0004-input.md` | Touching focus, pointer capture, gestures, keyboard, accessibility | Focus tree, pointer capture protocol, gesture pipeline, IME, local feedback contract, event dispatch |
+| **0005** | `about/law-and-lore/rfcs/0005-session-protocol.md` | Touching wire protocol, session lifecycle, message envelope, reconnection | Session state machine, multiplexed oneof envelope (47+ fields), traffic classes, version negotiation, MCP bridge, subscription management |
 
 ### Governance and policy
 
 | RFC | File | Read when... | Key content |
 |-----|------|-------------|-------------|
-| **0006** | `docs/rfcs/0006-configuration.md` | Touching TOML config, display profiles, capability registry | Display profiles (full-display/headless/mobile), budget defaults, capability vocabulary, validation rules |
-| **0007** | `docs/rfcs/0007-system-shell.md` | Touching chrome layer, safe mode, freeze, mute, override, badges | Chrome semantics, safe mode protocol, privacy-safe capture, backpressure signals, audit events |
-| **0008** | `docs/rfcs/0008-lease-governance.md` | Touching leases, priority, suspension, revocation, resource budgets | Lease state machine, priority levels 0–4, suspension vs revocation, orphan handling, grace periods, zone interaction |
-| **0009** | `docs/rfcs/0009-policy-arbitration.md` | Touching conflict resolution, arbitration stack, GPU failure handling | 7-level arbitration stack (human override → safety → privacy → security → attention → resource → content) |
+| **0006** | `about/law-and-lore/rfcs/0006-configuration.md` | Touching TOML config, display profiles, capability registry | Display profiles (full-display/headless/mobile), budget defaults, capability vocabulary, validation rules |
+| **0007** | `about/law-and-lore/rfcs/0007-system-shell.md` | Touching chrome layer, safe mode, freeze, mute, override, badges | Chrome semantics, safe mode protocol, privacy-safe capture, backpressure signals, audit events |
+| **0008** | `about/law-and-lore/rfcs/0008-lease-governance.md` | Touching leases, priority, suspension, revocation, resource budgets | Lease state machine, priority levels 0–4, suspension vs revocation, orphan handling, grace periods, zone interaction |
+| **0009** | `about/law-and-lore/rfcs/0009-policy-arbitration.md` | Touching conflict resolution, arbitration stack, GPU failure handling | 7-level arbitration stack (human override → safety → privacy → security → attention → resource → content) |
 
 ### Events and storage
 
 | RFC | File | Read when... | Key content |
 |-----|------|-------------|-------------|
-| **0010** | `docs/rfcs/0010-scene-events.md` | Touching event taxonomy, interruptions, quiet hours, subscriptions | Event taxonomy (input/scene/system), interruption classes, quiet hours, event bus, `tab_switch_on_event` contract |
-| **0011** | `docs/rfcs/0011-resource-store.md` | Touching content-addressed storage, uploads, GC, font lifecycle | Upload protocol, BLAKE3 content addressing, reference counting, cross-agent sharing, size limits |
+| **0010** | `about/law-and-lore/rfcs/0010-scene-events.md` | Touching event taxonomy, interruptions, quiet hours, subscriptions | Event taxonomy (input/scene/system), interruption classes, quiet hours, event bus, `tab_switch_on_event` contract |
+| **0011** | `about/law-and-lore/rfcs/0011-resource-store.md` | Touching content-addressed storage, uploads, GC, font lifecycle | Upload protocol, BLAKE3 content addressing, reference counting, cross-agent sharing, size limits |
 
 ## How to load
 
-Read RFCs directly from `docs/rfcs/`:
+Read RFCs directly from `about/law-and-lore/rfcs/`:
 
 ```
-Read docs/rfcs/0001-scene-contract.md    # scene graph data model
-Read docs/rfcs/0005-session-protocol.md  # wire protocol and envelope
-Read docs/rfcs/0008-lease-governance.md  # lease state machine
+Read about/law-and-lore/rfcs/0001-scene-contract.md    # scene graph data model
+Read about/law-and-lore/rfcs/0005-session-protocol.md  # wire protocol and envelope
+Read about/law-and-lore/rfcs/0008-lease-governance.md  # lease state machine
 ```
 
 For cross-RFC integration questions (field number conflicts, cross-subsystem contracts, resolved inconsistencies, quantitative budgets), load the reference map:

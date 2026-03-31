@@ -146,7 +146,7 @@ The hardware timestamp from winit is effectively in the OS monotonic domain (or 
 
 ## Summary of Applied Fixes
 
-All MUST-FIX items are applied to `docs/rfcs/0004-input.md`:
+All MUST-FIX items are applied to `about/law-and-lore/rfcs/0004-input.md`:
 
 1. §12 RFC Dependency Map: corrected "Lease Model" → "Timing Model" for RFC 0003; added RFC 0005 and RFC 0008 entries
 2. §8.3 Note: corrected description of RFC 0005 field 34 type from `InputEnvelope` to `InputEvent`

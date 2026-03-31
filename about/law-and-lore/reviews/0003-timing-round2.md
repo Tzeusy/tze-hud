@@ -218,7 +218,7 @@ separate endpoint) is the ergonomically correct choice — agents manage one con
 
 ## Changes Applied
 
-### RFC 0003 (docs/rfcs/0003-timing.md)
+### RFC 0003 (about/law-and-lore/rfcs/0003-timing.md)
 - §Review History: Added Round 2 summary.
 - §2.3: Added tile deletion mid-deferral behavior.
 - §4.3: Added clock jump detection and window reset.
@@ -229,7 +229,7 @@ separate endpoint) is the ergonomically correct choice — agents manage one con
 - §8.1: Added Clock trait design constraint note.
 - §8.2: Added three new test coverage requirements.
 
-### RFC 0005 (docs/rfcs/0005-session-protocol.md)
+### RFC 0005 (about/law-and-lore/rfcs/0005-session-protocol.md)
 - `SessionInit`: Added `agent_timestamp_us` (field 11).
 - `SessionEstablished`: Added `compositor_wallclock_us` (field 9) and `estimated_skew_us` (field 10).
 - Inline `TimingHints`: Fixed `sync_group_id` from `string` to `bytes`.

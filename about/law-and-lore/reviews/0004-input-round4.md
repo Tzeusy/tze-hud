@@ -136,7 +136,7 @@ Without this, the implementor must choose a threshold. If both Swipe and Drag ca
 
 ## Summary of Applied Fixes
 
-All MUST-FIX and SHOULD-FIX items applied to `docs/rfcs/0004-input.md`:
+All MUST-FIX and SHOULD-FIX items applied to `about/law-and-lore/rfcs/0004-input.md`:
 
 1. **§3.6** — rewrote to remove `GestureBeganEvent`/`GestureCancelledEvent` references; narrative now correctly describes `GestureEvent` with Phase enum for phased gestures and `PointerCancelEvent` for losers.
 2. **§3.2** — added note below gesture table clarifying ContextMenu dispatch as standalone `ContextMenuEvent`; updated §3.5 to remove ContextMenu from gesture priority list and add a note about its dispatch.

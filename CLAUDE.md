@@ -4,13 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-**tze_hud** — an agent-native presence engine. A local, high-performance display runtime that gives LLMs safe, synchronized, live, interactive presence on real screens (wall displays to smart glasses). See `heart-and-soul/` for full doctrine (start with `heart-and-soul/README.md`).
+**tze_hud** — an agent-native presence engine. A local, high-performance display runtime that gives LLMs safe, synchronized, live, interactive presence on real screens (wall displays to smart glasses). See `about/heart-and-soul/` for full doctrine (start with `about/heart-and-soul/README.md`).
 
 This is **not** a dashboard or chatbot UI. It's an operating environment for model presence: spatial ownership, timed media, bidirectional interaction, governed leases.
 
 ## Status
 
-Pre-code. Doctrine is written (`heart-and-soul/`); the next artifact is an RFC with scene object model, session/lease model, protobuf definitions, and core RPCs. See `heart-and-soul/v1.md` for scope boundary.
+Pre-code. Doctrine is written (`about/heart-and-soul/`); the next artifact is an RFC with scene object model, session/lease model, protobuf definitions, and core RPCs. See `about/heart-and-soul/v1.md` for scope boundary.
 
 ## Locked-In Technology Decisions
 

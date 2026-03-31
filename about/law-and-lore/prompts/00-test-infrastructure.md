@@ -13,7 +13,7 @@ Create a `/beads-writer` epic for **test-driven validation infrastructure** — 
 
 ### Context
 
-The v1-mvp-standards spec set contains 378 normative requirements across 12 subsystem specs, with 623 WHEN/THEN scenarios that map directly to test cases. The project doctrine (`heart-and-soul/validation.md`, `validation-framework/spec.md`) treats validation as architecture, not garnish. The existing codebase already has:
+The v1-mvp-standards spec set contains 378 normative requirements across 12 subsystem specs, with 623 WHEN/THEN scenarios that map directly to test cases. The project doctrine (`about/heart-and-soul/validation.md`, `validation-framework/spec.md`) treats validation as architecture, not garnish. The existing codebase already has:
 
 - `TestSceneRegistry` with 5 named scenes (spec requires 25) in `crates/tze_hud_scene/src/test_scenes.rs`
 - `assert_layer0_invariants()` with 16 structural checks

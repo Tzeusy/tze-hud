@@ -10,11 +10,11 @@
 
 ## Doctrine Files Loaded
 
-- `heart-and-soul/architecture.md` (Session model, protocol planes, message classes, versioning, error model)
-- `heart-and-soul/security.md` (Trust gradient, authentication, capability scopes, resource governance)
-- `heart-and-soul/failure.md` (Agent crash recovery, reconnection contract, degradation axes)
-- `heart-and-soul/presence.md` (Presence levels, leases, zones, zone publishing)
-- `heart-and-soul/v1.md` (V1 scope, protocol deliverables, deferred items)
+- `about/heart-and-soul/architecture.md` (Session model, protocol planes, message classes, versioning, error model)
+- `about/heart-and-soul/security.md` (Trust gradient, authentication, capability scopes, resource governance)
+- `about/heart-and-soul/failure.md` (Agent crash recovery, reconnection contract, degradation axes)
+- `about/heart-and-soul/presence.md` (Presence levels, leases, zones, zone publishing)
+- `about/heart-and-soul/v1.md` (V1 scope, protocol deliverables, deferred items)
 
 ---
 
@@ -183,7 +183,7 @@ ALIGNED.
 
 ## Changes Made to RFC 0005
 
-All MUST-FIX and SHOULD-FIX items above have been applied directly to `docs/rfcs/0005-session-protocol.md`:
+All MUST-FIX and SHOULD-FIX items above have been applied directly to `about/law-and-lore/rfcs/0005-session-protocol.md`:
 
 1. `heartbeat_interval_ms` default: 10,000 → 5,000
 2. `max_concurrent_sessions`: split into `max_concurrent_resident_sessions = 16` / `max_concurrent_guest_sessions = 64`

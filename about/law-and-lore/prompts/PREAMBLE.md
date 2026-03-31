@@ -6,11 +6,11 @@
 
 - **Specs are authoritative.** Treat `openspec/changes/v1-mvp-standards/specs/<subsystem>/spec.md` as the source of truth over this prompt text and over summary text in `tasks.md`. If prompt, task, and spec disagree, **do not normalize silently** — add a conflict note in the bead description.
 - **Preserve exact canonical names.** Do not invent aliases, synonyms, or paraphrases for state names, message types, capability identifiers, error codes, or event type names that the spec already defines. Use the spec's exact terminology.
-- **Doctrine is non-negotiable.** The principles in `heart-and-soul/` are architectural invariants, not aspirational goals. Every bead must be compatible with them.
+- **Doctrine is non-negotiable.** The principles in `about/heart-and-soul/` are architectural invariants, not aspirational goals. Every bead must be compatible with them.
 
 ## Doctrine Guardrails
 
-Every bead in every epic must be compatible with these load-bearing principles from `heart-and-soul/`:
+Every bead in every epic must be compatible with these load-bearing principles from `about/heart-and-soul/`:
 
 - **LLMs must never sit in the frame loop.** Models drive the scene; the runtime composits. (architecture.md)
 - **Arrival time ≠ presentation time.** All payloads carry timing semantics. (architecture.md, timing-model spec)

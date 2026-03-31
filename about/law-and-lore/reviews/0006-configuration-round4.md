@@ -149,10 +149,10 @@ All scores ≥ 4. All dimensions ≥ 3. Round 4 complete.
 
 ## Changes Made
 
-- `docs/rfcs/0006-configuration.md`: Added `CONFIG_NO_TABS` validation rule to §2.4; added `CONFIG_NO_TABS` error code to §10 enum and summary table
-- `docs/rfcs/0006-configuration.md`: Added `CONFIG_INVALID_RESERVED_FRACTION` validation rules to §5.3; added to §10 enum and summary table
-- `docs/rfcs/0006-configuration.md`: Added `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE` validation rules to §6.2; corrected `doorbell_agent` `max_texture_mb` example; added to §10 enum and summary table
-- `docs/rfcs/0006-configuration.md`: Added `tab_switch_on_event` WARN behavior to §5.4
-- `docs/rfcs/0006-configuration.md`: Fixed `DisplayProfileConfig.extends` doc comment in §10 to include `headless` with correct usage note
-- `docs/rfcs/0006-configuration.md`: Added Round 4 review history entry
-- `docs/reviews/0006-configuration-round4.md`: This review document
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added `CONFIG_NO_TABS` validation rule to §2.4; added `CONFIG_NO_TABS` error code to §10 enum and summary table
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added `CONFIG_INVALID_RESERVED_FRACTION` validation rules to §5.3; added to §10 enum and summary table
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added `CONFIG_AGENT_BUDGET_EXCEEDS_PROFILE` validation rules to §6.2; corrected `doorbell_agent` `max_texture_mb` example; added to §10 enum and summary table
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added `tab_switch_on_event` WARN behavior to §5.4
+- `about/law-and-lore/rfcs/0006-configuration.md`: Fixed `DisplayProfileConfig.extends` doc comment in §10 to include `headless` with correct usage note
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added Round 4 review history entry
+- `about/law-and-lore/reviews/0006-configuration-round4.md`: This review document

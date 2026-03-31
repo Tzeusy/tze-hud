@@ -415,7 +415,7 @@ categories of gap items were identified:
 
 The delta specs in `openspec/changes/widget-system/specs/` cover five capability domains
 (widget-system, scene-graph, session-protocol, configuration, resource-store). The RFC documents
-in `docs/rfcs/` have been updated by hud-mim2.6 to include widget content. There is no
+in `about/law-and-lore/rfcs/` have been updated by hud-mim2.6 to include widget content. There is no
 separate authoritative `openspec/specs/` tree — the delta specs in the changes directory
 ARE the canonical spec artifacts for this project at this stage.
 

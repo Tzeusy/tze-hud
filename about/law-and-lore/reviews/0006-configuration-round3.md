@@ -128,9 +128,9 @@ All scores ≥ 3. Round 3 complete.
 
 ## Changes Made
 
-- `docs/rfcs/0006-configuration.md`: Added RFC 0005, RFC 0008, RFC 0009 to Cross-References section
-- `docs/rfcs/0006-configuration.md`: Removed `redaction_style` from `[chrome]` section (§2.8); added clarifying note per RFC 0009 §3.2
-- `docs/rfcs/0006-configuration.md`: Added `read_telemetry` and `lease:priority:<N>` to capability identifier table (§6.3); added authoritative RFC column; added vocabulary note
-- `docs/rfcs/0006-configuration.md`: Added cross-reference note to `reconnect_grace_secs` field comment
-- `docs/rfcs/0006-configuration.md`: Added Round 3 review history entry
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added RFC 0005, RFC 0008, RFC 0009 to Cross-References section
+- `about/law-and-lore/rfcs/0006-configuration.md`: Removed `redaction_style` from `[chrome]` section (§2.8); added clarifying note per RFC 0009 §3.2
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added `read_telemetry` and `lease:priority:<N>` to capability identifier table (§6.3); added authoritative RFC column; added vocabulary note
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added cross-reference note to `reconnect_grace_secs` field comment
+- `about/law-and-lore/rfcs/0006-configuration.md`: Added Round 3 review history entry
 - `docs/reviews/0006-configuration-round3.md`: This review document

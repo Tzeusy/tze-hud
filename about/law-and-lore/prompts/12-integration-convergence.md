@@ -13,7 +13,7 @@ Create a `/beads-writer` epic for **integration and convergence** — the final 
 
 ### Context
 
-This epic runs after all subsystem epics are substantially complete. It focuses on cross-subsystem integration contracts, the higher validation layers (Layer 2 SSIM, Layer 3 performance, Layer 4 artifacts), and the v1 success criteria from `heart-and-soul/v1.md`: three resident agents coexisting, lease model working, zones as LLM-first surface, p99 latencies measured, headless fully functional, and validation architecture operational.
+This epic runs after all subsystem epics are substantially complete. It focuses on cross-subsystem integration contracts, the higher validation layers (Layer 2 SSIM, Layer 3 performance, Layer 4 artifacts), and the v1 success criteria from `about/heart-and-soul/v1.md`: three resident agents coexisting, lease model working, zones as LLM-first surface, p99 latencies measured, headless fully functional, and validation architecture operational.
 
 ### Epic structure
 
@@ -64,7 +64,7 @@ Implement Layer 4 per `validation-framework/spec.md` Requirement: Layer 4 - Deve
 - **Spec refs:** `validation-framework/spec.md` Requirement: Layer 4 - Developer Visibility Artifacts
 
 #### 6. V1 thesis proof (depends on all above)
-Final validation that the v1 success criteria from `heart-and-soul/v1.md` are met:
+Final validation that the v1 success criteria from `about/heart-and-soul/v1.md` are met:
 - An LLM can hold a tile and have it render at 60fps
 - The lease model works (auth, capabilities, TTL, revocation)
 - Multiple agents coexist without interference
@@ -73,7 +73,7 @@ Final validation that the v1 success criteria from `heart-and-soul/v1.md` are me
 - Zones work as LLM-first surface (single MCP call, no scene context needed)
 - Headless mode fully functional (no display server, CI on software GPU)
 - **Acceptance:** All 7 v1 success criteria demonstrated. All 25 test scenes pass all applicable layers. All budget assertions pass on calibrated hardware.
-- **Spec refs:** `heart-and-soul/v1.md` success criteria, all 12 subsystem specs
+- **Spec refs:** `about/heart-and-soul/v1.md` success criteria, all 12 subsystem specs
 
 ### Requirements for every sub-bead
 

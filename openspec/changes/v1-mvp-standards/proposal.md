@@ -1,8 +1,8 @@
 ## Why
 
-tze_hud has mature doctrine (`heart-and-soul/`) and detailed design contracts (`docs/rfcs/0001–0011`) but no formal specification artifacts that can be verified against implementation, diffed against changes, or used to generate implementation task lists. The RFCs define wire-level contracts; what's missing is a normative specification layer that bridges doctrine and code — one that an LLM implementer can load, an OpenSpec change can diff against, and CI can eventually validate.
+tze_hud has mature doctrine (`about/heart-and-soul/`) and detailed design contracts (`about/law-and-lore/rfcs/0001–0011`) but no formal specification artifacts that can be verified against implementation, diffed against changes, or used to generate implementation task lists. The RFCs define wire-level contracts; what's missing is a normative specification layer that bridges doctrine and code — one that an LLM implementer can load, an OpenSpec change can diff against, and CI can eventually validate.
 
-This change creates the complete v1 MVP specification set: one spec per subsystem, each grounded in its corresponding RFC and the soul doctrine, scoped precisely to the v1 boundary defined in `heart-and-soul/v1.md`.
+This change creates the complete v1 MVP specification set: one spec per subsystem, each grounded in its corresponding RFC and the soul doctrine, scoped precisely to the v1 boundary defined in `about/heart-and-soul/v1.md`.
 
 ## What Changes
 

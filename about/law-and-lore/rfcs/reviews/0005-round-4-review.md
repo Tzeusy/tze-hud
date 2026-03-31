@@ -10,10 +10,10 @@
 
 ## Doctrine Files Consulted
 
-- `heart-and-soul/architecture.md` — Three-plane protocol, session model, error model, message classes
-- `heart-and-soul/failure.md` — Reconnection contract, agent crash recovery, degradation axes
-- `heart-and-soul/security.md` — Trust gradient, capability scopes, agent isolation
-- `heart-and-soul/validation.md` — Testing doctrine, split latency budgets, structured telemetry
+- `about/heart-and-soul/architecture.md` — Three-plane protocol, session model, error model, message classes
+- `about/heart-and-soul/failure.md` — Reconnection contract, agent crash recovery, degradation axes
+- `about/heart-and-soul/security.md` — Trust gradient, capability scopes, agent isolation
+- `about/heart-and-soul/validation.md` — Testing doctrine, split latency budgets, structured telemetry
 
 ---
 

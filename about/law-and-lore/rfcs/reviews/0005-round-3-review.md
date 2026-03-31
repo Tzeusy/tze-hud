@@ -10,10 +10,10 @@
 
 ## Doctrine Files Consulted
 
-- `heart-and-soul/architecture.md` — Three-plane protocol, session model, one stream per agent
-- `heart-and-soul/security.md` — Trust gradient, capability scopes
-- `heart-and-soul/failure.md` — Reconnection contract, degradation
-- `heart-and-soul/v1.md` — V1 scope boundary, deferred items
+- `about/heart-and-soul/architecture.md` — Three-plane protocol, session model, one stream per agent
+- `about/heart-and-soul/security.md` — Trust gradient, capability scopes
+- `about/heart-and-soul/failure.md` — Reconnection contract, degradation
+- `about/heart-and-soul/v1.md` — V1 scope boundary, deferred items
 
 ---
 

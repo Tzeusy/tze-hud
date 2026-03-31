@@ -25,7 +25,7 @@ Scope: v1-mandatory
 
 ### Requirement: Legacy unary service exclusion
 The v1 runtime MUST NOT host a unary RPC scene service alongside the streaming session protocol. The bidirectional streaming `HudSession` service is the single authoritative resident control path. Any legacy unary service definitions (e.g., `SceneService` with `Connect`/`RequestLease` unary RPCs) MUST be removed from the v1 codebase and protobuf definitions before release.
-Source: RFC 0005 §1.1, heart-and-soul/architecture.md (one stream per agent)
+Source: RFC 0005 §1.1, about/heart-and-soul/architecture.md (one stream per agent)
 Scope: v1-mandatory
 
 #### Scenario: No unary scene service in v1 binary

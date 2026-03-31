@@ -976,7 +976,7 @@ See §8.2 for the full test coverage matrix.
 
 This section specifies the media timing model for reference. All content in this section is **explicitly deferred to post-v1**. v1 ships sync groups for scene-level coordination only; media clock integration is not part of the v1 delivery.
 
-See `heart-and-soul/v1.md` §"V1 explicitly defers" for the authoritative v1 boundary.
+See `about/heart-and-soul/v1.md` §"V1 explicitly defers" for the authoritative v1 boundary.
 
 ### 6.1 GStreamer Pipeline Clock
 
@@ -1373,7 +1373,7 @@ The following behaviors must be covered by Layer 0 (scene graph assertion) tests
 
 ### 8.3 Chaos Test Requirements
 
-The timing model must survive chaos injection (see `heart-and-soul/validation.md`):
+The timing model must survive chaos injection (see `about/heart-and-soul/validation.md`):
 
 - Clock discontinuities: simulated clock jumps forward by 10s — all pending queues drain correctly, expired tiles are removed, no crashes.
 - Clock jumps backward: monotonic clock cannot go backward; the simulation must never do this. Network clock going backward (agent skew) triggers skew detection.
