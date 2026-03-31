@@ -1773,13 +1773,23 @@ impl WidgetRegistry {
     ///
     /// Returns `None` if the instance is not found.
     ///
-    /// # effective_params stub
+    /// # effective_params resolution
     ///
-    /// `effective_params` is currently a simplified stub: when publications are
-    /// active it returns `instance.current_params` without applying
-    /// Stack/MergeByKey reduction semantics (e.g., no per-key merge, no depth
-    /// capping).  Correct per-policy reduction is deferred to the widget
-    /// registry runtime integration tracked in **hud-mim2.3**.
+    /// `effective_params` is computed by applying the widget's contention policy
+    /// to the current set of active publications:
+    ///
+    /// - **LatestWins**: the sole active publication's params are merged over
+    ///   the schema defaults.
+    /// - **Stack**: the top-of-stack (most recent, i.e. last) publication's
+    ///   params are merged over the schema defaults.
+    /// - **MergeByKey**: each active publication holds the most recent value for
+    ///   its key; all publications' params are merged over schema defaults in
+    ///   insertion order (later entries win on overlap).
+    /// - **Replace**: the sole active publication's params are used as-is,
+    ///   without falling back to schema defaults for missing keys.
+    ///
+    /// When no publications are active, `effective_params` always falls back to
+    /// the schema defaults regardless of policy.
     pub fn get_occupancy(&self, instance_name: &str, tab_id: SceneId) -> Option<WidgetOccupancy> {
         let instance = self.instances.get(instance_name)?;
         let def = self.definitions.get(&instance.widget_type_name)?;
@@ -1790,16 +1800,62 @@ impl WidgetRegistry {
             .unwrap_or_default();
         let occupant_count = pubs.len() as u32;
 
-        // Fall back to definition defaults when no publications are active.
-        // NOTE: when pubs is non-empty, current_params is returned as-is (stub
-        // — see doc comment above for the tracking issue).
+        // Build schema defaults once; used as the base for all merge-over policies.
+        let defaults: HashMap<std::string::String, WidgetParameterValue> = def
+            .parameter_schema
+            .iter()
+            .map(|p| (p.name.clone(), p.default_value.clone()))
+            .collect();
+
+        let contention_policy = instance
+            .contention_override
+            .unwrap_or(def.default_contention_policy);
+
         let effective_params = if pubs.is_empty() {
-            def.parameter_schema
-                .iter()
-                .map(|p| (p.name.clone(), p.default_value.clone()))
-                .collect()
+            // No active publications — always use schema defaults.
+            defaults
         } else {
-            instance.current_params.clone()
+            match contention_policy {
+                ContentionPolicy::LatestWins => {
+                    // Only one publication is retained by publish_to_widget;
+                    // merge it over defaults.
+                    let mut params = defaults;
+                    for (k, v) in &pubs[0].params {
+                        params.insert(k.clone(), v.clone());
+                    }
+                    params
+                }
+                ContentionPolicy::Stack { .. } => {
+                    // Publications are ordered oldest-first (new entries pushed to back).
+                    // Top-of-stack = last element = most recent publication.
+                    let mut params = defaults;
+                    if let Some(top) = pubs.last() {
+                        for (k, v) in &top.params {
+                            params.insert(k.clone(), v.clone());
+                        }
+                    }
+                    params
+                }
+                ContentionPolicy::MergeByKey { .. } => {
+                    // One record per key, each already holding the most recent value
+                    // for that key.  Merge all publications' params over defaults;
+                    // later entries in the vec win on key overlap (consistent with
+                    // insertion order maintained by publish_to_widget).
+                    let mut params = defaults;
+                    for pub_record in &pubs {
+                        for (k, v) in &pub_record.params {
+                            params.insert(k.clone(), v.clone());
+                        }
+                    }
+                    params
+                }
+                ContentionPolicy::Replace => {
+                    // Replace policy: most recent publication's params are used
+                    // as-is.  No fallback to defaults for missing keys — the
+                    // publication completely replaces prior state.
+                    pubs[0].params.clone()
+                }
+            }
         };
 
         Some(WidgetOccupancy {
