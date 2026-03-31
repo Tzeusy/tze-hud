@@ -149,8 +149,8 @@ pub fn check_frozen_section_changes(
         .as_ref()
         .and_then(|a| a.registered.as_ref());
     let new_registered = new_raw.agents.as_ref().and_then(|a| a.registered.as_ref());
-    let current_reg_val = serde_json::to_value(&current_registered).ok();
-    let new_reg_val = serde_json::to_value(&new_registered).ok();
+    let current_reg_val = serde_json::to_value(current_registered).ok();
+    let new_reg_val = serde_json::to_value(new_registered).ok();
     if current_reg_val != new_reg_val {
         tracing::warn!(
             section = "agents.registered",

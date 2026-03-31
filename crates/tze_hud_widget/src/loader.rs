@@ -48,7 +48,8 @@ pub struct LoadedBundle {
 ///
 /// `LoadedBundle` is intentionally large — it holds in-memory SVG bytes keyed
 /// by filename. Bundle scanning is a startup-time, non-hot-path operation, so
-/// the extra stack size is acceptable here.
+/// the extra stack size is acceptable here. Boxing would require call-site
+/// updates across the workspace.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum BundleScanResult {
