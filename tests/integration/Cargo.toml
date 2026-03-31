@@ -23,6 +23,15 @@ path = "presence_card_tile.rs"
 name = "disconnect_orphan"
 path = "disconnect_orphan.rs"
 
+# E13: Presence card periodic content updates and multi-agent coexistence.
+# Tests hud-apoe.3 acceptance criteria: 30-second content update loop (SetTileRoot),
+# human-friendly time formatting ("now", "30s ago", "1m ago", "2m ago"), and
+# 3-agent concurrent coexistence (non-overlapping geometry, namespace isolation,
+# concurrent content updates).
+[[test]]
+name = "presence_card_coexistence"
+path = "presence_card_coexistence.rs"
+
 [[test]]
 name = "trace_regression"
 path = "trace_regression.rs"

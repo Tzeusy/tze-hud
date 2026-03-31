@@ -69,6 +69,7 @@ use tze_hud_widget::loader::{BundleScanResult, scan_bundle_dirs};
 ///   in widget SVG files. Pass an empty map when no design tokens are configured.
 ///   Per component-shape-language/spec.md §SVG Token Placeholder Resolution: global
 ///   bundles resolve against the global token map.
+///
 /// SVG asset from a loaded widget bundle: `(widget_type_id, svg_filename, svg_bytes)`.
 pub type WidgetSvgAsset = (String, String, Vec<u8>);
 

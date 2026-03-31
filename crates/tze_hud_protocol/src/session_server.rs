@@ -2171,8 +2171,9 @@ async fn handle_mutation_batch(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                // tile_id is 16-byte UUIDv7 bytes (SceneId wire format).
-                if let Some(tile_id) = tze_hud_scene::SceneId::from_bytes_le(&str_.tile_id) {
+                // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
+                // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
+                if let Ok(tile_id) = bytes_to_scene_id(&str_.tile_id) {
                     if let Some(ref node_proto) = str_.node
                         && let Some(node) = convert::proto_node_to_scene(node_proto)
                     {
@@ -2370,8 +2371,9 @@ async fn apply_queued_batch_to_scene(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                // tile_id is 16-byte UUIDv7 bytes (SceneId wire format).
-                if let Some(tile_id) = tze_hud_scene::SceneId::from_bytes_le(&str_.tile_id) {
+                // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
+                // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
+                if let Ok(tile_id) = bytes_to_scene_id(&str_.tile_id) {
                     if let Some(ref node_proto) = str_.node
                         && let Some(node) = convert::proto_node_to_scene(node_proto)
                     {
