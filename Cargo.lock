@@ -1228,6 +1228,8 @@ dependencies = [
 name = "integration"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "image",
  "serde",
  "serde_json",
  "tokio",
@@ -1235,6 +1237,7 @@ dependencies = [
  "tonic",
  "tze_hud_compositor",
  "tze_hud_protocol",
+ "tze_hud_resource",
  "tze_hud_runtime",
  "tze_hud_scene",
  "tze_hud_telemetry",
