@@ -42,6 +42,7 @@ use crate::privacy;
 use crate::profile;
 use crate::raw::{RawConfig, RawDegradation};
 use crate::resolver;
+use crate::tokens;
 use crate::widgets;
 use crate::zones;
 
@@ -296,6 +297,9 @@ impl ConfigLoader for TzeHudConfig {
             let type_map = std::collections::HashMap::new();
             widgets::validate_widget_instances(&self.raw, &known, &type_map, &mut errors);
         }
+
+        // ── (14) Design token key validation ──────────────────────────────────
+        tokens::validate_design_tokens(&self.raw, &mut errors);
 
         errors
     }

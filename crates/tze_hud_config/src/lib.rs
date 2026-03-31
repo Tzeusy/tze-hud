@@ -59,6 +59,7 @@ pub mod resolver;
 pub mod schema;
 #[cfg(test)]
 mod tests;
+pub mod tokens;
 pub mod widgets;
 pub mod zones;
 
