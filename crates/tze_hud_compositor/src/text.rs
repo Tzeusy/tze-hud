@@ -622,6 +622,10 @@ mod tests {
         assert_eq!(item.pixel_y, 208.0);
         assert_eq!(item.bounds_width, 384.0);
         assert_eq!(item.bounds_height, 84.0);
+        // New fields default correctly.
+        assert!(item.outline_color.is_none());
+        assert!(item.outline_width.is_none());
+        assert_eq!(item.opacity, 1.0);
     }
 
     #[test]
@@ -663,5 +667,102 @@ mod tests {
         assert_eq!(item.pixel_x, 66.0);
         assert_eq!(item.pixel_y, 76.0);
         assert_eq!(item.text, "Hello\nworld");
+        // New fields default correctly.
+        assert!(item.outline_color.is_none());
+        assert!(item.outline_width.is_none());
+        assert_eq!(item.opacity, 1.0);
+    }
+
+    // ── from_zone_policy tests [hud-sc0a.8] ──────────────────────────────────
+
+    #[test]
+    fn from_zone_policy_reads_font_size_and_color() {
+        use tze_hud_scene::types::{RenderingPolicy, Rgba};
+        let policy = RenderingPolicy {
+            font_size_px: Some(24.0),
+            text_color: Some(Rgba::new(1.0, 0.0, 0.0, 1.0)), // red
+            ..Default::default()
+        };
+        let item = TextItem::from_zone_policy("hello", 0.0, 0.0, 300.0, 80.0, &policy, 1.0);
+        assert_eq!(item.font_size_px, 24.0);
+        // Red channel (R=1.0 linear → 255 sRGB).
+        assert_eq!(item.color[0], 255, "R should be max (red)");
+        assert_eq!(item.color[1], 0, "G should be 0");
+    }
+
+    #[test]
+    fn from_zone_policy_outline_fields_propagated() {
+        use tze_hud_scene::types::{RenderingPolicy, Rgba};
+        let policy = RenderingPolicy {
+            outline_color: Some(Rgba::BLACK),
+            outline_width: Some(2.0),
+            ..Default::default()
+        };
+        let item = TextItem::from_zone_policy("outlined", 0.0, 0.0, 300.0, 80.0, &policy, 1.0);
+        assert!(item.outline_color.is_some(), "outline_color should be Some");
+        assert_eq!(item.outline_width.unwrap(), 2.0);
+    }
+
+    #[test]
+    fn from_zone_policy_outline_width_zero_suppresses_outline() {
+        use tze_hud_scene::types::{RenderingPolicy, Rgba};
+        let policy = RenderingPolicy {
+            outline_color: Some(Rgba::BLACK),
+            outline_width: Some(0.0), // zero = no outline
+            ..Default::default()
+        };
+        let item = TextItem::from_zone_policy("no_outline", 0.0, 0.0, 300.0, 80.0, &policy, 1.0);
+        assert!(
+            item.outline_color.is_none(),
+            "outline_color should be None when outline_width=0"
+        );
+        assert!(item.outline_width.is_none());
+    }
+
+    #[test]
+    fn from_zone_policy_opacity_applied_to_alpha() {
+        use tze_hud_scene::types::{RenderingPolicy, Rgba};
+        let policy = RenderingPolicy {
+            text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+            ..Default::default()
+        };
+        // opacity=0.5 should halve the alpha.
+        let item = TextItem::from_zone_policy("faded", 0.0, 0.0, 300.0, 80.0, &policy, 0.5);
+        let alpha = item.color[3];
+        // 255 * 0.5 = 127 (±2 for rounding).
+        assert!(
+            (alpha as i32 - 127).abs() <= 2,
+            "opacity=0.5 should halve alpha (got {alpha})"
+        );
+    }
+
+    #[test]
+    fn from_zone_policy_default_margins_used_when_none() {
+        use tze_hud_scene::types::RenderingPolicy;
+        let policy = RenderingPolicy::default(); // margin_horizontal/vertical = None
+        let item = TextItem::from_zone_policy("text", 100.0, 200.0, 400.0, 100.0, &policy, 1.0);
+        // Default margin = 8px on each side.
+        assert_eq!(item.pixel_x, 108.0, "default margin_h = 8.0");
+        assert_eq!(item.pixel_y, 208.0, "default margin_v = 8.0");
+    }
+
+    #[test]
+    fn rgba_to_srgb_u8_black_and_white() {
+        use tze_hud_scene::types::Rgba;
+        let black = rgba_to_srgb_u8(Rgba::BLACK);
+        assert_eq!(black, [0, 0, 0, 255]);
+        let white = rgba_to_srgb_u8(Rgba::WHITE);
+        assert_eq!(white, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn apply_opacity_to_color_halves_alpha() {
+        let color = [200u8, 100, 50, 200];
+        let result = apply_opacity_to_color(color, 0.5);
+        assert_eq!(result[0], 200, "RGB channels unchanged");
+        assert_eq!(result[1], 100);
+        assert_eq!(result[2], 50);
+        // 200 * 0.5 = 100.
+        assert_eq!(result[3], 100, "alpha halved");
     }
 }
