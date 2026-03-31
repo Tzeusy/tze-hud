@@ -49,4 +49,6 @@ pub mod manifest;
 pub mod svg_ids;
 
 pub use error::BundleError;
-pub use loader::{BundleScanResult, LoadedBundle, load_bundle_dir, scan_bundle_dirs};
+pub use loader::{
+    BundleScanResult, LoadedBundle, load_bundle_dir, load_bundle_dir_with_tokens, scan_bundle_dirs,
+};

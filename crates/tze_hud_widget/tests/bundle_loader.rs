@@ -10,10 +10,13 @@
 //! Source: widget-system/spec.md §Requirement: Widget Asset Bundle Format,
 //!         §Requirement: SVG Layer Parameter Bindings.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tze_hud_widget::error::BundleError;
-use tze_hud_widget::loader::{BundleScanResult, load_bundle_dir, scan_bundle_dirs};
+use tze_hud_widget::loader::{
+    BundleScanResult, load_bundle_dir, load_bundle_dir_with_tokens, scan_bundle_dirs,
+};
 
 // ─── Test helper: path to the gauge fixture ───────────────────────────────────
 
@@ -349,7 +352,10 @@ svg_file = "fill.svg"
     std::fs::write(bundle_b.join("widget.toml"), manifest).unwrap();
     std::fs::write(bundle_b.join("fill.svg"), svg).unwrap();
 
-    let results = scan_bundle_dirs(&[root.path().to_path_buf()]);
+    let results = scan_bundle_dirs(
+        &[root.path().to_path_buf()],
+        &std::collections::HashMap::new(),
+    );
 
     // Exactly one should succeed and one should fail with DuplicateType.
     let ok_count = results
@@ -714,7 +720,10 @@ svg_file = "fill.svg"
     std::fs::create_dir_all(&bad_dir).unwrap();
     std::fs::write(bad_dir.join("fill.svg"), b"<svg></svg>").unwrap();
 
-    let results = scan_bundle_dirs(&[root.path().to_path_buf()]);
+    let results = scan_bundle_dirs(
+        &[root.path().to_path_buf()],
+        &std::collections::HashMap::new(),
+    );
 
     let ok_count = results
         .iter()
@@ -734,7 +743,10 @@ svg_file = "fill.svg"
 #[test]
 fn empty_bundle_root_returns_no_results() {
     let root = tempfile::tempdir().unwrap();
-    let results = scan_bundle_dirs(&[root.path().to_path_buf()]);
+    let results = scan_bundle_dirs(
+        &[root.path().to_path_buf()],
+        &std::collections::HashMap::new(),
+    );
     assert!(
         results.is_empty(),
         "empty root should produce no results, got {results:?}"
@@ -867,4 +879,127 @@ fn invalid_name_wire_code() {
         name: "Gauge".to_string(),
     };
     assert_eq!(err.wire_code(), "WIDGET_BUNDLE_INVALID_NAME");
+}
+
+// ─── Token placeholder resolution (bundle-level integration) ─────────────────
+
+/// SVG containing a resolved token placeholder loads successfully; resolved
+/// text is stored in svg_contents.
+#[test]
+fn bundle_with_resolved_token_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "token-test"
+version = "1.0.0"
+description = "token substitution test"
+
+[[layers]]
+svg_file = "fill.svg"
+"#,
+    )
+    .unwrap();
+    // SVG uses a token placeholder for the fill colour.
+    std::fs::write(
+        dir.path().join("fill.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"bar\" fill=\"{{token.color.primary}}\"/></svg>",
+    )
+    .unwrap();
+
+    let mut tokens = HashMap::new();
+    tokens.insert("color.primary".to_string(), "red".to_string());
+
+    let result = load_bundle_dir_with_tokens(dir.path(), &tokens);
+    match result {
+        BundleScanResult::Ok(bundle) => {
+            // The stored SVG bytes should contain the resolved value, not the placeholder.
+            let svg_bytes = bundle.svg_contents.get("fill.svg").unwrap();
+            let svg_str = std::str::from_utf8(svg_bytes).unwrap();
+            assert!(
+                svg_str.contains("red"),
+                "resolved token value should be present: {svg_str}"
+            );
+            assert!(
+                !svg_str.contains("{{token.color.primary}}"),
+                "placeholder should have been replaced: {svg_str}"
+            );
+        }
+        BundleScanResult::Err(e) => panic!("unexpected error: {e}"),
+    }
+}
+
+/// SVG with an unresolved token produces `BundleError::UnresolvedToken`.
+#[test]
+fn bundle_with_unresolved_token_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "unresolved-test"
+version = "1.0.0"
+description = "unresolved token test"
+
+[[layers]]
+svg_file = "fill.svg"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("fill.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"{{token.missing.key}}\"/></svg>",
+    )
+    .unwrap();
+
+    // Empty token map — placeholder cannot be resolved.
+    let result = load_bundle_dir_with_tokens(dir.path(), &HashMap::new());
+    match result {
+        BundleScanResult::Err(BundleError::UnresolvedToken {
+            svg_file,
+            token_key,
+            ..
+        }) => {
+            assert_eq!(svg_file, "fill.svg");
+            assert_eq!(token_key, "missing.key");
+        }
+        other => panic!("expected UnresolvedToken, got {other:?}"),
+    }
+}
+
+/// Wire code for `UnresolvedToken` is `WIDGET_BUNDLE_UNRESOLVED_TOKEN`.
+#[test]
+fn unresolved_token_wire_code() {
+    let err = BundleError::UnresolvedToken {
+        path: "/tmp".to_string(),
+        svg_file: "fill.svg".to_string(),
+        token_key: "color.primary".to_string(),
+    };
+    assert_eq!(err.wire_code(), "WIDGET_BUNDLE_UNRESOLVED_TOKEN");
+}
+
+/// `load_bundle_dir` (no-token variant) still works when SVG contains no placeholders.
+#[test]
+fn load_bundle_dir_no_tokens_no_placeholders() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "plain-test"
+version = "1.0.0"
+description = "no placeholders"
+
+[[layers]]
+svg_file = "fill.svg"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("fill.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><rect id=\"bar\"/></svg>",
+    )
+    .unwrap();
+
+    // load_bundle_dir uses an empty token map internally.
+    let result = load_bundle_dir(dir.path());
+    assert!(
+        matches!(result, BundleScanResult::Ok(_)),
+        "plain SVG without placeholders should load fine: {result:?}"
+    );
 }
