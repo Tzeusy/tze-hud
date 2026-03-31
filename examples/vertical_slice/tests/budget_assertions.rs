@@ -878,6 +878,186 @@ async fn test_texture_upload_p99_within_budget() {
     }
 }
 
+/// Assert that Stage 6 (Render Encode) p99 is under the hardware-normalized budget
+/// with text rendering active.
+///
+/// ## Spec Reference
+///
+/// From `runtime-kernel/spec.md` §Requirement: Stage 6 Render Encode (line 128–135):
+/// > Stage 6 (Render Encode) MUST run on the compositor thread with a p99 budget
+/// > of < 4ms. It SHALL build wgpu CommandEncoder from the RenderFrame, issue draw
+/// > calls for tile nodes (solid color, text, image), encode alpha-blend passes for
+/// > transparent tiles, and encode the chrome layer.
+///
+/// Text rasterization was added in hud-pmkf (PR#233) but no automated benchmark
+/// validated the budget. This test fills that gap.
+///
+/// ## Scene
+///
+/// Creates `TEXT_TILE_COUNT` tiles each containing a `TextMarkdown` node with a
+/// paragraph of text across multiple lines. This exercises the full text-rasterization
+/// path (glyphon layout + atlas upload) on every frame.
+///
+/// ## Thresholds
+///
+/// - **Spec target**: 4ms p99 (4_000 µs) on reference GPU hardware.
+/// - **CI threshold**: 16ms p99 (16_000 µs) — a 4× budget to accommodate
+///   llvmpipe/SwiftShader software rasterisers and slow CI runners.
+///
+/// The test uses `assert_p99_calibrated` with the GPU fill factor. The 16ms CI floor
+/// is applied as an absolute lower bound on the effective budget regardless of calibration
+/// state. On uncalibrated machines (no GPU calibration data), the hard assertion still
+/// runs against the 16ms floor — 16ms is conservative enough to be safe on any runner.
+/// On calibrated machines, `gpu_scaled_budget` may produce a larger budget (e.g., on
+/// llvmpipe with fill factor 10×, the budget is 40ms), but never below the 16ms floor.
+///
+/// ## CI Compatibility
+///
+/// Per the note in hud-3m8h: budget assertions can be fragile in CI. This test is
+/// intentionally lenient (4× multiplier = 16ms floor) to avoid spurious failures on
+/// slow software renderers. The spec target (4ms) is logged for observability only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_stage6_render_encode_p99_within_budget() {
+    /// Spec target: 4ms p99 on reference GPU hardware (runtime-kernel/spec.md line 135).
+    const NOMINAL_BUDGET_US: u64 = 4_000;
+    /// CI-friendly threshold: 4× the spec target, used as an absolute floor for all runners.
+    /// This floor is applied even on reference hardware (gpu_fill_factor ~1.0) where the
+    /// calibrated budget would be 4ms — the floor lifts it to 16ms to protect against
+    /// transient CI noise. The goal is catching runaway regressions (>>16ms), not enforcing
+    /// the 4ms spec boundary in automation. The spec target is tracked separately via
+    /// NOMINAL_BUDGET_US in the assertion output for observability.
+    const CI_BUDGET_MULTIPLIER: u64 = 4;
+    const CI_BUDGET_US: u64 = NOMINAL_BUDGET_US * CI_BUDGET_MULTIPLIER;
+    /// Number of text-content tiles in the benchmark scene.
+    const TEXT_TILE_COUNT: usize = 5;
+    /// Frames measured (excluding warmup).
+    const FRAME_COUNT: usize = 30;
+
+    // Ensure GPU factors are populated (reuses calibration from frame_time test
+    // if it ran earlier in this process, otherwise runs fresh).
+    run_gpu_fill_calibration().await;
+    let cal = current_calibration_with_gpu();
+    // Use gpu_scaled_budget for calibrated path; fall back to CI_BUDGET_US when uncalibrated.
+    let calibrated_budget = gpu_scaled_budget(NOMINAL_BUDGET_US, &cal).map(|b| b.max(CI_BUDGET_US)); // CI_BUDGET_US is an absolute floor on all hardware
+
+    let config = HeadlessConfig {
+        width: 800,
+        height: 600,
+        grpc_port: 0,
+        psk: "stage6-bench".to_string(),
+        config_toml: None,
+    };
+    let mut runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+
+    // ── Build scene with TEXT_TILE_COUNT text tiles ───────────────────────────
+    // Each tile has a multi-line TextMarkdown node to activate text rasterisation
+    // and the glyphon layout path on every frame.
+    {
+        let state = runtime.shared_state().lock().await;
+        let mut scene = state.scene.lock().await;
+        let tab = scene.create_tab("BenchTab", 0).unwrap();
+        let lease = scene.grant_lease("bench-agent", 120_000, vec![]);
+        if let Some(l) = scene.leases.get_mut(&lease) {
+            l.resource_budget.max_tiles = (TEXT_TILE_COUNT + 2) as u32;
+        }
+
+        for i in 0..TEXT_TILE_COUNT {
+            // Lay tiles in a grid across the 800×600 surface.
+            let col = i % 3;
+            let row = i / 3;
+            let x = 10.0 + col as f32 * 265.0;
+            let y = 10.0 + row as f32 * 290.0;
+            let w = 250.0_f32;
+            let h = 275.0_f32;
+
+            let tile = scene
+                .create_tile(
+                    tab,
+                    "bench-agent",
+                    lease,
+                    Rect::new(x, y, w, h),
+                    (i + 1) as u32,
+                )
+                .unwrap();
+
+            // Paragraph text exercises the full glyphon rasterisation path.
+            let content = format!(
+                "# Widget {}\n\nStatus: **active**\nMetric: {:.1} ms\n\nLorem ipsum dolor sit amet, \
+                 consectetur adipiscing elit. Pellentesque habitant morbi tristique \
+                 senectus et netus et malesuada fames ac turpis egestas.",
+                i + 1,
+                i as f32 * 1.5 + 0.5,
+            );
+
+            scene
+                .set_tile_root(
+                    tile,
+                    Node {
+                        id: SceneId::new(),
+                        children: vec![],
+                        data: NodeData::TextMarkdown(TextMarkdownNode {
+                            content,
+                            bounds: Rect::new(0.0, 0.0, w, h),
+                            font_size_px: 14.0,
+                            font_family: FontFamily::SystemSansSerif,
+                            color: Rgba::WHITE,
+                            background: Some(Rgba::new(0.08, 0.10, 0.18, 1.0)),
+                            alignment: TextAlign::Start,
+                            overflow: TextOverflow::Clip,
+                        }),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    // ── Warmup frame — discard to absorb wgpu pipeline compilation overhead ───
+    runtime.render_frame().await;
+    runtime.telemetry = tze_hud_telemetry::TelemetryCollector::new();
+
+    // ── Measurement loop ──────────────────────────────────────────────────────
+    let mut bucket = LatencyBucket::new("stage6_render_encode");
+
+    for _ in 0..FRAME_COUNT {
+        let telemetry = runtime.render_frame().await;
+        // stage6_render_encode_us is the wall-clock encode time reported by the
+        // compositor for Stage 6 (render encode) — excludes GPU submit (Stage 7).
+        bucket.record(telemetry.stage6_render_encode_us);
+    }
+
+    assert_eq!(
+        bucket.samples.len(),
+        FRAME_COUNT,
+        "expected {FRAME_COUNT} stage6 samples"
+    );
+
+    // ── Budget assertion (calibrated) ─────────────────────────────────────────
+    // effective_budget is always Some: CI_BUDGET_US is used as the fallback when
+    // gpu_scaled_budget returns None (uncalibrated GPU). Passing Some(...) to
+    // assert_p99_calibrated means uncalibrated machines still get a hard assertion
+    // against the 16ms CI floor — intentional, since 16ms is conservative enough
+    // to be safe on any runner, including those without GPU calibration data.
+    let effective_budget = calibrated_budget.unwrap_or(CI_BUDGET_US);
+    let status = bucket
+        .assert_p99_calibrated(Some(effective_budget), NOMINAL_BUDGET_US)
+        .expect("stage6_render_encode p99 calibrated budget");
+
+    // CalibrationStatus::Uncalibrated is unreachable here because we always pass
+    // Some(effective_budget) — but Rust requires exhaustive enum handling.
+    let CalibrationStatus::Pass(p99) = status else {
+        unreachable!(
+            "assert_p99_calibrated returns Uncalibrated only when passed None; \
+             effective_budget is always Some"
+        );
+    };
+    eprintln!(
+        "[PASS] stage6_render_encode p99={p99}us within budget={effective_budget}us \
+         (spec target={NOMINAL_BUDGET_US}us, ci floor={CI_BUDGET_US}us, \
+         gpu_fill_factor={:.2}×)",
+        cal.gpu_fill_factor.unwrap_or(0.0),
+    );
+}
+
 // ─── Layer 1: Pixel readback assertions ──────────────────────────────────────
 
 /// Verify background pixels match the compositor clear color after rendering
