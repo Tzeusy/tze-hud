@@ -745,8 +745,14 @@ impl Compositor {
             let (effective_params, still_animating) =
                 wr.resolve_animated_params(&instance_name, current_params, degradation_level);
 
+            let params_changed = wr
+                .texture_entry(&instance_name)
+                .map(|e| e.last_rendered_params != effective_params)
+                .unwrap_or(false);
+
             let dirty = needs_initial
                 || still_animating
+                || params_changed
                 || wr
                     .texture_entry(&instance_name)
                     .map(|e| e.dirty)
@@ -762,6 +768,11 @@ impl Compositor {
                     pw,
                     ph,
                 );
+                // Record what params were rendered so we can detect future changes.
+                if let Some(entry) = wr.texture_entry_mut(&instance_name) {
+                    entry.last_rendered_params = effective_params;
+                    entry.dirty = false;
+                }
             }
         }
     }

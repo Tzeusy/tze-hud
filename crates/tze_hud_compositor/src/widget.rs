@@ -315,6 +315,9 @@ pub struct WidgetTextureEntry {
     pub height: u32,
     /// When true, the texture must be re-rasterized before compositing.
     pub dirty: bool,
+    /// Parameters used for the last successful rasterization.
+    /// Compared against current scene params to detect changes from MCP publishes.
+    pub last_rendered_params: HashMap<String, WidgetParameterValue>,
     /// Animation state: start time, duration, starting params, target params.
     pub animation: Option<WidgetAnimationState>,
 }
@@ -822,6 +825,7 @@ impl WidgetRenderer {
                 width,
                 height,
                 dirty: false,
+                last_rendered_params: HashMap::new(),
                 animation: None,
             },
         );
@@ -903,6 +907,10 @@ impl WidgetRenderer {
     /// Get a reference to the texture entry for an instance (for testing / inspection).
     pub fn texture_entry(&self, instance_name: &str) -> Option<&WidgetTextureEntry> {
         self.textures.get(instance_name)
+    }
+
+    pub fn texture_entry_mut(&mut self, instance_name: &str) -> Option<&mut WidgetTextureEntry> {
+        self.textures.get_mut(instance_name)
     }
 
     /// Returns true if any widget instance has an active animation (needs re-rasterize).
