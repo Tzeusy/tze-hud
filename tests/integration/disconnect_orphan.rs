@@ -24,12 +24,9 @@ use std::sync::Arc;
 
 use tze_hud_scene::{
     Capability, Clock, SceneGraph, SceneId, TestClock,
-    lease::{LeaseState, TileVisualHint},
+    lease::{LeaseState, ORPHAN_GRACE_PERIOD_MS, TileVisualHint},
     mutation::{MutationBatch, SceneMutation},
-    types::{
-        FontFamily, InputMode, Node, NodeData, Rect, Rgba, SolidColorNode, TextAlign,
-        TextMarkdownNode, TextOverflow,
-    },
+    types::{InputMode, Node, NodeData, Rect, Rgba, SolidColorNode},
 };
 
 // ─── Display and card constants (mirroring exemplar-presence-card spec) ──────
@@ -52,8 +49,8 @@ const HEARTBEAT_MISSED_THRESHOLD: u64 = 3;
 /// Heartbeat timeout that triggers ORPHANED: 3 × 5000ms = 15000ms.
 const HEARTBEAT_TIMEOUT_MS: u64 = HEARTBEAT_INTERVAL_MS * HEARTBEAT_MISSED_THRESHOLD;
 
-/// Reconnect grace period (ms).
-const GRACE_PERIOD_MS: u64 = 30_000;
+/// Reconnect grace period (ms) — imported from library to stay in sync with the implementation.
+const GRACE_PERIOD_MS: u64 = ORPHAN_GRACE_PERIOD_MS;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -92,35 +89,20 @@ fn make_batch(
     }
 }
 
-/// Build a minimal 3-node presence card content tree (bg + text).
+/// Build a minimal presence card root node (background SolidColor only).
 ///
-/// Returns a root SolidColorNode with a TextMarkdownNode child.
-/// (Avatar node omitted here — no ResourceStore in scene-level tests.)
-fn make_card_root_node(agent_name: &str) -> Node {
-    let text_node = Node {
-        id: SceneId::new(),
-        children: Vec::new(),
-        data: NodeData::TextMarkdown(TextMarkdownNode {
-            content: format!("**{agent_name}**\nLast active: now"),
-            bounds: Rect::new(48.0, 8.0, 144.0, 64.0),
-            font_size_px: 14.0,
-            font_family: FontFamily::SystemSansSerif,
-            color: Rgba {
-                r: 0.94,
-                g: 0.94,
-                b: 0.94,
-                a: 1.0,
-            },
-            background: None,
-            alignment: TextAlign::Start,
-            overflow: TextOverflow::Ellipsis,
-        }),
-    };
-    let text_id = text_node.id;
-
+/// These disconnect/reconnect tests exercise lease state-machine behavior, not node
+/// content. A single root node (no children) is sufficient: the scene graph's
+/// `insert_node_tree` only inserts the root; child IDs in `node.children` must be
+/// inserted via separate `AddNode` mutations to become valid graph entries.
+/// Including a `text_id` in children without a corresponding `AddNode` would create
+/// a dangling reference detected by `check_node_child_consistency` invariants.
+///
+/// For full multi-node tree tests see `presence_card_tile.rs`.
+fn make_card_root_node(_agent_name: &str) -> Node {
     Node {
         id: SceneId::new(),
-        children: vec![text_id],
+        children: Vec::new(),
         data: NodeData::SolidColor(SolidColorNode {
             color: Rgba {
                 r: 0.08,
