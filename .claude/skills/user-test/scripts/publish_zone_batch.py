@@ -10,8 +10,21 @@ Message file format (JSON array):
     "merge_key": "agent-status",
     "ttl_us": 60000000,
     "namespace": "butler-test"
+  },
+  {
+    "zone_name": "subtitle",
+    "content": "The quick brown fox",
+    "breakpoints": [3, 9, 15],
+    "ttl_us": 10000000,
+    "namespace": "exemplar-test"
   }
 ]
+
+Optional fields per message:
+  merge_key   -- coalesce key for latest-wins contention
+  breakpoints -- list of byte offsets for stream-text word-by-word reveal
+  namespace   -- overrides --namespace default
+  ttl_us      -- overrides --ttl-us default
 """
 
 from __future__ import annotations
@@ -105,6 +118,8 @@ def main() -> int:
             }
             if msg.get("merge_key") is not None:
                 params["merge_key"] = msg["merge_key"]
+            if msg.get("breakpoints") is not None:
+                params["breakpoints"] = msg["breakpoints"]
 
             response = rpc_call(args.url, token, "publish_to_zone", params, req_id)
             results.append(
