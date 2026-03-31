@@ -11,6 +11,7 @@ Run an automation-first cross-machine validation loop:
 2. Launch it on Windows over SSH/SCP.
 3. Verify MCP HTTP is reachable.
 4. Publish configurable zone test messages.
+5. Publish configurable widget test messages.
 
 ## Required Inputs
 
@@ -75,6 +76,35 @@ Message shape — `content` is either a plain string (StreamText) or a typed JSO
 - `ambient-background`, `pip`: `{"type":"solid_color","r":0-1,"g":0-1,"b":0-1,"a":0-1}`
 
 `merge_key`, `ttl_us`, and `namespace` are optional per message.
+
+- `widget_messages`: array of widget publishes (optional)
+
+Widget message shape:
+
+```json
+[
+  {
+    "widget_name": "gauge",
+    "params": {"level": 0.75, "label": "CPU Usage"},
+    "transition_ms": 500,
+    "ttl_us": 60000000,
+    "namespace": "user-test"
+  },
+  {
+    "action": "clear",
+    "widget_name": "gauge",
+    "namespace": "user-test"
+  }
+]
+```
+
+**Widget parameter types:**
+- `f32`: JSON number (e.g. `0.75`) — often with min/max range
+- `string`: JSON string (e.g. `"CPU Usage"`)
+- `color`: JSON object `{"r": 0-1, "g": 0-1, "b": 0-1, "a": 0-1}`
+- `enum`: JSON string from allowed values (e.g. `"warning"`)
+
+`transition_ms`, `ttl_us`, `namespace`, and `instance_id` are optional per message.
 
 ## Workflow
 
@@ -166,6 +196,29 @@ python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
   --messages-file /tmp/hud-zone-messages.json \
   --list-zones
 ```
+
+### Step 4: Publish Configurable Widget Messages
+
+Use `scripts/publish_widget_batch.py` from this skill.
+
+Recommended sequence:
+
+1. Generate a temporary JSON file with user-provided widget messages.
+2. List widgets first (`--list-widgets`) to discover available widget types and instances.
+3. Publish the full widget message batch.
+4. Return per-message results (success/failure, applied params, and errors).
+
+Example:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file /tmp/hud-widget-messages.json \
+  --list-widgets
+```
+
+If `list_widgets` returns no instances, skip widget publishing and report that no widgets are registered (the HUD binary may predate widget support).
 
 ## Behavior Rules
 

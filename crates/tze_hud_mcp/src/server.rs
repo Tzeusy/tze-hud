@@ -310,6 +310,22 @@ impl McpServer {
             return serde_json::to_string(&resp).unwrap_or_default();
         }
 
+        // ── Auto-grant widget capabilities to authenticated callers ──────────
+        //
+        // PSK-authenticated callers are trusted principals.  Grant
+        // `publish_widget:<name>` for every registered widget instance so
+        // they can publish without per-caller capability configuration.
+        // This keeps the capability gate meaningful (unauthenticated callers
+        // still cannot publish) while avoiding the need for per-widget ACLs
+        // in the v1 single-PSK model.
+        let mut capabilities = ctx.capabilities.clone();
+        {
+            let scene = self.scene.lock().await;
+            for instance_name in scene.widget_registry.instances.keys() {
+                capabilities.push(format!("publish_widget:{instance_name}"));
+            }
+        }
+
         debug!(method = %request.method, "MCP: dispatching tool call");
 
         // ── Guest / Resident capability gate (spec §8.1, §8.3) ──────────────
@@ -338,7 +354,7 @@ impl McpServer {
 
         let id = request.id.clone();
         let result = self
-            .invoke_tool(&request.method, request.params, &ctx.capabilities)
+            .invoke_tool(&request.method, request.params, &capabilities)
             .await;
 
         let response = match result {

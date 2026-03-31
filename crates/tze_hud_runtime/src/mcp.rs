@@ -156,42 +156,89 @@ async fn handle_connection(
 ) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let mut buf = vec![0u8; 65536];
-    let n = match stream.read(&mut buf).await {
-        Ok(0) => return, // EOF
-        Ok(n) => n,
-        Err(e) => {
-            tracing::debug!(peer = %peer, error = %e, "MCP: read error");
+    // Read the full HTTP request.  A single read() may return a partial TCP
+    // segment (headers without body, or truncated body), so we loop until we
+    // find the header/body boundary and have received Content-Length bytes of
+    // body.  Cap total read at 64 KiB to bound memory.
+    const MAX_REQUEST: usize = 65536;
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+
+    // Phase 1: read until we have the full headers (terminated by \r\n\r\n).
+    let header_end;
+    loop {
+        let n = match stream.read(&mut tmp).await {
+            Ok(0) => return,
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(peer = %peer, error = %e, "MCP: read error");
+                return;
+            }
+        };
+        buf.extend_from_slice(&tmp[..n]);
+        if buf.len() > MAX_REQUEST {
+            tracing::debug!(peer = %peer, "MCP: request too large, dropping");
             return;
         }
-    };
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = pos;
+            break;
+        }
+    }
 
-    let raw = &buf[..n];
+    let body_start = header_end + 4;
 
-    // Split header section from body at the blank line.
-    let (header_section, body) = if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-        let headers = std::str::from_utf8(&raw[..pos]).unwrap_or("");
-        let body = std::str::from_utf8(&raw[pos + 4..]).unwrap_or("");
-        (headers, body)
-    } else {
-        ("", std::str::from_utf8(raw).unwrap_or(""))
-    };
+    // Parse Content-Length and extract bearer token from headers before we
+    // mutate `buf` further (satisfies the borrow checker).
+    let (content_length, bearer_token) = {
+        let header_section = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
 
-    // Extract Bearer token from `Authorization` header (case-insensitive).
-    let bearer_token = header_section
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("authorization:"))
-        .and_then(|l| l.split_once(':').map(|x| x.1))
-        .map(|v| v.trim())
-        .and_then(|v| {
-            let mut parts = v.splitn(2, ' ');
-            match (parts.next(), parts.next()) {
-                (Some(scheme), Some(credentials)) if scheme.eq_ignore_ascii_case("bearer") => {
-                    Some(credentials.trim().to_owned())
+        let cl: usize = header_section
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("content-length:"))
+            .and_then(|l| l.split_once(':').map(|x| x.1))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+
+        let bt = header_section
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("authorization:"))
+            .and_then(|l| l.split_once(':').map(|x| x.1))
+            .map(|v| v.trim().to_owned())
+            .and_then(|v| {
+                let mut parts = v.splitn(2, ' ');
+                match (parts.next(), parts.next()) {
+                    (Some(scheme), Some(credentials))
+                        if scheme.eq_ignore_ascii_case("bearer") =>
+                    {
+                        Some(credentials.trim().to_owned())
+                    }
+                    _ => None,
                 }
-                _ => None,
+            });
+
+        (cl, bt)
+    };
+
+    // Phase 2: read remaining body bytes if we don't have them yet.
+    let body_end = body_start + content_length;
+    while buf.len() < body_end {
+        if buf.len() > MAX_REQUEST {
+            tracing::debug!(peer = %peer, "MCP: request too large, dropping");
+            return;
+        }
+        let n = match stream.read(&mut tmp).await {
+            Ok(0) => break, // EOF — use what we have
+            Ok(n) => n,
+            Err(e) => {
+                tracing::debug!(peer = %peer, error = %e, "MCP: read error (body)");
+                return;
             }
-        });
+        };
+        buf.extend_from_slice(&tmp[..n]);
+    }
+
+    let body = std::str::from_utf8(&buf[body_start..buf.len().min(body_end)]).unwrap_or("");
 
     let ctx = if let Some(token) = bearer_token {
         CallerContext::with_bearer(token)
