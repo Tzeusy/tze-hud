@@ -904,25 +904,28 @@ async fn test_texture_upload_p99_within_budget() {
 /// - **CI threshold**: 16ms p99 (16_000 µs) — a 4× budget to accommodate
 ///   llvmpipe/SwiftShader software rasterisers and slow CI runners.
 ///
-/// The test uses `assert_p99_calibrated` with the GPU fill factor. When GPU
-/// calibration has not been run, the result is "uncalibrated" (a warning, not a
-/// failure), per the validation-framework spec §Hardware-Normalized Calibration
-/// (lines 154-156). The CI threshold is applied only when calibration is available.
+/// The test uses `assert_p99_calibrated` with the GPU fill factor. The 16ms CI floor
+/// is applied as an absolute lower bound on the effective budget regardless of calibration
+/// state. On uncalibrated machines (no GPU calibration data), the hard assertion still
+/// runs against the 16ms floor — 16ms is conservative enough to be safe on any runner.
+/// On calibrated machines, `gpu_scaled_budget` may produce a larger budget (e.g., on
+/// llvmpipe with fill factor 10×, the budget is 40ms), but never below the 16ms floor.
 ///
 /// ## CI Compatibility
 ///
 /// Per the note in hud-3m8h: budget assertions can be fragile in CI. This test is
-/// intentionally lenient (4× multiplier) and uses the calibrated path to avoid
-/// spurious failures on slow software renderers.
+/// intentionally lenient (4× multiplier = 16ms floor) to avoid spurious failures on
+/// slow software renderers. The spec target (4ms) is logged for observability only.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_stage6_render_encode_p99_within_budget() {
     /// Spec target: 4ms p99 on reference GPU hardware (runtime-kernel/spec.md line 135).
     const NOMINAL_BUDGET_US: u64 = 4_000;
-    /// CI-friendly threshold: 4× the spec target to accommodate llvmpipe/SwiftShader.
-    /// On real GPU hardware the GPU fill factor is ~1.0, so the effective budget is 4ms.
-    /// On llvmpipe (CI) the fill factor is typically 8–12×; we apply a fixed 4× to keep
-    /// CI fast while still catching runaway regressions. Use assert_p99_calibrated so
-    /// uncalibrated machines emit a warning instead of a hard failure.
+    /// CI-friendly threshold: 4× the spec target, used as an absolute floor for all runners.
+    /// This floor is applied even on reference hardware (gpu_fill_factor ~1.0) where the
+    /// calibrated budget would be 4ms — the floor lifts it to 16ms to protect against
+    /// transient CI noise. The goal is catching runaway regressions (>>16ms), not enforcing
+    /// the 4ms spec boundary in automation. The spec target is tracked separately via
+    /// NOMINAL_BUDGET_US in the assertion output for observability.
     const CI_BUDGET_MULTIPLIER: u64 = 4;
     const CI_BUDGET_US: u64 = NOMINAL_BUDGET_US * CI_BUDGET_MULTIPLIER;
     /// Number of text-content tiles in the benchmark scene.
@@ -936,7 +939,7 @@ async fn test_stage6_render_encode_p99_within_budget() {
     let cal = current_calibration_with_gpu();
     // Use gpu_scaled_budget for calibrated path; fall back to CI_BUDGET_US when uncalibrated.
     let calibrated_budget = gpu_scaled_budget(NOMINAL_BUDGET_US, &cal)
-        .map(|b| b.max(CI_BUDGET_US)); // never below CI floor on uncalibrated hardware
+        .map(|b| b.max(CI_BUDGET_US)); // CI_BUDGET_US is an absolute floor on all hardware
 
     let config = HeadlessConfig {
         width: 800,
@@ -1024,30 +1027,25 @@ async fn test_stage6_render_encode_p99_within_budget() {
     );
 
     // ── Budget assertion (calibrated) ─────────────────────────────────────────
-    // Use CI_BUDGET_US as the floor when the calibrated budget would be lower.
-    // This prevents the test from being tighter than the CI runner can sustain
-    // even on reference hardware with llvmpipe.
+    // effective_budget is always Some: CI_BUDGET_US is used as the fallback when
+    // gpu_scaled_budget returns None (uncalibrated GPU). Passing Some(...) to
+    // assert_p99_calibrated means uncalibrated machines still get a hard assertion
+    // against the 16ms CI floor — intentional, since 16ms is conservative enough
+    // to be safe on any runner, including those without GPU calibration data.
     let effective_budget = calibrated_budget.unwrap_or(CI_BUDGET_US);
     let status = bucket
         .assert_p99_calibrated(Some(effective_budget), NOMINAL_BUDGET_US)
         .expect("stage6_render_encode p99 calibrated budget");
 
-    match status {
-        CalibrationStatus::Pass(p99) => {
-            eprintln!(
-                "[PASS] stage6_render_encode p99={p99}us within budget={effective_budget}us \
-                 (spec target={NOMINAL_BUDGET_US}us, ci floor={CI_BUDGET_US}us, \
-                 gpu_fill_factor={:.2}×)",
-                cal.gpu_fill_factor.unwrap_or(0.0),
-            );
-        }
-        CalibrationStatus::Uncalibrated { raw_p99 } => {
-            eprintln!(
-                "[UNCALIBRATED] stage6_render_encode raw_p99={raw_p99}us; \
-                 spec target={NOMINAL_BUDGET_US}us; test is informational only",
-            );
-        }
-    }
+    // Note: CalibrationStatus::Uncalibrated is unreachable here because we always
+    // pass Some(effective_budget). The match covers only the Pass variant.
+    let CalibrationStatus::Pass(p99) = status;
+    eprintln!(
+        "[PASS] stage6_render_encode p99={p99}us within budget={effective_budget}us \
+         (spec target={NOMINAL_BUDGET_US}us, ci floor={CI_BUDGET_US}us, \
+         gpu_fill_factor={:.2}×)",
+        cal.gpu_fill_factor.unwrap_or(0.0),
+    );
 }
 
 // ─── Layer 1: Pixel readback assertions ──────────────────────────────────────
