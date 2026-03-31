@@ -1678,4 +1678,105 @@ component_type = "subtitle"
         let zone_override = profile.zone_overrides.get("subtitle").unwrap();
         assert_eq!(zone_override.font_size_px, Some(32.0));
     }
+
+    // ── exemplar-status-bar profile integration tests ─────────────────────────
+    //
+    // These tests load the actual `profiles/exemplar-status-bar/` directory from
+    // the repository root and verify:
+    //   1. Profile loads without validation errors.
+    //   2. OpaqueBackdrop readability passes (backdrop_opacity 0.9 >= 0.8).
+    //
+    // Source: exemplar-status-bar/tasks.md §1.3–1.4
+
+    /// Returns the path to `profiles/exemplar-status-bar/` relative to the
+    /// workspace root.  `CARGO_MANIFEST_DIR` points to `crates/tze_hud_config/`,
+    /// so we go up two levels to reach the workspace root, then into `profiles/`.
+    fn exemplar_status_bar_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("profiles")
+            .join("exemplar-status-bar")
+    }
+
+    /// Build the token map that the exemplar profile expects to resolve against.
+    ///
+    /// These are the canonical fallback values the profile overrides; supplying
+    /// them here mimics what the runtime injects from global tokens + canonical
+    /// fallbacks during startup.
+    fn exemplar_status_bar_tokens() -> DesignTokenMap {
+        let mut tokens = DesignTokenMap::new();
+        // Required by status-bar component type contract (component_types.rs)
+        tokens.insert("color.text.secondary".to_string(), "#B0B0B0".to_string());
+        tokens.insert("color.backdrop.default".to_string(), "#1A1A2E".to_string());
+        tokens.insert("opacity.backdrop.opaque".to_string(), "0.9".to_string());
+        tokens.insert("typography.body.family".to_string(), "system-ui".to_string());
+        tokens.insert("typography.body.size".to_string(), "16".to_string());
+        // Used in zone override token references
+        tokens.insert("spacing.padding.medium".to_string(), "8".to_string());
+        tokens
+    }
+
+    /// exemplar-status-bar/tasks.md §1.3 — profile loads without errors.
+    ///
+    /// WHEN the runtime scans `profiles/exemplar-status-bar/`
+    /// THEN the profile SHALL load successfully with `component_type = "status-bar"`.
+    #[test]
+    fn exemplar_status_bar_profile_loads_without_errors() {
+        let path = exemplar_status_bar_dir();
+        let tokens = exemplar_status_bar_tokens();
+
+        let result = load_profile_dir(&path, &tokens);
+        let profile = result.expect("exemplar-status-bar profile should load without errors");
+
+        assert_eq!(profile.name, "exemplar-status-bar");
+        assert_eq!(profile.version, "1.0.0");
+        assert_eq!(profile.component_type, ComponentType::StatusBar);
+        assert!(
+            profile.zone_overrides.contains_key("status-bar"),
+            "zone override keyed 'status-bar' should be present"
+        );
+    }
+
+    /// exemplar-status-bar/tasks.md §1.4 — OpaqueBackdrop readability passes.
+    ///
+    /// WHEN the exemplar profile is loaded and its effective zone override is
+    /// inspected THEN backdrop_opacity = 0.9 (>= 0.8) satisfies OpaqueBackdrop.
+    #[test]
+    fn exemplar_status_bar_opaque_backdrop_readability_passes() {
+        use crate::component_types::ReadabilityTechnique;
+        use crate::readability::check_zone_readability;
+        use tze_hud_scene::types::{RenderingPolicy, Rgba};
+
+        let path = exemplar_status_bar_dir();
+        let tokens = exemplar_status_bar_tokens();
+
+        let profile =
+            load_profile_dir(&path, &tokens).expect("exemplar-status-bar should load");
+
+        let zone_override = profile
+            .zone_overrides
+            .get("status-bar")
+            .expect("status-bar zone override must be present");
+
+        // Confirm backdrop_opacity = 0.9 was parsed correctly.
+        let opacity = zone_override
+            .backdrop_opacity
+            .expect("backdrop_opacity must be Some");
+        assert!(
+            opacity >= 0.8,
+            "OpaqueBackdrop requires backdrop_opacity >= 0.8, got {opacity}"
+        );
+
+        // Build a minimal RenderingPolicy that mirrors what the compositor would
+        // assemble from the zone override, then run the readability check.
+        let policy = RenderingPolicy {
+            backdrop: Some(Rgba::BLACK), // non-None is all that matters for OpaqueBackdrop check
+            backdrop_opacity: Some(opacity),
+            ..RenderingPolicy::default()
+        };
+
+        check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop)
+            .expect("OpaqueBackdrop check must pass for exemplar-status-bar (opacity >= 0.8)");
+    }
 }
