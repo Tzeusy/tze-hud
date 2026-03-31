@@ -46,9 +46,17 @@
 //! - Component Type Contract (v1-mandatory)
 //! - V1 Component Type Definitions (v1-mandatory)
 //! - Zone Name Reconciliation (v1-mandatory)
+//!
+//! ### hud-sc0a.5 (Component profile loader and zone override parser)
+//! - Component Profile Format (v1-mandatory)
+//! - Zone Rendering Override Schema (v1-mandatory)
+//! - Profile-Scoped Token Resolution (v1-mandatory)
+//! - Profile Widget Scope (v1-mandatory)
+//! - Zone Name Reconciliation (v1-mandatory)
 
 pub mod agents;
 pub mod capability;
+pub mod component_profiles;
 pub mod component_types;
 pub mod loader;
 pub mod privacy;
@@ -67,6 +75,7 @@ pub use agents::{
     AuthEnvWarning, check_agent_auth_env_vars, check_agent_auth_env_vars_with_lookup,
     dynamic_agents_allowed, validate_agents,
 };
+pub use component_profiles::{ComponentProfile, ZoneRenderingOverride, scan_profile_dirs};
 pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};
 pub use loader::TzeHudConfig;
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
