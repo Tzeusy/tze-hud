@@ -21,7 +21,13 @@
 //!
 //! Only profile-scoped widget bundles are subject to readability checks.
 //! Global widget bundles (not inside a profile directory) MUST NOT be checked.
-//! The caller is responsible for passing only profile-scoped SVGs.
+//!
+//! The loader enforces this defensively via [`crate::loader::BundleScope`]:
+//! `BundleScope::Global` forces `SvgReadabilityTechnique::None` in the loader
+//! regardless of any technique a caller might pass.  New call sites MUST use
+//! the scoped loader API (`load_bundle_dir_scoped` /
+//! `load_bundle_dir_scoped_with_tokens`) rather than relying on passing `None`
+//! manually.
 
 use quick_xml::Reader;
 use quick_xml::events::Event;
