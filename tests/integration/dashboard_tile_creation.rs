@@ -144,11 +144,8 @@ fn make_icon_png() -> Vec<u8> {
         Rgb([70u8, 130, 180])
     });
     let mut buf = Vec::new();
-    img.write_to(
-        &mut std::io::Cursor::new(&mut buf),
-        image::ImageFormat::Png,
-    )
-    .expect("PNG encoding must not fail for a solid-color image");
+    img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+        .expect("PNG encoding must not fail for a solid-color image");
     buf
 }
 
@@ -522,8 +519,7 @@ async fn resource_upload_48x48_png_returns_blake3_resource_id() {
     let resource_id = upload_png(&store, "dashboard-agent", png, ICON_W, ICON_H).await;
 
     assert_eq!(
-        resource_id,
-        expected_id,
+        resource_id, expected_id,
         "ResourceId must equal the BLAKE3 hash of the raw PNG bytes"
     );
     assert_eq!(
@@ -588,7 +584,11 @@ async fn atomic_tile_creation_batch_accepted() {
 
     // Atomic node + opacity + input_mode batch
     let (_, node_result) = apply_initial_node_batch(
-        &mut scene, tile_id, lease_id, resource_id, "Status: operational\nUptime: 0s",
+        &mut scene,
+        tile_id,
+        lease_id,
+        resource_id,
+        "Status: operational\nUptime: 0s",
     );
     assert!(
         node_result.applied,
@@ -604,7 +604,10 @@ async fn atomic_tile_creation_batch_accepted() {
         InputMode::Passthrough,
         "tile input_mode must be Passthrough"
     );
-    assert_eq!(tile.z_order, TILE_Z_ORDER, "tile z_order must be {TILE_Z_ORDER}");
+    assert_eq!(
+        tile.z_order, TILE_Z_ORDER,
+        "tile z_order must be {TILE_Z_ORDER}"
+    );
     assert_eq!(
         tile.bounds,
         Rect::new(TILE_X, TILE_Y, TILE_W, TILE_H),
@@ -646,9 +649,8 @@ async fn scene_graph_has_6_nodes_in_correct_tree_order() {
     let tile_id = create_result.created_ids[0];
 
     // Apply 6-node batch
-    let (bg_id, node_result) = apply_initial_node_batch(
-        &mut scene, tile_id, lease_id, resource_id, "**Status**: OK",
-    );
+    let (bg_id, node_result) =
+        apply_initial_node_batch(&mut scene, tile_id, lease_id, resource_id, "**Status**: OK");
     assert!(
         node_result.applied,
         "node batch must succeed; rejection: {:?}",
@@ -656,11 +658,7 @@ async fn scene_graph_has_6_nodes_in_correct_tree_order() {
     );
 
     // Verify total node count
-    assert_eq!(
-        scene.node_count(),
-        6,
-        "scene must contain exactly 6 nodes"
-    );
+    assert_eq!(scene.node_count(), 6, "scene must contain exactly 6 nodes");
 
     // Verify tile root
     let tile = scene.tiles.get(&tile_id).expect("tile must exist");
@@ -697,7 +695,13 @@ async fn scene_graph_has_6_nodes_in_correct_tree_order() {
 
     assert_eq!(
         child_types,
-        ["StaticImage", "TextMarkdown", "TextMarkdown", "HitRegion", "HitRegion"],
+        [
+            "StaticImage",
+            "TextMarkdown",
+            "TextMarkdown",
+            "HitRegion",
+            "HitRegion"
+        ],
         "children must be in painter's model order: \
          StaticImage, TextMarkdown (header), TextMarkdown (body), \
          HitRegion (refresh), HitRegion (dismiss)"
@@ -855,15 +859,18 @@ async fn content_update_with_active_lease_accepted() {
     let tile_id = create_result.created_ids[0];
 
     // Initial 6-node tree
-    let (_, init_result) = apply_initial_node_batch(
-        &mut scene, tile_id, lease_id, resource_id, "Uptime: 0s",
-    );
+    let (_, init_result) =
+        apply_initial_node_batch(&mut scene, tile_id, lease_id, resource_id, "Uptime: 0s");
     assert!(
         init_result.applied,
         "initial node batch must succeed; rejection: {:?}",
         init_result.rejection
     );
-    assert_eq!(scene.node_count(), 6, "scene must have 6 nodes after initial setup");
+    assert_eq!(
+        scene.node_count(),
+        6,
+        "scene must have 6 nodes after initial setup"
+    );
 
     // Periodic content update — full tree swap (spec: no ReplaceNode; use SetTileRoot)
     let updated_body = "**Status**: online\nUptime: 5s\nConnections: 3";
@@ -873,9 +880,8 @@ async fn content_update_with_active_lease_accepted() {
         tze_hud_scene::MAX_MARKDOWN_BYTES,
     );
 
-    let update_result = apply_content_update_batch(
-        &mut scene, tile_id, lease_id, resource_id, updated_body,
-    );
+    let update_result =
+        apply_content_update_batch(&mut scene, tile_id, lease_id, resource_id, updated_body);
     assert!(
         update_result.applied,
         "content update must succeed when lease is ACTIVE; rejection: {:?}",
@@ -931,9 +937,8 @@ async fn content_update_with_expired_lease_rejected() {
     assert!(create_result.applied, "CreateTile must succeed");
     let tile_id = create_result.created_ids[0];
 
-    let (_, init_result) = apply_initial_node_batch(
-        &mut scene, tile_id, lease_id, resource_id, "Uptime: 0s",
-    );
+    let (_, init_result) =
+        apply_initial_node_batch(&mut scene, tile_id, lease_id, resource_id, "Uptime: 0s");
     assert!(
         init_result.applied,
         "initial node batch must succeed; rejection: {:?}",
@@ -944,9 +949,8 @@ async fn content_update_with_expired_lease_rejected() {
     clock.advance(300);
 
     // Attempt content update with expired lease
-    let update_result = apply_content_update_batch(
-        &mut scene, tile_id, lease_id, resource_id, "Uptime: 5s",
-    );
+    let update_result =
+        apply_content_update_batch(&mut scene, tile_id, lease_id, resource_id, "Uptime: 5s");
 
     assert!(
         !update_result.applied,
@@ -970,8 +974,7 @@ async fn content_update_with_expired_lease_rejected() {
         has_lease_expired,
         "rejection must contain LeaseExpired error code; \
          rejection: {:?}, error: {:?}",
-        update_result.rejection,
-        update_result.error
+        update_result.rejection, update_result.error
     );
 }
 

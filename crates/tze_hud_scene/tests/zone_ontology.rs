@@ -1418,6 +1418,397 @@ fn exemplar_status_bar_lease_expiry_isolation() {
     }
 }
 
+// ─── MergeByKey contention: status-bar integration ───────────────────────────
+//
+// These tests verify MergeByKey semantics for the status-bar zone loaded from
+// ZoneRegistry::with_defaults().  The status-bar zone is defined as:
+//   contention_policy: MergeByKey { max_keys: 32 }
+//   accepted_media_types: [KeyValuePairs]  (StatusBar content)
+//   layer_attachment: Chrome
+//
+// Spec references: openspec/changes/exemplar-status-bar/spec.md
+// Task references: openspec/changes/exemplar-status-bar/tasks.md §2
+
+/// Build a SceneGraph pre-loaded with the default v1 zone registry
+/// (status-bar, notification-area, subtitle, pip, ambient-background, alert-banner).
+fn make_scene_with_defaults() -> SceneGraph {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+    scene
+}
+
+/// Construct a StatusBar payload with a single key/value entry.
+fn status_bar_entry(key: &str, value: &str) -> ZoneContent {
+    ZoneContent::StatusBar(StatusBarPayload {
+        entries: HashMap::from([(key.to_string(), value.to_string())]),
+    })
+}
+
+// ── Test 1: Three agents coexist with different merge_keys ────────────────────
+//
+// Scenario: agents "weather-agent", "battery-agent", "time-agent" each publish
+// to the status-bar zone using distinct merge_keys.  All three publications
+// must coexist because their keys are different.
+
+#[test]
+fn exemplar_status_bar_three_agents_coexist() {
+    // [hud-t1in.2]: MergeByKey — three distinct keys must coexist.
+    let mut scene = make_scene_with_defaults();
+
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("weather", "☀ 22°C"),
+            "weather-agent",
+            Some("weather".to_string()),
+            None,
+            None,
+        )
+        .expect("weather-agent publish must succeed");
+
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("battery", "87%"),
+            "battery-agent",
+            Some("battery".to_string()),
+            None,
+            None,
+        )
+        .expect("battery-agent publish must succeed");
+
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("time", "14:32"),
+            "time-agent",
+            Some("time".to_string()),
+            None,
+            None,
+        )
+        .expect("time-agent publish must succeed");
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        3,
+        "three distinct merge_keys must produce 3 active publications; got {}",
+        pubs.len()
+    );
+
+    let keys: std::collections::HashSet<_> = pubs
+        .iter()
+        .map(|r| r.merge_key.as_deref().unwrap())
+        .collect();
+    let expected_keys: std::collections::HashSet<_> =
+        ["weather", "battery", "time"].iter().copied().collect();
+    assert_eq!(
+        keys, expected_keys,
+        "active publications must contain exactly the expected merge keys"
+    );
+}
+
+// ── Test 2: Key update replaces previous value for same merge_key ─────────────
+//
+// Scenario: weather-agent publishes "weather" key twice with different values.
+// The second publish must replace the first — publication count stays at 1.
+
+#[test]
+fn exemplar_status_bar_key_update_replaces() {
+    // [hud-t1in.2]: MergeByKey — same key replaces previous value.
+    let mut scene = make_scene_with_defaults();
+
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("weather", "☁ 15°C"),
+            "weather-agent",
+            Some("weather".to_string()),
+            None,
+            None,
+        )
+        .expect("first publish must succeed");
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(pubs.len(), 1, "after first publish: 1 publication expected");
+
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("weather", "☀ 22°C"),
+            "weather-agent",
+            Some("weather".to_string()),
+            None,
+            None,
+        )
+        .expect("second publish (same key) must succeed");
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        1,
+        "same merge_key must replace, not accumulate; got {} publications",
+        pubs.len()
+    );
+
+    // The stored content must reflect the updated value.
+    match &pubs[0].content {
+        ZoneContent::StatusBar(payload) => {
+            let val = payload
+                .entries
+                .get("weather")
+                .map(String::as_str)
+                .unwrap_or("");
+            assert_eq!(
+                val, "☀ 22°C",
+                "publication content must reflect the updated value"
+            );
+        }
+        other => panic!("unexpected content variant: {other:?}"),
+    }
+}
+
+// ── Test 3: Key removal via empty-string value ────────────────────────────────
+//
+// Scenario: an agent previously published a "weather" key.  It now re-publishes
+// the same merge_key with an empty string value.  Per the empty-value-removal
+// convention (openspec/changes/exemplar-status-bar/design.md), the scene graph
+// MUST store the updated record (MergeByKey replacement) and the entry value
+// MUST be an empty string.  The compositor is responsible for skipping empty-
+// valued entries when rendering.
+
+#[test]
+fn exemplar_status_bar_key_removal_empty_value() {
+    // [hud-t1in.2]: MergeByKey — empty-value publish is stored; compositor skip convention.
+    let mut scene = make_scene_with_defaults();
+
+    // Initial publish with a visible value.
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("weather", "☀ 22°C"),
+            "weather-agent",
+            Some("weather".to_string()),
+            None,
+            None,
+        )
+        .expect("initial publish must succeed");
+
+    // Re-publish with empty string value — signals compositor to hide this key.
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("weather", ""),
+            "weather-agent",
+            Some("weather".to_string()),
+            None,
+            None,
+        )
+        .expect("empty-value publish must succeed (stored as tombstone convention)");
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        1,
+        "empty-value publish replaces the existing record; count must stay at 1"
+    );
+
+    // The scene graph stores the record; it does NOT filter it out.
+    // The compositor is responsible for skipping entries whose value is "".
+    match &pubs[0].content {
+        ZoneContent::StatusBar(payload) => {
+            let val = payload.entries.get("weather").map(String::as_str);
+            assert_eq!(
+                val,
+                Some(""),
+                "empty-value publish must be stored with value=\"\" (compositor skip convention)"
+            );
+        }
+        other => panic!("unexpected content variant: {other:?}"),
+    }
+}
+
+// ── Test 4: Key removal via TTL expiry (drain_expired_zone_publications) ───────
+//
+// Scenario: an agent publishes merge_key "weather" with a short TTL.
+// After simulated time advances past the expiry, drain_expired_zone_publications
+// removes the record and the key is no longer active.
+
+#[test]
+fn exemplar_status_bar_key_removal_ttl_expiry() {
+    // [hud-t1in.2]: MergeByKey — TTL expiry removes the publication.
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let clock = Arc::new(SimulatedClock::new(1_000_000)); // t=1s
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+
+    // Publish "weather" with expiry at t=2s.
+    let expiry_us = 2_000_000u64;
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("weather", "☀ 22°C"),
+            "weather-agent",
+            Some("weather".to_string()),
+            Some(expiry_us),
+            None,
+        )
+        .expect("publish with TTL must succeed");
+
+    // Also publish "battery" with no TTL — must survive the sweep.
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("battery", "87%"),
+            "battery-agent",
+            Some("battery".to_string()),
+            None,
+            None,
+        )
+        .expect("publish without TTL must succeed");
+
+    assert_eq!(
+        scene.zone_registry.active_for_zone("status-bar").len(),
+        2,
+        "before expiry: 2 active publications expected"
+    );
+
+    // Before expiry — drain is a no-op.
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 0, "no publications should expire before TTL");
+    assert_eq!(scene.zone_registry.active_for_zone("status-bar").len(), 2);
+
+    // Advance past the TTL expiry.
+    clock.set_us(2_000_001);
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 1, "exactly 1 publication (weather) must be swept");
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        1,
+        "only the non-expiring publication must remain"
+    );
+    assert_eq!(
+        pubs[0].merge_key.as_deref(),
+        Some("battery"),
+        "surviving publication must be the 'battery' key"
+    );
+}
+
+// ── Test 5: Max keys capacity — 33rd distinct key is rejected ─────────────────
+//
+// NOTE: The current implementation returns Err(ZoneMaxKeysReached) when the key
+// limit is reached rather than evicting the oldest entry.  This test verifies
+// the actual enforcement semantics: publishing 33 distinct keys to a
+// max_keys=32 zone produces an error on the 33rd publish and the zone retains
+// exactly 32 active publications.
+//
+// Reference: openspec/changes/exemplar-status-bar/tasks.md §2.5 (tasks.md
+// describes "oldest evicted"; the implementation rejects — this test documents
+// the implemented behaviour).
+
+#[test]
+fn exemplar_status_bar_max_keys_capacity_enforced() {
+    // [hud-t1in.2]: MergeByKey max_keys=32 — 33rd distinct key is rejected.
+    let mut scene = make_scene_with_defaults();
+
+    // Publish 32 distinct keys — all must succeed.
+    for i in 0..32u32 {
+        let key = format!("key-{i:02}");
+        scene
+            .publish_to_zone(
+                "status-bar",
+                status_bar_entry(&key, &format!("val-{i}")),
+                &format!("agent-{i}"),
+                Some(key.clone()),
+                None,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("publish {i} (key={key}) must succeed; got {e:?}"));
+    }
+
+    assert_eq!(
+        scene.zone_registry.active_for_zone("status-bar").len(),
+        32,
+        "32 distinct keys must all be stored"
+    );
+
+    // The 33rd distinct key must be rejected (max_keys=32 reached).
+    let result = scene.publish_to_zone(
+        "status-bar",
+        status_bar_entry("overflow-key", "overflow"),
+        "overflow-agent",
+        Some("overflow-key".to_string()),
+        None,
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "publishing a 33rd distinct key to a max_keys=32 zone must be rejected"
+    );
+
+    // The zone must still hold exactly 32 publications.
+    assert_eq!(
+        scene.zone_registry.active_for_zone("status-bar").len(),
+        32,
+        "zone must retain exactly 32 publications after rejected overflow"
+    );
+}
+
+// ── Test 6: Rapid updates coalesce to latest value ────────────────────────────
+//
+// Scenario: a single agent publishes the same merge_key many times in rapid
+// succession.  Only the most recent value must be present in the zone —
+// MergeByKey semantics require that the count never exceeds 1 for a given key
+// and the content reflects the last write.
+
+#[test]
+fn exemplar_status_bar_rapid_updates_coalesce_to_latest() {
+    // [hud-t1in.2]: MergeByKey — rapid same-key updates coalesce to latest value.
+    let mut scene = make_scene_with_defaults();
+
+    // Rapid-fire 50 updates with the same key from the same agent.
+    for i in 0..50u32 {
+        scene
+            .publish_to_zone(
+                "status-bar",
+                status_bar_entry("battery", &format!("{i}%")),
+                "battery-agent",
+                Some("battery".to_string()),
+                None,
+                None,
+            )
+            .unwrap_or_else(|e| panic!("rapid update {i} must succeed; got {e:?}"));
+    }
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        1,
+        "rapid same-key updates must coalesce to a single publication; got {}",
+        pubs.len()
+    );
+
+    // Content must reflect the last write (update 49).
+    match &pubs[0].content {
+        ZoneContent::StatusBar(payload) => {
+            let val = payload
+                .entries
+                .get("battery")
+                .map(String::as_str)
+                .unwrap_or("");
+            assert_eq!(
+                val, "49%",
+                "coalesced content must reflect the final update value; got \"{val}\""
+            );
+        }
+        other => panic!("unexpected content variant: {other:?}"),
+    }
+}
+
 // ─── Proptest: contention policy invariants ──────────────────────────────────
 
 #[cfg(test)]

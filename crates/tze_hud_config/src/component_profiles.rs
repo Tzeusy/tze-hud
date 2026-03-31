@@ -1859,8 +1859,7 @@ component_type = "subtitle"
         let path = exemplar_subtitle_dir();
         let tokens = exemplar_subtitle_tokens();
 
-        let profile =
-            load_profile_dir(&path, &tokens).expect("exemplar-subtitle should load");
+        let profile = load_profile_dir(&path, &tokens).expect("exemplar-subtitle should load");
 
         let zone_override = profile
             .zone_overrides
@@ -1895,10 +1894,9 @@ component_type = "subtitle"
             ..RenderingPolicy::default()
         };
 
-        check_zone_readability(&policy, ReadabilityTechnique::DualLayer)
-            .expect(
-                "DualLayer check must pass for exemplar-subtitle \
+        check_zone_readability(&policy, ReadabilityTechnique::DualLayer).expect(
+            "DualLayer check must pass for exemplar-subtitle \
                  (backdrop_opacity >= 0.3, outline_width >= 1.0)",
-            );
+        );
     }
 }
