@@ -117,10 +117,7 @@ fn gauge_fill_bindings() -> Vec<WidgetBinding> {
 
 fn gauge_params() -> HashMap<String, WidgetParameterValue> {
     [
-        (
-            "level".to_string(),
-            WidgetParameterValue::F32(0.75),
-        ),
+        ("level".to_string(), WidgetParameterValue::F32(0.75)),
         (
             "fill_color".to_string(),
             WidgetParameterValue::Color(Rgba::new(0.0, 0.706, 1.0, 1.0)),
@@ -161,10 +158,8 @@ fn gauge_512x512_rasterize_within_ci_budget() {
     let constraints = gauge_param_constraints();
     let bindings = gauge_fill_bindings();
 
-    let layers: Vec<(&str, &[WidgetBinding])> = vec![
-        (GAUGE_BACKGROUND_SVG, &[]),
-        (GAUGE_FILL_SVG, &bindings),
-    ];
+    let layers: Vec<(&str, &[WidgetBinding])> =
+        vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
 
     // Warmup: one iteration to allow any lazy initialization.
     let _ = rasterize_svg_layers(&layers, &constraints, &params, 512, 512);
@@ -218,9 +213,8 @@ fn gauge_512x512_rasterize_produces_non_empty_pixels() {
     // Background layer only (no bindings).
     let layers: Vec<(&str, &[WidgetBinding])> = vec![(GAUGE_BACKGROUND_SVG, &[])];
 
-    let pixmap =
-        rasterize_svg_layers(&layers, &constraints, &params, 512, 512)
-            .expect("rasterize_svg_layers must succeed for gauge background");
+    let pixmap = rasterize_svg_layers(&layers, &constraints, &params, 512, 512)
+        .expect("rasterize_svg_layers must succeed for gauge background");
 
     // The background SVG fills with #1a1a2e — at least some pixels should be non-zero.
     let non_zero = pixmap.data().iter().any(|&b| b != 0);
@@ -244,16 +238,14 @@ fn gauge_fill_bindings_are_applied() {
     // level = 0.0 → bar height 0 (empty)
     let mut params_empty = gauge_params();
     params_empty.insert("level".to_string(), WidgetParameterValue::F32(0.0));
-    let pixmap_empty =
-        rasterize_svg_layers(&layers, &constraints, &params_empty, 512, 512)
-            .expect("rasterize must succeed at level=0.0");
+    let pixmap_empty = rasterize_svg_layers(&layers, &constraints, &params_empty, 512, 512)
+        .expect("rasterize must succeed at level=0.0");
 
     // level = 1.0 → bar height 200 (full)
     let mut params_full = gauge_params();
     params_full.insert("level".to_string(), WidgetParameterValue::F32(1.0));
-    let pixmap_full =
-        rasterize_svg_layers(&layers, &constraints, &params_full, 512, 512)
-            .expect("rasterize must succeed at level=1.0");
+    let pixmap_full = rasterize_svg_layers(&layers, &constraints, &params_full, 512, 512)
+        .expect("rasterize must succeed at level=1.0");
 
     // Pixmaps at different fill levels must differ.
     assert_ne!(

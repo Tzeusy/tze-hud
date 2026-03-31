@@ -99,15 +99,10 @@ fn gauge_fill_bindings() -> Vec<WidgetBinding> {
 
 fn gauge_params() -> HashMap<String, WidgetParameterValue> {
     [
-        (
-            "level".to_string(),
-            WidgetParameterValue::F32(0.75),
-        ),
+        ("level".to_string(), WidgetParameterValue::F32(0.75)),
         (
             "fill_color".to_string(),
-            WidgetParameterValue::Color(tze_hud_scene::types::Rgba::new(
-                0.0, 0.706, 1.0, 1.0,
-            )),
+            WidgetParameterValue::Color(tze_hud_scene::types::Rgba::new(0.0, 0.706, 1.0, 1.0)),
         ),
         (
             "label".to_string(),
@@ -139,10 +134,8 @@ fn bench_gauge_512x512_cold(c: &mut Criterion) {
     group.bench_function(BenchmarkId::new("gauge_512x512", "cold"), |b| {
         b.iter(|| {
             let bindings = gauge_fill_bindings();
-            let layers: Vec<(&str, &[WidgetBinding])> = vec![
-                (GAUGE_BACKGROUND_SVG, &[]),
-                (GAUGE_FILL_SVG, &bindings),
-            ];
+            let layers: Vec<(&str, &[WidgetBinding])> =
+                vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
             black_box(rasterize_svg_layers(
                 &layers,
                 black_box(&constraints),
@@ -161,10 +154,8 @@ fn bench_gauge_512x512_warm(c: &mut Criterion) {
     let params = gauge_params();
     let constraints = gauge_param_constraints();
     let bindings = gauge_fill_bindings();
-    let layers: Vec<(&str, &[WidgetBinding])> = vec![
-        (GAUGE_BACKGROUND_SVG, &[]),
-        (GAUGE_FILL_SVG, &bindings),
-    ];
+    let layers: Vec<(&str, &[WidgetBinding])> =
+        vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
 
     let mut group = c.benchmark_group("widget_rasterize");
 
@@ -188,10 +179,8 @@ fn bench_gauge_128x128(c: &mut Criterion) {
     let params = gauge_params();
     let constraints = gauge_param_constraints();
     let bindings = gauge_fill_bindings();
-    let layers: Vec<(&str, &[WidgetBinding])> = vec![
-        (GAUGE_BACKGROUND_SVG, &[]),
-        (GAUGE_FILL_SVG, &bindings),
-    ];
+    let layers: Vec<(&str, &[WidgetBinding])> =
+        vec![(GAUGE_BACKGROUND_SVG, &[]), (GAUGE_FILL_SVG, &bindings)];
 
     let mut group = c.benchmark_group("widget_rasterize");
 

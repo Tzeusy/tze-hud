@@ -660,7 +660,13 @@ impl WidgetRenderer {
             .collect();
 
         // Delegate to the CPU-only rasterization path (shared with benchmarks/tests).
-        let composed = rasterize_svg_layers(&svg_layers, &param_constraints, params, pixel_width, pixel_height);
+        let composed = rasterize_svg_layers(
+            &svg_layers,
+            &param_constraints,
+            params,
+            pixel_width,
+            pixel_height,
+        );
 
         let raster_us = start.elapsed().as_micros() as u64;
 
