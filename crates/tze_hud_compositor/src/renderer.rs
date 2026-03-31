@@ -889,53 +889,74 @@ impl Compositor {
                 .map(|s| s.current_opacity())
                 .unwrap_or(1.0);
 
-            // Use the most-recent publish. For Stack contention policy, publishes
-            // are sorted oldest-first, so we iterate in reverse to get the newest
-            // StreamText, Notification, or StatusBar entry. For LatestWins/Replace
-            // there is at most one entry.
-            for record in publishes.iter().rev() {
-                match &record.content {
-                    ZoneContent::StreamText(text) => {
-                        items.push(TextItem::from_zone_policy(
-                            text,
-                            zx,
-                            zy,
-                            zw,
-                            zh,
-                            policy,
-                            anim_opacity,
-                        ));
-                        // Only render the most-recent StreamText publish.
-                        break;
+            // Emit TextItems based on contention policy.
+            //
+            // Stack: each publication occupies a vertically-stacked slot (oldest at top,
+            //   newest at bottom).  slot_h = zh / max_depth.
+            //
+            // MergeByKey: collect ALL StatusBar publications, merge their entries
+            //   (last write wins per key), render the merged set as one text item.
+            //
+            // LatestWins / Replace: render only the most-recent publication.
+            match zone_def.contention_policy {
+                ContentionPolicy::Stack { max_depth } => {
+                    let slot_h = (zh / (max_depth.max(1) as f32)).max(1.0);
+                    // Publishes are oldest-first; slot 0 = oldest (top of stack).
+                    for (slot_idx, record) in publishes.iter().enumerate() {
+                        let slot_y = zy + slot_idx as f32 * slot_h;
+                        // Clip to zone bounds.
+                        if slot_y >= zy + zh {
+                            break;
+                        }
+                        let effective_slot_h = slot_h.min((zy + zh) - slot_y);
+
+                        match &record.content {
+                            ZoneContent::StreamText(text) => {
+                                items.push(TextItem::from_zone_policy(
+                                    text,
+                                    zx,
+                                    slot_y,
+                                    zw,
+                                    effective_slot_h,
+                                    policy,
+                                    anim_opacity,
+                                ));
+                            }
+                            ZoneContent::Notification(payload) => {
+                                // Icon rendering is stubbed (no texture pipeline in v1).
+                                items.push(TextItem::from_zone_policy(
+                                    &payload.text,
+                                    zx,
+                                    slot_y,
+                                    zw,
+                                    effective_slot_h,
+                                    policy,
+                                    anim_opacity,
+                                ));
+                            }
+                            _ => {}
+                        }
                     }
-                    ZoneContent::Notification(payload) => {
-                        // Render the notification text.
-                        // For alert-banner, text color is always policy.text_color
-                        // for contrast against the severity-colored backdrop.
-                        // For notification-area, policy.text_color is also used.
-                        // Icon rendering is stubbed (no texture pipeline in v1).
-                        items.push(TextItem::from_zone_policy(
-                            &payload.text,
-                            zx,
-                            zy,
-                            zw,
-                            zh,
-                            policy,
-                            anim_opacity,
-                        ));
-                        // Only render the most-recent publish.
-                        break;
+                }
+                ContentionPolicy::MergeByKey { .. } => {
+                    // Collect all StatusBar publications and merge their entries.
+                    // For each key, the last publish wins (latest value).
+                    let mut merged: HashMap<String, String> = HashMap::new();
+                    for record in publishes.iter() {
+                        if let ZoneContent::StatusBar(payload) = &record.content {
+                            for (k, v) in &payload.entries {
+                                merged.insert(k.clone(), v.clone());
+                            }
+                        }
                     }
-                    ZoneContent::StatusBar(payload) => {
-                        // Format key-value pairs as "key: value" lines, sorted by key
-                        // for deterministic output.
-                        let mut sorted: Vec<(&String, &String)> = payload.entries.iter().collect();
+                    if !merged.is_empty() {
+                        let mut sorted: Vec<(&String, &String)> = merged.iter().collect();
                         sorted.sort_by_key(|(k, _)| k.as_str());
                         let text = sorted
                             .iter()
                             .map(|(k, v)| format!("{k}: {v}"))
                             .collect::<Vec<_>>()
-                            .join("\n");
+                            .join("  ");
                         items.push(TextItem::from_zone_policy(
                             &text,
                             zx,
@@ -945,10 +966,88 @@ impl Compositor {
                             policy,
                             anim_opacity,
                         ));
-                        // Only render the most-recent StatusBar publish.
-                        break;
+                    } else {
+                        // Fallback: render whatever the latest publication contains.
+                        for record in publishes.iter().rev() {
+                            match &record.content {
+                                ZoneContent::StreamText(text) => {
+                                    items.push(TextItem::from_zone_policy(
+                                        text, zx, zy, zw, zh, policy, anim_opacity,
+                                    ));
+                                    break;
+                                }
+                                ZoneContent::Notification(payload) => {
+                                    items.push(TextItem::from_zone_policy(
+                                        &payload.text, zx, zy, zw, zh, policy, anim_opacity,
+                                    ));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
-                    _ => {}
+                }
+                ContentionPolicy::LatestWins | ContentionPolicy::Replace => {
+                    // Use the most-recent publish only.
+                    for record in publishes.iter().rev() {
+                        match &record.content {
+                            ZoneContent::StreamText(text) => {
+                                items.push(TextItem::from_zone_policy(
+                                    text,
+                                    zx,
+                                    zy,
+                                    zw,
+                                    zh,
+                                    policy,
+                                    anim_opacity,
+                                ));
+                                // Only render the most-recent StreamText publish.
+                                break;
+                            }
+                            ZoneContent::Notification(payload) => {
+                                // Render the notification text.
+                                // For alert-banner, text color is always policy.text_color
+                                // for contrast against the severity-colored backdrop.
+                                // For notification-area, policy.text_color is also used.
+                                // Icon rendering is stubbed (no texture pipeline in v1).
+                                items.push(TextItem::from_zone_policy(
+                                    &payload.text,
+                                    zx,
+                                    zy,
+                                    zw,
+                                    zh,
+                                    policy,
+                                    anim_opacity,
+                                ));
+                                // Only render the most-recent publish.
+                                break;
+                            }
+                            ZoneContent::StatusBar(payload) => {
+                                // Format key-value pairs as "key: value" lines, sorted by key
+                                // for deterministic output.
+                                let mut sorted: Vec<(&String, &String)> =
+                                    payload.entries.iter().collect();
+                                sorted.sort_by_key(|(k, _)| k.as_str());
+                                let text = sorted
+                                    .iter()
+                                    .map(|(k, v)| format!("{k}: {v}"))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                items.push(TextItem::from_zone_policy(
+                                    &text,
+                                    zx,
+                                    zy,
+                                    zw,
+                                    zh,
+                                    policy,
+                                    anim_opacity,
+                                ));
+                                // Only render the most-recent StatusBar publish.
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
         }
@@ -1715,42 +1814,96 @@ impl Compositor {
                 .map(|s| s.current_opacity())
                 .unwrap_or(1.0);
 
-            // Resolve backdrop color.
-            // For SolidColor content, use the color directly.
-            // For all other content, read backdrop from RenderingPolicy.
-            let latest = &publishes[publishes.len() - 1];
-            let backdrop_rgba: Option<Rgba> = match &latest.content {
-                ZoneContent::SolidColor(rgba) => {
-                    // SolidColor always renders its own color (no policy override).
-                    Some(*rgba)
-                }
-                ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
-                    // alert-banner: map urgency to severity token color.
-                    // Per spec §Notification Urgency-to-Severity Token Mapping:
-                    //   urgency 0,1 → color.severity.info
-                    //   urgency 2   → color.severity.warning
-                    //   urgency 3   → color.severity.critical
-                    // Token-resolved values take precedence over hardcoded constants;
-                    // falls back to SEVERITY_* when the token map is empty or the
-                    // key is absent.
-                    let severity_color = urgency_to_severity_color(n.urgency, &self.token_map);
-                    Some(severity_color)
-                }
-                _ => {
-                    // All other content: use policy.backdrop.
-                    policy.backdrop
-                }
-            };
+            // Resolve and emit backdrop quads based on the zone's contention policy.
+            //
+            // Stack zones: each publication gets its own vertically-stacked slot.
+            //   Publishes are stored oldest-first; slot 0 = oldest (top of stack).
+            //   slot_h = zone_height / max_depth (floored, ≥1 px).
+            //
+            // MergeByKey zones: single backdrop for the full zone (entries are merged
+            //   at the data level; visually one unified strip).
+            //
+            // LatestWins / Replace: single backdrop from the most-recent publish only.
+            match zone_def.contention_policy {
+                ContentionPolicy::Stack { max_depth } => {
+                    let slot_h = (h / (max_depth.max(1) as f32)).max(1.0);
+                    // Render backdrop for each active publication, oldest-first (index 0).
+                    for (slot_idx, record) in publishes.iter().enumerate() {
+                        let slot_y = y + slot_idx as f32 * slot_h;
+                        // Clip to zone bounds.
+                        if slot_y >= y + h {
+                            break;
+                        }
+                        let effective_slot_h = slot_h.min((y + h) - slot_y);
 
-            if let Some(mut rgba) = backdrop_rgba {
-                // Apply backdrop_opacity override.
-                if let Some(opacity) = policy.backdrop_opacity {
-                    rgba.a = opacity.clamp(0.0, 1.0);
-                }
-                // Apply zone animation opacity.
-                rgba.a *= anim_opacity.clamp(0.0, 1.0);
+                        let backdrop_rgba: Option<Rgba> = match &record.content {
+                            ZoneContent::SolidColor(rgba) => Some(*rgba),
+                            ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                                let severity_color =
+                                    urgency_to_severity_color(n.urgency, &self.token_map);
+                                Some(severity_color)
+                            }
+                            _ => policy.backdrop,
+                        };
 
-                vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, rgba.to_array()));
+                        if let Some(mut rgba) = backdrop_rgba {
+                            if let Some(opacity) = policy.backdrop_opacity {
+                                rgba.a = opacity.clamp(0.0, 1.0);
+                            }
+                            rgba.a *= anim_opacity.clamp(0.0, 1.0);
+                            vertices.extend_from_slice(&rect_vertices(
+                                x,
+                                slot_y,
+                                w,
+                                effective_slot_h,
+                                sw,
+                                sh,
+                                rgba.to_array(),
+                            ));
+                        }
+                    }
+                }
+                ContentionPolicy::MergeByKey { .. } | ContentionPolicy::LatestWins | ContentionPolicy::Replace => {
+                    // For MergeByKey and single-publish policies: render a single backdrop
+                    // for the zone using the latest publication's content type.
+                    let latest = &publishes[publishes.len() - 1];
+                    let backdrop_rgba: Option<Rgba> = match &latest.content {
+                        ZoneContent::SolidColor(rgba) => {
+                            // SolidColor always renders its own color (no policy override).
+                            Some(*rgba)
+                        }
+                        ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                            // alert-banner: map urgency to severity token color.
+                            // Per spec §Notification Urgency-to-Severity Token Mapping:
+                            //   urgency 0,1 → color.severity.info
+                            //   urgency 2   → color.severity.warning
+                            //   urgency 3   → color.severity.critical
+                            // Token-resolved values take precedence over hardcoded constants;
+                            // falls back to SEVERITY_* when the token map is empty or the
+                            // key is absent.
+                            let severity_color =
+                                urgency_to_severity_color(n.urgency, &self.token_map);
+                            Some(severity_color)
+                        }
+                        _ => {
+                            // All other content: use policy.backdrop.
+                            policy.backdrop
+                        }
+                    };
+
+                    if let Some(mut rgba) = backdrop_rgba {
+                        // Apply backdrop_opacity override.
+                        if let Some(opacity) = policy.backdrop_opacity {
+                            rgba.a = opacity.clamp(0.0, 1.0);
+                        }
+                        // Apply zone animation opacity.
+                        rgba.a *= anim_opacity.clamp(0.0, 1.0);
+
+                        vertices.extend_from_slice(&rect_vertices(
+                            x, y, w, h, sw, sh, rgba.to_array(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -3743,5 +3896,452 @@ mod tests {
         // Margins: x+12, y+6
         assert_eq!(item.pixel_x, 12.0);
         assert_eq!(item.pixel_y, 6.0);
+    }
+
+    // ── Multi-publication rendering: Stack and MergeByKey policies ──────────
+
+    /// Stack zone with two notifications: render_zone_content must emit a
+    /// separate backdrop quad for each publication, stacked vertically.
+    /// With max_depth=4 and zone height=400px, each slot is 100px tall.
+    /// Two publications → two quads; the second quad starts at y+100.
+    #[tokio::test]
+    async fn test_stack_zone_renders_separate_backdrop_per_publication() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Zone: top-right, 200×400 px via Relative.
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "stack zone for multi-pub test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,    // 320 px at 1280 wide
+                height_pct: 0.5556, // ~400 px at 720 tall (≈400/720)
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                backdrop_opacity: Some(0.9),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 4 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish two separate notifications.
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "First notification".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Second notification".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                }),
+                "agent-b",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // Two publications → two backdrop quads → 2 × 6 = 12 vertices.
+        assert_eq!(
+            vertices.len(),
+            12,
+            "Stack zone with 2 publications must emit 12 vertices (2 quads × 6 verts)"
+        );
+
+        // The first quad's top-left y should be 0 (zone starts at y_pct=0.0 → y=0).
+        // The second quad's top-left y should be ~slot_h = zone_h / max_depth.
+        // zone_h = 720 * 0.5556 ≈ 400; slot_h = 400 / 4 = 100.
+        // Vertices are in NDC; we check the first and 7th vertex y values differ.
+        // rect_vertices emits 6 verts per quad in positions [x,y] NDC.
+        let first_quad_y = vertices[0].position[1];
+        let second_quad_y = vertices[6].position[1];
+        assert!(
+            (first_quad_y - second_quad_y).abs() > 0.01,
+            "second Stack slot must start at a different y than the first; got first={first_quad_y:.4}, second={second_quad_y:.4}"
+        );
+    }
+
+    /// Stack zone: collect_text_items must produce a separate TextItem for
+    /// each publication, with each item positioned in its own vertical slot.
+    #[tokio::test]
+    async fn test_stack_zone_collect_text_items_per_publication() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "stack zone text items test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5556,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 4 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Alpha alert".to_owned(),
+                    icon: String::new(),
+                    urgency: 0,
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Beta alert".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                }),
+                "agent-b",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Gamma alert".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                }),
+                "agent-c",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // Three publications in a Stack zone must produce three TextItems.
+        assert_eq!(
+            items.len(),
+            3,
+            "Stack zone with 3 publications must produce 3 TextItems, got {}",
+            items.len()
+        );
+
+        // Items should be ordered oldest-first (same order as publishes vec).
+        assert!(
+            items[0].text.contains("Alpha"),
+            "first TextItem should be the oldest publication"
+        );
+        assert!(
+            items[1].text.contains("Beta"),
+            "second TextItem should be the second publication"
+        );
+        assert!(
+            items[2].text.contains("Gamma"),
+            "third TextItem should be the newest publication"
+        );
+
+        // Each item should occupy a different vertical slot.
+        assert!(
+            items[1].pixel_y > items[0].pixel_y,
+            "slot 1 y ({}) must be below slot 0 y ({})",
+            items[1].pixel_y,
+            items[0].pixel_y
+        );
+        assert!(
+            items[2].pixel_y > items[1].pixel_y,
+            "slot 2 y ({}) must be below slot 1 y ({})",
+            items[2].pixel_y,
+            items[1].pixel_y
+        );
+    }
+
+    /// MergeByKey zone: collect_text_items must merge ALL StatusBar publications'
+    /// entries and produce a single TextItem containing all unique keys.
+    #[tokio::test]
+    async fn test_merge_by_key_zone_merges_all_status_bar_entries() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "status-bar".to_owned(),
+            description: "merge-by-key zone test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.04,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::MergeByKey { max_keys: 32 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Agent A publishes "cpu" and "mem" keys.
+        let mut entries_a = std::collections::HashMap::new();
+        entries_a.insert("cpu".to_owned(), "45%".to_owned());
+        entries_a.insert("mem".to_owned(), "8.2 GB".to_owned());
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload { entries: entries_a }),
+                "agent-a",
+                Some("cpu-mem".to_owned()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Agent B publishes a "net" key.
+        let mut entries_b = std::collections::HashMap::new();
+        entries_b.insert("net".to_owned(), "1.2 MB/s".to_owned());
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload { entries: entries_b }),
+                "agent-b",
+                Some("net".to_owned()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // MergeByKey must produce exactly ONE TextItem containing all merged entries.
+        assert_eq!(
+            items.len(),
+            1,
+            "MergeByKey zone must produce a single merged TextItem, got {}",
+            items.len()
+        );
+
+        let text = &items[0].text;
+        assert!(
+            text.contains("cpu"),
+            "merged text must include 'cpu' key; got: {text}"
+        );
+        assert!(
+            text.contains("mem"),
+            "merged text must include 'mem' key; got: {text}"
+        );
+        assert!(
+            text.contains("net"),
+            "merged text must include 'net' key; got: {text}"
+        );
+        assert!(
+            text.contains("45%"),
+            "merged text must include cpu value '45%'; got: {text}"
+        );
+        assert!(
+            text.contains("1.2 MB/s"),
+            "merged text must include net value '1.2 MB/s'; got: {text}"
+        );
+    }
+
+    /// MergeByKey zone: when a key appears in multiple publications, the latest
+    /// value wins (last-write-wins per key semantics).
+    #[tokio::test]
+    async fn test_merge_by_key_latest_value_wins_for_duplicate_keys() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "status-bar".to_owned(),
+            description: "merge-by-key duplicate key test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.04,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::MergeByKey { max_keys: 32 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // First publish: cpu = "10%"
+        let mut entries_old = std::collections::HashMap::new();
+        entries_old.insert("cpu".to_owned(), "10%".to_owned());
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload {
+                    entries: entries_old,
+                }),
+                "agent-a",
+                Some("cpu".to_owned()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Second publish: same key "cpu" with updated value "90%"
+        let mut entries_new = std::collections::HashMap::new();
+        entries_new.insert("cpu".to_owned(), "90%".to_owned());
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload {
+                    entries: entries_new,
+                }),
+                "agent-a",
+                Some("cpu".to_owned()),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        assert_eq!(items.len(), 1, "must produce one merged TextItem");
+        let text = &items[0].text;
+
+        // The latest value "90%" must appear; "10%" must not.
+        assert!(
+            text.contains("90%"),
+            "merged text must show latest cpu value '90%'; got: {text}"
+        );
+        assert!(
+            !text.contains("10%"),
+            "merged text must not show stale cpu value '10%'; got: {text}"
+        );
+    }
+
+    /// LatestWins zone still renders only one TextItem even when multiple
+    /// publications are present (regression guard).
+    #[tokio::test]
+    async fn test_latest_wins_zone_renders_only_latest_publication() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "latest-wins regression guard".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // LatestWins should only keep the last publication.
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("Old content".to_owned()),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        // With LatestWins policy the scene graph may have already replaced it,
+        // but we publish again to ensure only one ends up active.
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("New content".to_owned()),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // LatestWins must produce exactly one TextItem.
+        assert_eq!(
+            items.len(),
+            1,
+            "LatestWins zone must produce exactly 1 TextItem; got {}",
+            items.len()
+        );
+        // The item should contain the latest content.
+        assert!(
+            items[0].text.contains("New content"),
+            "LatestWins must render latest publish; got: {}",
+            items[0].text
+        );
     }
 }
