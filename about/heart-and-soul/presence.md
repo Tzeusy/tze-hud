@@ -221,6 +221,78 @@ Widget visual assets are user-authorable directories on disk. Each bundle contai
 
 Widget types are static in v1. There is no runtime widget creation, no widget upload by agents, and no hot-reload of bundles. Restart is required to pick up bundle changes. This is acceptable for v1: widget bundles are authored during development, not modified at runtime.
 
+## Component shape language: visual identity as a swappable layer
+
+Zones define *behavior* — where content appears, how contention resolves, what media types are accepted. Widgets define *structure* — SVG layers with parameter bindings. Neither defines *visual identity*. Without a shared vocabulary for colors, typography, outlines, and backdrops, every zone rendering policy and widget bundle is a visual island. Two independently-authored subtitle implementations will look different, and swapping one for the other requires re-authoring zone types, rendering policies, and widget bundles from scratch.
+
+The component shape language fills this gap. It is a visual identity layer that sits above zones and widgets, giving the HUD a coherent, professional appearance while keeping every visual component modular and swappable.
+
+### Design tokens
+
+A **design token** is a named visual primitive: a color, a font size, a stroke width, an opacity value. The runtime loads tokens from a flat `[design_tokens]` section in the configuration file — a simple key-value map with dotted namespace conventions:
+
+```toml
+[design_tokens]
+"color.text.primary" = "#FFFFFF"
+"color.backdrop.default" = "#000000"
+"opacity.backdrop.default" = "0.6"
+"typography.subtitle.size" = "28"
+"stroke.outline.width" = "2"
+```
+
+Tokens flow into two rendering paths:
+- **Zone rendering** (glyphon + wgpu quads): tokens are parsed into typed `RenderingPolicy` fields at startup. The compositor reads `policy.text_color`, `policy.backdrop`, `policy.outline_width` instead of hardcoded values.
+- **Widget rendering** (SVG + resvg): tokens are injected into SVG templates via `{{token.key}}` placeholders, resolved by text substitution at bundle load time before SVG parsing. Zero runtime overhead.
+
+The canonical token schema defines ~28 required keys with fallback values covering colors, typography, spacing, and strokes. Operators override any token in configuration. Non-canonical keys are accepted for profile-specific use. All tokens are resolved once at startup and are immutable during the runtime lifecycle.
+
+### Component types and profiles
+
+A **component type** is a named contract that defines "what it means to be a subtitle" (or a notification, or an alert-banner):
+
+- Which zone type it governs
+- What readability technique is required (dual-layer, opaque backdrop, or none)
+- Which specific design tokens must be resolvable
+- Informal geometry expectations
+
+V1 defines six component types matching the six built-in zone types: `subtitle`, `notification`, `status-bar`, `alert-banner`, `ambient-background`, `pip`.
+
+A **component profile** is a user-authored implementation of a component type. It is a directory containing:
+
+- `profile.toml` — name, version, component type, optional token overrides
+- `zones/` — rendering policy overrides for the governed zone type
+- `widgets/` — optional widget bundles for enhanced visuals
+
+Profiles are the **swappable unit**. My subtitle profile renders white-on-black outlined text with 60% backdrop opacity. Yours renders yellow-on-navy with a solid background. Both conform to the `subtitle` component type contract. The operator switches between them in configuration:
+
+```toml
+[component_profiles]
+subtitle = "cinematic-subs"
+notification = "clean-notifs"
+```
+
+Agents are unaffected — they still publish to `"subtitle"` by name. The visual treatment changes without any agent code change. This is the plug-and-play contract.
+
+### Readability enforcement
+
+The HUD renders over arbitrary window content. White text on a white background is invisible. The component shape language enforces readability structurally — at startup, not at render time:
+
+- **Subtitle** requires dual-layer readability: a backdrop quad AND text outline (8-direction offset rendering). Both are validated on the effective `RenderingPolicy` at startup.
+- **Notification** and **status-bar** require opaque backdrop (opacity >= 0.8).
+- **Widget SVGs** in text-bearing profiles must use `data-role="backdrop"` and `data-role="text"` attributes with correct document order and stroke requirements.
+
+In production builds, readability violations reject the profile. In development builds (`TZE_HUD_DEV=1`), violations are logged as warnings to enable iterative authoring.
+
+### Extensibility principle
+
+The component shape language is designed for ecosystem growth. The pattern is:
+
+1. **The runtime defines the contract** (component type: governed zone, readability, required tokens).
+2. **Authors implement the contract** (component profile: rendering overrides, widget bundles, token overrides).
+3. **Operators select the implementation** (configuration: which profile is active per component type).
+
+This three-layer separation means visual identity is never hardcoded in the runtime. The runtime ships with token-derived defaults that produce a clean, readable appearance out of the box. But every aspect of that appearance — colors, fonts, outlines, backdrops, transitions — is overridable through profiles without modifying runtime code or agent behavior. New component types can be added post-v1 as new zone types are introduced, following the same pattern.
+
 ---
 
 ## Presence levels

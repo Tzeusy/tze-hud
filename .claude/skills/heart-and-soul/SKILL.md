@@ -75,3 +75,4 @@ These rules are absolute and non-negotiable. They appear in the soul files but a
 5. **Presence requires governance.** Agents hold leases with TTL, scopes, and revocation.
 6. **Tests measure spirit, not letter.** The north star is consistent, deterministic, performant functionality with clean APIs — not green checkmarks.
 7. **The human can always override.** Dismiss, mute, revoke, freeze, safe mode — always available, never interceptable.
+8. **Visual identity is modular.** Every visual component separates contract from implementation. Design tokens provide shared visual vocabulary; component profiles are the swappable unit. Never hardcode colors, fonts, or styling in the compositor.

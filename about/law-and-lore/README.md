@@ -26,3 +26,4 @@ Authoritative design contracts for tze_hud: wire-level protobuf schemas, state m
 | 0009 | Policy Arbitration | 7-level arbitration stack |
 | 0010 | Scene Events | Event taxonomy, interruptions, quiet hours |
 | 0011 | Resource Store | Content-addressed storage, uploads, GC |
+| 0012 | Component Shape Language | Design tokens, component profiles, visual extensibility |

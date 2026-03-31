@@ -10,7 +10,7 @@ This is **not** a dashboard or chatbot UI. It's an operating environment for mod
 
 ## Status
 
-Pre-code. Doctrine is written (`about/heart-and-soul/`); the next artifact is an RFC with scene object model, session/lease model, protobuf definitions, and core RPCs. See `about/heart-and-soul/v1.md` for scope boundary.
+Active development. ~100k lines of Rust across 15 crates. Doctrine is in `about/heart-and-soul/`; design contracts in `about/law-and-lore/` (11 RFCs); capability specs in `openspec/`. See `about/heart-and-soul/v1.md` for scope boundary.
 
 ## Locked-In Technology Decisions
 
@@ -38,6 +38,7 @@ Do not collapse these into one protocol.
 - **Local feedback first.** Touch/interaction acknowledgement happens locally and instantly; remote semantics follow.
 - **One scene model, two profiles.** Desktop (Full Display Node) and mobile (Mobile Presence Node) share the same API; differences are negotiated capabilities/budgets, not separate architectures.
 - **Screen is sovereign.** The runtime owns pixels, timing, composition, permissions, arbitration. Models request via leases with TTL, capability scopes, and revocation semantics.
+- **Visual identity is modular.** Every visual component (subtitle, notification, etc.) separates contract from implementation. Design tokens provide shared visual vocabulary; component profiles are the swappable unit. Never hardcode colors, fonts, or styling in the compositor — use `RenderingPolicy` fields populated from design tokens.
 
 ## Four Message Classes
 
@@ -58,3 +59,5 @@ Design transport around these — they have different delivery semantics:
 - Forking API into desktop vs mobile versions
 - Unbounded agent screen territory (use leases)
 - Treating graceful degradation as a bug
+- Hardcoded visual properties in the compositor (use design tokens and RenderingPolicy)
+- Monolithic visual implementations that can't be swapped (use component profiles)

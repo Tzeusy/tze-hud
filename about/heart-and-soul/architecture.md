@@ -202,6 +202,16 @@ Text is a runtime responsibility, not an agent concern. When an agent publishes 
 
 This is the same principle as zone geometry abstraction: agents declare what to show, the runtime decides how to render it. An agent that publishes "The quick brown fox" with breakpoints to the subtitle zone does not know what font, size, color, or backdrop the runtime uses. That's the point.
 
+### Text rendering policy and design tokens
+
+The visual treatment of zone text — font family, font size, text color, backdrop color and opacity, outline color and width, margins, transition timing — is governed by the zone's `RenderingPolicy`. These fields are populated from **design tokens** at startup: named visual primitives (`color.text.primary`, `typography.subtitle.size`, `stroke.outline.width`) loaded from the `[design_tokens]` configuration section. When a component profile is active, its overrides are merged on top.
+
+This means zone text rendering is fully parameterized. The compositor does not hardcode "subtitle text is white at 28px" — it reads `policy.text_color`, `policy.font_size_px`, `policy.outline_color` from the effective RenderingPolicy. Every visual property is token-derived and overridable without changing runtime code.
+
+For subtitle text, the compositor renders an 8-direction text outline (outline color at pixel offsets) beneath the fill text — this guarantees readability over arbitrary backgrounds. The outline is only rendered when `outline_width > 0`. Backdrop quads use `backdrop` color with `backdrop_opacity` applied. Transition animations (fade-in/out) are opacity ramps on the zone's composite quad.
+
+Widget SVG templates use a different mechanism for the same tokens: `{{token.key}}` mustache placeholders in SVG attribute values, resolved by text substitution at bundle load time before SVG parsing. Both rendering paths consume the same token map — zone rendering through typed struct fields, widget rendering through string substitution — so the entire HUD shares a coherent visual vocabulary.
+
 ## Media: GStreamer
 
 Media is not an add-on. It is one of the reasons the project exists. The media layer is built around GStreamer: graph-based pipelines, clock/timestamp/segment synchronization, Rust bindings for applications and plugins. This shapes live ingest, decode, synchronization, stream switching, timed metadata, subtitle/cue alignment, and low-latency AV composition.
@@ -306,3 +316,5 @@ Quick reference — these are expanded in their parent sections:
 - Forked desktop/mobile API
 - Graceful degradation treated as a bug
 - Unstructured or opaque error responses (see error model)
+- Hardcoded visual properties in the compositor (use design tokens and RenderingPolicy)
+- Monolithic visual implementations that can't be swapped (use component profiles)

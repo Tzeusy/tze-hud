@@ -46,6 +46,18 @@ That means the system must treat the following as first-class concepts:
 
 The result should feel less like "a chatbot that can display things" and more like "an agent that can inhabit, manage, and negotiate a live visual environment."
 
+## Visual identity is modular
+
+The HUD's visual appearance — colors, typography, outlines, backdrops, component styling — must never be hardcoded in the runtime. Every visual element is a **component** that separates contract from implementation:
+
+- The runtime defines what a component *does* (a subtitle occupies the bottom of the screen, renders text readably over arbitrary backgrounds).
+- An author defines what a component *looks like* (white text with black outline over a 60% opacity backdrop, using 28px system sans-serif).
+- An operator selects which author's implementation is active — swapping visual identity without changing agent code or runtime behavior.
+
+This is the same principle as zone publishing (agents declare intent, runtime decides rendering) applied to visual identity itself. If two people disagree about what subtitles should look like, they author different component profiles and the operator chooses. The runtime ships sensible defaults, but every default is overridable.
+
+This extensibility is not a post-v1 aspiration. It is load-bearing for v1: the design token system, component type contracts, and component profile format are specified and implemented alongside the core rendering pipeline. Making visual components fully and easily extensible is part of the product.
+
 ## Performance is part of the product
 
 For this system, performance is not an optimization pass. It is part of the meaning of the product.

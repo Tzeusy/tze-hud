@@ -2,7 +2,7 @@
 name: law-and-lore
 description: >
   Load tze_hud RFC design contracts to contextualize implementation work. The
-  about/law-and-lore/ directory contains 11 RFCs that define the wire-level contracts,
+  about/law-and-lore/ directory contains 12 RFCs that define the wire-level contracts,
   data models, state machines, protobuf schemas, and quantitative budgets for the tze_hud
   presence engine. Consult relevant RFCs before implementing features, writing protobuf
   definitions, designing state machines, choosing field numbers, setting performance
@@ -60,6 +60,12 @@ The `about/law-and-lore/rfcs/` directory contains the authoritative design contr
 | **0010** | `about/law-and-lore/rfcs/0010-scene-events.md` | Touching event taxonomy, interruptions, quiet hours, subscriptions | Event taxonomy (input/scene/system), interruption classes, quiet hours, event bus, `tab_switch_on_event` contract |
 | **0011** | `about/law-and-lore/rfcs/0011-resource-store.md` | Touching content-addressed storage, uploads, GC, font lifecycle | Upload protocol, BLAKE3 content addressing, reference counting, cross-agent sharing, size limits |
 
+### Visual identity and extensibility
+
+| RFC | File | Read when... | Key content |
+|-----|------|-------------|-------------|
+| **0012** | `openspec/changes/component-shape-language/` | Touching design tokens, rendering policies, visual styling, component profiles, SVG token placeholders, readability enforcement | Design token system, canonical token schema, RenderingPolicy extension, component type contracts, component profile format, zone/widget rendering with tokens, readability validation, error catalog |
+
 ## How to load
 
 Read RFCs directly from `about/law-and-lore/rfcs/`:
@@ -87,6 +93,7 @@ These contracts are load-bearing. Violating them breaks cross-subsystem integrat
 5. **Clock domains are typed.** Wall-clock fields end `_wall_us`, monotonic fields end `_mono_us`. Never mix them (0003, 0005).
 6. **Field numbers are allocated.** Session envelope fields 1–47 are assigned; 50–99 are reserved for post-v1. Check 0005 §9 before adding fields.
 7. **Local feedback is non-negotiable.** Input acknowledgement must happen locally within 4ms p99 — never wait for a remote roundtrip (0004).
+8. **Visual identity is modular.** Never hardcode colors, fonts, or styling in the compositor — use design tokens and RenderingPolicy fields. Component profiles are the swappable unit for visual identity (0012).
 
 ## V1 scope boundaries from RFCs
 
