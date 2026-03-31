@@ -17,15 +17,13 @@
 //! 4. MutationBatch submitted with a random (unknown) lease_id is rejected with
 //!    `MutationResult { accepted: false }` (MUTATION_REJECTED / LeaseNotFound).
 
+use tokio_stream::StreamExt;
 use tze_hud_protocol::proto::session::client_message::Payload as ClientPayload;
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::server_message::Payload as ServerPayload;
-use tze_hud_protocol::proto::session::{
-    ClientMessage, LeaseRequest, MutationBatch, SessionInit,
-};
+use tze_hud_protocol::proto::session::{ClientMessage, LeaseRequest, MutationBatch, SessionInit};
 use tze_hud_protocol::session_server::HudSessionImpl;
-use tokio_stream::StreamExt;
 use tze_hud_scene::graph::SceneGraph;
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────
@@ -246,10 +244,7 @@ async fn exemplar_lease_grant_returns_granted_true_and_uuidv7_lease_id() {
         timestamp_wall_us: now_wall_us(),
         payload: Some(ClientPayload::LeaseRequest(LeaseRequest {
             ttl_ms: 60_000,
-            capabilities: vec![
-                "create_tiles".to_string(),
-                "modify_own_tiles".to_string(),
-            ],
+            capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
             lease_priority: 2,
         })),
     })
@@ -365,9 +360,9 @@ async fn exemplar_lease_request_with_invalid_capability_is_denied() {
                 "deny_reason must be non-empty"
             );
         }
-        other => panic!(
-            "Expected LeaseResponse(denied) for non-canonical capability, got: {other:?}"
-        ),
+        other => {
+            panic!("Expected LeaseResponse(denied) for non-canonical capability, got: {other:?}")
+        }
     }
 }
 
@@ -434,8 +429,6 @@ async fn exemplar_mutation_without_active_lease_is_rejected() {
                 "error_code must be non-empty on rejection"
             );
         }
-        other => panic!(
-            "Expected MutationResult(rejected) when no active lease, got: {other:?}"
-        ),
+        other => panic!("Expected MutationResult(rejected) when no active lease, got: {other:?}"),
     }
 }
