@@ -10,7 +10,7 @@
        "indicator"  — circle; fill is bound to "severity" via discrete value_map
 
      Token placeholders ({{...}}) are resolved at bundle load time.
-     Zero hardcoded hex colors — all colors use {{token.key}} form.
+     Zero hardcoded hex colors — all colors use token placeholder form.
 
      data-role="text" on label-text satisfies DualLayer readability profile
      validation: stroke + fill both present, stroke-width >= 1.0. -->

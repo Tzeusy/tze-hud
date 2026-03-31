@@ -1195,3 +1195,350 @@ svg_file = "layer.svg"
         "well-formed profile-scoped DualLayer bundle should load; got {result:?}"
     );
 }
+
+// ─── Exemplar gauge bundle (assets/widgets/gauge/) [hud-x5cm] ────────────────
+//
+// These tests validate the production-quality exemplar gauge bundle that lives
+// at assets/widgets/gauge/ (distinct from the unit-test fixture at
+// crates/tze_hud_widget/tests/fixtures/gauge/).
+//
+// The exemplar uses {{token.key}} placeholders in all SVG color/style
+// attributes — zero hardcoded hex values.  A canonical token map is required
+// to load it successfully.
+
+/// Returns the path to the production exemplar gauge bundle.
+/// Located at <workspace>/assets/widgets/gauge/ relative to CARGO_MANIFEST_DIR.
+fn exemplar_gauge_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..") // crates/
+        .join("..") // workspace root
+        .join("assets")
+        .join("widgets")
+        .join("gauge")
+}
+
+/// Returns the canonical token map for the production gauge exemplar.
+/// Keys match every {{token.key}} placeholder in background.svg and fill.svg.
+fn canonical_gauge_tokens() -> HashMap<String, String> {
+    let mut tokens = HashMap::new();
+    tokens.insert("color.backdrop.default".to_string(), "#000000".to_string());
+    tokens.insert("color.border.default".to_string(), "#333333".to_string());
+    tokens.insert("color.text.accent".to_string(), "#4A9EFF".to_string());
+    tokens.insert("color.text.primary".to_string(), "#FFFFFF".to_string());
+    tokens.insert("color.outline.default".to_string(), "#000000".to_string());
+    tokens.insert("stroke.outline.width".to_string(), "1".to_string());
+    tokens.insert("color.severity.info".to_string(), "#4A9EFF".to_string());
+    tokens
+}
+
+/// AC-1: The exemplar gauge bundle loads without errors via `load_bundle_dir_with_tokens`.
+/// Validates that the production bundle is structurally valid and all token
+/// placeholders are resolvable with the canonical token map.
+///
+/// Source: hud-x5cm §Acceptance criterion 1.
+#[test]
+fn exemplar_gauge_loads_without_errors() {
+    let dir = exemplar_gauge_path();
+    let tokens = canonical_gauge_tokens();
+    let result = load_bundle_dir_with_tokens(&dir, &tokens);
+    match &result {
+        BundleScanResult::Ok(_) => {}
+        BundleScanResult::Err(e) => {
+            panic!("exemplar gauge bundle failed to load: {e}");
+        }
+    }
+}
+
+/// AC-2: Token resolution produces correct values in the stored SVG bytes.
+/// After loading with the canonical token map, the resolved SVG contents must
+/// contain the expected colour values and must not contain any {{token.*}} placeholders.
+///
+/// Source: hud-x5cm §Acceptance criterion 2.
+#[test]
+fn exemplar_gauge_token_resolution_correct() {
+    let dir = exemplar_gauge_path();
+    let tokens = canonical_gauge_tokens();
+    let result = load_bundle_dir_with_tokens(&dir, &tokens);
+    let bundle = match result {
+        BundleScanResult::Ok(b) => b,
+        BundleScanResult::Err(e) => panic!("exemplar gauge failed to load: {e}"),
+    };
+
+    // background.svg: tokens color.backdrop.default and color.border.default must be resolved.
+    let bg = bundle.svg_contents.get("background.svg").unwrap();
+    let bg_str = std::str::from_utf8(bg).unwrap();
+    assert!(
+        bg_str.contains("#000000"),
+        "background.svg must contain resolved backdrop color #000000: {bg_str}"
+    );
+    assert!(
+        bg_str.contains("#333333"),
+        "background.svg must contain resolved border color #333333: {bg_str}"
+    );
+    assert!(
+        !bg_str.contains("{{token."),
+        "background.svg must not contain unresolved token placeholders after substitution: {bg_str}"
+    );
+
+    // fill.svg: accent, primary, outline, stroke-width, severity tokens must be resolved.
+    let fill = bundle.svg_contents.get("fill.svg").unwrap();
+    let fill_str = std::str::from_utf8(fill).unwrap();
+    assert!(
+        fill_str.contains("#4A9EFF"),
+        "fill.svg must contain resolved accent color #4A9EFF: {fill_str}"
+    );
+    assert!(
+        fill_str.contains("#FFFFFF"),
+        "fill.svg must contain resolved text.primary color #FFFFFF: {fill_str}"
+    );
+    assert!(
+        !fill_str.contains("{{token."),
+        "fill.svg must not contain unresolved token placeholders after substitution: {fill_str}"
+    );
+}
+
+/// AC-3: The exemplar gauge registers as "gauge" with 4 params, 2 layers, and
+/// correct default values for each parameter.
+///
+/// Source: hud-x5cm §Acceptance criterion 3.
+#[test]
+fn exemplar_gauge_registration_structure() {
+    let dir = exemplar_gauge_path();
+    let tokens = canonical_gauge_tokens();
+    let result = load_bundle_dir_with_tokens(&dir, &tokens);
+    let bundle = match result {
+        BundleScanResult::Ok(b) => b,
+        BundleScanResult::Err(e) => panic!("exemplar gauge failed to load: {e}"),
+    };
+
+    let def = &bundle.definition;
+
+    // Widget identity.
+    assert_eq!(def.id, "gauge", "widget id must be 'gauge'");
+    assert_eq!(def.name, "gauge", "widget name must be 'gauge'");
+    assert!(
+        !def.description.is_empty(),
+        "widget description must not be empty"
+    );
+
+    // 4 parameters: level, label, fill_color, severity.
+    assert_eq!(def.parameter_schema.len(), 4, "must have exactly 4 parameters");
+    let param_names: Vec<&str> = def
+        .parameter_schema
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(param_names.contains(&"level"), "must declare 'level' param");
+    assert!(param_names.contains(&"label"), "must declare 'label' param");
+    assert!(
+        param_names.contains(&"fill_color"),
+        "must declare 'fill_color' param"
+    );
+    assert!(
+        param_names.contains(&"severity"),
+        "must declare 'severity' param"
+    );
+
+    // Defaults: level=0.0, label="", fill_color=[74,158,255,255], severity="info".
+    let level_param = def
+        .parameter_schema
+        .iter()
+        .find(|p| p.name == "level")
+        .unwrap();
+    assert!(
+        matches!(
+            level_param.default_value,
+            tze_hud_scene::types::WidgetParameterValue::F32(v) if (v - 0.0_f32).abs() < 1e-6
+        ),
+        "level default must be 0.0, got {:?}",
+        level_param.default_value
+    );
+
+    let label_param = def
+        .parameter_schema
+        .iter()
+        .find(|p| p.name == "label")
+        .unwrap();
+    assert!(
+        matches!(
+            &label_param.default_value,
+            tze_hud_scene::types::WidgetParameterValue::String(s) if s.is_empty()
+        ),
+        "label default must be empty string, got {:?}",
+        label_param.default_value
+    );
+
+    let fill_color_param = def
+        .parameter_schema
+        .iter()
+        .find(|p| p.name == "fill_color")
+        .unwrap();
+    // Default declared as [74, 158, 255, 255] → normalized to [~0.29, ~0.62, ~1.0, 1.0].
+    if let tze_hud_scene::types::WidgetParameterValue::Color(c) = fill_color_param.default_value {
+        assert!(
+            (c.r - 74.0_f32 / 255.0).abs() < 0.005,
+            "fill_color default r must be ~{}, got {}",
+            74.0_f32 / 255.0,
+            c.r
+        );
+        assert!(
+            (c.g - 158.0_f32 / 255.0).abs() < 0.005,
+            "fill_color default g must be ~{}, got {}",
+            158.0_f32 / 255.0,
+            c.g
+        );
+        assert!(
+            (c.b - 255.0_f32 / 255.0).abs() < 0.005,
+            "fill_color default b must be ~1.0, got {}",
+            c.b
+        );
+        assert!(
+            (c.a - 1.0_f32).abs() < 0.005,
+            "fill_color default a must be 1.0, got {}",
+            c.a
+        );
+    } else {
+        panic!(
+            "fill_color default must be Color, got {:?}",
+            fill_color_param.default_value
+        );
+    }
+
+    let severity_param = def
+        .parameter_schema
+        .iter()
+        .find(|p| p.name == "severity")
+        .unwrap();
+    assert!(
+        matches!(
+            &severity_param.default_value,
+            tze_hud_scene::types::WidgetParameterValue::Enum(s) if s == "info"
+        ),
+        "severity default must be 'info', got {:?}",
+        severity_param.default_value
+    );
+
+    // 2 layers: background.svg (no bindings) and fill.svg (4 bindings).
+    assert_eq!(def.layers.len(), 2, "must have exactly 2 layers");
+    assert_eq!(
+        def.layers[0].svg_file, "background.svg",
+        "first layer must be background.svg"
+    );
+    assert_eq!(
+        def.layers[1].svg_file, "fill.svg",
+        "second layer must be fill.svg"
+    );
+    assert!(
+        def.layers[0].bindings.is_empty(),
+        "background.svg must have no bindings"
+    );
+    assert_eq!(
+        def.layers[1].bindings.len(),
+        4,
+        "fill.svg must have exactly 4 bindings"
+    );
+}
+
+/// AC-4: Operator token override — supplying color.text.primary=#00FF00 causes
+/// the label element's fill in the resolved SVG to be green (#00FF00) instead
+/// of the canonical white (#FFFFFF).
+///
+/// Source: hud-x5cm §Acceptance criterion 4.
+#[test]
+fn exemplar_gauge_operator_token_override_label_green() {
+    let dir = exemplar_gauge_path();
+
+    // Start with the canonical token map, then override color.text.primary.
+    let mut tokens = canonical_gauge_tokens();
+    tokens.insert("color.text.primary".to_string(), "#00FF00".to_string());
+
+    let result = load_bundle_dir_with_tokens(&dir, &tokens);
+    let bundle = match result {
+        BundleScanResult::Ok(b) => b,
+        BundleScanResult::Err(e) => panic!("exemplar gauge failed to load with override: {e}"),
+    };
+
+    let fill = bundle.svg_contents.get("fill.svg").unwrap();
+    let fill_str = std::str::from_utf8(fill).unwrap();
+
+    assert!(
+        fill_str.contains("#00FF00"),
+        "fill.svg must contain overridden label color #00FF00: {fill_str}"
+    );
+    assert!(
+        !fill_str.contains("#FFFFFF"),
+        "fill.svg must NOT contain the default text.primary #FFFFFF after override: {fill_str}"
+    );
+    assert!(
+        !fill_str.contains("{{token."),
+        "fill.svg must have no unresolved token placeholders after override: {fill_str}"
+    );
+}
+
+/// AC-5: The raw SVG files in the exemplar bundle contain zero hardcoded hex
+/// colour values.  All colours must use {{token.key}} placeholder form.
+///
+/// This test reads the SVG files directly from disk (before token resolution)
+/// and checks that no bare #RRGGBB or #RGB literals appear in attribute values.
+///
+/// Source: hud-x5cm §Acceptance criterion 5.
+#[test]
+fn exemplar_gauge_svgs_have_no_hardcoded_hex_colors() {
+    let dir = exemplar_gauge_path();
+    // Regex-free check: scan for patterns matching #[0-9a-fA-F]{3,6} in SVG attribute context.
+    // We read the raw bytes so no token substitution occurs.
+    for svg_name in &["background.svg", "fill.svg"] {
+        let path = dir.join(svg_name);
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {svg_name}: {e}"));
+
+        // Scan for any # followed by 3-8 hex digits (covers #RGB, #RRGGBB, #RRGGBBAA).
+        // We walk the string looking for '#' outside of comments.
+        for (i, ch) in content.char_indices() {
+            if ch != '#' {
+                continue;
+            }
+            // Count consecutive hex digits following the '#'.
+            let hex_run: String = content[i + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit())
+                .collect();
+            // A hex color is 3, 4, 6, or 8 hex digits after '#'.
+            if matches!(hex_run.len(), 3 | 4 | 6 | 8) {
+                // Allow '#' inside XML comments <!-- ... --> and inside CDATA.
+                // Simple heuristic: check the preceding context for "<!--".
+                let before = &content[..i];
+                let in_comment = before.rfind("<!--").is_some()
+                    && before
+                        .rfind("-->")
+                        .is_none_or(|end| end < before.rfind("<!--").unwrap());
+                if !in_comment {
+                    panic!(
+                        "{svg_name} contains a hardcoded hex color '#{hex_run}' at byte offset \
+                         {i}. All colors must use {{{{token.key}}}} placeholders."
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// AC-1 (failure path): Loading the exemplar gauge without any token map must
+/// fail with `BundleError::UnresolvedToken` because the SVGs contain
+/// {{token.key}} placeholders that cannot be resolved.
+///
+/// Source: hud-x5cm §Acceptance criterion 1 (negative case).
+#[test]
+fn exemplar_gauge_fails_without_token_map() {
+    let dir = exemplar_gauge_path();
+    // Pass an empty token map — placeholders cannot be resolved.
+    let result = load_bundle_dir_with_tokens(&dir, &HashMap::new());
+    match result {
+        BundleScanResult::Err(BundleError::UnresolvedToken { .. }) => {
+            // Expected: at least one token placeholder was unresolvable.
+        }
+        other => panic!(
+            "expected UnresolvedToken when loading exemplar gauge without tokens, got {other:?}"
+        ),
+    }
+}
