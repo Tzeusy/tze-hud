@@ -7212,7 +7212,9 @@ mod spec_scenarios {
         assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 1);
 
         // Clear as "agent.a" — should remove the publication
-        scene.clear_widget_for_publisher("gauge", "agent.a").unwrap();
+        scene
+            .clear_widget_for_publisher("gauge", "agent.a")
+            .unwrap();
         assert_eq!(
             scene.widget_registry.active_for_widget("gauge").len(),
             0,
@@ -7224,8 +7226,7 @@ mod spec_scenarios {
     /// THEN only the matching publisher's records are removed.
     #[test]
     fn clear_widget_for_publisher_only_affects_own_publications() {
-        let (mut scene, _tab) =
-            scene_with_gauge(ContentionPolicy::Stack { max_depth: 4 });
+        let (mut scene, _tab) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 4 });
 
         // Publish as "agent.a" and "agent.b"
         scene
@@ -7257,9 +7258,15 @@ mod spec_scenarios {
         assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 2);
 
         // Clear as "agent.a" — only "agent.a"'s publication should be removed
-        scene.clear_widget_for_publisher("gauge", "agent.a").unwrap();
+        scene
+            .clear_widget_for_publisher("gauge", "agent.a")
+            .unwrap();
         let remaining = scene.widget_registry.active_for_widget("gauge");
-        assert_eq!(remaining.len(), 1, "only agent.a's publication should be cleared");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only agent.a's publication should be cleared"
+        );
         assert_eq!(
             remaining[0].publisher_namespace, "agent.b",
             "agent.b's publication should remain"
@@ -7274,7 +7281,10 @@ mod spec_scenarios {
 
         // No publications yet — clear should succeed silently
         let result = scene.clear_widget_for_publisher("gauge", "agent.nobody");
-        assert!(result.is_ok(), "should succeed even when no publications exist");
+        assert!(
+            result.is_ok(),
+            "should succeed even when no publications exist"
+        );
         assert_eq!(scene.widget_registry.active_for_widget("gauge").len(), 0);
     }
 
@@ -7355,12 +7365,20 @@ mod spec_scenarios {
 
         // "agent.a"'s publication on "gauge" is gone; "agent.b"'s remains
         let gauge_pubs = scene.widget_registry.active_for_widget("gauge");
-        assert_eq!(gauge_pubs.len(), 1, "only agent.b's gauge pub should remain");
+        assert_eq!(
+            gauge_pubs.len(),
+            1,
+            "only agent.b's gauge pub should remain"
+        );
         assert_eq!(gauge_pubs[0].publisher_namespace, "agent.b");
 
         // "agent.a"'s publication on "mem-gauge" is gone
         let mem_pubs = scene.widget_registry.active_for_widget("mem-gauge");
-        assert_eq!(mem_pubs.len(), 0, "agent.a's mem-gauge pub should be cleared");
+        assert_eq!(
+            mem_pubs.len(),
+            0,
+            "agent.a's mem-gauge pub should be cleared"
+        );
     }
 
     /// WHEN ClearWidget is sent as a scene mutation batch
@@ -7416,7 +7434,11 @@ mod spec_scenarios {
 
         // Only "agent.b"'s publication should remain
         let remaining = scene.widget_registry.active_for_widget("gauge");
-        assert_eq!(remaining.len(), 1, "agent.a's publication should be cleared");
+        assert_eq!(
+            remaining.len(),
+            1,
+            "agent.a's publication should be cleared"
+        );
         assert_eq!(remaining[0].publisher_namespace, "agent.b");
     }
 }
