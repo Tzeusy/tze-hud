@@ -373,15 +373,18 @@ fn grace_period_expiry_removes_tile_and_nodes() {
         "expire_leases must return an expiry for the grace-expired orphaned lease"
     );
 
-    // Lease state must be EXPIRED.
-    // Note: after expiry the lease entry may still be present in the map until GC.
-    if let Some(lease) = scene.leases.get(&lease_id) {
-        assert!(
-            lease.state == LeaseState::Expired || lease.state == LeaseState::Revoked,
-            "lease must be in a terminal state after grace expiry, got {:?}",
-            lease.state
-        );
-    }
+    // Lease state must be EXPIRED or REVOKED (terminal).
+    // The lease entry remains in the map after expiry until GC; use expect() to
+    // make a missing entry detectable rather than silently passing.
+    let lease = scene
+        .leases
+        .get(&lease_id)
+        .expect("lease must still be present in the map after grace expiry");
+    assert!(
+        lease.state == LeaseState::Expired || lease.state == LeaseState::Revoked,
+        "lease must be in a terminal state after grace expiry, got {:?}",
+        lease.state
+    );
 
     // Tile must have been removed from the scene graph.
     assert!(
@@ -477,13 +480,17 @@ fn explicit_lease_release_removes_tile_cleanly() {
     );
 
     // Lease must be in a terminal state.
-    if let Some(lease) = scene.leases.get(&lease_id) {
-        assert!(
-            lease.state.is_terminal(),
-            "lease must be in terminal state after release, got {:?}",
-            lease.state
-        );
-    }
+    // The lease entry remains in the map after revocation until GC; use expect() to
+    // make a missing entry detectable rather than silently passing.
+    let lease = scene
+        .leases
+        .get(&lease_id)
+        .expect("lease must still be present in the map after revoke_lease");
+    assert!(
+        lease.state.is_terminal(),
+        "lease must be in terminal state after release, got {:?}",
+        lease.state
+    );
 }
 
 /// Explicit release also removes all nodes that were part of the tile.
