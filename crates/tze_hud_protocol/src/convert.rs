@@ -524,11 +524,9 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
         proto::FontFamilyProto::SystemMonospace => Some(FontFamily::SystemMonospace),
         proto::FontFamilyProto::SystemSerif => Some(FontFamily::SystemSerif),
     };
-    let font_weight = if p.font_weight > 0 {
-        Some(p.font_weight as u16)
-    } else {
-        None
-    };
+    // font_weight: 0 = not set; valid range 100-900. Use checked conversion to
+    // safely reject malformed values that exceed u16::MAX (e.g. from adversarial proto).
+    let font_weight = u16::try_from(p.font_weight).ok().filter(|&w| w > 0);
     // text_color: zero alpha = not set
     let text_color = p
         .text_color
