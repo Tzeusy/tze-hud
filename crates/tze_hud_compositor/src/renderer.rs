@@ -980,6 +980,11 @@ impl Compositor {
         // Render zone content.
         self.render_zone_content(scene, &mut vertices, sw, sh);
 
+        // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
+        // SVG rasterization can be slow; if a resize event arrives while we hold
+        // the surface texture, the texture is destroyed and queue.submit panics.
+        self.sync_widget_textures(scene);
+
         // Acquire frame through the surface trait (surface-agnostic).
         // The CompositorFrame._guard keeps the backing resource alive until drop.
         let frame = surface.acquire_frame();
@@ -994,8 +999,7 @@ impl Compositor {
         );
         telemetry.render_encode_us = encode_us;
 
-        // ── Widget pass: sync textures then composite above zone content ────
-        self.sync_widget_textures(scene);
+        // ── Widget pass: composite pre-synced textures above zone content ────
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
 
         let submit_start = std::time::Instant::now();
@@ -1066,6 +1070,9 @@ impl Compositor {
             }
         }
 
+        // ── Widget texture sync before frame acquisition (same as windowed path).
+        self.sync_widget_textures(scene);
+
         // Acquire frame via trait — same code path as render_frame().
         let frame = surface.acquire_frame();
 
@@ -1074,8 +1081,7 @@ impl Compositor {
             self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false);
         telemetry.render_encode_us = encode_us;
 
-        // ── Widget pass: sync textures then composite above zone content ────
-        self.sync_widget_textures(scene);
+        // ── Widget pass: composite pre-synced textures above zone content ────
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
 
         // Headless-specific: copy rendered texture to readback buffer.
@@ -1127,6 +1133,9 @@ impl Compositor {
         self.frame_number += 1;
 
         let mut telemetry = FrameTelemetry::new(self.frame_number);
+
+        // ── Widget texture sync before encoding (avoids surface-texture race).
+        self.sync_widget_textures(scene);
 
         // ── Pass 1: Content (background + agent tiles) ──────────────────────
         let tiles = scene.visible_tiles();
@@ -1258,8 +1267,8 @@ impl Compositor {
             tr.trim_atlas();
         }
 
-        // ── Widget pass: sync textures, then composite above content + text ──
-        self.sync_widget_textures(scene);
+        // ── Widget pass: composite pre-synced textures above content + text ──
+        // sync_widget_textures is called earlier, before frame encoding begins.
         self.encode_widget_pass(&mut encoder, &surface.view, &scene.widget_registry, sw, sh);
 
         // Chrome render pass — uses LoadOp::Load to preserve content pixels.
