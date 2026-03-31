@@ -36,7 +36,9 @@ use tze_hud_scene::config::{ConfigError, ConfigErrorCode};
 use tze_hud_widget::loader::{BundleScanResult, LoadedBundle, scan_bundle_dirs};
 
 use crate::component_types::ComponentType;
-use crate::tokens::{DesignTokenMap, font_family_from_keyword, parse_color_hex, parse_numeric, resolve_tokens};
+use crate::tokens::{
+    DesignTokenMap, font_family_from_keyword, parse_color_hex, parse_numeric, resolve_tokens,
+};
 
 // ─── ZoneRenderingOverride ────────────────────────────────────────────────────
 
@@ -466,12 +468,7 @@ fn load_profile_dir(
     // ── Step 6: Load zone overrides from zones/ subdirectory ──────────────────
     let zones_dir = dir.join("zones");
     let zone_overrides = if zones_dir.is_dir() {
-        match load_zone_overrides(
-            &zones_dir,
-            &name,
-            component_type,
-            &scoped_tokens,
-        ) {
+        match load_zone_overrides(&zones_dir, &name, component_type, &scoped_tokens) {
             Ok(overrides) => overrides,
             Err(zone_errors) => return Err(zone_errors),
         }
@@ -549,11 +546,7 @@ fn load_zone_overrides(
         if zone_type_name != governed_zone {
             errors.push(ConfigError {
                 code: ConfigErrorCode::ProfileZoneOverrideMismatch,
-                field_path: format!(
-                    "{}/zones/{}",
-                    zones_dir.display(),
-                    file_name
-                ),
+                field_path: format!("{}/zones/{}", zones_dir.display(), file_name),
                 expected: format!(
                     "zone override file for the governed zone \"{governed_zone}\" \
                      (profile {:?} with component_type {:?} only governs \"{governed_zone}\")",
@@ -615,12 +608,7 @@ fn load_zone_overrides(
         };
 
         // Validate and resolve the raw override.
-        match validate_zone_override(
-            &raw,
-            profile_name,
-            zone_type_name,
-            scoped_tokens,
-        ) {
+        match validate_zone_override(&raw, profile_name, zone_type_name, scoped_tokens) {
             Ok(override_val) => {
                 overrides.insert(zone_type_name.to_string(), override_val);
             }
@@ -656,7 +644,13 @@ fn validate_zone_override(
     macro_rules! resolve_numeric_field {
         ($raw_field:expr, $field_name:expr) => {
             if let Some(val) = &$raw_field {
-                Some(resolve_numeric_value(val, scoped_tokens, profile_name, zone_type_name, $field_name)?)
+                Some(resolve_numeric_value(
+                    val,
+                    scoped_tokens,
+                    profile_name,
+                    zone_type_name,
+                    $field_name,
+                )?)
             } else {
                 None
             }
@@ -668,7 +662,13 @@ fn validate_zone_override(
     // in Token Value Formats" — only the three system keywords are valid in v1.
     if let Some(val) = &raw.font_family {
         let s = extract_string_value(val, "font_family", profile_name, zone_type_name)?;
-        let resolved = resolve_token_ref(&s, scoped_tokens, profile_name, zone_type_name, "font_family")?;
+        let resolved = resolve_token_ref(
+            &s,
+            scoped_tokens,
+            profile_name,
+            zone_type_name,
+            "font_family",
+        )?;
         if font_family_from_keyword(&resolved).is_none() {
             return Err(ConfigError {
                 code: ConfigErrorCode::ProfileInvalidZoneOverride,
@@ -694,12 +694,20 @@ fn validate_zone_override(
     // ── text_color (color hex string) ────────────────────────────────────────
     if let Some(val) = &raw.text_color {
         let s = extract_string_value(val, "text_color", profile_name, zone_type_name)?;
-        let resolved = resolve_token_ref(&s, scoped_tokens, profile_name, zone_type_name, "text_color")?;
+        let resolved = resolve_token_ref(
+            &s,
+            scoped_tokens,
+            profile_name,
+            zone_type_name,
+            "text_color",
+        )?;
         // Validate color format.
         if parse_color_hex(&resolved).is_none() {
             return Err(ConfigError {
                 code: ConfigErrorCode::ProfileInvalidZoneOverride,
-                field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:text_color"),
+                field_path: format!(
+                    "profile:{profile_name}/zones/{zone_type_name}.toml:text_color"
+                ),
                 expected: "color hex string (#RRGGBB or #RRGGBBAA)".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
@@ -715,11 +723,19 @@ fn validate_zone_override(
     // ── text_align (enum) ────────────────────────────────────────────────────
     if let Some(val) = &raw.text_align {
         let s = extract_string_value(val, "text_align", profile_name, zone_type_name)?;
-        let resolved = resolve_token_ref(&s, scoped_tokens, profile_name, zone_type_name, "text_align")?;
+        let resolved = resolve_token_ref(
+            &s,
+            scoped_tokens,
+            profile_name,
+            zone_type_name,
+            "text_align",
+        )?;
         if !matches!(resolved.as_str(), "start" | "center" | "end") {
             return Err(ConfigError {
                 code: ConfigErrorCode::ProfileInvalidZoneOverride,
-                field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:text_align"),
+                field_path: format!(
+                    "profile:{profile_name}/zones/{zone_type_name}.toml:text_align"
+                ),
                 expected: "one of \"start\", \"center\", \"end\"".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
@@ -735,11 +751,19 @@ fn validate_zone_override(
     // ── backdrop_color (color hex string) ────────────────────────────────────
     if let Some(val) = &raw.backdrop_color {
         let s = extract_string_value(val, "backdrop_color", profile_name, zone_type_name)?;
-        let resolved = resolve_token_ref(&s, scoped_tokens, profile_name, zone_type_name, "backdrop_color")?;
+        let resolved = resolve_token_ref(
+            &s,
+            scoped_tokens,
+            profile_name,
+            zone_type_name,
+            "backdrop_color",
+        )?;
         if parse_color_hex(&resolved).is_none() {
             return Err(ConfigError {
                 code: ConfigErrorCode::ProfileInvalidZoneOverride,
-                field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:backdrop_color"),
+                field_path: format!(
+                    "profile:{profile_name}/zones/{zone_type_name}.toml:backdrop_color"
+                ),
                 expected: "color hex string (#RRGGBB or #RRGGBBAA)".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
@@ -753,11 +777,19 @@ fn validate_zone_override(
 
     // ── backdrop_opacity ─────────────────────────────────────────────────────
     if let Some(val) = &raw.backdrop_opacity {
-        let n = resolve_numeric_value(val, scoped_tokens, profile_name, zone_type_name, "backdrop_opacity")?;
+        let n = resolve_numeric_value(
+            val,
+            scoped_tokens,
+            profile_name,
+            zone_type_name,
+            "backdrop_opacity",
+        )?;
         if !(0.0..=1.0).contains(&n) {
             return Err(ConfigError {
                 code: ConfigErrorCode::ProfileInvalidZoneOverride,
-                field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:backdrop_opacity"),
+                field_path: format!(
+                    "profile:{profile_name}/zones/{zone_type_name}.toml:backdrop_opacity"
+                ),
                 expected: "a float in [0.0, 1.0]".into(),
                 got: format!("{n}"),
                 hint: format!(
@@ -773,11 +805,19 @@ fn validate_zone_override(
     // ── outline_color (color hex string) ─────────────────────────────────────
     if let Some(val) = &raw.outline_color {
         let s = extract_string_value(val, "outline_color", profile_name, zone_type_name)?;
-        let resolved = resolve_token_ref(&s, scoped_tokens, profile_name, zone_type_name, "outline_color")?;
+        let resolved = resolve_token_ref(
+            &s,
+            scoped_tokens,
+            profile_name,
+            zone_type_name,
+            "outline_color",
+        )?;
         if parse_color_hex(&resolved).is_none() {
             return Err(ConfigError {
                 code: ConfigErrorCode::ProfileInvalidZoneOverride,
-                field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:outline_color"),
+                field_path: format!(
+                    "profile:{profile_name}/zones/{zone_type_name}.toml:outline_color"
+                ),
                 expected: "color hex string (#RRGGBB or #RRGGBBAA)".into(),
                 got: format!("{resolved:?}"),
                 hint: format!(
@@ -800,12 +840,22 @@ fn validate_zone_override(
 
     // ── transition_in_ms ─────────────────────────────────────────────────────
     if let Some(val) = &raw.transition_in_ms {
-        out.transition_in_ms = Some(resolve_u32_value(val, profile_name, zone_type_name, "transition_in_ms")?);
+        out.transition_in_ms = Some(resolve_u32_value(
+            val,
+            profile_name,
+            zone_type_name,
+            "transition_in_ms",
+        )?);
     }
 
     // ── transition_out_ms ────────────────────────────────────────────────────
     if let Some(val) = &raw.transition_out_ms {
-        out.transition_out_ms = Some(resolve_u32_value(val, profile_name, zone_type_name, "transition_out_ms")?);
+        out.transition_out_ms = Some(resolve_u32_value(
+            val,
+            profile_name,
+            zone_type_name,
+            "transition_out_ms",
+        )?);
     }
 
     Ok(out)
@@ -824,9 +874,7 @@ fn extract_string_value(
         toml::Value::String(s) => Ok(s.clone()),
         _ => Err(ConfigError {
             code: ConfigErrorCode::ProfileInvalidZoneOverride,
-            field_path: format!(
-                "profile:{profile_name}/zones/{zone_type_name}.toml:{field_name}"
-            ),
+            field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:{field_name}"),
             expected: "a TOML string (possibly with {{token.key}} reference)".into(),
             got: format!("{val:?}"),
             hint: format!(
@@ -927,7 +975,8 @@ fn resolve_numeric_value(
         toml::Value::Integer(i) => Ok(*i as f32),
         toml::Value::String(s) => {
             // May be a {{token.key}} reference.
-            let resolved = resolve_token_ref(s, scoped_tokens, profile_name, zone_type_name, field_name)?;
+            let resolved =
+                resolve_token_ref(s, scoped_tokens, profile_name, zone_type_name, field_name)?;
             parse_numeric(&resolved).ok_or_else(|| ConfigError {
                 code: ConfigErrorCode::ProfileInvalidZoneOverride,
                 field_path: format!(
@@ -944,9 +993,7 @@ fn resolve_numeric_value(
         }
         _ => Err(ConfigError {
             code: ConfigErrorCode::ProfileInvalidZoneOverride,
-            field_path: format!(
-                "profile:{profile_name}/zones/{zone_type_name}.toml:{field_name}"
-            ),
+            field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:{field_name}"),
             expected: "a TOML float, integer, or string with {{token.key}} reference".into(),
             got: format!("{val:?}"),
             hint: format!(
@@ -984,9 +1031,7 @@ fn resolve_u32_value(
         }
         _ => Err(ConfigError {
             code: ConfigErrorCode::ProfileInvalidZoneOverride,
-            field_path: format!(
-                "profile:{profile_name}/zones/{zone_type_name}.toml:{field_name}"
-            ),
+            field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:{field_name}"),
             expected: "a TOML integer (e.g., transition_in_ms = 200)".into(),
             got: format!("{val:?}"),
             hint: format!(
@@ -1041,7 +1086,8 @@ mod tests {
 
     #[test]
     fn valid_profile_round_trip() {
-        let (_dir, path) = make_profile_dir(r##"
+        let (_dir, path) = make_profile_dir(
+            r##"
 name = "test-subtitle"
 version = "1.0.0"
 description = "Test subtitle profile"
@@ -1049,7 +1095,8 @@ component_type = "subtitle"
 
 [token_overrides]
 "color.text.primary" = "#FFFF00"
-"##);
+"##,
+        );
 
         let result = load_profile_dir(&path, &empty_tokens());
         let profile = result.expect("valid profile should load");
@@ -1100,7 +1147,9 @@ component_type = "subtitle"
         let result = load_profile_dir(&path, &empty_tokens());
         let errors = result.expect_err("missing name should produce errors");
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ParseError)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ParseError)),
             "missing name should produce ParseError, got: {errors:?}"
         );
     }
@@ -1117,7 +1166,9 @@ component_type = "subtitle"
         let result = load_profile_dir(&path, &empty_tokens());
         let errors = result.expect_err("missing version should produce errors");
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ParseError)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ParseError)),
             "missing version should produce ParseError"
         );
     }
@@ -1134,7 +1185,9 @@ version = "1.0.0"
         let result = load_profile_dir(&path, &empty_tokens());
         let errors = result.expect_err("missing component_type should produce errors");
         assert!(
-            errors.iter().any(|e| matches!(e.code, ConfigErrorCode::ParseError)),
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ParseError)),
             "missing component_type should produce ParseError"
         );
     }
@@ -1205,8 +1258,7 @@ component_type = "subtitle"
         std::fs::write(p2.join("profile.toml"), profile_toml).unwrap();
 
         let mut errors: Vec<ConfigError> = Vec::new();
-        let profiles =
-            scan_profile_dirs(&[root1, root2], &empty_tokens(), &mut errors);
+        let profiles = scan_profile_dirs(&[root1, root2], &empty_tokens(), &mut errors);
 
         // Exactly one profile loaded (the second is rejected as duplicate).
         assert_eq!(profiles.len(), 1, "only one profile should be loaded");
@@ -1257,7 +1309,10 @@ text_align = "center"
 
         let result = load_profile_dir(&path, &empty_tokens());
         let profile = result.expect("correct zone override should load");
-        let zone_override = profile.zone_overrides.get("subtitle").expect("subtitle override should exist");
+        let zone_override = profile
+            .zone_overrides
+            .get("subtitle")
+            .expect("subtitle override should exist");
         assert_eq!(zone_override.backdrop_opacity, Some(0.8));
         assert_eq!(zone_override.text_align, Some("center".to_string()));
     }
@@ -1454,7 +1509,8 @@ component_type = "notification"
         );
 
         let result = load_profile_dir(&path, &empty_tokens());
-        let errors = result.expect_err("notification.toml for notification type should be rejected");
+        let errors =
+            result.expect_err("notification.toml for notification type should be rejected");
         assert!(
             errors
                 .iter()
@@ -1468,7 +1524,10 @@ component_type = "notification"
 
     #[test]
     fn extract_token_key_valid() {
-        assert_eq!(extract_token_key("{{color.text.primary}}"), Some("color.text.primary"));
+        assert_eq!(
+            extract_token_key("{{color.text.primary}}"),
+            Some("color.text.primary")
+        );
         assert_eq!(extract_token_key("{{spacing.unit}}"), Some("spacing.unit"));
         assert_eq!(extract_token_key("{{a}}"), Some("a"));
     }
