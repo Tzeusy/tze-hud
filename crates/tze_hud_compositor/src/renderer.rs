@@ -2293,6 +2293,7 @@ mod tests {
                 backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
                 text_align: None,
                 margin_px: None,
+                ..Default::default()
             },
             contention_policy: ContentionPolicy::LatestWins,
             max_publishers: 1,
@@ -2374,6 +2375,7 @@ mod tests {
                 backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.75)),
                 text_align: None,
                 margin_px: None,
+                ..Default::default()
             },
             contention_policy: ContentionPolicy::LatestWins,
             max_publishers: 1,
@@ -2456,6 +2458,7 @@ mod tests {
                 backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
                 text_align: None,
                 margin_px: None,
+                ..Default::default()
             },
             contention_policy: ContentionPolicy::LatestWins,
             max_publishers: 1,
@@ -2624,6 +2627,7 @@ mod tests {
                 backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
                 text_align: None,
                 margin_px: None,
+                ..Default::default()
             },
             contention_policy: ContentionPolicy::LatestWins,
             max_publishers: 1,
