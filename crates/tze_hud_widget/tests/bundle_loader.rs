@@ -1322,7 +1322,11 @@ fn exemplar_gauge_registration_structure() {
     );
 
     // 4 parameters: level, label, fill_color, severity.
-    assert_eq!(def.parameter_schema.len(), 4, "must have exactly 4 parameters");
+    assert_eq!(
+        def.parameter_schema.len(),
+        4,
+        "must have exactly 4 parameters"
+    );
     let param_names: Vec<&str> = def
         .parameter_schema
         .iter()

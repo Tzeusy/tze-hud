@@ -574,8 +574,9 @@ fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, Status> {
 /// `BatchRejected` or `MutationResult` echoes the client's own `batch_id`.
 /// Note: `bytes_to_scene_id` validates only the byte length (16 bytes); UUID
 /// version/variant are not checked because the spec (RFC 0005 §3.2) requires
-/// only that `batch_id` is a 16-byte little-endian SceneId — version bits are
-/// the client's responsibility.
+/// only that `batch_id` is a 16-byte RFC 4122 UUID (big-endian, matching
+/// `scene_id_to_bytes` / `bytes_to_scene_id`) — version bits are the client's
+/// responsibility.
 ///
 /// Falls back to a fresh `SceneId` only when the field is absent or malformed
 /// (wrong length); logs a debug warning so SDK regressions are diagnosable.
@@ -2171,12 +2172,22 @@ async fn handle_mutation_batch(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                // tile_id is 16-byte UUIDv7 bytes (SceneId wire format).
-                if let Some(tile_id) = tze_hud_scene::SceneId::from_bytes_le(&str_.tile_id) {
-                    if let Some(ref node_proto) = str_.node
-                        && let Some(node) = convert::proto_node_to_scene(node_proto)
-                    {
-                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
+                // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
+                match bytes_to_scene_id(&str_.tile_id) {
+                    Ok(tile_id) => {
+                        if let Some(ref node_proto) = str_.node
+                            && let Some(node) = convert::proto_node_to_scene(node_proto)
+                        {
+                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = str_.tile_id.len(),
+                            "SetTileRoot: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
                     }
                 }
             }
@@ -2370,12 +2381,22 @@ async fn apply_queued_batch_to_scene(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
-                // tile_id is 16-byte UUIDv7 bytes (SceneId wire format).
-                if let Some(tile_id) = tze_hud_scene::SceneId::from_bytes_le(&str_.tile_id) {
-                    if let Some(ref node_proto) = str_.node
-                        && let Some(node) = convert::proto_node_to_scene(node_proto)
-                    {
-                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
+                // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
+                match bytes_to_scene_id(&str_.tile_id) {
+                    Ok(tile_id) => {
+                        if let Some(ref node_proto) = str_.node
+                            && let Some(node) = convert::proto_node_to_scene(node_proto)
+                        {
+                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = str_.tile_id.len(),
+                            "SetTileRoot (queued): invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
                     }
                 }
             }
