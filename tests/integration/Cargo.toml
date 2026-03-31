@@ -8,6 +8,14 @@ edition.workspace = true
 name = "multi_agent"
 path = "multi_agent.rs"
 
+# E13: Presence card tile builder — avatar upload, tile creation, node tree.
+# Tests hud-apoe.1 acceptance criteria: avatar resource upload (BLAKE3 dedup),
+# tile geometry (200x80, computed y-offset, z_order), 3-node flat tree
+# (SolidColorNode + StaticImageNode + TextMarkdownNode), and batch submission.
+[[test]]
+name = "presence_card_tile"
+path = "presence_card_tile.rs"
+
 [[test]]
 name = "trace_regression"
 path = "trace_regression.rs"
@@ -52,6 +60,7 @@ tze_hud_scene = { path = "../../crates/tze_hud_scene" }
 tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["headless", "dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
+tze_hud_resource = { path = "../../crates/tze_hud_resource" }
 tze_hud_telemetry = { path = "../../crates/tze_hud_telemetry" }
 tze_hud_validation = { path = "../../crates/tze_hud_validation" }
 tokio = { workspace = true }
@@ -60,3 +69,5 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+blake3 = { workspace = true }
