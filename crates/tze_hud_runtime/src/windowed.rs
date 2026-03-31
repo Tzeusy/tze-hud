@@ -272,6 +272,9 @@ struct WindowedRuntimeState {
     /// Pending mode switch requested at runtime (disruptive — triggers surface
     /// recreation on the next event loop tick).
     pending_mode_switch: Option<WindowMode>,
+    /// Pending widget SVG assets to register with the compositor after
+    /// `init_widget_renderer` is called. Consumed once during first `resumed()`.
+    pending_widget_svgs: Vec<crate::widget_startup::WidgetSvgAsset>,
     /// Tracked modifier key state for shortcut detection.
     modifiers: winit::keyboard::ModifiersState,
     /// Current monitor index for Ctrl+Shift+F8/F9 cycling.
@@ -522,6 +525,13 @@ impl ApplicationHandler for WinitApp {
             .format;
         compositor.init_text_renderer(surface_format);
         compositor.init_widget_renderer(surface_format);
+
+        // Register pending widget SVG assets with the widget renderer.
+        if let Some(wr) = compositor.widget_renderer_mut() {
+            for (type_id, filename, bytes) in self.state.pending_widget_svgs.drain(..) {
+                wr.register_svg(&type_id, &filename, bytes);
+            }
+        }
         tracing::info!(format = ?surface_format, "windowed: text + widget renderers initialized");
 
         let window_surface = Arc::new(window_surface);
@@ -1113,6 +1123,7 @@ impl WindowedRuntime {
             .as_deref()
             .and_then(|toml| toml::from_str(toml).ok());
 
+        let mut pending_widget_svgs: Vec<crate::widget_startup::WidgetSvgAsset> = Vec::new();
         let shared_scene = {
             let mut scene = SceneGraph::new(width, height);
 
@@ -1137,6 +1148,8 @@ impl WindowedRuntime {
                 );
                 // Step 9b: register profile-scoped widget bundles
                 register_profile_widgets(&mut scene, &startup_result);
+                // Stash SVG assets for compositor registration after init_widget_renderer.
+                pending_widget_svgs = startup_result.widget_svg_assets;
             } else {
                 // No config provided — bootstrap with canonical zone defaults (no token derivation).
                 scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
@@ -1290,6 +1303,7 @@ impl WindowedRuntime {
             effective_mode,
             hit_regions: Vec::new(),
             pending_mode_switch: None,
+            pending_widget_svgs,
             modifiers: winit::keyboard::ModifiersState::empty(),
             current_monitor_index: 0,
         };

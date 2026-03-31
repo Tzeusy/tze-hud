@@ -79,6 +79,8 @@ pub struct ComponentStartupResult {
     ///
     /// These are already processed and ready for `WidgetRegistry::register_definition`.
     pub profile_widget_bundles: Vec<LoadedBundle>,
+    /// SVG assets from global widget bundles for compositor registration.
+    pub widget_svg_assets: Vec<crate::widget_startup::WidgetSvgAsset>,
 }
 
 // ─── run_component_startup ────────────────────────────────────────────────────
@@ -132,7 +134,7 @@ pub fn run_component_startup(
     // placeholders in SVG files are resolved at load time.
     // (Profile-scoped widget bundles are handled in step 4 below.)
     let tab_map = std::collections::HashMap::new();
-    init_widget_registry(scene, raw, config_parent, &tab_map, &global_tokens);
+    let widget_svg_assets = init_widget_registry(scene, raw, config_parent, &tab_map, &global_tokens);
 
     tracing::debug!("component_startup: step 3 — global widget bundles loaded");
 
@@ -324,6 +326,7 @@ pub fn run_component_startup(
         global_tokens,
         zone_registry,
         profile_widget_bundles,
+        widget_svg_assets,
     }
 }
 

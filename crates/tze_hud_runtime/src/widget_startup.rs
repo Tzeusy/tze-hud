@@ -69,21 +69,24 @@ use tze_hud_widget::loader::{BundleScanResult, scan_bundle_dirs};
 ///   in widget SVG files. Pass an empty map when no design tokens are configured.
 ///   Per component-shape-language/spec.md §SVG Token Placeholder Resolution: global
 ///   bundles resolve against the global token map.
+/// SVG asset from a loaded widget bundle: `(widget_type_id, svg_filename, svg_bytes)`.
+pub type WidgetSvgAsset = (String, String, Vec<u8>);
+
 pub fn init_widget_registry(
     scene: &mut SceneGraph,
     raw: &RawConfig,
     config_parent: Option<&Path>,
     tab_name_to_id: &HashMap<String, SceneId>,
     token_map: &HashMap<String, String>,
-) {
+) -> Vec<WidgetSvgAsset> {
     let Some(wb) = &raw.widget_bundles else {
         tracing::debug!("widget_startup: no [widget_bundles] section; widget registry empty");
-        return;
+        return Vec::new();
     };
 
     if wb.paths.is_empty() {
         tracing::debug!("widget_startup: [widget_bundles].paths is empty; widget registry empty");
-        return;
+        return Vec::new();
     }
 
     let base = config_parent.unwrap_or_else(|| Path::new("."));
@@ -106,6 +109,7 @@ pub fn init_widget_registry(
     // already handles within-dir duplicates, but we re-check here for safety).
     let mut registered_names: HashMap<String, ()> = HashMap::new();
     let mut type_map: HashMap<String, LoadedWidgetType> = HashMap::new();
+    let mut svg_assets: Vec<WidgetSvgAsset> = Vec::new();
 
     for result in scan_results {
         match result {
@@ -130,9 +134,15 @@ pub fn init_widget_registry(
                 };
                 type_map.insert(name.clone(), loaded);
 
+                // Collect SVG bytes for compositor registration.
+                for (svg_filename, svg_bytes) in &bundle.svg_contents {
+                    svg_assets.push((name.clone(), svg_filename.clone(), svg_bytes.clone()));
+                }
+
                 // Register the WidgetDefinition in the scene graph.
                 tracing::info!(
                     widget_name = %name,
+                    svg_count = bundle.svg_contents.len(),
                     "widget_startup: registered widget type"
                 );
                 scene.widget_registry.register_definition(bundle.definition);
@@ -242,8 +252,11 @@ pub fn init_widget_registry(
 
     tracing::info!(
         widget_instances = total_instances,
+        svg_assets = svg_assets.len(),
         "widget_startup: widget instance creation complete"
     );
+
+    svg_assets
 }
 
 // ─── Helper: collect tab_name → SceneId from scene graph ──────────────────────
