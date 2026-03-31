@@ -1665,15 +1665,7 @@ impl Compositor {
                 // Apply zone animation opacity.
                 rgba.a *= anim_opacity.clamp(0.0, 1.0);
 
-                vertices.extend_from_slice(&rect_vertices(
-                    x,
-                    y,
-                    w,
-                    h,
-                    sw,
-                    sh,
-                    rgba.to_array(),
-                ));
+                vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, rgba.to_array()));
             }
         }
 
@@ -3295,7 +3287,10 @@ mod tests {
         // Opacity at duration=0 should immediately be target (1.0).
         let opacity = state.current_opacity();
         assert_eq!(opacity, 1.0, "fade-in with 0ms should be 1.0 immediately");
-        assert!(state.is_complete(), "0ms fade-in should be complete immediately");
+        assert!(
+            state.is_complete(),
+            "0ms fade-in should be complete immediately"
+        );
     }
 
     /// ZoneAnimationState fade-out starts at 1.0 and reaches 0.0 after duration.
@@ -3304,7 +3299,10 @@ mod tests {
         let state = ZoneAnimationState::fade_out(0);
         let opacity = state.current_opacity();
         assert_eq!(opacity, 0.0, "fade-out with 0ms should be 0.0 immediately");
-        assert!(state.is_complete(), "0ms fade-out should be complete immediately");
+        assert!(
+            state.is_complete(),
+            "0ms fade-out should be complete immediately"
+        );
     }
 
     /// ZoneAnimationState with non-zero duration: opacity is interpolated.
@@ -3344,8 +3342,8 @@ mod tests {
             },
             accepted_media_types: vec![ZoneMediaType::StreamText],
             rendering_policy: RenderingPolicy {
-                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)),  // alpha=1.0
-                backdrop_opacity: Some(0.6),                      // override to 0.6
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)), // alpha=1.0
+                backdrop_opacity: Some(0.6),                   // override to 0.6
                 ..Default::default()
             },
             contention_policy: ContentionPolicy::LatestWins,

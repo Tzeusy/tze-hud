@@ -37,7 +37,9 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
-use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow};
+use tze_hud_scene::types::{
+    FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
+};
 use wgpu::{Device, MultisampleState, Queue};
 
 // ─── TextRasterizer ───────────────────────────────────────────────────────────
@@ -390,14 +392,8 @@ impl TextItem {
         // Margin: prefer margin_horizontal/margin_vertical; fall back to margin_px;
         // then fall back to 8px.  Per spec §Extended RenderingPolicy: margin_horizontal
         // "overrides margin_px for the horizontal axis. When None, falls back to margin_px."
-        let margin_h = policy
-            .margin_horizontal
-            .or(policy.margin_px)
-            .unwrap_or(8.0);
-        let margin_v = policy
-            .margin_vertical
-            .or(policy.margin_px)
-            .unwrap_or(8.0);
+        let margin_h = policy.margin_horizontal.or(policy.margin_px).unwrap_or(8.0);
+        let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
 
         let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
         let font_family = policy.font_family.unwrap_or(FontFamily::SystemSansSerif);
@@ -774,8 +770,14 @@ mod tests {
             ..Default::default()
         };
         let item = TextItem::from_zone_policy("text", 0.0, 0.0, 400.0, 100.0, &policy, 1.0);
-        assert_eq!(item.pixel_x, 20.0, "margin_px fallback should apply to horizontal margin");
-        assert_eq!(item.pixel_y, 20.0, "margin_px fallback should apply to vertical margin");
+        assert_eq!(
+            item.pixel_x, 20.0,
+            "margin_px fallback should apply to horizontal margin"
+        );
+        assert_eq!(
+            item.pixel_y, 20.0,
+            "margin_px fallback should apply to vertical margin"
+        );
     }
 
     #[test]
