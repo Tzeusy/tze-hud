@@ -226,7 +226,18 @@ pub fn scan_profile_dirs(
             }
         };
 
-        for entry in read_dir.flatten() {
+        for entry_result in read_dir {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        root = %root.display(),
+                        error = %e,
+                        "error reading profile root directory entry, skipping"
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_dir() {
                 continue;
@@ -508,7 +519,18 @@ fn load_zone_overrides(
         }
     };
 
-    for entry in read_dir.flatten() {
+    for entry_result in read_dir {
+        let entry = match entry_result {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    zones_dir = %zones_dir.display(),
+                    error = %e,
+                    "error reading zone override directory entry, skipping"
+                );
+                continue;
+            }
+        };
         let path = entry.path();
 
         // Only process .toml files.
