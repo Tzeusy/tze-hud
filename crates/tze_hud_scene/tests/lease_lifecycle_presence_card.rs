@@ -80,7 +80,11 @@ fn create_presence_card_tile(
         lease_id: Some(lease_id),
     };
     let result = scene.apply_batch(&batch);
-    assert!(result.applied, "CreateTile must succeed: {:?}", result.error);
+    assert!(
+        result.applied,
+        "CreateTile must succeed: {:?}",
+        result.error
+    );
     result.created_ids[0]
 }
 
@@ -122,8 +126,7 @@ fn test_presence_card_lease_request_granted() {
 
     // Correct TTL stored.
     assert_eq!(
-        scene.leases[&lease_id].ttl_ms,
-        PRESENCE_CARD_TTL_MS,
+        scene.leases[&lease_id].ttl_ms, PRESENCE_CARD_TTL_MS,
         "granted TTL must match requested ttl_ms"
     );
 
@@ -156,8 +159,11 @@ fn test_presence_card_lease_request_granted() {
 #[test]
 fn test_presence_card_auto_renew_fires_at_75_percent_ttl() {
     let clock = TestClock::new(0);
-    let mut ttl =
-        TtlState::new_activated(PRESENCE_CARD_TTL_MS, tze_hud_scene::lease::RenewalPolicy::AutoRenew, clock.clone());
+    let mut ttl = TtlState::new_activated(
+        PRESENCE_CARD_TTL_MS,
+        tze_hud_scene::lease::RenewalPolicy::AutoRenew,
+        clock.clone(),
+    );
 
     // Timer must be Armed at activation (agent needs no renewal timer).
     assert_eq!(
@@ -468,9 +474,7 @@ fn test_mutation_rejected_with_no_lease() {
                 "LeaseNotFound must reference the correct lease_id"
             );
         }
-        other => panic!(
-            "Expected ValidationError::LeaseNotFound, got: {other:?}"
-        ),
+        other => panic!("Expected ValidationError::LeaseNotFound, got: {other:?}"),
     }
     assert_eq!(
         scene.tile_count(),
@@ -509,13 +513,11 @@ fn test_presence_card_tile_binds_to_lease() {
 
     // Tile is bound to the lease.
     assert_eq!(
-        scene.tiles[&tile_id].lease_id,
-        lease_id,
+        scene.tiles[&tile_id].lease_id, lease_id,
         "tile's lease_id must bind to the granting lease"
     );
     assert_eq!(
-        scene.tiles[&tile_id].namespace,
-        "agent.presence",
+        scene.tiles[&tile_id].namespace, "agent.presence",
         "tile's namespace must match the agent's namespace"
     );
 
@@ -534,7 +536,10 @@ fn test_presence_card_tile_binds_to_lease() {
         lease_id: None,
     };
     let root_result = scene.apply_batch(&batch);
-    assert!(root_result.applied, "SetTileRoot must succeed on active lease");
+    assert!(
+        root_result.applied,
+        "SetTileRoot must succeed on active lease"
+    );
 
     // Lease is ACTIVE; tile visible.
     assert_eq!(
@@ -751,7 +756,10 @@ fn test_presence_card_namespace_isolation() {
     // All three agents render simultaneously (60fps target is compositor concern;
     // here we just verify all tiles exist).
     for &tile_id in &[tile_a, tile_b, tile_c] {
-        assert!(scene.tiles.contains_key(&tile_id), "tile {tile_id} must exist");
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "tile {tile_id} must exist"
+        );
     }
 
     // ── Agent bravo disconnects ────────────────────────────────────────────
@@ -935,8 +943,7 @@ fn test_presence_card_full_lifecycle_integration() {
     );
     assert_eq!(scene.tile_count(), 1);
     assert_eq!(
-        scene.tiles[&tile_id].lease_id,
-        lease_id,
+        scene.tiles[&tile_id].lease_id, lease_id,
         "tile bound to lease"
     );
 
@@ -988,11 +995,7 @@ fn test_presence_card_full_lifecycle_integration() {
         .expect("disconnect");
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
     // Tile still visible during grace (disconnection badge would be set).
-    assert_eq!(
-        scene.tile_count(),
-        1,
-        "tile visible during grace period"
-    );
+    assert_eq!(scene.tile_count(), 1, "tile visible during grace period");
 
     // Mutations are rejected while ORPHANED.
     let orphan_batch = MutationBatch {
@@ -1028,11 +1031,7 @@ fn test_presence_card_full_lifecycle_integration() {
         LeaseState::Expired,
         "lease EXPIRED after grace"
     );
-    assert_eq!(
-        scene.tile_count(),
-        0,
-        "zero tiles after lease expiry"
-    );
+    assert_eq!(scene.tile_count(), 0, "zero tiles after lease expiry");
     assert!(
         !scene.tiles.contains_key(&tile_id),
         "tile must be removed after expiry"
