@@ -110,5 +110,5 @@
 - [ ] 12.8 Integration tests: widget in SceneSnapshot (session establishment includes widget registry)
 - [ ] 12.9 Compositor tests: SVG rasterization correctness (render known SVG, compare output texture)
 - [ ] 12.10 Compositor tests: parameter interpolation (verify intermediate values during transition)
-- [ ] 12.11 Performance tests: re-rasterization < 2ms for 512x512, SceneSnapshot < 1ms with widgets
+- [x] 12.11 Performance tests: re-rasterization < 2ms for 512x512, SceneSnapshot < 1ms with widgets
 - [ ] 12.12 Configuration tests: valid widget config, each CONFIG_WIDGET_* error case
