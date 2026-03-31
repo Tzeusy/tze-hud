@@ -184,6 +184,10 @@ pub struct WindowedConfig {
     /// }
     /// ```
     pub config_file_path: Option<String>,
+    /// Render zone boundaries with colored debug tints.  Default: `false`.
+    pub debug_zones: bool,
+    /// Monitor index for overlay placement (0-based).  `None` = primary monitor.
+    pub monitor_index: Option<usize>,
 }
 
 impl Default for WindowedConfig {
@@ -197,6 +201,8 @@ impl Default for WindowedConfig {
             target_fps: 60,
             config_toml: None,
             config_file_path: None,
+            debug_zones: false,
+            monitor_index: None,
         }
     }
 }
@@ -342,10 +348,15 @@ impl ApplicationHandler for WinitApp {
                 //
                 // Fall back to the configured width/height if monitor detection fails
                 // (headless environments, missing display server, etc.).
-                let (overlay_w, overlay_h) = if self.state.config.overlay_auto_size {
-                    detect_primary_monitor_size(event_loop, cfg_width, cfg_height)
+                let (overlay_w, overlay_h, mon_x, mon_y) = if self.state.config.overlay_auto_size {
+                    detect_monitor_size(
+                        event_loop,
+                        cfg_width,
+                        cfg_height,
+                        self.state.config.monitor_index,
+                    )
                 } else {
-                    (cfg_width, cfg_height)
+                    (cfg_width, cfg_height, 0, 0)
                 };
 
                 // Update the config so that downstream code (surface init, logging)
@@ -356,6 +367,8 @@ impl ApplicationHandler for WinitApp {
                 tracing::info!(
                     width = overlay_w,
                     height = overlay_h,
+                    position_x = mon_x,
+                    position_y = mon_y,
                     auto_size = self.state.config.overlay_auto_size,
                     "window mode: overlay/HUD — transparent borderless always-on-top"
                 );
@@ -365,7 +378,7 @@ impl ApplicationHandler for WinitApp {
                     WindowAttributes::default()
                         .with_title(window_title)
                         .with_inner_size(winit::dpi::PhysicalSize::new(overlay_w, overlay_h))
-                        .with_position(winit::dpi::PhysicalPosition::new(0i32, 0i32))
+                        .with_position(winit::dpi::PhysicalPosition::new(mon_x, mon_y))
                         .with_transparent(true)
                         .with_decorations(false)
                         .with_window_level(WindowLevel::AlwaysOnTop)
@@ -491,6 +504,7 @@ impl ApplicationHandler for WinitApp {
             }
             .expect("Compositor::new_windowed failed");
             c.0.overlay_mode = is_overlay;
+            c.0.debug_zone_tints = self.state.config.debug_zones;
             c
         });
 
@@ -503,7 +517,8 @@ impl ApplicationHandler for WinitApp {
             .expect("WindowSurface config lock poisoned at text renderer init")
             .format;
         compositor.init_text_renderer(surface_format);
-        tracing::info!(format = ?surface_format, "windowed: text renderer initialized");
+        compositor.init_widget_renderer(surface_format);
+        tracing::info!(format = ?surface_format, "windowed: text + widget renderers initialized");
 
         let window_surface = Arc::new(window_surface);
         self.state.window_surface = Some(window_surface.clone());
@@ -1511,33 +1526,65 @@ fn winit_logical_to_str(key: &winit::keyboard::Key) -> String {
 ///
 /// Failures (no monitors detected, headless environment) are logged as warnings
 /// and cause a graceful fall back to the configured fallback dimensions.
-fn detect_primary_monitor_size(
+/// Returns `(width, height, x_position, y_position)` for the selected monitor.
+///
+/// When `monitor_index` is `Some(i)`, selects the i-th available monitor.
+/// When `None`, uses the primary monitor (or first available as fallback).
+fn detect_monitor_size(
     event_loop: &ActiveEventLoop,
     fallback_width: u32,
     fallback_height: u32,
-) -> (u32, u32) {
-    // Try primary_monitor() first, then fall back to the first available monitor.
-    let monitor = event_loop
-        .primary_monitor()
-        .or_else(|| event_loop.available_monitors().next());
+    monitor_index: Option<usize>,
+) -> (u32, u32, i32, i32) {
+    // Log available monitors for diagnostics.
+    let monitors: Vec<_> = event_loop.available_monitors().collect();
+    for (i, m) in monitors.iter().enumerate() {
+        let size = m.size();
+        let pos = m.position();
+        tracing::info!(
+            index = i,
+            name = m.name().as_deref().unwrap_or("<unnamed>"),
+            width = size.width,
+            height = size.height,
+            x = pos.x,
+            y = pos.y,
+            scale = m.scale_factor(),
+            "available monitor"
+        );
+    }
+
+    // Select monitor: by index, or primary, or first available.
+    let monitor = if let Some(idx) = monitor_index {
+        monitors.get(idx).cloned().or_else(|| {
+            tracing::warn!(
+                requested_index = idx,
+                available = monitors.len(),
+                "overlay: monitor index out of range, falling back to primary"
+            );
+            event_loop.primary_monitor()
+                .or_else(|| monitors.into_iter().next())
+        })
+    } else {
+        event_loop.primary_monitor()
+            .or_else(|| monitors.into_iter().next())
+    };
 
     match monitor {
         Some(m) => {
-            // `MonitorHandle::size()` returns PhysicalSize<u32> — physical pixels
-            // when the process has per-monitor DPI awareness (guaranteed by the
-            // embedded manifest). Do NOT multiply by scale_factor; that would
-            // over-count on DPI-scaled displays (e.g. 2560 * 1.25 = 3200 at 125%).
             let size = m.size();
-            let scale = m.scale_factor(); // logged for diagnostics only
+            let pos = m.position();
+            let scale = m.scale_factor();
             if size.width > 0 && size.height > 0 {
                 tracing::info!(
                     monitor_name = m.name().as_deref().unwrap_or("<unnamed>"),
                     physical_width = size.width,
                     physical_height = size.height,
+                    position_x = pos.x,
+                    position_y = pos.y,
                     scale_factor = scale,
-                    "overlay auto-size: detected primary monitor physical resolution"
+                    "overlay auto-size: selected monitor"
                 );
-                (size.width, size.height)
+                (size.width, size.height, pos.x, pos.y)
             } else {
                 tracing::warn!(
                     fallback_width,
@@ -1545,7 +1592,7 @@ fn detect_primary_monitor_size(
                     "overlay auto-size: monitor size returned (0,0); \
                      using configured fallback dimensions"
                 );
-                (fallback_width, fallback_height)
+                (fallback_width, fallback_height, 0, 0)
             }
         }
         None => {
@@ -1555,7 +1602,7 @@ fn detect_primary_monitor_size(
                 "overlay auto-size: no monitors detected (headless?); \
                  using configured fallback dimensions"
             );
-            (fallback_width, fallback_height)
+            (fallback_width, fallback_height, 0, 0)
         }
     }
 }

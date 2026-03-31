@@ -240,7 +240,8 @@ impl HeadlessRuntime {
         // HeadlessSurface always uses Rgba8UnormSrgb. Must be called here so
         // glyphon text rendering is active for all runtime paths (not just tests).
         compositor.init_text_renderer(TextureFormat::Rgba8UnormSrgb);
-        tracing::debug!("headless: text renderer initialized");
+        compositor.init_widget_renderer(TextureFormat::Rgba8UnormSrgb);
+        tracing::debug!("headless: text + widget renderers initialized");
 
         let scene = Arc::new(Mutex::new(SceneGraph::new(
             config.width as f32,

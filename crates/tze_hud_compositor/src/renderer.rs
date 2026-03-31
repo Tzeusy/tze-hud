@@ -44,6 +44,9 @@ pub struct Compositor {
     frame_number: u64,
     /// When true, the clear color uses alpha=0 for transparent overlay mode.
     pub overlay_mode: bool,
+    /// When true, render all zone boundaries with colored tints even when
+    /// zones have no active content. Controlled by `TZE_HUD_DEBUG_ZONES=1`.
+    pub debug_zone_tints: bool,
     /// Optional text rasterizer (glyphon). Absent until `init_text_renderer`
     /// is called. When `None`, TextMarkdownNode and zone StreamText content
     /// renders as solid-color rectangles only (no glyph output).
@@ -110,6 +113,7 @@ impl Compositor {
             height,
             frame_number: 0,
             overlay_mode: false,
+            debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").map_or(false, |v| v == "1"),
             text_rasterizer: None,
             widget_renderer: None,
         })
@@ -202,12 +206,22 @@ impl Compositor {
         );
 
         // ── Step 4: Request device ────────────────────────────────────────────
+        // Use downlevel_defaults() for broad compatibility but override
+        // max_texture_dimension_2d with the adapter's actual capability.
+        // downlevel_defaults() caps this at 2048 which is smaller than
+        // common display resolutions (e.g. 2560x1440).  The adapter knows
+        // the GPU's true limit; requesting it ensures the surface can be
+        // configured at the monitor's native resolution.
+        let mut required_limits = wgpu::Limits::downlevel_defaults();
+        required_limits.max_texture_dimension_2d =
+            adapter.limits().max_texture_dimension_2d;
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("tze_hud_compositor_windowed"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_defaults(),
+                    required_limits,
                     memory_hints: wgpu::MemoryHints::default(),
                 },
                 None,
@@ -341,6 +355,7 @@ impl Compositor {
             height: clamped_height,
             frame_number: 0,
             overlay_mode: false,
+            debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").map_or(false, |v| v == "1"),
             text_rasterizer: None,
             widget_renderer: None,
         };
@@ -979,7 +994,8 @@ impl Compositor {
         );
         telemetry.render_encode_us = encode_us;
 
-        // ── Widget pass: composite widget textures above zone content ─────────
+        // ── Widget pass: sync textures then composite above zone content ────
+        self.sync_widget_textures(scene);
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
 
         let submit_start = std::time::Instant::now();
@@ -1058,7 +1074,8 @@ impl Compositor {
             self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false);
         telemetry.render_encode_us = encode_us;
 
-        // ── Widget pass: composite widget textures above zone content ─────────
+        // ── Widget pass: sync textures then composite above zone content ────
+        self.sync_widget_textures(scene);
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
 
         // Headless-specific: copy rendered texture to readback buffer.
@@ -1241,7 +1258,8 @@ impl Compositor {
             tr.trim_atlas();
         }
 
-        // ── Widget pass: above content + text, below chrome ───────────────────
+        // ── Widget pass: sync textures, then composite above content + text ──
+        self.sync_widget_textures(scene);
         self.encode_widget_pass(&mut encoder, &surface.view, &scene.widget_registry, sw, sh);
 
         // Chrome render pass — uses LoadOp::Load to preserve content pixels.
@@ -1376,37 +1394,7 @@ impl Compositor {
                 Some(z) => z,
                 None => continue,
             };
-            // Resolve zone geometry to pixel bounds.
-            let (x, y, w, h) = match &zone_def.geometry_policy {
-                GeometryPolicy::EdgeAnchored {
-                    edge,
-                    height_pct,
-                    width_pct,
-                    margin_px,
-                } => {
-                    let zw = sw * width_pct;
-                    let zh = sh * height_pct;
-                    let zx = (sw - zw) / 2.0;
-                    let zy = match edge {
-                        DisplayEdge::Top => *margin_px,
-                        DisplayEdge::Bottom => sh - zh - margin_px,
-                        DisplayEdge::Left | DisplayEdge::Right => 0.0,
-                    };
-                    (zx, zy, zw, zh)
-                }
-                GeometryPolicy::Relative {
-                    x_pct,
-                    y_pct,
-                    width_pct,
-                    height_pct,
-                } => {
-                    let zx = sw * x_pct;
-                    let zy = sh * y_pct;
-                    let zw = sw * width_pct;
-                    let zh = sh * height_pct;
-                    (zx, zy, zw, zh)
-                }
-            };
+            let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
 
             // Render based on the most recent publication's content type.
             let latest = &publishes[publishes.len() - 1];
@@ -1426,6 +1414,73 @@ impl Compositor {
                 _ => [0.1, 0.1, 0.15, 0.85],
             };
             vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, bg_color));
+        }
+
+        // ── Debug zone tints (--debug-zones) ─────────────────────────────────
+        // Render ALL zone boundaries with colored tints ON TOP of content
+        // backgrounds so developers can see zone geometry even when zones have
+        // opaque content.  The overall background gets a subtle black tint;
+        // each zone gets a rainbow-sampled color at low opacity.
+        if self.debug_zone_tints {
+            // 0.5% opacity black background tint over the full window.
+            // In overlay mode, the clear_pipeline writes RGBA directly (no
+            // GPU blending). DWM composites with premultiplied alpha, so RGB
+            // values must be pre-multiplied by alpha.
+            const A: f32 = 0.001;
+            vertices.extend_from_slice(&rect_vertices(
+                0.0, 0.0, sw, sh, sw, sh,
+                [0.0, 0.0, 0.0, A],
+            ));
+
+            // Rainbow palette for zone tints (1% opacity, premultiplied).
+            const ZA: f32 = 0.005;
+            let palette: &[[f32; 4]] = &[
+                [1.0 * ZA, 0.2 * ZA, 0.2 * ZA, ZA], // red
+                [1.0 * ZA, 0.6 * ZA, 0.1 * ZA, ZA], // orange
+                [1.0 * ZA, 1.0 * ZA, 0.2 * ZA, ZA], // yellow
+                [0.2 * ZA, 0.9 * ZA, 0.2 * ZA, ZA], // green
+                [0.2 * ZA, 0.6 * ZA, 1.0 * ZA, ZA], // blue
+                [0.7 * ZA, 0.3 * ZA, 1.0 * ZA, ZA], // violet
+            ];
+            for (idx, (_zone_name, zone_def)) in scene.zone_registry.zones.iter().enumerate() {
+                let color = palette[idx % palette.len()];
+                let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+                vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, color));
+            }
+        }
+    }
+
+    /// Resolve a zone's geometry policy to pixel bounds (x, y, w, h).
+    fn resolve_zone_geometry(policy: &GeometryPolicy, sw: f32, sh: f32) -> (f32, f32, f32, f32) {
+        match policy {
+            GeometryPolicy::EdgeAnchored {
+                edge,
+                height_pct,
+                width_pct,
+                margin_px,
+            } => {
+                let zw = sw * width_pct;
+                let zh = sh * height_pct;
+                let zx = (sw - zw) / 2.0;
+                let zy = match edge {
+                    DisplayEdge::Top => *margin_px,
+                    DisplayEdge::Bottom => sh - zh - margin_px,
+                    DisplayEdge::Left | DisplayEdge::Right => 0.0,
+                };
+                (zx, zy, zw, zh)
+            }
+            GeometryPolicy::Relative {
+                x_pct,
+                y_pct,
+                width_pct,
+                height_pct,
+            } => {
+                let zx = sw * x_pct;
+                let zy = sh * y_pct;
+                let zw = sw * width_pct;
+                let zh = sh * height_pct;
+                (zx, zy, zw, zh)
+            }
         }
     }
 

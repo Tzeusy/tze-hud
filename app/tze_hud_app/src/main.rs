@@ -128,6 +128,10 @@ struct StartupOptions {
     mcp_port: u16,
     psk: String,
     fps: u32,
+    /// When true, render zone boundaries with colored debug tints.
+    debug_zones: bool,
+    /// Monitor index for overlay placement (0-based). `None` = primary monitor.
+    monitor_index: Option<usize>,
 }
 
 impl Default for StartupOptions {
@@ -143,6 +147,8 @@ impl Default for StartupOptions {
             mcp_port: 9090,
             psk: "tze-hud-key".to_string(),
             fps: 60,
+            debug_zones: false,
+            monitor_index: None,
         }
     }
 }
@@ -269,6 +275,19 @@ fn parse_options(args: &[String]) -> Result<StartupOptions, String> {
                     .parse::<u32>()
                     .map_err(|_| format!("--fps: invalid integer: {val:?}"))?;
             }
+            "--debug-zones" => {
+                opts.debug_zones = true;
+            }
+            "--monitor" => {
+                i += 1;
+                let val = args
+                    .get(i)
+                    .ok_or_else(|| "--monitor requires a monitor index (0-based)".to_string())?;
+                opts.monitor_index = Some(
+                    val.parse::<usize>()
+                        .map_err(|_| format!("--monitor: invalid index: {val:?}"))?,
+                );
+            }
             flag if flag.starts_with('-') => {
                 return Err(format!(
                     "unknown flag: {flag}\nRun '{BIN_NAME} --help' for usage."
@@ -392,6 +411,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         target_fps: opts.fps,
         config_toml,
         config_file_path,
+        debug_zones: opts.debug_zones,
+        monitor_index: opts.monitor_index,
     };
 
     // Diagnostic: write resolved config to disk so we can verify args were parsed.
