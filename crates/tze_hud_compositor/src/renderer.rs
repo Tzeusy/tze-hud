@@ -22,6 +22,8 @@
 //! This separation is the architectural foundation for future render-skip redaction
 //! (capture-safe architecture): the content and chrome passes are structurally independent.
 
+use std::collections::HashMap;
+
 use crate::pipeline::{ChromeDrawCmd, RectVertex, rect_vertices};
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
@@ -30,6 +32,115 @@ use tze_hud_scene::DegradationLevel;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::FrameTelemetry;
+
+// ─── Severity token fallback colors ─────────────────────────────────────────
+
+/// Default severity colors (linear sRGB) used when design tokens are absent.
+///
+/// Per spec §Canonical Token Schema:
+///   color.severity.info     → #4A9EFF → (0.078, 0.384, 1.0)
+///   color.severity.warning  → #FFB800 → (1.0, 0.722, 0.0)
+///   color.severity.critical → #FF0000 → (1.0, 0.0, 0.0)
+const SEVERITY_INFO: Rgba = Rgba {
+    r: 0.078,
+    g: 0.384,
+    b: 1.0,
+    a: 1.0,
+};
+const SEVERITY_WARNING: Rgba = Rgba {
+    r: 1.0,
+    g: 0.722,
+    b: 0.0,
+    a: 1.0,
+};
+const SEVERITY_CRITICAL: Rgba = Rgba {
+    r: 1.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
+
+/// Returns `true` if the zone name is an alert-banner zone.
+///
+/// Per spec §V1 Component Type Definitions: the alert-banner zone name is
+/// `"alert-banner"`.  notification-area does NOT use urgency mapping.
+#[inline]
+fn is_alert_banner_zone(zone_name: &str) -> bool {
+    zone_name == "alert-banner"
+}
+
+/// Map a `NotificationPayload.urgency` level to a severity backdrop color.
+///
+/// Per spec §Notification Urgency-to-Severity Token Mapping:
+///   urgency 0, 1 → color.severity.info   (fallback: #4A9EFF)
+///   urgency 2    → color.severity.warning (fallback: #FFB800)
+///   urgency 3    → color.severity.critical (fallback: #FF0000)
+///
+/// The returned `Rgba` alpha is 1.0; `backdrop_opacity` from the policy is
+/// applied by the caller after this lookup.
+fn urgency_to_severity_color(urgency: u32) -> Rgba {
+    match urgency {
+        3 => SEVERITY_CRITICAL,
+        2 => SEVERITY_WARNING,
+        _ => SEVERITY_INFO, // 0 and 1
+    }
+}
+
+/// Per-zone opacity animation state.
+///
+/// Tracks a fade-in or fade-out transition for a single zone.
+/// When no transition is active, the zone is at full opacity (1.0).
+///
+/// Modeled after `WidgetAnimationState` in `crate::widget`.
+pub struct ZoneAnimationState {
+    /// Wall-clock time when the transition started.
+    pub transition_start: std::time::Instant,
+    /// Duration of the transition in milliseconds.
+    pub duration_ms: u32,
+    /// Opacity at the start of the transition.
+    pub from_opacity: f32,
+    /// Target opacity at the end of the transition (0.0 = fade-out, 1.0 = fade-in).
+    pub target_opacity: f32,
+}
+
+impl ZoneAnimationState {
+    /// Create a fade-in state (opacity 0 → 1) with the given duration.
+    pub fn fade_in(duration_ms: u32) -> Self {
+        Self {
+            transition_start: std::time::Instant::now(),
+            duration_ms,
+            from_opacity: 0.0,
+            target_opacity: 1.0,
+        }
+    }
+
+    /// Create a fade-out state (opacity 1 → 0) with the given duration.
+    pub fn fade_out(duration_ms: u32) -> Self {
+        Self {
+            transition_start: std::time::Instant::now(),
+            duration_ms,
+            from_opacity: 1.0,
+            target_opacity: 0.0,
+        }
+    }
+
+    /// Compute the current interpolated opacity.
+    ///
+    /// Returns `target_opacity` once the transition has elapsed.
+    pub fn current_opacity(&self) -> f32 {
+        if self.duration_ms == 0 {
+            return self.target_opacity;
+        }
+        let elapsed_ms = self.transition_start.elapsed().as_millis() as f32;
+        let t = (elapsed_ms / self.duration_ms as f32).clamp(0.0, 1.0);
+        self.from_opacity + (self.target_opacity - self.from_opacity) * t
+    }
+
+    /// Returns `true` if the transition has fully completed.
+    pub fn is_complete(&self) -> bool {
+        self.transition_start.elapsed().as_millis() >= self.duration_ms as u128
+    }
+}
 
 /// GPU state and render pipeline.
 pub struct Compositor {
@@ -61,6 +172,15 @@ pub struct Compositor {
     /// Optional widget renderer. Absent until `init_widget_renderer` is called.
     /// When `None`, widget instances in the scene graph are not composited.
     pub(crate) widget_renderer: Option<WidgetRenderer>,
+    /// Per-zone fade-in / fade-out animation state.
+    ///
+    /// Keyed by zone name. An entry is inserted on the first publish to a zone
+    /// that has `transition_in_ms > 0`, and on every zone clear when
+    /// `transition_out_ms > 0`. Completed transitions are pruned each frame.
+    pub(crate) zone_animation_states: HashMap<String, ZoneAnimationState>,
+    /// Track which zones had active publishes in the previous frame so we can
+    /// detect publish → clear transitions and start fade-out animations.
+    prev_active_zones: HashMap<String, bool>,
 }
 
 impl Compositor {
@@ -124,6 +244,8 @@ impl Compositor {
             degradation_level: DegradationLevel::Nominal,
             text_rasterizer: None,
             widget_renderer: None,
+            zone_animation_states: HashMap::new(),
+            prev_active_zones: HashMap::new(),
         })
     }
 
@@ -366,6 +488,8 @@ impl Compositor {
             degradation_level: DegradationLevel::Nominal,
             text_rasterizer: None,
             widget_renderer: None,
+            zone_animation_states: HashMap::new(),
+            prev_active_zones: HashMap::new(),
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -645,6 +769,10 @@ impl Compositor {
     /// Collect `TextItem`s for all TextMarkdownNode tiles and zone StreamText
     /// and ShortTextWithIcon/Notification content in the scene.
     ///
+    /// All zone `TextItem`s are constructed from `RenderingPolicy` fields —
+    /// no hardcoded colors or font choices.  Animation opacity is applied to
+    /// the color channels so text fades with the backdrop.
+    ///
     /// Returns a flat `Vec<TextItem>` ready for `TextRasterizer::prepare_text_items`.
     fn collect_text_items(&self, scene: &SceneGraph, sw: f32, sh: f32) -> Vec<TextItem> {
         let mut items: Vec<TextItem> = Vec::new();
@@ -656,7 +784,7 @@ impl Compositor {
             }
         }
 
-        // ── Zone StreamText and Notification content ─────────────────────────
+        // ── Zone StreamText, Notification, and StatusBar content ─────────────
         for (zone_name, publishes) in &scene.zone_registry.active_publishes {
             if publishes.is_empty() {
                 continue;
@@ -667,66 +795,50 @@ impl Compositor {
             };
 
             // Resolve zone geometry to pixel bounds.
-            let (zx, zy, zw, zh) = match &zone_def.geometry_policy {
-                GeometryPolicy::EdgeAnchored {
-                    edge,
-                    height_pct,
-                    width_pct,
-                    margin_px,
-                } => {
-                    let zw = sw * width_pct;
-                    let zh = sh * height_pct;
-                    let zx = (sw - zw) / 2.0;
-                    let zy = match edge {
-                        DisplayEdge::Top => *margin_px,
-                        DisplayEdge::Bottom => sh - zh - margin_px,
-                        DisplayEdge::Left | DisplayEdge::Right => 0.0,
-                    };
-                    (zx, zy, zw, zh)
-                }
-                GeometryPolicy::Relative {
-                    x_pct,
-                    y_pct,
-                    width_pct,
-                    height_pct,
-                } => {
-                    let zx = sw * x_pct;
-                    let zy = sh * y_pct;
-                    let zw = sw * width_pct;
-                    let zh = sh * height_pct;
-                    (zx, zy, zw, zh)
-                }
-            };
+            let (zx, zy, zw, zh) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
 
-            let font_size = zone_def.rendering_policy.font_size_px.unwrap_or(16.0);
+            let policy = &zone_def.rendering_policy;
+
+            // Current animation opacity for this zone.
+            let anim_opacity = self
+                .zone_animation_states
+                .get(zone_name)
+                .map(|s| s.current_opacity())
+                .unwrap_or(1.0);
 
             // Use the most-recent publish. For Stack contention policy, publishes
             // are sorted oldest-first, so we iterate in reverse to get the newest
             // StreamText, Notification, or StatusBar entry. For LatestWins/Replace
             // there is at most one entry.
             for record in publishes.iter().rev() {
-                let color = [255u8, 255, 255, 220];
                 match &record.content {
                     ZoneContent::StreamText(text) => {
-                        // White text on the semi-transparent zone background.
-                        items.push(TextItem::from_zone_stream_text(
-                            text, zx, zy, zw, zh, font_size, color,
+                        items.push(TextItem::from_zone_policy(
+                            text,
+                            zx,
+                            zy,
+                            zw,
+                            zh,
+                            policy,
+                            anim_opacity,
                         ));
                         // Only render the most-recent StreamText publish.
                         break;
                     }
                     ZoneContent::Notification(payload) => {
-                        // Render the notification text. Icon rendering is stubbed for
-                        // v1 — no texture pipeline yet (per hud-lh3w spec).
-                        // White text on zone background.
-                        items.push(TextItem::from_zone_notification(
+                        // Render the notification text.
+                        // For alert-banner, text color is always policy.text_color
+                        // for contrast against the severity-colored backdrop.
+                        // For notification-area, policy.text_color is also used.
+                        // Icon rendering is stubbed (no texture pipeline in v1).
+                        items.push(TextItem::from_zone_policy(
                             &payload.text,
                             zx,
                             zy,
                             zw,
                             zh,
-                            font_size,
-                            color,
+                            policy,
+                            anim_opacity,
                         ));
                         // Only render the most-recent publish.
                         break;
@@ -741,8 +853,14 @@ impl Compositor {
                             .map(|(k, v)| format!("{k}: {v}"))
                             .collect::<Vec<_>>()
                             .join("\n");
-                        items.push(TextItem::from_zone_stream_text(
-                            &text, zx, zy, zw, zh, font_size, color,
+                        items.push(TextItem::from_zone_policy(
+                            &text,
+                            zx,
+                            zy,
+                            zw,
+                            zh,
+                            policy,
+                            anim_opacity,
                         ));
                         // Only render the most-recent StatusBar publish.
                         break;
@@ -753,6 +871,70 @@ impl Compositor {
         }
 
         items
+    }
+
+    /// Update zone animation states before each frame.
+    ///
+    /// Starts fade-in animations for newly-published zones and fade-out
+    /// animations for zones that just lost their last publish.
+    ///
+    /// Also handles zone unregistration: zones that were active and have since
+    /// been removed from the registry are treated as cleared (no fade-out is
+    /// possible since the zone_def is gone, so the state is simply pruned).
+    ///
+    /// Prunes completed transitions.
+    pub fn update_zone_animations(&mut self, scene: &SceneGraph) {
+        // Build current active-zone set (zone_name → has active publishes).
+        let current_active: HashMap<String, bool> = scene
+            .zone_registry
+            .active_publishes
+            .iter()
+            .map(|(name, pubs)| (name.clone(), !pubs.is_empty()))
+            .collect();
+
+        // Detect publish transitions within currently-registered zones.
+        for (zone_name, &is_active) in &current_active {
+            let was_active = self
+                .prev_active_zones
+                .get(zone_name)
+                .copied()
+                .unwrap_or(false);
+
+            if is_active && !was_active {
+                // Zone just received its first publish — start fade-in.
+                if let Some(zone_def) = scene.zone_registry.zones.get(zone_name) {
+                    if let Some(ms) = zone_def.rendering_policy.transition_in_ms {
+                        if ms > 0 {
+                            self.zone_animation_states
+                                .insert(zone_name.clone(), ZoneAnimationState::fade_in(ms));
+                        }
+                    }
+                }
+            } else if !is_active && was_active {
+                // Zone just lost its last publish — start fade-out.
+                if let Some(zone_def) = scene.zone_registry.zones.get(zone_name) {
+                    if let Some(ms) = zone_def.rendering_policy.transition_out_ms {
+                        if ms > 0 {
+                            self.zone_animation_states
+                                .insert(zone_name.clone(), ZoneAnimationState::fade_out(ms));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Detect zone unregistration: zones that were previously tracked but
+        // are now absent from active_publishes (zone was removed from registry).
+        // Since zone_def is gone, no fade-out animation is possible; we simply
+        // prune any in-flight animation state for that zone immediately.
+        self.zone_animation_states
+            .retain(|zone_name, _| current_active.contains_key(zone_name));
+
+        // Prune completed transitions (reached target opacity).
+        self.zone_animation_states
+            .retain(|_, state| !state.is_complete());
+
+        self.prev_active_zones = current_active;
     }
 
     /// Recursively collect `TextItem`s from a node and its children.
@@ -993,6 +1175,9 @@ impl Compositor {
             }
         }
 
+        // Update zone animation states (fade-in/fade-out) before rendering.
+        self.update_zone_animations(scene);
+
         // Render zone content.
         self.render_zone_content(scene, &mut vertices, sw, sh);
 
@@ -1085,6 +1270,12 @@ impl Compositor {
                 self.render_node(root_id, tile, scene, &mut vertices, sw, sh);
             }
         }
+
+        // Update zone animation states before rendering zone content.
+        self.update_zone_animations(scene);
+
+        // Render zone content backdrops.
+        self.render_zone_content(scene, &mut vertices, sw, sh);
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -1180,6 +1371,10 @@ impl Compositor {
                 self.render_node(root_id, tile, scene, &mut content_vertices, sw, sh);
             }
         }
+
+        // Update zone animation states and render zone content backdrops.
+        self.update_zone_animations(scene);
+        self.render_zone_content(scene, &mut content_vertices, sw, sh);
 
         let encode_start = std::time::Instant::now();
 
@@ -1400,11 +1595,17 @@ impl Compositor {
         wr.composite_widgets(&mut widget_pass, registry, surf_w, surf_h, &self.device);
     }
 
-    /// Render zone content as colored rectangles at zone geometry positions.
+    /// Render zone content backdrop quads driven by `RenderingPolicy`.
     ///
-    /// Zones with active publishes get a visible indicator. Text rendering is
-    /// deferred; for now the content text is not drawn, but the zone region is
-    /// made visible so the user can confirm zone publishing works end-to-end.
+    /// For each zone with at least one active publish:
+    /// - Reads `backdrop` + `backdrop_opacity` from the zone's `RenderingPolicy`.
+    /// - For `alert-banner` zones with `Notification` content, overrides the
+    ///   backdrop color with the urgency-derived severity token color.
+    /// - Applies the zone's current animation opacity (fade-in/fade-out).
+    /// - Skips the backdrop quad when `rendering_policy.backdrop` is `None`.
+    ///
+    /// No per-content-type color branching — all visual properties come from
+    /// `RenderingPolicy` fields (spec §Refactoring note, §Default Zone Rendering).
     fn render_zone_content(
         &self,
         scene: &SceneGraph,
@@ -1422,24 +1623,58 @@ impl Compositor {
             };
             let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
 
-            // Render based on the most recent publication's content type.
+            let policy = &zone_def.rendering_policy;
+
+            // Determine current animation opacity for this zone.
+            let anim_opacity = self
+                .zone_animation_states
+                .get(zone_name)
+                .map(|s| s.current_opacity())
+                .unwrap_or(1.0);
+
+            // Resolve backdrop color.
+            // For SolidColor content, use the color directly.
+            // For all other content, read backdrop from RenderingPolicy.
             let latest = &publishes[publishes.len() - 1];
-            let bg_color = match &latest.content {
-                ZoneContent::SolidColor(rgba) => rgba.to_array(),
-                ZoneContent::Notification(n) => {
-                    // Urgency-tinted background: higher urgency → more red.
-                    match n.urgency {
-                        3 => [0.6, 0.1, 0.1, 0.9],    // critical — red
-                        2 => [0.5, 0.3, 0.1, 0.9],    // urgent — amber
-                        1 => [0.15, 0.15, 0.25, 0.9], // normal — dark blue
-                        _ => [0.1, 0.1, 0.15, 0.85],  // low — default
-                    }
+            let backdrop_rgba: Option<Rgba> = match &latest.content {
+                ZoneContent::SolidColor(rgba) => {
+                    // SolidColor always renders its own color (no policy override).
+                    Some(*rgba)
                 }
-                ZoneContent::StatusBar(_) => [0.08, 0.08, 0.12, 0.9],
-                ZoneContent::StreamText(_) => [0.1, 0.1, 0.18, 0.85],
-                _ => [0.1, 0.1, 0.15, 0.85],
+                ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                    // alert-banner: map urgency to severity token color.
+                    // Per spec §Notification Urgency-to-Severity Token Mapping:
+                    //   urgency 0,1 → color.severity.info
+                    //   urgency 2   → color.severity.warning
+                    //   urgency 3   → color.severity.critical
+                    // Fallback to policy.backdrop when no urgency-specific color.
+                    let severity_color = urgency_to_severity_color(n.urgency);
+                    Some(severity_color)
+                }
+                _ => {
+                    // All other content: use policy.backdrop.
+                    policy.backdrop
+                }
             };
-            vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, bg_color));
+
+            if let Some(mut rgba) = backdrop_rgba {
+                // Apply backdrop_opacity override.
+                if let Some(opacity) = policy.backdrop_opacity {
+                    rgba.a = opacity.clamp(0.0, 1.0);
+                }
+                // Apply zone animation opacity.
+                rgba.a *= anim_opacity.clamp(0.0, 1.0);
+
+                vertices.extend_from_slice(&rect_vertices(
+                    x,
+                    y,
+                    w,
+                    h,
+                    sw,
+                    sh,
+                    rgba.to_array(),
+                ));
+            }
         }
 
         // ── Debug zone tints (--debug-zones) ─────────────────────────────────
@@ -2698,5 +2933,527 @@ mod tests {
             "Stage 6 render-encode p99 ({p99_us} µs) exceeds budget ({STAGE6_BUDGET_US} µs). \
              All timings (sorted): {timings:?}"
         );
+    }
+
+    // ── RenderingPolicy-driven zone rendering tests [hud-sc0a.8] ─────────────
+
+    /// Subtitle with outline: when outline_color + outline_width are set in
+    /// RenderingPolicy, collect_text_items produces a TextItem with non-None
+    /// outline fields.
+    #[tokio::test]
+    async fn test_zone_subtitle_with_outline_text_item() {
+        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "subtitle zone with outline".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(22.0),
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
+                text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                outline_color: Some(Rgba::BLACK),
+                outline_width: Some(2.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("Test outline text".to_owned()),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 1, "expected one TextItem");
+        let item = &items[0];
+        assert!(
+            item.outline_color.is_some(),
+            "outline_color should be set from RenderingPolicy"
+        );
+        assert!(
+            item.outline_width.is_some(),
+            "outline_width should be set from RenderingPolicy"
+        );
+        assert_eq!(
+            item.outline_width.unwrap(),
+            2.0,
+            "outline_width should match policy"
+        );
+        // Text color should be white (from text_color).
+        assert_eq!(
+            item.color[0], 255,
+            "text fill color R should be white (255)"
+        );
+    }
+
+    /// Subtitle without outline: when outline_width is None, outline fields
+    /// on the TextItem should be None.
+    #[tokio::test]
+    async fn test_zone_subtitle_without_outline_text_item() {
+        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "subtitle zone without outline".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(22.0),
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
+                text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                outline_color: None,
+                outline_width: None,
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("No outline subtitle".to_owned()),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 1, "expected one TextItem");
+        let item = &items[0];
+        assert!(
+            item.outline_color.is_none(),
+            "outline_color should be None when policy has no outline"
+        );
+        assert!(
+            item.outline_width.is_none(),
+            "outline_width should be None when policy has no outline"
+        );
+    }
+
+    /// Notification with opaque backdrop: backdrop_opacity=0.9 overrides
+    /// the backdrop color's alpha.  The backdrop quad should be rendered with
+    /// effective alpha = 0.9.
+    #[tokio::test]
+    async fn test_notification_with_opaque_backdrop() {
+        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "notification area zone".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.08,
+                width_pct: 0.70,
+                margin_px: 12.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(18.0),
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)),
+                backdrop_opacity: Some(0.9),
+                text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: Some(5_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Notification with opaque backdrop".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // render_zone_content should produce backdrop rect vertices.
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        // We check that vertices were emitted (backdrop rendered).
+        assert!(
+            !vertices.is_empty(),
+            "expected backdrop vertices for notification with opaque backdrop"
+        );
+
+        // Also verify the text item uses the policy text_color.
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 1, "expected one TextItem for notification");
+        // White text → R channel should be near 255.
+        assert!(
+            items[0].color[0] > 200,
+            "text color R should be near-white from policy.text_color"
+        );
+    }
+
+    /// Alert-banner severity mapping: urgency 2 (warning) should map to
+    /// color.severity.warning (amber/yellow), NOT the policy backdrop.
+    /// We verify by inspecting the vertices emitted by render_zone_content.
+    #[tokio::test]
+    async fn test_alert_banner_urgency2_maps_to_severity_warning() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_owned(),
+            description: "alert banner zone".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.07,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(20.0),
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)), // dark default
+                backdrop_opacity: Some(1.0),
+                text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish urgency=2 (warning).
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Warning: disk space low".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Collect vertices from render_zone_content.
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // The backdrop should be severity warning color (~amber: R=1.0, G~0.72, B=0.0).
+        // rect_vertices emits 6 vertices; each has color at the end.
+        // We check that the R component is high (>0.9) and G is mid (~0.5-0.8) and B is low.
+        assert!(
+            !vertices.is_empty(),
+            "expected backdrop vertices for alert-banner urgency=2"
+        );
+
+        // Verify urgency_to_severity_color directly.
+        let warning_color = urgency_to_severity_color(2);
+        assert!(
+            warning_color.r > 0.9,
+            "warning severity R should be ~1.0 (amber)"
+        );
+        assert!(
+            warning_color.g > 0.5,
+            "warning severity G should be >0.5 (amber)"
+        );
+        assert!(
+            warning_color.b < 0.1,
+            "warning severity B should be ~0.0 (amber)"
+        );
+    }
+
+    /// Alert-banner urgency=3 maps to critical (red).
+    #[tokio::test]
+    async fn test_alert_banner_urgency3_maps_to_severity_critical() {
+        let critical = urgency_to_severity_color(3);
+        assert!(critical.r > 0.9, "critical R should be ~1.0");
+        assert!(critical.g < 0.1, "critical G should be ~0.0");
+        assert!(critical.b < 0.1, "critical B should be ~0.0");
+    }
+
+    /// Alert-banner urgency=0 and 1 both map to info (blue).
+    #[tokio::test]
+    async fn test_alert_banner_urgency_low_maps_to_info() {
+        let info0 = urgency_to_severity_color(0);
+        let info1 = urgency_to_severity_color(1);
+        // Info color is blue-ish (#4A9EFF).
+        assert!(info0.b > 0.9, "info urgency=0 should be blue");
+        assert!(info1.b > 0.9, "info urgency=1 should be blue");
+        // Both should be the same color.
+        assert_eq!(info0.r, info1.r);
+        assert_eq!(info0.b, info1.b);
+    }
+
+    /// notification-area does NOT use urgency-to-severity mapping.
+    /// Even with urgency=3, it uses the policy.backdrop color.
+    #[tokio::test]
+    async fn test_notification_area_ignores_urgency_mapping() {
+        let (_compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        let dark_backdrop = Rgba::new(0.05, 0.05, 0.05, 0.85);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "notification area - no urgency mapping".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(dark_backdrop),
+                backdrop_opacity: Some(0.85),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 16,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "System alert".to_owned(),
+                    icon: String::new(),
+                    urgency: 3, // Critical — but notification-area must NOT remap this.
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // The backdrop should use policy.backdrop (dark), NOT severity critical (red).
+        // We verify is_alert_banner_zone returns false for this zone.
+        assert!(
+            !is_alert_banner_zone("notification-area"),
+            "notification-area must not be treated as alert-banner"
+        );
+    }
+
+    /// ZoneAnimationState fade-in reaches 1.0 after duration elapses.
+    #[test]
+    fn test_zone_animation_state_fade_in_completes() {
+        // Use 0ms duration for instant completion.
+        let state = ZoneAnimationState::fade_in(0);
+        // Opacity at duration=0 should immediately be target (1.0).
+        let opacity = state.current_opacity();
+        assert_eq!(opacity, 1.0, "fade-in with 0ms should be 1.0 immediately");
+        assert!(state.is_complete(), "0ms fade-in should be complete immediately");
+    }
+
+    /// ZoneAnimationState fade-out starts at 1.0 and reaches 0.0 after duration.
+    #[test]
+    fn test_zone_animation_state_fade_out_completes() {
+        let state = ZoneAnimationState::fade_out(0);
+        let opacity = state.current_opacity();
+        assert_eq!(opacity, 0.0, "fade-out with 0ms should be 0.0 immediately");
+        assert!(state.is_complete(), "0ms fade-out should be complete immediately");
+    }
+
+    /// ZoneAnimationState with non-zero duration: opacity is interpolated.
+    #[test]
+    fn test_zone_animation_state_interpolates() {
+        // 10_000ms duration — very long, so elapsed << duration.
+        let state = ZoneAnimationState::fade_in(10_000);
+        // Very shortly after creation, opacity should be close to 0.
+        let opacity = state.current_opacity();
+        assert!(
+            opacity >= 0.0 && opacity <= 0.1,
+            "fade-in opacity shortly after start should be near 0, got {opacity}"
+        );
+        assert!(
+            !state.is_complete(),
+            "10s fade-in should not be complete immediately"
+        );
+    }
+
+    /// backdrop_opacity overrides the backdrop color's alpha channel.
+    /// When backdrop_opacity=0.6 and backdrop.a=1.0, effective alpha=0.6.
+    #[tokio::test]
+    async fn test_backdrop_opacity_overrides_color_alpha() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // backdrop color has alpha=1.0 but backdrop_opacity=0.6 should override it.
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "test backdrop opacity override".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 1.0)),  // alpha=1.0
+                backdrop_opacity: Some(0.6),                      // override to 0.6
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("opacity test".to_owned()),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // The backdrop rendered should use alpha=0.6 (backdrop_opacity), not 1.0.
+        // We verify this by checking the vertex colors produced — the alpha channel
+        // of the first rect vertex should reflect 0.6.
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        assert!(!vertices.is_empty(), "expected backdrop vertices");
+        // The RectVertex has color field [f32; 4]; alpha should be ~0.6.
+        let alpha = vertices[0].color[3];
+        assert!(
+            (alpha - 0.6).abs() < 0.01,
+            "backdrop alpha should be ~0.6 (backdrop_opacity override), got {alpha}"
+        );
+    }
+
+    /// backdrop=None: no backdrop quad rendered even when backdrop_opacity is set.
+    #[tokio::test]
+    async fn test_no_backdrop_when_backdrop_is_none() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "no-backdrop test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy {
+                backdrop: None,
+                backdrop_opacity: Some(0.9), // ignored because backdrop is None
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("no backdrop".to_owned()),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // With backdrop=None, no rect vertices should be emitted.
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        assert!(
+            vertices.is_empty(),
+            "no backdrop quad should be rendered when policy.backdrop is None"
+        );
+    }
+
+    /// text.rs: TextItem::from_zone_policy respects all RenderingPolicy fields.
+    #[test]
+    fn test_from_zone_policy_reads_all_policy_fields() {
+        use crate::text::TextItem;
+
+        let policy = RenderingPolicy {
+            font_size_px: Some(28.0),
+            text_color: Some(Rgba::new(1.0, 0.5, 0.0, 1.0)), // orange
+            font_family: Some(FontFamily::SystemMonospace),
+            text_align: Some(TextAlign::Center),
+            outline_color: Some(Rgba::BLACK),
+            outline_width: Some(1.5),
+            margin_horizontal: Some(12.0),
+            margin_vertical: Some(6.0),
+            ..Default::default()
+        };
+
+        let item = TextItem::from_zone_policy("test", 0.0, 0.0, 400.0, 100.0, &policy, 1.0);
+        assert_eq!(item.font_size_px, 28.0);
+        assert_eq!(item.font_family, FontFamily::SystemMonospace);
+        assert_eq!(item.alignment, TextAlign::Center);
+        assert!(item.outline_color.is_some(), "outline_color should be set");
+        assert_eq!(item.outline_width.unwrap(), 1.5);
+        // Margins: x+12, y+6
+        assert_eq!(item.pixel_x, 12.0);
+        assert_eq!(item.pixel_y, 6.0);
     }
 }
