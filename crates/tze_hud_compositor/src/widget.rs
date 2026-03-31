@@ -384,17 +384,17 @@ pub fn rasterize_svg_layers(
         resvg::render(&tree, transform, &mut pixmap.as_mut());
 
         // Composite this layer onto the accumulation pixmap (source-over).
+        // Uses tiny_skia::PixmapMut::draw_pixmap which is SIMD-optimised and
+        // handles premultiplied alpha correctly — avoiding a manual pixel loop.
         if let Some(ref mut base) = composed {
-            let layer_data = pixmap.data();
-            let base_data = base.data_mut();
-            for (b, l) in base_data.chunks_mut(4).zip(layer_data.chunks(4)) {
-                let src_a = l[3] as f32 / 255.0;
-                let inv_a = 1.0 - src_a;
-                b[0] = (l[0] as f32 + b[0] as f32 * inv_a).min(255.0) as u8;
-                b[1] = (l[1] as f32 + b[1] as f32 * inv_a).min(255.0) as u8;
-                b[2] = (l[2] as f32 + b[2] as f32 * inv_a).min(255.0) as u8;
-                b[3] = (l[3] as f32 + b[3] as f32 * inv_a).min(255.0) as u8;
-            }
+            base.as_mut().draw_pixmap(
+                0,
+                0,
+                pixmap.as_ref(),
+                &tiny_skia::PixmapPaint::default(),
+                tiny_skia::Transform::identity(),
+                None,
+            );
         } else {
             composed = Some(pixmap);
         }
@@ -623,10 +623,12 @@ impl WidgetRenderer {
             })
             .collect();
 
-        // Composite all layers into a single pixmap.
-        let mut composed: Option<tiny_skia::Pixmap> = None;
+        // Resolve SVG text for each layer (bytes → str).
+        let mut layer_texts: Vec<String> = Vec::with_capacity(widget_def.layers.len());
+        let mut layer_data: Vec<(usize, &[WidgetBinding])> =
+            Vec::with_capacity(widget_def.layers.len());
 
-        for layer in &widget_def.layers {
+        for (idx, layer) in widget_def.layers.iter().enumerate() {
             let key = (widget_def.id.clone(), layer.svg_file.clone());
             let svg_bytes = match self.svgs.get(&key) {
                 Some(b) => b.clone(),
@@ -639,82 +641,26 @@ impl WidgetRenderer {
                     continue;
                 }
             };
-
-            let svg_text = match std::str::from_utf8(&svg_bytes) {
-                Ok(s) => s.to_string(),
+            match std::str::from_utf8(&svg_bytes) {
+                Ok(s) => {
+                    layer_texts.push(s.to_string());
+                    layer_data.push((idx, &layer.bindings));
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "widget SVG not valid UTF-8");
-                    continue;
                 }
-            };
-
-            // Apply parameter bindings to the SVG source.
-            let mut modified_svg = svg_text;
-            for binding in &layer.bindings {
-                if let Some(attr_val) = resolve_binding_value(binding, params, &param_constraints) {
-                    modified_svg = apply_svg_attribute(
-                        &modified_svg,
-                        &binding.target_element,
-                        &binding.target_attribute,
-                        &attr_val,
-                    );
-                }
-            }
-
-            // Parse modified SVG into usvg::Tree.
-            let opts = resvg::usvg::Options::default();
-            let tree = match resvg::usvg::Tree::from_str(&modified_svg, &opts) {
-                Ok(t) => t,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        widget = widget_def.id,
-                        svg_file = layer.svg_file,
-                        "failed to parse modified SVG"
-                    );
-                    continue;
-                }
-            };
-
-            // Rasterize into a pixmap at the target size.
-            let mut pixmap = match tiny_skia::Pixmap::new(pixel_width, pixel_height) {
-                Some(p) => p,
-                None => {
-                    tracing::warn!(
-                        width = pixel_width,
-                        height = pixel_height,
-                        "failed to allocate pixmap for widget"
-                    );
-                    continue;
-                }
-            };
-
-            // Scale the SVG to fill the target pixel size.
-            let svg_size = tree.size();
-            let sx = pixel_width as f32 / svg_size.width();
-            let sy = pixel_height as f32 / svg_size.height();
-            let transform = tiny_skia::Transform::from_scale(sx, sy);
-            resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-            // Composite this layer onto the accumulation pixmap.
-            if let Some(ref mut base) = composed {
-                // Composite layer on top of base using source-over blending.
-                // tiny-skia Pixmap stores premultiplied RGBA.
-                let layer_data = pixmap.data();
-                let base_data = base.data_mut();
-                for (b, l) in base_data.chunks_mut(4).zip(layer_data.chunks(4)) {
-                    // Premultiplied source-over: out = src + dst * (1 - src_a)
-                    let src_a = l[3] as f32 / 255.0;
-                    let inv_a = 1.0 - src_a;
-                    b[0] = (l[0] as f32 + b[0] as f32 * inv_a).min(255.0) as u8;
-                    b[1] = (l[1] as f32 + b[1] as f32 * inv_a).min(255.0) as u8;
-                    b[2] = (l[2] as f32 + b[2] as f32 * inv_a).min(255.0) as u8;
-                    b[3] = (l[3] as f32 + b[3] as f32 * inv_a).min(255.0) as u8;
-                }
-            } else {
-                composed = Some(pixmap);
             }
         }
+
+        // Build the slice expected by rasterize_svg_layers.
+        let svg_layers: Vec<(&str, &[WidgetBinding])> = layer_data
+            .iter()
+            .zip(layer_texts.iter())
+            .map(|((_, bindings), text)| (text.as_str(), *bindings))
+            .collect();
+
+        // Delegate to the CPU-only rasterization path (shared with benchmarks/tests).
+        let composed = rasterize_svg_layers(&svg_layers, &param_constraints, params, pixel_width, pixel_height);
 
         let raster_us = start.elapsed().as_micros() as u64;
 

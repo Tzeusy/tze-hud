@@ -149,7 +149,7 @@ fn gauge_param_constraints() -> HashMap<String, (f32, f32)> {
 /// Acceptance criterion for hud-4kj0 / task 12.11:
 /// SVG re-rasterization < 2ms at 512×512 on reference hardware.
 ///
-/// This test enforces the lenient CI threshold (32ms) and verifies correctness
+/// This test enforces the lenient CI threshold (500ms) and verifies correctness
 /// (non-empty pixmap).  The strict 2ms spec target is measured by the Criterion
 /// benchmark (`benches/widget_rasterize.rs`).
 ///

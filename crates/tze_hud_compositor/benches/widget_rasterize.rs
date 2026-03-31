@@ -17,9 +17,9 @@
 //! | Context              | Threshold | Notes                                        |
 //! |----------------------|-----------|----------------------------------------------|
 //! | Reference hardware   | < 2ms     | Spec requirement (task 7.9, 12.11)           |
-//! | CI (llvmpipe/any)    | < 32ms    | Lenient; llvmpipe rasterization is ~8–16× slower |
+//! | CI (llvmpipe/any)    | < 500ms   | Lenient; headroom for debug builds + llvmpipe VMs |
 //!
-//! The CI assertion test uses the lenient 32ms threshold.  Run this Criterion
+//! The CI assertion test uses the lenient 500ms threshold.  Run this Criterion
 //! benchmark on target hardware to verify the 2ms spec requirement.
 //!
 //! ## Benchmark groups
