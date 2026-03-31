@@ -1162,6 +1162,9 @@ impl Compositor {
             }
         }
 
+        // Update zone animation states (fade-in/fade-out) before rendering.
+        self.update_zone_animations(scene);
+
         // Render zone content.
         self.render_zone_content(scene, &mut vertices, sw, sh);
 
@@ -1254,6 +1257,12 @@ impl Compositor {
                 self.render_node(root_id, tile, scene, &mut vertices, sw, sh);
             }
         }
+
+        // Update zone animation states before rendering zone content.
+        self.update_zone_animations(scene);
+
+        // Render zone content backdrops.
+        self.render_zone_content(scene, &mut vertices, sw, sh);
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -1349,6 +1358,10 @@ impl Compositor {
                 self.render_node(root_id, tile, scene, &mut content_vertices, sw, sh);
             }
         }
+
+        // Update zone animation states and render zone content backdrops.
+        self.update_zone_animations(scene);
+        self.render_zone_content(scene, &mut content_vertices, sw, sh);
 
         let encode_start = std::time::Instant::now();
 
