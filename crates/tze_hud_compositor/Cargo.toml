@@ -22,6 +22,7 @@ tiny-skia = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true }
 criterion = { workspace = true }
+tze_hud_widget = { path = "../tze_hud_widget" }
 
 [[bench]]
 name = "widget_rasterize"
