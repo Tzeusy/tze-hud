@@ -1042,9 +1042,14 @@ async fn test_stage6_render_encode_p99_within_budget() {
         .assert_p99_calibrated(Some(effective_budget), NOMINAL_BUDGET_US)
         .expect("stage6_render_encode p99 calibrated budget");
 
-    // Note: CalibrationStatus::Uncalibrated is unreachable here because we always
-    // pass Some(effective_budget). The match covers only the Pass variant.
-    let CalibrationStatus::Pass(p99) = status;
+    // CalibrationStatus::Uncalibrated is unreachable here because we always pass
+    // Some(effective_budget) — but Rust requires exhaustive enum handling.
+    let CalibrationStatus::Pass(p99) = status else {
+        unreachable!(
+            "assert_p99_calibrated returns Uncalibrated only when passed None; \
+             effective_budget is always Some"
+        );
+    };
     eprintln!(
         "[PASS] stage6_render_encode p99={p99}us within budget={effective_budget}us \
          (spec target={NOMINAL_BUDGET_US}us, ci floor={CI_BUDGET_US}us, \
