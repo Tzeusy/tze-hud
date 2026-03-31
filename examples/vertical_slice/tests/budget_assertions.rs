@@ -938,8 +938,7 @@ async fn test_stage6_render_encode_p99_within_budget() {
     run_gpu_fill_calibration().await;
     let cal = current_calibration_with_gpu();
     // Use gpu_scaled_budget for calibrated path; fall back to CI_BUDGET_US when uncalibrated.
-    let calibrated_budget = gpu_scaled_budget(NOMINAL_BUDGET_US, &cal)
-        .map(|b| b.max(CI_BUDGET_US)); // CI_BUDGET_US is an absolute floor on all hardware
+    let calibrated_budget = gpu_scaled_budget(NOMINAL_BUDGET_US, &cal).map(|b| b.max(CI_BUDGET_US)); // CI_BUDGET_US is an absolute floor on all hardware
 
     let config = HeadlessConfig {
         width: 800,
@@ -972,7 +971,13 @@ async fn test_stage6_render_encode_p99_within_budget() {
             let h = 275.0_f32;
 
             let tile = scene
-                .create_tile(tab, "bench-agent", lease, Rect::new(x, y, w, h), (i + 1) as u32)
+                .create_tile(
+                    tab,
+                    "bench-agent",
+                    lease,
+                    Rect::new(x, y, w, h),
+                    (i + 1) as u32,
+                )
                 .unwrap();
 
             // Paragraph text exercises the full glyphon rasterisation path.
