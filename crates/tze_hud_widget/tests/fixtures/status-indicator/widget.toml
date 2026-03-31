@@ -1,0 +1,47 @@
+# Reference status-indicator widget bundle — used as a test fixture.
+#
+# This implements a simple status indicator with a coloured fill circle and a
+# text label.  The circle fill is controlled by the "status" enum parameter via
+# a discrete colour mapping.  The label text is driven by the "label" parameter.
+#
+# Source: hud-tjq8.1 §Create status-indicator asset bundle
+
+name = "status-indicator"
+version = "1.0.0"
+description = "Status indicator widget — reference fixture for discrete binding and text-content tests"
+
+[[parameter_schema]]
+name = "status"
+type = "enum"
+default = "online"
+
+[parameter_schema.constraints]
+enum_allowed_values = ["online", "away", "busy", "offline"]
+
+[[parameter_schema]]
+name = "label"
+type = "string"
+default = ""
+
+# Indicator layer: circle fill driven by "status" discrete mapping,
+# label text driven by "label" direct binding.
+[[layers]]
+svg_file = "indicator.svg"
+
+[[layers.bindings]]
+param = "status"
+target_element = "indicator-fill"
+target_attribute = "fill"
+mapping = "discrete"
+
+[layers.bindings.value_map]
+online = "#00cc66"
+away = "#ffcc00"
+busy = "#ff3300"
+offline = "#888888"
+
+[[layers.bindings]]
+param = "label"
+target_element = "label-text"
+target_attribute = "text-content"
+mapping = "direct"

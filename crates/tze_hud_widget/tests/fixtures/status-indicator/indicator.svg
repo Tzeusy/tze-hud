@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Indicator layer for the reference status-indicator widget fixture.
+     Contains the status circle (bound to "status" via discrete mapping)
+     and the label text element (bound to "label" via text-content synthetic target).
+
+     Element IDs referenced in widget.toml bindings:
+       - "indicator-fill"  — circle, fill color driven by "status" discrete mapping
+       - "label-text"      — SVG text element, text content driven by "label" -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <!-- Status indicator circle: fill driven by "status" discrete mapping -->
+  <circle id="indicator-fill" cx="24" cy="20" r="10"
+          fill="#00cc66"
+          stroke="{{token.color.border.default}}" stroke-width="2"/>
+  <!-- Label text: text content driven by "label" -->
+  <text id="label-text" x="24" y="42" text-anchor="middle"
+        font-family="sans-serif" font-size="8"
+        fill="{{token.color.text.secondary}}"></text>
+</svg>

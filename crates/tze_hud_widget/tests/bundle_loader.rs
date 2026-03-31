@@ -139,6 +139,125 @@ fn gauge_fixture_loads_successfully() {
     }
 }
 
+// ─── Status-indicator fixture [hud-tjq8.1] ───────────────────────────────────
+
+fn status_indicator_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("status-indicator")
+}
+
+/// Returns the canonical token map for the status-indicator fixture.
+/// Keys match every {{token.key}} placeholder in indicator.svg.
+fn status_indicator_tokens() -> HashMap<String, String> {
+    let mut tokens = HashMap::new();
+    tokens.insert("color.border.default".to_string(), "#333333".to_string());
+    tokens.insert("color.text.secondary".to_string(), "#aaaaaa".to_string());
+    tokens
+}
+
+/// Validates the status-indicator fixture bundle:
+/// - widget type is "status-indicator"
+/// - exactly 2 parameters (status enum, label string)
+/// - exactly 1 layer (indicator.svg)
+/// - exactly 2 bindings: discrete status→indicator-fill/fill and
+///   direct label→label-text/text-content
+///
+/// Source: hud-tjq8.1 §Create status-indicator asset bundle
+#[test]
+fn status_indicator_fixture_loads_successfully() {
+    let dir = status_indicator_fixture_path();
+    let tokens = status_indicator_tokens();
+    let result = load_bundle_dir_with_tokens(&dir, &tokens);
+    match result {
+        BundleScanResult::Ok(bundle) => {
+            let def = &bundle.definition;
+            assert_eq!(def.id, "status-indicator", "widget id should be 'status-indicator'");
+            assert_eq!(def.name, "status-indicator");
+            assert!(
+                !def.description.is_empty(),
+                "description should not be empty"
+            );
+
+            // Parameter schema: status (enum) and label (string).
+            assert_eq!(def.parameter_schema.len(), 2, "must have exactly 2 parameters");
+            let param_names: Vec<&str> = def
+                .parameter_schema
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect();
+            assert!(param_names.contains(&"status"), "must declare 'status' param");
+            assert!(param_names.contains(&"label"), "must declare 'label' param");
+
+            // Verify status param is an enum with the expected allowed values.
+            let status_param = def
+                .parameter_schema
+                .iter()
+                .find(|p| p.name == "status")
+                .unwrap();
+            let status_constraints = status_param
+                .constraints
+                .as_ref()
+                .expect("status parameter should have enum constraints");
+            assert!(
+                status_constraints.enum_allowed_values.contains(&"online".to_string()),
+                "status constraints must include 'online'"
+            );
+            assert!(
+                status_constraints.enum_allowed_values.contains(&"away".to_string()),
+                "status constraints must include 'away'"
+            );
+            assert!(
+                status_constraints.enum_allowed_values.contains(&"busy".to_string()),
+                "status constraints must include 'busy'"
+            );
+            assert!(
+                status_constraints.enum_allowed_values.contains(&"offline".to_string()),
+                "status constraints must include 'offline'"
+            );
+
+            // Layers: exactly 1 layer (indicator.svg).
+            assert_eq!(def.layers.len(), 1, "must have exactly 1 layer");
+            assert_eq!(def.layers[0].svg_file, "indicator.svg");
+
+            // indicator.svg has exactly 2 bindings.
+            let bindings = &def.layers[0].bindings;
+            assert_eq!(bindings.len(), 2, "indicator.svg must have exactly 2 bindings");
+
+            // Check discrete binding: status → indicator-fill / fill.
+            let status_binding = bindings.iter().find(|b| b.param == "status").unwrap();
+            assert_eq!(status_binding.target_element, "indicator-fill");
+            assert_eq!(status_binding.target_attribute, "fill");
+            if let tze_hud_scene::types::WidgetBindingMapping::Discrete { value_map } =
+                &status_binding.mapping
+            {
+                assert_eq!(value_map.get("online").map(String::as_str), Some("#00cc66"));
+                assert_eq!(value_map.get("away").map(String::as_str), Some("#ffcc00"));
+                assert_eq!(value_map.get("busy").map(String::as_str), Some("#ff3300"));
+                assert_eq!(value_map.get("offline").map(String::as_str), Some("#888888"));
+            } else {
+                panic!("expected discrete mapping for status binding");
+            }
+
+            // Check direct text-content binding: label → label-text / text-content.
+            let label_binding = bindings.iter().find(|b| b.param == "label").unwrap();
+            assert_eq!(label_binding.target_element, "label-text");
+            assert_eq!(label_binding.target_attribute, "text-content");
+            assert!(matches!(
+                label_binding.mapping,
+                tze_hud_scene::types::WidgetBindingMapping::Direct
+            ));
+
+            // SVG content is captured.
+            assert!(bundle.svg_contents.contains_key("indicator.svg"));
+        }
+        BundleScanResult::Err(e) => {
+            panic!("status-indicator fixture failed to load: {e}");
+        }
+    }
+}
+
 // ─── Error: WIDGET_BUNDLE_NO_MANIFEST ─────────────────────────────────────────
 
 /// Acceptance criterion 2: WIDGET_BUNDLE_NO_MANIFEST.
