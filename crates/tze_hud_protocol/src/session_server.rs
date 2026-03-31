@@ -2174,11 +2174,20 @@ async fn handle_mutation_batch(
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
                 // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
                 // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
-                if let Ok(tile_id) = bytes_to_scene_id(&str_.tile_id) {
-                    if let Some(ref node_proto) = str_.node
-                        && let Some(node) = convert::proto_node_to_scene(node_proto)
-                    {
-                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                match bytes_to_scene_id(&str_.tile_id) {
+                    Ok(tile_id) => {
+                        if let Some(ref node_proto) = str_.node
+                            && let Some(node) = convert::proto_node_to_scene(node_proto)
+                        {
+                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = str_.tile_id.len(),
+                            "SetTileRoot: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
                     }
                 }
             }
@@ -2374,11 +2383,20 @@ async fn apply_queued_batch_to_scene(
             Some(crate::proto::mutation_proto::Mutation::SetTileRoot(str_)) => {
                 // tile_id is encoded as uuid::Uuid::as_bytes() (big-endian RFC 4122 bytes),
                 // matching scene_id_to_bytes / bytes_to_scene_id wire contract.
-                if let Ok(tile_id) = bytes_to_scene_id(&str_.tile_id) {
-                    if let Some(ref node_proto) = str_.node
-                        && let Some(node) = convert::proto_node_to_scene(node_proto)
-                    {
-                        scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                match bytes_to_scene_id(&str_.tile_id) {
+                    Ok(tile_id) => {
+                        if let Some(ref node_proto) = str_.node
+                            && let Some(node) = convert::proto_node_to_scene(node_proto)
+                        {
+                            scene_mutations.push(SceneMutation::SetTileRoot { tile_id, node });
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = str_.tile_id.len(),
+                            "SetTileRoot (queued): invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
                     }
                 }
             }
