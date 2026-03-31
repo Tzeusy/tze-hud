@@ -4,7 +4,11 @@
 # text label.  The circle fill is controlled by the "status" enum parameter via
 # a discrete colour mapping.  The label text is driven by the "label" parameter.
 #
+# Colours and constraints match spec.md §Requirement: Status Indicator Discrete
+# Color Binding and §Requirement: Status Indicator Parameter Schema exactly.
+#
 # Source: hud-tjq8.1 §Create status-indicator asset bundle
+#         hud-tjq8.2 §Add discrete binding and token resolution tests
 
 name = "status-indicator"
 version = "1.0.0"
@@ -13,7 +17,7 @@ description = "Status indicator widget — reference fixture for discrete bindin
 [[parameter_schema]]
 name = "status"
 type = "enum"
-default = "online"
+default = "offline"
 
 [parameter_schema.constraints]
 enum_allowed_values = ["online", "away", "busy", "offline"]
@@ -22,6 +26,9 @@ enum_allowed_values = ["online", "away", "busy", "offline"]
 name = "label"
 type = "string"
 default = ""
+
+[parameter_schema.constraints]
+string_max_bytes = 16
 
 # Indicator layer: circle fill driven by "status" discrete mapping,
 # label text driven by "label" direct binding.
@@ -35,10 +42,10 @@ target_attribute = "fill"
 mapping = "discrete"
 
 [layers.bindings.value_map]
-online = "#00cc66"
-away = "#ffcc00"
-busy = "#ff3300"
-offline = "#888888"
+online  = "#00CC66"
+away    = "#FFB800"
+busy    = "#FF4444"
+offline = "#666666"
 
 [[layers.bindings]]
 param = "label"
