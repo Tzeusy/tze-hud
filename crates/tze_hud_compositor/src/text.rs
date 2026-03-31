@@ -37,7 +37,7 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
-use tze_hud_scene::types::{FontFamily, TextAlign, TextMarkdownNode, TextOverflow};
+use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow};
 use wgpu::{Device, MultisampleState, Queue};
 
 // ─── TextRasterizer ───────────────────────────────────────────────────────────
@@ -150,6 +150,10 @@ impl TextRasterizer {
     /// `renderer.prepare`. Must be called after `update_viewport` and before
     /// `render_text_pass`.
     ///
+    /// When a `TextItem` has `outline_color` and `outline_width > 0`, the text
+    /// is rendered 9 times: once at each of the 8 cardinal+diagonal pixel offsets
+    /// in `outline_color`, then once more in the fill `color` on top.
+    ///
     /// Returns `Ok(())` on success, or a string on glyphon error (non-fatal —
     /// the frame continues with missing text rather than a crash).
     pub fn prepare_text_items(
@@ -158,7 +162,23 @@ impl TextRasterizer {
         queue: &Queue,
         items: &[TextItem],
     ) -> Result<(), String> {
-        // Build one glyphon Buffer per item.
+        // 8-direction offsets for outline rendering (cardinal + diagonal).
+        const OUTLINE_DIRS: [(f32, f32); 8] = [
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (0.0, -1.0),
+            (0.0, 1.0),
+            (-1.0, -1.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (1.0, 1.0),
+        ];
+
+        // Each item with outline produces 9 TextAreas (8 outline + 1 fill).
+        // Items without outline produce 1 TextArea each.
+        // We build all Buffers first, then construct TextArea references.
+
+        // Phase 1: build one Buffer per item (shared by all outline + fill passes).
         let buffers: Vec<Buffer> = items
             .iter()
             .map(|item| {
@@ -167,15 +187,12 @@ impl TextRasterizer {
                     &mut self.font_system,
                     Metrics::new(item.font_size_px, line_height),
                 );
-
-                // Set available size so word-wrap operates within bounds.
                 buf.set_size(
                     &mut self.font_system,
                     Some(item.bounds_width),
                     Some(item.bounds_height),
                 );
                 buf.set_wrap(&mut self.font_system, Wrap::Word);
-
                 let family = match item.font_family {
                     FontFamily::SystemSansSerif => Family::SansSerif,
                     FontFamily::SystemMonospace => Family::Monospace,
@@ -188,31 +205,62 @@ impl TextRasterizer {
             })
             .collect();
 
-        // Build TextArea slice from items + buffers (same order).
-        let text_areas: Vec<TextArea<'_>> = items
-            .iter()
-            .zip(buffers.iter())
-            .map(|(item, buf)| {
-                let color = item.color;
-                // Hard clip bounds for both Clip and Ellipsis (ellipsis approximated
-                // by word-wrap fitting into bounds height).
-                let bounds = TextBounds {
-                    left: item.pixel_x as i32,
-                    top: item.pixel_y as i32,
-                    right: (item.pixel_x + item.bounds_width) as i32,
-                    bottom: (item.pixel_y + item.bounds_height) as i32,
-                };
-                TextArea {
-                    buffer: buf,
-                    left: item.pixel_x,
-                    top: item.pixel_y,
-                    scale: 1.0,
-                    bounds,
-                    default_color: Color::rgba(color[0], color[1], color[2], color[3]),
-                    custom_glyphs: &[],
+        // Phase 2: build TextArea list.
+        // For outlined items, we emit 8 outline passes then 1 fill pass.
+        // For non-outlined items, we emit 1 fill pass.
+        // Because TextArea borrows the buffer, all buffers must outlive this Vec.
+        let mut text_areas: Vec<TextArea<'_>> = Vec::with_capacity(items.len() * 9);
+
+        for (item, buf) in items.iter().zip(buffers.iter()) {
+            let fill_color = item.color;
+            let bounds = TextBounds {
+                left: item.pixel_x as i32,
+                top: item.pixel_y as i32,
+                right: (item.pixel_x + item.bounds_width) as i32,
+                bottom: (item.pixel_y + item.bounds_height) as i32,
+            };
+
+            // Outline passes (only when outline is active).
+            if let (Some(oc), Some(ow)) = (item.outline_color, item.outline_width) {
+                if ow > 0.0 {
+                    for (dx, dy) in &OUTLINE_DIRS {
+                        let offset = ow;
+                        // Offset bounds to match shifted position.
+                        let shifted_bounds = TextBounds {
+                            left: (item.pixel_x + dx * offset) as i32,
+                            top: (item.pixel_y + dy * offset) as i32,
+                            right: (item.pixel_x + dx * offset + item.bounds_width) as i32,
+                            bottom: (item.pixel_y + dy * offset + item.bounds_height) as i32,
+                        };
+                        text_areas.push(TextArea {
+                            buffer: buf,
+                            left: item.pixel_x + dx * offset,
+                            top: item.pixel_y + dy * offset,
+                            scale: 1.0,
+                            bounds: shifted_bounds,
+                            default_color: Color::rgba(oc[0], oc[1], oc[2], oc[3]),
+                            custom_glyphs: &[],
+                        });
+                    }
                 }
-            })
-            .collect();
+            }
+
+            // Fill pass (always last so it renders on top of outline).
+            text_areas.push(TextArea {
+                buffer: buf,
+                left: item.pixel_x,
+                top: item.pixel_y,
+                scale: 1.0,
+                bounds,
+                default_color: Color::rgba(
+                    fill_color[0],
+                    fill_color[1],
+                    fill_color[2],
+                    fill_color[3],
+                ),
+                custom_glyphs: &[],
+            });
+        }
 
         self.renderer
             .prepare(
@@ -273,6 +321,12 @@ pub struct TextItem {
     pub alignment: TextAlign,
     /// Overflow mode.
     pub overflow: TextOverflow,
+    /// Outline color for 8-direction text outline; None = no outline.
+    pub outline_color: Option<[u8; 4]>,
+    /// Outline stroke width in pixels; None or 0.0 = no outline.
+    pub outline_width: Option<f32>,
+    /// Opacity multiplier (0.0–1.0) from zone animation state; 1.0 = fully opaque.
+    pub opacity: f32,
 }
 
 impl TextItem {
@@ -307,12 +361,84 @@ impl TextItem {
             color: [r, g, b, a],
             alignment: node.alignment,
             overflow: node.overflow,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
+        }
+    }
+
+    /// Build a `TextItem` for zone text content driven by a [`RenderingPolicy`].
+    ///
+    /// This is the primary factory method for zone rendering — replaces the
+    /// old `from_zone_stream_text` / `from_zone_notification` hardcoded-color
+    /// variants.  All visual properties are read from `policy`; no hardcoded
+    /// colors or font choices.
+    ///
+    /// `x`, `y`, `w`, `h` are the zone geometry in physical pixels.
+    /// `opacity` is the current zone animation opacity (1.0 = fully opaque).
+    ///
+    /// [`RenderingPolicy`]: tze_hud_scene::types::RenderingPolicy
+    pub fn from_zone_policy(
+        text: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        policy: &RenderingPolicy,
+        opacity: f32,
+    ) -> Self {
+        // Margin: prefer policy.margin_horizontal/margin_vertical, fall back to 8px.
+        let margin_h = policy.margin_horizontal.unwrap_or(8.0);
+        let margin_v = policy.margin_vertical.unwrap_or(8.0);
+
+        let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
+        let font_family = policy.font_family.unwrap_or(FontFamily::SystemSansSerif);
+        let alignment = policy.text_align.unwrap_or(TextAlign::Start);
+
+        // text_color: policy.text_color if present, else white.
+        let color = policy
+            .text_color
+            .map(rgba_to_srgb_u8)
+            .unwrap_or([255, 255, 255, 220]);
+
+        // Apply opacity to the fill color alpha.
+        let color = apply_opacity_to_color(color, opacity);
+
+        // Outline: propagate only when outline_width > 0.
+        let (outline_color, outline_width) = match (policy.outline_color, policy.outline_width) {
+            (Some(oc), Some(ow)) if ow > 0.0 => {
+                let oc_srgb = apply_opacity_to_color(rgba_to_srgb_u8(oc), opacity);
+                (Some(oc_srgb), Some(ow))
+            }
+            _ => (None, None),
+        };
+
+        TextItem {
+            text: text.to_owned(),
+            pixel_x: x + margin_h,
+            pixel_y: y + margin_v,
+            bounds_width: (w - margin_h * 2.0).max(1.0),
+            bounds_height: (h - margin_v * 2.0).max(1.0),
+            font_size_px,
+            font_family,
+            color,
+            alignment,
+            overflow: TextOverflow::Clip,
+            outline_color,
+            outline_width,
+            opacity,
         }
     }
 
     /// Build a `TextItem` for zone `StreamText` content.
     ///
     /// `x`, `y`, `w`, `h` are the zone geometry in physical pixels.
+    ///
+    /// # Deprecation note
+    ///
+    /// Prefer [`TextItem::from_zone_policy`] which reads all visual properties
+    /// from `RenderingPolicy`.  This method retains explicit parameters for
+    /// callers that do not yet have a policy (e.g. benchmarks).
     pub fn from_zone_stream_text(
         text: &str,
         x: f32,
@@ -334,6 +460,9 @@ impl TextItem {
             color,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
         }
     }
 
@@ -366,8 +495,32 @@ impl TextItem {
             color,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
+            outline_color: None,
+            outline_width: None,
+            opacity: 1.0,
         }
     }
+}
+
+// ─── Color helpers ────────────────────────────────────────────────────────────
+
+/// Convert an `Rgba` (linear f32) to sRGB u8 `[r, g, b, a]`.
+///
+/// The alpha channel is passed through directly (0..1 → 0..255) rather than
+/// being gamma-encoded, which matches glyphon's expected color space.
+pub fn rgba_to_srgb_u8(c: Rgba) -> [u8; 4] {
+    [
+        linear_to_srgb_u8(c.r),
+        linear_to_srgb_u8(c.g),
+        linear_to_srgb_u8(c.b),
+        (c.a * 255.0).clamp(0.0, 255.0) as u8,
+    ]
+}
+
+/// Multiply the alpha channel of an sRGB u8 color by `opacity`.
+pub fn apply_opacity_to_color(color: [u8; 4], opacity: f32) -> [u8; 4] {
+    let a = (color[3] as f32 * opacity.clamp(0.0, 1.0)).clamp(0.0, 255.0) as u8;
+    [color[0], color[1], color[2], a]
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
