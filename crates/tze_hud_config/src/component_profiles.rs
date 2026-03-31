@@ -36,7 +36,7 @@ use tze_hud_scene::config::{ConfigError, ConfigErrorCode};
 use tze_hud_widget::loader::{BundleScanResult, LoadedBundle, scan_bundle_dirs};
 
 use crate::component_types::ComponentType;
-use crate::tokens::{DesignTokenMap, parse_color_hex, parse_numeric, resolve_tokens};
+use crate::tokens::{DesignTokenMap, font_family_from_keyword, parse_color_hex, parse_numeric, resolve_tokens};
 
 // ─── ZoneRenderingOverride ────────────────────────────────────────────────────
 
@@ -652,19 +652,6 @@ fn validate_zone_override(
 ) -> Result<ZoneRenderingOverride, ConfigError> {
     let mut out = ZoneRenderingOverride::default();
 
-    // Helper: resolve a string field (may contain {{token.key}} reference).
-    // Returns the resolved string or an error.
-    macro_rules! resolve_string_field {
-        ($raw_field:expr, $field_name:expr) => {
-            if let Some(val) = &$raw_field {
-                let s = extract_string_value(val, $field_name, profile_name, zone_type_name)?;
-                Some(resolve_token_ref(&s, scoped_tokens, profile_name, zone_type_name, $field_name)?)
-            } else {
-                None
-            }
-        };
-    }
-
     // Helper: resolve a numeric field (TOML float/integer or {{token.key}} string).
     macro_rules! resolve_numeric_field {
         ($raw_field:expr, $field_name:expr) => {
@@ -677,7 +664,26 @@ fn validate_zone_override(
     }
 
     // ── font_family ──────────────────────────────────────────────────────────
-    out.font_family = resolve_string_field!(raw.font_family, "font_family");
+    // Spec (§Zone Rendering Override Schema): font_family is "parsed per font family format
+    // in Token Value Formats" — only the three system keywords are valid in v1.
+    if let Some(val) = &raw.font_family {
+        let s = extract_string_value(val, "font_family", profile_name, zone_type_name)?;
+        let resolved = resolve_token_ref(&s, scoped_tokens, profile_name, zone_type_name, "font_family")?;
+        if font_family_from_keyword(&resolved).is_none() {
+            return Err(ConfigError {
+                code: ConfigErrorCode::ProfileInvalidZoneOverride,
+                field_path: format!("profile:{profile_name}/zones/{zone_type_name}.toml:font_family"),
+                expected: "a v1 font family keyword (\"system-ui\", \"sans-serif\", \"monospace\", or \"serif\")".into(),
+                got: format!("{resolved:?}"),
+                hint: format!(
+                    "profile {:?}: font_family value {:?} is not a recognized font family keyword; \
+                     v1 supports only \"system-ui\", \"sans-serif\", \"monospace\", and \"serif\"",
+                    profile_name, resolved
+                ),
+            });
+        }
+        out.font_family = Some(resolved);
+    }
 
     // ── font_size_px ─────────────────────────────────────────────────────────
     out.font_size_px = resolve_numeric_field!(raw.font_size_px, "font_size_px");
@@ -1478,6 +1484,52 @@ component_type = "notification"
         assert_eq!(extract_token_key("{{}}"), None);
         // Literal escaped braces (treated as non-token since they are {{{}}}}).
         assert_eq!(extract_token_key("{{}}"), None);
+    }
+
+    // ── font_family validation ────────────────────────────────────────────────
+
+    #[test]
+    fn invalid_font_family_keyword_produces_error() {
+        // v1 only supports system-ui, sans-serif, monospace, serif.
+        let (_dir, path) = make_profile_dir_with_zone(
+            r#"name = "bad-font"
+version = "1.0.0"
+component_type = "subtitle"
+"#,
+            "subtitle",
+            r#"font_family = "Fira Code"
+"#,
+        );
+
+        let result = load_profile_dir(&path, &empty_tokens());
+        let errors = result.expect_err("invalid font_family keyword should produce errors");
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::ProfileInvalidZoneOverride)),
+            "invalid font_family should produce PROFILE_INVALID_ZONE_OVERRIDE, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn valid_font_family_keywords_accepted() {
+        for kw in &["system-ui", "sans-serif", "monospace", "serif"] {
+            let (_dir, path) = make_profile_dir_with_zone(
+                r#"name = "font-kw-test"
+version = "1.0.0"
+component_type = "subtitle"
+"#,
+                "subtitle",
+                &format!(r#"font_family = "{kw}""#),
+            );
+            let result = load_profile_dir(&path, &empty_tokens());
+            assert!(
+                result.is_ok(),
+                "font_family {:?} should be accepted, got: {:?}",
+                kw,
+                result.err()
+            );
+        }
     }
 
     // ── Profile with numeric token reference ──────────────────────────────────
