@@ -1054,21 +1054,22 @@ fn tab_from_dismiss_crosses_to_next_tile() {
         )
         .unwrap();
     let other_node_id = SceneId::new();
-    scene.nodes.insert(
-        other_node_id,
-        Node {
-            id: other_node_id,
-            children: vec![],
-            data: NodeData::HitRegion(HitRegionNode {
-                bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
-                interaction_id: "other-button".to_string(),
-                accepts_focus: true,
-                accepts_pointer: true,
-                ..Default::default()
-            }),
-        },
-    );
-    scene.tiles.get_mut(&tile_id2).unwrap().root_node = Some(other_node_id);
+    scene
+        .set_tile_root(
+            tile_id2,
+            Node {
+                id: other_node_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                    interaction_id: "other-button".to_string(),
+                    accepts_focus: true,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
 
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
