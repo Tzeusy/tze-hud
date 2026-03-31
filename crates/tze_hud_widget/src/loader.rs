@@ -171,6 +171,14 @@ fn load_bundle_dir_inner(dir: &Path, path_str: &str) -> Result<LoadedBundle, Bun
             detail: "missing required field 'name'".to_string(),
         })?;
 
+    // Step 3a: Validate widget type id format: [a-z][a-z0-9-]*
+    if !is_valid_widget_type_id(name) {
+        return Err(BundleError::InvalidName {
+            path: path_str.to_string(),
+            name: name.to_string(),
+        });
+    }
+
     let version = raw
         .version
         .as_deref()
@@ -607,6 +615,26 @@ fn parse_binding_mapping(
     }
 }
 
+// ─── Widget type id validation ────────────────────────────────────────────────
+
+/// Returns `true` if `id` conforms to the widget type id format: `[a-z][a-z0-9-]*`.
+///
+/// The id must:
+/// - start with a lowercase ASCII letter (`a`–`z`),
+/// - contain only lowercase ASCII letters, ASCII digits, or hyphens (`-`).
+///
+/// Source: scene-graph/spec.md §Widget Type Identifier.
+pub(crate) fn is_valid_widget_type_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    match chars.next() {
+        // Must start with a lowercase letter.
+        Some(first) if first.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    // Remaining characters must be lowercase letters, digits, or hyphens.
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 // ─── Policy helpers ────────────────────────────────────────────────────────────
 
 fn parse_contention_policy(
@@ -628,4 +656,93 @@ fn parse_rendering_policy(
     // Default rendering policy when not specified.
     let _ = s;
     Ok(RenderingPolicy::default())
+}
+
+// ─── Unit tests ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::is_valid_widget_type_id;
+
+    // Valid ids.
+    #[test]
+    fn valid_single_letter() {
+        assert!(is_valid_widget_type_id("a"));
+    }
+
+    #[test]
+    fn valid_simple_name() {
+        assert!(is_valid_widget_type_id("gauge"));
+    }
+
+    #[test]
+    fn valid_with_digits() {
+        assert!(is_valid_widget_type_id("widget123"));
+    }
+
+    #[test]
+    fn valid_with_hyphens() {
+        assert!(is_valid_widget_type_id("my-widget"));
+    }
+
+    #[test]
+    fn valid_complex_name() {
+        assert!(is_valid_widget_type_id("a1b2-c3d4"));
+    }
+
+    #[test]
+    fn valid_trailing_digit() {
+        assert!(is_valid_widget_type_id("progress-bar2"));
+    }
+
+    // Invalid ids.
+    #[test]
+    fn invalid_empty() {
+        assert!(!is_valid_widget_type_id(""));
+    }
+
+    #[test]
+    fn invalid_starts_with_digit() {
+        assert!(!is_valid_widget_type_id("1gauge"));
+    }
+
+    #[test]
+    fn invalid_starts_with_hyphen() {
+        assert!(!is_valid_widget_type_id("-gauge"));
+    }
+
+    #[test]
+    fn invalid_uppercase() {
+        assert!(!is_valid_widget_type_id("Gauge"));
+    }
+
+    #[test]
+    fn invalid_all_uppercase() {
+        assert!(!is_valid_widget_type_id("GAUGE"));
+    }
+
+    #[test]
+    fn invalid_contains_uppercase() {
+        assert!(!is_valid_widget_type_id("my-Gauge"));
+    }
+
+    #[test]
+    fn invalid_space() {
+        assert!(!is_valid_widget_type_id("my gauge"));
+    }
+
+    #[test]
+    fn invalid_underscore() {
+        assert!(!is_valid_widget_type_id("my_gauge"));
+    }
+
+    #[test]
+    fn invalid_dot() {
+        assert!(!is_valid_widget_type_id("my.gauge"));
+    }
+
+    #[test]
+    fn invalid_slash() {
+        assert!(!is_valid_widget_type_id("my/gauge"));
+    }
 }

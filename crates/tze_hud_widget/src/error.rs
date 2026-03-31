@@ -24,6 +24,15 @@ pub enum BundleError {
     #[error("WIDGET_BUNDLE_INVALID_MANIFEST: {path}: {detail}")]
     InvalidManifest { path: String, detail: String },
 
+    /// The widget type name in `widget.toml` does not conform to the required
+    /// format `[a-z][a-z0-9-]*`.
+    ///
+    /// Wire code: `WIDGET_BUNDLE_INVALID_NAME`
+    #[error(
+        "WIDGET_BUNDLE_INVALID_NAME: {path}: widget type name '{name}' is invalid (must match [a-z][a-z0-9-]*)"
+    )]
+    InvalidName { path: String, name: String },
+
     /// A widget type name is declared in two different loaded bundles.
     ///
     /// Wire code: `WIDGET_BUNDLE_DUPLICATE_TYPE`
@@ -66,6 +75,7 @@ impl BundleError {
         match self {
             BundleError::NoManifest { .. } => "WIDGET_BUNDLE_NO_MANIFEST",
             BundleError::InvalidManifest { .. } => "WIDGET_BUNDLE_INVALID_MANIFEST",
+            BundleError::InvalidName { .. } => "WIDGET_BUNDLE_INVALID_NAME",
             BundleError::DuplicateType { .. } => "WIDGET_BUNDLE_DUPLICATE_TYPE",
             BundleError::MissingSvg { .. } => "WIDGET_BUNDLE_MISSING_SVG",
             BundleError::SvgParseError { .. } => "WIDGET_BUNDLE_SVG_PARSE_ERROR",

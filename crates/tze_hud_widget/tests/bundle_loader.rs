@@ -740,3 +740,131 @@ fn empty_bundle_root_returns_no_results() {
         "empty root should produce no results, got {results:?}"
     );
 }
+
+// ─── Error: WIDGET_BUNDLE_INVALID_NAME ───────────────────────────────────────
+
+/// Acceptance criterion: widget type name must match [a-z][a-z0-9-]*.
+/// Names with uppercase letters, spaces, or special characters are rejected.
+/// Source: scene-graph/spec.md §Widget Type Identifier.
+#[test]
+fn invalid_name_uppercase_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "Gauge"
+version = "1.0.0"
+description = "uppercase name not allowed"
+"#,
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    match result {
+        BundleScanResult::Err(BundleError::InvalidName { name, .. }) => {
+            assert_eq!(name, "Gauge");
+        }
+        other => panic!("expected InvalidName, got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_name_starts_with_digit_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "1gauge"
+version = "1.0.0"
+description = "digit-leading name not allowed"
+"#,
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    match result {
+        BundleScanResult::Err(BundleError::InvalidName { name, .. }) => {
+            assert_eq!(name, "1gauge");
+        }
+        other => panic!("expected InvalidName, got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_name_underscore_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "my_gauge"
+version = "1.0.0"
+description = "underscore not allowed"
+"#,
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    match result {
+        BundleScanResult::Err(BundleError::InvalidName { name, .. }) => {
+            assert_eq!(name, "my_gauge");
+        }
+        other => panic!("expected InvalidName, got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_name_space_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "my gauge"
+version = "1.0.0"
+description = "space not allowed"
+"#,
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    match result {
+        BundleScanResult::Err(BundleError::InvalidName { name, .. }) => {
+            assert_eq!(name, "my gauge");
+        }
+        other => panic!("expected InvalidName, got {other:?}"),
+    }
+}
+
+#[test]
+fn valid_name_with_hyphens_and_digits_accepted() {
+    // Names like "my-widget2" must be accepted.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "my-widget2"
+version = "1.0.0"
+description = "hyphen and digit are valid"
+"#,
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    // No layers in this minimal bundle, but the name is valid so we should NOT get InvalidName.
+    // We expect Ok (no layers = valid but empty layer list).
+    match result {
+        BundleScanResult::Ok(bundle) => {
+            assert_eq!(bundle.definition.id, "my-widget2");
+        }
+        BundleScanResult::Err(BundleError::InvalidName { name, .. }) => {
+            panic!("valid name '{name}' was incorrectly rejected");
+        }
+        BundleScanResult::Err(e) => {
+            // Any other error (e.g. MissingSvg) is acceptable — the name was valid.
+            let _ = e;
+        }
+    }
+}
+
+#[test]
+fn invalid_name_wire_code() {
+    let err = BundleError::InvalidName {
+        path: "/tmp/test".to_string(),
+        name: "Gauge".to_string(),
+    };
+    assert_eq!(err.wire_code(), "WIDGET_BUNDLE_INVALID_NAME");
+}
