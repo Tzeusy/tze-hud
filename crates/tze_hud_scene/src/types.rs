@@ -1800,39 +1800,38 @@ impl WidgetRegistry {
             .unwrap_or_default();
         let occupant_count = pubs.len() as u32;
 
-        // Build schema defaults once; used as the base for all merge-over policies.
-        let defaults: HashMap<std::string::String, WidgetParameterValue> = def
-            .parameter_schema
-            .iter()
-            .map(|p| (p.name.clone(), p.default_value.clone()))
-            .collect();
-
         let contention_policy = instance
             .contention_override
             .unwrap_or(def.default_contention_policy);
 
+        // Build schema defaults lazily (helper closure); only branches that
+        // merge over defaults call this.  Replace does not need defaults, so
+        // we avoid the allocation in that fast path.
+        let make_defaults = || -> HashMap<std::string::String, WidgetParameterValue> {
+            def.parameter_schema
+                .iter()
+                .map(|p| (p.name.clone(), p.default_value.clone()))
+                .collect()
+        };
+
         let effective_params = if pubs.is_empty() {
             // No active publications — always use schema defaults.
-            defaults
+            make_defaults()
         } else {
             match contention_policy {
                 ContentionPolicy::LatestWins => {
                     // Only one publication is retained by publish_to_widget;
                     // merge it over defaults.
-                    let mut params = defaults;
-                    for (k, v) in &pubs[0].params {
-                        params.insert(k.clone(), v.clone());
-                    }
+                    let mut params = make_defaults();
+                    params.extend(pubs[0].params.clone());
                     params
                 }
                 ContentionPolicy::Stack { .. } => {
                     // Publications are ordered oldest-first (new entries pushed to back).
                     // Top-of-stack = last element = most recent publication.
-                    let mut params = defaults;
+                    let mut params = make_defaults();
                     if let Some(top) = pubs.last() {
-                        for (k, v) in &top.params {
-                            params.insert(k.clone(), v.clone());
-                        }
+                        params.extend(top.params.clone());
                     }
                     params
                 }
@@ -1841,11 +1840,9 @@ impl WidgetRegistry {
                     // for that key.  Merge all publications' params over defaults;
                     // later entries in the vec win on key overlap (consistent with
                     // insertion order maintained by publish_to_widget).
-                    let mut params = defaults;
+                    let mut params = make_defaults();
                     for pub_record in &pubs {
-                        for (k, v) in &pub_record.params {
-                            params.insert(k.clone(), v.clone());
-                        }
+                        params.extend(pub_record.params.clone());
                     }
                     params
                 }
