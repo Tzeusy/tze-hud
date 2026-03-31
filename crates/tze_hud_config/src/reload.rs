@@ -112,14 +112,17 @@ pub fn check_frozen_section_changes(
     new_raw: &crate::raw::RawConfig,
 ) -> bool {
     // Compare serialized representations of the frozen sections.
-    // We use serde_json for a canonical, diff-friendly comparison.
+    // We use serde_json::Value for order-independent structural comparison so
+    // that HashMap fields (design_tokens, component_profiles, agents.registered)
+    // do not produce false-positive warnings due to non-deterministic map
+    // iteration order in Rust's HashMap.
     let mut any_changed = false;
 
     macro_rules! check_frozen_field {
         ($field:ident, $section_name:expr) => {
-            let current_json = serde_json::to_string(&current_raw.$field).unwrap_or_default();
-            let new_json = serde_json::to_string(&new_raw.$field).unwrap_or_default();
-            if current_json != new_json {
+            let current_val = serde_json::to_value(&current_raw.$field).ok();
+            let new_val = serde_json::to_value(&new_raw.$field).ok();
+            if current_val != new_val {
                 tracing::warn!(
                     section = $section_name,
                     "SIGHUP detected change in frozen config section '{}'; \
@@ -133,9 +136,26 @@ pub fn check_frozen_section_changes(
 
     check_frozen_field!(runtime, "runtime");
     check_frozen_field!(tabs, "tabs");
+    check_frozen_field!(display_profile, "display_profile");
     check_frozen_field!(design_tokens, "design_tokens");
     check_frozen_field!(component_profile_bundles, "component_profile_bundles");
     check_frozen_field!(component_profiles, "component_profiles");
+
+    // agents.registered is frozen; agents.dynamic_policy is hot-reloadable.
+    // Compare only the registered sub-field to avoid false positives from
+    // dynamic_policy changes being flagged as requiring a restart.
+    let current_registered = current_raw.agents.as_ref().and_then(|a| a.registered.as_ref());
+    let new_registered = new_raw.agents.as_ref().and_then(|a| a.registered.as_ref());
+    let current_reg_val = serde_json::to_value(&current_registered).ok();
+    let new_reg_val = serde_json::to_value(&new_registered).ok();
+    if current_reg_val != new_reg_val {
+        tracing::warn!(
+            section = "agents.registered",
+            "SIGHUP detected change in frozen config section 'agents.registered'; \
+             a restart is required for this change to take effect",
+        );
+        any_changed = true;
+    }
 
     any_changed
 }
