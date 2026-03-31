@@ -1245,7 +1245,10 @@ fn exemplar_status_bar_clear_per_publisher() {
         "only agent-power's publication must be removed; two remain"
     );
 
-    let namespaces: Vec<&str> = pubs.iter().map(|r| r.publisher_namespace.as_str()).collect();
+    let namespaces: Vec<&str> = pubs
+        .iter()
+        .map(|r| r.publisher_namespace.as_str())
+        .collect();
     assert!(
         !namespaces.contains(&"agent-power"),
         "agent-power's publication must not appear after clear"
@@ -1370,7 +1373,10 @@ fn exemplar_status_bar_lease_expiry_isolation() {
         "two publications must survive after agent-power's lease expires"
     );
 
-    let namespaces: Vec<&str> = pubs.iter().map(|r| r.publisher_namespace.as_str()).collect();
+    let namespaces: Vec<&str> = pubs
+        .iter()
+        .map(|r| r.publisher_namespace.as_str())
+        .collect();
     assert!(
         !namespaces.contains(&"agent-power"),
         "agent-power's publication must be cleared after lease expiry"
