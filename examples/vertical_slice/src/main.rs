@@ -158,6 +158,8 @@ fn run_windowed() -> Result<(), Box<dyn std::error::Error>> {
         target_fps: 60,
         config_toml: None,      // No configuration file for the standalone demo.
         config_file_path: None, // No config file path needed when config_toml is None.
+        debug_zones: false,     // Render zone boundaries — disabled for the demo.
+        monitor_index: None,    // Use primary monitor.
     };
 
     let runtime = WindowedRuntime::new(config);
