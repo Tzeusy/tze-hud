@@ -1710,7 +1710,10 @@ component_type = "subtitle"
         tokens.insert("color.text.secondary".to_string(), "#B0B0B0".to_string());
         tokens.insert("color.backdrop.default".to_string(), "#1A1A2E".to_string());
         tokens.insert("opacity.backdrop.opaque".to_string(), "0.9".to_string());
-        tokens.insert("typography.body.family".to_string(), "system-ui".to_string());
+        tokens.insert(
+            "typography.body.family".to_string(),
+            "system-ui".to_string(),
+        );
         tokens.insert("typography.body.size".to_string(), "16".to_string());
         // Used in zone override token references
         tokens.insert("spacing.padding.medium".to_string(), "8".to_string());
@@ -1751,8 +1754,7 @@ component_type = "subtitle"
         let path = exemplar_status_bar_dir();
         let tokens = exemplar_status_bar_tokens();
 
-        let profile =
-            load_profile_dir(&path, &tokens).expect("exemplar-status-bar should load");
+        let profile = load_profile_dir(&path, &tokens).expect("exemplar-status-bar should load");
 
         let zone_override = profile
             .zone_overrides

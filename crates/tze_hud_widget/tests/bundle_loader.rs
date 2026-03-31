@@ -173,7 +173,10 @@ fn status_indicator_fixture_loads_successfully() {
     match result {
         BundleScanResult::Ok(bundle) => {
             let def = &bundle.definition;
-            assert_eq!(def.id, "status-indicator", "widget id should be 'status-indicator'");
+            assert_eq!(
+                def.id, "status-indicator",
+                "widget id should be 'status-indicator'"
+            );
             assert_eq!(def.name, "status-indicator");
             assert!(
                 !def.description.is_empty(),
@@ -181,13 +184,20 @@ fn status_indicator_fixture_loads_successfully() {
             );
 
             // Parameter schema: status (enum) and label (string).
-            assert_eq!(def.parameter_schema.len(), 2, "must have exactly 2 parameters");
+            assert_eq!(
+                def.parameter_schema.len(),
+                2,
+                "must have exactly 2 parameters"
+            );
             let param_names: Vec<&str> = def
                 .parameter_schema
                 .iter()
                 .map(|p| p.name.as_str())
                 .collect();
-            assert!(param_names.contains(&"status"), "must declare 'status' param");
+            assert!(
+                param_names.contains(&"status"),
+                "must declare 'status' param"
+            );
             assert!(param_names.contains(&"label"), "must declare 'label' param");
 
             // Verify status param is an enum with the expected allowed values.
@@ -201,19 +211,27 @@ fn status_indicator_fixture_loads_successfully() {
                 .as_ref()
                 .expect("status parameter should have enum constraints");
             assert!(
-                status_constraints.enum_allowed_values.contains(&"online".to_string()),
+                status_constraints
+                    .enum_allowed_values
+                    .contains(&"online".to_string()),
                 "status constraints must include 'online'"
             );
             assert!(
-                status_constraints.enum_allowed_values.contains(&"away".to_string()),
+                status_constraints
+                    .enum_allowed_values
+                    .contains(&"away".to_string()),
                 "status constraints must include 'away'"
             );
             assert!(
-                status_constraints.enum_allowed_values.contains(&"busy".to_string()),
+                status_constraints
+                    .enum_allowed_values
+                    .contains(&"busy".to_string()),
                 "status constraints must include 'busy'"
             );
             assert!(
-                status_constraints.enum_allowed_values.contains(&"offline".to_string()),
+                status_constraints
+                    .enum_allowed_values
+                    .contains(&"offline".to_string()),
                 "status constraints must include 'offline'"
             );
 
@@ -223,7 +241,11 @@ fn status_indicator_fixture_loads_successfully() {
 
             // indicator.svg has exactly 2 bindings.
             let bindings = &def.layers[0].bindings;
-            assert_eq!(bindings.len(), 2, "indicator.svg must have exactly 2 bindings");
+            assert_eq!(
+                bindings.len(),
+                2,
+                "indicator.svg must have exactly 2 bindings"
+            );
 
             // Check discrete binding: status → indicator-fill / fill.
             let status_binding = bindings.iter().find(|b| b.param == "status").unwrap();
@@ -235,7 +257,10 @@ fn status_indicator_fixture_loads_successfully() {
                 assert_eq!(value_map.get("online").map(String::as_str), Some("#00cc66"));
                 assert_eq!(value_map.get("away").map(String::as_str), Some("#ffcc00"));
                 assert_eq!(value_map.get("busy").map(String::as_str), Some("#ff3300"));
-                assert_eq!(value_map.get("offline").map(String::as_str), Some("#888888"));
+                assert_eq!(
+                    value_map.get("offline").map(String::as_str),
+                    Some("#888888")
+                );
             } else {
                 panic!("expected discrete mapping for status binding");
             }
