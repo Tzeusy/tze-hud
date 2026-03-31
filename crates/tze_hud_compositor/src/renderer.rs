@@ -938,10 +938,10 @@ impl Compositor {
                         }
                     }
                 }
-                ContentionPolicy::MergeByKey { .. } => {
+                ContentionPolicy::MergeByKey { max_keys } => {
                     // Collect all StatusBar publications and merge their entries.
                     // For each key, the last publish wins (latest value).
-                    let mut merged: HashMap<String, String> = HashMap::new();
+                    let mut merged: HashMap<String, String> = HashMap::with_capacity(max_keys as usize);
                     for record in publishes.iter() {
                         if let ZoneContent::StatusBar(payload) = &record.content {
                             for (k, v) in &payload.entries {
