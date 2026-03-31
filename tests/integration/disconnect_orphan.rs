@@ -120,13 +120,7 @@ fn make_card_root_node(_agent_name: &str) -> Node {
 /// Shared setup: create a tab and 3 agent leases each with a presence card tile.
 ///
 /// Returns: (scene, clock, tab_id, [lease_id0, lease_id1, lease_id2], [tile_id0, tile_id1, tile_id2])
-fn setup_three_agent_scene() -> (
-    SceneGraph,
-    TestClock,
-    SceneId,
-    [SceneId; 3],
-    [SceneId; 3],
-) {
+fn setup_three_agent_scene() -> (SceneGraph, TestClock, SceneId, [SceneId; 3], [SceneId; 3]) {
     let (mut scene, clock) = scene_with_clock();
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
@@ -553,7 +547,11 @@ fn grace_period_expiry_removes_tile_and_expires_lease() {
         .disconnect_lease(&lease_ids[2], now_ms)
         .expect("disconnect must succeed");
 
-    assert_eq!(scene.tile_count(), 3, "all 3 tiles must be present initially");
+    assert_eq!(
+        scene.tile_count(),
+        3,
+        "all 3 tiles must be present initially"
+    );
 
     // Advance past grace period (30s + a little margin)
     clock.advance(GRACE_PERIOD_MS + 500);
