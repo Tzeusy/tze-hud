@@ -47,7 +47,7 @@ use tze_hud_widget::loader::{BundleScanResult, scan_bundle_dirs};
 /// Called at runtime startup after zone registry initialization.  This function:
 ///
 /// 1. Resolves `[widget_bundles].paths` relative to `config_parent`.
-/// 2. Calls `scan_bundle_dirs` to load all valid bundles.
+/// 2. Calls `scan_bundle_dirs` to load all valid bundles (with token substitution).
 /// 3. Registers each `WidgetDefinition` in `scene.widget_registry`.
 /// 4. Pre-creates tabs from config if they do not exist in the scene graph yet
 ///    (needed to bind widget instances to tab IDs).
@@ -65,11 +65,16 @@ use tze_hud_widget::loader::{BundleScanResult, scan_bundle_dirs};
 /// - `tab_name_to_id`: Map from tab name string to its `SceneId` in the scene graph.
 ///   Used to bind widget instances to tabs. When a tab name from config is not
 ///   found in this map, the function will attempt to pre-create the tab.
+/// - `token_map`: Global design token map for `{{token.key}}` placeholder resolution
+///   in widget SVG files. Pass an empty map when no design tokens are configured.
+///   Per component-shape-language/spec.md §SVG Token Placeholder Resolution: global
+///   bundles resolve against the global token map.
 pub fn init_widget_registry(
     scene: &mut SceneGraph,
     raw: &RawConfig,
     config_parent: Option<&Path>,
     tab_name_to_id: &HashMap<String, SceneId>,
+    token_map: &HashMap<String, String>,
 ) {
     let Some(wb) = &raw.widget_bundles else {
         tracing::debug!("widget_startup: no [widget_bundles] section; widget registry empty");
@@ -91,10 +96,10 @@ pub fn init_widget_registry(
         .map(|p| resolve_bundle_path(p, base))
         .collect();
 
-    // Step 2: Scan all bundle directories.
-    // Token map is empty until the runtime wires up design-token resolution
-    // (see component-shape-language task 10.2).
-    let scan_results = scan_bundle_dirs(&bundle_roots, &HashMap::new());
+    // Step 2: Scan all bundle directories with token substitution.
+    // Per component-shape-language/spec.md §SVG Token Placeholder Resolution:
+    // global bundles resolve {{token.key}} placeholders against the global token map.
+    let scan_results = scan_bundle_dirs(&bundle_roots, token_map);
 
     // Step 3: Register each valid WidgetDefinition.
     // Track registered names to detect cross-dir duplicates (scan_bundle_dirs
@@ -269,7 +274,8 @@ mod tests {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let raw = RawConfig::default();
         let tab_map = HashMap::new();
-        init_widget_registry(&mut scene, &raw, None, &tab_map);
+        let token_map = HashMap::new();
+        init_widget_registry(&mut scene, &raw, None, &tab_map, &token_map);
         assert!(
             scene.widget_registry.definitions.is_empty(),
             "widget registry should be empty when no bundles configured"
@@ -287,7 +293,8 @@ mod tests {
         let mut raw = RawConfig::default();
         raw.widget_bundles = Some(RawWidgetBundles { paths: vec![] });
         let tab_map = HashMap::new();
-        init_widget_registry(&mut scene, &raw, None, &tab_map);
+        let token_map = HashMap::new();
+        init_widget_registry(&mut scene, &raw, None, &tab_map, &token_map);
         assert!(scene.widget_registry.definitions.is_empty());
     }
 
@@ -301,8 +308,9 @@ mod tests {
             paths: vec!["/tmp/tze_hud_nonexistent_widget_dir_99999_a1b2c3".into()],
         });
         let tab_map = HashMap::new();
+        let token_map = HashMap::new();
         // Should not panic; the bundle scanner handles missing dirs gracefully.
-        init_widget_registry(&mut scene, &raw, None, &tab_map);
+        init_widget_registry(&mut scene, &raw, None, &tab_map, &token_map);
         assert!(scene.widget_registry.definitions.is_empty());
     }
 
@@ -322,7 +330,8 @@ mod tests {
         });
         // Empty tab map — tab "Main" not in scene yet.
         let tab_map = HashMap::new();
-        init_widget_registry(&mut scene, &raw, None, &tab_map);
+        let token_map = HashMap::new();
+        init_widget_registry(&mut scene, &raw, None, &tab_map, &token_map);
         assert!(scene.widget_registry.instances.is_empty());
     }
 }
