@@ -21,12 +21,12 @@
     x="960" y="76"
     text-anchor="middle"
     dominant-baseline="middle"
-    font-family="{{typography.subtitle.family}}"
-    font-size="{{typography.subtitle.size}}"
-    font-weight="{{typography.subtitle.weight}}"
-    fill="{{color.text.primary}}"
-    stroke="{{color.outline.default}}"
-    stroke-width="{{stroke.outline.width}}"
+    font-family="{{token.typography.subtitle.family}}"
+    font-size="{{token.typography.subtitle.size}}"
+    font-weight="{{token.typography.subtitle.weight}}"
+    fill="{{token.color.text.primary}}"
+    stroke="{{token.color.outline.default}}"
+    stroke-width="{{token.stroke.outline.width}}"
     stroke-linejoin="round"
     paint-order="stroke fill">Subtitle text</text>
 </svg>
