@@ -272,6 +272,10 @@ struct WindowedRuntimeState {
     /// Pending mode switch requested at runtime (disruptive — triggers surface
     /// recreation on the next event loop tick).
     pending_mode_switch: Option<WindowMode>,
+    /// Tracked modifier key state for shortcut detection.
+    modifiers: winit::keyboard::ModifiersState,
+    /// Current monitor index for Ctrl+Shift+F8/F9 cycling.
+    current_monitor_index: usize,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -766,10 +770,36 @@ impl ApplicationHandler for WinitApp {
                 }
             }
 
+            // ── Modifiers ─────────────────────────────────────────────────
+            WindowEvent::ModifiersChanged(mods) => {
+                self.state.modifiers = mods.state();
+            }
+
             // ── Keyboard ──────────────────────────────────────────────────
             // Stage 1: Drain keyboard events into the input ring buffer.
             // Map winit keyboard events to InputEventKind::KeyPress / KeyRelease.
             WindowEvent::KeyboardInput { event, .. } => {
+                // ── Monitor cycling: Ctrl+Shift+F9 (next) / Ctrl+Shift+F8 (prev)
+                if event.state == ElementState::Pressed && !event.repeat {
+                    use winit::keyboard::{KeyCode, PhysicalKey};
+                    let mods = self.state.modifiers;
+                    let ctrl_shift = mods.control_key() && mods.shift_key()
+                        && !mods.alt_key() && !mods.super_key();
+                    if ctrl_shift {
+                        match event.physical_key {
+                            PhysicalKey::Code(KeyCode::F9) => {
+                                self.cycle_monitor(event_loop, 1);
+                                return;
+                            }
+                            PhysicalKey::Code(KeyCode::F8) => {
+                                self.cycle_monitor(event_loop, -1);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
                 // Extract a u32 key code from the physical key for the channel type.
                 let key_u32 = physical_key_to_u32(&event.physical_key);
                 let input_event = InputEvent {
@@ -972,6 +1002,44 @@ impl WinitApp {
     /// `SurfaceTexture::present()` on it — satisfying the macOS/Metal requirement
     /// that `present()` runs on the main thread, and ensuring we present the
     /// texture the compositor actually rendered into.
+    /// Cycle the overlay to the next (+1) or previous (-1) monitor.
+    ///
+    /// Enumerates available monitors, advances the index, and repositions +
+    /// resizes the window to cover the target monitor's full physical area.
+    /// The compositor surface is reconfigured automatically via the existing
+    /// `WindowEvent::Resized` handler.
+    fn cycle_monitor(&mut self, event_loop: &ActiveEventLoop, direction: i32) {
+        let monitors: Vec<_> = event_loop.available_monitors().collect();
+        if monitors.is_empty() {
+            return;
+        }
+        let count = monitors.len();
+        let new_idx = ((self.state.current_monitor_index as i32 + direction)
+            .rem_euclid(count as i32)) as usize;
+        self.state.current_monitor_index = new_idx;
+
+        let m = &monitors[new_idx];
+        let size = m.size();
+        let pos = m.position();
+        tracing::info!(
+            monitor_index = new_idx,
+            name = m.name().as_deref().unwrap_or("<unnamed>"),
+            width = size.width,
+            height = size.height,
+            x = pos.x,
+            y = pos.y,
+            "monitor cycle: moving overlay"
+        );
+
+        if let Some(window) = &self.state.window {
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(pos.x, pos.y));
+            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
+                size.width,
+                size.height,
+            ));
+        }
+    }
+
     fn maybe_present_frame(&mut self) {
         if self.state.frame_ready_rx.has_changed().unwrap_or(false) {
             // Acknowledge the signal.
@@ -1216,6 +1284,8 @@ impl WindowedRuntime {
             effective_mode,
             hit_regions: Vec::new(),
             pending_mode_switch: None,
+            modifiers: winit::keyboard::ModifiersState::empty(),
+            current_monitor_index: 0,
         };
 
         let mut app = WinitApp { state: app_state };
