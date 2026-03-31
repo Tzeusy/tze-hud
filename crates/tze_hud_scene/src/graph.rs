@@ -6674,6 +6674,415 @@ mod spec_scenarios {
         assert!(occ.is_none(), "unknown instance should return None");
     }
 
+    // ── get_occupancy per-policy effective_params tests ───────────────────────
+
+    /// LatestWins: WHEN one publication is active THEN effective_params = that
+    /// publication's params merged over schema defaults.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Widget Contention.
+    #[test]
+    fn widget_occupancy_latest_wins_merges_over_defaults() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        // Publish only "level"; "label" and "severity" should fall back to defaults.
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.75),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(occ.occupant_count, 1);
+
+        // Published param should reflect the publication value.
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.75).abs() < 1e-6),
+            "LatestWins level should be 0.75, got: {level:?}"
+        );
+
+        // Unpublished params should retain schema defaults.
+        let label = occ.effective_params.get("label");
+        assert!(
+            matches!(label, Some(WidgetParameterValue::String(s)) if s.is_empty()),
+            "LatestWins: missing label should fall back to default empty string, got: {label:?}"
+        );
+        let severity = occ.effective_params.get("severity");
+        assert!(
+            matches!(severity, Some(WidgetParameterValue::Enum(s)) if s == "info"),
+            "LatestWins: missing severity should fall back to default 'info', got: {severity:?}"
+        );
+    }
+
+    /// LatestWins: WHEN two sequential publishes arrive THEN effective_params
+    /// reflects only the most recent one (merged over defaults).
+    #[test]
+    fn widget_occupancy_latest_wins_uses_most_recent() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::LatestWins);
+
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.2),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.9),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 1,
+            "LatestWins retains only 1 publication"
+        );
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.9).abs() < 1e-6),
+            "LatestWins: most recent level (0.9) should win, got: {level:?}"
+        );
+    }
+
+    /// Stack: WHEN three publishes arrive THEN effective_params reflects the
+    /// top-of-stack (most recent) publication merged over defaults.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Widget Contention (Stack).
+    #[test]
+    fn widget_occupancy_stack_uses_top_of_stack() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 5 });
+
+        for (i, level) in [0.1f32, 0.5f32, 0.8f32].iter().enumerate() {
+            scene
+                .publish_to_widget(
+                    "gauge",
+                    std::collections::HashMap::from([(
+                        "level".to_string(),
+                        WidgetParameterValue::F32(*level),
+                    )]),
+                    &format!("agent.{i}"),
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 3,
+            "Stack should have 3 active publications"
+        );
+
+        // Top-of-stack = most recent = last pushed = 0.8.
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.8).abs() < 1e-6),
+            "Stack: top-of-stack level should be 0.8, got: {level:?}"
+        );
+
+        // Unpublished params should fall back to schema defaults.
+        let label = occ.effective_params.get("label");
+        assert!(
+            matches!(label, Some(WidgetParameterValue::String(s)) if s.is_empty()),
+            "Stack: missing label should fall back to default empty string, got: {label:?}"
+        );
+    }
+
+    /// Stack: WHEN stack exceeds max_depth THEN effective_params still reflects
+    /// the most recent (top-of-stack) publication.
+    #[test]
+    fn widget_occupancy_stack_top_after_depth_cap() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::Stack { max_depth: 3 });
+
+        // Push 5 publications; oldest 2 will be evicted, leaving levels [0.2, 0.3, 0.4].
+        for (i, level) in [0.0f32, 0.1f32, 0.2f32, 0.3f32, 0.4f32].iter().enumerate() {
+            scene
+                .publish_to_widget(
+                    "gauge",
+                    std::collections::HashMap::from([(
+                        "level".to_string(),
+                        WidgetParameterValue::F32(*level),
+                    )]),
+                    &format!("agent.{i}"),
+                    None,
+                    0,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 3,
+            "Stack(3) should cap at 3 publications"
+        );
+
+        // Top-of-stack is the most recent surviving publication (0.4).
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.4).abs() < 1e-6),
+            "Stack: top-of-stack after depth cap should be 0.4, got: {level:?}"
+        );
+    }
+
+    /// MergeByKey: WHEN two different-keyed publications are active THEN
+    /// effective_params merges both over defaults.
+    ///
+    /// Source: widget-system/spec.md §Requirement: Widget Contention (MergeByKey).
+    #[test]
+    fn widget_occupancy_merge_by_key_merges_all_keys_over_defaults() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::MergeByKey { max_keys: 8 });
+
+        // "cpu" key sets level=0.4; "mem" key sets level=0.6.
+        // Since both touch the same param ("level"), the last-inserted key wins.
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.4),
+                )]),
+                "agent.a",
+                Some("cpu".to_string()),
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([
+                    ("level".to_string(), WidgetParameterValue::F32(0.6)),
+                    (
+                        "label".to_string(),
+                        WidgetParameterValue::String("mem".to_string()),
+                    ),
+                ]),
+                "agent.b",
+                Some("mem".to_string()),
+                0,
+                None,
+            )
+            .unwrap();
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 2,
+            "MergeByKey should have 2 active publications"
+        );
+
+        // "mem" was pushed after "cpu", so its level (0.6) wins for "level".
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.6).abs() < 1e-6),
+            "MergeByKey: last-inserted key's level (0.6) should win, got: {level:?}"
+        );
+
+        // "label" was only set by "mem" — should appear in effective_params.
+        let label = occ.effective_params.get("label");
+        assert!(
+            matches!(label, Some(WidgetParameterValue::String(s)) if s == "mem"),
+            "MergeByKey: label from 'mem' key should be 'mem', got: {label:?}"
+        );
+
+        // "severity" was not set by either key — should fall back to schema default.
+        let severity = occ.effective_params.get("severity");
+        assert!(
+            matches!(severity, Some(WidgetParameterValue::Enum(s)) if s == "info"),
+            "MergeByKey: missing severity should fall back to default 'info', got: {severity:?}"
+        );
+    }
+
+    /// MergeByKey: WHEN the same key is updated THEN effective_params reflects
+    /// the updated value.
+    #[test]
+    fn widget_occupancy_merge_by_key_updated_key_reflects_latest_value() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::MergeByKey { max_keys: 8 });
+
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.3),
+                )]),
+                "agent.a",
+                Some("cpu".to_string()),
+                0,
+                None,
+            )
+            .unwrap();
+        // Same key — should replace the previous value in-place.
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.7),
+                )]),
+                "agent.a",
+                Some("cpu".to_string()),
+                0,
+                None,
+            )
+            .unwrap();
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(
+            occ.occupant_count, 1,
+            "Same-key update should not add a second record"
+        );
+
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.7).abs() < 1e-6),
+            "MergeByKey: updated key level should be 0.7, got: {level:?}"
+        );
+    }
+
+    /// Replace: WHEN a publication is active THEN effective_params = that
+    /// publication's params only (no defaults for missing keys).
+    ///
+    /// Source: widget-system/spec.md §Requirement: Widget Contention (Replace).
+    #[test]
+    fn widget_occupancy_replace_no_default_fallback_for_missing_keys() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::Replace);
+
+        // Publish only "level" — "label" and "severity" are omitted intentionally.
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.5),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(occ.occupant_count, 1);
+
+        let level = occ.effective_params.get("level");
+        assert!(
+            matches!(level, Some(WidgetParameterValue::F32(v)) if (*v - 0.5).abs() < 1e-6),
+            "Replace level should be 0.5, got: {level:?}"
+        );
+
+        // Replace must NOT include defaults for missing keys.
+        assert!(
+            occ.effective_params.get("label").is_none(),
+            "Replace: absent keys must NOT be filled from defaults (label), got: {:?}",
+            occ.effective_params.get("label")
+        );
+        assert!(
+            occ.effective_params.get("severity").is_none(),
+            "Replace: absent keys must NOT be filled from defaults (severity), got: {:?}",
+            occ.effective_params.get("severity")
+        );
+    }
+
+    /// Replace: WHEN two sequential publishes arrive THEN effective_params
+    /// reflects only the most recent one (no merge, no defaults).
+    #[test]
+    fn widget_occupancy_replace_uses_most_recent_params_only() {
+        let (mut scene, tab_id) = scene_with_gauge(ContentionPolicy::Replace);
+
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "level".to_string(),
+                    WidgetParameterValue::F32(0.1),
+                )]),
+                "agent.a",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_widget(
+                "gauge",
+                std::collections::HashMap::from([(
+                    "label".to_string(),
+                    WidgetParameterValue::String("replaced".to_string()),
+                )]),
+                "agent.b",
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+
+        let occ = scene
+            .widget_registry
+            .get_occupancy("gauge", tab_id)
+            .unwrap();
+        assert_eq!(occ.occupant_count, 1, "Replace retains only 1 publication");
+
+        // Second publish only set "label"; "level" must NOT appear (not in params,
+        // and Replace does not fall back to defaults).
+        assert!(
+            occ.effective_params.get("level").is_none(),
+            "Replace: prior 'level' must be gone after Replace by second publish, got: {:?}",
+            occ.effective_params.get("level")
+        );
+        let label = occ.effective_params.get("label");
+        assert!(
+            matches!(label, Some(WidgetParameterValue::String(s)) if s == "replaced"),
+            "Replace: label from second publish should be 'replaced', got: {label:?}"
+        );
+    }
+
     /// WHEN a publish is recorded THEN active_for_widget returns it.
     #[test]
     fn widget_registry_publish_recorded_in_active_for_widget() {
