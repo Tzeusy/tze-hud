@@ -134,7 +134,8 @@ pub fn run_component_startup(
     // placeholders in SVG files are resolved at load time.
     // (Profile-scoped widget bundles are handled in step 4 below.)
     let tab_map = std::collections::HashMap::new();
-    let widget_svg_assets = init_widget_registry(scene, raw, config_parent, &tab_map, &global_tokens);
+    let widget_svg_assets =
+        init_widget_registry(scene, raw, config_parent, &tab_map, &global_tokens);
 
     tracing::debug!("component_startup: step 3 — global widget bundles loaded");
 

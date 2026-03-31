@@ -127,8 +127,9 @@ fn urgency_to_severity_color(urgency: u32, token_map: &HashMap<String, String>) 
     match urgency {
         3 => resolve_severity_token(token_map, "color.severity.critical")
             .unwrap_or(SEVERITY_CRITICAL),
-        2 => resolve_severity_token(token_map, "color.severity.warning")
-            .unwrap_or(SEVERITY_WARNING),
+        2 => {
+            resolve_severity_token(token_map, "color.severity.warning").unwrap_or(SEVERITY_WARNING)
+        }
         _ => resolve_severity_token(token_map, "color.severity.info").unwrap_or(SEVERITY_INFO),
     }
 }
@@ -941,7 +942,8 @@ impl Compositor {
                 ContentionPolicy::MergeByKey { max_keys } => {
                     // Collect all StatusBar publications and merge their entries.
                     // For each key, the last publish wins (latest value).
-                    let mut merged: HashMap<String, String> = HashMap::with_capacity(max_keys as usize);
+                    let mut merged: HashMap<String, String> =
+                        HashMap::with_capacity(max_keys as usize);
                     for record in publishes.iter() {
                         if let ZoneContent::StatusBar(payload) = &record.content {
                             for (k, v) in &payload.entries {
@@ -972,13 +974,25 @@ impl Compositor {
                             match &record.content {
                                 ZoneContent::StreamText(text) => {
                                     items.push(TextItem::from_zone_policy(
-                                        text, zx, zy, zw, zh, policy, anim_opacity,
+                                        text,
+                                        zx,
+                                        zy,
+                                        zw,
+                                        zh,
+                                        policy,
+                                        anim_opacity,
                                     ));
                                     break;
                                 }
                                 ZoneContent::Notification(payload) => {
                                     items.push(TextItem::from_zone_policy(
-                                        &payload.text, zx, zy, zw, zh, policy, anim_opacity,
+                                        &payload.text,
+                                        zx,
+                                        zy,
+                                        zw,
+                                        zh,
+                                        policy,
+                                        anim_opacity,
                                     ));
                                     break;
                                 }
@@ -1863,7 +1877,9 @@ impl Compositor {
                         }
                     }
                 }
-                ContentionPolicy::MergeByKey { .. } | ContentionPolicy::LatestWins | ContentionPolicy::Replace => {
+                ContentionPolicy::MergeByKey { .. }
+                | ContentionPolicy::LatestWins
+                | ContentionPolicy::Replace => {
                     // For MergeByKey and single-publish policies: render a single backdrop
                     // for the zone using the latest publication's content type.
                     let latest = &publishes[publishes.len() - 1];
@@ -1900,7 +1916,13 @@ impl Compositor {
                         rgba.a *= anim_opacity.clamp(0.0, 1.0);
 
                         vertices.extend_from_slice(&rect_vertices(
-                            x, y, w, h, sw, sh, rgba.to_array(),
+                            x,
+                            y,
+                            w,
+                            h,
+                            sw,
+                            sh,
+                            rgba.to_array(),
                         ));
                     }
                 }
@@ -3528,10 +3550,7 @@ mod tests {
     fn test_custom_severity_warning_token_overrides_constant() {
         let mut token_map = HashMap::new();
         // Custom warning: bright green (#00FF00) — clearly distinct from amber.
-        token_map.insert(
-            "color.severity.warning".to_string(),
-            "#00FF00".to_string(),
-        );
+        token_map.insert("color.severity.warning".to_string(), "#00FF00".to_string());
         let color = urgency_to_severity_color(2, &token_map);
         assert!(
             color.g > 0.9,
@@ -3555,10 +3574,7 @@ mod tests {
     fn test_custom_severity_critical_token_overrides_constant() {
         let mut token_map = HashMap::new();
         // Custom critical: bright magenta (#FF00FF).
-        token_map.insert(
-            "color.severity.critical".to_string(),
-            "#FF00FF".to_string(),
-        );
+        token_map.insert("color.severity.critical".to_string(), "#FF00FF".to_string());
         let color = urgency_to_severity_color(3, &token_map);
         assert!(
             color.r > 0.9,
@@ -3643,10 +3659,7 @@ mod tests {
 
         // Install a custom token map: override warning with pure green (#00FF00).
         let mut token_map = HashMap::new();
-        token_map.insert(
-            "color.severity.warning".to_string(),
-            "#00FF00".to_string(),
-        );
+        token_map.insert("color.severity.warning".to_string(), "#00FF00".to_string());
         compositor.set_token_map(token_map);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
