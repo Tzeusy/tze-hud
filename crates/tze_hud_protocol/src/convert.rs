@@ -313,6 +313,7 @@ pub fn geometry_policy_to_proto(gp: &GeometryPolicy) -> proto::GeometryPolicyPro
 /// Convert a scene RenderingPolicy to a protobuf RenderingPolicyProto.
 pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicyProto {
     proto::RenderingPolicyProto {
+        // Fields 1-4 (original; must not be renumbered)
         font_size_px: rp.font_size_px.unwrap_or(0.0),
         backdrop: rp.backdrop.map(|c| proto::Rgba {
             r: c.r,
@@ -329,6 +330,36 @@ pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicy
             })
             .unwrap_or(proto::TextAlignProto::Unspecified as i32),
         margin_px: rp.margin_px.unwrap_or(0.0),
+        // Fields 5-14 (extended policy fields)
+        font_family: rp
+            .font_family
+            .map(|ff| match ff {
+                FontFamily::SystemSansSerif => proto::FontFamilyProto::SystemSans as i32,
+                FontFamily::SystemMonospace => proto::FontFamilyProto::SystemMonospace as i32,
+                FontFamily::SystemSerif => proto::FontFamilyProto::SystemSerif as i32,
+            })
+            .unwrap_or(proto::FontFamilyProto::Unspecified as i32),
+        font_weight: rp.font_weight.unwrap_or(0) as u32,
+        text_color: rp.text_color.map(|c| proto::Rgba {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        }),
+        // Sentinel: -1.0 = not set (proto float default 0.0 is valid for this field)
+        backdrop_opacity: rp.backdrop_opacity.unwrap_or(-1.0),
+        outline_color: rp.outline_color.map(|c| proto::Rgba {
+            r: c.r,
+            g: c.g,
+            b: c.b,
+            a: c.a,
+        }),
+        outline_width: rp.outline_width.unwrap_or(0.0),
+        // Sentinel: -1.0 = not set (0.0 is a valid margin)
+        margin_horizontal: rp.margin_horizontal.unwrap_or(-1.0),
+        margin_vertical: rp.margin_vertical.unwrap_or(-1.0),
+        transition_in_ms: rp.transition_in_ms.unwrap_or(0),
+        transition_out_ms: rp.transition_out_ms.unwrap_or(0),
     }
 }
 
@@ -463,6 +494,7 @@ pub fn proto_to_geometry_policy(p: &proto::GeometryPolicyProto) -> Option<Geomet
 
 /// Convert a protobuf RenderingPolicyProto to scene RenderingPolicy.
 pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPolicy {
+    // Fields 1-4 (original)
     let font_size_px = if p.font_size_px > 0.0 {
         Some(p.font_size_px)
     } else {
@@ -482,11 +514,81 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
     } else {
         None
     };
+
+    // Fields 5-14 (extended policy fields)
+    let font_family = match proto::FontFamilyProto::try_from(p.font_family)
+        .unwrap_or(proto::FontFamilyProto::Unspecified)
+    {
+        proto::FontFamilyProto::Unspecified => None,
+        proto::FontFamilyProto::SystemSans => Some(FontFamily::SystemSansSerif),
+        proto::FontFamilyProto::SystemMonospace => Some(FontFamily::SystemMonospace),
+        proto::FontFamilyProto::SystemSerif => Some(FontFamily::SystemSerif),
+    };
+    let font_weight = if p.font_weight > 0 {
+        Some(p.font_weight as u16)
+    } else {
+        None
+    };
+    // text_color: zero alpha = not set
+    let text_color = p
+        .text_color
+        .as_ref()
+        .filter(|c| c.a > 0.0)
+        .map(proto_rgba_to_scene);
+    // backdrop_opacity: sentinel -1.0 = not set
+    let backdrop_opacity = if p.backdrop_opacity >= 0.0 {
+        Some(p.backdrop_opacity)
+    } else {
+        None
+    };
+    // outline_color: zero alpha = not set
+    let outline_color = p
+        .outline_color
+        .as_ref()
+        .filter(|c| c.a > 0.0)
+        .map(proto_rgba_to_scene);
+    let outline_width = if p.outline_width > 0.0 {
+        Some(p.outline_width)
+    } else {
+        None
+    };
+    // margin_horizontal / margin_vertical: sentinel -1.0 = not set
+    let margin_horizontal = if p.margin_horizontal >= 0.0 {
+        Some(p.margin_horizontal)
+    } else {
+        None
+    };
+    let margin_vertical = if p.margin_vertical >= 0.0 {
+        Some(p.margin_vertical)
+    } else {
+        None
+    };
+    let transition_in_ms = if p.transition_in_ms > 0 {
+        Some(p.transition_in_ms)
+    } else {
+        None
+    };
+    let transition_out_ms = if p.transition_out_ms > 0 {
+        Some(p.transition_out_ms)
+    } else {
+        None
+    };
+
     RenderingPolicy {
         font_size_px,
         backdrop,
         text_align,
         margin_px,
+        font_family,
+        font_weight,
+        text_color,
+        backdrop_opacity,
+        outline_color,
+        outline_width,
+        margin_horizontal,
+        margin_vertical,
+        transition_in_ms,
+        transition_out_ms,
     }
 }
 
