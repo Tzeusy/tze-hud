@@ -173,7 +173,7 @@ categories of gap items were identified:
 | No built-in widget types | COVERED | WidgetRegistry starts empty; no built-in entries |
 | Zero bundles configured → empty registry | COVERED | widget_startup.rs:74 — no [widget_bundles] → return immediately |
 | list_widgets returns empty on zero bundles | COVERED | handle_list_widgets (tools.rs) reads registry which is empty |
-| publish_to_widget rejected → WIDGET_TYPE_NOT_FOUND | PARTIAL | The error code would be WIDGET_NOT_FOUND (per session-protocol spec error codes), not WIDGET_TYPE_NOT_FOUND. The widget-system spec uses "WIDGET_TYPE_NOT_FOUND" but the session-protocol spec and implementation use "WIDGET_NOT_FOUND". Spec inconsistency: minor, but worth noting. |
+| publish_to_widget rejected → WIDGET_NOT_FOUND | COVERED | Aligned spec to use WIDGET_NOT_FOUND; matches session-protocol/spec.md and implementation |
 
 ### REQ: Widget Input Mode
 
@@ -399,10 +399,9 @@ categories of gap items were identified:
 
 ### GAP-5: Widget Type Name "WIDGET_TYPE_NOT_FOUND" vs "WIDGET_NOT_FOUND" Inconsistency (P3)
 
-**Status**: MINOR SPEC INCONSISTENCY
+**Status**: RESOLVED
 **Files**: session-protocol/spec.md, widget-system/spec.md, session_server.rs
-**Description**: widget-system/spec.md §Built-in Widget Types uses "WIDGET_TYPE_NOT_FOUND" for the error when publish_to_widget is called on a zero-bundle runtime. The session-protocol spec and implementation use "WIDGET_NOT_FOUND" (no TYPE suffix) for all "widget not found" cases. These are semantically equivalent but the spec language is inconsistent.
-**Suggested bead**: type=task (spec clarification), P3
+**Description**: Aligned widget-system/spec.md §Built-in Widget Types to use WIDGET_NOT_FOUND (matching session-protocol/spec.md and implementation) instead of WIDGET_TYPE_NOT_FOUND. This resolves the spec inconsistency and ensures canonical naming across documentation.
 
 ### GAP-6: Re-rasterization Performance Budget Not Asserted in CI (P3)
 

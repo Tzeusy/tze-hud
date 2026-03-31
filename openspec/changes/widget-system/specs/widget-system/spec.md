@@ -319,7 +319,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Built-in Widget Types
-V1 MUST NOT ship built-in widget types. Unlike zones (which define six built-in types), all widget types MUST come from user-authored asset bundles loaded at startup. The runtime MUST function correctly with zero widget bundles configured — in this case, the WidgetRegistry SHALL be empty, `list_widgets` SHALL return an empty list, and `publish_to_widget` calls SHALL be rejected with WIDGET_TYPE_NOT_FOUND.
+V1 MUST NOT ship built-in widget types. Unlike zones (which define six built-in types), all widget types MUST come from user-authored asset bundles loaded at startup. The runtime MUST function correctly with zero widget bundles configured — in this case, the WidgetRegistry SHALL be empty, `list_widgets` SHALL return an empty list, and `publish_to_widget` calls SHALL be rejected with WIDGET_NOT_FOUND.
 Scope: v1-mandatory
 
 #### Scenario: No widgets configured
