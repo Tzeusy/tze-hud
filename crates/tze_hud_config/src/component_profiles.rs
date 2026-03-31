@@ -6,6 +6,7 @@
 //! - `component-shape-language/spec.md §Requirement: Profile-Scoped Token Resolution`
 //! - `component-shape-language/spec.md §Requirement: Profile Widget Scope`
 //! - `component-shape-language/spec.md §Requirement: Zone Name Reconciliation`
+//! - `component-shape-language/spec.md §Requirement: Profile Validation at Startup`
 //!
 //! ## Overview
 //!
@@ -17,16 +18,34 @@
 //! Zone override files use the zone registry name (e.g., `notification-area.toml`),
 //! not the config constant form (`notification.toml`).
 //!
+//! ## Profile validation sequence
+//!
+//! Per `§Requirement: Profile Validation at Startup`, each profile is validated
+//! in five ordered phases. A failure in an earlier phase halts that profile
+//! before later phases run:
+//!
+//! 1. **Manifest validation** — `profile.toml` parsed, required fields present,
+//!    `component_type` resolved to a known v1 type, name unique across all roots.
+//! 2. **Token resolution** — profile-scoped token map built from profile overrides
+//!    merged over global config tokens and canonical fallbacks.
+//! 3. **Zone override validation** — `zones/` files validated: governed-zone check,
+//!    field type/range checks, token reference resolution.
+//! 4. **Widget bundle validation** — `widgets/` bundles loaded with scoped tokens;
+//!    SVG placeholder resolution and structural validation.
+//! 5. **Readability validation** — RenderingPolicy field checks per component type
+//!    readability technique. Executed at a higher level after effective zone
+//!    policies are assembled; not performed in this module.
+//!
 //! ## Error codes produced
 //!
-//! | Error code | Condition |
-//! |---|---|
-//! | `PROFILE_UNKNOWN_COMPONENT_TYPE` | `component_type` field does not match a v1 type |
-//! | `CONFIG_PROFILE_DUPLICATE_NAME` | Two profile directories declare the same name |
-//! | `CONFIG_PROFILE_PATH_NOT_FOUND` | Configured bundle path does not exist |
-//! | `PROFILE_ZONE_OVERRIDE_MISMATCH` | Zone override file governs a zone not owned by this profile's type |
-//! | `PROFILE_INVALID_ZONE_OVERRIDE` | A zone override field has an invalid value or type |
-//! | `PROFILE_UNRESOLVED_TOKEN` | A `{{token.key}}` reference could not be resolved |
+//! | Error code | Phase | Condition |
+//! |---|---|---|
+//! | `CONFIG_PROFILE_PATH_NOT_FOUND` | pre-1 | Configured bundle root does not exist |
+//! | `PROFILE_UNKNOWN_COMPONENT_TYPE` | 1 | `component_type` field does not match a v1 type |
+//! | `CONFIG_PROFILE_DUPLICATE_NAME` | 1 | Two profile directories declare the same name |
+//! | `PROFILE_ZONE_OVERRIDE_MISMATCH` | 3 | Zone override file governs a zone not owned by this profile's type |
+//! | `PROFILE_INVALID_ZONE_OVERRIDE` | 3 | A zone override field has an invalid value or type |
+//! | `PROFILE_UNRESOLVED_TOKEN` | 2–4 | A `{{token.key}}` reference could not be resolved |
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -178,20 +197,25 @@ struct RawZoneOverride {
 
 /// Scan one or more profile root directories and load all valid component profiles.
 ///
-/// For each root path, every immediate subdirectory is treated as a potential
-/// profile. Failed profiles are logged and skipped; they do not prevent other
-/// profiles from loading (per spec: "Invalid profiles MUST be logged and skipped").
+/// Each candidate subdirectory is validated by [`load_profile_dir`], which
+/// executes the spec's 5-phase profile validation sequence
+/// (`§Requirement: Profile Validation at Startup`). This function additionally
+/// enforces the **name-uniqueness** sub-check of Phase 1: duplicate profile
+/// names across roots produce `CONFIG_PROFILE_DUPLICATE_NAME` and the second
+/// occurrence is skipped.
 ///
-/// Duplicate profile names within and across roots produce
-/// `CONFIG_PROFILE_DUPLICATE_NAME` and the second profile is skipped.
+/// Failed profiles are logged and skipped; they do not prevent other profiles
+/// from loading (per spec: "Invalid profiles MUST be logged and skipped").
 ///
 /// # Arguments
 ///
 /// - `profile_roots`: directories to scan; each immediate subdirectory is a
 ///   potential profile directory (must contain `profile.toml`).
-/// - `config_tokens`: global design token map (from `[design_tokens]`).
-/// - `errors`: mutable error accumulator (path-not-found and duplicate errors are
-///   appended here; per-profile errors are also appended but the profile is skipped).
+/// - `config_tokens`: global design token map (from `[design_tokens]`), used
+///   as the base layer for per-profile scoped token maps in Phase 2.
+/// - `errors`: mutable error accumulator. Root path-not-found errors,
+///   duplicate-name errors, and per-profile validation errors are all appended
+///   here; callers decide whether to treat accumulated errors as fatal.
 ///
 /// Returns the list of successfully loaded profiles.
 pub fn scan_profile_dirs(
@@ -312,9 +336,30 @@ pub fn scan_profile_dirs(
 
 /// Load a single profile from `dir/profile.toml`.
 ///
-/// Returns `Ok(ComponentProfile)` on success.
-/// Returns `Err(Vec<ConfigError>)` on any validation failure (including
-/// unknown component type, zone override mismatches, unresolved tokens, etc.).
+/// Executes the 5-phase profile validation sequence defined by the spec
+/// (`§Requirement: Profile Validation at Startup`):
+///
+/// 1. **Manifest validation** — parse `profile.toml`, check required fields,
+///    resolve `component_type` to a known v1 type.
+/// 2. **Token resolution** — build the profile-scoped token map by layering
+///    profile overrides on top of global config tokens and canonical fallbacks.
+/// 3. **Zone override validation** — parse `zones/` TOML files, verify each
+///    file governs a zone owned by this profile's component type, and resolve
+///    all token references in override field values.
+/// 4. **Widget bundle validation** — scan `widgets/` with the scoped token
+///    map; SVG placeholders are resolved and SVGs are structurally validated.
+/// 5. **Readability validation** — RenderingPolicy field checks per the
+///    component type's readability technique. This phase runs at a higher level
+///    after effective zone policies are fully assembled; it is NOT performed
+///    here. This function completes after phase 4.
+///
+/// Returns `Ok(ComponentProfile)` when all four in-scope phases pass.
+/// Returns `Err(Vec<ConfigError>)` on any validation failure; each error
+/// carries a specific error code matching the failing phase.
+///
+/// The spec guarantees that phases execute in order: a manifest failure
+/// (phase 1) stops evaluation before token resolution (phase 2), a bad
+/// component type stops evaluation before token/zone/widget work, etc.
 fn load_profile_dir(
     dir: &Path,
     config_tokens: &DesignTokenMap,
@@ -322,7 +367,11 @@ fn load_profile_dir(
     let manifest_path = dir.join("profile.toml");
     let path_str = dir.display().to_string();
 
-    // ── Step 1: Read and parse profile.toml ──────────────────────────────────
+    // ── Validation Phase 1: Manifest validation ───────────────────────────────
+    // Spec: "profile.toml has all required fields, component_type references a
+    // known v1 type, name is kebab-case and unique."
+    //
+    // Sub-step 1a: Read and parse profile.toml from disk.
     let toml_str = std::fs::read_to_string(&manifest_path).map_err(|e| {
         vec![ConfigError {
             code: ConfigErrorCode::ConfigProfilePathNotFound,
@@ -348,7 +397,7 @@ fn load_profile_dir(
         }]
     })?;
 
-    // ── Step 2: Validate required fields ─────────────────────────────────────
+    // Sub-step 1b: Validate that all required fields are present and non-empty.
     let mut errors: Vec<ConfigError> = Vec::new();
 
     let name = raw
@@ -403,7 +452,10 @@ fn load_profile_dir(
     let version = version.unwrap();
     let component_type_str = component_type_str.unwrap();
 
-    // ── Step 3: Resolve component type ───────────────────────────────────────
+    // Sub-step 1c: Resolve component_type string to a known v1 ComponentType.
+    // Failure here produces PROFILE_UNKNOWN_COMPONENT_TYPE and halts this profile
+    // before any token, zone, or widget work begins (spec: "step 1 MUST NOT
+    // proceed to token resolution (step 2)").
     let component_type = match ComponentType::from_name(&component_type_str) {
         Some(ct) => ct,
         None => {
@@ -433,12 +485,46 @@ fn load_profile_dir(
             }]);
         }
     };
+    // Uniqueness check ("name is kebab-case and unique") is enforced by
+    // `scan_profile_dirs`, which accumulates successfully-loaded profiles and
+    // rejects duplicates with CONFIG_PROFILE_DUPLICATE_NAME — still part of
+    // phase 1 semantics, but structurally outside this function.
 
-    // ── Step 4: Build profile-scoped token map ────────────────────────────────
+    // ── Validation Phase 2: Token resolution ──────────────────────────────────
+    // Spec: "Profile-scoped token map is constructed (profile overrides merged
+    // with global tokens and canonical fallbacks). All required tokens for the
+    // component type are resolvable."
+    //
     // Three-layer resolution: profile overrides → global config → canonical fallbacks.
+    // Individual token references are resolved lazily in phases 3 and 4 as each
+    // field value is parsed; this call builds the merged map used in those phases.
     let scoped_tokens = resolve_tokens(config_tokens, &raw.token_overrides);
 
-    // ── Step 5: Load widget bundles from widgets/ subdirectory ────────────────
+    // ── Validation Phase 3: Zone override validation ──────────────────────────
+    // Spec: "Zone override files reference only zone types governed by the
+    // profile's component type. Override field values are valid types and
+    // ranges. Token references in override fields are resolvable."
+    //
+    // `load_zone_overrides` reads each `zones/{zone_type}.toml`, validates that
+    // the zone name is governed by `component_type` (PROFILE_ZONE_OVERRIDE_MISMATCH
+    // if not), and resolves {{token.key}} references in field values against
+    // `scoped_tokens` (PROFILE_UNRESOLVED_TOKEN / PROFILE_INVALID_ZONE_OVERRIDE
+    // on failure).
+    let zones_dir = dir.join("zones");
+    let zone_overrides = if zones_dir.is_dir() {
+        load_zone_overrides(&zones_dir, &name, component_type, &scoped_tokens)?
+    } else {
+        HashMap::new()
+    };
+
+    // ── Validation Phase 4: Widget bundle validation ──────────────────────────
+    // Spec: "Profile-scoped widget bundles are loaded with the profile's scoped
+    // token map. SVG placeholders are resolved. SVGs parse after resolution."
+    //
+    // Widget names are namespaced as "{profile_name}/{widget_name}" to prevent
+    // collision with global bundles in the WidgetRegistry. Bundle errors are
+    // logged and skipped; they do not fail the overall profile load (per spec:
+    // invalid bundles are logged, the profile may still register successfully).
     let widgets_dir = dir.join("widgets");
     let widget_bundles = if widgets_dir.is_dir() {
         let results = scan_bundle_dirs(&[widgets_dir.clone()], &scoped_tokens);
@@ -466,14 +552,8 @@ fn load_profile_dir(
         Vec::new()
     };
 
-    // ── Step 6: Load zone overrides from zones/ subdirectory ──────────────────
-    let zones_dir = dir.join("zones");
-    let zone_overrides = if zones_dir.is_dir() {
-        load_zone_overrides(&zones_dir, &name, component_type, &scoped_tokens)?
-    } else {
-        HashMap::new()
-    };
-
+    // Phases 1–4 complete. Phase 5 (readability validation) is deferred to the
+    // caller after effective zone RenderingPolicy is fully assembled.
     Ok(ComponentProfile {
         name,
         version,
