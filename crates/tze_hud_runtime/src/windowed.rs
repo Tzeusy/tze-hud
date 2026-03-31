@@ -87,7 +87,7 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel};
 
-use crate::widget_startup::init_widget_registry;
+use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{Compositor, WindowSurface};
 use tze_hud_config::TzeHudConfig;
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
@@ -98,7 +98,7 @@ use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::{ZoneContent, ZoneRegistry};
+use tze_hud_scene::types::ZoneContent;
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -1108,32 +1108,38 @@ impl WindowedRuntime {
         // Parse the raw config once here so we can use it for both widget
         // registry initialization and the RuntimeContext build. Failure is
         // non-fatal — widget startup will just leave the registry empty.
-        let raw_config_for_widgets: Option<tze_hud_config::raw::RawConfig> = cfg
+        let raw_config_for_startup: Option<tze_hud_config::raw::RawConfig> = cfg
             .config_toml
             .as_deref()
             .and_then(|toml| toml::from_str(toml).ok());
 
         let shared_scene = {
             let mut scene = SceneGraph::new(width, height);
-            // Bootstrap the canonical zone definitions (status-bar, subtitle,
-            // notification-area, etc.) so that MCP publish_to_zone works
-            // immediately without requiring a gRPC session handshake first.
-            scene.zone_registry = ZoneRegistry::with_defaults();
 
-            // Bootstrap the widget registry from [widget_bundles] and [[tabs.widgets]]
-            // configuration. This is a no-op when no [widget_bundles] section exists.
-            // Tabs are pre-created as needed to bind widget instances to tab IDs.
-            if let Some(raw) = &raw_config_for_widgets {
-                let tab_map = std::collections::HashMap::new();
-                // Resolve widget bundle paths relative to the config file's parent
-                // directory (spec §Widget Bundle Configuration). Fall back to CWD
-                // when the config file path is unknown (e.g. in tests or when TOML
-                // was supplied as a raw string without a file path).
-                let config_parent_buf: Option<std::path::PathBuf> = cfg
-                    .config_file_path
-                    .as_deref()
-                    .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_path_buf()));
-                init_widget_registry(&mut scene, raw, config_parent_buf.as_deref(), &tab_map);
+            // Resolve config file parent directory for path resolution.
+            let config_parent_buf: Option<std::path::PathBuf> = cfg
+                .config_file_path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_path_buf()));
+
+            // Run the full component shape language startup sequence (steps 2-9):
+            // design token loading, global widget bundles, component profile loading,
+            // profile selection, effective rendering policy construction, readability
+            // validation, zone registry construction, and widget registry population.
+            //
+            // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
+            if let Some(raw) = &raw_config_for_startup {
+                let startup_result = run_component_startup(
+                    raw,
+                    config_parent_buf.as_deref(),
+                    None, // profile_name: windowed mode uses production readability (no dev-mode unless TZE_HUD_DEV=1)
+                    &mut scene,
+                );
+                // Step 9b: register profile-scoped widget bundles
+                register_profile_widgets(&mut scene, &startup_result);
+            } else {
+                // No config provided — bootstrap with canonical zone defaults (no token derivation).
+                scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
             }
 
             if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {

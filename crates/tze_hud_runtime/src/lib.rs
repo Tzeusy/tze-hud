@@ -81,6 +81,7 @@ pub mod agent_events;
 pub mod attention_budget;
 pub mod budget;
 pub mod channels;
+pub mod component_startup;
 pub mod degradation;
 pub mod event_bus;
 pub mod font_loader;
