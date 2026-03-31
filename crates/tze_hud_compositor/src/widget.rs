@@ -1271,13 +1271,22 @@ mod tests {
     fn compute_transition_t_interpolates_below_rendering_simplified() {
         // At 50% elapsed out of 100ms duration → t = 0.5
         let t_nominal = compute_transition_t(50.0, 100.0, DegradationLevel::Nominal);
-        assert!((t_nominal - 0.5).abs() < 1e-6, "Nominal: expected t=0.5, got {t_nominal}");
+        assert!(
+            (t_nominal - 0.5).abs() < 1e-6,
+            "Nominal: expected t=0.5, got {t_nominal}"
+        );
 
         let t_minor = compute_transition_t(50.0, 100.0, DegradationLevel::Minor);
-        assert!((t_minor - 0.5).abs() < 1e-6, "Minor: expected t=0.5, got {t_minor}");
+        assert!(
+            (t_minor - 0.5).abs() < 1e-6,
+            "Minor: expected t=0.5, got {t_minor}"
+        );
 
         let t_moderate = compute_transition_t(50.0, 100.0, DegradationLevel::Moderate);
-        assert!((t_moderate - 0.5).abs() < 1e-6, "Moderate: expected t=0.5, got {t_moderate}");
+        assert!(
+            (t_moderate - 0.5).abs() < 1e-6,
+            "Moderate: expected t=0.5, got {t_moderate}"
+        );
     }
 
     /// Under RENDERING_SIMPLIFIED (Significant) or higher, transitions snap to t=1.0.

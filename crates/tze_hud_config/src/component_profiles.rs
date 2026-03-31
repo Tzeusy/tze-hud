@@ -99,8 +99,11 @@ pub struct ZoneRenderingOverride {
 /// loading its widget bundles from `widgets/`, and parsing zone rendering
 /// overrides from `zones/`.
 ///
+/// Note: `Clone` is derived here for use in profile selection — profiles
+/// are cloned into the `ProfileSelection` map during startup.
+///
 /// Source: `component-shape-language/spec.md §Requirement: Component Profile Format`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ComponentProfile {
     /// Profile name (kebab-case, unique across all loaded profiles).
     pub name: String,
