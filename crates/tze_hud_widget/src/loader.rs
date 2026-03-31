@@ -699,16 +699,15 @@ fn parse_rendering_policy(
 ///   `[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)*` — no whitespace inside the braces.
 /// - The token lookup key is the full dotted path after `token.` (e.g. the
 ///   placeholder `{{token.color.primary}}` looks up the key `color.primary`).
-/// - `\{{` and `\}}` escape sequences in the *source* are NOT supported at this
-///   level (SVG files are not Rust source). Instead, the caller may pre-process
-///   escape sequences before calling this function.  The function itself performs
-///   a single left-to-right pass with no recursive re-scanning.
+/// - The function performs a single left-to-right pass with no recursive
+///   re-scanning of substituted values.
 ///
 /// # Escape sequences
 ///
-/// Literal `{{` and `}}` can be written as `\{{` / `\}}` in the SVG source.
-/// These are replaced with sentinels before scanning and restored afterwards,
-/// ensuring they are never treated as placeholder delimiters.
+/// Literal `{{` and `}}` can be written as `\{\{` / `\}\}` in the SVG source
+/// (each brace individually backslash-escaped, per the spec).  These are
+/// replaced with sentinels before scanning and restored afterwards, ensuring
+/// they are never treated as placeholder delimiters.
 ///
 /// # Errors
 ///
@@ -722,6 +721,7 @@ fn parse_rendering_policy(
 ///   re-scanned for further placeholders.
 /// - Placeholders in `<style>` blocks are resolved identically to any other
 ///   text content.
+/// - UTF-8 safe: uses string-level `find` for all scanning; no raw byte casts.
 pub(crate) fn resolve_token_placeholders(
     svg_text: &str,
     tokens: &HashMap<String, String>,
@@ -731,55 +731,57 @@ pub(crate) fn resolve_token_placeholders(
     const ESC_CLOSE: &str = "\x00RBRACE\x00";
 
     // Step 1: Replace escape sequences with sentinels.
+    // The spec escape format is \{\{ / \}\} (each brace individually escaped).
     let work = svg_text
-        .replace("\\{{", ESC_OPEN)
-        .replace("\\}}", ESC_CLOSE);
+        .replace("\\{\\{", ESC_OPEN)
+        .replace("\\}\\}", ESC_CLOSE);
 
-    // Step 2: Single left-to-right scan.
+    // Step 2: Single left-to-right scan using string-level find().
+    // This is UTF-8 safe: `find` returns byte positions at character
+    // boundaries; we only slice at those positions.
     let mut result = String::with_capacity(work.len());
-    let bytes = work.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
+    let mut remaining = work.as_str();
 
-    while i < len {
-        // Look for `{{`.
-        if i + 1 < len && bytes[i] == b'{' && bytes[i + 1] == b'{' {
-            // Find the matching `}}`.
-            if let Some(close_offset) = work[i + 2..].find("}}") {
-                let inner = &work[i + 2..i + 2 + close_offset];
+    while let Some(open_pos) = remaining.find("{{") {
+        // Append everything before the `{{`.
+        result.push_str(&remaining[..open_pos]);
+        let after_open = &remaining[open_pos + 2..];
 
-                // Validate: must be `token.<key>` with no whitespace.
-                if let Some(key_part) = inner.strip_prefix("token.") {
-                    if is_valid_token_key(key_part) {
-                        // Resolve against the token map.
-                        match tokens.get(key_part) {
-                            Some(value) => {
-                                result.push_str(value);
-                                i += 2 + close_offset + 2; // skip `{{inner}}`
-                                continue;
-                            }
-                            None => {
-                                // Unresolved token — return the key as the error.
-                                return Err(key_part.to_string());
-                            }
+        // Find the matching `}}`.
+        if let Some(close_offset) = after_open.find("}}") {
+            let inner = &after_open[..close_offset];
+
+            // Validate: must be `token.<key>` with no whitespace.
+            if let Some(key_part) = inner.strip_prefix("token.") {
+                if is_valid_token_key(key_part) {
+                    // Resolve against the token map.
+                    match tokens.get(key_part) {
+                        Some(value) => {
+                            result.push_str(value);
+                            remaining = &after_open[close_offset + 2..]; // skip past `}}`
+                            continue;
+                        }
+                        None => {
+                            // Unresolved token — return the key as the error.
+                            return Err(key_part.to_string());
                         }
                     }
                 }
-                // Inner text didn't match token syntax — pass `{{` through literally.
-                result.push('{');
-                result.push('{');
-                i += 2;
-            } else {
-                // No closing `}}` found — pass `{{` through literally.
-                result.push('{');
-                result.push('{');
-                i += 2;
             }
+            // Inner text didn't match token syntax — pass `{{` through literally
+            // and advance past just the `{{` so the inner text is re-scanned.
+            result.push_str("{{");
+            remaining = after_open;
         } else {
-            result.push(bytes[i] as char);
-            i += 1;
+            // No closing `}}` found — pass `{{` through and stop scanning.
+            result.push_str("{{");
+            remaining = after_open;
         }
     }
+
+    // Append any remaining text after the last `{{` (or the whole string if
+    // no `{{` was found).
+    result.push_str(remaining);
 
     // Step 3: Restore sentinels to their literal form.
     let result = result.replace(ESC_OPEN, "{{").replace(ESC_CLOSE, "}}");
@@ -789,19 +791,33 @@ pub(crate) fn resolve_token_placeholders(
 
 /// Returns `true` if `key` matches `[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)*`.
 ///
+/// Pattern breakdown:
+/// - First segment: `[a-z][a-z0-9]*` — lowercase letter followed by lowercase
+///   letters and digits only (no underscores).
+/// - Each additional segment: `[a-z][a-z0-9_]*` — lowercase letter followed by
+///   lowercase letters, digits, and underscores.
+///
 /// This is the allowed token key syntax within `{{token.<key>}}` placeholders.
 fn is_valid_token_key(key: &str) -> bool {
     if key.is_empty() {
         return false;
     }
-    for segment in key.split('.') {
+    for (segment_index, segment) in key.split('.').enumerate() {
         let mut chars = segment.chars();
         match chars.next() {
             Some(first) if first.is_ascii_lowercase() => {}
             _ => return false,
         }
-        if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-            return false;
+        if segment_index == 0 {
+            // First segment: only lowercase letters and digits (no underscores).
+            if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+                return false;
+            }
+        } else {
+            // Subsequent segments: lowercase letters, digits, and underscores.
+            if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                return false;
+            }
         }
     }
     true
@@ -925,11 +941,15 @@ mod tests {
         assert_eq!(result, r#"<text fill="white" stroke="black">x</text>"#);
     }
 
-    /// Escaped braces `\{{` / `\}}` are preserved as literal `{{` / `}}`.
+    /// Escaped braces `\{\{` / `\}\}` are preserved as literal `{{` / `}}`.
+    ///
+    /// The spec escape format requires each brace to be individually escaped:
+    /// `\{\{` (not `\{{`) and `\}\}` (not `\}}`).
     #[test]
     fn escaped_braces_preserved_as_literals() {
         let tokens = token_map(&[]);
-        let input = r"no placeholder \{{ here \}} either";
+        // Each brace is individually escaped: \{ \{ and \} \}
+        let input = r"no placeholder \{\{ here \}\} either";
         let result = resolve_token_placeholders(input, &tokens).unwrap();
         assert_eq!(result, "no placeholder {{ here }} either");
     }
@@ -997,5 +1017,38 @@ mod tests {
         let tokens = token_map(&[]);
         let result = resolve_token_placeholders("{{ no close", &tokens).unwrap();
         assert_eq!(result, "{{ no close");
+    }
+
+    /// A key whose first segment contains an underscore is NOT a valid placeholder.
+    ///
+    /// The spec pattern `[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)*)` disallows
+    /// underscores in the first segment; only subsequent segments permit them.
+    #[test]
+    fn underscore_in_first_segment_not_a_placeholder() {
+        // `my_key` starts with a valid letter but the first segment contains `_`.
+        let tokens = token_map(&[("my_key", "SHOULD_NOT_APPEAR")]);
+        let input = "{{token.my_key}} stays put";
+        // Should pass through unchanged — `my_key` fails the first-segment rule.
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, "{{token.my_key}} stays put");
+    }
+
+    /// Underscores in a subsequent (non-first) segment are valid.
+    #[test]
+    fn underscore_in_subsequent_segment_is_valid() {
+        let tokens = token_map(&[("color.text_primary", "#00ff00")]);
+        let input = r##"<rect fill="{{token.color.text_primary}}"/>"##;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, r##"<rect fill="#00ff00"/>"##);
+    }
+
+    /// Non-ASCII (multi-byte UTF-8) content outside placeholders is preserved intact.
+    #[test]
+    fn non_ascii_content_preserved() {
+        let tokens = token_map(&[("color.primary", "red")]);
+        // U+00E9 (é) is a 2-byte UTF-8 sequence.
+        let input = "<!-- caf\u{00e9} -->{{token.color.primary}}";
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, "<!-- caf\u{00e9} -->red");
     }
 }
