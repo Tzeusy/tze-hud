@@ -9,11 +9,14 @@ Depends on: scene-graph, lease-governance, session-protocol
 
 ### Requirement: Presence Card Tile Geometry
 Each agent presence card SHALL be a tile with fixed dimensions 200x80 logical pixels. The tile SHALL be anchored to the bottom-left corner of the active tab with a 16px margin from the left edge and 16px margin from the bottom edge. The tile opacity SHALL be 1.0. The tile input_mode SHALL be Passthrough (display-only, no input capture).
+
+> **Implementation note:** `CreateTile` only carries `tab_id`, `namespace`, `lease_id`, `bounds`, and `z_order`. Opacity and input_mode must be set via separate `UpdateTileOpacity` and `UpdateTileInputMode` mutations in the same batch.
+
 Source: proposal (visual requirements), scene-graph spec (tile CRUD, tile field invariants)
 
 #### Scenario: Single agent presence card creation
-- **WHEN** an agent with an ACTIVE lease submits a CreateTile mutation with bounds {x: 16.0, y: tab_height - 96.0, width: 200.0, height: 80.0}, opacity 1.0, and input_mode Passthrough
-- **THEN** the runtime MUST create the tile in the agent's namespace with the specified geometry
+- **WHEN** an agent with an ACTIVE lease submits a MutationBatch containing CreateTile with bounds {x: 16.0, y: tab_height - 96.0, width: 200.0, height: 80.0}, followed by UpdateTileOpacity (1.0) and UpdateTileInputMode (Passthrough)
+- **THEN** the runtime MUST create the tile in the agent's namespace with the specified geometry, opacity, and input mode
 
 #### Scenario: Tile input mode is Passthrough
 - **WHEN** a pointer event lands on a presence card tile
@@ -33,19 +36,19 @@ Source: proposal (multi-agent coexistence), scene-graph spec (tile field invaria
 
 ### Requirement: Presence Card Node Tree
 Each presence card tile SHALL have a flat node tree (depth = 1) with exactly 3 child nodes under the tile root:
-1. **SolidColorNode** — background fill with RGBA (20, 20, 20, 200), bounds matching the full tile (0, 0, 200, 80)
+1. **SolidColorNode** — background fill with `Rgba { r: 0.08, g: 0.08, b: 0.08, a: 0.78 }`, bounds matching the full tile (0, 0, 200, 80)
 2. **StaticImageNode** — agent avatar icon, 32x32 pixels, positioned at (8, 24) within the tile, fit mode Cover, referencing a pre-uploaded ResourceId
-3. **TextMarkdownNode** — agent identity text positioned at (48, 8) within the tile, 144px wide, 64px tall, containing the agent name in bold followed by a newline and "Last active: now" status text. Font size 14px, color RGBA (240, 240, 240, 255), left-aligned, overflow Ellipsis.
+3. **TextMarkdownNode** — agent identity text positioned at (48, 8) within the tile, 144px wide, 64px tall, containing the agent name in bold followed by a newline and "Last active: now" status text. Font size 14px, color `Rgba { r: 0.94, g: 0.94, b: 0.94, a: 1.0 }`, left-aligned, overflow Ellipsis.
 
-The nodes SHALL be inserted in the order listed (SolidColorNode first, then StaticImageNode, then TextMarkdownNode) so that the background renders behind the icon and text.
-Source: proposal (visual requirements), scene-graph spec (V1 node types, InsertNode)
+The nodes SHALL be added in the order listed (SolidColorNode first, then StaticImageNode, then TextMarkdownNode) so that the background renders behind the icon and text. Use either `SetTileRoot` with the complete tree, or individual `AddNode` mutations.
+Source: proposal (visual requirements), scene-graph spec (V1 node types, AddNode)
 
 #### Scenario: Node tree structure after creation
-- **WHEN** an agent creates a presence card tile and inserts 3 nodes
+- **WHEN** an agent creates a presence card tile and adds 3 nodes (via SetTileRoot or AddNode)
 - **THEN** the tile MUST have exactly 3 child nodes: a SolidColorNode (background), a StaticImageNode (avatar), and a TextMarkdownNode (identity text), in that insertion order
 
 #### Scenario: Background node covers full tile
-- **WHEN** the SolidColorNode is inserted with bounds (0, 0, 200, 80) and color RGBA (20, 20, 20, 200)
+- **WHEN** the SolidColorNode is added with bounds (0, 0, 200, 80) and color `Rgba { r: 0.08, g: 0.08, b: 0.08, a: 0.78 }`
 - **THEN** the node MUST render a semi-transparent dark rectangle covering the entire tile area
 
 #### Scenario: Avatar image node with pre-uploaded resource
@@ -57,16 +60,18 @@ Source: proposal (visual requirements), scene-graph spec (V1 node types, InsertN
 - **THEN** the runtime MUST render "AgentName" in bold and "Last active: now" on a second line, both left-aligned, with overflow Ellipsis if text exceeds 144px width
 
 ### Requirement: Lease Lifecycle for Presence Cards
-Each agent SHALL request a lease with renewal_policy AUTO_RENEW, ttl_ms 120000 (2 minutes), and capability_scope including create_tiles and modify_own_tiles. The runtime SHALL auto-renew the lease at 75% TTL (90 seconds elapsed). The agent MUST hold the lease for the entire lifetime of the presence card. Tile creation and node mutations MUST be rejected if the lease is not ACTIVE.
+Each agent SHALL request a lease with ttl_ms 120000 (2 minutes) and capabilities including create_tiles and modify_own_tiles. The server-side lease state machine SHALL be configured with `AutoRenew` renewal policy. The runtime SHALL auto-renew the lease at 75% TTL (90 seconds elapsed). The agent MUST hold the lease for the entire lifetime of the presence card. Tile creation and node mutations MUST be rejected if the lease is not ACTIVE.
+
+> **Implementation note:** The LeaseRequest proto has fields: `ttl_ms`, `capabilities` (repeated string), and `lease_priority`. Renewal policy (`AutoRenew`) is a server-side / Rust-layer concern, not a wire field. LeaseResponse has `granted: bool`, not an enum result.
 Source: proposal (lease governance), lease-governance spec (lease state machine, auto-renewal)
 
 #### Scenario: Lease request and grant
-- **WHEN** an agent sends a LeaseRequest with renewal_policy AUTO_RENEW, ttl_ms 120000, and capabilities [create_tiles, modify_own_tiles]
-- **THEN** the runtime MUST grant the lease (transition REQUESTED -> ACTIVE) and return a LeaseResponse with result GRANTED, the assigned LeaseId, and the effective TTL
+- **WHEN** an agent sends a LeaseRequest with ttl_ms 120000 and capabilities [create_tiles, modify_own_tiles]
+- **THEN** the runtime MUST grant the lease (transition REQUESTED -> ACTIVE) and return a LeaseResponse with granted = true, the assigned LeaseId, and the effective TTL
 
 #### Scenario: Auto-renewal at 75% TTL
 - **WHEN** 90 seconds have elapsed since lease grant (75% of 120s TTL)
-- **THEN** the runtime MUST auto-renew the lease and send a LeaseResponse with result GRANTED, resetting the TTL expiry
+- **THEN** the runtime MUST auto-renew the lease and send a LeaseResponse with granted = true, resetting the TTL expiry
 
 #### Scenario: Tile mutation with active lease succeeds
 - **WHEN** an agent with an ACTIVE lease submits a MutationBatch containing CreateTile
@@ -77,12 +82,15 @@ Source: proposal (lease governance), lease-governance spec (lease state machine,
 - **THEN** the runtime MUST reject the batch with LeaseExpired error
 
 ### Requirement: Periodic Content Update
-Each agent SHALL update its presence card's TextMarkdownNode content every 30 seconds by submitting a MutationBatch with a single ReplaceNode mutation. The updated content SHALL contain the agent name (bold) and an updated "Last active: Ns ago" timestamp reflecting the elapsed time since the agent's session started. The SolidColorNode and StaticImageNode SHALL NOT be modified during content updates.
+Each agent SHALL update its presence card's TextMarkdownNode content every 30 seconds by submitting a MutationBatch with a single `SetTileRoot` mutation containing the complete updated node tree. The updated text content SHALL contain the agent name (bold) and an updated "Last active: Ns ago" timestamp reflecting the elapsed time since the agent's session started. The SolidColorNode and StaticImageNode SHALL be included unchanged in the rebuilt tree.
+
+> **Implementation note:** There is no `ReplaceNode` variant in `SceneMutation`. To update a single node's content, the agent rebuilds the full node tree and submits it via `SetTileRoot`. For a 3-node flat tree this is trivially cheap.
+
 Source: proposal (behavioral requirements), scene-graph spec (atomic batch mutations)
 
 #### Scenario: Content update after 30 seconds
 - **WHEN** 30 seconds have elapsed since the last content update
-- **THEN** the agent MUST submit a MutationBatch with a ReplaceNode mutation targeting the TextMarkdownNode, updating the content to "**AgentName**\nLast active: 30s ago"
+- **THEN** the agent MUST submit a MutationBatch with a SetTileRoot mutation containing the full node tree with the TextMarkdownNode updated to "**AgentName**\nLast active: 30s ago"
 
 #### Scenario: Content update after 90 seconds
 - **WHEN** 90 seconds have elapsed since session start
@@ -90,7 +98,7 @@ Source: proposal (behavioral requirements), scene-graph spec (atomic batch mutat
 
 #### Scenario: Only text node is replaced
 - **WHEN** a content update MutationBatch is submitted
-- **THEN** the batch MUST contain exactly 1 mutation (ReplaceNode for the TextMarkdownNode); the SolidColorNode and StaticImageNode MUST remain unchanged
+- **THEN** the batch MUST contain exactly 1 mutation (SetTileRoot with the complete node tree); the SolidColorNode and StaticImageNode MUST be included unchanged in the rebuilt tree
 
 ### Requirement: Agent Disconnect and Orphan Handling
 When an agent disconnects (gRPC stream close or heartbeat timeout after 15 seconds), the runtime SHALL transition all the agent's ACTIVE leases to ORPHANED. The presence card tile SHALL be frozen at its last committed state. A disconnection badge SHALL appear on the tile within 1 frame (16.6ms). The reconnect grace period (30 seconds) SHALL start. If the agent does not reconnect within the grace period, leases SHALL transition to EXPIRED and the tile SHALL be removed from the scene graph.
@@ -143,13 +151,12 @@ Source: proposal (visual requirements), scene-graph spec (ResourceId identity, c
 ### Requirement: gRPC Test Sequence
 The exemplar SHALL define a complete gRPC test sequence for one agent that exercises the full presence card lifecycle:
 1. SessionInit (authenticate, receive SessionEstablished with SceneSnapshot)
-2. LeaseRequest (AUTO_RENEW, 120s TTL, capabilities: create_tiles, modify_own_tiles)
+2. LeaseRequest (ttl_ms=120000, capabilities: create_tiles, modify_own_tiles; `AutoRenew` is server-side)
 3. UploadResource (32x32 PNG avatar)
-4. MutationBatch: CreateTile (200x80, bottom-left corner, Passthrough)
-5. MutationBatch: InsertNode x3 (SolidColorNode, StaticImageNode, TextMarkdownNode)
-6. Wait 30s, then MutationBatch: ReplaceNode (update TextMarkdownNode content)
-7. Repeat step 6 every 30s
-8. SessionClose (expect_resume = false) or connection drop for disconnect test
+4. MutationBatch: CreateTile (200x80, bottom-left corner) + UpdateTileOpacity(1.0) + UpdateTileInputMode(Passthrough) + SetTileRoot (3-node tree: SolidColorNode, StaticImageNode, TextMarkdownNode)
+5. Wait 30s, then MutationBatch: SetTileRoot (updated node tree with new TextMarkdownNode content)
+6. Repeat step 5 every 30s
+7. SessionClose (expect_resume = false) or connection drop for disconnect test
 
 The multi-agent test sequence SHALL run 3 instances of this sequence concurrently with different agent namespaces, avatar colors, y-offsets, and z_orders.
 Source: proposal (test integration), session-protocol spec (ClientMessage/ServerMessage)

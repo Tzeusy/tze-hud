@@ -6,7 +6,7 @@ The component-shape-language spec defines the SVG token placeholder resolution m
 
 Existing infrastructure:
 - Widget bundle loading from `widget.toml` + SVG files (widget-system spec)
-- Parameter schema validation: f32 with min/max, string with max_length, color with RGBA
+- Parameter schema validation: f32 with min/max, string with string_max_bytes, color with RGBA
 - Linear binding: maps f32 `[min, max]` to `[attr_min, attr_max]` on SVG attributes
 - Direct binding: color parameter value set as-is on SVG fill/stroke attributes
 - Text-content binding: string parameter replaces text node content inside `<text>`/`<tspan>` elements
@@ -18,7 +18,7 @@ Existing infrastructure:
 **Goals:**
 - Define a complete, production-quality widget asset bundle (widget.toml, track.svg, fill.svg) that is self-contained and exemplary for widget authors.
 - Exercise the three binding types (linear, direct, text-content) in a single widget.
-- Validate the token placeholder pipeline with `{{color.backdrop.default}}`, `{{color.text.accent}}`, `{{color.text.primary}}`.
+- Validate the token placeholder pipeline with `{{token.color.backdrop.default}}`, `{{token.color.text.accent}}`, `{{token.color.text.primary}}`.
 - Provide concrete MCP `publish_to_widget` test sequences that step through progress values with smooth interpolation.
 - Serve as a user-test fixture for visual validation of widget rendering.
 
@@ -61,11 +61,11 @@ Existing infrastructure:
 
 ### Default fill color from token, overridable via parameter
 
-**Decision:** The fill bar's `fill` attribute in the SVG template uses `{{color.text.accent}}` as the initial value. The `fill_color` parameter (type: color) has a direct binding that overrides this attribute at runtime.
+**Decision:** The fill bar's `fill` attribute in the SVG template uses `{{token.color.text.accent}}` as the initial value. The `fill_color` parameter (type: color) has a direct binding that overrides this attribute at runtime.
 
 **Rationale:** Token-driven default means the progress bar inherits the deployment's accent color out of the box. The `fill_color` parameter allows per-publish overrides without modifying the bundle — an agent can publish `fill_color=[255, 0, 0, 255]` for a red error progress bar.
 
-**Ordering:** Token substitution happens at bundle load time (resolving `{{color.text.accent}}` to e.g. `#4A9EFF`). Parameter binding resolution happens at registration time (validating the binding target exists). Parameter publication happens at runtime (applying the new color). This means the token value is the effective default until a publication overrides it.
+**Ordering:** Token substitution happens at bundle load time (resolving `{{token.color.text.accent}}` to e.g. `#4A9EFF`). Parameter binding resolution happens at registration time (validating the binding target exists). Parameter publication happens at runtime (applying the new color). This means the token value is the effective default until a publication overrides it.
 
 ### Transition behavior
 
@@ -77,6 +77,6 @@ Existing infrastructure:
 
 **[Risk] Fill bar at progress=0.0 with rx/ry still shows rounded end-caps as a tiny sliver** -- Mitigation: When width=0, the fill rect collapses to nothing (width=0 rect is not rendered by SVG). At very small widths (< 2*rx), the rounded corners merge and the bar appears as an ellipse rather than a pill, which is acceptable visual behavior.
 
-**[Risk] Label text overflows bar at small widths** -- Mitigation: The label is placed on the fill.svg layer which spans the full 300x20 viewport, not clipped to the fill bar rect. The label sits on top of both track and fill visually. Long labels are the caller's responsibility — the max_length=32 constraint limits text to short strings like "75%", "Loading...", or "3/10".
+**[Risk] Label text overflows bar at small widths** -- Mitigation: The label is placed on the fill.svg layer which spans the full 300x20 viewport, not clipped to the fill bar rect. The label sits on top of both track and fill visually. Long labels are the caller's responsibility — the string_max_bytes=32 constraint limits text to short strings like "75%", "Loading...", or "3/10".
 
 **[Risk] Token resolution failure blocks bundle loading** -- Mitigation: All referenced tokens (`color.backdrop.default`, `color.text.accent`, `color.text.primary`) are canonical tokens with hardcoded fallbacks. They will always resolve unless the operator provides an invalid override, which is caught at startup with `WIDGET_BUNDLE_UNRESOLVED_TOKEN`.

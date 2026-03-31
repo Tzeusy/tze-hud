@@ -1,3 +1,7 @@
+> **Implementation prerequisites:** This exemplar requires the following compositor/runtime changes that are not yet landed:
+> - Stack-by-severity requires the alert-banner zone to use `ContentionPolicy::Stack`, but the zone default is `Replace`. The zone definition must be updated, and `render_zone_content()` in `renderer.rs` must iterate all active publications (it currently breaks after the first match).
+> - Severity backdrop colors are resolved from compile-time constants in `urgency_to_severity_color()`, not from the profile's resolved token map. Token override of `color.severity.*` has no effect at render time until the compositor reads from the resolved token map.
+
 ## ADDED Requirements
 
 ### Requirement: Alert-Banner Exemplar Component Profile

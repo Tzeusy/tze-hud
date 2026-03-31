@@ -1,3 +1,6 @@
+> **Implementation prerequisites:** This exemplar requires the following compositor/runtime changes that are not yet landed:
+> - `render_zone_content()` in `renderer.rs` breaks after the first publication match — MergeByKey contention requires collecting and rendering all active publications (one per merge key). Currently only the latest publication is rendered.
+
 # Exemplar: Status Bar Zone
 
 A polished zone exemplar defining the visual, behavioral, and test contract for the `status-bar` zone type. Proves merge-by-key contention, multi-agent coexistence, and chrome-layer always-on-top rendering through a concrete component profile and end-to-end test scenarios.

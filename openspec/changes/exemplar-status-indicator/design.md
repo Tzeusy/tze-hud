@@ -7,7 +7,7 @@ This exemplar is a specification artifact, not a code change. It defines the vis
 ### Current State
 
 - The widget system spec defines discrete bindings: enum parameter -> lookup table -> SVG attribute value (spec.md §SVG Layer Parameter Bindings, "Discrete mapping applied" scenario).
-- The component-shape-language spec defines `{{token.key}}` mustache placeholder resolution in SVG strings at bundle load time, including border/outline colors via `{{color.border.default}}`.
+- The component-shape-language spec defines `{{token.key}}` mustache placeholder resolution in SVG strings at bundle load time, including border/outline colors via `{{token.color.border.default}}`.
 - The component-shape-language epic (hud-sc0a) is fully implemented: SVG token placeholders, design tokens, RenderingPolicy extensions, and component profiles are all live.
 - No existing exemplar exercises discrete enum bindings. The progress-bar exemplar covers linear f32 bindings; this exemplar completes the binding-type coverage.
 
@@ -15,7 +15,7 @@ This exemplar is a specification artifact, not a code change. It defines the vis
 
 - The widget must be small (32x32 or 48x48) — it is an icon-sized indicator, not a full-panel visualization.
 - Discrete binding snaps immediately: `transition_ms` on the publish call does NOT interpolate between enum values. Enum parameters have no interpolation path — only f32 and color parameters interpolate. The runtime must snap to the new enum value on the next frame.
-- Token placeholders (`{{color.border.default}}`) are resolved at bundle load time, not at publish time. The border ring color is baked into the SVG at load, not parameterized.
+- Token placeholders (`{{token.color.border.default}}`) are resolved at bundle load time, not at publish time. The border ring color is baked into the SVG at load, not parameterized.
 - Test fixtures must be compatible with the existing MCP `publish_to_widget` tool surface.
 
 ## Goals / Non-Goals
@@ -41,15 +41,15 @@ This exemplar is a specification artifact, not a code change. It defines the vis
 
 **Rationale:** Multiple SVG layers add compositor complexity (layer compositing, z-order) without value for a 32x32 widget. A single SVG keeps the exemplar focused on proving discrete bindings, not multi-layer composition.
 
-### 2. Border ring uses {{color.border.default}} token placeholder, not a parameter
+### 2. Border ring uses {{token.color.border.default}} token placeholder, not a parameter
 
-**Decision:** The circle's border ring (`stroke` attribute) uses `{{color.border.default}}` — a token placeholder resolved at bundle load time. It is not a runtime-parameterized attribute.
+**Decision:** The circle's border ring (`stroke` attribute) uses `{{token.color.border.default}}` — a token placeholder resolved at bundle load time. It is not a runtime-parameterized attribute.
 
 **Rationale:** The border ring is a visual-identity concern (visibility on any background), not agent-controlled data. Token resolution is the correct mechanism. This also exercises the token placeholder path within a widget SVG, proving both placeholder substitution and discrete parameter binding coexist in the same SVG file.
 
 ### 3. Default geometry is 48x48, not 32x32
 
-**Decision:** `default_geometry` in the widget.toml is 48x48 pixels. Operators can override this in instance configuration.
+**Decision:** The intended instance geometry is 48x48 pixels. The bundle manifest has no `default_geometry` field (the loader always assigns 100% relative geometry). Per-instance geometry is configured via the `geometry_override` field in `[[tabs.widgets]]` config entries.
 
 **Rationale:** 32x32 is tight for a circle + label. At 48x48 the circle is 32px diameter with 16px vertical space for an optional label line. The SVG viewBox is designed for this aspect ratio. 32x32 remains a valid operator override for label-free deployments.
 
@@ -69,8 +69,8 @@ This exemplar is a specification artifact, not a code change. It defines the vis
 
 ## Risks / Trade-offs
 
-- **[Risk] Label text may overflow at 48x48 viewBox.** Long labels (e.g., "Home Assistant Server") won't fit in ~48px width. -> Mitigation: The SVG label uses a small font size (10px) and the spec notes that labels exceeding the viewBox are clipped. The parameter schema sets `max_length: 16` for the label string.
+- **[Risk] Label text may overflow at 48x48 viewBox.** Long labels (e.g., "Home Assistant Server") won't fit in ~48px width. -> Mitigation: The SVG label uses a small font size (10px) and the spec notes that labels exceeding the viewBox are clipped. The parameter schema sets `string_max_bytes: 16` for the label string.
 
-- **[Risk] Discrete binding lookup table has no fallback for unknown enum values.** If the enum validation is bypassed somehow, the lookup returns no match. -> Mitigation: The widget parameter schema's `allowed_values` constraint rejects invalid enum values at publish time (WIDGET_PARAMETER_INVALID_VALUE). The discrete binding is never reached with an unknown value. The default parameter value ("offline") ensures the widget always has a valid initial state.
+- **[Risk] Discrete binding lookup table has no fallback for unknown enum values.** If the enum validation is bypassed somehow, the lookup returns no match. -> Mitigation: The widget parameter schema's `enum_allowed_values` constraint rejects invalid enum values at publish time (WIDGET_PARAMETER_INVALID_VALUE). The discrete binding is never reached with an unknown value. The default parameter value ("offline") ensures the widget always has a valid initial state.
 
 - **[Risk] Border ring visibility depends on operator's color.border.default token.** If an operator sets this to transparent, the ring disappears. -> Mitigation: The canonical fallback for `color.border.default` is `#333333` (dark gray). Operators who override tokens accept the visual consequences.

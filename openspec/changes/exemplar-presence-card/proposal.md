@@ -6,8 +6,8 @@ The tile API exists for genuinely custom agent layouts that no zone or widget co
 
 - Define an **exemplar-presence-card specification** covering the full tile-based agent presence card: fixed-size tile (200x80), corner-anchored, with SolidColorNode background, StaticImageNode avatar (32x32), and TextMarkdownNode for agent name + last-active status
 - Define **multi-agent coexistence layout**: 3 agents each create a presence card tile in the same tab, vertically stacked in the bottom-left corner with 8px gaps, non-overlapping (agent A at y=offset, agent B at y=offset+88, agent C at y=offset+176)
-- Define **lease lifecycle scenarios**: lease request with AUTO_RENEW policy, periodic content mutation (update "last active" timestamp every 30s), lease renewal, and agent disconnect → ORPHANED state → disconnection badge → grace period expiry → tile removal
-- Define **gRPC test sequences**: concrete MutationBatch payloads for tile creation, node insertion, and content update — exercising CreateTile, InsertNode (3 node types), and ReplaceNode (text update)
+- Define **lease lifecycle scenarios**: lease request with `AutoRenew` policy, periodic content mutation (update "last active" timestamp every 30s), lease renewal, and agent disconnect → ORPHANED state → disconnection badge → grace period expiry → tile removal
+- Define **gRPC test sequences**: concrete MutationBatch payloads for tile creation, node insertion, and content update — exercising CreateTile, AddNode (3 node types), and SetTileRoot (text update)
 - Define a **user-test scenario**: 3 agents create presence cards, one disconnects, visual verification of staleness badge and eventual cleanup
 
 ## Capabilities

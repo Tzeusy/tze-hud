@@ -1,3 +1,6 @@
+> **Implementation prerequisites:** This exemplar requires the following compositor/runtime changes that are not yet landed:
+> - MCP `parse_zone_content()` in `tools.rs` does not handle the `"static_image"` content type. Dispatch for `static_image` must be added before the StaticImage MCP scenarios will work.
+
 ## ADDED Requirements
 
 ### Requirement: Ambient Background Zone Visual Contract

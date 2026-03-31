@@ -9,12 +9,12 @@ Depends on: widget-system, component-shape-language
 ## ADDED Requirements
 
 ### Requirement: Progress Bar Asset Bundle Structure
-The progress bar exemplar MUST be delivered as a widget asset bundle directory named `progress-bar` containing exactly three files: `widget.toml` (manifest), `track.svg` (background track layer), and `fill.svg` (dynamic fill bar and label layer). The bundle MUST conform to the Widget Asset Bundle Format requirement from widget-system. The `widget.toml` MUST declare: `name = "progress-bar"`, `version = "1.0.0"`, `description = "Horizontal progress bar with configurable fill and label"`, a `parameter_schema` with three parameters, a `layers` array referencing both SVG files with bindings, and `default_geometry = { x = 0, y = 0, width = 300, height = 20 }`.
+The progress bar exemplar MUST be delivered as a widget asset bundle directory named `progress-bar` containing exactly three files: `widget.toml` (manifest), `track.svg` (background track layer), and `fill.svg` (dynamic fill bar and label layer). The bundle MUST conform to the Widget Asset Bundle Format requirement from widget-system. The `widget.toml` MUST declare: `name = "progress-bar"`, `version = "1.0.0"`, `description = "Horizontal progress bar with configurable fill and label"`, a `parameter_schema` with three parameters, and a `layers` array referencing both SVG files with bindings. Note: The bundle manifest has no `default_geometry` field; the loader always assigns 100% relative geometry. Per-instance geometry is configured via the `geometry_override` field in `[[tabs.widgets]]` config entries.
 Scope: v1-mandatory
 
 #### Scenario: Bundle loads successfully with default tokens
 - **WHEN** the runtime scans the `progress-bar` bundle directory containing `widget.toml`, `track.svg`, and `fill.svg`, and the design token map contains all canonical fallback values
-- **THEN** the runtime MUST register a Widget Type named "progress-bar" with three parameters, two SVG layers, and default geometry 300x20
+- **THEN** the runtime MUST register a Widget Type named "progress-bar" with three parameters and two SVG layers
 
 #### Scenario: Bundle rejected when SVG file missing
 - **WHEN** the `progress-bar` bundle directory contains `widget.toml` and `track.svg` but `fill.svg` is absent
@@ -26,10 +26,10 @@ Scope: v1-mandatory
 The progress bar widget MUST declare exactly three parameters in its `parameter_schema`:
 
 1. `progress` — type: f32, min: 0.0, max: 1.0, default: 0.0. Represents the fill level as a fraction of the total bar width.
-2. `label` — type: string, max_length: 32, default: "" (empty string). Represents optional text centered on the bar (e.g., "75%", "Loading...", or empty for no label).
+2. `label` — type: string, `string_max_bytes`: 32, default: "" (empty string). Represents optional text centered on the bar (e.g., "75%", "Loading...", or empty for no label).
 3. `fill_color` — type: color, default: [74, 158, 255, 255] (the RGBA equivalent of the canonical `color.text.accent` fallback `#4A9EFF`). Represents the fill bar color, overriding the token-derived default when published.
 
-**Note on `fill_color` default interaction:** The `fill_color` parameter's schema default `[74, 158, 255, 255]` serves as the initial parameter value before any publication. However, the SVG template's `fill` attribute is set to `{{color.text.accent}}` which is resolved at bundle load time. Since the direct binding only activates when `fill_color` is explicitly included in a publication, the token-resolved SVG value is the effective visual default until a publish overrides it. If an operator changes `color.text.accent` in `[design_tokens]`, the visual default changes accordingly — the schema default is only used when the parameter is explicitly published without a value.
+**Note on `fill_color` default interaction:** The `fill_color` parameter's schema default `[74, 158, 255, 255]` serves as the initial parameter value before any publication. However, the SVG template's `fill` attribute is set to `{{token.color.text.accent}}` which is resolved at bundle load time. Since the direct binding only activates when `fill_color` is explicitly included in a publication, the token-resolved SVG value is the effective visual default until a publish overrides it. If an operator changes `color.text.accent` in `[design_tokens]`, the visual default changes accordingly — the schema default is only used when the parameter is explicitly published without a value.
 
 The runtime MUST validate all publications against this schema using the standard Widget Parameter Schema requirement from widget-system.
 Scope: v1-mandatory
@@ -59,7 +59,7 @@ Scope: v1-mandatory
 ### Requirement: Progress Bar SVG Track Layer
 The `track.svg` file MUST define the background track — a static rounded rectangle that forms the visual boundary of the progress bar. The SVG MUST have:
 - `viewBox="0 0 300 20"` matching the default geometry.
-- A `<rect>` element with `id="track-bg"`, `x="0"`, `y="0"`, `width="300"`, `height="20"`, `rx="10"`, `ry="10"` for rounded end-caps, and `fill` set to `{{color.backdrop.default}}` with `fill-opacity="0.3"` (30% opacity for a muted background).
+- A `<rect>` element with `id="track-bg"`, `x="0"`, `y="0"`, `width="300"`, `height="20"`, `rx="10"`, `ry="10"` for rounded end-caps, and `fill` set to `{{token.color.backdrop.default}}` with `fill-opacity="0.3"` (30% opacity for a muted background).
 - No parameter bindings — the track layer is fully static after token resolution.
 
 Token placeholders MUST be resolved at bundle load time per the SVG Token Placeholder Resolution requirement from component-shape-language. The resolved SVG MUST parse successfully.
@@ -82,8 +82,8 @@ Scope: v1-mandatory
 ### Requirement: Progress Bar SVG Fill Layer
 The `fill.svg` file MUST define the dynamic fill bar and optional label text. The SVG MUST have `viewBox="0 0 300 20"` and contain:
 
-1. A `<rect>` element with `id="fill-bar"`, `x="2"`, `y="2"`, `width="0"` (default, overridden by binding), `height="16"`, `rx="8"`, `ry="8"` for rounded end-caps proportional to the fill bar height, and `fill="{{color.text.accent}}"` (token-resolved default, overridden by fill_color binding).
-2. A `<text>` element with `id="label-text"`, positioned at `x="150"`, `y="10"` (center of viewport), with `text-anchor="middle"`, `dominant-baseline="central"`, `font-size="11"`, `fill="{{color.text.primary}}"`, and text content bound to the `label` parameter.
+1. A `<rect>` element with `id="fill-bar"`, `x="2"`, `y="2"`, `width="0"` (default, overridden by binding), `height="16"`, `rx="8"`, `ry="8"` for rounded end-caps proportional to the fill bar height, and `fill="{{token.color.text.accent}}"` (token-resolved default, overridden by fill_color binding).
+2. A `<text>` element with `id="label-text"`, positioned at `x="150"`, `y="10"` (center of viewport), with `text-anchor="middle"`, `dominant-baseline="central"`, `font-size="11"`, `fill="{{token.color.text.primary}}"`, and text content bound to the `label` parameter.
 
 The fill bar rect MUST have 2px inset from the track edges (x=2, y=2, max_width=296, height=16) so it sits visually inside the track.
 Scope: v1-mandatory

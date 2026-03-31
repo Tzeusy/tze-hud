@@ -6,7 +6,7 @@ A polished progress bar exemplar serves three purposes: (1) it proves the SVG as
 
 ## What Changes
 
-- Define a **progress bar widget exemplar specification** covering the complete visual contract: thin horizontal bar (300x20 default geometry), background track with rounded end-caps in `{{color.backdrop.default}}` at 30% opacity, fill bar in `{{color.text.accent}}` (or configurable `fill_color`) with rounded end-caps via SVG `rx`/`ry`, optional centered label text.
+- Define a **progress bar widget exemplar specification** covering the complete visual contract: thin horizontal bar (300x20 default geometry), background track with rounded end-caps in `{{token.color.backdrop.default}}` at 30% opacity, fill bar in `{{token.color.text.accent}}` (or configurable `fill_color`) with rounded end-caps via SVG `rx`/`ry`, optional centered label text.
 - Define the **asset bundle** structure: `widget.toml` manifest with parameter_schema (progress: f32, label: string, fill_color: color), layers (track.svg, fill.svg), and bindings (linear mapping for fill width, direct mapping for fill color, text-content binding for label).
 - Define **behavioral test scenarios**: smooth progress interpolation with transition_ms=200, immediate label snap, re-rasterization under 2ms budget at default size.
 - Define **MCP test fixtures** — concrete `publish_to_widget` call sequences stepping progress through 0.0 -> 0.25 -> 0.50 -> 0.75 -> 1.0 with transition_ms, label updates, and fill_color overrides.

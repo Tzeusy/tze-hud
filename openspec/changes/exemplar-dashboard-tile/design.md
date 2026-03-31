@@ -12,7 +12,7 @@ The component-shape-language system (zones, widgets, design tokens, component pr
 
 - Prove all four v1 node types (SolidColorNode, TextMarkdownNode, StaticImageNode, HitRegionNode) compose correctly in a single tile via intra-tile tree-order compositing (painter's model).
 - Prove the full gRPC session lifecycle: connect, authenticate, request lease, create tile + nodes atomically, receive input events, update content, release/disconnect.
-- Prove lease governance integration: TTL with AUTO_RENEW, orphan handling on disconnect, disconnection badge rendering, and lease expiry leading to tile cleanup.
+- Prove lease governance integration: TTL with `AutoRenew` policy, orphan handling on disconnect, disconnection badge rendering, and lease expiry leading to tile cleanup.
 - Prove input capture: HitRegionNode local feedback (pressed/hovered in < 4ms), focus semantics, event routing to the owning agent, and agent callback on ACTIVATE.
 - Provide a concrete, testable scenario for headless CI (Layer 0 unit tests + integration tests without GPU).
 - Serve as a developer reference for building interactive tiles with the raw API.
@@ -46,15 +46,17 @@ The exemplar uses a single tile with a flat list of child nodes under the tile r
 
 ### Decision 2: Atomic batch for initial tile creation
 
-The entire tile (CreateTile + 6x InsertNode) MUST be submitted as a single MutationBatch. The user MUST never see a partially-constructed tile.
+The entire tile (CreateTile + SetTileRoot with full node tree) MUST be submitted as a single MutationBatch. The user MUST never see a partially-constructed tile.
 
 **Rationale:** This directly validates the atomic batch mutation requirement from the scene-graph spec. If any node fails insertion (e.g., bounds validation), the entire batch is rejected and no tile appears. This is the doctrinal "agents never expose intermediate state" principle from `presence.md`.
 
-### Decision 3: AUTO_RENEW lease with 60-second TTL
+### Decision 3: AutoRenew lease with 60-second TTL
 
-The exemplar agent requests a lease with `ttl_ms = 60000` and `renewal_policy = AUTO_RENEW`. The runtime auto-renews at 75% TTL (45 seconds). This keeps the tile alive indefinitely while the agent is connected, with a clean expiry path on disconnect.
+The exemplar agent requests a lease with `ttl_ms = 60000` and auto-renewal semantics. The runtime auto-renews at 75% TTL (45 seconds). This keeps the tile alive indefinitely while the agent is connected, with a clean expiry path on disconnect.
 
-**Rationale:** AUTO_RENEW is the natural policy for a persistent dashboard tile. MANUAL would require the agent to implement renewal logic (extra complexity for the exemplar). ONE_SHOT would cause the tile to disappear after 60 seconds, which is wrong for a dashboard. The 60-second TTL is long enough to be realistic but short enough that orphan expiry is observable in tests.
+> **Implementation note:** The LeaseRequest proto carries `ttl_ms`, `capabilities` (repeated string), and `lease_priority`. Renewal policy (e.g., `AutoRenew`) is a server-side / Rust-layer concern configured on the lease state machine, not a field on the wire LeaseRequest.
+
+**Rationale:** Auto-renewal (`AutoRenew`) is the natural policy for a persistent dashboard tile. Manual renewal would require the agent to implement renewal logic (extra complexity for the exemplar). One-shot would cause the tile to disappear after 60 seconds, which is wrong for a dashboard. The 60-second TTL is long enough to be realistic but short enough that orphan expiry is observable in tests.
 
 **Alternative considered:** Indefinite TTL (`ttl_ms = 0`). Rejected because it doesn't exercise the TTL/renewal machinery, which is a key validation target.
 
@@ -66,7 +68,9 @@ Each HitRegionNode carries a distinct `interaction_id` string: `"refresh-button"
 
 ### Decision 5: Periodic content update via MutationBatch
 
-The agent periodically (every 5 seconds) updates the body TextMarkdownNode content with fresh markdown (e.g., live stats, timestamp, connection uptime). This is done via a MutationBatch containing a single ReplaceNode mutation targeting the body node.
+The agent periodically (every 5 seconds) updates the body TextMarkdownNode content with fresh markdown (e.g., live stats, timestamp, connection uptime). This is done via a MutationBatch containing a `SetTileRoot` mutation that replaces the entire node tree with an updated tree where only the body text has changed.
+
+> **Implementation note:** There is no `ReplaceNode` variant in `SceneMutation`. To update a single node's content, the agent rebuilds the full node tree and submits it via `SetTileRoot`. This is cheap for small trees (6 nodes) and maintains the atomic-update invariant.
 
 **Rationale:** This validates that an agent can update node content within an existing tile using the atomic mutation path, and that the compositor re-renders the updated text correctly. The 5-second interval is low-frequency enough to avoid hitting rate limits but frequent enough to be observable.
 

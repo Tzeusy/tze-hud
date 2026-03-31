@@ -36,13 +36,13 @@ A minimal gauge test fixture exists at `crates/tze_hud_widget/tests/fixtures/gau
 
 ### D2: Token placeholders for all colors, hardcoded geometry
 
-**Choice:** All color values in SVG layers use `{{token.key}}` placeholders (e.g., `{{color.backdrop.default}}`, `{{color.text.primary}}`, `{{color.severity.info}}`). Geometry values (viewBox, dimensions, positions) remain hardcoded.
+**Choice:** All color values in SVG layers use `{{token.key}}` placeholders (e.g., `{{token.color.backdrop.default}}`, `{{token.color.text.primary}}`, `{{token.color.severity.info}}`). Geometry values (viewBox, dimensions, positions) remain hardcoded.
 
 **Rationale:** Color tokens demonstrate the design token pipeline with zero ambiguity — every color in the rendered gauge traces back to a token key. Geometry tokens exist in the canonical schema (`spacing.*`, `typography.*.size`) but the gauge's spatial layout is widget-specific, not theme-driven. Mixing token-driven colors with hardcoded layout is the intended v1 pattern: tokens handle visual consistency across widgets, layout is per-widget.
 
 ### D3: Severity indicator uses canonical color.severity.* tokens in discrete mapping
 
-**Choice:** The discrete binding for the `severity` enum parameter maps to canonical token values rather than arbitrary hex colors. The `value_map` in `widget.toml` references the same colors that `color.severity.info`, `color.severity.warning`, and `color.severity.error` tokens resolve to at startup. The SVG indicator element itself uses `{{color.severity.info}}` as its default fill (resolved at bundle load time).
+**Choice:** The discrete binding for the `severity` enum parameter maps to canonical token values rather than arbitrary hex colors. The `value_map` in `widget.toml` references the same colors that `color.severity.info`, `color.severity.warning`, and `color.severity.error` tokens resolve to at startup. The SVG indicator element itself uses `{{token.color.severity.info}}` as its default fill (resolved at bundle load time).
 
 **Rationale:** This ensures the gauge's severity colors are always consistent with the operator's configured design tokens. If an operator overrides `color.severity.error` to a different red, both the zone-level severity rendering and the gauge widget's indicator use the same color. The discrete `value_map` in `widget.toml` must use concrete hex values (not token references — the binding value_map is resolved at render time, not bundle load time), so the exemplar documents that the value_map should match the canonical token fallback values or be updated when tokens are customized.
 

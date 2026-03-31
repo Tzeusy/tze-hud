@@ -34,22 +34,24 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Atomic Tile Creation Batch
-The entire dashboard tile (CreateTile + SetTileRoot + 6x InsertNode) SHALL be submitted as a single MutationBatch. The batch SHALL be validated and committed atomically: if any mutation fails, the entire batch SHALL be rejected with no partial application. The user SHALL never see a partially-constructed dashboard tile.
+The entire dashboard tile SHALL be submitted as a single MutationBatch containing: CreateTile (bounds and z_order only), SetTileRoot (with the complete 6-node tree), UpdateTileOpacity, and UpdateTileInputMode. The batch SHALL be validated and committed atomically: if any mutation fails, the entire batch SHALL be rejected with no partial application. The user SHALL never see a partially-constructed dashboard tile.
+
+> **Implementation note:** `CreateTile` carries only `tab_id`, `namespace`, `lease_id`, `bounds`, and `z_order`. Opacity and input_mode must be set via separate `UpdateTileOpacity` and `UpdateTileInputMode` mutations in the same batch. Nodes are provided via `SetTileRoot` (complete tree) or individual `AddNode` mutations. There is no `InsertNode` variant.
 
 Source: scene-graph spec (Atomic Batch Mutations, Transaction Validation Pipeline); presence.md (Scene mutations are atomic)
 Scope: v1-mandatory
 
 #### Scenario: Successful atomic tile creation
-- **WHEN** the agent submits a MutationBatch containing CreateTile, SetTileRoot, and 6 InsertNode mutations with valid parameters
+- **WHEN** the agent submits a MutationBatch containing CreateTile, SetTileRoot (with 6-node tree), UpdateTileOpacity, and UpdateTileInputMode with valid parameters
 - **THEN** the entire batch SHALL be committed atomically and the dashboard tile SHALL appear fully constructed in one frame
 
 #### Scenario: Partial failure rejects entire batch
-- **WHEN** the agent submits the tile creation batch but one InsertNode has invalid bounds (e.g., width = 0)
+- **WHEN** the agent submits the tile creation batch but one AddNode has invalid bounds (e.g., width = 0)
 - **THEN** the entire batch SHALL be rejected, no tile SHALL appear in the scene, and the rejection SHALL include the failing mutation_index and error code
 
 #### Scenario: Batch does not exceed mutation limits
 - **WHEN** the tile creation batch is submitted
-- **THEN** the batch SHALL contain fewer than 1000 mutations (8 mutations: 1 CreateTile + 1 SetTileRoot + 6 InsertNode) and SHALL pass the batch size check
+- **THEN** the batch SHALL contain fewer than 1000 mutations (4 mutations: 1 CreateTile + 1 SetTileRoot + 1 UpdateTileOpacity + 1 UpdateTileInputMode, or if using AddNode: 1 CreateTile + 6 AddNode + 1 UpdateTileOpacity + 1 UpdateTileInputMode) and SHALL pass the batch size check
 
 ---
 
@@ -65,19 +67,21 @@ Scope: v1-mandatory
 
 #### Scenario: Unknown resource rejected
 - **WHEN** the agent submits the tile creation batch with a StaticImageNode referencing a ResourceId that was not previously uploaded
-- **THEN** the batch SHALL be rejected with `ResourceNotFound` at the InsertNode mutation for the StaticImageNode
+- **THEN** the batch SHALL be rejected with `ResourceNotFound` at the SetTileRoot or AddNode mutation containing the StaticImageNode
 
 ---
 
-### Requirement: Lease Request With AUTO_RENEW
-The agent SHALL request a lease before creating the dashboard tile. The LeaseRequest SHALL specify: ttl_ms = 60000, renewal_policy = AUTO_RENEW, capability_scope including `create_tiles` and `modify_own_tiles`, resource_budget with max_tiles >= 1 and max_nodes_per_tile >= 6 and appropriate texture_bytes_total for the icon image. The runtime SHALL respond with LeaseResponse result = GRANTED.
+### Requirement: Lease Request With AutoRenew
+The agent SHALL request a lease before creating the dashboard tile. The LeaseRequest SHALL specify: ttl_ms = 60000, capabilities including `create_tiles` and `modify_own_tiles`, and an appropriate lease_priority. The runtime SHALL respond with LeaseResponse granted = true. The server-side lease state machine SHALL be configured with `AutoRenew` renewal policy.
+
+> **Implementation note:** The LeaseRequest proto has fields: `ttl_ms`, `capabilities` (repeated string), and `lease_priority`. Renewal policy (`AutoRenew` vs `Manual`) and resource budgets (max_tiles, max_nodes_per_tile, texture_bytes_total) are server-side / Rust-layer concerns configured on the lease governance state machine, not wire fields on LeaseRequest. LeaseResponse has `granted: bool`, not an enum result.
 
 Source: lease-governance spec (Lease State Machine, Auto-Renewal Policy, Operations Requiring a Lease, Lease Identity)
 Scope: v1-mandatory
 
 #### Scenario: Lease granted with requested parameters
-- **WHEN** the agent sends a LeaseRequest with ttl_ms = 60000, renewal_policy = AUTO_RENEW, and valid capabilities
-- **THEN** the runtime SHALL respond with LeaseResponse result = GRANTED, a UUIDv7 LeaseId, the granted TTL, and the allocated resource budget
+- **WHEN** the agent sends a LeaseRequest with ttl_ms = 60000 and capabilities [create_tiles, modify_own_tiles]
+- **THEN** the runtime SHALL respond with LeaseResponse granted = true, a UUIDv7 LeaseId, and the granted TTL
 
 #### Scenario: Tile creation requires active lease
 - **WHEN** the agent attempts to submit the tile creation MutationBatch without a prior ACTIVE lease
@@ -85,19 +89,21 @@ Scope: v1-mandatory
 
 #### Scenario: Lease auto-renews at 75% TTL
 - **WHEN** the lease has been active for 45 seconds (75% of 60-second TTL) and the agent session is still connected
-- **THEN** the runtime SHALL auto-renew the lease and send LeaseResponse with result = GRANTED and an updated expiry
+- **THEN** the runtime SHALL auto-renew the lease and send LeaseResponse with granted = true and an updated expiry
 
 ---
 
 ### Requirement: Periodic Content Update
-The agent SHALL update the body TextMarkdownNode content every 5 seconds by submitting a MutationBatch containing a single ReplaceNode mutation. The updated content SHALL be valid CommonMark markdown (e.g., including a timestamp, connection uptime, or simulated metrics). The update SHALL require the existing ACTIVE lease.
+The agent SHALL update the body TextMarkdownNode content every 5 seconds by submitting a MutationBatch containing a single `SetTileRoot` mutation with the complete updated node tree. The updated text content SHALL be valid CommonMark markdown (e.g., including a timestamp, connection uptime, or simulated metrics). The update SHALL require the existing ACTIVE lease.
+
+> **Implementation note:** There is no `ReplaceNode` variant in `SceneMutation`. To update a single node's content, the agent rebuilds the full node tree and submits it via `SetTileRoot`. For a 6-node flat tree this is trivially cheap.
 
 Source: scene-graph spec (V1 Node Types — TextMarkdownNode content limit); lease-governance spec (Operations Requiring a Lease)
 Scope: v1-mandatory
 
 #### Scenario: Successful content update
-- **WHEN** the agent submits a ReplaceNode mutation targeting the body TextMarkdownNode with new markdown content
-- **THEN** the runtime SHALL accept the batch, replace the node content, and re-render the text in the next frame
+- **WHEN** the agent submits a SetTileRoot mutation with an updated node tree (body TextMarkdownNode content changed)
+- **THEN** the runtime SHALL accept the batch, replace the tile's node tree, and re-render the text in the next frame
 
 #### Scenario: Content update with expired lease rejected
 - **WHEN** the agent's lease has expired and it attempts to submit a content update MutationBatch
@@ -165,7 +171,7 @@ Scope: v1-mandatory
 
 #### Scenario: Tab key cycles through buttons
 - **WHEN** the "Refresh" HitRegionNode has focus and the user presses Tab
-- **THEN** focus SHALL transfer to the "Dismiss" HitRegionNode, dispatching FocusLostEvent to Refresh and FocusGainedEvent(source=TAB_KEY) to the agent for Dismiss
+- **THEN** focus SHALL transfer to the "Dismiss" HitRegionNode, dispatching FocusLostEvent to Refresh and FocusGainedEvent(source=TabKey) to the agent for Dismiss
 
 #### Scenario: Tab key wraps from last to first
 - **WHEN** the "Dismiss" HitRegionNode has focus and the user presses Tab
@@ -254,7 +260,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Full Lifecycle User-Test Scenario
-The exemplar SHALL define a user-test scenario covering the complete lifecycle: (1) agent establishes gRPC session, (2) agent requests lease with AUTO_RENEW, (3) agent uploads icon resource, (4) agent submits atomic tile creation batch, (5) tile appears with all nodes rendered, (6) agent periodically updates body content, (7) user clicks "Refresh" button and agent receives callback, (8) user clicks "Dismiss" button and agent releases lease, (9) tile disappears cleanly.
+The exemplar SHALL define a user-test scenario covering the complete lifecycle: (1) agent establishes gRPC session, (2) agent requests lease with `AutoRenew` policy, (3) agent uploads icon resource, (4) agent submits atomic tile creation batch, (5) tile appears with all nodes rendered, (6) agent periodically updates body content, (7) user clicks "Refresh" button and agent receives callback, (8) user clicks "Dismiss" button and agent releases lease, (9) tile disappears cleanly.
 
 Source: all referenced specs combined
 Scope: v1-mandatory

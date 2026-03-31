@@ -7,16 +7,16 @@
 
 ## 2. Asset Bundle: background.svg
 
-- [ ] 2.1 Create `background.svg` with 100x240 viewBox, outer frame `<rect>` using `fill="{{color.backdrop.default}}"`, `stroke="{{color.border.default}}"`, `data-role="backdrop"`
-- [ ] 2.2 Add inner track `<rect id="track">` with `fill="{{color.backdrop.default}}"` and `fill-opacity="0.3"` (30% opacity for a lighter appearance) — no `data-role` attribute
+- [ ] 2.1 Create `background.svg` with 100x240 viewBox, outer frame `<rect>` using `fill="{{token.color.backdrop.default}}"`, `stroke="{{token.color.border.default}}"`, `data-role="backdrop"`
+- [ ] 2.2 Add inner track `<rect id="track">` with `fill="{{token.color.backdrop.default}}"` and `fill-opacity="0.3"` (30% opacity for a lighter appearance) — no `data-role` attribute
 - [ ] 2.3 Verify zero hardcoded hex colors in the SVG markup — all colors use `{{token.key}}` placeholders
 
 ## 3. Asset Bundle: fill.svg
 
 - [ ] 3.1 Create `fill.svg` with 100x240 viewBox, `<clipPath id="track-clip">` constraining fill bar to the track area (x=30, y=10, width=40, height=200)
-- [ ] 3.2 Add `<rect id="bar">` fill bar with `clip-path="url(#track-clip)"`, positioned at track bottom (y=210), height=0 (default), `fill="{{color.text.accent}}"` — grows upward via linear binding
-- [ ] 3.3 Add `<text id="label-text">` with `fill="{{color.text.primary}}"`, `stroke="{{color.outline.default}}"`, `stroke-width="{{stroke.outline.width}}"`, `data-role="text"`, centered below the track, `font-family="sans-serif"`, `font-size="10"` — stroke attributes make the gauge compatible with DualLayer readability profiles even though it ships as a global bundle
-- [ ] 3.4 Add `<circle id="indicator">` severity indicator with `fill="{{color.severity.info}}"`, positioned top-right of the gauge
+- [ ] 3.2 Add `<rect id="bar">` fill bar with `clip-path="url(#track-clip)"`, positioned at track bottom (y=210), height=0 (default), `fill="{{token.color.text.accent}}"` — grows upward via linear binding
+- [ ] 3.3 Add `<text id="label-text">` with `fill="{{token.color.text.primary}}"`, `stroke="{{token.color.outline.default}}"`, `stroke-width="{{token.stroke.outline.width}}"`, `data-role="text"`, centered below the track, `font-family="sans-serif"`, `font-size="10"` — stroke attributes make the gauge compatible with DualLayer readability profiles even though it ships as a global bundle
+- [ ] 3.4 Add `<circle id="indicator">` severity indicator with `fill="{{token.color.severity.info}}"`, positioned top-right of the gauge
 - [ ] 3.5 Verify zero hardcoded hex colors — all colors use `{{token.key}}` placeholders
 - [ ] 3.6 Verify `data-role="text"` on label-text, no `data-role` on bar or indicator
 

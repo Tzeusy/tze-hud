@@ -5,7 +5,7 @@ The v1 MVP specifications define four node types (SolidColorNode, TextMarkdownNo
 ## What Changes
 
 - Define a concrete **exemplar dashboard tile**: a 400x300 agent-owned tile at content layer depth demonstrating all four v1 node types composited in tree order (SolidColorNode background, StaticImageNode icon, TextMarkdownNode header/body, HitRegionNode buttons).
-- Specify the **full gRPC lifecycle**: session establishment, lease request with TTL and AUTO_RENEW policy, atomic batch creation of tile + all nodes, periodic TextMarkdownNode content updates, HitRegionNode interaction callbacks, and graceful lease release/dismiss.
+- Specify the **full gRPC lifecycle**: session establishment, lease request with TTL and `AutoRenew` policy, atomic batch creation of tile + all nodes, periodic TextMarkdownNode content updates, HitRegionNode interaction callbacks, and graceful lease release/dismiss.
 - Define **input capture behavior**: HitRegionNode buttons with local pressed/hovered state (runtime-owned, < 4ms), focus semantics, event_mask configuration, and agent callback on ACTIVATE (pointer click or command input).
 - Define **lease governance integration**: TTL-based lease with auto-renewal at 75%, orphan handling with disconnection badge on disconnect, lease expiry leading to tile removal.
 - Specify **test integration points**: headless Layer 0 tests for tile creation + node composition, input event injection for hit region verification, lease expiry simulation, and a full user-test lifecycle scenario.

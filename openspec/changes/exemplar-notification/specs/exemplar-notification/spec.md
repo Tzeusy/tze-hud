@@ -1,3 +1,7 @@
+> **Implementation prerequisites:** This exemplar requires the following compositor/runtime changes that are not yet landed:
+> - `render_zone_content()` in `renderer.rs` breaks after the first publication match — Stack contention zones (like notification-area) only render the latest publication. Multi-publication iteration is required for vertical stacking to work.
+> - Per-publication urgency backdrop colors are resolved from compile-time constants in `urgency_to_severity_color()`, not from the profile's scoped token map. Token override of `color.notification.urgency.*` has no effect at render time until the compositor reads from the resolved token map.
+
 ## ADDED Requirements
 
 ### Requirement: Notification Stack Vertical Layout

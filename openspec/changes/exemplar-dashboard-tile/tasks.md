@@ -5,8 +5,8 @@
 
 ## 2. Lease Acquisition
 
-- [ ] 2.1 Implement LeaseRequest with ttl_ms = 60000, renewal_policy = AUTO_RENEW, capability_scope = [create_tiles, modify_own_tiles], and resource_budget (max_tiles >= 1, max_nodes_per_tile >= 6, texture_bytes_total sufficient for icon)
-- [ ] 2.2 Verify LeaseResponse result = GRANTED and store the returned LeaseId for subsequent mutations
+- [ ] 2.1 Implement LeaseRequest with ttl_ms = 60000, capabilities = [create_tiles, modify_own_tiles], and lease_priority. Note: renewal policy (`AutoRenew`) and resource budgets are server-side / Rust-layer concerns, not LeaseRequest proto fields.
+- [ ] 2.2 Verify LeaseResponse granted = true and store the returned LeaseId for subsequent mutations
 - [ ] 2.3 Add test: lease request without required capabilities is denied
 
 ## 3. Resource Upload
@@ -16,10 +16,10 @@
 
 ## 4. Atomic Tile Creation Batch
 
-- [ ] 4.1 Build the MutationBatch containing: CreateTile (400x300 at (50,50), z_order=100, opacity=1.0), SetTileRoot, and 6x InsertNode mutations for the node tree (SolidColorNode, StaticImageNode, 2x TextMarkdownNode, 2x HitRegionNode) with all field values matching the spec
-- [ ] 4.2 Submit the batch and verify MutationResult success with the assigned sequence_number
+- [ ] 4.1 Build the MutationBatch containing: CreateTile (400x300 at (50,50), z_order=100), SetTileRoot (with full 6-node tree: SolidColorNode, StaticImageNode, 2x TextMarkdownNode, 2x HitRegionNode), followed by separate UpdateTileOpacity and UpdateTileInputMode mutations. Note: CreateTile only carries tab_id, namespace, lease_id, bounds, z_order — opacity and input_mode must be set via separate mutations.
+- [ ] 4.2 Submit the batch and verify MutationResult success (fields: batch_id, accepted, created_ids, error_code, error_message)
 - [ ] 4.3 Add test: verify the scene graph contains the tile with all 6 nodes in correct tree order after commit
-- [ ] 4.4 Add test: partial failure (e.g., one InsertNode with width=0) rejects the entire batch atomically — no tile appears
+- [ ] 4.4 Add test: partial failure (e.g., one AddNode with width=0) rejects the entire batch atomically — no tile appears
 
 ## 5. Intra-Tile Compositing Verification
 
@@ -29,7 +29,7 @@
 
 ## 6. Periodic Content Update
 
-- [ ] 6.1 Implement a periodic task (every 5 seconds) that submits a ReplaceNode mutation targeting the body TextMarkdownNode with updated markdown content (timestamp, uptime, simulated metrics)
+- [ ] 6.1 Implement a periodic task (every 5 seconds) that submits a SetTileRoot mutation with an updated node tree (only the body TextMarkdownNode content changes; the full tree is rebuilt). Note: there is no SetTileRoot variant — use SetTileRoot to swap the entire node tree atomically.
 - [ ] 6.2 Add test: content update succeeds when lease is ACTIVE and the TextMarkdownNode reflects the new content
 - [ ] 6.3 Add test: content update is rejected when lease has expired (LeaseExpired error)
 
@@ -44,7 +44,7 @@
 ## 8. Agent Callbacks on Button Activation
 
 - [ ] 8.1 Implement agent-side event handler: receive EventBatch from gRPC stream, extract ClickEvent or CommandInputEvent(ACTIVATE), match on interaction_id
-- [ ] 8.2 On interaction_id = "refresh-button": trigger an immediate content update (MutationBatch with ReplaceNode)
+- [ ] 8.2 On interaction_id = "refresh-button": trigger an immediate content update (MutationBatch with SetTileRoot)
 - [ ] 8.3 On interaction_id = "dismiss-button": send LeaseRelease and verify the tile is removed from the scene
 - [ ] 8.4 Add test: click on Refresh dispatches ClickEvent with correct interaction_id, tile_id, node_id to agent
 - [ ] 8.5 Add test: ACTIVATE command on focused Dismiss button dispatches CommandInputEvent with action = ACTIVATE and interaction_id = "dismiss-button"
@@ -58,7 +58,7 @@
 
 ## 10. Lease Governance Lifecycle
 
-- [ ] 10.1 Add test: auto-renewal fires at 75% TTL (45 seconds) — agent receives LeaseResponse with result = GRANTED and updated expiry
+- [ ] 10.1 Add test: auto-renewal fires at 75% TTL (45 seconds) — agent receives LeaseResponse with granted = true and updated expiry
 - [ ] 10.2 Add test: agent disconnect transitions lease to ORPHANED, tile is frozen, disconnection badge appears within 1 frame
 - [ ] 10.3 Add test: agent reconnect within 30-second grace period restores ACTIVE lease and clears badge
 - [ ] 10.4 Add test: grace period expiry (no reconnect within 30 seconds) transitions lease to EXPIRED and removes tile

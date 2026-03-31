@@ -1,3 +1,6 @@
+> **Implementation prerequisites:** This exemplar requires the following compositor/runtime changes that are not yet landed:
+> - `TextItem::from_zone_policy` in `text.rs` hardcodes `TextOverflow::Clip`. Ellipsis overflow for multi-line truncation requires wiring `TextOverflow` from the zone's `RenderingPolicy` into `TextItem` construction.
+
 # Exemplar Subtitle Specification
 
 Domain: PRESENCE

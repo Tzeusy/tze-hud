@@ -9,7 +9,7 @@ Depends on: widget-system, component-shape-language
 ## ADDED Requirements
 
 ### Requirement: Status Indicator Visual Contract
-The status indicator widget SHALL render as a filled circle with a border ring and an optional text label below. The circle MUST be centered horizontally within the widget's viewport. The default viewport SHALL be 48x48 pixels (configurable per widget instance). The circle diameter MUST be 32 pixels at default viewport size. The border ring MUST use a 1.5px stroke in the color resolved from the `{{color.border.default}}` design token placeholder at bundle load time. The fill color MUST be determined by the discrete binding on the `status` enum parameter. The optional label text MUST be rendered below the circle, centered horizontally, at 10px font size in the color resolved from `{{color.text.secondary}}`.
+The status indicator widget SHALL render as a filled circle with a border ring and an optional text label below. The circle MUST be centered horizontally within the widget's viewport. The default viewport SHALL be 48x48 pixels (configurable per widget instance). The circle diameter MUST be 32 pixels at default viewport size. The border ring MUST use a 1.5px stroke in the color resolved from the `{{token.color.border.default}}` design token placeholder at bundle load time. The fill color MUST be determined by the discrete binding on the `status` enum parameter. The optional label text MUST be rendered below the circle, centered horizontally, at 10px font size in the color resolved from `{{token.color.text.secondary}}`.
 Scope: v1-mandatory
 
 #### Scenario: Default render with no publication
@@ -43,7 +43,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Status Indicator Parameter Schema
-The status indicator widget type MUST declare exactly two parameters in its `widget.toml` parameter_schema. The `status` parameter MUST be of type `enum` with `allowed_values: ["online", "away", "busy", "offline"]` and `default: "offline"`. The `label` parameter MUST be of type `string` with `default: ""` and `max_length: 16`. The runtime MUST validate all publications against this schema per the widget-system parameter validation requirements.
+The status indicator widget type MUST declare exactly two parameters in its `widget.toml` parameter_schema. The `status` parameter MUST be of type `enum` with `enum_allowed_values: ["online", "away", "busy", "offline"]` and `default: "offline"`. The `label` parameter MUST be of type `string` with `default: ""` and `string_max_bytes: 16`. The runtime MUST validate all publications against this schema per the widget-system parameter validation requirements.
 Scope: v1-mandatory
 
 #### Scenario: Valid enum publish accepted
@@ -54,7 +54,7 @@ Scope: v1-mandatory
 - **WHEN** an agent publishes `{ "status": "do-not-disturb" }` to the status indicator widget
 - **THEN** the runtime MUST reject the publication with error code WIDGET_PARAMETER_INVALID_VALUE
 
-#### Scenario: Label exceeding max_length rejected
+#### Scenario: Label exceeding string_max_bytes rejected
 - **WHEN** an agent publishes `{ "label": "This label is way too long for the widget" }` to the status indicator widget
 - **THEN** the runtime MUST reject the publication with error code WIDGET_PARAMETER_INVALID_VALUE
 
@@ -65,7 +65,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Status Indicator Asset Bundle Structure
-The status indicator asset bundle MUST contain exactly two files: `widget.toml` (manifest) and `indicator.svg` (single SVG layer). The `widget.toml` MUST declare: name `"status-indicator"`, version `"1.0.0"`, description `"Enum-driven status indicator with discrete color mapping"`, parameter_schema with the status enum and label string parameters, a single layer entry referencing `indicator.svg`, default_geometry of `{ x: 0, y: 0, width: 48, height: 48 }`, default_contention_policy of `"LatestWins"`, and bindings for the discrete color mapping and text-content label.
+The status indicator asset bundle MUST contain exactly two files: `widget.toml` (manifest) and `indicator.svg` (single SVG layer). The `widget.toml` MUST declare: name `"status-indicator"`, version `"1.0.0"`, description `"Enum-driven status indicator with discrete color mapping"`, parameter_schema with the status enum and label string parameters, a single layer entry referencing `indicator.svg`, default_contention_policy of `"LatestWins"`, and bindings for the discrete color mapping and text-content label. Note: The bundle manifest has no `default_geometry` field; the loader always assigns 100% relative geometry. Per-instance geometry (e.g., 48x48) is configured via the `geometry_override` field in `[[tabs.widgets]]` config entries.
 Scope: v1-mandatory
 
 #### Scenario: Bundle loads successfully
@@ -74,10 +74,10 @@ Scope: v1-mandatory
 
 #### Scenario: Discrete binding resolved at registration
 - **WHEN** the widget type is registered and the discrete binding maps status enum values to fill colors
-- **THEN** the runtime MUST validate that all enum values in allowed_values have corresponding entries in the discrete mapping lookup table
+- **THEN** the runtime MUST validate that all enum values in enum_allowed_values have corresponding entries in the discrete mapping lookup table
 
 #### Scenario: Token placeholders resolved in SVG at load time
-- **WHEN** the bundle's `indicator.svg` contains `stroke="{{color.border.default}}"` and `fill="{{color.text.secondary}}"`
+- **WHEN** the bundle's `indicator.svg` contains `stroke="{{token.color.border.default}}"` and `fill="{{token.color.text.secondary}}"`
 - **THEN** the runtime MUST substitute these placeholders with the resolved token values (fallback: `#333333` and `#B0B0B0` respectively) before SVG parsing
 
 ---
@@ -96,12 +96,12 @@ Scope: v1-mandatory
 
 #### Scenario: Lookup table covers all allowed values
 - **WHEN** the widget type is loaded and the discrete binding is resolved
-- **THEN** the binding's lookup table MUST have exactly one entry for each value in the status parameter's allowed_values — no missing entries, no extra entries
+- **THEN** the binding's lookup table MUST have exactly one entry for each value in the status parameter's enum_allowed_values — no missing entries, no extra entries
 
 ---
 
 ### Requirement: Status Indicator Text-Content Binding
-The status indicator MUST use a direct text-content binding mapping the `label` string parameter to the text content of the SVG element with id `label-text`. The binding target_attribute MUST be `text-content` (the synthetic binding target that replaces the element's character data, not an XML attribute). When the label value is an empty string, the `<text>` element MUST contain no character data (effectively invisible). The label text MUST NOT be truncated or ellipsized by the binding — max_length enforcement in the parameter schema ensures values fit.
+The status indicator MUST use a direct text-content binding mapping the `label` string parameter to the text content of the SVG element with id `label-text`. The binding target_attribute MUST be `text-content` (the synthetic binding target that replaces the element's character data, not an XML attribute). When the label value is an empty string, the `<text>` element MUST contain no character data (effectively invisible). The label text MUST NOT be truncated or ellipsized by the binding — string_max_bytes enforcement in the parameter schema ensures values fit.
 Scope: v1-mandatory
 
 #### Scenario: Label text updated via text-content binding
@@ -167,7 +167,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Status Indicator SVG Template
-The `indicator.svg` file MUST define a valid SVG document with viewBox `"0 0 48 48"` containing: (1) a `<circle>` element with id `indicator-fill`, cx="24", cy="20", r="14", fill="#666666" (default offline color, overridden by discrete binding at runtime), stroke=`"{{color.border.default}}"`, stroke-width="1.5"; (2) a `<text>` element with id `label-text`, x="24", y="44", text-anchor="middle", font-size="10", fill=`"{{color.text.secondary}}"`, containing empty default text content. The SVG MUST NOT contain any scripting, external references, or animation elements. Token placeholders MUST be limited to `{{color.border.default}}` (circle stroke) and `{{color.text.secondary}}` (label fill).
+The `indicator.svg` file MUST define a valid SVG document with viewBox `"0 0 48 48"` containing: (1) a `<circle>` element with id `indicator-fill`, cx="24", cy="20", r="14", fill="#666666" (default offline color, overridden by discrete binding at runtime), stroke=`"{{token.color.border.default}}"`, stroke-width="1.5"; (2) a `<text>` element with id `label-text`, x="24", y="44", text-anchor="middle", font-size="10", fill=`"{{token.color.text.secondary}}"`, containing empty default text content. The SVG MUST NOT contain any scripting, external references, or animation elements. Token placeholders MUST be limited to `{{token.color.border.default}}` (circle stroke) and `{{token.color.text.secondary}}` (label fill).
 Scope: v1-mandatory
 
 #### Scenario: SVG structure valid for resvg
@@ -176,7 +176,7 @@ Scope: v1-mandatory
 
 #### Scenario: Token placeholders resolve to canonical fallbacks
 - **WHEN** no design token overrides are configured (empty `[design_tokens]` section)
-- **THEN** `{{color.border.default}}` MUST resolve to `#333333` and `{{color.text.secondary}}` MUST resolve to `#B0B0B0` in the SVG before parsing
+- **THEN** `{{token.color.border.default}}` MUST resolve to `#333333` and `{{token.color.text.secondary}}` MUST resolve to `#B0B0B0` in the SVG before parsing
 
 #### Scenario: SVG has no external dependencies
 - **WHEN** the runtime loads `indicator.svg`

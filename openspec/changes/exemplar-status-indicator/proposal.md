@@ -4,8 +4,8 @@ The widget system spec defines discrete enum-to-attribute bindings as a first-cl
 
 ## What Changes
 
-- Define a **status indicator widget exemplar specification** covering the complete visual contract: small icon-sized widget (48x48 default, 32x32 optional), circle indicator shape, discrete color mapping from enum values ("online" -> #00CC66, "away" -> #FFB800, "busy" -> #FF4444, "offline" -> #666666), optional label text below the indicator, and a subtle border ring using `{{color.border.default}}` for visibility on any background.
-- Define the **asset bundle** structure: `widget.toml` manifest with parameter_schema (status: enum with allowed_values, label: string), single SVG layer `indicator.svg` containing the circle shape with discrete color binding on fill and text-content binding for the label.
+- Define a **status indicator widget exemplar specification** covering the complete visual contract: small icon-sized widget (48x48 default, 32x32 optional), circle indicator shape, discrete color mapping from enum values ("online" -> #00CC66, "away" -> #FFB800, "busy" -> #FF4444, "offline" -> #666666), optional label text below the indicator, and a subtle border ring using `{{token.color.border.default}}` for visibility on any background.
+- Define the **asset bundle** structure: `widget.toml` manifest with parameter_schema (status: enum with enum_allowed_values, label: string), single SVG layer `indicator.svg` containing the circle shape with discrete color binding on fill and text-content binding for the label.
 - Define **behavioral test scenarios**: enum value snaps immediately (no interpolation — discrete mapping has no transition_ms effect on the enum parameter itself), LatestWins contention policy, re-rasterization under 2ms at 48x48 (trivially met at this small size).
 - Define **MCP test fixtures** — concrete `publish_to_widget` call sequences cycling through each enum value ("online", "away", "busy", "offline") and verifying each renders the correct discrete-mapped color.
 - Define a **user-test scenario** where an agent publishes status changes and the visual result is confirmed on a real display.
