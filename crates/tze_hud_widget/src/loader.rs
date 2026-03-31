@@ -45,7 +45,12 @@ pub struct LoadedBundle {
 
 /// Outcome of scanning a bundle directory: either a successful load or a
 /// structured error (the error is logged but does not abort scanning).
+///
+/// `LoadedBundle` is intentionally large — it holds in-memory SVG bytes keyed
+/// by filename. Bundle scanning is a startup-time, non-hot-path operation, so
+/// the extra stack size is acceptable here.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum BundleScanResult {
     Ok(LoadedBundle),
     Err(BundleError),

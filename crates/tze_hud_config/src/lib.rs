@@ -78,15 +78,13 @@ pub use agents::{
 };
 pub use component_profiles::{ComponentProfile, ZoneRenderingOverride, scan_profile_dirs};
 pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};
-pub use readability::{
-    PolicySnapshot, ReadabilityViolation, check_zone_readability, is_dev_mode,
-};
 pub use loader::TzeHudConfig;
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{
     AutoDetectResult, HeadlessSignal, auto_detect_profile, resolve_headless_dimensions,
     resolve_profile, validate_display_profile,
 };
+pub use readability::{PolicySnapshot, ReadabilityViolation, check_zone_readability, is_dev_mode};
 pub use reload::{
     FieldClassification, HotReloadableConfig, SighupHandler, reload_config, section_classification,
 };

@@ -45,7 +45,7 @@ pub enum SvgReadabilityTechnique {
 // ─── SVG element kind found in a scan pass ────────────────────────────────────
 
 /// Describes a `data-role`-tagged element found by the scanner.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum DataRoleElement {
     /// `data-role="backdrop"` element found at this document-order position.
     Backdrop { position: usize },
@@ -54,6 +54,8 @@ enum DataRoleElement {
         position: usize,
         has_fill: bool,
         has_stroke: bool,
+        /// Parsed value of `stroke-width` attribute, if present.
+        stroke_width: Option<f32>,
     },
 }
 
@@ -125,6 +127,7 @@ pub fn check_svg_readability(
             position: _,
             has_fill,
             has_stroke,
+            stroke_width,
         } = element
         {
             match technique {
@@ -141,6 +144,23 @@ pub fn check_svg_readability(
                              {missing}; DualLayer profiles (e.g. subtitle) require both fill \
                              and stroke on text elements for readability"
                         ));
+                    }
+                    // stroke-width must be present and >= 1.0.
+                    match stroke_width {
+                        None => {
+                            return Err(
+                                "data-role=\"text\" element is missing required stroke-width \
+                                 attribute; DualLayer profiles require stroke-width >= 1.0"
+                                    .to_string(),
+                            );
+                        }
+                        Some(w) if *w < 1.0 => {
+                            return Err(format!(
+                                "data-role=\"text\" element has stroke-width {w} which is below \
+                                 the required minimum of 1.0 for DualLayer profiles"
+                            ));
+                        }
+                        _ => {}
                     }
                 }
                 SvgReadabilityTechnique::OpaqueBackdrop => {
@@ -181,24 +201,36 @@ fn scan_data_role_elements(svg_text: &str) -> Result<Vec<DataRoleElement>, Strin
                 let mut data_role: Option<String> = None;
                 let mut has_fill = false;
                 let mut has_stroke = false;
+                let mut stroke_width: Option<f32> = None;
 
-                for attr in e.attributes().flatten() {
-                    let local_name = attr.key.local_name();
-                    let key = std::str::from_utf8(local_name.as_ref()).unwrap_or("");
-                    let val =
-                        std::str::from_utf8(attr.value.as_ref()).unwrap_or("").trim().to_string();
+                for attr_res in e.attributes() {
+                    let attr = attr_res.map_err(|e| format!("XML attribute error: {e}"))?;
+                    let key_bytes = attr.key.local_name();
+                    let key = std::str::from_utf8(key_bytes.as_ref()).unwrap_or("");
 
                     match key {
-                        "data-role" => {
-                            data_role = Some(val);
-                        }
-                        "fill" => {
-                            has_fill = true;
-                        }
-                        "stroke" => {
-                            // Only count non-"none" stroke as present.
-                            if val != "none" {
-                                has_stroke = true;
+                        "data-role" | "fill" | "stroke" | "stroke-width" => {
+                            let val = std::str::from_utf8(attr.value.as_ref())
+                                .unwrap_or("")
+                                .trim();
+                            match key {
+                                "data-role" => data_role = Some(val.to_string()),
+                                "fill" => {
+                                    // Only count non-"none" fill as present.
+                                    if val != "none" {
+                                        has_fill = true;
+                                    }
+                                }
+                                "stroke" => {
+                                    // Only count non-"none" stroke as present.
+                                    if val != "none" {
+                                        has_stroke = true;
+                                    }
+                                }
+                                "stroke-width" => {
+                                    stroke_width = val.parse::<f32>().ok();
+                                }
+                                _ => {}
                             }
                         }
                         _ => {}
@@ -215,6 +247,7 @@ fn scan_data_role_elements(svg_text: &str) -> Result<Vec<DataRoleElement>, Strin
                                 position,
                                 has_fill,
                                 has_stroke,
+                                stroke_width,
                             });
                         }
                         _ => {
@@ -251,7 +284,10 @@ mod tests {
             <text data-role="text" fill="#FFFFFF" stroke="#000000" stroke-width="2">Subtitle</text>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
-        assert!(result.is_ok(), "well-formed DualLayer SVG should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "well-formed DualLayer SVG should pass: {result:?}"
+        );
     }
 
     #[test]
@@ -262,7 +298,10 @@ mod tests {
             <text fill="#FFFFFF">plain text, no data-role</text>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
-        assert!(result.is_ok(), "SVG without data-role elements should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "SVG without data-role elements should pass: {result:?}"
+        );
     }
 
     // ── DualLayer fail: missing stroke ────────────────────────────────────────
@@ -295,7 +334,10 @@ mod tests {
         let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
         assert!(result.is_err(), "DualLayer text missing fill must fail");
         let detail = result.unwrap_err();
-        assert!(detail.contains("fill"), "error detail must mention 'fill': {detail}");
+        assert!(
+            detail.contains("fill"),
+            "error detail must mention 'fill': {detail}"
+        );
     }
 
     #[test]
@@ -305,7 +347,10 @@ mod tests {
             <text data-role="text">Nothing at all</text>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
-        assert!(result.is_err(), "DualLayer text missing fill and stroke must fail");
+        assert!(
+            result.is_err(),
+            "DualLayer text missing fill and stroke must fail"
+        );
         let detail = result.unwrap_err();
         assert!(
             detail.contains("fill") && detail.contains("stroke"),
@@ -329,7 +374,9 @@ mod tests {
         );
         let detail = result.unwrap_err();
         assert!(
-            detail.contains("painter") || detail.contains("document order") || detail.contains("backdrop"),
+            detail.contains("painter")
+                || detail.contains("document order")
+                || detail.contains("backdrop"),
             "error must mention document order / painter's model: {detail}"
         );
     }
@@ -357,7 +404,10 @@ mod tests {
             <text data-role="text" fill="#FFFFFF" stroke="#333333">With stroke too</text>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::OpaqueBackdrop);
-        assert!(result.is_ok(), "OpaqueBackdrop text with fill+stroke should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "OpaqueBackdrop text with fill+stroke should pass: {result:?}"
+        );
     }
 
     // ── OpaqueBackdrop fail: missing fill ─────────────────────────────────────
@@ -369,7 +419,10 @@ mod tests {
             <text data-role="text">No fill attribute</text>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::OpaqueBackdrop);
-        assert!(result.is_err(), "OpaqueBackdrop text without fill must fail");
+        assert!(
+            result.is_err(),
+            "OpaqueBackdrop text without fill must fail"
+        );
         let detail = result.unwrap_err();
         assert!(detail.contains("fill"), "error must mention fill: {detail}");
     }
@@ -383,7 +436,10 @@ mod tests {
             <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::OpaqueBackdrop);
-        assert!(result.is_err(), "backdrop after text must fail for OpaqueBackdrop too");
+        assert!(
+            result.is_err(),
+            "backdrop after text must fail for OpaqueBackdrop too"
+        );
     }
 
     // ── None technique: no checks ─────────────────────────────────────────────
@@ -396,7 +452,10 @@ mod tests {
             <rect data-role="backdrop" fill="#000000"/>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::None);
-        assert!(result.is_ok(), "None technique must skip all readability checks");
+        assert!(
+            result.is_ok(),
+            "None technique must skip all readability checks"
+        );
     }
 
     // ── Text without data-role is ignored ─────────────────────────────────────
@@ -436,10 +495,107 @@ mod tests {
     fn dual_layer_all_text_elements_must_pass() {
         let svg = r##"<svg xmlns="http://www.w3.org/2000/svg">
             <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
-            <text data-role="text" fill="#FFFFFF" stroke="#000000">Good</text>
+            <text data-role="text" fill="#FFFFFF" stroke="#000000" stroke-width="2">Good</text>
             <text data-role="text" fill="#FFFFFF">Missing stroke here</text>
         </svg>"##;
         let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
-        assert!(result.is_err(), "any text failing DualLayer check should fail the whole SVG");
+        assert!(
+            result.is_err(),
+            "any text failing DualLayer check should fail the whole SVG"
+        );
+    }
+
+    // ── fill="none" counts as missing fill ────────────────────────────────────
+
+    #[test]
+    fn dual_layer_fill_none_counts_as_missing() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
+            <text data-role="text" fill="none" stroke="#000000" stroke-width="2">Explicit none fill</text>
+        </svg>"##;
+        let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
+        assert!(
+            result.is_err(),
+            "fill=\"none\" must count as missing fill in DualLayer"
+        );
+    }
+
+    #[test]
+    fn opaque_backdrop_fill_none_counts_as_missing() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
+            <text data-role="text" fill="none">Explicit none fill</text>
+        </svg>"##;
+        let result = check_svg_readability(svg, SvgReadabilityTechnique::OpaqueBackdrop);
+        assert!(
+            result.is_err(),
+            "fill=\"none\" must count as missing fill in OpaqueBackdrop"
+        );
+    }
+
+    // ── stroke-width required in DualLayer ────────────────────────────────────
+
+    #[test]
+    fn dual_layer_missing_stroke_width_fails() {
+        // stroke is present but stroke-width is omitted entirely.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
+            <text data-role="text" fill="#FFFFFF" stroke="#000000">No stroke-width</text>
+        </svg>"##;
+        let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
+        assert!(
+            result.is_err(),
+            "DualLayer text missing stroke-width must fail"
+        );
+        let detail = result.unwrap_err();
+        assert!(
+            detail.contains("stroke-width"),
+            "error must mention stroke-width: {detail}"
+        );
+    }
+
+    #[test]
+    fn dual_layer_stroke_width_below_minimum_fails() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
+            <text data-role="text" fill="#FFFFFF" stroke="#000000" stroke-width="0.5">Too thin</text>
+        </svg>"##;
+        let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
+        assert!(
+            result.is_err(),
+            "DualLayer text with stroke-width < 1.0 must fail"
+        );
+        let detail = result.unwrap_err();
+        assert!(
+            detail.contains("stroke-width") || detail.contains("0.5"),
+            "error must mention stroke-width or the actual value: {detail}"
+        );
+    }
+
+    #[test]
+    fn dual_layer_stroke_width_at_minimum_passes() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
+            <text data-role="text" fill="#FFFFFF" stroke="#000000" stroke-width="1.0">Exactly 1.0</text>
+        </svg>"##;
+        let result = check_svg_readability(svg, SvgReadabilityTechnique::DualLayer);
+        assert!(
+            result.is_ok(),
+            "DualLayer text with stroke-width exactly 1.0 should pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn opaque_backdrop_stroke_width_not_required() {
+        // OpaqueBackdrop does not require stroke-width (only fill is required).
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <rect data-role="backdrop" fill="#000000" width="200" height="50"/>
+            <text data-role="text" fill="#FFFFFF">No stroke at all</text>
+        </svg>"##;
+        let result = check_svg_readability(svg, SvgReadabilityTechnique::OpaqueBackdrop);
+        assert!(
+            result.is_ok(),
+            "OpaqueBackdrop text without stroke/stroke-width should pass: {result:?}"
+        );
     }
 }

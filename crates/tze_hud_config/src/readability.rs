@@ -96,7 +96,9 @@ impl PolicySnapshot {
 /// - `profile_name`: the resolved display profile name (e.g. `"full-display"`,
 ///   `"headless"`). Pass `None` to rely solely on the environment variable.
 pub fn is_dev_mode(profile_name: Option<&str>) -> bool {
-    let env_dev = std::env::var("TZE_HUD_DEV").map(|v| v == "1").unwrap_or(false);
+    let env_dev = std::env::var("TZE_HUD_DEV")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     let headless = profile_name.map(|p| p == "headless").unwrap_or(false);
     env_dev || headless
 }
@@ -127,13 +129,9 @@ pub fn check_zone_readability(
     match technique {
         ReadabilityTechnique::None => Ok(()),
 
-        ReadabilityTechnique::DualLayer => {
-            check_dual_layer(policy)
-        }
+        ReadabilityTechnique::DualLayer => check_dual_layer(policy),
 
-        ReadabilityTechnique::OpaqueBackdrop => {
-            check_opaque_backdrop(policy)
-        }
+        ReadabilityTechnique::OpaqueBackdrop => check_opaque_backdrop(policy),
     }
 }
 
@@ -163,9 +161,7 @@ fn check_dual_layer(policy: &RenderingPolicy) -> Result<(), ReadabilityViolation
         Some(v) if v < 0.3 => {
             return Err(ReadabilityViolation {
                 technique: ReadabilityTechnique::DualLayer,
-                failing_check: format!(
-                    "DualLayer: backdrop_opacity must be >= 0.3, got {v}"
-                ),
+                failing_check: format!("DualLayer: backdrop_opacity must be >= 0.3, got {v}"),
                 policy_snapshot: snapshot,
             });
         }
@@ -193,9 +189,7 @@ fn check_dual_layer(policy: &RenderingPolicy) -> Result<(), ReadabilityViolation
         Some(v) if v < 1.0 => {
             return Err(ReadabilityViolation {
                 technique: ReadabilityTechnique::DualLayer,
-                failing_check: format!(
-                    "DualLayer: outline_width must be >= 1.0, got {v}"
-                ),
+                failing_check: format!("DualLayer: outline_width must be >= 1.0, got {v}"),
                 policy_snapshot: snapshot,
             });
         }
@@ -232,9 +226,7 @@ fn check_opaque_backdrop(policy: &RenderingPolicy) -> Result<(), ReadabilityViol
         Some(v) if v < 0.8 => {
             return Err(ReadabilityViolation {
                 technique: ReadabilityTechnique::OpaqueBackdrop,
-                failing_check: format!(
-                    "OpaqueBackdrop: backdrop_opacity must be >= 0.8, got {v}"
-                ),
+                failing_check: format!("OpaqueBackdrop: backdrop_opacity must be >= 0.8, got {v}"),
                 policy_snapshot: snapshot,
             });
         }
@@ -248,7 +240,7 @@ fn check_opaque_backdrop(policy: &RenderingPolicy) -> Result<(), ReadabilityViol
 
 #[cfg(test)]
 mod tests {
-    use tze_hud_scene::types::{Rgba, RenderingPolicy};
+    use tze_hud_scene::types::{RenderingPolicy, Rgba};
 
     use super::*;
 
@@ -281,20 +273,26 @@ mod tests {
     fn dual_layer_valid_policy_passes() {
         let policy = dual_layer_policy();
         let result = check_zone_readability(&policy, ReadabilityTechnique::DualLayer);
-        assert!(result.is_ok(), "valid DualLayer policy should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid DualLayer policy should pass: {result:?}"
+        );
     }
 
     #[test]
     fn dual_layer_at_minimum_thresholds_passes() {
         let policy = RenderingPolicy {
             backdrop: Some(Rgba::BLACK),
-            backdrop_opacity: Some(0.3),  // exactly 0.3 is OK
+            backdrop_opacity: Some(0.3), // exactly 0.3 is OK
             outline_color: Some(Rgba::BLACK),
-            outline_width: Some(1.0),     // exactly 1.0 is OK
+            outline_width: Some(1.0), // exactly 1.0 is OK
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::DualLayer);
-        assert!(result.is_ok(), "DualLayer at minimum thresholds should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "DualLayer at minimum thresholds should pass: {result:?}"
+        );
     }
 
     // ── DualLayer fail: no backdrop ───────────────────────────────────────────
@@ -327,7 +325,7 @@ mod tests {
             backdrop: Some(Rgba::BLACK),
             backdrop_opacity: Some(0.6),
             outline_color: Some(Rgba::BLACK),
-            outline_width: None,  // ← failing field
+            outline_width: None, // ← failing field
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::DualLayer);
@@ -351,13 +349,20 @@ mod tests {
             backdrop: Some(Rgba::BLACK),
             backdrop_opacity: Some(0.6),
             outline_color: Some(Rgba::BLACK),
-            outline_width: Some(0.5),  // below 1.0
+            outline_width: Some(0.5), // below 1.0
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::DualLayer);
-        assert!(result.is_err(), "DualLayer with outline_width < 1.0 must fail");
+        assert!(
+            result.is_err(),
+            "DualLayer with outline_width < 1.0 must fail"
+        );
         let v = result.unwrap_err();
-        assert!(v.failing_check.contains("outline_width"), "{}", v.failing_check);
+        assert!(
+            v.failing_check.contains("outline_width"),
+            "{}",
+            v.failing_check
+        );
         assert!(v.failing_check.contains("0.5"), "{}", v.failing_check);
     }
 
@@ -366,14 +371,18 @@ mod tests {
         let policy = RenderingPolicy {
             backdrop: Some(Rgba::BLACK),
             backdrop_opacity: Some(0.6),
-            outline_color: None,  // ← failing field
+            outline_color: None, // ← failing field
             outline_width: Some(2.0),
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::DualLayer);
         assert!(result.is_err(), "DualLayer with no outline_color must fail");
         let v = result.unwrap_err();
-        assert!(v.failing_check.contains("outline_color"), "{}", v.failing_check);
+        assert!(
+            v.failing_check.contains("outline_color"),
+            "{}",
+            v.failing_check
+        );
     }
 
     // ── DualLayer fail: low backdrop_opacity ─────────────────────────────────
@@ -382,15 +391,22 @@ mod tests {
     fn dual_layer_low_backdrop_opacity_fails() {
         let policy = RenderingPolicy {
             backdrop: Some(Rgba::BLACK),
-            backdrop_opacity: Some(0.1),  // below 0.3
+            backdrop_opacity: Some(0.1), // below 0.3
             outline_color: Some(Rgba::BLACK),
             outline_width: Some(2.0),
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::DualLayer);
-        assert!(result.is_err(), "DualLayer with backdrop_opacity < 0.3 must fail");
+        assert!(
+            result.is_err(),
+            "DualLayer with backdrop_opacity < 0.3 must fail"
+        );
         let v = result.unwrap_err();
-        assert!(v.failing_check.contains("backdrop_opacity"), "{}", v.failing_check);
+        assert!(
+            v.failing_check.contains("backdrop_opacity"),
+            "{}",
+            v.failing_check
+        );
     }
 
     // ── OpaqueBackdrop pass ───────────────────────────────────────────────────
@@ -399,18 +415,24 @@ mod tests {
     fn opaque_backdrop_valid_policy_passes() {
         let policy = opaque_backdrop_policy();
         let result = check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop);
-        assert!(result.is_ok(), "valid OpaqueBackdrop policy should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid OpaqueBackdrop policy should pass: {result:?}"
+        );
     }
 
     #[test]
     fn opaque_backdrop_at_minimum_threshold_passes() {
         let policy = RenderingPolicy {
             backdrop: Some(Rgba::BLACK),
-            backdrop_opacity: Some(0.8),  // exactly 0.8 is OK
+            backdrop_opacity: Some(0.8), // exactly 0.8 is OK
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop);
-        assert!(result.is_ok(), "OpaqueBackdrop at exactly 0.8 should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "OpaqueBackdrop at exactly 0.8 should pass: {result:?}"
+        );
     }
 
     // ── OpaqueBackdrop fail: low opacity ──────────────────────────────────────
@@ -420,7 +442,7 @@ mod tests {
     fn opaque_backdrop_low_opacity_fails() {
         let policy = RenderingPolicy {
             backdrop: Some(Rgba::BLACK),
-            backdrop_opacity: Some(0.5),  // below 0.8
+            backdrop_opacity: Some(0.5), // below 0.8
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop);
@@ -457,7 +479,10 @@ mod tests {
             ..RenderingPolicy::default()
         };
         let result = check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop);
-        assert!(result.is_err(), "OpaqueBackdrop with no backdrop_opacity must fail");
+        assert!(
+            result.is_err(),
+            "OpaqueBackdrop with no backdrop_opacity must fail"
+        );
         let v = result.unwrap_err();
         assert!(v.failing_check.contains("None"), "{}", v.failing_check);
     }
@@ -496,9 +521,18 @@ mod tests {
 
     #[test]
     fn is_dev_mode_headless_profile() {
-        assert!(is_dev_mode(Some("headless")), "headless profile should trigger dev mode");
-        assert!(!is_dev_mode(Some("full-display")), "full-display should not trigger dev mode");
-        assert!(!is_dev_mode(None), "no profile name and no env var should not trigger dev mode");
+        assert!(
+            is_dev_mode(Some("headless")),
+            "headless profile should trigger dev mode"
+        );
+        assert!(
+            !is_dev_mode(Some("full-display")),
+            "full-display should not trigger dev mode"
+        );
+        assert!(
+            !is_dev_mode(None),
+            "no profile name and no env var should not trigger dev mode"
+        );
     }
 
     // NOTE: We cannot reliably test TZE_HUD_DEV=1 in a unit test without
