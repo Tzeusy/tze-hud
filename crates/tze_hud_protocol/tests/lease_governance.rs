@@ -91,7 +91,10 @@ fn create_tile(scene: &mut SceneGraph, tab_id: SceneId, ns: &str, lease_id: Scen
 #[test]
 fn auto_renewal_fires_at_75_percent_ttl() {
     use tze_hud_scene::clock::TestClock;
-    use tze_hud_scene::lease::{RenewalPolicy, ttl::{TtlCheck, TtlState}};
+    use tze_hud_scene::lease::{
+        RenewalPolicy,
+        ttl::{TtlCheck, TtlState},
+    };
 
     let clock = TestClock::new(0);
     let mut ttl = TtlState::new_activated(60_000, RenewalPolicy::AutoRenew, clock.clone());
@@ -138,7 +141,10 @@ fn auto_renewal_fires_at_75_percent_ttl() {
 #[test]
 fn auto_renewal_arm_armed_at_activation() {
     use tze_hud_scene::clock::TestClock;
-    use tze_hud_scene::lease::{RenewalPolicy, ttl::{AutoRenewalArm, TtlState}};
+    use tze_hud_scene::lease::{
+        RenewalPolicy,
+        ttl::{AutoRenewalArm, TtlState},
+    };
 
     let clock = TestClock::new(0);
     let ttl = TtlState::new_activated(60_000, RenewalPolicy::AutoRenew, clock);
@@ -238,8 +244,14 @@ fn disconnect_badges_all_owned_tiles() {
     let now_ms = clock.now_millis();
     scene.disconnect_lease(&lease_id, now_ms).unwrap();
 
-    assert_eq!(scene.tiles[&tile_a].visual_hint, TileVisualHint::DisconnectionBadge);
-    assert_eq!(scene.tiles[&tile_b].visual_hint, TileVisualHint::DisconnectionBadge);
+    assert_eq!(
+        scene.tiles[&tile_a].visual_hint,
+        TileVisualHint::DisconnectionBadge
+    );
+    assert_eq!(
+        scene.tiles[&tile_b].visual_hint,
+        TileVisualHint::DisconnectionBadge
+    );
 }
 
 // ─── Scenario 10.3: Reconnect within grace period restores ACTIVE ─────────────
@@ -408,11 +420,16 @@ fn grace_period_expiry_removes_all_tile_nodes() {
         .set_tile_root_checked(tile_id, node, "node-agent")
         .expect("set_tile_root must succeed with active lease");
 
-    assert!(scene.nodes.contains_key(&node_id), "node must exist before expiry");
+    assert!(
+        scene.nodes.contains_key(&node_id),
+        "node must exist before expiry"
+    );
 
     // Disconnect and advance past grace period.
     clock.advance(500);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
     clock.advance(31_000);
     scene.expire_leases();
 
@@ -527,7 +544,7 @@ fn explicit_lease_release_removes_all_nodes() {
 /// (tile count, node count, texture_bytes) which drops on tile removal.
 #[test]
 fn resource_ref_count_drops_after_lease_expiry() {
-    use tze_hud_scene::types::{NodeData, ResourceId, StaticImageNode, ImageFitMode};
+    use tze_hud_scene::types::{ImageFitMode, NodeData, ResourceId, StaticImageNode};
 
     let (mut scene, clock) = make_scene(0);
     let tab_id = setup_active_tab(&mut scene);
@@ -564,12 +581,17 @@ fn resource_ref_count_drops_after_lease_expiry() {
 
     // Disconnect and expire past grace.
     clock.advance(500);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
     clock.advance(31_000); // past 30s grace
     scene.expire_leases();
 
     // Tile must be gone.
-    assert!(!scene.tiles.contains_key(&tile_id), "tile must be removed after expiry");
+    assert!(
+        !scene.tiles.contains_key(&tile_id),
+        "tile must be removed after expiry"
+    );
 
     // Resource usage after expiry: tile is gone so tile count = 0.
     // (If the lease entry is still in the map, its usage drops to 0.)
@@ -598,7 +620,12 @@ fn ttl_expiry_without_renewal_removes_tile() {
     let node = tze_hud_scene::types::Node {
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
-            color: tze_hud_scene::types::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+            color: tze_hud_scene::types::Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
         }),
         children: vec![],
@@ -655,7 +682,12 @@ fn second_agent_cannot_mutate_dashboard_tile() {
     let node = tze_hud_scene::types::Node {
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
-            color: tze_hud_scene::types::Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            color: tze_hud_scene::types::Rgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
         }),
         children: vec![],
@@ -745,7 +777,12 @@ fn dashboard_agent_cannot_mutate_other_namespace_tiles() {
     let node = tze_hud_scene::types::Node {
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
-            color: tze_hud_scene::types::Rgba { r: 0.0, g: 1.0, b: 0.0, a: 1.0 },
+            color: tze_hud_scene::types::Rgba {
+                r: 0.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            },
             bounds: Rect::new(0.0, 0.0, 300.0, 200.0),
         }),
         children: vec![],
@@ -832,7 +869,9 @@ fn ttl_expires_while_orphaned_removes_tile() {
 
     // Disconnect at t=2_000ms (2s into the 5s TTL).
     clock.advance(2_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
     assert_eq!(scene.leases[&lease_id].state, LeaseState::Orphaned);
 
     // Advance to t=6_000ms — TTL has elapsed (5s), grace still running.
@@ -860,7 +899,9 @@ fn reconnect_after_grace_period_fails() {
 
     let lease_id = grant_lease(&mut scene, "late-agent");
     clock.advance(1_000);
-    scene.disconnect_lease(&lease_id, clock.now_millis()).unwrap();
+    scene
+        .disconnect_lease(&lease_id, clock.now_millis())
+        .unwrap();
 
     // Advance past the 30-second grace period.
     clock.advance(31_000);
@@ -915,7 +956,12 @@ fn mutation_after_release_is_rejected() {
     let node = tze_hud_scene::types::Node {
         id: SceneId::new(),
         data: NodeData::SolidColor(tze_hud_scene::types::SolidColorNode {
-            color: tze_hud_scene::types::Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            color: tze_hud_scene::types::Rgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
             bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
         }),
         children: vec![],
