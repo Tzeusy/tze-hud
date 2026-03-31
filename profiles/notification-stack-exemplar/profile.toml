@@ -1,0 +1,37 @@
+# Notification Stack Exemplar Component Profile
+#
+# This profile is the canonical exemplar for the "notification" component type.
+# It declares urgency-tinted backdrop color tokens and satisfies OpaqueBackdrop
+# readability validation at startup.
+#
+# Source: exemplar-notification/spec.md §Notification Stack Exemplar Component Profile,
+#         exemplar-notification/tasks.md §7.1
+
+name        = "notification-stack-exemplar"
+version     = "1.0.0"
+description = "Notification stack exemplar — urgency-tinted backdrops, 90% opacity, body typography"
+
+component_type = "notification"
+
+# Profile-scoped token overrides.
+# These urgency tokens are used by the compositor's urgency-to-color mapping
+# when rendering notification-area items. They override the compositor's
+# hardcoded defaults when this profile is active.
+#
+# All four urgency levels must be defined for full coverage.
+[token_overrides]
+"color.notification.urgency.low"      = "#2A2A2A"   # dark gray — low urgency
+"color.notification.urgency.normal"   = "#1A1A3A"   # dark navy — normal
+"color.notification.urgency.urgent"   = "#8B6914"   # amber — urgent attention
+"color.notification.urgency.critical" = "#8B1A1A"   # deep red — critical
+
+# Base backdrop and typography tokens
+"color.text.primary"      = "#FFFFFF"
+"color.backdrop.default"  = "#1A1A2E"    # fallback when no urgency tinting
+"opacity.backdrop.opaque" = "0.9"        # satisfies OpaqueBackdrop (>= 0.8)
+"color.border.default"    = "#333355"
+"typography.body.family"  = "system-ui"
+"typography.body.size"    = "16"
+"typography.body.weight"  = "400"
+"spacing.padding.medium"  = "8"
+"stroke.border.width"     = "1"
