@@ -279,6 +279,13 @@ struct WindowedRuntimeState {
     modifiers: winit::keyboard::ModifiersState,
     /// Current monitor index for Ctrl+Shift+F8/F9 cycling.
     current_monitor_index: usize,
+    /// Resolved design token map from component startup.
+    ///
+    /// Stashed here after `run_component_startup` returns so it can be applied
+    /// to the compositor via `set_token_map` when the compositor is created in
+    /// `resumed()`. After that call the field is no longer needed but is kept
+    /// for potential hot-reload use.
+    global_tokens: std::collections::HashMap<String, String>,
 }
 
 // ─── WinitApp ────────────────────────────────────────────────────────────────
@@ -533,6 +540,16 @@ impl ApplicationHandler for WinitApp {
             }
         }
         tracing::info!(format = ?surface_format, "windowed: text + widget renderers initialized");
+
+        // Apply resolved design tokens to the compositor so severity colors are
+        // looked up from the token map at render time rather than using hardcoded
+        // constants.  Clone the map so the state retains its copy for potential
+        // future hot-reload use.
+        compositor.set_token_map(self.state.global_tokens.clone());
+        tracing::debug!(
+            token_count = self.state.global_tokens.len(),
+            "windowed: compositor token map applied"
+        );
 
         let window_surface = Arc::new(window_surface);
         self.state.window_surface = Some(window_surface.clone());
@@ -1124,7 +1141,7 @@ impl WindowedRuntime {
             .and_then(|toml| toml::from_str(toml).ok());
 
         let mut pending_widget_svgs: Vec<crate::widget_startup::WidgetSvgAsset> = Vec::new();
-        let shared_scene = {
+        let (shared_scene, global_tokens_for_compositor) = {
             let mut scene = SceneGraph::new(width, height);
 
             // Resolve config file parent directory for path resolution.
@@ -1139,7 +1156,7 @@ impl WindowedRuntime {
             // validation, zone registry construction, and widget registry population.
             //
             // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
-            if let Some(raw) = &raw_config_for_startup {
+            let startup_global_tokens = if let Some(raw) = &raw_config_for_startup {
                 let startup_result = run_component_startup(
                     raw,
                     config_parent_buf.as_deref(),
@@ -1150,10 +1167,12 @@ impl WindowedRuntime {
                 register_profile_widgets(&mut scene, &startup_result);
                 // Stash SVG assets for compositor registration after init_widget_renderer.
                 pending_widget_svgs = startup_result.widget_svg_assets;
+                startup_result.global_tokens
             } else {
                 // No config provided — bootstrap with canonical zone defaults (no token derivation).
                 scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
-            }
+                std::collections::HashMap::new()
+            };
 
             if std::env::var("TZE_HUD_SIM_SUBTITLES").as_deref() == Ok("1") {
                 let samples = [
@@ -1174,7 +1193,7 @@ impl WindowedRuntime {
                     }
                 }
             }
-            Arc::new(Mutex::new(scene))
+            (Arc::new(Mutex::new(scene)), startup_global_tokens)
         };
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
         let shared_state = Arc::new(Mutex::new(SharedState {
@@ -1306,6 +1325,7 @@ impl WindowedRuntime {
             pending_widget_svgs,
             modifiers: winit::keyboard::ModifiersState::empty(),
             current_monitor_index: 0,
+            global_tokens: global_tokens_for_compositor,
         };
 
         let mut app = WinitApp { state: app_state };

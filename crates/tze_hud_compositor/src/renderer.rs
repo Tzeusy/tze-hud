@@ -69,20 +69,74 @@ fn is_alert_banner_zone(zone_name: &str) -> bool {
     zone_name == "alert-banner"
 }
 
+/// Parse a `#RRGGBB` or `#RRGGBBAA` hex string into `Rgba`.
+///
+/// This is a minimal, allocation-free parser used to resolve token color
+/// values at render time without depending on `tze_hud_config`.
+/// Returns `None` if the string does not match either form.
+fn parse_hex_color(s: &str) -> Option<Rgba> {
+    let s = s.trim();
+    if !s.starts_with('#') || !s.is_ascii() {
+        return None;
+    }
+    let hex = &s[1..];
+    match hex.len() {
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Rgba::new(
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                1.0,
+            ))
+        }
+        8 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
+            Some(Rgba::new(
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                a as f32 / 255.0,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Look up a severity token key in the resolved token map and parse it as a
+/// color.  Returns `None` if the key is absent or the value is not a valid
+/// hex color.
+#[inline]
+fn resolve_severity_token(token_map: &HashMap<String, String>, key: &str) -> Option<Rgba> {
+    token_map.get(key).and_then(|v| parse_hex_color(v))
+}
+
 /// Map a `NotificationPayload.urgency` level to a severity backdrop color.
+///
+/// Looks up `color.severity.{info,warning,critical}` in `token_map` first;
+/// falls back to hardcoded SEVERITY_* constants when the key is absent or
+/// cannot be parsed as a hex color.
 ///
 /// Per spec §Notification Urgency-to-Severity Token Mapping:
 ///   urgency 0, 1 → color.severity.info   (fallback: #4A9EFF)
 ///   urgency 2    → color.severity.warning (fallback: #FFB800)
 ///   urgency 3    → color.severity.critical (fallback: #FF0000)
 ///
-/// The returned `Rgba` alpha is 1.0; `backdrop_opacity` from the policy is
-/// applied by the caller after this lookup.
-fn urgency_to_severity_color(urgency: u32) -> Rgba {
+/// The returned `Rgba` alpha is 1.0 (unless the token itself carries an alpha
+/// via `#RRGGBBAA`); `backdrop_opacity` from the policy is applied by the
+/// caller after this lookup.
+fn urgency_to_severity_color(urgency: u32, token_map: &HashMap<String, String>) -> Rgba {
     match urgency {
-        3 => SEVERITY_CRITICAL,
-        2 => SEVERITY_WARNING,
-        _ => SEVERITY_INFO, // 0 and 1
+        3 => resolve_severity_token(token_map, "color.severity.critical")
+            .unwrap_or(SEVERITY_CRITICAL),
+        2 => resolve_severity_token(token_map, "color.severity.warning")
+            .unwrap_or(SEVERITY_WARNING),
+        _ => resolve_severity_token(token_map, "color.severity.info").unwrap_or(SEVERITY_INFO),
     }
 }
 
@@ -181,6 +235,15 @@ pub struct Compositor {
     /// Track which zones had active publishes in the previous frame so we can
     /// detect publish → clear transitions and start fade-out animations.
     prev_active_zones: HashMap<String, bool>,
+    /// Resolved design token map, set at startup via `set_token_map`.
+    ///
+    /// Used to resolve `color.severity.{info,warning,critical}` tokens for
+    /// alert-banner backdrop colors. When empty (the default), all severity
+    /// lookups fall back to the hardcoded `SEVERITY_*` constants.
+    ///
+    /// Populated by calling `set_token_map` after `run_component_startup`
+    /// produces a `ComponentStartupResult::global_tokens`.
+    pub token_map: HashMap<String, String>,
 }
 
 impl Compositor {
@@ -246,6 +309,7 @@ impl Compositor {
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
+            token_map: HashMap::new(),
         })
     }
 
@@ -490,6 +554,7 @@ impl Compositor {
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
+            token_map: HashMap::new(),
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -622,6 +687,20 @@ impl Compositor {
     /// Create a render pipeline for headless mode (`Rgba8UnormSrgb`).
     fn create_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
         Self::create_pipeline_inner(device, wgpu::TextureFormat::Rgba8UnormSrgb, "")
+    }
+
+    /// Replace the compositor's resolved design token map.
+    ///
+    /// Should be called once at startup after `run_component_startup` produces a
+    /// `ComponentStartupResult::global_tokens`.  The map is keyed by canonical
+    /// token names (e.g. `"color.severity.warning"`) with hex-color string values
+    /// (e.g. `"#FFB800"`).
+    ///
+    /// At render time the compositor looks up `color.severity.{info,warning,critical}`
+    /// to derive alert-banner backdrop colors, falling back to hardcoded constants
+    /// when a key is absent or unparseable.
+    pub fn set_token_map(&mut self, map: HashMap<String, String>) {
+        self.token_map = map;
     }
 
     /// Initialize (or re-initialize) the text rasterizer for a given surface format.
@@ -1647,8 +1726,10 @@ impl Compositor {
                     //   urgency 0,1 → color.severity.info
                     //   urgency 2   → color.severity.warning
                     //   urgency 3   → color.severity.critical
-                    // Fallback to policy.backdrop when no urgency-specific color.
-                    let severity_color = urgency_to_severity_color(n.urgency);
+                    // Token-resolved values take precedence over hardcoded constants;
+                    // falls back to SEVERITY_* when the token map is empty or the
+                    // key is absent.
+                    let severity_color = urgency_to_severity_color(n.urgency, &self.token_map);
                     Some(severity_color)
                 }
                 _ => {
@@ -3186,8 +3267,9 @@ mod tests {
             "expected backdrop vertices for alert-banner urgency=2"
         );
 
-        // Verify urgency_to_severity_color directly.
-        let warning_color = urgency_to_severity_color(2);
+        // Verify urgency_to_severity_color directly (no token map → fallback constants).
+        let no_tokens = HashMap::new();
+        let warning_color = urgency_to_severity_color(2, &no_tokens);
         assert!(
             warning_color.r > 0.9,
             "warning severity R should be ~1.0 (amber)"
@@ -3205,7 +3287,8 @@ mod tests {
     /// Alert-banner urgency=3 maps to critical (red).
     #[tokio::test]
     async fn test_alert_banner_urgency3_maps_to_severity_critical() {
-        let critical = urgency_to_severity_color(3);
+        let no_tokens = HashMap::new();
+        let critical = urgency_to_severity_color(3, &no_tokens);
         assert!(critical.r > 0.9, "critical R should be ~1.0");
         assert!(critical.g < 0.1, "critical G should be ~0.0");
         assert!(critical.b < 0.1, "critical B should be ~0.0");
@@ -3214,8 +3297,9 @@ mod tests {
     /// Alert-banner urgency=0 and 1 both map to info (blue).
     #[tokio::test]
     async fn test_alert_banner_urgency_low_maps_to_info() {
-        let info0 = urgency_to_severity_color(0);
-        let info1 = urgency_to_severity_color(1);
+        let no_tokens = HashMap::new();
+        let info0 = urgency_to_severity_color(0, &no_tokens);
+        let info1 = urgency_to_severity_color(1, &no_tokens);
         // Info color is blue-ish (#4A9EFF).
         assert!(info0.b > 0.9, "info urgency=0 should be blue");
         assert!(info1.b > 0.9, "info urgency=1 should be blue");
@@ -3276,6 +3360,208 @@ mod tests {
         assert!(
             !is_alert_banner_zone("notification-area"),
             "notification-area must not be treated as alert-banner"
+        );
+    }
+
+    // ── Token-resolved severity color tests ───────────────────────────────────
+
+    /// Custom `color.severity.warning` token overrides the hardcoded SEVERITY_WARNING
+    /// constant for urgency=2.
+    #[test]
+    fn test_custom_severity_warning_token_overrides_constant() {
+        let mut token_map = HashMap::new();
+        // Custom warning: bright green (#00FF00) — clearly distinct from amber.
+        token_map.insert(
+            "color.severity.warning".to_string(),
+            "#00FF00".to_string(),
+        );
+        let color = urgency_to_severity_color(2, &token_map);
+        assert!(
+            color.g > 0.9,
+            "custom warning token G should be ~1.0 (green), got {}",
+            color.g
+        );
+        assert!(
+            color.r < 0.1,
+            "custom warning token R should be ~0.0 (green), got {}",
+            color.r
+        );
+        assert!(
+            color.b < 0.1,
+            "custom warning token B should be ~0.0 (green), got {}",
+            color.b
+        );
+    }
+
+    /// Custom `color.severity.critical` token overrides the hardcoded SEVERITY_CRITICAL.
+    #[test]
+    fn test_custom_severity_critical_token_overrides_constant() {
+        let mut token_map = HashMap::new();
+        // Custom critical: bright magenta (#FF00FF).
+        token_map.insert(
+            "color.severity.critical".to_string(),
+            "#FF00FF".to_string(),
+        );
+        let color = urgency_to_severity_color(3, &token_map);
+        assert!(
+            color.r > 0.9,
+            "custom critical R should be ~1.0 (magenta), got {}",
+            color.r
+        );
+        assert!(
+            color.b > 0.9,
+            "custom critical B should be ~1.0 (magenta), got {}",
+            color.b
+        );
+        assert!(
+            color.g < 0.1,
+            "custom critical G should be ~0.0 (magenta), got {}",
+            color.g
+        );
+    }
+
+    /// Custom `color.severity.info` token overrides the hardcoded SEVERITY_INFO.
+    #[test]
+    fn test_custom_severity_info_token_overrides_constant() {
+        let mut token_map = HashMap::new();
+        // Custom info: pure red (#FF0000) — clearly distinct from default blue.
+        token_map.insert("color.severity.info".to_string(), "#FF0000".to_string());
+        let color0 = urgency_to_severity_color(0, &token_map);
+        let color1 = urgency_to_severity_color(1, &token_map);
+        for (urgency, color) in [(0, color0), (1, color1)] {
+            assert!(
+                color.r > 0.9,
+                "custom info urgency={urgency} R should be ~1.0 (red), got {}",
+                color.r
+            );
+            assert!(
+                color.g < 0.1,
+                "custom info urgency={urgency} G should be ~0.0 (red), got {}",
+                color.g
+            );
+            assert!(
+                color.b < 0.1,
+                "custom info urgency={urgency} B should be ~0.0 (red), got {}",
+                color.b
+            );
+        }
+    }
+
+    /// Invalid/absent token values fall back to hardcoded constants.
+    #[test]
+    fn test_invalid_severity_token_value_falls_back_to_constant() {
+        let mut token_map = HashMap::new();
+        // Not a valid hex color — should be ignored.
+        token_map.insert(
+            "color.severity.warning".to_string(),
+            "not-a-color".to_string(),
+        );
+        let color = urgency_to_severity_color(2, &token_map);
+        // Falls back to SEVERITY_WARNING (#FFB800): R~1.0, G~0.72, B~0.0.
+        assert!(
+            color.r > 0.9,
+            "fallback warning R should be ~1.0, got {}",
+            color.r
+        );
+        assert!(
+            color.g > 0.5,
+            "fallback warning G should be >0.5, got {}",
+            color.g
+        );
+        assert!(
+            color.b < 0.1,
+            "fallback warning B should be ~0.0, got {}",
+            color.b
+        );
+    }
+
+    /// Custom severity tokens in [design_tokens] affect alert-banner backdrop colors.
+    ///
+    /// This is the end-to-end integration test: `set_token_map` populates the
+    /// compositor, and `render_zone_content` uses the token-resolved color for the
+    /// alert-banner backdrop.
+    #[tokio::test]
+    async fn test_custom_severity_tokens_affect_alert_banner_backdrop() {
+        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        // Install a custom token map: override warning with pure green (#00FF00).
+        let mut token_map = HashMap::new();
+        token_map.insert(
+            "color.severity.warning".to_string(),
+            "#00FF00".to_string(),
+        );
+        compositor.set_token_map(token_map);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_owned(),
+            description: "alert banner zone".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.07,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(20.0),
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)),
+                backdrop_opacity: Some(1.0),
+                text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish urgency=2 (warning) — should use custom green token.
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Custom token warning".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Collect vertices from render_zone_content.
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // rect_vertices emits 6 vertices per quad; each vertex has a `color: [f32; 4]` field.
+        // The backdrop should be green (R~0.0, G~1.0, B~0.0), not amber.
+        assert!(
+            !vertices.is_empty(),
+            "expected backdrop vertices for alert-banner"
+        );
+
+        // Check first vertex color. RectVertex layout: [position: [f32; 2], color: [f32; 4]].
+        let first = &vertices[0];
+        assert!(
+            first.color[1] > 0.9,
+            "alert-banner backdrop G should be ~1.0 (custom green token), got {}",
+            first.color[1]
+        );
+        assert!(
+            first.color[0] < 0.1,
+            "alert-banner backdrop R should be ~0.0 (custom green token), got {}",
+            first.color[0]
+        );
+        assert!(
+            first.color[2] < 0.1,
+            "alert-banner backdrop B should be ~0.0 (custom green token), got {}",
+            first.color[2]
         );
     }
 
