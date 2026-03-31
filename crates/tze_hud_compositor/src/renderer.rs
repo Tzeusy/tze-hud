@@ -26,6 +26,7 @@ use crate::pipeline::{ChromeDrawCmd, RectVertex, rect_vertices};
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
 use crate::widget::WidgetRenderer;
+use tze_hud_scene::DegradationLevel;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::FrameTelemetry;
@@ -47,6 +48,12 @@ pub struct Compositor {
     /// When true, render all zone boundaries with colored tints even when
     /// zones have no active content. Controlled by `TZE_HUD_DEBUG_ZONES=1`.
     pub debug_zone_tints: bool,
+    /// Current degradation level, set by the runtime before each frame.
+    ///
+    /// At [`DegradationLevel::Significant`] or higher, widget transition
+    /// interpolation is skipped and final parameter values are applied
+    /// immediately to reduce re-rasterization under load.
+    pub degradation_level: DegradationLevel,
     /// Optional text rasterizer (glyphon). Absent until `init_text_renderer`
     /// is called. When `None`, TextMarkdownNode and zone StreamText content
     /// renders as solid-color rectangles only (no glyph output).
@@ -114,6 +121,7 @@ impl Compositor {
             frame_number: 0,
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
+            degradation_level: DegradationLevel::Nominal,
             text_rasterizer: None,
             widget_renderer: None,
         })
@@ -355,6 +363,7 @@ impl Compositor {
             frame_number: 0,
             overlay_mode: false,
             debug_zone_tints: std::env::var("TZE_HUD_DEBUG_ZONES").is_ok_and(|v| v == "1"),
+            degradation_level: DegradationLevel::Nominal,
             text_rasterizer: None,
             widget_renderer: None,
         };
@@ -567,8 +576,16 @@ impl Compositor {
     /// - If the instance has a `dirty` flag set, re-rasterizes with current params.
     /// - If an animation is active, resolves interpolated params and re-rasterizes.
     ///
+    /// Under degradation level [`DegradationLevel::Significant`] or higher, active
+    /// transitions are snapped to their final values immediately, reducing
+    /// re-rasterization to at most once per parameter change during transitions.
+    ///
     /// This should be called once per frame before `render_frame`.
-    pub fn sync_widget_textures(&mut self, scene: &SceneGraph) {
+    pub fn sync_widget_textures(
+        &mut self,
+        scene: &SceneGraph,
+        degradation_level: DegradationLevel,
+    ) {
         let wr = match &mut self.widget_renderer {
             Some(r) => r,
             None => return,
@@ -599,10 +616,10 @@ impl Compositor {
             // Check if this instance needs an initial texture (no entry yet).
             let needs_initial = wr.texture_entry(&instance_name).is_none();
 
-            // Resolve animated or static params.
+            // Resolve animated or static params, applying degradation-aware snapping.
             let current_params = &instance.current_params;
             let (effective_params, still_animating) =
-                wr.resolve_animated_params(&instance_name, current_params);
+                wr.resolve_animated_params(&instance_name, current_params, degradation_level);
 
             let dirty = needs_initial
                 || still_animating
@@ -982,7 +999,7 @@ impl Compositor {
         // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
         // SVG rasterization can be slow; if a resize event arrives while we hold
         // the surface texture, the texture is destroyed and queue.submit panics.
-        self.sync_widget_textures(scene);
+        self.sync_widget_textures(scene, self.degradation_level);
 
         // Acquire frame through the surface trait (surface-agnostic).
         // The CompositorFrame._guard keeps the backing resource alive until drop.
@@ -1070,7 +1087,7 @@ impl Compositor {
         }
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
-        self.sync_widget_textures(scene);
+        self.sync_widget_textures(scene, self.degradation_level);
 
         // Acquire frame via trait — same code path as render_frame().
         let frame = surface.acquire_frame();
@@ -1134,7 +1151,7 @@ impl Compositor {
         let mut telemetry = FrameTelemetry::new(self.frame_number);
 
         // ── Widget texture sync before encoding (avoids surface-texture race).
-        self.sync_widget_textures(scene);
+        self.sync_widget_textures(scene, self.degradation_level);
 
         // ── Pass 1: Content (background + agent tiles) ──────────────────────
         let tiles = scene.visible_tiles();
