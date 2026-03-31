@@ -231,6 +231,87 @@ fn chrome_tile_at_low_z_still_wins() {
     );
 }
 
+// ─── Widget passthrough hit-test ─────────────────────────────────────────────
+//
+// Widget tiles MUST default to input_mode = Passthrough per widget-system/spec.md
+// §Requirement: Widget Input Mode. Input events landing on a widget tile's
+// geometry MUST pass through to the next tile in z-order.
+
+#[test]
+fn widget_passthrough_skips_to_agent_tile_below() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    let tab_id = scene.create_tab("Main", 0).unwrap();
+    let agent_lease = scene.grant_lease(
+        "agent.test",
+        60_000,
+        vec![Capability::CreateTile, Capability::CreateNode],
+    );
+    let widget_lease = scene.grant_lease(
+        "widget.renderer",
+        60_000,
+        vec![Capability::CreateTile],
+    );
+
+    // Agent-owned content tile: covers central region, z=10, Capture (default).
+    // Bounds: (300, 200, 600×400).
+    let agent_tile = scene
+        .create_tile(tab_id, "agent.test", agent_lease, Rect::new(300.0, 200.0, 600.0, 400.0), 10)
+        .unwrap();
+    let agent_node_id = SceneId::new();
+    scene
+        .set_tile_root(
+            agent_tile,
+            Node {
+                id: agent_node_id,
+                children: vec![],
+                data: NodeData::HitRegion(HitRegionNode {
+                    bounds: Rect::new(0.0, 0.0, 600.0, 400.0),
+                    interaction_id: "agent-content".to_string(),
+                    accepts_focus: false,
+                    accepts_pointer: true,
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+
+    // Widget tile: overlaps agent tile, z=20, Passthrough (widget default).
+    // Bounds: (250, 150, 700×500) — extends beyond agent tile.
+    // No interactive nodes (per spec, widgets are display-only).
+    let widget_tile = scene
+        .create_tile(tab_id, "widget.renderer", widget_lease, Rect::new(250.0, 150.0, 700.0, 500.0), 20)
+        .unwrap();
+    // Explicitly set widget tile to Passthrough (should be default for widgets).
+    scene.tiles.get_mut(&widget_tile).unwrap().input_mode = InputMode::Passthrough;
+
+    // Test point inside overlap region: (500, 350).
+    // This point is inside both tiles' bounds:
+    //   - Agent tile: (300, 200) to (900, 600)
+    //   - Widget tile: (250, 150) to (950, 650)
+    // Widget tile (z=20) is higher, but since it's Passthrough,
+    // hit-test must skip it and return the agent tile (z=10).
+    let result = scene.hit_test(500.0, 350.0);
+    assert_eq!(
+        result,
+        HitResult::NodeHit {
+            tile_id: agent_tile,
+            node_id: agent_node_id,
+            interaction_id: "agent-content".to_string(),
+        },
+        "widget passthrough tile must be skipped in z-order traversal"
+    );
+
+    // Test point outside overlap but inside widget only: (100, 100).
+    // This point is inside widget tile bounds but outside agent tile.
+    // Since widget tile is Passthrough and no other tiles below it, result is Passthrough.
+    let result = scene.hit_test(100.0, 100.0);
+    assert_eq!(
+        result,
+        HitResult::Passthrough,
+        "point in widget-only region with no capture tiles below must return Passthrough"
+    );
+}
+
 // ─── Passthrough tiles skipped ───────────────────────────────────────────────
 
 #[test]
