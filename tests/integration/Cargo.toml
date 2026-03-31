@@ -16,6 +16,13 @@ path = "multi_agent.rs"
 name = "presence_card_tile"
 path = "presence_card_tile.rs"
 
+# hud-apoe.4: Disconnect detection, orphan handling, and reconnect-within-grace tests.
+# Scene-graph-level tests using TestClock for deterministic time control.
+# Covers all 6 acceptance criteria (AC1-AC6) plus no-repositioning (AC7).
+[[test]]
+name = "disconnect_orphan"
+path = "disconnect_orphan.rs"
+
 [[test]]
 name = "trace_regression"
 path = "trace_regression.rs"
