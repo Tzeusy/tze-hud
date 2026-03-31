@@ -574,8 +574,9 @@ fn bytes_to_scene_id(bytes: &[u8]) -> Result<tze_hud_scene::SceneId, Status> {
 /// `BatchRejected` or `MutationResult` echoes the client's own `batch_id`.
 /// Note: `bytes_to_scene_id` validates only the byte length (16 bytes); UUID
 /// version/variant are not checked because the spec (RFC 0005 §3.2) requires
-/// only that `batch_id` is a 16-byte little-endian SceneId — version bits are
-/// the client's responsibility.
+/// only that `batch_id` is a 16-byte RFC 4122 UUID (big-endian, matching
+/// `scene_id_to_bytes` / `bytes_to_scene_id`) — version bits are the client's
+/// responsibility.
 ///
 /// Falls back to a fresh `SceneId` only when the field is absent or malformed
 /// (wrong length); logs a debug warning so SDK regressions are diagnosable.
