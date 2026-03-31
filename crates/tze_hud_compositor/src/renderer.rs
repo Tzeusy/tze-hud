@@ -1160,8 +1160,9 @@ impl Compositor {
         telemetry.active_leases = scene.leases.len() as u32;
 
         let mut content_vertices: Vec<RectVertex> = Vec::new();
-        let sw = self.width as f32;
-        let sh = self.height as f32;
+        let (surf_w, surf_h) = surface.size();
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
 
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
