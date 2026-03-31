@@ -877,9 +877,14 @@ impl Compositor {
     ///
     /// Starts fade-in animations for newly-published zones and fade-out
     /// animations for zones that just lost their last publish.
+    ///
+    /// Also handles zone unregistration: zones that were active and have since
+    /// been removed from the registry are treated as cleared (no fade-out is
+    /// possible since the zone_def is gone, so the state is simply pruned).
+    ///
     /// Prunes completed transitions.
     pub fn update_zone_animations(&mut self, scene: &SceneGraph) {
-        // Build current active-zone set.
+        // Build current active-zone set (zone_name → has active publishes).
         let current_active: HashMap<String, bool> = scene
             .zone_registry
             .active_publishes
@@ -887,14 +892,15 @@ impl Compositor {
             .map(|(name, pubs)| (name.clone(), !pubs.is_empty()))
             .collect();
 
-        for (zone_name, is_active) in &current_active {
+        // Detect publish transitions within currently-registered zones.
+        for (zone_name, &is_active) in &current_active {
             let was_active = self
                 .prev_active_zones
                 .get(zone_name)
                 .copied()
                 .unwrap_or(false);
 
-            if *is_active && !was_active {
+            if is_active && !was_active {
                 // Zone just received its first publish — start fade-in.
                 if let Some(zone_def) = scene.zone_registry.zones.get(zone_name) {
                     if let Some(ms) = zone_def.rendering_policy.transition_in_ms {
@@ -916,6 +922,13 @@ impl Compositor {
                 }
             }
         }
+
+        // Detect zone unregistration: zones that were previously tracked but
+        // are now absent from active_publishes (zone was removed from registry).
+        // Since zone_def is gone, no fade-out animation is possible; we simply
+        // prune any in-flight animation state for that zone immediately.
+        self.zone_animation_states
+            .retain(|zone_name, _| current_active.contains_key(zone_name));
 
         // Prune completed transitions (reached target opacity).
         self.zone_animation_states
