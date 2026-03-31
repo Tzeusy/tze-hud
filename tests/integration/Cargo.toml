@@ -41,6 +41,15 @@ path = "presence_card_coexistence.rs"
 name = "dashboard_tile_creation"
 path = "dashboard_tile_creation.rs"
 
+# hud-i6yd.5: HitRegionNode input capture, local feedback, and focus cycling.
+# Tests: PointerDown/Up events on Refresh/Dismiss buttons, hover enter/leave,
+# auto_capture + release_on_up semantics, focus cycling Tab/Shift+Tab,
+# focus ring bounds, FocusGainedEvent/FocusLostEvent dispatch, cross-tile Tab,
+# and keyboard-only activation via NAVIGATE_NEXT + ACTIVATE.
+[[test]]
+name = "dashboard_tile_input"
+path = "dashboard_tile_input.rs"
+
 [[test]]
 name = "trace_regression"
 path = "trace_regression.rs"
@@ -82,6 +91,7 @@ headless = ["tze_hud_compositor/headless"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
+tze_hud_input = { path = "../../crates/tze_hud_input" }
 tze_hud_compositor = { path = "../../crates/tze_hud_compositor" }
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["headless", "dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }

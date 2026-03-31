@@ -414,6 +414,7 @@ impl InputProcessor {
             let hit_test_us = 0; // capture bypasses hit-test
 
             let mut dispatches: Vec<AgentDispatch> = Vec::new();
+            let mut capture_local_patch = SceneLocalPatch::new();
 
             match event.kind {
                 PointerEventKind::Move => {
@@ -442,6 +443,9 @@ impl InputProcessor {
                             state.pressed = false;
                         }
                         self.current_press = None;
+                        // Emit pressed=false in local patch so compositor updates immediately
+                        capture_local_patch
+                            .push_state(LocalStateUpdate::new(cap_node_id).with_pressed(false));
 
                         if let Some(ns) = &captured_namespace {
                             // PointerUp
@@ -479,6 +483,9 @@ impl InputProcessor {
                             state.pressed = false;
                         }
                         self.current_press = None;
+                        // Emit pressed=false in local patch
+                        capture_local_patch
+                            .push_state(LocalStateUpdate::new(cap_node_id).with_pressed(false));
 
                         if let Some(ns) = captured_namespace {
                             dispatches.push(AgentDispatch {
@@ -502,6 +509,9 @@ impl InputProcessor {
                     if let Some(state) = scene.hit_region_states.get_mut(&cap_node_id) {
                         state.pressed = true;
                     }
+                    // Emit pressed=true in local patch (mirrors non-capture path)
+                    capture_local_patch
+                        .push_state(LocalStateUpdate::new(cap_node_id).with_pressed(true));
                     if let Some(ns) = captured_namespace {
                         dispatches.push(AgentDispatch {
                             namespace: ns,
@@ -542,7 +552,7 @@ impl InputProcessor {
                 hit_test_us,
                 dispatch,
                 extra_dispatches,
-                local_patch: SceneLocalPatch::new(),
+                local_patch: capture_local_patch,
             };
         }
 
