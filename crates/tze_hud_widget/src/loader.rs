@@ -30,6 +30,44 @@ use tze_hud_scene::types::{
 use crate::error::BundleError;
 use crate::manifest::{RawBinding, RawManifest, RawParameterDeclaration};
 use crate::svg_ids::collect_svg_element_ids;
+use crate::svg_readability::{SvgReadabilityTechnique, check_svg_readability};
+
+// ─── Bundle scope ─────────────────────────────────────────────────────────────
+
+/// The scope of a widget bundle: global or profile-scoped.
+///
+/// Only profile-scoped bundles are subject to SVG readability validation.
+/// Global bundles bypass readability checks entirely — this is enforced
+/// defensively in the loader regardless of what the caller requests.
+///
+/// Source: component-shape-language/spec.md
+///         §Requirement: Widget SVG Readability Conventions (scope restriction).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BundleScope {
+    /// Bundle is not inside any component profile directory.
+    ///
+    /// Readability checks are NEVER applied to global bundles, even if the
+    /// caller supplies a non-`None` readability technique.  The loader
+    /// silently forces `SvgReadabilityTechnique::None` for all SVG layers.
+    Global,
+    /// Bundle is inside a component profile directory.
+    ///
+    /// The supplied readability technique is applied to every SVG layer.
+    ProfileScoped(SvgReadabilityTechnique),
+}
+
+impl BundleScope {
+    /// Resolve the effective readability technique for this scope.
+    ///
+    /// This is the **defensive guard**: regardless of what technique the
+    /// caller requested, a `Global` scope always produces `None`.
+    fn effective_technique(self) -> SvgReadabilityTechnique {
+        match self {
+            BundleScope::Global => SvgReadabilityTechnique::None,
+            BundleScope::ProfileScoped(technique) => technique,
+        }
+    }
+}
 
 // ─── Bundle loader ─────────────────────────────────────────────────────────────
 
@@ -140,6 +178,10 @@ pub fn scan_bundle_dirs(
 
 /// Load a single bundle directory with no token substitution.
 ///
+/// The bundle is treated as [`BundleScope::Global`] — no readability checks
+/// are applied.  Use [`load_bundle_dir_scoped`] when loading profile-scoped
+/// bundles that require readability validation.
+///
 /// Returns `BundleScanResult::Ok` on success, or `BundleScanResult::Err` with
 /// the first structural error encountered.  A rejected bundle does not prevent
 /// other bundles from loading.
@@ -150,6 +192,10 @@ pub fn load_bundle_dir(dir: &Path) -> BundleScanResult {
 /// Load a single bundle directory, substituting design-token placeholders in
 /// SVG files using the supplied `tokens` map.
 ///
+/// The bundle is treated as [`BundleScope::Global`] — no readability checks
+/// are applied.  Use [`load_bundle_dir_scoped_with_tokens`] when loading
+/// profile-scoped bundles that require readability validation.
+///
 /// Returns `BundleScanResult::Ok` on success, or `BundleScanResult::Err` with
 /// the first structural error encountered.  A rejected bundle does not prevent
 /// other bundles from loading.
@@ -157,8 +203,42 @@ pub fn load_bundle_dir_with_tokens(
     dir: &Path,
     tokens: &HashMap<String, String>,
 ) -> BundleScanResult {
+    load_bundle_dir_scoped_with_tokens(dir, tokens, BundleScope::Global)
+}
+
+/// Load a single bundle directory with scope-aware readability validation.
+///
+/// This is the preferred entry point when you know whether the bundle lives
+/// inside a component profile directory:
+///
+/// - [`BundleScope::Global`] — readability checks are suppressed regardless of
+///   any technique that might be inferred; the loader defensively forces
+///   [`SvgReadabilityTechnique::None`].
+/// - [`BundleScope::ProfileScoped(technique)`] — the supplied technique is
+///   applied to every SVG layer; a violation returns
+///   [`BundleError::ReadabilityConventionViolation`].
+///
+/// Returns `BundleScanResult::Ok` on success, or `BundleScanResult::Err` with
+/// the first structural error encountered.
+pub fn load_bundle_dir_scoped(dir: &Path, scope: BundleScope) -> BundleScanResult {
+    load_bundle_dir_scoped_with_tokens(dir, &HashMap::new(), scope)
+}
+
+/// Load a single bundle directory with token substitution and scope-aware
+/// readability validation.
+///
+/// Combines token placeholder resolution (see [`load_bundle_dir_with_tokens`])
+/// with the readability guard described in [`load_bundle_dir_scoped`].
+///
+/// Returns `BundleScanResult::Ok` on success, or `BundleScanResult::Err` with
+/// the first structural error encountered.
+pub fn load_bundle_dir_scoped_with_tokens(
+    dir: &Path,
+    tokens: &HashMap<String, String>,
+    scope: BundleScope,
+) -> BundleScanResult {
     let path_str = dir.display().to_string();
-    match load_bundle_dir_inner(dir, &path_str, tokens) {
+    match load_bundle_dir_inner(dir, &path_str, tokens, scope) {
         Ok(bundle) => BundleScanResult::Ok(bundle),
         Err(e) => BundleScanResult::Err(e),
     }
@@ -168,7 +248,11 @@ fn load_bundle_dir_inner(
     dir: &Path,
     path_str: &str,
     tokens: &HashMap<String, String>,
+    scope: BundleScope,
 ) -> Result<LoadedBundle, BundleError> {
+    // Defensive guard: resolve the effective readability technique from scope.
+    // Global bundles ALWAYS use None, regardless of what any caller intended.
+    let readability_technique = scope.effective_technique();
     // Step 1: Locate widget.toml.
     let manifest_path = dir.join("widget.toml");
     if !manifest_path.exists() {
@@ -280,6 +364,19 @@ fn load_bundle_dir_inner(
             path: path_str.to_string(),
             svg_file: svg_file.to_string(),
             detail: e.to_string(),
+        })?;
+
+        // Step 5b-readability: Enforce readability conventions for profile-scoped bundles.
+        //
+        // The `readability_technique` was resolved from `scope` at the top of this
+        // function: global bundles always receive `None` here (the defensive guard),
+        // while profile-scoped bundles carry the technique declared by the caller.
+        check_svg_readability(svg_text, readability_technique).map_err(|detail| {
+            BundleError::ReadabilityConventionViolation {
+                path: path_str.to_string(),
+                svg_file: svg_file.to_string(),
+                detail,
+            }
         })?;
 
         // Step 5c: Collect element IDs for binding resolution.
