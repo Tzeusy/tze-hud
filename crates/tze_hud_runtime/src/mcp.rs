@@ -208,9 +208,7 @@ async fn handle_connection(
             .and_then(|v| {
                 let mut parts = v.splitn(2, ' ');
                 match (parts.next(), parts.next()) {
-                    (Some(scheme), Some(credentials))
-                        if scheme.eq_ignore_ascii_case("bearer") =>
-                    {
+                    (Some(scheme), Some(credentials)) if scheme.eq_ignore_ascii_case("bearer") => {
                         Some(credentials.trim().to_owned())
                     }
                     _ => None,

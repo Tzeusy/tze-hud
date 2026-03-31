@@ -59,6 +59,7 @@ pub mod resolver;
 pub mod schema;
 #[cfg(test)]
 mod tests;
+pub mod tokens;
 pub mod widgets;
 pub mod zones;
 
@@ -66,6 +67,7 @@ pub use agents::{
     AuthEnvWarning, check_agent_auth_env_vars, check_agent_auth_env_vars_with_lookup,
     dynamic_agents_allowed, validate_agents,
 };
+pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};
 pub use loader::TzeHudConfig;
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{
@@ -81,4 +83,3 @@ pub use widgets::{
     LoadedWidgetType, build_widget_instance, validate_widget_bundles, validate_widget_instances,
 };
 pub use zones::{BUILTIN_ZONE_TYPES, is_known_zone_type, validate_zone_type_ref, validate_zones};
-pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};

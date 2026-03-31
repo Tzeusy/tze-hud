@@ -43,6 +43,10 @@ pub enum ConfigErrorCode {
     WidgetInvalidInitialParams,
     /// Two bundles declare the same widget type name.
     WidgetBundleDuplicateType,
+    /// A key in `[design_tokens]` does not match the required pattern.
+    InvalidTokenKey,
+    /// A token value string could not be parsed into the expected format.
+    TokenValueParseError,
     Other(String),
 }
 

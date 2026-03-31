@@ -54,4 +54,23 @@ mod tests {
         let json = serde_json::to_string_pretty(&schema);
         assert!(json.is_ok(), "JSON Schema serialisation should succeed");
     }
+
+    /// WHEN schema_value() is called THEN it contains the design token fields.
+    #[test]
+    fn test_schema_contains_design_token_fields() {
+        let v = schema_value();
+        let json_str = serde_json::to_string(&v).unwrap();
+        assert!(
+            json_str.contains("design_tokens"),
+            "schema should contain design_tokens field"
+        );
+        assert!(
+            json_str.contains("component_profile_bundles"),
+            "schema should contain component_profile_bundles field"
+        );
+        assert!(
+            json_str.contains("component_profiles"),
+            "schema should contain component_profiles field"
+        );
+    }
 }

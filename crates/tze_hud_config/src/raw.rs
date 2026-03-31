@@ -307,6 +307,45 @@ pub struct RawWidgetGeometry {
     pub height_pct: Option<f32>,
 }
 
+// ─── [design_tokens] ─────────────────────────────────────────────────────────
+
+/// `[design_tokens]` table — optional.
+///
+/// A flat key→value map of design tokens.  All keys must match
+/// `^[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)*$`.  Values are opaque strings
+/// that are parsed into typed values at runtime (color, numeric, font family,
+/// or literal string).
+///
+/// Unknown keys (non-canonical) are accepted and passed through unchanged.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct RawDesignTokens(pub HashMap<String, String>);
+
+// ─── [component_profile_bundles] ─────────────────────────────────────────────
+
+/// `[component_profile_bundles]` table — optional.
+///
+/// Specifies directories to scan for component profile bundles. Each directory
+/// may contain one or more component profile definitions (e.g. `profile.toml`).
+/// Paths are resolved relative to the configuration file's parent directory.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct RawComponentProfileBundles {
+    /// Array of directory paths to scan for component profile bundles.
+    /// Each path is resolved relative to the config file's parent directory.
+    #[serde(default)]
+    pub paths: Vec<String>,
+}
+
+// ─── [component_profiles] ────────────────────────────────────────────────────
+
+/// `[component_profiles]` table — optional.
+///
+/// Maps component type names to profile names.  For example:
+/// `subtitle = "minimal"` selects the "minimal" profile for the subtitle
+/// component type.  Profile names must reference a profile loaded from a
+/// bundle in `[component_profile_bundles].paths`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct RawComponentProfiles(pub HashMap<String, String>);
+
 // ─── Top-level document ──────────────────────────────────────────────────────
 
 /// The top-level TOML document.
@@ -332,4 +371,13 @@ pub struct RawConfig {
     pub agents: Option<RawAgents>,
     /// Optional widget bundle directories to scan at startup.
     pub widget_bundles: Option<RawWidgetBundles>,
+    /// Optional design token overrides.
+    #[serde(default)]
+    pub design_tokens: Option<RawDesignTokens>,
+    /// Optional component profile bundle directories to scan at startup.
+    #[serde(default)]
+    pub component_profile_bundles: Option<RawComponentProfileBundles>,
+    /// Optional mapping of component type → profile name.
+    #[serde(default)]
+    pub component_profiles: Option<RawComponentProfiles>,
 }
