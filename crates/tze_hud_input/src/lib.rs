@@ -444,9 +444,8 @@ impl InputProcessor {
                         }
                         self.current_press = None;
                         // Emit pressed=false in local patch so compositor updates immediately
-                        capture_local_patch.push_state(
-                            LocalStateUpdate::new(cap_node_id).with_pressed(false),
-                        );
+                        capture_local_patch
+                            .push_state(LocalStateUpdate::new(cap_node_id).with_pressed(false));
 
                         if let Some(ns) = &captured_namespace {
                             // PointerUp
@@ -485,9 +484,8 @@ impl InputProcessor {
                         }
                         self.current_press = None;
                         // Emit pressed=false in local patch
-                        capture_local_patch.push_state(
-                            LocalStateUpdate::new(cap_node_id).with_pressed(false),
-                        );
+                        capture_local_patch
+                            .push_state(LocalStateUpdate::new(cap_node_id).with_pressed(false));
 
                         if let Some(ns) = captured_namespace {
                             dispatches.push(AgentDispatch {
@@ -512,9 +510,8 @@ impl InputProcessor {
                         state.pressed = true;
                     }
                     // Emit pressed=true in local patch (mirrors non-capture path)
-                    capture_local_patch.push_state(
-                        LocalStateUpdate::new(cap_node_id).with_pressed(true),
-                    );
+                    capture_local_patch
+                        .push_state(LocalStateUpdate::new(cap_node_id).with_pressed(true));
                     if let Some(ns) = captured_namespace {
                         dispatches.push(AgentDispatch {
                             namespace: ns,

@@ -23,9 +23,9 @@
 //!         §Requirement: Focus Cycling Between Buttons (lines 166-182)
 
 use tze_hud_input::{
-    CaptureReleasedReason, CommandAction, CommandProcessor, CommandSource,
-    FocusLostReason, FocusManager, FocusOwner, FocusSource, InputProcessor,
-    PointerEvent, PointerEventKind, RawCommandEvent,
+    CaptureReleasedReason, CommandAction, CommandProcessor, CommandSource, FocusLostReason,
+    FocusManager, FocusOwner, FocusSource, InputProcessor, PointerEvent, PointerEventKind,
+    RawCommandEvent,
 };
 use tze_hud_scene::{
     Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneGraph, SceneId, SolidColorNode,
@@ -583,7 +583,10 @@ fn pointer_up_clears_pressed_and_releases_capture_on_dismiss() {
 
     assert!(scene.hit_region_states[&dismiss_id].pressed);
     assert!(processor.capture.is_captured(device_id));
-    assert_eq!(processor.capture.get(device_id).unwrap().node_id, dismiss_id);
+    assert_eq!(
+        processor.capture.get(device_id).unwrap().node_id,
+        dismiss_id
+    );
 
     processor.process(
         &PointerEvent {
@@ -828,8 +831,12 @@ fn focus_ring_bounds_computed_in_display_space_for_refresh() {
 
     let t = fm.on_click(tab_id, tile_id, Some(refresh_id), &scene);
 
-    let ring = t.ring_update.expect("FocusRingUpdate must be produced on click");
-    let bounds = ring.bounds.expect("ring bounds must be set for HitRegionNode focus");
+    let ring = t
+        .ring_update
+        .expect("FocusRingUpdate must be produced on click");
+    let bounds = ring
+        .bounds
+        .expect("ring bounds must be set for HitRegionNode focus");
 
     // Display-space: tile_origin + node_local_bounds
     let expected_x = TILE_X + REFRESH_LOCAL_X;
@@ -865,8 +872,12 @@ fn focus_ring_produced_on_tab_navigation_to_dismiss() {
     fm.on_click(tab_id, tile_id, Some(refresh_id), &scene);
 
     let t = fm.navigate_next(tab_id, &scene);
-    let ring = t.ring_update.expect("FocusRingUpdate must be produced on Tab");
-    let bounds = ring.bounds.expect("ring bounds must be set after Tab to Dismiss");
+    let ring = t
+        .ring_update
+        .expect("FocusRingUpdate must be produced on Tab");
+    let bounds = ring
+        .bounds
+        .expect("ring bounds must be set after Tab to Dismiss");
 
     let expected_x = TILE_X + DISMISS_LOCAL_X;
     let expected_y = TILE_Y + DISMISS_LOCAL_Y;
@@ -1007,7 +1018,11 @@ fn focus_gained_and_lost_events_dispatched_on_click_to_focus() {
     let t2 = fm.on_click(tab_id, tile_id, Some(dismiss_id), &scene);
 
     let (lost_ev, lost_ns) = t2.lost.expect("FocusLostEvent required on focus transfer");
-    assert_eq!(lost_ev.node_id, Some(refresh_id), "lost node must be Refresh");
+    assert_eq!(
+        lost_ev.node_id,
+        Some(refresh_id),
+        "lost node must be Refresh"
+    );
     assert_eq!(
         lost_ev.reason,
         FocusLostReason::ClickElsewhere,
@@ -1076,7 +1091,9 @@ fn tab_from_dismiss_crosses_to_next_tile() {
     );
 
     // Focus events must be dispatched
-    let (lost_ev, _) = t.lost.expect("FocusLostEvent must be dispatched on cross-tile Tab");
+    let (lost_ev, _) = t
+        .lost
+        .expect("FocusLostEvent must be dispatched on cross-tile Tab");
     assert_eq!(lost_ev.node_id, Some(dismiss_id));
     assert_eq!(lost_ev.reason, FocusLostReason::TabKey);
 
