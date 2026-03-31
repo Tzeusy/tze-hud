@@ -62,6 +62,7 @@ pub mod loader;
 pub mod privacy;
 pub mod profile;
 pub mod raw;
+pub mod readability;
 pub mod reload;
 pub mod resolver;
 pub mod schema;
@@ -77,6 +78,9 @@ pub use agents::{
 };
 pub use component_profiles::{ComponentProfile, ZoneRenderingOverride, scan_profile_dirs};
 pub use component_types::{ComponentType, ComponentTypeContract, ReadabilityTechnique};
+pub use readability::{
+    PolicySnapshot, ReadabilityViolation, check_zone_readability, is_dev_mode,
+};
 pub use loader::TzeHudConfig;
 pub use privacy::{QuietHoursAction, quiet_hours_action, validate_privacy};
 pub use profile::{

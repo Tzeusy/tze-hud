@@ -59,6 +59,10 @@ pub enum ConfigErrorCode {
     ProfileInvalidZoneOverride,
     /// A `{{token.key}}` reference in a zone override field could not be resolved.
     ProfileUnresolvedToken,
+    /// A profile's effective RenderingPolicy fails the component type's readability check.
+    ///
+    /// Wire code: `PROFILE_READABILITY_VIOLATION`
+    ProfileReadabilityViolation,
     Other(String),
 }
 
