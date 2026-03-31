@@ -220,6 +220,22 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
 
 If `list_widgets` returns no instances, skip widget publishing and report that no widgets are registered (the HUD binary may predate widget support).
 
+### Step 5: Widget Reactivity Test (Gauge Cycling)
+
+After the initial widget publish, cycle the gauge through a sequence of values with 3-second delays to verify widget reactivity (re-rasterization on param change).
+
+Use `scripts/gauge_cycle_test.json` from this skill with `--delay-ms 3000`:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/gauge_cycle_test.json \
+  --delay-ms 3000
+```
+
+The gauge should visually cycle through: blue 25% "Low" → yellow 50% "Medium" → red 95% "Critical!" → green 42% "Normal". Report per-step success and whether the user confirmed visual updates.
+
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
