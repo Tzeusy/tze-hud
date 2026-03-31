@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use tze_hud_widget::error::BundleError;
 use tze_hud_widget::loader::{
-    BundleScope, BundleScanResult, load_bundle_dir, load_bundle_dir_scoped,
+    BundleScanResult, BundleScope, load_bundle_dir, load_bundle_dir_scoped,
     load_bundle_dir_scoped_with_tokens, load_bundle_dir_with_tokens, scan_bundle_dirs,
 };
 use tze_hud_widget::svg_readability::SvgReadabilityTechnique;

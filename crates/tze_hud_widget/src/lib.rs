@@ -51,7 +51,7 @@ pub mod svg_readability;
 
 pub use error::BundleError;
 pub use loader::{
-    BundleScope, BundleScanResult, LoadedBundle, load_bundle_dir, load_bundle_dir_scoped,
+    BundleScanResult, BundleScope, LoadedBundle, load_bundle_dir, load_bundle_dir_scoped,
     load_bundle_dir_scoped_with_tokens, load_bundle_dir_with_tokens, scan_bundle_dirs,
 };
 pub use svg_readability::{SvgReadabilityTechnique, check_svg_readability};
