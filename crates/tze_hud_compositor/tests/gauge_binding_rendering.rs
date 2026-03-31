@@ -33,7 +33,7 @@ use std::collections::HashMap;
 
 use tze_hud_compositor::widget::{apply_svg_attribute, resolve_binding_value};
 use tze_hud_scene::types::{
-    ContentionPolicy, GeometryPolicy, Rgba, RenderingPolicy, WidgetBinding, WidgetBindingMapping,
+    ContentionPolicy, GeometryPolicy, RenderingPolicy, Rgba, WidgetBinding, WidgetBindingMapping,
     WidgetParameterValue,
 };
 
@@ -158,7 +158,10 @@ fn gauge_linear_binding_level_half_produces_height_100() {
     let params = HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.5))]);
     let val = resolve_binding_value(&level_height_binding(), &params, &level_param_constraints())
         .expect("resolve must succeed for level=0.5");
-    assert_eq!(val, "100", "level=0.5 should produce height='100', got: {val}");
+    assert_eq!(
+        val, "100",
+        "level=0.5 should produce height='100', got: {val}"
+    );
 }
 
 /// 6.1b: level=0.0 → bar height = 0.0 (empty track, bar visually invisible).
@@ -176,7 +179,10 @@ fn gauge_linear_binding_level_one_produces_height_200() {
     let params = HashMap::from([("level".to_string(), WidgetParameterValue::F32(1.0))]);
     let val = resolve_binding_value(&level_height_binding(), &params, &level_param_constraints())
         .expect("resolve must succeed for level=1.0");
-    assert_eq!(val, "200", "level=1.0 should produce height='200', got: {val}");
+    assert_eq!(
+        val, "200",
+        "level=1.0 should produce height='200', got: {val}"
+    );
 }
 
 /// 6.1d: level=0.25 → bar height = 50.0.
@@ -185,7 +191,10 @@ fn gauge_linear_binding_level_quarter_produces_height_50() {
     let params = HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.25))]);
     let val = resolve_binding_value(&level_height_binding(), &params, &level_param_constraints())
         .expect("resolve must succeed for level=0.25");
-    assert_eq!(val, "50", "level=0.25 should produce height='50', got: {val}");
+    assert_eq!(
+        val, "50",
+        "level=0.25 should produce height='50', got: {val}"
+    );
 }
 
 // ─── 6.1y Bar fills UPWARD: y = 210 − height ─────────────────────────────────
@@ -271,9 +280,8 @@ fn gauge_direct_color_binding_red_produces_hex_ff0000() {
         "fill_color".to_string(),
         WidgetParameterValue::Color(Rgba::new(1.0, 0.0, 0.0, 1.0)),
     )]);
-    let val =
-        resolve_binding_value(&fill_color_binding(), &params, &HashMap::new())
-            .expect("resolve must succeed for fill_color=red");
+    let val = resolve_binding_value(&fill_color_binding(), &params, &HashMap::new())
+        .expect("resolve must succeed for fill_color=red");
 
     // Opaque red: alpha ≈ 1.0 → hex shorthand without alpha channel.
     assert_eq!(
@@ -292,9 +300,8 @@ fn gauge_direct_color_binding_green_with_alpha() {
         "fill_color".to_string(),
         WidgetParameterValue::Color(Rgba::new(0.0, 1.0, 0.0, alpha)),
     )]);
-    let val =
-        resolve_binding_value(&fill_color_binding(), &params, &HashMap::new())
-            .expect("resolve must succeed for fill_color=green+alpha");
+    let val = resolve_binding_value(&fill_color_binding(), &params, &HashMap::new())
+        .expect("resolve must succeed for fill_color=green+alpha");
 
     // alpha ≈ 0.502 < 1.0 → rgba(...) form expected
     assert!(
@@ -314,9 +321,8 @@ fn gauge_direct_color_binding_blue_produces_hex_0000ff() {
         "fill_color".to_string(),
         WidgetParameterValue::Color(Rgba::new(0.0, 0.0, 1.0, 1.0)),
     )]);
-    let val =
-        resolve_binding_value(&fill_color_binding(), &params, &HashMap::new())
-            .expect("resolve must succeed for fill_color=blue");
+    let val = resolve_binding_value(&fill_color_binding(), &params, &HashMap::new())
+        .expect("resolve must succeed for fill_color=blue");
 
     assert_eq!(
         val, "#0000ff",
@@ -378,7 +384,10 @@ fn gauge_text_content_binding_empty_label() {
     )]);
     let val = resolve_binding_value(&label_binding(), &params, &HashMap::new())
         .expect("resolve must succeed for label=''");
-    assert_eq!(val, "", "empty label should resolve to empty string, got: {val}");
+    assert_eq!(
+        val, "",
+        "empty label should resolve to empty string, got: {val}"
+    );
 
     let modified = apply_svg_attribute(PRODUCTION_FILL_SVG, "label-text", "text-content", &val);
     // text element must be present (not removed), content is empty
@@ -398,7 +407,10 @@ fn gauge_text_content_binding_long_label() {
     )]);
     let val = resolve_binding_value(&label_binding(), &params, &HashMap::new())
         .expect("resolve must succeed for long label");
-    assert_eq!(val, label, "long label should be preserved verbatim, got: {val}");
+    assert_eq!(
+        val, label,
+        "long label should be preserved verbatim, got: {val}"
+    );
 
     let modified = apply_svg_attribute(PRODUCTION_FILL_SVG, "label-text", "text-content", &val);
     assert!(
@@ -621,7 +633,10 @@ mod contention {
         // Agent A publishes level=0.5 and label="CPU".
         let params_a = HashMap::from([
             ("level".to_string(), WidgetParameterValue::F32(0.5)),
-            ("label".to_string(), WidgetParameterValue::String("CPU".to_string())),
+            (
+                "label".to_string(),
+                WidgetParameterValue::String("CPU".to_string()),
+            ),
         ]);
         scene
             .publish_to_widget("gauge", params_a, "agent.a", None, 0, None)
@@ -677,23 +692,39 @@ mod contention {
         // Override the instance contention policy to MergeByKey.
         // Directly set the contention_override on the registered instance.
         if let Some(instance) = scene.widget_registry.instances.get_mut("gauge") {
-            instance.contention_override =
-                Some(ContentionPolicy::MergeByKey { max_keys: 32 });
+            instance.contention_override = Some(ContentionPolicy::MergeByKey { max_keys: 32 });
         }
 
         // Agent A publishes level=0.5 and label="CPU" (merge key = agent.a).
         let params_a = HashMap::from([
             ("level".to_string(), WidgetParameterValue::F32(0.5)),
-            ("label".to_string(), WidgetParameterValue::String("CPU".to_string())),
+            (
+                "label".to_string(),
+                WidgetParameterValue::String("CPU".to_string()),
+            ),
         ]);
         scene
-            .publish_to_widget("gauge", params_a, "agent.a", Some("agent.a".to_string()), 0, None)
+            .publish_to_widget(
+                "gauge",
+                params_a,
+                "agent.a",
+                Some("agent.a".to_string()),
+                0,
+                None,
+            )
             .expect("Agent A publish must succeed");
 
         // Agent B publishes only level=0.8 under its own merge key.
         let params_b = HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.8))]);
         scene
-            .publish_to_widget("gauge", params_b, "agent.b", Some("agent.b".to_string()), 0, None)
+            .publish_to_widget(
+                "gauge",
+                params_b,
+                "agent.b",
+                Some("agent.b".to_string()),
+                0,
+                None,
+            )
             .expect("Agent B publish must succeed");
 
         let occupancy = scene
@@ -764,10 +795,7 @@ mod contention {
         // Verify level.
         match ep.get("level") {
             Some(WidgetParameterValue::F32(v)) => {
-                assert!(
-                    (v - 0.65).abs() < 1e-5,
-                    "level should be 0.65, got: {v}"
-                );
+                assert!((v - 0.65).abs() < 1e-5, "level should be 0.65, got: {v}");
             }
             other => panic!("expected F32(0.65) for level, got: {other:?}"),
         }
@@ -843,19 +871,29 @@ mod contention {
             resolve_binding_value(&level_height_binding(), &params, &constraints).unwrap();
         let fill_val =
             resolve_binding_value(&fill_color_binding(), &params, &HashMap::new()).unwrap();
-        let label_val =
-            resolve_binding_value(&label_binding(), &params, &HashMap::new()).unwrap();
-        let sev_val =
-            resolve_binding_value(&severity_binding(), &params, &HashMap::new()).unwrap();
+        let label_val = resolve_binding_value(&label_binding(), &params, &HashMap::new()).unwrap();
+        let sev_val = resolve_binding_value(&severity_binding(), &params, &HashMap::new()).unwrap();
 
         // level=0.65 → height = 0.65 * 200 = 130.
-        assert_eq!(height_val, "130", "level=0.65 should produce height=130, got: {height_val}");
+        assert_eq!(
+            height_val, "130",
+            "level=0.65 should produce height=130, got: {height_val}"
+        );
         // fill_color=orange → hex color (no alpha)
-        assert_eq!(fill_val, "#ffa500", "orange fill should be #ffa500, got: {fill_val}");
+        assert_eq!(
+            fill_val, "#ffa500",
+            "orange fill should be #ffa500, got: {fill_val}"
+        );
         // label="System"
-        assert_eq!(label_val, "System", "label should be 'System', got: {label_val}");
+        assert_eq!(
+            label_val, "System",
+            "label should be 'System', got: {label_val}"
+        );
         // severity=warning → canonical warning color
-        assert_eq!(sev_val, "#FFB800", "warning severity should be #FFB800, got: {sev_val}");
+        assert_eq!(
+            sev_val, "#FFB800",
+            "warning severity should be #FFB800, got: {sev_val}"
+        );
 
         // Apply all four bindings to the production SVG.
         let y_val = (210.0 - height_val.parse::<f32>().unwrap()) as i64;
