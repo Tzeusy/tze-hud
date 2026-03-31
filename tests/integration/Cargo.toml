@@ -32,6 +32,15 @@ path = "disconnect_orphan.rs"
 name = "presence_card_coexistence"
 path = "presence_card_coexistence.rs"
 
+# hud-i6yd.4: Atomic tile creation batch with resource upload.
+# Tests: 48x48 PNG icon upload (BLAKE3 ResourceId), atomic MutationBatch
+# (CreateTile + SetTileRoot 6-node tree + UpdateTileOpacity + UpdateTileInputMode),
+# partial failure atomicity, z_order=100 in agent-owned band, and periodic
+# content update (SetTileRoot) with active/expired lease checks.
+[[test]]
+name = "dashboard_tile_creation"
+path = "dashboard_tile_creation.rs"
+
 [[test]]
 name = "trace_regression"
 path = "trace_regression.rs"
