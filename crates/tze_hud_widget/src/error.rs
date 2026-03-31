@@ -67,6 +67,19 @@ pub enum BundleError {
     /// Wire code: `WIDGET_BINDING_UNRESOLVABLE`
     #[error("WIDGET_BINDING_UNRESOLVABLE: {path}: {detail}")]
     BindingUnresolvable { path: String, detail: String },
+
+    /// An SVG file contains a `{{token.key}}` placeholder that was not present in
+    /// the supplied token map.
+    ///
+    /// Wire code: `WIDGET_BUNDLE_UNRESOLVED_TOKEN`
+    #[error(
+        "WIDGET_BUNDLE_UNRESOLVED_TOKEN: {path}: SVG file '{svg_file}': unresolved token '{{{{token.{token_key}}}}}'"
+    )]
+    UnresolvedToken {
+        path: String,
+        svg_file: String,
+        token_key: String,
+    },
 }
 
 impl BundleError {
@@ -80,6 +93,7 @@ impl BundleError {
             BundleError::MissingSvg { .. } => "WIDGET_BUNDLE_MISSING_SVG",
             BundleError::SvgParseError { .. } => "WIDGET_BUNDLE_SVG_PARSE_ERROR",
             BundleError::BindingUnresolvable { .. } => "WIDGET_BINDING_UNRESOLVABLE",
+            BundleError::UnresolvedToken { .. } => "WIDGET_BUNDLE_UNRESOLVED_TOKEN",
         }
     }
 }

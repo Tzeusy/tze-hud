@@ -92,7 +92,9 @@ pub fn init_widget_registry(
         .collect();
 
     // Step 2: Scan all bundle directories.
-    let scan_results = scan_bundle_dirs(&bundle_roots);
+    // Token map is empty until the runtime wires up design-token resolution
+    // (see component-shape-language task 10.2).
+    let scan_results = scan_bundle_dirs(&bundle_roots, &HashMap::new());
 
     // Step 3: Register each valid WidgetDefinition.
     // Track registered names to detect cross-dir duplicates (scan_bundle_dirs
