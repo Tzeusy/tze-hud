@@ -25,6 +25,8 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
+# MSRV constraint: glyphon 0.8.x pins us to wgpu 24.x and Rust 1.88.
+# See [workspace.dependencies] note on glyphon for upgrade path.
 rust-version = "1.88"
 
 [workspace.dependencies]
@@ -40,6 +42,9 @@ prost = "0.13"
 prost-types = "0.13"
 
 # GPU / windowing
+# NOTE: glyphon version is pinned to 0.8.x to match wgpu 24.x and Rust 1.88.
+# Upgrade path: glyphon 0.9+ requires wgpu 28+ which requires Rust 1.92+.
+# When bumping rust-version in [workspace.package], ensure glyphon is upgraded in sync.
 wgpu = "24"
 winit = "0.30"
 glyphon = "0.8"
