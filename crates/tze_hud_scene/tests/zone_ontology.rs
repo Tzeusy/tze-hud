@@ -1152,6 +1152,266 @@ fn publish_with_content_classification_stored() {
     assert_eq!(pubs[0].content_classification.as_deref(), Some("pii"));
 }
 
+// ─── Multi-agent isolation: status-bar zone ──────────────────────────────────
+
+/// Build a status-bar ZoneDefinition using the canonical default parameters.
+fn make_status_bar_zone() -> ZoneDefinition {
+    ZoneDefinition {
+        id: SceneId::new(),
+        name: "status-bar".to_string(),
+        description: "Status bar (MergeByKey)".to_string(),
+        geometry_policy: GeometryPolicy::EdgeAnchored {
+            edge: DisplayEdge::Bottom,
+            height_pct: 0.04,
+            width_pct: 1.0,
+            margin_px: 0.0,
+        },
+        accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+        rendering_policy: RenderingPolicy::default(),
+        contention_policy: ContentionPolicy::MergeByKey { max_keys: 32 },
+        max_publishers: 16,
+        transport_constraint: None,
+        auto_clear_ms: None,
+        layer_attachment: LayerAttachment::Chrome,
+        ephemeral: false,
+    }
+}
+
+/// Helper: build a `StatusBar` payload with a single key-value pair.
+fn sb(key: &str, value: &str) -> ZoneContent {
+    let mut entries = HashMap::new();
+    entries.insert(key.to_string(), value.to_string());
+    ZoneContent::StatusBar(StatusBarPayload { entries })
+}
+
+/// exemplar_status_bar_clear_per_publisher
+///
+/// Three agents publish to the status-bar zone using distinct namespaces and
+/// merge keys.  One agent clears its publication.  Only that agent's entries
+/// must be removed; the other two agents' publications must remain intact.
+#[test]
+fn exemplar_status_bar_clear_per_publisher() {
+    let mut scene = SceneGraph::new(1920.0, 1080.0);
+    scene.register_zone(make_status_bar_zone());
+
+    // Three agents publish distinct keys.
+    scene
+        .publish_to_zone(
+            "status-bar",
+            sb("temperature", "22°C"),
+            "agent-weather",
+            Some("temperature".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+    scene
+        .publish_to_zone(
+            "status-bar",
+            sb("battery", "87%"),
+            "agent-power",
+            Some("battery".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+    scene
+        .publish_to_zone(
+            "status-bar",
+            sb("time", "14:35"),
+            "agent-clock",
+            Some("time".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+    // All three publications are active.
+    assert_eq!(
+        scene.zone_registry.active_for_zone("status-bar").len(),
+        3,
+        "all three agents must have active publications before clear"
+    );
+
+    // agent-power clears its publication.
+    scene
+        .clear_zone_for_publisher("status-bar", "agent-power")
+        .unwrap();
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        2,
+        "only agent-power's publication must be removed; two remain"
+    );
+
+    let namespaces: Vec<&str> = pubs.iter().map(|r| r.publisher_namespace.as_str()).collect();
+    assert!(
+        !namespaces.contains(&"agent-power"),
+        "agent-power's publication must not appear after clear"
+    );
+    assert!(
+        namespaces.contains(&"agent-weather"),
+        "agent-weather's publication must survive"
+    );
+    assert!(
+        namespaces.contains(&"agent-clock"),
+        "agent-clock's publication must survive"
+    );
+
+    // Confirm the surviving values are unchanged.
+    let weather_pub = pubs
+        .iter()
+        .find(|r| r.publisher_namespace == "agent-weather")
+        .unwrap();
+    if let ZoneContent::StatusBar(sb) = &weather_pub.content {
+        assert_eq!(
+            sb.entries["temperature"], "22°C",
+            "agent-weather's temperature value must be unchanged"
+        );
+    } else {
+        panic!("expected StatusBar content for agent-weather");
+    }
+
+    let clock_pub = pubs
+        .iter()
+        .find(|r| r.publisher_namespace == "agent-clock")
+        .unwrap();
+    if let ZoneContent::StatusBar(sb) = &clock_pub.content {
+        assert_eq!(
+            sb.entries["time"], "14:35",
+            "agent-clock's time value must be unchanged"
+        );
+    } else {
+        panic!("expected StatusBar content for agent-clock");
+    }
+}
+
+/// exemplar_status_bar_lease_expiry_isolation
+///
+/// Three agents publish to the status-bar zone.  One agent publishes with a
+/// short lease (expires at t=2s); the other two publish without expiry.  After
+/// the simulated clock advances past the lease boundary, only the expired
+/// agent's publication is removed by `drain_expired_zone_publications`; the
+/// other two agents' publications remain intact.
+#[test]
+fn exemplar_status_bar_lease_expiry_isolation() {
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let clock = Arc::new(SimulatedClock::new(1_000_000)); // t=1s
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.register_zone(make_status_bar_zone());
+
+    // agent-weather: permanent (no expiry).
+    scene
+        .publish_to_zone(
+            "status-bar",
+            sb("temperature", "19°C"),
+            "agent-weather",
+            Some("temperature".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+    // agent-power: short lease, expires at t=2s (2_000_000 µs).
+    scene
+        .publish_to_zone(
+            "status-bar",
+            sb("battery", "54%"),
+            "agent-power",
+            Some("battery".to_string()),
+            Some(2_000_000),
+            None,
+        )
+        .unwrap();
+
+    // agent-clock: permanent (no expiry).
+    scene
+        .publish_to_zone(
+            "status-bar",
+            sb("time", "09:15"),
+            "agent-clock",
+            Some("time".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+
+    // All three publications active before clock advances.
+    assert_eq!(
+        scene.zone_registry.active_for_zone("status-bar").len(),
+        3,
+        "all three publications must be active before expiry"
+    );
+
+    // Drain at t=1s — nothing expired yet.
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 0, "no publications should expire at t=1s");
+    assert_eq!(
+        scene.zone_registry.active_for_zone("status-bar").len(),
+        3,
+        "all three publications must still be active at t=1s"
+    );
+
+    // Advance clock past agent-power's lease boundary.
+    clock.set_us(2_000_001); // t=2.000001s
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(
+        removed, 1,
+        "exactly one publication (agent-power) must expire"
+    );
+
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        2,
+        "two publications must survive after agent-power's lease expires"
+    );
+
+    let namespaces: Vec<&str> = pubs.iter().map(|r| r.publisher_namespace.as_str()).collect();
+    assert!(
+        !namespaces.contains(&"agent-power"),
+        "agent-power's publication must be cleared after lease expiry"
+    );
+    assert!(
+        namespaces.contains(&"agent-weather"),
+        "agent-weather's permanent publication must survive"
+    );
+    assert!(
+        namespaces.contains(&"agent-clock"),
+        "agent-clock's permanent publication must survive"
+    );
+
+    // Confirm surviving values are intact.
+    let weather_pub = pubs
+        .iter()
+        .find(|r| r.publisher_namespace == "agent-weather")
+        .unwrap();
+    if let ZoneContent::StatusBar(sb) = &weather_pub.content {
+        assert_eq!(
+            sb.entries["temperature"], "19°C",
+            "agent-weather's temperature must be unchanged after expiry sweep"
+        );
+    } else {
+        panic!("expected StatusBar content for agent-weather");
+    }
+
+    let clock_pub = pubs
+        .iter()
+        .find(|r| r.publisher_namespace == "agent-clock")
+        .unwrap();
+    if let ZoneContent::StatusBar(sb) = &clock_pub.content {
+        assert_eq!(
+            sb.entries["time"], "09:15",
+            "agent-clock's time must be unchanged after expiry sweep"
+        );
+    } else {
+        panic!("expected StatusBar content for agent-clock");
+    }
+}
+
 // ─── Proptest: contention policy invariants ──────────────────────────────────
 
 #[cfg(test)]
