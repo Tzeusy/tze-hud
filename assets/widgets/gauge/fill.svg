@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Fill layer for the production gauge widget exemplar.
+     Contains three bound elements: fill bar, label text, severity indicator.
+
+     100x240 viewBox — extra 20px below track (y=210-240) reserved for the label.
+
+     Element IDs referenced by widget.toml bindings:
+       "bar"        — fill rect; height (linear 0→200) and fill (direct) are bound
+       "label-text" — SVG text element; text-content is bound to "label" param
+       "indicator"  — circle; fill is bound to "severity" via discrete value_map
+
+     Token placeholders ({{...}}) are resolved at bundle load time.
+     Zero hardcoded hex colors — all colors use {{token.key}} form.
+
+     data-role="text" on label-text satisfies DualLayer readability profile
+     validation: stroke + fill both present, stroke-width >= 1.0. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 240" width="100" height="240">
+  <!-- clipPath constrains the fill bar to the track area (x=30,y=10,w=40,h=200).
+       The bar rect extends downward from y=210 so that as height grows the bar
+       fills upward within the clipped region — visual growth from bottom to top. -->
+  <defs>
+    <clipPath id="track-clip">
+      <rect x="30" y="10" width="40" height="200"/>
+    </clipPath>
+  </defs>
+
+  <!-- Fill bar: grows upward from track bottom (y=210) as "level" increases.
+       clip-path keeps the bar strictly within the track bounds.
+       height is driven by "level" binding (linear: 0.0 → 200px).
+       fill is driven by "fill_color" binding (direct). -->
+  <rect
+    id="bar"
+    x="30" y="210"
+    width="40" height="0"
+    rx="3" ry="3"
+    fill="{{token.color.text.accent}}"
+    clip-path="url(#track-clip)"/>
+
+  <!-- Label text: centered below the track, vertically in the label clearance zone.
+       data-role="text" marks this element for DualLayer readability validation.
+       stroke + fill both present; paint-order="stroke fill" keeps outline clean.
+       stroke-width matches the canonical DualLayer requirement (>= 1.0). -->
+  <text
+    id="label-text"
+    data-role="text"
+    x="50" y="228"
+    text-anchor="middle"
+    dominant-baseline="middle"
+    font-family="sans-serif"
+    font-size="10"
+    fill="{{token.color.text.primary}}"
+    stroke="{{token.color.outline.default}}"
+    stroke-width="{{token.stroke.outline.width}}"
+    stroke-linejoin="round"
+    paint-order="stroke fill"></text>
+
+  <!-- Severity indicator: small circle at top-right corner of the gauge.
+       fill is driven by "severity" discrete binding (info/warning/error).
+       Default fill uses the info severity token fallback. -->
+  <circle
+    id="indicator"
+    cx="85" cy="15"
+    r="6"
+    fill="{{token.color.severity.info}}"/>
+</svg>

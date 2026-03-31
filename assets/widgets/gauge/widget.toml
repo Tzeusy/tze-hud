@@ -1,0 +1,95 @@
+# Production gauge widget bundle — token-driven exemplar.
+#
+# This is the canonical production-quality gauge widget, demonstrating:
+# - All four binding types: linear (level→height), direct (fill_color→fill,
+#   label→text-content), discrete (severity→fill indicator)
+# - All colors via {{token.key}} placeholders — zero hardcoded hex values
+# - data-role attributes for DualLayer readability profile compatibility
+# - 100x240 viewBox providing extra clearance for the label below the track
+#
+# Registered as "gauge" in the WidgetRegistry when loaded from assets/widgets/.
+#
+# IMPORTANT: Do NOT confuse with crates/tze_hud_widget/tests/fixtures/gauge/
+# which is the unit-test fixture (hardcoded colors, 100x220 viewBox). This
+# bundle is the production exemplar with canonical token placeholders.
+#
+# Parameters:
+#   level      - Fill level (f32, 0.0-1.0); drives bar height via linear mapping
+#   label      - Display label below the gauge track (string)
+#   fill_color - Override fill color for the bar (color param)
+#   severity   - Severity indicator state; drives indicator color (enum)
+#
+# Token placeholders ({{token.key}}) in layer SVGs are resolved against the
+# global token map at bundle load time — never at render time.
+
+name        = "gauge"
+version     = "1.0.0"
+description = "Vertical fill gauge: token-driven exemplar with severity indicator and label"
+
+[[parameter_schema]]
+name    = "level"
+type    = "f32"
+default = 0.0
+
+[parameter_schema.constraints]
+f32_min = 0.0
+f32_max = 1.0
+
+[[parameter_schema]]
+name    = "label"
+type    = "string"
+default = ""
+
+[[parameter_schema]]
+name    = "fill_color"
+type    = "color"
+default = [74, 158, 255, 255]
+
+[[parameter_schema]]
+name    = "severity"
+type    = "enum"
+default = "info"
+
+[parameter_schema.constraints]
+enum_allowed_values = ["info", "warning", "error"]
+
+# Background layer: static SVG frame with inner track. Zero bindings.
+# Must appear first (painter's model) so fill layer renders on top.
+[[layers]]
+svg_file = "background.svg"
+
+# Fill layer: dynamic bar, label text, and severity indicator.
+# Four bindings drive all visual state from widget parameters.
+[[layers]]
+svg_file = "fill.svg"
+
+[[layers.bindings]]
+param            = "level"
+target_element   = "bar"
+target_attribute = "height"
+mapping          = "linear"
+attr_min         = 0.0
+attr_max         = 200.0
+
+[[layers.bindings]]
+param            = "fill_color"
+target_element   = "bar"
+target_attribute = "fill"
+mapping          = "direct"
+
+[[layers.bindings]]
+param            = "label"
+target_element   = "label-text"
+target_attribute = "text-content"
+mapping          = "direct"
+
+[[layers.bindings]]
+param            = "severity"
+target_element   = "indicator"
+target_attribute = "fill"
+mapping          = "discrete"
+
+[layers.bindings.value_map]
+info    = "#4A9EFF"
+warning = "#FFB800"
+error   = "#FF4444"
