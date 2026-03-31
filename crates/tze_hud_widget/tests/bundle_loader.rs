@@ -352,7 +352,10 @@ svg_file = "fill.svg"
     std::fs::write(bundle_b.join("widget.toml"), manifest).unwrap();
     std::fs::write(bundle_b.join("fill.svg"), svg).unwrap();
 
-    let results = scan_bundle_dirs(&[root.path().to_path_buf()], &std::collections::HashMap::new());
+    let results = scan_bundle_dirs(
+        &[root.path().to_path_buf()],
+        &std::collections::HashMap::new(),
+    );
 
     // Exactly one should succeed and one should fail with DuplicateType.
     let ok_count = results
@@ -717,7 +720,10 @@ svg_file = "fill.svg"
     std::fs::create_dir_all(&bad_dir).unwrap();
     std::fs::write(bad_dir.join("fill.svg"), b"<svg></svg>").unwrap();
 
-    let results = scan_bundle_dirs(&[root.path().to_path_buf()], &std::collections::HashMap::new());
+    let results = scan_bundle_dirs(
+        &[root.path().to_path_buf()],
+        &std::collections::HashMap::new(),
+    );
 
     let ok_count = results
         .iter()
@@ -737,7 +743,10 @@ svg_file = "fill.svg"
 #[test]
 fn empty_bundle_root_returns_no_results() {
     let root = tempfile::tempdir().unwrap();
-    let results = scan_bundle_dirs(&[root.path().to_path_buf()], &std::collections::HashMap::new());
+    let results = scan_bundle_dirs(
+        &[root.path().to_path_buf()],
+        &std::collections::HashMap::new(),
+    );
     assert!(
         results.is_empty(),
         "empty root should produce no results, got {results:?}"

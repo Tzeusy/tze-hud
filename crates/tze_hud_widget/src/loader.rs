@@ -147,7 +147,10 @@ pub fn load_bundle_dir(dir: &Path) -> BundleScanResult {
 /// Returns `BundleScanResult::Ok` on success, or `BundleScanResult::Err` with
 /// the first structural error encountered.  A rejected bundle does not prevent
 /// other bundles from loading.
-pub fn load_bundle_dir_with_tokens(dir: &Path, tokens: &HashMap<String, String>) -> BundleScanResult {
+pub fn load_bundle_dir_with_tokens(
+    dir: &Path,
+    tokens: &HashMap<String, String>,
+) -> BundleScanResult {
     let path_str = dir.display().to_string();
     match load_bundle_dir_inner(dir, &path_str, tokens) {
         Ok(bundle) => BundleScanResult::Ok(bundle),
@@ -257,14 +260,13 @@ fn load_bundle_dir_inner(
         })?;
 
         // Step 5b-post: Resolve {{token.key}} placeholders BEFORE SVG parse/scan.
-        let svg_text_resolved =
-            resolve_token_placeholders(svg_text, tokens).map_err(|key| {
-                BundleError::UnresolvedToken {
-                    path: path_str.to_string(),
-                    svg_file: svg_file.to_string(),
-                    token_key: key,
-                }
-            })?;
+        let svg_text_resolved = resolve_token_placeholders(svg_text, tokens).map_err(|key| {
+            BundleError::UnresolvedToken {
+                path: path_str.to_string(),
+                svg_file: svg_file.to_string(),
+                token_key: key,
+            }
+        })?;
         let svg_text = svg_text_resolved.as_str();
 
         // Validate SVG (well-formed XML + <svg> root check).
