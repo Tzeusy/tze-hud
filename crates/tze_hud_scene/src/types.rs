@@ -1376,6 +1376,36 @@ pub struct RenderingPolicy {
     pub backdrop: Option<Rgba>,
     pub text_align: Option<TextAlign>,
     pub margin_px: Option<f32>,
+    /// Font family for zone text rendering.
+    #[serde(default)]
+    pub font_family: Option<FontFamily>,
+    /// Font weight (CSS-style: 100–900); None = compositor default (400).
+    #[serde(default)]
+    pub font_weight: Option<u16>,
+    /// Primary text color; None = compositor default (white).
+    #[serde(default)]
+    pub text_color: Option<Rgba>,
+    /// Backdrop opacity override (0.0–1.0); None = use `backdrop` alpha.
+    #[serde(default)]
+    pub backdrop_opacity: Option<f32>,
+    /// Outline/border color for the zone frame; None = no outline.
+    #[serde(default)]
+    pub outline_color: Option<Rgba>,
+    /// Outline/border width in pixels; None = no outline.
+    #[serde(default)]
+    pub outline_width: Option<f32>,
+    /// Horizontal margin in pixels (left + right); None = compositor default.
+    #[serde(default)]
+    pub margin_horizontal: Option<f32>,
+    /// Vertical margin in pixels (top + bottom); None = compositor default.
+    #[serde(default)]
+    pub margin_vertical: Option<f32>,
+    /// Duration of the enter/reveal transition in milliseconds; None = no transition.
+    #[serde(default)]
+    pub transition_in_ms: Option<u32>,
+    /// Duration of the exit/dismiss transition in milliseconds; None = no transition.
+    #[serde(default)]
+    pub transition_out_ms: Option<u32>,
 }
 
 /// Contention policy — what happens when multiple agents publish to the same zone.

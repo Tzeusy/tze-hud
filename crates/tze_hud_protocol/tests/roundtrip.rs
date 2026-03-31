@@ -71,6 +71,7 @@ use tze_hud_protocol::proto::{
     FocusLostEvent,
     FocusLostReason,
     FocusSource,
+    FontFamilyProto,
     GeometryPolicyProto,
     GestureEvent,
     HitRegionNodeProto,
@@ -460,6 +461,17 @@ fn roundtrip_zone_definition_proto() {
             }),
             text_align: TextAlignProto::Center as i32,
             margin_px: 8.0,
+            // Extended fields: zero-defaults (not set)
+            font_family: FontFamilyProto::Unspecified as i32,
+            font_weight: 0,
+            text_color: None,
+            backdrop_opacity: -1.0,
+            outline_color: None,
+            outline_width: 0.0,
+            margin_horizontal: -1.0,
+            margin_vertical: -1.0,
+            transition_in_ms: 0,
+            transition_out_ms: 0,
         }),
         contention_policy: ContentionPolicyProto::ContentionPolicyLatestWins as i32,
         max_publishers: 4,
@@ -1416,5 +1428,359 @@ fn roundtrip_decode_with_unknown_fields_succeeds() {
     assert_eq!(
         decoded.timestamp_mono_us, 12345,
         "known fields must survive decoding alongside unknown fields"
+    );
+}
+
+// ─── RenderingPolicyProto extended fields (hud-sc0a.2) ───────────────────────
+
+/// Round-trip with ALL extended fields populated (fields 5-14).
+#[test]
+fn roundtrip_rendering_policy_proto_all_fields_populated() {
+    let orig = RenderingPolicyProto {
+        // original fields 1-4
+        font_size_px: 18.0,
+        backdrop: Some(Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.6,
+        }),
+        text_align: TextAlignProto::Center as i32,
+        margin_px: 12.0,
+        // extended fields 5-14
+        font_family: FontFamilyProto::SystemMonospace as i32,
+        font_weight: 700,
+        text_color: Some(Rgba {
+            r: 1.0,
+            g: 0.9,
+            b: 0.8,
+            a: 1.0,
+        }),
+        backdrop_opacity: 0.75,
+        outline_color: Some(Rgba {
+            r: 0.2,
+            g: 0.6,
+            b: 1.0,
+            a: 1.0,
+        }),
+        outline_width: 2.5,
+        margin_horizontal: 16.0,
+        margin_vertical: 8.0,
+        transition_in_ms: 250,
+        transition_out_ms: 150,
+    };
+    let decoded = round_trip(&orig);
+    // original fields
+    assert_eq!(orig.font_size_px, decoded.font_size_px);
+    assert_eq!(orig.text_align, decoded.text_align);
+    assert_eq!(orig.margin_px, decoded.margin_px);
+    assert_eq!(
+        orig.backdrop.as_ref().map(|c| c.a),
+        decoded.backdrop.as_ref().map(|c| c.a)
+    );
+    // extended fields
+    assert_eq!(orig.font_family, decoded.font_family);
+    assert_eq!(orig.font_weight, decoded.font_weight);
+    assert_eq!(
+        orig.text_color.as_ref().map(|c| c.r),
+        decoded.text_color.as_ref().map(|c| c.r)
+    );
+    assert_eq!(orig.backdrop_opacity, decoded.backdrop_opacity);
+    assert_eq!(
+        orig.outline_color.as_ref().map(|c| c.r),
+        decoded.outline_color.as_ref().map(|c| c.r)
+    );
+    assert_eq!(orig.outline_width, decoded.outline_width);
+    assert_eq!(orig.margin_horizontal, decoded.margin_horizontal);
+    assert_eq!(orig.margin_vertical, decoded.margin_vertical);
+    assert_eq!(orig.transition_in_ms, decoded.transition_in_ms);
+    assert_eq!(orig.transition_out_ms, decoded.transition_out_ms);
+}
+
+/// Round-trip with all extended fields absent (all-None / zero-value proto defaults).
+#[test]
+fn roundtrip_rendering_policy_proto_all_fields_none() {
+    let orig = RenderingPolicyProto {
+        font_size_px: 0.0,
+        backdrop: None,
+        text_align: TextAlignProto::Unspecified as i32,
+        margin_px: 0.0,
+        font_family: FontFamilyProto::Unspecified as i32,
+        font_weight: 0,
+        text_color: None,
+        // -1.0 sentinel = not set for backdrop_opacity
+        backdrop_opacity: -1.0,
+        outline_color: None,
+        outline_width: 0.0,
+        // -1.0 sentinel = not set for margin_horizontal / margin_vertical
+        margin_horizontal: -1.0,
+        margin_vertical: -1.0,
+        transition_in_ms: 0,
+        transition_out_ms: 0,
+    };
+    let decoded = round_trip(&orig);
+    assert_eq!(decoded.font_size_px, 0.0);
+    assert!(decoded.backdrop.is_none());
+    assert_eq!(decoded.font_family, FontFamilyProto::Unspecified as i32);
+    assert_eq!(decoded.font_weight, 0);
+    assert!(decoded.text_color.is_none());
+    assert_eq!(decoded.backdrop_opacity, -1.0);
+    assert!(decoded.outline_color.is_none());
+    assert_eq!(decoded.outline_width, 0.0);
+    assert_eq!(decoded.margin_horizontal, -1.0);
+    assert_eq!(decoded.margin_vertical, -1.0);
+    assert_eq!(decoded.transition_in_ms, 0);
+    assert_eq!(decoded.transition_out_ms, 0);
+}
+
+/// Backward-compatibility: a pre-extension serialized RenderingPolicyProto
+/// (only fields 1-4) decodes cleanly, and all extended fields default to
+/// their "not set" sentinel values (proto3 defaults).
+#[test]
+fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
+    // Simulate a v0 message that only contains the original 4 fields.
+    let pre_extension = RenderingPolicyProto {
+        font_size_px: 16.0,
+        backdrop: Some(Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        }),
+        text_align: TextAlignProto::Start as i32,
+        margin_px: 8.0,
+        // All extended fields use proto3 defaults (zero / None)
+        font_family: 0,
+        font_weight: 0,
+        text_color: None,
+        backdrop_opacity: 0.0, // proto3 default for float
+        outline_color: None,
+        outline_width: 0.0,
+        margin_horizontal: 0.0,
+        margin_vertical: 0.0,
+        transition_in_ms: 0,
+        transition_out_ms: 0,
+    };
+
+    // Encode only the fields that would be present in a v0 wire message.
+    // We do this by encoding the full struct (prost skips zero-valued fields in proto3)
+    // and then decoding as the current type.
+    let mut buf = Vec::new();
+    pre_extension.encode(&mut buf).unwrap();
+    let decoded =
+        RenderingPolicyProto::decode(buf.as_slice()).expect("backward-compat decode must succeed");
+
+    // Original fields must be preserved.
+    assert_eq!(decoded.font_size_px, 16.0);
+    assert_eq!(decoded.margin_px, 8.0);
+    assert_eq!(decoded.text_align, TextAlignProto::Start as i32);
+    assert_eq!(decoded.backdrop.as_ref().map(|c| c.a), Some(0.5));
+
+    // Extended fields must be at their proto3 zero defaults.
+    assert_eq!(
+        decoded.font_family, 0,
+        "font_family must default to Unspecified"
+    );
+    assert_eq!(
+        decoded.font_weight, 0,
+        "font_weight must default to not-set"
+    );
+    assert!(decoded.text_color.is_none(), "text_color must be absent");
+    assert_eq!(
+        decoded.backdrop_opacity, 0.0,
+        "backdrop_opacity must default to 0.0"
+    );
+    assert!(
+        decoded.outline_color.is_none(),
+        "outline_color must be absent"
+    );
+    assert_eq!(
+        decoded.outline_width, 0.0,
+        "outline_width must default to 0.0"
+    );
+    assert_eq!(
+        decoded.transition_in_ms, 0,
+        "transition_in_ms must default to 0"
+    );
+    assert_eq!(
+        decoded.transition_out_ms, 0,
+        "transition_out_ms must default to 0"
+    );
+}
+
+/// Round-trip: convert::rendering_policy_to_proto then proto_to_rendering_policy
+/// with all 14 fields populated and verify None fields are preserved.
+#[test]
+fn roundtrip_rendering_policy_convert_all_fields_populated() {
+    use tze_hud_protocol::convert::{proto_to_rendering_policy, rendering_policy_to_proto};
+    use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba as SceneRgba, TextAlign};
+
+    let original = RenderingPolicy {
+        font_size_px: Some(20.0),
+        backdrop: Some(SceneRgba {
+            r: 0.1,
+            g: 0.1,
+            b: 0.1,
+            a: 0.8,
+        }),
+        text_align: Some(TextAlign::End),
+        margin_px: Some(10.0),
+        font_family: Some(FontFamily::SystemSerif),
+        font_weight: Some(600),
+        text_color: Some(SceneRgba {
+            r: 1.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        }),
+        backdrop_opacity: Some(0.5),
+        outline_color: Some(SceneRgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }),
+        outline_width: Some(3.0),
+        margin_horizontal: Some(12.0),
+        margin_vertical: Some(6.0),
+        transition_in_ms: Some(300),
+        transition_out_ms: Some(200),
+    };
+
+    let proto = rendering_policy_to_proto(&original);
+    let recovered = proto_to_rendering_policy(&proto);
+
+    assert_eq!(recovered.font_size_px, original.font_size_px);
+    assert_eq!(recovered.text_align, original.text_align);
+    assert_eq!(recovered.margin_px, original.margin_px);
+    assert_eq!(
+        recovered.backdrop.map(|c| c.a),
+        original.backdrop.map(|c| c.a)
+    );
+    assert_eq!(recovered.font_family, original.font_family);
+    assert_eq!(recovered.font_weight, original.font_weight);
+    assert_eq!(
+        recovered.text_color.map(|c| c.r),
+        original.text_color.map(|c| c.r)
+    );
+    assert_eq!(recovered.backdrop_opacity, original.backdrop_opacity);
+    assert_eq!(
+        recovered.outline_color.map(|c| c.r),
+        original.outline_color.map(|c| c.r)
+    );
+    assert_eq!(recovered.outline_width, original.outline_width);
+    assert_eq!(recovered.margin_horizontal, original.margin_horizontal);
+    assert_eq!(recovered.margin_vertical, original.margin_vertical);
+    assert_eq!(recovered.transition_in_ms, original.transition_in_ms);
+    assert_eq!(recovered.transition_out_ms, original.transition_out_ms);
+}
+
+/// Round-trip: convert with all extended fields as None — original 4 fields survive.
+#[test]
+fn roundtrip_rendering_policy_convert_all_new_fields_none() {
+    use tze_hud_protocol::convert::{proto_to_rendering_policy, rendering_policy_to_proto};
+    use tze_hud_scene::types::{RenderingPolicy, Rgba as SceneRgba, TextAlign};
+
+    let original = RenderingPolicy {
+        font_size_px: Some(14.0),
+        backdrop: Some(SceneRgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        }),
+        text_align: Some(TextAlign::Center),
+        margin_px: Some(4.0),
+        font_family: None,
+        font_weight: None,
+        text_color: None,
+        backdrop_opacity: None,
+        outline_color: None,
+        outline_width: None,
+        margin_horizontal: None,
+        margin_vertical: None,
+        transition_in_ms: None,
+        transition_out_ms: None,
+    };
+
+    let proto = rendering_policy_to_proto(&original);
+    let recovered = proto_to_rendering_policy(&proto);
+
+    // Original fields preserved
+    assert_eq!(recovered.font_size_px, original.font_size_px);
+    assert_eq!(recovered.text_align, original.text_align);
+    assert_eq!(recovered.margin_px, original.margin_px);
+    // Extended fields remain None
+    assert!(recovered.font_family.is_none());
+    assert!(recovered.font_weight.is_none());
+    assert!(recovered.text_color.is_none());
+    assert!(recovered.backdrop_opacity.is_none());
+    assert!(recovered.outline_color.is_none());
+    assert!(recovered.outline_width.is_none());
+    assert!(recovered.margin_horizontal.is_none());
+    assert!(recovered.margin_vertical.is_none());
+    assert!(recovered.transition_in_ms.is_none());
+    assert!(recovered.transition_out_ms.is_none());
+}
+
+/// Backward-compat: deserialize a pre-extension JSON RenderingPolicy
+/// (only original 4 fields) → new extended fields are all None.
+#[test]
+fn roundtrip_rendering_policy_json_backward_compat_pre_extension() {
+    use tze_hud_scene::types::RenderingPolicy;
+
+    // JSON produced by the old schema (only the 4 original fields).
+    let old_json = r#"{
+        "font_size_px": 16.0,
+        "backdrop": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.5},
+        "text_align": "Center",
+        "margin_px": 8.0
+    }"#;
+
+    let rp: RenderingPolicy =
+        serde_json::from_str(old_json).expect("backward-compat JSON deserialization must succeed");
+
+    assert_eq!(rp.font_size_px, Some(16.0));
+    assert_eq!(rp.margin_px, Some(8.0));
+    // All extended fields must be None when absent in the JSON
+    assert!(
+        rp.font_family.is_none(),
+        "font_family must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.font_weight.is_none(),
+        "font_weight must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.text_color.is_none(),
+        "text_color must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.backdrop_opacity.is_none(),
+        "backdrop_opacity must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.outline_color.is_none(),
+        "outline_color must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.outline_width.is_none(),
+        "outline_width must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.margin_horizontal.is_none(),
+        "margin_horizontal must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.margin_vertical.is_none(),
+        "margin_vertical must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.transition_in_ms.is_none(),
+        "transition_in_ms must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.transition_out_ms.is_none(),
+        "transition_out_ms must be None for pre-extension JSON"
     );
 }
