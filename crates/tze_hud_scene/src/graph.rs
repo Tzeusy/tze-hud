@@ -2341,12 +2341,14 @@ impl SceneGraph {
                 {
                     publishes[pos] = record;
                 } else {
-                    // Check key count limit
-                    if publishes.len() >= max_keys as usize {
-                        return Err(ValidationError::ZoneMaxKeysReached {
-                            zone: zone_name.to_string(),
-                            max: max_keys as u32,
-                        });
+                    let max = max_keys as usize;
+                    if max > 0 && publishes.len() >= max {
+                        // At max key capacity — evict the oldest entry so the new key can
+                        // take its place.  "Oldest" is the front of the insertion-ordered
+                        // Vec (index 0); drain it before pushing the new record.
+                        // Spec: openspec/changes/exemplar-status-bar/tasks.md §2.5
+                        //   "oldest evicted, 32 remain"
+                        publishes.remove(0);
                     }
                     publishes.push(record);
                 }
