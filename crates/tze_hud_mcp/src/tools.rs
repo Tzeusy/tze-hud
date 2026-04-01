@@ -377,6 +377,7 @@ pub struct PublishToZoneParams {
     ///   - `{"type":"notification","text":"...","icon":"","urgency":1}` → `Notification`
     ///   - `{"type":"status_bar","entries":{"key":"val",...}}` → `StatusBar`
     ///   - `{"type":"solid_color","r":1.0,"g":0.0,"b":0.0,"a":1.0}` → `SolidColor`
+    ///   - `{"type":"static_image","resource_id":"<hex>"}` → `StaticImage`
     pub content: Value,
     /// Optional namespace for the lease. Defaults to "mcp".
     #[serde(default = "default_mcp_namespace")]
@@ -406,7 +407,7 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
                     McpError::InvalidParams(
-                        "object content must have a \"type\" field (one of: stream_text, notification, status_bar, solid_color)".to_string(),
+                        "object content must have a \"type\" field (one of: stream_text, notification, status_bar, solid_color, static_image)".to_string(),
                     )
                 })?;
             match type_str {
@@ -463,8 +464,41 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                     let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
                     Ok(ZoneContent::SolidColor(Rgba { r, g, b, a }))
                 }
+                "static_image" => {
+                    use tze_hud_scene::types::ResourceId;
+                    let hex = obj
+                        .get("resource_id")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            McpError::InvalidParams(
+                                "static_image content must have a \"resource_id\" field (hex-encoded 32-byte BLAKE3 hash)".to_string(),
+                            )
+                        })?;
+                    // Decode hex without an external crate: parse pairs of chars as u8.
+                    if hex.len() != 64 {
+                        return Err(McpError::InvalidParams(format!(
+                            "static_image \"resource_id\" must be 64 hex chars (32 bytes), got {}",
+                            hex.len()
+                        )));
+                    }
+                    let mut raw = [0u8; 32];
+                    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+                        let hi = char::from(chunk[0])
+                            .to_digit(16)
+                            .ok_or_else(|| McpError::InvalidParams(format!(
+                                "static_image \"resource_id\" is not valid hex: \"{hex}\""
+                            )))?;
+                        let lo = char::from(chunk[1])
+                            .to_digit(16)
+                            .ok_or_else(|| McpError::InvalidParams(format!(
+                                "static_image \"resource_id\" is not valid hex: \"{hex}\""
+                            )))?;
+                        raw[i] = (hi * 16 + lo) as u8;
+                    }
+                    Ok(ZoneContent::StaticImage(ResourceId::from_bytes(raw)))
+                }
                 other => Err(McpError::InvalidParams(format!(
-                    "unknown content type \"{other}\"; expected one of: stream_text, notification, status_bar, solid_color"
+                    "unknown content type \"{other}\"; expected one of: stream_text, notification, status_bar, solid_color, static_image"
                 ))),
             }
         }
@@ -2715,5 +2749,131 @@ mod tests {
         )
         .unwrap();
         assert!(result.cleared);
+    }
+
+    // ── parse_zone_content: static_image ────────────────────────────────────
+
+    /// Build a scene with a zone that accepts StaticImage media type.
+    fn scene_with_static_image_zone() -> (SceneGraph, String) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone_name = "pip".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Picture-in-picture zone (accepts static images)".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 0.25,
+                    height_pct: 0.25,
+                },
+                accepted_media_types: vec![ZoneMediaType::StaticImage],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Replace,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+        (scene, zone_name)
+    }
+
+    #[test]
+    fn test_parse_zone_content_static_image_valid_hex() {
+        // A 64-char lowercase hex string must be accepted and produce StaticImage.
+        let (mut scene, zone) = scene_with_static_image_zone();
+        // blake3::hash(b"test") as a 64-char hex string.
+        let hex = "4878ca0425c739fa427f7eda20fe845f6b2f46ba5fe5ac7d6b85add8db6bb08f"; // blake3 of "test"
+        let result = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": {"type": "static_image", "resource_id": hex}}),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(result.zone_name, zone);
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1);
+        assert!(
+            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StaticImage(_)),
+            "static_image content must produce ZoneContent::StaticImage, got: {:?}", &publishes[0].content
+        );
+    }
+
+    #[test]
+    fn test_parse_zone_content_static_image_uppercase_hex_accepted() {
+        // Uppercase hex must also be accepted.
+        let (mut scene, zone) = scene_with_static_image_zone();
+        let hex = "4878CA0425C739FA427F7EDA20FE845F6B2F46BA5FE5AC7D6B85ADD8DB6BB08F";
+        let result = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": {"type": "static_image", "resource_id": hex}}),
+            &mut scene,
+        );
+        // Uppercase hex is valid (A-F are recognized by to_digit(16)).
+        assert!(result.is_ok(), "uppercase hex must be accepted: {result:?}");
+    }
+
+    #[test]
+    fn test_parse_zone_content_static_image_missing_resource_id_rejected() {
+        // Missing resource_id field must return InvalidParams.
+        let (mut scene, zone) = scene_with_static_image_zone();
+        let err = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": {"type": "static_image"}}),
+            &mut scene,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::InvalidParams(msg) if msg.contains("resource_id")),
+            "expected InvalidParams about resource_id, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_zone_content_static_image_wrong_length_rejected() {
+        // A hex string that is not exactly 64 chars must return InvalidParams.
+        let (mut scene, zone) = scene_with_static_image_zone();
+        let err = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": {"type": "static_image", "resource_id": "deadbeef"}}),
+            &mut scene,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::InvalidParams(msg) if msg.contains("64 hex chars") || msg.contains("64")),
+            "expected InvalidParams about length, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_zone_content_static_image_invalid_hex_chars_rejected() {
+        // Non-hex characters must return InvalidParams.
+        let (mut scene, zone) = scene_with_static_image_zone();
+        // 64 chars with a 'g' which is not a valid hex digit.
+        let bad_hex = "4878ca0425c739fa427f7eda20fe845f6b2f46ba5fe5ac7d6b85add8db6bXXXX";
+        let err = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": {"type": "static_image", "resource_id": bad_hex}}),
+            &mut scene,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::InvalidParams(msg) if msg.contains("not valid hex") || msg.contains("hex")),
+            "expected InvalidParams about invalid hex, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_zone_content_unknown_type_error_includes_static_image() {
+        // The error message for unknown content type must list static_image as valid.
+        let (mut scene, zone) = scene_with_static_image_zone();
+        let err = handle_publish_to_zone(
+            json!({"zone_name": zone, "content": {"type": "bogus_type"}}),
+            &mut scene,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, McpError::InvalidParams(msg) if msg.contains("static_image")),
+            "error for unknown type must mention static_image, got: {err:?}"
+        );
     }
 }
