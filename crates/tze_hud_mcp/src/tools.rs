@@ -1961,9 +1961,12 @@ mod tests {
     }
 
     #[test]
-    fn test_contention_merge_by_key_max_keys_exceeded_fails() {
+    fn test_contention_merge_by_key_max_keys_evicts_oldest() {
+        // When a MergeByKey zone is at max_keys capacity, publishing a new
+        // distinct key must succeed by evicting the oldest entry (index 0).
+        // Spec: openspec/changes/exemplar-status-bar/tasks.md §2.5
         let (mut scene, zone) = scene_with_merge_zone(); // max_keys = 4
-        // Fill all 4 key slots from different namespaces
+        // Fill all 4 key slots; key-0 is inserted first (oldest).
         for i in 0..4u32 {
             handle_publish_to_zone(
                 json!({"zone_name": zone, "content": format!("val-{i}"), "merge_key": format!("key-{i}"), "namespace": format!("agent-{i}")}),
@@ -1971,15 +1974,30 @@ mod tests {
             )
             .unwrap();
         }
-        // 5th distinct key must fail
-        let err = handle_publish_to_zone(
+        // 5th distinct key must SUCCEED — evicting the oldest entry.
+        handle_publish_to_zone(
             json!({"zone_name": zone, "content": "overflow", "merge_key": "key-overflow", "namespace": "agent-x"}),
             &mut scene,
         )
-        .unwrap_err();
+        .expect("5th key must succeed: oldest evicted, max_keys remain");
+
+        // Zone must retain exactly max_keys (4) publications.
+        let pubs = scene.zone_registry.active_for_zone(&zone);
+        assert_eq!(
+            pubs.len(),
+            4,
+            "zone must retain exactly 4 publications after eviction"
+        );
+        // The oldest key ("key-0") must have been evicted.
         assert!(
-            matches!(err, McpError::SceneError(_)),
-            "max_keys exceeded must return SceneError, got: {err:?}"
+            !pubs.iter().any(|r| r.merge_key.as_deref() == Some("key-0")),
+            "key-0 (oldest) must have been evicted"
+        );
+        // The new key must be present.
+        assert!(
+            pubs.iter()
+                .any(|r| r.merge_key.as_deref() == Some("key-overflow")),
+            "key-overflow must be present after eviction"
         );
     }
 
