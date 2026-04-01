@@ -7353,7 +7353,7 @@ mod tests {
     /// confirms the placeholder path is exercised.
     #[tokio::test]
     async fn test_static_image_zone_emits_warm_gray_placeholder() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -7436,7 +7436,7 @@ mod tests {
     /// Content zones emit no vertices when filtered to Background only.
     #[tokio::test]
     async fn test_layer_filter_background_only_emits_background_vertices() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
         // Background zone: solid dark blue (r=0.0, g=0.0, b=1.0).
@@ -7562,7 +7562,7 @@ mod tests {
     /// Using Chrome filter emits no Content zone vertices.
     #[tokio::test]
     async fn test_layer_filter_chrome_only_emits_chrome_vertices() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
         // Content zone: solid green (r=0.0, g=1.0, b=0.0).
@@ -7683,7 +7683,7 @@ mod tests {
     /// the correct ordering regardless of registration order.
     #[tokio::test]
     async fn test_three_pass_ordering_independent_of_registration_order() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
         // Register in REVERSE order: Chrome first, then Background, then Content.
