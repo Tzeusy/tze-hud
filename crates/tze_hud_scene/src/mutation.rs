@@ -1248,8 +1248,13 @@ mod tests {
         let result = scene.apply_batch(&batch);
         assert!(!result.applied, "type-change should be rejected");
         let rej = result.rejection.unwrap();
-        // Must be an InvalidField error
+        // Must be an InvalidField error targeting the data discriminant mismatch.
         assert_eq!(rej.errors[0].mutation_type, "UpdateNodeContent");
+        assert_eq!(
+            rej.primary_code(),
+            Some(ValidationErrorCode::InvalidField),
+            "type-change must produce an InvalidField error code"
+        );
     }
 
     #[test]
