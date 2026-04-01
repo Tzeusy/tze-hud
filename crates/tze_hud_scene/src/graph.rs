@@ -1038,6 +1038,12 @@ impl SceneGraph {
             }
         }
 
+        // Running projected texture total for the batch.  We accumulate deltas
+        // across SetTileRoot and UpdateNodeContent mutations so that a batch
+        // with multiple texture swaps is evaluated against the cumulative
+        // projected usage, not independently against the initial snapshot.
+        let mut projected_tex = usage.texture_bytes;
+
         // Count new nodes per tile (AddNode / SetTileRoot)
         for mutation in &batch.mutations {
             match mutation {
@@ -1065,22 +1071,62 @@ impl SceneGraph {
                             requested: new_count as u64,
                         });
                     }
-                    // Check texture bytes in new tree
+                    // Check texture bytes in new tree against the running projected total.
                     let new_tex = Self::count_texture_bytes_in_node(node);
-                    let other_tex = usage.texture_bytes
-                        - self
-                            .tiles
-                            .get(tile_id)
-                            .and_then(|t| t.root_node)
-                            .map(|r| self.sum_texture_bytes(r))
-                            .unwrap_or(0);
-                    if other_tex + new_tex > budget.max_texture_bytes {
+                    let old_tile_tex = self
+                        .tiles
+                        .get(tile_id)
+                        .and_then(|t| t.root_node)
+                        .map(|r| self.sum_texture_bytes(r))
+                        .unwrap_or(0);
+                    let other_tex = projected_tex.saturating_sub(old_tile_tex);
+                    if other_tex.saturating_add(new_tex) > budget.max_texture_bytes {
                         return Err(BudgetError {
                             resource: "texture_bytes".to_string(),
                             current: other_tex,
                             limit: budget.max_texture_bytes,
                             requested: new_tex,
                         });
+                    }
+                    // Advance the running projected total for subsequent mutations.
+                    projected_tex = other_tex.saturating_add(new_tex);
+                }
+                crate::mutation::SceneMutation::UpdateNodeContent {
+                    node_id,
+                    data: NodeData::StaticImage(new_si),
+                    ..
+                } => {
+                    // UpdateNodeContent on a StaticImage node swaps the texture.
+                    // Compute the old texture bytes for this specific node (if any),
+                    // subtract them from the running projected total, and check
+                    // whether the replacement fits within the budget.
+                    //
+                    // If the resource_id is unchanged and decoded_bytes == 0, the
+                    // preservation logic in update_node_content_impl will restore the
+                    // stored value — so the net texture delta is zero and no budget
+                    // violation can occur.  If decoded_bytes > 0, the caller has
+                    // supplied a concrete new size and we must validate it.
+                    let new_tex = new_si.decoded_bytes;
+                    if new_tex > 0 {
+                        let old_tex = self
+                            .nodes
+                            .get(node_id)
+                            .map(|n| match &n.data {
+                                NodeData::StaticImage(si) => si.decoded_bytes,
+                                _ => 0,
+                            })
+                            .unwrap_or(0);
+                        let other_tex = projected_tex.saturating_sub(old_tex);
+                        if other_tex.saturating_add(new_tex) > budget.max_texture_bytes {
+                            return Err(BudgetError {
+                                resource: "texture_bytes".to_string(),
+                                current: other_tex,
+                                limit: budget.max_texture_bytes,
+                                requested: new_tex,
+                            });
+                        }
+                        // Advance the running projected total for subsequent mutations.
+                        projected_tex = other_tex.saturating_add(new_tex);
                     }
                 }
                 _ => {}
@@ -1691,7 +1737,7 @@ impl SceneGraph {
         &mut self,
         tile_id: SceneId,
         node_id: SceneId,
-        data: NodeData,
+        mut data: NodeData,
         agent_namespace: Option<&str>,
     ) -> Result<(), ValidationError> {
         // Stage 4: Lease + capability check (when namespace is provided).
@@ -1747,6 +1793,32 @@ impl SceneGraph {
 
         // Apply the update — replace data in-place, preserving id and children.
         let node = self.nodes.get_mut(&node_id).unwrap();
+
+        // Budget re-accounting for StaticImage replacement.
+        //
+        // Proto ingest always sets `decoded_bytes = 0` on inbound `StaticImageNode`
+        // payloads because `decoded_bytes` is runtime-owned metadata that the client
+        // must not supply (see `convert.rs`).  If we blindly wrote the incoming zero
+        // into the graph the texture-budget tracking in `sum_texture_bytes` /
+        // `lease_resource_usage` would under-report actual GPU memory usage after
+        // the replacement.
+        //
+        // Preservation rule:
+        //   • Same resource_id AND incoming decoded_bytes == 0 → preserve the
+        //     stored decoded_bytes (the image content has not changed; the stored
+        //     value is authoritative for budget accounting).
+        //   • resource_id changed OR incoming decoded_bytes > 0 → use the incoming
+        //     value.  The caller (session server or test) is responsible for
+        //     populating decoded_bytes from the resource store when the resource
+        //     changes.
+        if let (NodeData::StaticImage(old_si), NodeData::StaticImage(new_si)) =
+            (&node.data, &mut data)
+        {
+            if new_si.resource_id == old_si.resource_id && new_si.decoded_bytes == 0 {
+                new_si.decoded_bytes = old_si.decoded_bytes;
+            }
+        }
+
         node.data = data;
         self.version += 1;
         Ok(())
@@ -4516,6 +4588,187 @@ mod tests {
         // Old image node should be gone.
         assert!(!scene.nodes.contains_key(&node1_id));
         assert_eq!(scene.node_count(), 1);
+    }
+
+    // ─── UpdateNodeContent + StaticImage decoded_bytes tests ────────────
+
+    /// Helper: build a scene with a lease, a tile, and a StaticImage root node.
+    /// Returns (scene, lease_id, tile_id, node_id, original_decoded_bytes).
+    fn scene_with_static_image_node(
+        w: u32,
+        h: u32,
+    ) -> (SceneGraph, SceneId, SceneId, SceneId, u64) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        let (resource_id, decoded_bytes) = make_test_image_resource(w, h);
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                resource_id,
+                width: w,
+                height: h,
+                decoded_bytes,
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            }),
+        };
+        let node_id = node.id;
+        scene.set_tile_root(tile_id, node).unwrap();
+        (scene, lease_id, tile_id, node_id, decoded_bytes)
+    }
+
+    #[test]
+    fn test_update_static_image_same_resource_preserves_decoded_bytes() {
+        // WHEN UpdateNodeContent is applied with the same resource_id and decoded_bytes=0
+        // (as proto ingest always produces), the stored decoded_bytes must be preserved.
+        let (mut scene, lease_id, tile_id, node_id, original_decoded_bytes) =
+            scene_with_static_image_node(64, 48);
+        assert_eq!(original_decoded_bytes, 64 * 48 * 4);
+
+        let (resource_id, _) = make_test_image_resource(64, 48);
+
+        // Simulate proto-ingest: decoded_bytes is zeroed out.
+        let result = scene.update_node_content_checked(
+            tile_id,
+            node_id,
+            NodeData::StaticImage(StaticImageNode {
+                resource_id,
+                width: 64,
+                height: 48,
+                decoded_bytes: 0, // proto ingest always zeros this
+                fit_mode: ImageFitMode::Cover, // changed fit mode
+                bounds: Rect::new(10.0, 10.0, 380.0, 280.0),
+            }),
+            "agent",
+        );
+        assert!(result.is_ok(), "update should succeed: {result:?}");
+
+        // decoded_bytes must be restored from the stored node — not zero.
+        let stored = &scene.nodes[&node_id];
+        match &stored.data {
+            NodeData::StaticImage(si) => {
+                assert_eq!(
+                    si.decoded_bytes, original_decoded_bytes,
+                    "decoded_bytes must be preserved when resource_id is unchanged"
+                );
+                // Other fields must reflect the update.
+                assert_eq!(si.fit_mode, ImageFitMode::Cover);
+            }
+            _ => panic!("expected StaticImage node"),
+        }
+
+        // Texture budget accounting must also reflect the correct bytes.
+        let usage = scene.lease_resource_usage(&lease_id);
+        assert_eq!(
+            usage.texture_bytes, original_decoded_bytes,
+            "lease texture_bytes must still account for the full image size"
+        );
+    }
+
+    #[test]
+    fn test_update_static_image_new_resource_uses_caller_decoded_bytes() {
+        // WHEN UpdateNodeContent replaces a StaticImage with a different resource_id
+        // AND the caller supplies non-zero decoded_bytes (as the session server should),
+        // the new decoded_bytes must be used — not the old value.
+        let (mut scene, lease_id, tile_id, node_id, original_decoded_bytes) =
+            scene_with_static_image_node(64, 48);
+
+        let (new_resource_id, new_decoded_bytes) = make_test_image_resource(128, 96);
+        assert_ne!(
+            new_resource_id,
+            make_test_image_resource(64, 48).0,
+            "resources must differ for this test to be meaningful"
+        );
+
+        let result = scene.update_node_content_checked(
+            tile_id,
+            node_id,
+            NodeData::StaticImage(StaticImageNode {
+                resource_id: new_resource_id,
+                width: 128,
+                height: 96,
+                decoded_bytes: new_decoded_bytes, // caller explicitly provides the new size
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            }),
+            "agent",
+        );
+        assert!(result.is_ok(), "update should succeed: {result:?}");
+
+        let stored = &scene.nodes[&node_id];
+        match &stored.data {
+            NodeData::StaticImage(si) => {
+                assert_eq!(si.resource_id, new_resource_id);
+                assert_eq!(
+                    si.decoded_bytes, new_decoded_bytes,
+                    "decoded_bytes must reflect the new resource size"
+                );
+                assert_ne!(
+                    si.decoded_bytes, original_decoded_bytes,
+                    "old decoded_bytes must not be carried forward to a new resource"
+                );
+            }
+            _ => panic!("expected StaticImage node"),
+        }
+
+        let usage = scene.lease_resource_usage(&lease_id);
+        assert_eq!(
+            usage.texture_bytes, new_decoded_bytes,
+            "lease texture_bytes must account for the new image size"
+        );
+    }
+
+    #[test]
+    fn test_update_static_image_decoded_bytes_zero_after_resource_change_is_zero() {
+        // WHEN UpdateNodeContent replaces a StaticImage with a different resource_id
+        // AND decoded_bytes is 0 (caller bug / missing resource-store lookup),
+        // the graph stores 0 (does NOT inherit the old resource's bytes).
+        // This is the correct conservative behaviour: it's better to under-report
+        // (visible as a budget accounting gap) than to silently charge the wrong amount.
+        let (mut scene, _lease_id, tile_id, node_id, _) = scene_with_static_image_node(64, 48);
+
+        let (new_resource_id, _) = make_test_image_resource(128, 96);
+
+        let result = scene.update_node_content_checked(
+            tile_id,
+            node_id,
+            NodeData::StaticImage(StaticImageNode {
+                resource_id: new_resource_id,
+                width: 128,
+                height: 96,
+                decoded_bytes: 0, // caller failed to populate
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            }),
+            "agent",
+        );
+        assert!(result.is_ok(), "update should succeed");
+
+        let stored = &scene.nodes[&node_id];
+        match &stored.data {
+            NodeData::StaticImage(si) => {
+                assert_eq!(
+                    si.decoded_bytes, 0,
+                    "with a changed resource_id and decoded_bytes=0, graph must store 0"
+                );
+            }
+            _ => panic!("expected StaticImage node"),
+        }
     }
 
     // ─── Lease State Machine Tests (RFC 0008) ───────────────────────────
