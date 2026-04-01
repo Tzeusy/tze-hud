@@ -2432,8 +2432,9 @@ async fn handle_mutation_batch(
                 match bytes_to_scene_id(&utim.tile_id) {
                     Ok(tile_id) => {
                         let input_mode = convert::proto_input_mode_to_scene(
-                            crate::proto::TileInputModeProto::try_from(utim.input_mode)
-                                .unwrap_or(crate::proto::TileInputModeProto::TileInputModeUnspecified),
+                            crate::proto::TileInputModeProto::try_from(utim.input_mode).unwrap_or(
+                                crate::proto::TileInputModeProto::TileInputModeUnspecified,
+                            ),
                         );
                         scene_mutations.push(SceneMutation::UpdateTileInputMode {
                             tile_id,
@@ -2744,10 +2745,9 @@ async fn apply_queued_batch_to_scene(
                 match bytes_to_scene_id(&utim.tile_id) {
                     Ok(tile_id) => {
                         let input_mode = convert::proto_input_mode_to_scene(
-                            crate::proto::TileInputModeProto::try_from(utim.input_mode)
-                                .unwrap_or(
-                                    crate::proto::TileInputModeProto::TileInputModeUnspecified,
-                                ),
+                            crate::proto::TileInputModeProto::try_from(utim.input_mode).unwrap_or(
+                                crate::proto::TileInputModeProto::TileInputModeUnspecified,
+                            ),
                         );
                         scene_mutations.push(SceneMutation::UpdateTileInputMode {
                             tile_id,

@@ -2116,7 +2116,10 @@ fn test_ambient_background_zero_ttl_persists() {
         .expect("publish with zero-TTL (None expires) must succeed");
 
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "ambient-background must have 1 active publication immediately after publish"
     );
@@ -2131,7 +2134,10 @@ fn test_ambient_background_zero_ttl_persists() {
         "zero-TTL (indefinite) publication must not be removed after 60 s"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "ambient-background publication must persist 60 s after publish (zero TTL = indefinite)"
     );
@@ -2177,7 +2183,10 @@ fn test_ambient_background_omitted_ttl_persists() {
         "omitted-TTL publication must never expire via drain_expired_zone_publications"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "omitted-TTL ambient-background publication must survive indefinitely"
     );
@@ -2214,7 +2223,10 @@ fn test_ambient_background_nonzero_ttl_expires() {
 
     // Immediately present.
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "ambient-background must have 1 active publication immediately after publish"
     );
@@ -2230,7 +2242,13 @@ fn test_ambient_background_nonzero_ttl_expires() {
     // Before expiry: drain is a no-op.
     let removed = scene.drain_expired_zone_publications();
     assert_eq!(removed, 0, "publication must not expire before TTL elapses");
-    assert_eq!(scene.zone_registry.active_for_zone("ambient-background").len(), 1);
+    assert_eq!(
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
+        1
+    );
 
     // Advance past the TTL expiry.
     clock.set_us(expiry_us + 1);
@@ -2240,7 +2258,10 @@ fn test_ambient_background_nonzero_ttl_expires() {
         "non-zero-TTL ambient-background publication must be removed after expiry"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         0,
         "ambient-background must be empty after TTL expiry (reverts to transparent/clear)"
     );
@@ -2275,7 +2296,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
         .expect("initial publish with non-zero TTL must succeed");
 
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "warm_amber publication must be present immediately"
     );
@@ -2285,7 +2309,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
     let removed = scene.drain_expired_zone_publications();
     assert_eq!(removed, 1, "warm_amber TTL publication must expire");
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         0,
         "ambient-background must be empty after TTL expiry"
     );
@@ -2303,7 +2330,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
         .expect("republish after expiry must succeed");
 
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "forest_green republish must produce exactly 1 active publication"
     );
@@ -2324,7 +2354,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
         "persistent republish must not expire regardless of elapsed time"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "forest_green persistent publication must still be active 60 s after republish"
     );
