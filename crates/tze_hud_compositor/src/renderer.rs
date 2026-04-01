@@ -1910,6 +1910,20 @@ impl Compositor {
             ));
         }
 
+        // Update zone animation states (fade-in/fade-out) before rendering.
+        // Must run before any render_zone_content call below.
+        self.update_zone_animations(scene);
+
+        // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
+        // Background zones render first so agent tiles occlude them.
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            sw,
+            sh,
+            Some(LayerAttachment::Background),
+        );
+
         for tile in &tiles {
             // Render tile background
             let bg_color = self.tile_background_color(tile, scene);
@@ -1930,11 +1944,10 @@ impl Compositor {
             }
         }
 
-        // Update zone animation states (fade-in/fade-out) before rendering.
-        self.update_zone_animations(scene);
-
-        // Render zone content.
-        self.render_zone_content(scene, &mut vertices, sw, sh);
+        // Content zones render as a batch after all tiles (above background, below chrome).
+        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
+        // Chrome zones render last, above everything.
+        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Chrome));
 
         // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
         // SVG rasterization can be slow; if a resize event arrives while we hold
@@ -2008,6 +2021,20 @@ impl Compositor {
         let sh = surf_h as f32;
         let mut vertices: Vec<RectVertex> = Vec::new();
 
+        // Update zone animation states before rendering zone content.
+        // Must run before any render_zone_content call below.
+        self.update_zone_animations(scene);
+
+        // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
+        // Background zones render first so agent tiles occlude them.
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            sw,
+            sh,
+            Some(LayerAttachment::Background),
+        );
+
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
             let verts = rect_vertices(
@@ -2026,11 +2053,10 @@ impl Compositor {
             }
         }
 
-        // Update zone animation states before rendering zone content.
-        self.update_zone_animations(scene);
-
-        // Render zone content backdrops.
-        self.render_zone_content(scene, &mut vertices, sw, sh);
+        // Content zones render as a batch after all tiles (above background, below chrome).
+        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
+        // Chrome zones render last, above everything.
+        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Chrome));
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -2110,6 +2136,20 @@ impl Compositor {
         let sw = surf_w as f32;
         let sh = surf_h as f32;
 
+        // Update zone animation states before rendering zone content.
+        // Must run before any render_zone_content call below.
+        self.update_zone_animations(scene);
+
+        // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
+        // Background zones render first so agent tiles occlude them.
+        self.render_zone_content(
+            scene,
+            &mut content_vertices,
+            sw,
+            sh,
+            Some(LayerAttachment::Background),
+        );
+
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
             let verts = rect_vertices(
@@ -2127,9 +2167,22 @@ impl Compositor {
             }
         }
 
-        // Update zone animation states and render zone content backdrops.
-        self.update_zone_animations(scene);
-        self.render_zone_content(scene, &mut content_vertices, sw, sh);
+        // Content zones render as a batch after all tiles (above background, below chrome).
+        self.render_zone_content(
+            scene,
+            &mut content_vertices,
+            sw,
+            sh,
+            Some(LayerAttachment::Content),
+        );
+        // Chrome zones render last in the content pass (before the separate GPU chrome pass).
+        self.render_zone_content(
+            scene,
+            &mut content_vertices,
+            sw,
+            sh,
+            Some(LayerAttachment::Chrome),
+        );
 
         let encode_start = std::time::Instant::now();
 
@@ -2363,6 +2416,15 @@ impl Compositor {
     /// - Applies the zone's current animation opacity (fade-in/fade-out).
     /// - Skips the backdrop quad when `rendering_policy.backdrop` is `None`.
     ///
+    /// ## Layer filtering
+    ///
+    /// When `only_layer` is `Some(layer)`, only zones whose `layer_attachment`
+    /// matches `layer` are rendered.  Pass `None` to render all layers (the
+    /// legacy behaviour used by unit tests that call this method directly).
+    ///
+    /// Render-frame methods call this three times to enforce the canonical
+    /// layer order: Background → (tiles) → Content → Chrome.
+    ///
     /// No per-content-type color branching — all visual properties come from
     /// `RenderingPolicy` fields (spec §Refactoring note, §Default Zone Rendering).
     fn render_zone_content(
@@ -2371,6 +2433,7 @@ impl Compositor {
         vertices: &mut Vec<RectVertex>,
         sw: f32,
         sh: f32,
+        only_layer: Option<LayerAttachment>,
     ) {
         for (zone_name, publishes) in &scene.zone_registry.active_publishes {
             if publishes.is_empty() {
@@ -2380,6 +2443,12 @@ impl Compositor {
                 Some(z) => z,
                 None => continue,
             };
+            // Layer filter: skip zones that don't match the requested layer.
+            if let Some(required_layer) = only_layer {
+                if zone_def.layer_attachment != required_layer {
+                    continue;
+                }
+            }
             let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
 
             let policy = &zone_def.rendering_policy;
@@ -2629,7 +2698,15 @@ impl Compositor {
         // backgrounds so developers can see zone geometry even when zones have
         // opaque content.  The overall background gets a subtle black tint;
         // each zone gets a rainbow-sampled color at low opacity.
-        if self.debug_zone_tints {
+        //
+        // Guard: only emit debug tints when there is no layer filter (legacy
+        // single-pass test usage) or on the final Chrome pass.  The three-pass
+        // frame-render methods call this function three times; without this
+        // guard the debug overlay would be drawn 3× per frame, tripling its
+        // effective opacity.
+        let emit_debug_tints =
+            self.debug_zone_tints && matches!(only_layer, None | Some(LayerAttachment::Chrome));
+        if emit_debug_tints {
             // 0.5% opacity black background tint over the full window.
             // In overlay mode, the clear_pipeline writes RGBA directly (no
             // GPU blending). DWM composites with premultiplied alpha, so RGB
@@ -4083,7 +4160,7 @@ mod tests {
 
         // render_zone_content should produce backdrop rect vertices.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
         // We check that vertices were emitted (backdrop rendered).
         assert!(
             !vertices.is_empty(),
@@ -4153,7 +4230,7 @@ mod tests {
 
         // Collect vertices from render_zone_content.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // The backdrop should be severity warning color (~amber: R=1.0, G~0.72, B=0.0).
         // rect_vertices emits 6 vertices; each has color at the end.
@@ -4262,7 +4339,7 @@ mod tests {
         // Render and check: the backdrop must NOT be severity critical (pure red R~1.0, G~0.0, B~0.0).
         // It should be notification urgency critical fallback: #8B1A1A (R~0.545, G~0.102, B~0.102).
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         assert!(
             !vertices.is_empty(),
@@ -4513,7 +4590,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         assert!(!vertices.is_empty(), "expected vertices");
         // The first quad's alpha (index 3 of color) should be 0.9.
@@ -4575,7 +4652,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // One backdrop (6 vertices) + up to 4 border quads (6 each) = 6 + 24 = 30 max.
         // Minimum: 6 (backdrop) + 6 (at least top edge border) = 12.
@@ -4641,7 +4718,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // alert-banner: only 6 vertices (one backdrop quad, no border).
         assert_eq!(
@@ -4703,7 +4780,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // vertices[0..6] = backdrop quad (urgency low color)
         // vertices[6..] = border quads (should be cyan: R≈0, G≈1, B≈1)
@@ -4897,7 +4974,7 @@ mod tests {
 
         // Collect vertices from render_zone_content.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // rect_vertices emits 6 vertices per quad; each vertex has a `color: [f32; 4]` field.
         // The backdrop should be green (R~0.0, G~1.0, B~0.0), not amber.
@@ -5014,7 +5091,7 @@ mod tests {
         // We verify this by checking the vertex colors produced — the alpha channel
         // of the first rect vertex should reflect 0.6.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
         assert!(!vertices.is_empty(), "expected backdrop vertices");
         // The RectVertex has color field [f32; 4]; alpha should be ~0.6.
         let alpha = vertices[0].color[3];
@@ -5066,7 +5143,7 @@ mod tests {
 
         // With backdrop=None, no rect vertices should be emitted.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
         assert!(
             vertices.is_empty(),
             "no backdrop quad should be rendered when policy.backdrop is None"
@@ -5123,7 +5200,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
         assert!(
             vertices.is_empty(),
             "no backdrop or border quads should be rendered when policy.backdrop is None, got {} vertices",
@@ -5229,7 +5306,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // Two publications → two backdrop quads (6 verts each) + border quads.
         // Each Notification slot emits: 1 backdrop quad (6) + 4 border quads (24) = 30.
@@ -6132,7 +6209,7 @@ mod tests {
 
         // No publications — zone is inactive.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // Zero vertices emitted → zone occupies zero visible space.
         assert!(
@@ -6418,7 +6495,7 @@ mod tests {
         {
             let scene = make_alert_banner_scene();
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
             assert!(
                 vertices.is_empty(),
                 "0 banners → 0 vertices (zero height); got {} vertices",
@@ -6431,7 +6508,7 @@ mod tests {
             let mut scene = make_alert_banner_scene();
             publish_alert(&mut scene, "Single banner", 2, "agent-a");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
             assert_eq!(
                 vertices.len(),
                 6,
@@ -6452,7 +6529,7 @@ mod tests {
             publish_alert(&mut scene, "Banner B", 2, "agent-b");
             publish_alert(&mut scene, "Banner C", 3, "agent-c");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
             assert_eq!(
                 vertices.len(),
                 18,
@@ -6488,7 +6565,7 @@ mod tests {
         publish_alert(&mut scene, "Critical", 3, "agent-b");
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // 2 backdrop quads → 12 vertices.
         assert_eq!(vertices.len(), 12, "2 banners → 12 vertices");
@@ -7254,7 +7331,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
 
         // At least one backdrop quad must be emitted.
         assert!(
@@ -7283,6 +7360,450 @@ mod tests {
             color[3] > 0.5,
             "StaticImage placeholder must be substantially opaque (A > 0.5), got {}",
             color[3]
+        );
+    }
+
+    // ── LayerAttachment rendering order tests ─────────────────────────────────
+    //
+    // These tests verify that render_zone_content respects LayerAttachment when
+    // an only_layer filter is provided, and that the three-pass ordering
+    // (Background → Content → Chrome) is enforced by the layer filter.
+    //
+    // The approach: register zones with distinct SolidColor publishes, then call
+    // render_zone_content with each layer filter in sequence and verify which
+    // vertices are emitted.  rect_vertices emits 6 vertices per quad; the color
+    // fields let us identify which zone's vertices are which.
+
+    /// Background zones emit vertices only when the Background layer filter is used.
+    /// Content zones emit no vertices when filtered to Background only.
+    #[tokio::test]
+    async fn test_layer_filter_background_only_emits_background_vertices() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+
+        // Background zone: solid dark blue (r=0.0, g=0.0, b=1.0).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "bg-zone".to_owned(),
+            description: "background layer".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Background,
+        });
+
+        // Content zone: solid red (r=1.0, g=0.0, b=0.0).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "content-zone".to_owned(),
+            description: "content layer".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.1,
+                y_pct: 0.1,
+                width_pct: 0.5,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        scene
+            .publish_to_zone(
+                "bg-zone",
+                ZoneContent::SolidColor(Rgba::new(0.0, 0.0, 1.0, 1.0)),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "content-zone",
+                ZoneContent::SolidColor(Rgba::new(1.0, 0.0, 0.0, 1.0)),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Filter: Background only — should emit bg-zone quads (6 verts), not content-zone quads.
+        let mut bg_only: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(
+            &scene,
+            &mut bg_only,
+            1280.0,
+            720.0,
+            Some(LayerAttachment::Background),
+        );
+        // rect_vertices emits 6 vertices; bg-zone should emit exactly 6.
+        assert_eq!(
+            bg_only.len(),
+            6,
+            "Background filter must emit exactly one quad (6 verts) for bg-zone"
+        );
+        // Verify the color is the bg-zone blue (r≈0.0, b≈1.0).
+        let first_color = bg_only[0].color;
+        assert!(
+            first_color[0] < 0.1,
+            "Background zone vertex R must be near 0.0 (blue); got {:?}",
+            first_color
+        );
+        assert!(
+            first_color[2] > 0.9,
+            "Background zone vertex B must be near 1.0 (blue); got {:?}",
+            first_color
+        );
+
+        // Filter: Content only — should emit content-zone quads, not bg-zone quads.
+        let mut content_only: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(
+            &scene,
+            &mut content_only,
+            1280.0,
+            720.0,
+            Some(LayerAttachment::Content),
+        );
+        assert_eq!(
+            content_only.len(),
+            6,
+            "Content filter must emit exactly one quad (6 verts) for content-zone"
+        );
+        // Verify the color is the content-zone red (r≈1.0, b≈0.0).
+        let content_color = content_only[0].color;
+        assert!(
+            content_color[0] > 0.9,
+            "Content zone vertex R must be near 1.0 (red); got {:?}",
+            content_color
+        );
+        assert!(
+            content_color[2] < 0.1,
+            "Content zone vertex B must be near 0.0 (red); got {:?}",
+            content_color
+        );
+    }
+
+    /// Chrome zones emit vertices only when the Chrome layer filter is used.
+    /// Using Chrome filter emits no Content zone vertices.
+    #[tokio::test]
+    async fn test_layer_filter_chrome_only_emits_chrome_vertices() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+
+        // Content zone: solid green (r=0.0, g=1.0, b=0.0).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "content-zone".to_owned(),
+            description: "content layer".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.1,
+                y_pct: 0.1,
+                width_pct: 0.5,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // Chrome zone: solid yellow (r=1.0, g=1.0, b=0.0).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "chrome-zone".to_owned(),
+            description: "chrome layer".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.3,
+                height_pct: 0.1,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "content-zone",
+                ZoneContent::SolidColor(Rgba::new(0.0, 1.0, 0.0, 1.0)),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "chrome-zone",
+                ZoneContent::SolidColor(Rgba::new(1.0, 1.0, 0.0, 1.0)),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Chrome filter: must emit only chrome-zone vertices.
+        let mut chrome_only: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(
+            &scene,
+            &mut chrome_only,
+            1280.0,
+            720.0,
+            Some(LayerAttachment::Chrome),
+        );
+        assert_eq!(
+            chrome_only.len(),
+            6,
+            "Chrome filter must emit exactly one quad (6 verts) for chrome-zone"
+        );
+        // Verify the color is the chrome-zone yellow (r≈1.0, g≈1.0, b≈0.0).
+        let chrome_color = chrome_only[0].color;
+        assert!(
+            chrome_color[0] > 0.9,
+            "Chrome zone vertex R must be near 1.0 (yellow); got {:?}",
+            chrome_color
+        );
+        assert!(
+            chrome_color[1] > 0.9,
+            "Chrome zone vertex G must be near 1.0 (yellow); got {:?}",
+            chrome_color
+        );
+        assert!(
+            chrome_color[2] < 0.1,
+            "Chrome zone vertex B must be near 0.0 (yellow); got {:?}",
+            chrome_color
+        );
+
+        // Content filter: must emit only content-zone vertices.
+        let mut content_only: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(
+            &scene,
+            &mut content_only,
+            1280.0,
+            720.0,
+            Some(LayerAttachment::Content),
+        );
+        assert_eq!(
+            content_only.len(),
+            6,
+            "Content filter must emit exactly one quad (6 verts) for content-zone"
+        );
+    }
+
+    /// Three-pass ordering: Background vertices precede Content, Content precedes Chrome.
+    ///
+    /// This test registers zones in Chrome→Background→Content order (reverse of
+    /// the canonical order) and verifies that manual three-pass rendering produces
+    /// the correct ordering regardless of registration order.
+    #[tokio::test]
+    async fn test_three_pass_ordering_independent_of_registration_order() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+
+        // Register in REVERSE order: Chrome first, then Background, then Content.
+        // The rendering order must still be Background → Content → Chrome.
+
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "chrome-zone".to_owned(),
+            description: "registered first but renders last".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.2,
+                height_pct: 0.1,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "bg-zone".to_owned(),
+            description: "registered second but renders first".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Background,
+        });
+
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "content-zone".to_owned(),
+            description: "registered third, renders between bg and chrome".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.1,
+                y_pct: 0.1,
+                width_pct: 0.5,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::SolidColor],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // Publish distinct colors so we can identify each zone's vertices.
+        // Background = blue (r=0, g=0, b=1), Content = red (r=1, g=0, b=0),
+        // Chrome = yellow (r=1, g=1, b=0).
+        scene
+            .publish_to_zone(
+                "chrome-zone",
+                ZoneContent::SolidColor(Rgba::new(1.0, 1.0, 0.0, 1.0)),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "bg-zone",
+                ZoneContent::SolidColor(Rgba::new(0.0, 0.0, 1.0, 1.0)),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "content-zone",
+                ZoneContent::SolidColor(Rgba::new(1.0, 0.0, 0.0, 1.0)),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Perform three-pass rendering into a single vertex buffer.
+        // Pass 1: Background.
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(
+            &scene,
+            &mut vertices,
+            1280.0,
+            720.0,
+            Some(LayerAttachment::Background),
+        );
+        let after_background = vertices.len();
+
+        // Pass 2: Content.
+        compositor.render_zone_content(
+            &scene,
+            &mut vertices,
+            1280.0,
+            720.0,
+            Some(LayerAttachment::Content),
+        );
+        let after_content = vertices.len();
+
+        // Pass 3: Chrome.
+        compositor.render_zone_content(
+            &scene,
+            &mut vertices,
+            1280.0,
+            720.0,
+            Some(LayerAttachment::Chrome),
+        );
+        let after_chrome = vertices.len();
+
+        // Each zone produces exactly 6 vertices (one rect_vertices quad).
+        assert_eq!(
+            after_background, 6,
+            "Background pass must emit 6 vertices; got {after_background}"
+        );
+        assert_eq!(
+            after_content, 12,
+            "After Content pass, total must be 12 vertices; got {after_content}"
+        );
+        assert_eq!(
+            after_chrome, 18,
+            "After Chrome pass, total must be 18 vertices; got {after_chrome}"
+        );
+
+        // Verify vertex colors are in the correct positional order:
+        // indices 0–5 = Background (blue), 6–11 = Content (red), 12–17 = Chrome (yellow).
+        let bg_r = vertices[0].color[0];
+        let bg_b = vertices[0].color[2];
+        assert!(
+            bg_r < 0.1,
+            "First quad (background) must be blue (R≈0.0); got R={bg_r}"
+        );
+        assert!(
+            bg_b > 0.9,
+            "First quad (background) must be blue (B≈1.0); got B={bg_b}"
+        );
+
+        let content_r = vertices[6].color[0];
+        let content_b = vertices[6].color[2];
+        assert!(
+            content_r > 0.9,
+            "Second quad (content) must be red (R≈1.0); got R={content_r}"
+        );
+        assert!(
+            content_b < 0.1,
+            "Second quad (content) must be red (B≈0.0); got B={content_b}"
+        );
+
+        let chrome_r = vertices[12].color[0];
+        let chrome_g = vertices[12].color[1];
+        assert!(
+            chrome_r > 0.9,
+            "Third quad (chrome) must be yellow (R≈1.0); got R={chrome_r}"
+        );
+        assert!(
+            chrome_g > 0.9,
+            "Third quad (chrome) must be yellow (G≈1.0); got G={chrome_g}"
         );
     }
 }
