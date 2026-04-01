@@ -893,7 +893,7 @@ impl Compositor {
             // Emit TextItems based on contention policy.
             //
             // Stack: each publication occupies a vertically-stacked slot (newest at top,
-            //   slot 0 = newest).  slot_h = font_size_px + 2*margin_v + 2 (content-sized).
+            //   slot 0 = newest).  slot_h via Self::stack_slot_height().
             //
             // MergeByKey: collect ALL StatusBar publications, merge their entries
             //   (last write wins per key), render the merged set as one text item.
@@ -901,12 +901,7 @@ impl Compositor {
             // LatestWins / Replace: render only the most-recent publication.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
-                    // slot_height = font_size_px + 2*margin_v (from policy) + 2*border_width(1px).
-                    // Derive margin_v from RenderingPolicy (margin_vertical → margin_px → 8px)
-                    // rather than hardcoding 18.0, so per-zone policy overrides are respected.
-                    let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
-                    let slot_h = (font_size_px + 2.0 * margin_v + 2.0).max(1.0);
+                    let slot_h = Self::stack_slot_height(policy);
                     // Render newest-first: slot_index 0 = newest (top of zone).
                     for (slot_idx, record) in publishes.iter().rev().enumerate() {
                         let slot_y = zy + slot_idx as f32 * slot_h;
@@ -1837,7 +1832,7 @@ impl Compositor {
             //
             // Stack zones: each publication gets its own vertically-stacked slot.
             //   Publishes are rendered newest-first (slot 0 = newest, at top of zone).
-            //   slot_h = font_size_px + 2*margin_v (from RenderingPolicy) + 2*border_width(1px).
+            //   slot_h via Self::stack_slot_height() — content-sized, policy-driven.
             //   This gives each notification a content-sized slot rather than dividing
             //   zone height uniformly by max_depth.
             //
@@ -1847,12 +1842,7 @@ impl Compositor {
             // LatestWins / Replace: single backdrop from the most-recent publish only.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
-                    // slot_height = font_size_px + 2*margin_v (from policy) + 2*border_width(1px).
-                    // Derive margin_v from RenderingPolicy (margin_vertical → margin_px → 8px)
-                    // rather than hardcoding 18.0, so per-zone policy overrides are respected.
-                    let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
-                    let slot_h = (font_size_px + 2.0 * margin_v + 2.0).max(1.0);
+                    let slot_h = Self::stack_slot_height(policy);
                     // Render newest-first: slot_index 0 = newest (top of zone).
                     for (slot_idx, record) in publishes.iter().rev().enumerate() {
                         let slot_y = y + slot_idx as f32 * slot_h;
@@ -1978,6 +1968,25 @@ impl Compositor {
                 vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, color));
             }
         }
+    }
+
+    /// Compute the per-slot height for a Stack zone.
+    ///
+    /// `slot_h = font_size_px + 2 * margin_v + SLOT_BASELINE_GAP`
+    ///
+    /// - `font_size_px` — from `RenderingPolicy`; defaults to 16.
+    /// - `margin_v` — from `margin_vertical` → `margin_px` → 8 px fallback chain.
+    /// - `SLOT_BASELINE_GAP` — a small constant gap (2 px) between successive slot
+    ///   backdrops so they don't bleed into each other visually. This is not a
+    ///   configurable policy field; it is a structural layout constant.
+    ///
+    /// Used by both `collect_text_items` and `render_zone_content` so both code
+    /// paths stay consistent.
+    fn stack_slot_height(policy: &RenderingPolicy) -> f32 {
+        const SLOT_BASELINE_GAP: f32 = 2.0;
+        let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
+        let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
+        (font_size_px + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
     }
 
     /// Resolve a zone's geometry policy to pixel bounds (x, y, w, h).
@@ -4305,15 +4314,17 @@ mod tests {
         );
     }
 
-    /// Stack notifications clip at zone boundary: when slot_height pushes a
-    /// notification below zone bottom, it must not produce a TextItem.
+    /// Stack notifications clip at zone boundary: slots whose top-left y is at or
+    /// beyond zone_bottom are fully clipped and produce no TextItem. Partial slots
+    /// (y < zone_bottom but y+slot_h > zone_bottom) are emitted with clamped height.
     #[tokio::test]
     async fn test_stack_slot_clips_at_zone_boundary() {
         let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Zone height: 72px at 720 tall → height_pct = 72/720 = 0.1.
-        // slot_h = 16 + 18 = 34.  Only 2 full slots fit (2*34=68 < 72; 3*34=102 > 72).
+        // font_size_px=16, default margin_v=8 → slot_h = 16+2*8+2 = 34px.
+        // 2 full slots fit (slots 0,1: 2*34=68 < 72); slot 2 partial (y=68 < 72); slot 3 clipped.
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
             name: "notification-area".to_owned(),
@@ -4360,16 +4371,16 @@ mod tests {
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
 
         // Zone height = 72px, slot_h = 34px.
-        // slot 0 at y=0 (fits: 34 ≤ 72).
-        // slot 1 at y=34 (fits: 34+34=68 ≤ 72).
-        // slot 2 at y=68 (clips: 68+34=102 > 72, but y=68 < 72 so partial emit is ok,
-        //   but effective_slot_h = 4px which is < margin_v(8) — the text might not
-        //   render but the item is still emitted with clamped height).
-        // slot 3 at y=102 → y >= zone_bottom(72) → clipped, no item.
-        // So at most 3 items (slots 0,1,2); slot 3 is fully clipped.
-        assert!(
-            items.len() <= 3,
-            "with 72px zone and 34px slots, at most 3 items should fit; got {}",
+        // slot 0 at y=0  (fits: 0+34=34 ≤ 72 → emitted).
+        // slot 1 at y=34 (fits: 34+34=68 ≤ 72 → emitted).
+        // slot 2 at y=68 (partial: y=68 < 72, effective_slot_h = 4 → still emitted,
+        //   clamped; text may not visually render but the TextItem is produced).
+        // slot 3 at y=102 → y ≥ zone_bottom(72) → loop breaks, no item.
+        // Exactly 3 items (slots 0, 1, 2) are emitted.
+        assert_eq!(
+            items.len(),
+            3,
+            "with 72px zone and 34px slots, exactly 3 items should be emitted; got {}",
             items.len()
         );
 
