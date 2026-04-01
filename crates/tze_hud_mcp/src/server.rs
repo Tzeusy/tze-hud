@@ -1127,7 +1127,7 @@ mod tests {
     async fn server_with_gauge() -> McpServer {
         use std::collections::HashMap;
         use tze_hud_scene::types::{
-            ContentionPolicy as CP, GeometryPolicy, Rgba, RenderingPolicy, WidgetDefinition,
+            ContentionPolicy as CP, GeometryPolicy, RenderingPolicy, Rgba, WidgetDefinition,
             WidgetInstance, WidgetParamConstraints, WidgetParamType, WidgetParameterDeclaration,
             WidgetParameterValue,
         };
@@ -1448,7 +1448,10 @@ mod tests {
         });
         let raw1 = server.dispatch(&req1.to_string(), &guest()).await;
         let resp1 = parse_response(&raw1);
-        assert!(resp1["error"].is_null(), "first rapid publish should succeed");
+        assert!(
+            resp1["error"].is_null(),
+            "first rapid publish should succeed"
+        );
 
         // Second publish: level=0.8 with 300ms transition — immediately follows.
         let req2 = json!({
@@ -1518,7 +1521,10 @@ mod tests {
         );
 
         // Type count and instance count.
-        assert_eq!(resp["result"]["type_count"], 1, "one widget type registered");
+        assert_eq!(
+            resp["result"]["type_count"], 1,
+            "one widget type registered"
+        );
         assert_eq!(
             resp["result"]["instance_count"], 1,
             "one widget instance registered"
@@ -1575,9 +1581,8 @@ mod tests {
 
         let severity = find_param("severity");
         assert_eq!(severity["param_type"], "enum", "severity must be enum");
-        let allowed: Vec<String> =
-            serde_json::from_value(severity["enum_allowed_values"].clone())
-                .expect("enum_allowed_values must be an array");
+        let allowed: Vec<String> = serde_json::from_value(severity["enum_allowed_values"].clone())
+            .expect("enum_allowed_values must be an array");
         assert_eq!(
             allowed,
             vec!["info", "warning", "error"],
