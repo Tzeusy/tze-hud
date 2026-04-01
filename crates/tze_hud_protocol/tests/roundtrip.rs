@@ -107,6 +107,7 @@ use tze_hud_protocol::proto::{
     StatusBarPayload,
     TextAlignProto,
     TextMarkdownNodeProto,
+    TextOverflowProto,
     TileCreatedEvent,
     TileDeletedEvent,
     TileUpdatedEvent,
@@ -472,6 +473,7 @@ fn roundtrip_zone_definition_proto() {
             margin_vertical: -1.0,
             transition_in_ms: 0,
             transition_out_ms: 0,
+            overflow: 0, // TextOverflowProto::Unspecified = not set
         }),
         contention_policy: ContentionPolicyProto::ContentionPolicyLatestWins as i32,
         max_publishers: 4,
@@ -1433,7 +1435,7 @@ fn roundtrip_decode_with_unknown_fields_succeeds() {
 
 // ─── RenderingPolicyProto extended fields (hud-sc0a.2) ───────────────────────
 
-/// Round-trip with ALL extended fields populated (fields 5-14).
+/// Round-trip with ALL extended fields populated (fields 5-15).
 #[test]
 fn roundtrip_rendering_policy_proto_all_fields_populated() {
     let orig = RenderingPolicyProto {
@@ -1447,7 +1449,7 @@ fn roundtrip_rendering_policy_proto_all_fields_populated() {
         }),
         text_align: TextAlignProto::Center as i32,
         margin_px: 12.0,
-        // extended fields 5-14
+        // extended fields 5-15
         font_family: FontFamilyProto::SystemMonospace as i32,
         font_weight: 700,
         text_color: Some(Rgba {
@@ -1468,6 +1470,7 @@ fn roundtrip_rendering_policy_proto_all_fields_populated() {
         margin_vertical: 8.0,
         transition_in_ms: 250,
         transition_out_ms: 150,
+        overflow: TextOverflowProto::Ellipsis as i32,
     };
     let decoded = round_trip(&orig);
     // original fields
@@ -1495,6 +1498,7 @@ fn roundtrip_rendering_policy_proto_all_fields_populated() {
     assert_eq!(orig.margin_vertical, decoded.margin_vertical);
     assert_eq!(orig.transition_in_ms, decoded.transition_in_ms);
     assert_eq!(orig.transition_out_ms, decoded.transition_out_ms);
+    assert_eq!(orig.overflow, decoded.overflow);
 }
 
 /// Round-trip with all extended fields absent (all-None / zero-value proto defaults).
@@ -1517,6 +1521,7 @@ fn roundtrip_rendering_policy_proto_all_fields_none() {
         margin_vertical: -1.0,
         transition_in_ms: 0,
         transition_out_ms: 0,
+        overflow: TextOverflowProto::Unspecified as i32,
     };
     let decoded = round_trip(&orig);
     assert_eq!(decoded.font_size_px, 0.0);
@@ -1560,6 +1565,7 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
         margin_vertical: 0.0,
         transition_in_ms: 0,
         transition_out_ms: 0,
+        overflow: 0, // TextOverflowProto::Unspecified = proto3 default
     };
 
     // Encode only the fields that would be present in a v0 wire message.
@@ -1609,11 +1615,11 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
 }
 
 /// Round-trip: convert::rendering_policy_to_proto then proto_to_rendering_policy
-/// with all 14 fields populated and verify None fields are preserved.
+/// with all 15 fields populated and verify None fields are preserved.
 #[test]
 fn roundtrip_rendering_policy_convert_all_fields_populated() {
     use tze_hud_protocol::convert::{proto_to_rendering_policy, rendering_policy_to_proto};
-    use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba as SceneRgba, TextAlign};
+    use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba as SceneRgba, TextAlign, TextOverflow};
 
     let original = RenderingPolicy {
         font_size_px: Some(20.0),
@@ -1645,6 +1651,7 @@ fn roundtrip_rendering_policy_convert_all_fields_populated() {
         margin_vertical: Some(6.0),
         transition_in_ms: Some(300),
         transition_out_ms: Some(200),
+        overflow: Some(TextOverflow::Ellipsis),
     };
 
     let proto = rendering_policy_to_proto(&original);
@@ -1673,6 +1680,7 @@ fn roundtrip_rendering_policy_convert_all_fields_populated() {
     assert_eq!(recovered.margin_vertical, original.margin_vertical);
     assert_eq!(recovered.transition_in_ms, original.transition_in_ms);
     assert_eq!(recovered.transition_out_ms, original.transition_out_ms);
+    assert_eq!(recovered.overflow, original.overflow);
 }
 
 /// Round-trip: convert with all extended fields as None — original 4 fields survive.
@@ -1701,6 +1709,7 @@ fn roundtrip_rendering_policy_convert_all_new_fields_none() {
         margin_vertical: None,
         transition_in_ms: None,
         transition_out_ms: None,
+        overflow: None,
     };
 
     let proto = rendering_policy_to_proto(&original);
@@ -1721,6 +1730,7 @@ fn roundtrip_rendering_policy_convert_all_new_fields_none() {
     assert!(recovered.margin_vertical.is_none());
     assert!(recovered.transition_in_ms.is_none());
     assert!(recovered.transition_out_ms.is_none());
+    assert!(recovered.overflow.is_none());
 }
 
 /// Backward-compat: deserialize a pre-extension JSON RenderingPolicy
@@ -1782,5 +1792,9 @@ fn roundtrip_rendering_policy_json_backward_compat_pre_extension() {
     assert!(
         rp.transition_out_ms.is_none(),
         "transition_out_ms must be None for pre-extension JSON"
+    );
+    assert!(
+        rp.overflow.is_none(),
+        "overflow must be None for pre-extension JSON"
     );
 }

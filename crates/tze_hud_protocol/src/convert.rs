@@ -455,6 +455,13 @@ pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicy
         margin_vertical: rp.margin_vertical.unwrap_or(-1.0),
         transition_in_ms: rp.transition_in_ms.unwrap_or(0),
         transition_out_ms: rp.transition_out_ms.unwrap_or(0),
+        overflow: rp
+            .overflow
+            .map(|ov| match ov {
+                TextOverflow::Clip => proto::TextOverflowProto::Clip as i32,
+                TextOverflow::Ellipsis => proto::TextOverflowProto::Ellipsis as i32,
+            })
+            .unwrap_or(proto::TextOverflowProto::Unspecified as i32),
     }
 }
 
@@ -666,6 +673,13 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
     } else {
         None
     };
+    let overflow = match proto::TextOverflowProto::try_from(p.overflow)
+        .unwrap_or(proto::TextOverflowProto::Unspecified)
+    {
+        proto::TextOverflowProto::Unspecified => None,
+        proto::TextOverflowProto::Clip => Some(TextOverflow::Clip),
+        proto::TextOverflowProto::Ellipsis => Some(TextOverflow::Ellipsis),
+    };
 
     RenderingPolicy {
         font_size_px,
@@ -682,6 +696,7 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
         margin_vertical,
         transition_in_ms,
         transition_out_ms,
+        overflow,
     }
 }
 
