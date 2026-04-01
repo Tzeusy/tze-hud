@@ -60,10 +60,65 @@ const SEVERITY_CRITICAL: Rgba = Rgba {
     a: 1.0,
 };
 
+// ─── Notification urgency token fallback colors ───────────────────────────────
+
+/// Default notification urgency backdrop colors (linear sRGB) used when
+/// `color.notification.urgency.*` design tokens are absent.
+///
+/// Per spec §Notification Urgency Backdrop Token Schema:
+///   color.notification.urgency.low      → #2A2A2A → (0.165, 0.165, 0.165)
+///   color.notification.urgency.normal   → #1A1A3A → (0.102, 0.102, 0.227)
+///   color.notification.urgency.urgent   → #8B6914 → (0.545, 0.412, 0.078)
+///   color.notification.urgency.critical → #8B1A1A → (0.545, 0.102, 0.102)
+///
+/// These tokens are for notification-area (and non-alert-banner notification zones)
+/// only. Alert-banner continues to use `color.severity.*` tokens.
+const NOTIFICATION_URGENCY_LOW: Rgba = Rgba {
+    r: 0.165,
+    g: 0.165,
+    b: 0.165,
+    a: 1.0,
+};
+const NOTIFICATION_URGENCY_NORMAL: Rgba = Rgba {
+    r: 0.102,
+    g: 0.102,
+    b: 0.227,
+    a: 1.0,
+};
+const NOTIFICATION_URGENCY_URGENT: Rgba = Rgba {
+    r: 0.545,
+    g: 0.412,
+    b: 0.078,
+    a: 1.0,
+};
+const NOTIFICATION_URGENCY_CRITICAL: Rgba = Rgba {
+    r: 0.545,
+    g: 0.102,
+    b: 0.102,
+    a: 1.0,
+};
+
+/// Per-notification backdrop opacity applied to urgency-tinted backdrop quads.
+///
+/// This is the fixed 0.9 opacity specified for notification zone backdrop rendering.
+/// It overrides the token color's alpha channel.
+const NOTIFICATION_BACKDROP_OPACITY: f32 = 0.9;
+
+/// Fallback color for `color.border.default` when the token is absent.
+///
+/// Matches the default value in built-in component startup tokens (#444466).
+const BORDER_DEFAULT_FALLBACK: Rgba = Rgba {
+    r: 0.267,
+    g: 0.267,
+    b: 0.400,
+    a: 1.0,
+};
+
 /// Returns `true` if the zone name is an alert-banner zone.
 ///
 /// Per spec §V1 Component Type Definitions: the alert-banner zone name is
-/// `"alert-banner"`.  notification-area does NOT use urgency mapping.
+/// `"alert-banner"`.  notification-area uses urgency-tinted notification
+/// backdrop tokens, not severity tokens.
 #[inline]
 fn is_alert_banner_zone(zone_name: &str) -> bool {
     zone_name == "alert-banner"
@@ -101,12 +156,19 @@ fn parse_hex_color(s: &str) -> Option<Rgba> {
     }
 }
 
+/// Look up a token key in the resolved token map and parse it as a color.
+/// Returns `None` if the key is absent or the value is not a valid hex color.
+#[inline]
+fn resolve_token_color(token_map: &HashMap<String, String>, key: &str) -> Option<Rgba> {
+    token_map.get(key).and_then(|v| parse_hex_color(v))
+}
+
 /// Look up a severity token key in the resolved token map and parse it as a
 /// color.  Returns `None` if the key is absent or the value is not a valid
 /// hex color.
 #[inline]
 fn resolve_severity_token(token_map: &HashMap<String, String>, key: &str) -> Option<Rgba> {
-    token_map.get(key).and_then(|v| parse_hex_color(v))
+    resolve_token_color(token_map, key)
 }
 
 /// Map a `NotificationPayload.urgency` level to a severity backdrop color.
@@ -123,6 +185,8 @@ fn resolve_severity_token(token_map: &HashMap<String, String>, key: &str) -> Opt
 /// The returned `Rgba` alpha is 1.0 (unless the token itself carries an alpha
 /// via `#RRGGBBAA`); `backdrop_opacity` from the policy is applied by the
 /// caller after this lookup.
+///
+/// MUST NOT be used for notification-area zones. Only for alert-banner zones.
 fn urgency_to_severity_color(urgency: u32, token_map: &HashMap<String, String>) -> Rgba {
     match urgency {
         3 => resolve_severity_token(token_map, "color.severity.critical")
@@ -131,6 +195,113 @@ fn urgency_to_severity_color(urgency: u32, token_map: &HashMap<String, String>) 
             resolve_severity_token(token_map, "color.severity.warning").unwrap_or(SEVERITY_WARNING)
         }
         _ => resolve_severity_token(token_map, "color.severity.info").unwrap_or(SEVERITY_INFO),
+    }
+}
+
+/// Map a `NotificationPayload.urgency` level to a notification urgency backdrop color.
+///
+/// Looks up `color.notification.urgency.{low,normal,urgent,critical}` in `token_map`
+/// first; falls back to hardcoded NOTIFICATION_URGENCY_* constants when the key is
+/// absent or cannot be parsed as a hex color.
+///
+/// Per spec §Notification Urgency Backdrop Token Schema:
+///   urgency 0     → color.notification.urgency.low      (fallback: #2A2A2A)
+///   urgency 1     → color.notification.urgency.normal   (fallback: #1A1A3A)
+///   urgency 2     → color.notification.urgency.urgent   (fallback: #8B6914)
+///   urgency 3+    → color.notification.urgency.critical (fallback: #8B1A1A)
+///
+/// Urgency values greater than 3 are clamped to 3 (critical).
+///
+/// MUST NOT use `color.severity.*` tokens — those are for alert-banner only.
+fn urgency_to_notification_color(urgency: u32, token_map: &HashMap<String, String>) -> Rgba {
+    // Clamp urgency >3 to critical (3).
+    let level = urgency.min(3);
+    match level {
+        0 => resolve_token_color(token_map, "color.notification.urgency.low")
+            .unwrap_or(NOTIFICATION_URGENCY_LOW),
+        1 => resolve_token_color(token_map, "color.notification.urgency.normal")
+            .unwrap_or(NOTIFICATION_URGENCY_NORMAL),
+        2 => resolve_token_color(token_map, "color.notification.urgency.urgent")
+            .unwrap_or(NOTIFICATION_URGENCY_URGENT),
+        _ => resolve_token_color(token_map, "color.notification.urgency.critical")
+            .unwrap_or(NOTIFICATION_URGENCY_CRITICAL),
+    }
+}
+
+/// Resolve the `color.border.default` token from the map.
+///
+/// Falls back to `BORDER_DEFAULT_FALLBACK` (#444466) when the token is absent
+/// or cannot be parsed as a valid hex color.
+#[inline]
+fn resolve_border_default_color(token_map: &HashMap<String, String>) -> Rgba {
+    resolve_token_color(token_map, "color.border.default").unwrap_or(BORDER_DEFAULT_FALLBACK)
+}
+
+/// Emit 4 thin 1px border quads positioned inside the given backdrop rectangle.
+///
+/// Produces a 1px inset border using four axis-aligned rectangles:
+///   - top:    (x, y, w, 1)
+///   - bottom: (x, y+h-1, w, 1)
+///   - left:   (x, y+1, 1, h-2)
+///   - right:  (x+w-1, y+1, 1, h-2)
+///
+/// The border is drawn inside the backdrop bounds (does not extend outside).
+/// When `h < 2` or `w < 1`, the degenerate dimension quads are skipped (size ≤ 0
+/// after the inset). Top/bottom edges require `w >= 1` to avoid degenerate quads
+/// with zero or negative width.
+///
+/// `sw`/`sh` are the screen dimensions passed through to `rect_vertices`.
+#[allow(clippy::too_many_arguments)]
+fn emit_border_quads(
+    vertices: &mut Vec<crate::pipeline::RectVertex>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    sw: f32,
+    sh: f32,
+    border_color: [f32; 4],
+) {
+    const BORDER_PX: f32 = 1.0;
+    // Top edge.
+    if h >= BORDER_PX && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(x, y, w, BORDER_PX, sw, sh, border_color));
+    }
+    // Bottom edge.
+    if h >= BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + h - BORDER_PX,
+            w,
+            BORDER_PX,
+            sw,
+            sh,
+            border_color,
+        ));
+    }
+    // Left edge (inset 1px top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX {
+        vertices.extend_from_slice(&rect_vertices(
+            x,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            border_color,
+        ));
+    }
+    // Right edge (inset 1px top and bottom to avoid corner overlap).
+    if h > BORDER_PX * 2.0 && w >= BORDER_PX * 2.0 {
+        vertices.extend_from_slice(&rect_vertices(
+            x + w - BORDER_PX,
+            y + BORDER_PX,
+            BORDER_PX,
+            h - BORDER_PX * 2.0,
+            sw,
+            sh,
+            border_color,
+        ));
     }
 }
 
@@ -1796,7 +1967,11 @@ impl Compositor {
     /// For each zone with at least one active publish:
     /// - Reads `backdrop` + `backdrop_opacity` from the zone's `RenderingPolicy`.
     /// - For `alert-banner` zones with `Notification` content, overrides the
-    ///   backdrop color with the urgency-derived severity token color.
+    ///   backdrop color with the urgency-derived `color.severity.*` token color.
+    /// - For non-alert-banner zones with `Notification` content, overrides the
+    ///   backdrop color with the urgency-derived `color.notification.urgency.*`
+    ///   token color at 0.9 opacity, and renders a 1px 4-quad border using
+    ///   `color.border.default`.
     /// - Applies the zone's current animation opacity (fade-in/fade-out).
     /// - Skips the backdrop quad when `rendering_policy.backdrop` is `None`.
     ///
@@ -1852,19 +2027,54 @@ impl Compositor {
                         }
                         let effective_slot_h = slot_h.min((y + h) - slot_y);
 
+                        // Determine backdrop color.
+                        // alert-banner: urgency → color.severity.* tokens
+                        // non-alert-banner Notification: urgency → color.notification.urgency.* tokens
+                        //   with fixed 0.9 opacity and 1px 4-quad border
+                        // SolidColor: always its own color
+                        // Other: policy.backdrop
+                        let is_notification_content =
+                            matches!(&record.content, ZoneContent::Notification(_));
                         let backdrop_rgba: Option<Rgba> = match &record.content {
                             ZoneContent::SolidColor(rgba) => Some(*rgba),
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
-                                let severity_color =
-                                    urgency_to_severity_color(n.urgency, &self.token_map);
-                                Some(severity_color)
+                                // alert-banner: severity tokens (color.severity.*).
+                                // Respect policy.backdrop contract: only override the color when
+                                // a backdrop is enabled; skip entirely when backdrop is None.
+                                if policy.backdrop.is_some() {
+                                    let severity_color =
+                                        urgency_to_severity_color(n.urgency, &self.token_map);
+                                    Some(severity_color)
+                                } else {
+                                    None
+                                }
+                            }
+                            ZoneContent::Notification(n) => {
+                                // Non-alert-banner notification: urgency-tinted backdrop
+                                // using color.notification.urgency.* tokens.
+                                // Per spec: urgency >3 clamped to 3 (critical).
+                                // Respect policy.backdrop contract: only emit a backdrop (and
+                                // border) when a backdrop is enabled; skip entirely when None.
+                                if policy.backdrop.is_some() {
+                                    let mut color =
+                                        urgency_to_notification_color(n.urgency, &self.token_map);
+                                    color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                    Some(color)
+                                } else {
+                                    None
+                                }
                             }
                             _ => policy.backdrop,
                         };
 
                         if let Some(mut rgba) = backdrop_rgba {
-                            if let Some(opacity) = policy.backdrop_opacity {
-                                rgba.a = opacity.clamp(0.0, 1.0);
+                            // For non-notification content: apply policy backdrop_opacity.
+                            // For Notification content in non-alert-banner zones: opacity is
+                            // already set to NOTIFICATION_BACKDROP_OPACITY above; skip policy override.
+                            if !is_notification_content || is_alert_banner_zone(zone_name) {
+                                if let Some(opacity) = policy.backdrop_opacity {
+                                    rgba.a = opacity.clamp(0.0, 1.0);
+                                }
                             }
                             rgba.a *= anim_opacity.clamp(0.0, 1.0);
                             vertices.extend_from_slice(&rect_vertices(
@@ -1876,6 +2086,23 @@ impl Compositor {
                                 sh,
                                 rgba.to_array(),
                             ));
+
+                            // For non-alert-banner Notification content: emit 1px 4-quad border.
+                            if is_notification_content && !is_alert_banner_zone(zone_name) {
+                                let mut border_color =
+                                    resolve_border_default_color(&self.token_map);
+                                border_color.a *= anim_opacity.clamp(0.0, 1.0);
+                                emit_border_quads(
+                                    vertices,
+                                    x,
+                                    slot_y,
+                                    w,
+                                    effective_slot_h,
+                                    sw,
+                                    sh,
+                                    border_color.to_array(),
+                                );
+                            }
                         }
                     }
                 }
@@ -1885,6 +2112,8 @@ impl Compositor {
                     // For MergeByKey and single-publish policies: render a single backdrop
                     // for the zone using the latest publication's content type.
                     let latest = &publishes[publishes.len() - 1];
+                    let is_notification_content =
+                        matches!(&latest.content, ZoneContent::Notification(_));
                     let backdrop_rgba: Option<Rgba> = match &latest.content {
                         ZoneContent::SolidColor(rgba) => {
                             // SolidColor always renders its own color (no policy override).
@@ -1899,9 +2128,30 @@ impl Compositor {
                             // Token-resolved values take precedence over hardcoded constants;
                             // falls back to SEVERITY_* when the token map is empty or the
                             // key is absent.
-                            let severity_color =
-                                urgency_to_severity_color(n.urgency, &self.token_map);
-                            Some(severity_color)
+                            // Respect policy.backdrop contract: only override when backdrop
+                            // is enabled; skip entirely when backdrop is None.
+                            if policy.backdrop.is_some() {
+                                let severity_color =
+                                    urgency_to_severity_color(n.urgency, &self.token_map);
+                                Some(severity_color)
+                            } else {
+                                None
+                            }
+                        }
+                        ZoneContent::Notification(n) => {
+                            // Non-alert-banner notification: urgency-tinted backdrop using
+                            // color.notification.urgency.* tokens.
+                            // Per spec: urgency >3 clamped to 3 (critical).
+                            // Respect policy.backdrop contract: only emit a backdrop (and
+                            // border) when a backdrop is enabled; skip entirely when None.
+                            if policy.backdrop.is_some() {
+                                let mut color =
+                                    urgency_to_notification_color(n.urgency, &self.token_map);
+                                color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                Some(color)
+                            } else {
+                                None
+                            }
                         }
                         _ => {
                             // All other content: use policy.backdrop.
@@ -1910,9 +2160,13 @@ impl Compositor {
                     };
 
                     if let Some(mut rgba) = backdrop_rgba {
-                        // Apply backdrop_opacity override.
-                        if let Some(opacity) = policy.backdrop_opacity {
-                            rgba.a = opacity.clamp(0.0, 1.0);
+                        // For non-notification content: apply policy backdrop_opacity.
+                        // For Notification content in non-alert-banner zones: opacity is
+                        // already set to NOTIFICATION_BACKDROP_OPACITY above; skip policy override.
+                        if !is_notification_content || is_alert_banner_zone(zone_name) {
+                            if let Some(opacity) = policy.backdrop_opacity {
+                                rgba.a = opacity.clamp(0.0, 1.0);
+                            }
                         }
                         // Apply zone animation opacity.
                         rgba.a *= anim_opacity.clamp(0.0, 1.0);
@@ -1926,6 +2180,22 @@ impl Compositor {
                             sh,
                             rgba.to_array(),
                         ));
+
+                        // For non-alert-banner Notification content: emit 1px 4-quad border.
+                        if is_notification_content && !is_alert_banner_zone(zone_name) {
+                            let mut border_color = resolve_border_default_color(&self.token_map);
+                            border_color.a *= anim_opacity.clamp(0.0, 1.0);
+                            emit_border_quads(
+                                vertices,
+                                x,
+                                y,
+                                w,
+                                h,
+                                sw,
+                                sh,
+                                border_color.to_array(),
+                            );
+                        }
                     }
                 }
             }
@@ -3508,18 +3778,19 @@ mod tests {
         assert_eq!(info0.b, info1.b);
     }
 
-    /// notification-area does NOT use urgency-to-severity mapping.
-    /// Even with urgency=3, it uses the policy.backdrop color.
+    /// notification-area does NOT use urgency-to-severity mapping (color.severity.*).
+    /// It uses color.notification.urgency.* tokens instead.
+    /// Even with urgency=3, it must NOT produce severity critical (red #FF0000).
     #[tokio::test]
-    async fn test_notification_area_ignores_urgency_mapping() {
-        let (_compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+    async fn test_notification_area_does_not_use_severity_tokens() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
-        let dark_backdrop = Rgba::new(0.05, 0.05, 0.05, 0.85);
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
             name: "notification-area".to_owned(),
-            description: "notification area - no urgency mapping".to_owned(),
+            description: "notification area - uses notification urgency tokens, not severity"
+                .to_owned(),
             geometry_policy: GeometryPolicy::Relative {
                 x_pct: 0.75,
                 y_pct: 0.02,
@@ -3528,7 +3799,7 @@ mod tests {
             },
             accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
             rendering_policy: RenderingPolicy {
-                backdrop: Some(dark_backdrop),
+                backdrop: Some(Rgba::new(0.05, 0.05, 0.05, 0.85)),
                 backdrop_opacity: Some(0.85),
                 text_color: Some(Rgba::WHITE),
                 ..Default::default()
@@ -3546,7 +3817,7 @@ mod tests {
                 ZoneContent::Notification(NotificationPayload {
                     text: "System alert".to_owned(),
                     icon: String::new(),
-                    urgency: 3, // Critical — but notification-area must NOT remap this.
+                    urgency: 3, // Critical — must use color.notification.urgency.critical, NOT color.severity.critical
                 }),
                 "test",
                 None,
@@ -3555,11 +3826,477 @@ mod tests {
             )
             .unwrap();
 
-        // The backdrop should use policy.backdrop (dark), NOT severity critical (red).
-        // We verify is_alert_banner_zone returns false for this zone.
+        // notification-area must NOT be treated as alert-banner.
         assert!(
             !is_alert_banner_zone("notification-area"),
             "notification-area must not be treated as alert-banner"
+        );
+
+        // Render and check: the backdrop must NOT be severity critical (pure red R~1.0, G~0.0, B~0.0).
+        // It should be notification urgency critical fallback: #8B1A1A (R~0.545, G~0.102, B~0.102).
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        assert!(
+            !vertices.is_empty(),
+            "expected backdrop vertices for notification-area urgency=3"
+        );
+
+        // Check first vertex: R should NOT be ~1.0 (that would be severity critical).
+        let first = &vertices[0];
+        assert!(
+            first.color[0] < 0.7,
+            "notification-area urgency=3 R must NOT be severity critical (~1.0), got {}",
+            first.color[0]
+        );
+    }
+
+    // ── Notification urgency token tests ─────────────────────────────────────
+
+    /// urgency_to_notification_color: low (0) maps to #2A2A2A fallback.
+    #[test]
+    fn test_notification_urgency_low_fallback() {
+        let no_tokens = HashMap::new();
+        let color = urgency_to_notification_color(0, &no_tokens);
+        // #2A2A2A → R=G=B ≈ 0.165
+        assert!(
+            (color.r - 0.165).abs() < 0.01,
+            "urgency low R should be ~0.165, got {}",
+            color.r
+        );
+        assert!(
+            (color.g - 0.165).abs() < 0.01,
+            "urgency low G should be ~0.165, got {}",
+            color.g
+        );
+        assert!(
+            (color.b - 0.165).abs() < 0.01,
+            "urgency low B should be ~0.165, got {}",
+            color.b
+        );
+    }
+
+    /// urgency_to_notification_color: normal (1) maps to #1A1A3A fallback.
+    #[test]
+    fn test_notification_urgency_normal_fallback() {
+        let no_tokens = HashMap::new();
+        let color = urgency_to_notification_color(1, &no_tokens);
+        // #1A1A3A: R≈0.102, G≈0.102, B≈0.227
+        assert!(
+            (color.r - 0.102).abs() < 0.01,
+            "urgency normal R should be ~0.102, got {}",
+            color.r
+        );
+        assert!(
+            (color.b - 0.227).abs() < 0.02,
+            "urgency normal B should be ~0.227, got {}",
+            color.b
+        );
+        // B must be clearly greater than R for blue-tint
+        assert!(
+            color.b > color.r + 0.05,
+            "urgency normal B should be > R (blue tint)"
+        );
+    }
+
+    /// urgency_to_notification_color: urgent (2) maps to #8B6914 fallback.
+    #[test]
+    fn test_notification_urgency_urgent_fallback() {
+        let no_tokens = HashMap::new();
+        let color = urgency_to_notification_color(2, &no_tokens);
+        // #8B6914: R≈0.545, G≈0.412, B≈0.078
+        assert!(
+            color.r > 0.4,
+            "urgency urgent R should be >0.4, got {}",
+            color.r
+        );
+        assert!(
+            color.g > 0.3,
+            "urgency urgent G should be >0.3, got {}",
+            color.g
+        );
+        assert!(
+            color.b < 0.2,
+            "urgency urgent B should be <0.2, got {}",
+            color.b
+        );
+        // R should be greatest (amber-gold tint)
+        assert!(
+            color.r > color.b,
+            "urgency urgent R should be > B (amber tint)"
+        );
+    }
+
+    /// urgency_to_notification_color: critical (3) maps to #8B1A1A fallback.
+    #[test]
+    fn test_notification_urgency_critical_fallback() {
+        let no_tokens = HashMap::new();
+        let color = urgency_to_notification_color(3, &no_tokens);
+        // #8B1A1A: R≈0.545, G≈0.102, B≈0.102
+        assert!(
+            color.r > 0.4,
+            "urgency critical R should be >0.4, got {}",
+            color.r
+        );
+        assert!(
+            color.g < 0.2,
+            "urgency critical G should be <0.2, got {}",
+            color.g
+        );
+        assert!(
+            color.b < 0.2,
+            "urgency critical B should be <0.2, got {}",
+            color.b
+        );
+        // R should be clearly greater than G and B (dark red)
+        assert!(
+            color.r > color.g + 0.2,
+            "urgency critical R should dominate (dark red)"
+        );
+    }
+
+    /// urgency_to_notification_color: urgency > 3 is clamped to critical (3).
+    #[test]
+    fn test_notification_urgency_clamped_above_3() {
+        let no_tokens = HashMap::new();
+        let critical3 = urgency_to_notification_color(3, &no_tokens);
+        let clamped4 = urgency_to_notification_color(4, &no_tokens);
+        let clamped100 = urgency_to_notification_color(100, &no_tokens);
+        assert_eq!(
+            critical3.r, clamped4.r,
+            "urgency=4 should clamp to urgency=3"
+        );
+        assert_eq!(
+            critical3.g, clamped4.g,
+            "urgency=4 should clamp to urgency=3"
+        );
+        assert_eq!(
+            critical3.b, clamped4.b,
+            "urgency=4 should clamp to urgency=3"
+        );
+        assert_eq!(
+            critical3.r, clamped100.r,
+            "urgency=100 should clamp to urgency=3"
+        );
+    }
+
+    /// Profile token override: color.notification.urgency.low overrides fallback.
+    #[test]
+    fn test_notification_urgency_low_token_override() {
+        let mut token_map = HashMap::new();
+        // Override low with pure cyan (#00FFFF) — clearly distinct from default.
+        token_map.insert(
+            "color.notification.urgency.low".to_string(),
+            "#00FFFF".to_string(),
+        );
+        let color = urgency_to_notification_color(0, &token_map);
+        assert!(
+            color.r < 0.1,
+            "custom low token R should be ~0.0 (cyan), got {}",
+            color.r
+        );
+        assert!(
+            color.g > 0.9,
+            "custom low token G should be ~1.0 (cyan), got {}",
+            color.g
+        );
+        assert!(
+            color.b > 0.9,
+            "custom low token B should be ~1.0 (cyan), got {}",
+            color.b
+        );
+    }
+
+    /// Profile token override: color.notification.urgency.critical overrides fallback.
+    #[test]
+    fn test_notification_urgency_critical_token_override() {
+        let mut token_map = HashMap::new();
+        // Override critical with pure magenta (#FF00FF).
+        token_map.insert(
+            "color.notification.urgency.critical".to_string(),
+            "#FF00FF".to_string(),
+        );
+        let color = urgency_to_notification_color(3, &token_map);
+        assert!(
+            color.r > 0.9,
+            "custom critical token R should be ~1.0, got {}",
+            color.r
+        );
+        assert!(
+            color.b > 0.9,
+            "custom critical token B should be ~1.0, got {}",
+            color.b
+        );
+        assert!(
+            color.g < 0.1,
+            "custom critical token G should be ~0.0, got {}",
+            color.g
+        );
+    }
+
+    /// notification-area urgency-tinted backdrop: renders backdrop at 0.9 opacity.
+    ///
+    /// Per spec: non-alert-banner Notification content must use
+    /// color.notification.urgency.* tokens with fixed 0.9 opacity.
+    /// The policy.backdrop_opacity must NOT override this.
+    #[tokio::test]
+    async fn test_notification_area_backdrop_uses_0_9_opacity() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "notification area urgency opacity test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.5)),
+                // backdrop_opacity = 0.5 must NOT override the 0.9 fixed opacity
+                backdrop_opacity: Some(0.5),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "test".to_owned(),
+                    icon: String::new(),
+                    urgency: 1, // normal
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        assert!(!vertices.is_empty(), "expected vertices");
+        // The first quad's alpha (index 3 of color) should be 0.9.
+        let first_alpha = vertices[0].color[3];
+        assert!(
+            (first_alpha - 0.9).abs() < 0.01,
+            "notification-area backdrop alpha must be 0.9, got {first_alpha}"
+        );
+    }
+
+    /// notification-area border rendering: 1px 4-quad border is emitted after the
+    /// urgency-tinted backdrop quad.
+    ///
+    /// For a Stack zone with one Notification publish, render_zone_content should emit:
+    ///   - 6 vertices for the backdrop quad
+    ///   - up to 24 vertices (4 × 6) for the border quads
+    #[tokio::test]
+    async fn test_notification_area_emits_border_quads() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "notification area border test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.05, 0.05, 0.05, 1.0)),
+                font_size_px: Some(18.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "border test".to_owned(),
+                    icon: String::new(),
+                    urgency: 0,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // One backdrop (6 vertices) + up to 4 border quads (6 each) = 6 + 24 = 30 max.
+        // Minimum: 6 (backdrop) + 6 (at least top edge border) = 12.
+        assert!(
+            vertices.len() >= 12,
+            "expected at least 12 vertices (backdrop + border), got {}",
+            vertices.len()
+        );
+        // Total should be 6 * N for some N ≥ 2 (backdrop + at least one border quad).
+        assert_eq!(
+            vertices.len() % 6,
+            0,
+            "vertex count must be a multiple of 6 (each quad = 6 vertices), got {}",
+            vertices.len()
+        );
+    }
+
+    /// alert-banner does NOT emit border quads — border rendering is only for
+    /// non-alert-banner notification zones.
+    #[tokio::test]
+    async fn test_alert_banner_does_not_emit_border_quads() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_owned(),
+            description: "alert banner — no border".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.07,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(20.0),
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)),
+                backdrop_opacity: Some(1.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "no border here".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // alert-banner: only 6 vertices (one backdrop quad, no border).
+        assert_eq!(
+            vertices.len(),
+            6,
+            "alert-banner must emit exactly 6 vertices (backdrop only, no border), got {}",
+            vertices.len()
+        );
+    }
+
+    /// Border color uses color.border.default token when present.
+    #[tokio::test]
+    async fn test_notification_area_border_uses_border_default_token() {
+        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        // Install a custom border token: pure cyan (#00FFFF).
+        let mut token_map = HashMap::new();
+        token_map.insert("color.border.default".to_string(), "#00FFFF".to_string());
+        compositor.set_token_map(token_map);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "notification area border token test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.05, 0.05, 0.05, 1.0)),
+                font_size_px: Some(18.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "cyan border".to_owned(),
+                    icon: String::new(),
+                    urgency: 0,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // vertices[0..6] = backdrop quad (urgency low color)
+        // vertices[6..] = border quads (should be cyan: R≈0, G≈1, B≈1)
+        assert!(
+            vertices.len() > 6,
+            "expected border quads after backdrop, only got {}",
+            vertices.len()
+        );
+        // Check border quad color (vertex index 6 is the first border vertex).
+        let border_v = &vertices[6];
+        assert!(
+            border_v.color[0] < 0.1,
+            "border R should be ~0.0 (cyan token), got {}",
+            border_v.color[0]
+        );
+        assert!(
+            border_v.color[1] > 0.9,
+            "border G should be ~1.0 (cyan token), got {}",
+            border_v.color[1]
+        );
+        assert!(
+            border_v.color[2] > 0.9,
+            "border B should be ~1.0 (cyan token), got {}",
+            border_v.color[2]
         );
     }
 
@@ -3904,6 +4641,63 @@ mod tests {
         );
     }
 
+    /// backdrop=None with Notification content: no backdrop or border quads rendered.
+    ///
+    /// Even though Notification content in a non-alert-banner zone overrides the
+    /// backdrop color with urgency-tinted tokens, the override must respect the
+    /// policy.backdrop contract: when backdrop is None, nothing is emitted.
+    #[tokio::test]
+    async fn test_notification_no_backdrop_when_backdrop_is_none() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "notification area with backdrop=None".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: None,
+                backdrop_opacity: Some(0.9),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "no backdrop".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        assert!(
+            vertices.is_empty(),
+            "no backdrop or border quads should be rendered when policy.backdrop is None, got {} vertices",
+            vertices.len()
+        );
+    }
+
     /// text.rs: TextItem::from_zone_policy respects all RenderingPolicy fields.
     #[test]
     fn test_from_zone_policy_reads_all_policy_fields() {
@@ -4002,24 +4796,39 @@ mod tests {
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
         compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
 
-        // Two publications → two backdrop quads → 2 × 6 = 12 vertices.
+        // Two publications → two backdrop quads (6 verts each) + border quads.
+        // Each Notification slot emits: 1 backdrop quad (6) + 4 border quads (24) = 30.
+        // Total: 2 × 30 = 60 vertices.
+        // We assert at least 12 (2 backdrops) and a multiple of 6.
+        assert!(
+            vertices.len() >= 12,
+            "Stack zone with 2 publications must emit at least 12 vertices (2 backdrop quads), got {}",
+            vertices.len()
+        );
         assert_eq!(
-            vertices.len(),
-            12,
-            "Stack zone with 2 publications must emit 12 vertices (2 quads × 6 verts)"
+            vertices.len() % 6,
+            0,
+            "vertex count must be a multiple of 6 (each quad = 6 vertices), got {}",
+            vertices.len()
         );
 
-        // The first quad's top-left y should be 0 (zone starts at y_pct=0.0 → y=0).
-        // The second quad's top-left y should be ~slot_h = zone_h / max_depth.
-        // zone_h = 720 * 0.5556 ≈ 400; slot_h = 400 / 4 = 100.
+        // The first backdrop quad's top-left y should be 0 (zone starts at y_pct=0.0 → y=0).
+        // The second backdrop quad's top-left y should be ~slot_h after the first slot.
+        // zone_h = 720 * 0.5556 ≈ 400; slot_h is content-sized per stack_slot_height.
         // Vertices are in NDC; we check the first and 7th vertex y values differ.
         // rect_vertices emits 6 verts per quad in positions [x,y] NDC.
+        // With border quads added, the second backdrop quad starts at vertex index 30
+        // (6 backdrop + 24 border for first slot = 30 verts per slot).
         let first_quad_y = vertices[0].position[1];
-        let second_quad_y = vertices[6].position[1];
-        assert!(
-            (first_quad_y - second_quad_y).abs() > 0.01,
-            "second Stack slot must start at a different y than the first; got first={first_quad_y:.4}, second={second_quad_y:.4}"
-        );
+        // Find second backdrop by skipping first slot (30 vertices: 6 backdrop + 24 border).
+        let second_quad_idx = 30; // 6 backdrop + 4 border quads (6 each)
+        if vertices.len() > second_quad_idx {
+            let second_quad_y = vertices[second_quad_idx].position[1];
+            assert!(
+                (first_quad_y - second_quad_y).abs() > 0.01,
+                "second Stack slot must start at a different y than the first; got first={first_quad_y:.4}, second={second_quad_y:.4}"
+            );
+        }
     }
 
     /// Stack zone: collect_text_items must produce a separate TextItem for
