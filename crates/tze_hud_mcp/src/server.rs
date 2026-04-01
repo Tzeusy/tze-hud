@@ -1108,4 +1108,489 @@ mod tests {
             "unauthenticated caller must be rejected even for guest tools"
         );
     }
+
+    // ── Gauge widget MCP integration tests (hud-qc0c, openspec task 10) ────────
+    //
+    // These tests exercise publish_to_widget and list_widgets through the actual
+    // McpServer::dispatch path — the same code path an LLM would take.  They
+    // use a full 4-parameter gauge definition mirroring the production schema
+    // (level f32, label string, fill_color color, severity enum) so the
+    // assertions cover all four parameter types.
+
+    /// Build a server pre-seeded with the full production-schema gauge widget.
+    ///
+    /// The gauge definition mirrors `assets/widgets/gauge/widget.toml`:
+    /// - level: f32, [0.0, 1.0], default 0.0
+    /// - label: string, default ""
+    /// - fill_color: color, default (74,158,255,255) → Rgba f32 components
+    /// - severity: enum, allowed [info, warning, error], default "info"
+    async fn server_with_gauge() -> McpServer {
+        use std::collections::HashMap;
+        use tze_hud_scene::types::{
+            ContentionPolicy as CP, GeometryPolicy, Rgba, RenderingPolicy, WidgetDefinition,
+            WidgetInstance, WidgetParamConstraints, WidgetParamType, WidgetParameterDeclaration,
+            WidgetParameterValue,
+        };
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).expect("create tab");
+
+        scene.widget_registry.register_definition(WidgetDefinition {
+            id: "gauge".to_string(),
+            name: "Gauge".to_string(),
+            description: "Vertical fill gauge — level, label, fill color, severity indicator"
+                .to_string(),
+            parameter_schema: vec![
+                WidgetParameterDeclaration {
+                    name: "level".to_string(),
+                    param_type: WidgetParamType::F32,
+                    default_value: WidgetParameterValue::F32(0.0),
+                    constraints: Some(WidgetParamConstraints {
+                        f32_min: Some(0.0),
+                        f32_max: Some(1.0),
+                        string_max_bytes: None,
+                        enum_allowed_values: vec![],
+                    }),
+                },
+                WidgetParameterDeclaration {
+                    name: "label".to_string(),
+                    param_type: WidgetParamType::String,
+                    default_value: WidgetParameterValue::String(String::new()),
+                    constraints: None,
+                },
+                WidgetParameterDeclaration {
+                    name: "fill_color".to_string(),
+                    param_type: WidgetParamType::Color,
+                    default_value: WidgetParameterValue::Color(Rgba {
+                        r: 74.0 / 255.0,
+                        g: 158.0 / 255.0,
+                        b: 1.0,
+                        a: 1.0,
+                    }),
+                    constraints: None,
+                },
+                WidgetParameterDeclaration {
+                    name: "severity".to_string(),
+                    param_type: WidgetParamType::Enum,
+                    default_value: WidgetParameterValue::Enum("info".to_string()),
+                    constraints: Some(WidgetParamConstraints {
+                        f32_min: None,
+                        f32_max: None,
+                        string_max_bytes: None,
+                        enum_allowed_values: vec![
+                            "info".to_string(),
+                            "warning".to_string(),
+                            "error".to_string(),
+                        ],
+                    }),
+                },
+            ],
+            layers: vec![],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.2,
+                height_pct: 0.5,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: CP::LatestWins,
+            ephemeral: false,
+        });
+
+        let default_params: HashMap<String, WidgetParameterValue> = HashMap::from([
+            ("level".to_string(), WidgetParameterValue::F32(0.0)),
+            (
+                "label".to_string(),
+                WidgetParameterValue::String(String::new()),
+            ),
+            (
+                "fill_color".to_string(),
+                WidgetParameterValue::Color(Rgba {
+                    r: 74.0 / 255.0,
+                    g: 158.0 / 255.0,
+                    b: 1.0,
+                    a: 1.0,
+                }),
+            ),
+            (
+                "severity".to_string(),
+                WidgetParameterValue::Enum("info".to_string()),
+            ),
+        ]);
+
+        scene.widget_registry.register_instance(WidgetInstance {
+            widget_type_name: "gauge".to_string(),
+            tab_id,
+            geometry_override: None,
+            contention_override: None,
+            instance_name: "gauge".to_string(),
+            current_params: default_params,
+        });
+
+        test_server(scene)
+    }
+
+    // 10.1 — Set level via MCP.
+    //
+    // Publish level=0.75 and verify the response confirms the param was applied
+    // and the widget name echoes back.  Verifies the basic publish path works
+    // end-to-end through dispatch().
+    #[tokio::test]
+    async fn test_gauge_publish_level_via_dispatch() {
+        let server = server_with_gauge().await;
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "method": "publish_to_widget",
+            "params": {
+                "widget_name": "gauge",
+                "params": {"level": 0.75}
+            },
+            "id": 100
+        });
+        let raw = server.dispatch(&req.to_string(), &guest()).await;
+        let resp = parse_response(&raw);
+
+        assert!(
+            resp["error"].is_null(),
+            "publish level=0.75 should succeed, got: {}",
+            resp["error"]
+        );
+        assert_eq!(
+            resp["result"]["widget_name"], "gauge",
+            "response must echo widget_name"
+        );
+        let applied: Vec<String> = serde_json::from_value(resp["result"]["applied_params"].clone())
+            .expect("applied_params must be an array");
+        assert!(
+            applied.contains(&"level".to_string()),
+            "applied_params must contain 'level', got: {applied:?}"
+        );
+
+        // Verify the scene recorded the updated level via list_widgets.
+        let list_req = json!({
+            "jsonrpc": "2.0",
+            "method": "list_widgets",
+            "params": {},
+            "id": 101
+        });
+        let list_raw = server.dispatch(&list_req.to_string(), &guest()).await;
+        let list_resp = parse_response(&list_raw);
+        assert!(list_resp["error"].is_null());
+        let instances = &list_resp["result"]["widget_instances"];
+        let gauge_inst = instances
+            .as_array()
+            .expect("widget_instances is array")
+            .iter()
+            .find(|i| i["instance_name"] == "gauge")
+            .expect("gauge instance must be present");
+        let level_val = gauge_inst["current_params"]["level"]
+            .as_f64()
+            .expect("level must be a number");
+        assert!(
+            (level_val - 0.75).abs() < 1e-4,
+            "current level in scene should be ~0.75, got {level_val}"
+        );
+    }
+
+    // 10.2 — Animate level with transition_ms.
+    //
+    // Publish level=0.9 with transition_ms=300.  The response must succeed and
+    // echo back the widget name with the param applied.  The transition_ms field
+    // is forwarded to the scene graph; this test confirms it is not rejected.
+    #[tokio::test]
+    async fn test_gauge_publish_level_with_transition_via_dispatch() {
+        let server = server_with_gauge().await;
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "method": "publish_to_widget",
+            "params": {
+                "widget_name": "gauge",
+                "params": {"level": 0.9},
+                "transition_ms": 300
+            },
+            "id": 110
+        });
+        let raw = server.dispatch(&req.to_string(), &guest()).await;
+        let resp = parse_response(&raw);
+
+        assert!(
+            resp["error"].is_null(),
+            "publish level=0.9 transition_ms=300 should succeed, got: {}",
+            resp["error"]
+        );
+        let applied: Vec<String> = serde_json::from_value(resp["result"]["applied_params"].clone())
+            .expect("applied_params must be an array");
+        assert!(
+            applied.contains(&"level".to_string()),
+            "applied_params must contain 'level' for transition publish, got: {applied:?}"
+        );
+    }
+
+    // 10.3 — Set all four parameters in one call.
+    //
+    // Publish level=0.65, label="CPU", fill_color={orange}, severity="warning"
+    // in a single publish_to_widget call.  Verifies all four param types are
+    // accepted together and all appear in applied_params.
+    #[tokio::test]
+    async fn test_gauge_publish_all_four_params_via_dispatch() {
+        let server = server_with_gauge().await;
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "method": "publish_to_widget",
+            "params": {
+                "widget_name": "gauge",
+                "params": {
+                    "level": 0.65,
+                    "label": "CPU",
+                    "fill_color": {"r": 1.0, "g": 0.647, "b": 0.0, "a": 1.0},
+                    "severity": "warning"
+                }
+            },
+            "id": 120
+        });
+        let raw = server.dispatch(&req.to_string(), &guest()).await;
+        let resp = parse_response(&raw);
+
+        assert!(
+            resp["error"].is_null(),
+            "all-four-params publish should succeed, got: {}",
+            resp["error"]
+        );
+        let applied: Vec<String> = serde_json::from_value(resp["result"]["applied_params"].clone())
+            .expect("applied_params must be an array");
+        for param in &["level", "label", "fill_color", "severity"] {
+            assert!(
+                applied.contains(&param.to_string()),
+                "applied_params must contain '{param}', got: {applied:?}"
+            );
+        }
+        assert_eq!(applied.len(), 4, "exactly 4 params should be applied");
+    }
+
+    // 10.4 — Severity transition sequence: info → warning → error.
+    //
+    // Each severity change is a separate publish with only severity in params.
+    // Verifies that each snap-to-color transition succeeds and that list_widgets
+    // reflects the latest severity after each call.
+    #[tokio::test]
+    async fn test_gauge_severity_sequence_via_dispatch() {
+        let server = server_with_gauge().await;
+
+        for (id, severity) in [(130u32, "info"), (131, "warning"), (132, "error")] {
+            let req = json!({
+                "jsonrpc": "2.0",
+                "method": "publish_to_widget",
+                "params": {
+                    "widget_name": "gauge",
+                    "params": {"severity": severity}
+                },
+                "id": id
+            });
+            let raw = server.dispatch(&req.to_string(), &guest()).await;
+            let resp = parse_response(&raw);
+            assert!(
+                resp["error"].is_null(),
+                "publish severity={severity} should succeed, got: {}",
+                resp["error"]
+            );
+            let applied: Vec<String> =
+                serde_json::from_value(resp["result"]["applied_params"].clone())
+                    .expect("applied_params must be an array");
+            assert!(
+                applied.contains(&"severity".to_string()),
+                "applied_params must contain 'severity' for {severity} publish, got: {applied:?}"
+            );
+
+            // Verify scene reflects the latest severity.
+            let list_req = json!({
+                "jsonrpc": "2.0",
+                "method": "list_widgets",
+                "params": {},
+                "id": id + 100
+            });
+            let list_raw = server.dispatch(&list_req.to_string(), &guest()).await;
+            let list_resp = parse_response(&list_raw);
+            let instances = &list_resp["result"]["widget_instances"];
+            let gauge = instances
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["instance_name"] == "gauge")
+                .expect("gauge instance");
+            assert_eq!(
+                gauge["current_params"]["severity"], severity,
+                "scene severity should be '{severity}' after publish"
+            );
+        }
+    }
+
+    // 10.5 — Rapid successive publishes: level=0.3 then level=0.8 transition_ms=300.
+    //
+    // The second publish must succeed and its level must win in the scene state
+    // (LatestWins contention policy).  Verifies that back-to-back publishes do
+    // not interfere with each other at the MCP dispatch layer.
+    #[tokio::test]
+    async fn test_gauge_rapid_successive_publishes_via_dispatch() {
+        let server = server_with_gauge().await;
+
+        // First publish: level=0.3 (instant).
+        let req1 = json!({
+            "jsonrpc": "2.0",
+            "method": "publish_to_widget",
+            "params": {
+                "widget_name": "gauge",
+                "params": {"level": 0.3}
+            },
+            "id": 140
+        });
+        let raw1 = server.dispatch(&req1.to_string(), &guest()).await;
+        let resp1 = parse_response(&raw1);
+        assert!(resp1["error"].is_null(), "first rapid publish should succeed");
+
+        // Second publish: level=0.8 with 300ms transition — immediately follows.
+        let req2 = json!({
+            "jsonrpc": "2.0",
+            "method": "publish_to_widget",
+            "params": {
+                "widget_name": "gauge",
+                "params": {"level": 0.8},
+                "transition_ms": 300
+            },
+            "id": 141
+        });
+        let raw2 = server.dispatch(&req2.to_string(), &guest()).await;
+        let resp2 = parse_response(&raw2);
+        assert!(
+            resp2["error"].is_null(),
+            "second rapid publish should succeed (LatestWins interrupts first)"
+        );
+
+        // Scene state: the second publish target value (0.8) must be the latest.
+        let list_req = json!({
+            "jsonrpc": "2.0",
+            "method": "list_widgets",
+            "params": {},
+            "id": 142
+        });
+        let list_raw = server.dispatch(&list_req.to_string(), &guest()).await;
+        let list_resp = parse_response(&list_raw);
+        let instances = &list_resp["result"]["widget_instances"];
+        let gauge = instances
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["instance_name"] == "gauge")
+            .expect("gauge instance");
+        let level = gauge["current_params"]["level"]
+            .as_f64()
+            .expect("level must be a number");
+        assert!(
+            (level - 0.8).abs() < 1e-4,
+            "after rapid publishes, scene level should be ~0.8 (second publish wins), got {level}"
+        );
+    }
+
+    // 10.6 — list_widgets schema discovery.
+    //
+    // Verifies that list_widgets returns the gauge type with widget_type="gauge",
+    // and that the parameter schema includes all four params with correct types,
+    // defaults, and constraints.  This is how an LLM discovers the gauge API.
+    #[tokio::test]
+    async fn test_gauge_list_widgets_schema_discovery_via_dispatch() {
+        let server = server_with_gauge().await;
+
+        let req = json!({
+            "jsonrpc": "2.0",
+            "method": "list_widgets",
+            "params": {},
+            "id": 150
+        });
+        let raw = server.dispatch(&req.to_string(), &guest()).await;
+        let resp = parse_response(&raw);
+
+        assert!(
+            resp["error"].is_null(),
+            "list_widgets should succeed, got: {}",
+            resp["error"]
+        );
+
+        // Type count and instance count.
+        assert_eq!(resp["result"]["type_count"], 1, "one widget type registered");
+        assert_eq!(
+            resp["result"]["instance_count"], 1,
+            "one widget instance registered"
+        );
+
+        // Widget type entry.
+        let types = resp["result"]["widget_types"]
+            .as_array()
+            .expect("widget_types must be an array");
+        assert_eq!(types.len(), 1);
+        let ty = &types[0];
+        assert_eq!(ty["id"], "gauge", "widget type id must be 'gauge'");
+        assert_eq!(
+            ty["ephemeral"], false,
+            "gauge must be durable (not ephemeral)"
+        );
+
+        // Parameter schema: all four params must be present with correct types.
+        let schema = ty["parameter_schema"]
+            .as_array()
+            .expect("parameter_schema must be an array");
+        assert_eq!(
+            schema.len(),
+            4,
+            "gauge schema must have exactly 4 parameters"
+        );
+
+        let find_param = |name: &str| {
+            schema
+                .iter()
+                .find(|p| p["name"] == name)
+                .unwrap_or_else(|| panic!("parameter '{name}' must be present in gauge schema"))
+        };
+
+        let level = find_param("level");
+        assert_eq!(level["param_type"], "f32", "level must be f32");
+        assert!(
+            (level["f32_min"].as_f64().expect("f32_min") - 0.0).abs() < 1e-6,
+            "level f32_min must be 0.0"
+        );
+        assert!(
+            (level["f32_max"].as_f64().expect("f32_max") - 1.0).abs() < 1e-6,
+            "level f32_max must be 1.0"
+        );
+
+        let label = find_param("label");
+        assert_eq!(label["param_type"], "string", "label must be string");
+
+        let fill_color = find_param("fill_color");
+        assert_eq!(
+            fill_color["param_type"], "color",
+            "fill_color must be color"
+        );
+
+        let severity = find_param("severity");
+        assert_eq!(severity["param_type"], "enum", "severity must be enum");
+        let allowed: Vec<String> =
+            serde_json::from_value(severity["enum_allowed_values"].clone())
+                .expect("enum_allowed_values must be an array");
+        assert_eq!(
+            allowed,
+            vec!["info", "warning", "error"],
+            "severity allowed_values must be [info, warning, error] in order"
+        );
+
+        // Instance entry.
+        let instances = resp["result"]["widget_instances"]
+            .as_array()
+            .expect("widget_instances must be an array");
+        assert_eq!(instances.len(), 1);
+        let inst = &instances[0];
+        assert_eq!(inst["instance_name"], "gauge");
+        assert_eq!(inst["widget_type"], "gauge");
+    }
 }
