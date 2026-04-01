@@ -171,14 +171,7 @@ fn latest_wins_agent_b_displaces_agent_a() {
         ),
     ]);
     scene
-        .publish_to_widget(
-            "status-indicator",
-            params_a,
-            "agent.A",
-            None,
-            0,
-            None,
-        )
+        .publish_to_widget("status-indicator", params_a, "agent.A", None, 0, None)
         .expect("Agent A publish should succeed");
 
     // Sanity: exactly one active publication from A.
@@ -201,14 +194,7 @@ fn latest_wins_agent_b_displaces_agent_a() {
         ),
     ]);
     scene
-        .publish_to_widget(
-            "status-indicator",
-            params_b,
-            "agent.B",
-            None,
-            0,
-            None,
-        )
+        .publish_to_widget("status-indicator", params_b, "agent.B", None, 0, None)
         .expect("Agent B publish should succeed");
 
     // LatestWins: exactly one active publication, belonging to Agent B.
@@ -229,19 +215,17 @@ fn latest_wins_agent_b_displaces_agent_a() {
 
     // Verify status reflects B's value only.
     match pubs[0].params.get("status") {
-        Some(WidgetParameterValue::Enum(s)) => assert_eq!(
-            s, "busy",
-            "status should be 'busy' (B's value), got {s:?}"
-        ),
+        Some(WidgetParameterValue::Enum(s)) => {
+            assert_eq!(s, "busy", "status should be 'busy' (B's value), got {s:?}")
+        }
         other => panic!("expected Enum(\"busy\") for status, got {other:?}"),
     }
 
     // Verify label reflects B's value only.
     match pubs[0].params.get("label") {
-        Some(WidgetParameterValue::String(s)) => assert_eq!(
-            s, "B",
-            "label should be \"B\" (B's value), got {s:?}"
-        ),
+        Some(WidgetParameterValue::String(s)) => {
+            assert_eq!(s, "B", "label should be \"B\" (B's value), got {s:?}")
+        }
         other => panic!("expected String(\"B\") for label, got {other:?}"),
     }
 }
@@ -278,14 +262,7 @@ fn partial_update_retains_unpublished_parameters() {
         ),
     ]);
     scene
-        .publish_to_widget(
-            "status-indicator",
-            params_full,
-            "agent.test",
-            None,
-            0,
-            None,
-        )
+        .publish_to_widget("status-indicator", params_full, "agent.test", None, 0, None)
         .expect("full publish should succeed");
 
     // Sanity: current_params should reflect both params.
@@ -299,7 +276,9 @@ fn partial_update_retains_unpublished_parameters() {
             Some(WidgetParameterValue::String(s)) => {
                 assert_eq!(s, "Butler", "label should be 'Butler' after full publish")
             }
-            other => panic!("expected String(\"Butler\") for label after full publish, got {other:?}"),
+            other => {
+                panic!("expected String(\"Butler\") for label after full publish, got {other:?}")
+            }
         }
     }
 
