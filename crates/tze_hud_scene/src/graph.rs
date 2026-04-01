@@ -4650,7 +4650,7 @@ mod tests {
                 resource_id,
                 width: 64,
                 height: 48,
-                decoded_bytes: 0, // proto ingest always zeros this
+                decoded_bytes: 0,              // proto ingest always zeros this
                 fit_mode: ImageFitMode::Cover, // changed fit mode
                 bounds: Rect::new(10.0, 10.0, 380.0, 280.0),
             }),
