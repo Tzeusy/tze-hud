@@ -3012,6 +3012,39 @@ mod tests {
     /// it does not protect against separate test binary runs.
     static ENV_VAR_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Returns `true` when the test should be skipped due to missing GPU.
+    ///
+    /// Tests that require a wgpu adapter (GPU or software renderer) hang
+    /// indefinitely on `request_adapter` in environments without any GPU
+    /// or software fallback (e.g., minimal CI containers without llvmpipe).
+    ///
+    /// Set `TZE_HUD_SKIP_GPU_TESTS=1` to opt out all GPU-dependent tests.
+    /// In CI, Mesa/llvmpipe is installed and `HEADLESS_FORCE_SOFTWARE=1` is
+    /// set instead, so GPU tests run via a software adapter.
+    fn should_skip_gpu_tests() -> bool {
+        std::env::var("TZE_HUD_SKIP_GPU_TESTS")
+            .map(|v| v.trim() == "1")
+            .unwrap_or(false)
+    }
+
+    /// Skips a GPU-dependent test by returning early if no GPU is available.
+    ///
+    /// Usage inside an `async fn` test:
+    /// ```ignore
+    /// let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    /// ```
+    ///
+    /// Expands to a `match` that returns `()` (silently skips) when the
+    /// helper returns `None` (no adapter found or `TZE_HUD_SKIP_GPU_TESTS=1`).
+    macro_rules! require_gpu {
+        ($expr:expr) => {
+            match $expr {
+                Some(v) => v,
+                None => return,
+            }
+        };
+    }
+
     /// Convenience: build a minimal scene with one tile containing the given node.
     fn scene_with_node(node: Node) -> SceneGraph {
         let mut scene = SceneGraph::new(256.0, 256.0);
@@ -3031,12 +3064,32 @@ mod tests {
     }
 
     /// Create a headless compositor and surface pair for testing.
-    async fn make_compositor_and_surface(w: u32, h: u32) -> (Compositor, HeadlessSurface) {
-        let compositor = Compositor::new_headless(w, h)
-            .await
-            .expect("headless compositor");
-        let surface = HeadlessSurface::new(&compositor.device, w, h);
-        (compositor, surface)
+    ///
+    /// Returns `None` (and prints a skip notice) when:
+    /// - `TZE_HUD_SKIP_GPU_TESTS=1` is set, or
+    /// - no wgpu adapter is available in the current environment.
+    ///
+    /// Use the `require_gpu!` macro at the call site to early-return from the
+    /// test when `None` is returned:
+    /// ```ignore
+    /// let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
+    /// ```
+    async fn make_compositor_and_surface(w: u32, h: u32) -> Option<(Compositor, HeadlessSurface)> {
+        if should_skip_gpu_tests() {
+            eprintln!("skipping GPU test: TZE_HUD_SKIP_GPU_TESTS=1");
+            return None;
+        }
+        match Compositor::new_headless(w, h).await {
+            Ok(compositor) => {
+                let surface = HeadlessSurface::new(&compositor.device, w, h);
+                Some((compositor, surface))
+            }
+            Err(CompositorError::NoAdapter) => {
+                eprintln!("skipping GPU test: no wgpu adapter available");
+                None
+            }
+            Err(e) => panic!("unexpected compositor error: {e}"),
+        }
     }
 
     #[tokio::test]
@@ -3044,7 +3097,7 @@ mod tests {
         // The static image placeholder renders a warm-gray outer quad ~[0.55, 0.50, 0.45].
         // In sRGB output the linear values are gamma-compressed.
         // We just verify that *some* non-background pixels appear in the expected warm range.
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         // RS-4: StaticImageNode uses resource_id + decoded_bytes; no raw blob embedded.
         let resource_id = ResourceId::of(b"8x8 test image placeholder");
@@ -3081,7 +3134,7 @@ mod tests {
     #[tokio::test]
     async fn test_static_image_node_composited_with_other_nodes() {
         // Render a scene with both a SolidColor node and a StaticImage node in adjacent tiles.
-        let (mut compositor, surface) = make_compositor_and_surface(512, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(512, 256).await);
 
         let mut scene = SceneGraph::new(512.0, 256.0);
         let tab_id = scene.create_tab("test", 0).unwrap();
@@ -3159,7 +3212,7 @@ mod tests {
     /// must overwrite the red tile pixels.
     #[tokio::test]
     async fn test_chrome_always_above_max_zorder_tile() {
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         // Agent tile at max valid agent z-order with bright red content.
         // Agent tiles must use z_order < ZONE_TILE_Z_MIN (0x8000_0000); u32::MAX is
@@ -3231,7 +3284,7 @@ mod tests {
     async fn test_chrome_pass_uses_load_op_load() {
         // Render a scene with a blue agent tile + a chrome red stripe.
         // Blue content should persist where chrome doesn't cover; red should cover where it does.
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         let mut scene = SceneGraph::new(256.0, 256.0);
         let tab_id = scene.create_tab("test", 0).unwrap();
@@ -3302,7 +3355,7 @@ mod tests {
     /// Verify that render_frame_with_chrome renders correctly even when chrome_cmds is empty.
     #[tokio::test]
     async fn test_two_pass_with_empty_chrome_cmds() {
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         let scene = scene_with_node(Node {
             id: SceneId::new(),
             children: vec![],
@@ -3325,7 +3378,7 @@ mod tests {
     /// the same method that would be used with a windowed surface works headlessly.
     #[tokio::test]
     async fn test_render_frame_via_compositor_surface_trait() {
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         let scene = SceneGraph::new(256.0, 256.0);
 
         // render_frame takes &dyn CompositorSurface — no special headless branch.
@@ -3341,6 +3394,11 @@ mod tests {
     /// the env var set does not crash.
     #[tokio::test]
     async fn test_new_headless_with_force_software_env_var() {
+        if should_skip_gpu_tests() {
+            eprintln!("skipping GPU test: TZE_HUD_SKIP_GPU_TESTS=1");
+            return;
+        }
+
         // Serialize all env-var-mutating tests via a process-wide mutex.
         // Rust tests run in parallel by default; without serialization,
         // a concurrent test could observe or overwrite HEADLESS_FORCE_SOFTWARE.
@@ -3437,7 +3495,7 @@ mod tests {
     /// color.
     #[tokio::test]
     async fn test_text_markdown_node_renders_visible_text() {
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         // Dark-blue background, white text — high contrast for pixel detection.
@@ -3479,7 +3537,7 @@ mod tests {
     /// The bottom-right quadrant should remain all-dark (no text overflow).
     #[tokio::test]
     async fn test_text_clip_overflow_stays_within_bounds() {
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         // Text node occupies only top-left 64x64 pixels of the 256x256 tile.
@@ -3535,7 +3593,7 @@ mod tests {
     /// pixels appear (text was rendered at all).
     #[tokio::test]
     async fn test_text_ellipsis_overflow_no_panic() {
-        let (mut compositor, surface) = make_compositor_and_surface(256, 256).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let long_line =
@@ -3571,7 +3629,7 @@ mod tests {
     /// readable text at the zone geometry position.
     #[tokio::test]
     async fn test_zone_stream_text_renders_visible_text() {
-        let (mut compositor, surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
@@ -3653,7 +3711,7 @@ mod tests {
     /// geometry area.
     #[tokio::test]
     async fn test_zone_notification_renders_visible_text() {
-        let (mut compositor, surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
@@ -3737,7 +3795,7 @@ mod tests {
     ///   2. The key-value pairs are rendered as text at the zone geometry position.
     #[tokio::test]
     async fn test_zone_status_bar_renders_visible_text() {
-        let (mut compositor, surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
@@ -3838,7 +3896,7 @@ mod tests {
     /// `init_text_renderer` called multiple times replaces the rasterizer (no panic).
     #[tokio::test]
     async fn test_init_text_renderer_idempotent() {
-        let (mut compositor, surface) = make_compositor_and_surface(64, 64).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let scene = SceneGraph::new(64.0, 64.0);
@@ -3849,7 +3907,7 @@ mod tests {
     /// Text rendering with no text items (empty scene) must not panic.
     #[tokio::test]
     async fn test_text_renderer_empty_scene_no_panic() {
-        let (mut compositor, surface) = make_compositor_and_surface(64, 64).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         let scene = SceneGraph::new(64.0, 64.0);
         compositor.render_frame_headless(&scene, &surface);
@@ -3872,7 +3930,7 @@ mod tests {
         const STAGE6_BUDGET_US: u64 = 4_000;
         const FRAME_COUNT: usize = 60;
 
-        let (mut compositor, surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         // ── Build scene ─────────────────────────────────────────────────────────
@@ -3986,7 +4044,7 @@ mod tests {
     /// outline fields.
     #[tokio::test]
     async fn test_zone_subtitle_with_outline_text_item() {
-        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
@@ -4054,7 +4112,7 @@ mod tests {
     /// on the TextItem should be None.
     #[tokio::test]
     async fn test_zone_subtitle_without_outline_text_item() {
-        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
@@ -4113,7 +4171,7 @@ mod tests {
     /// effective alpha = 0.9.
     #[tokio::test]
     async fn test_notification_with_opaque_backdrop() {
-        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
@@ -4182,7 +4240,7 @@ mod tests {
     /// We verify by inspecting the vertices emitted by render_zone_content.
     #[tokio::test]
     async fn test_alert_banner_urgency2_maps_to_severity_warning() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -4286,7 +4344,7 @@ mod tests {
     /// Even with urgency=3, it must NOT produce severity critical (red #FF0000).
     #[tokio::test]
     async fn test_notification_area_does_not_use_severity_tokens() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -4545,7 +4603,7 @@ mod tests {
     /// The policy.backdrop_opacity must NOT override this.
     #[tokio::test]
     async fn test_notification_area_backdrop_uses_0_9_opacity() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -4609,7 +4667,7 @@ mod tests {
     ///   - up to 24 vertices (4 × 6) for the border quads
     #[tokio::test]
     async fn test_notification_area_emits_border_quads() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -4674,7 +4732,7 @@ mod tests {
     /// non-alert-banner notification zones.
     #[tokio::test]
     async fn test_alert_banner_does_not_emit_border_quads() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -4732,7 +4790,7 @@ mod tests {
     /// Border color uses color.border.default token when present.
     #[tokio::test]
     async fn test_notification_area_border_uses_border_default_token() {
-        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         // Install a custom border token: pure cyan (#00FFFF).
         let mut token_map = HashMap::new();
@@ -4921,7 +4979,7 @@ mod tests {
     /// alert-banner backdrop.
     #[tokio::test]
     async fn test_custom_severity_tokens_affect_alert_banner_backdrop() {
-        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         // Install a custom token map: override warning with pure green (#00FF00).
         let mut token_map = HashMap::new();
@@ -5049,7 +5107,7 @@ mod tests {
     /// When backdrop_opacity=0.6 and backdrop.a=1.0, effective alpha=0.6.
     #[tokio::test]
     async fn test_backdrop_opacity_overrides_color_alpha() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // backdrop color has alpha=1.0 but backdrop_opacity=0.6 should override it.
@@ -5104,7 +5162,7 @@ mod tests {
     /// backdrop=None: no backdrop quad rendered even when backdrop_opacity is set.
     #[tokio::test]
     async fn test_no_backdrop_when_backdrop_is_none() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -5157,7 +5215,7 @@ mod tests {
     /// policy.backdrop contract: when backdrop is None, nothing is emitted.
     #[tokio::test]
     async fn test_notification_no_backdrop_when_backdrop_is_none() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -5244,7 +5302,7 @@ mod tests {
     /// Two publications → two quads; the second quad starts at y+100.
     #[tokio::test]
     async fn test_stack_zone_renders_separate_backdrop_per_publication() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Zone: top-right, 200×400 px via Relative.
@@ -5347,7 +5405,7 @@ mod tests {
     /// each publication, with each item positioned in its own vertical slot.
     #[tokio::test]
     async fn test_stack_zone_collect_text_items_per_publication() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -5471,7 +5529,7 @@ mod tests {
     /// Verifies newest-first ordering: slot 0 = newest at zone top.
     #[tokio::test]
     async fn test_stack_slot_layout_five_notifications_distinct_y() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Zone: 300px wide × 300px tall — enough for 5 × 34px slots (170px).
@@ -5554,7 +5612,7 @@ mod tests {
     /// remain and the evicted notification is absent.
     #[tokio::test]
     async fn test_stack_slot_sixth_notification_evicts_oldest() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -5646,7 +5704,7 @@ mod tests {
     /// (y < zone_bottom but y+slot_h > zone_bottom) are emitted with clamped height.
     #[tokio::test]
     async fn test_stack_slot_clips_at_zone_boundary() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Zone height: 72px at 720 tall → height_pct = 72/720 = 0.1.
@@ -5728,7 +5786,7 @@ mod tests {
     /// entries and produce a single TextItem containing all unique keys.
     #[tokio::test]
     async fn test_merge_by_key_zone_merges_all_status_bar_entries() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -5821,7 +5879,7 @@ mod tests {
     /// value wins (last-write-wins per key semantics).
     #[tokio::test]
     async fn test_merge_by_key_latest_value_wins_for_duplicate_keys() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -5900,7 +5958,7 @@ mod tests {
     /// publications are present (regression guard).
     #[tokio::test]
     async fn test_latest_wins_zone_renders_only_latest_publication() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -5983,7 +6041,7 @@ mod tests {
     /// Acceptance criterion 3.1–3.3: heading typography wired to alert-banner zone.
     #[tokio::test]
     async fn test_alert_banner_heading_typography_in_rendering_policy() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Register alert-banner with heading-typography RenderingPolicy (spec values).
@@ -6177,7 +6235,7 @@ mod tests {
     ///   "When no alerts are active, the alert-banner zone MUST occupy zero vertical space."
     #[tokio::test]
     async fn test_alert_banner_zero_height_when_inactive() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Register alert-banner zone with a visible backdrop so it would render if active.
@@ -6341,7 +6399,7 @@ mod tests {
     /// publication order (warning published before critical).
     #[tokio::test]
     async fn test_alert_banner_critical_above_warning() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = make_alert_banner_scene();
 
         // Publish warning first, then critical.
@@ -6377,7 +6435,7 @@ mod tests {
     /// Info published before warning — severity sort must override arrival order.
     #[tokio::test]
     async fn test_alert_banner_warning_above_info() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = make_alert_banner_scene();
 
         // Publish info first, then warning.
@@ -6409,7 +6467,7 @@ mod tests {
     /// sort overrides arrival order.
     #[tokio::test]
     async fn test_alert_banner_three_level_severity_stack() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = make_alert_banner_scene();
 
         // Publish info first, then warning, then critical.
@@ -6454,7 +6512,7 @@ mod tests {
     /// insert (higher index) always wins on exact timestamp ties.
     #[tokio::test]
     async fn test_alert_banner_same_severity_recency_order() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = make_alert_banner_scene();
 
         // Publish two warnings in order.  Even if both arrive in the same µs,
@@ -6489,7 +6547,7 @@ mod tests {
     ///   this exceeds the 36px static height, proving dynamic expansion.
     #[tokio::test]
     async fn test_alert_banner_zone_height_grows_with_active_count() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         // ── 0 banners: no vertices emitted ──────────────────────────────────
         {
@@ -6557,7 +6615,7 @@ mod tests {
     /// (warning color).
     #[tokio::test]
     async fn test_alert_banner_backdrop_colors_ordered_by_severity() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = make_alert_banner_scene();
 
         // Publish warning first, then critical (to confirm severity overrides arrival).
@@ -6616,7 +6674,7 @@ mod tests {
     /// AC: notification text must use font_size_px resolved from typography.body.size.
     #[tokio::test]
     async fn test_notification_text_uses_body_typography_token_default() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -6738,7 +6796,7 @@ mod tests {
     /// AC: text content area starts at (x + 9, y + 9).
     #[tokio::test]
     async fn test_notification_text_inset_from_backdrop_edges() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Zone at x=0, y=0 (x_pct=0, y_pct=0) with 100% width and 50% height.
@@ -6906,7 +6964,7 @@ mod tests {
     ///     remaining notifications reflow (slot positions recalculated).
     #[tokio::test]
     async fn test_prune_faded_publications_removes_completed_fades() {
-        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -7076,7 +7134,7 @@ mod tests {
     /// AC: remaining notifications reflow to fill vacated slot instantly.
     #[tokio::test]
     async fn test_stack_reflow_after_publication_pruned() {
-        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Zone at x=0, y=0 with font_size 16px default → slot_h = 16 + 2*8 + 2 = 34px.
@@ -7295,7 +7353,7 @@ mod tests {
     /// confirms the placeholder path is exercised.
     #[tokio::test]
     async fn test_static_image_zone_emits_warm_gray_placeholder() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         scene.register_zone(ZoneDefinition {
@@ -7378,7 +7436,7 @@ mod tests {
     /// Content zones emit no vertices when filtered to Background only.
     #[tokio::test]
     async fn test_layer_filter_background_only_emits_background_vertices() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
         // Background zone: solid dark blue (r=0.0, g=0.0, b=1.0).
@@ -7504,7 +7562,7 @@ mod tests {
     /// Using Chrome filter emits no Content zone vertices.
     #[tokio::test]
     async fn test_layer_filter_chrome_only_emits_chrome_vertices() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
         // Content zone: solid green (r=0.0, g=1.0, b=0.0).
@@ -7625,7 +7683,7 @@ mod tests {
     /// the correct ordering regardless of registration order.
     #[tokio::test]
     async fn test_three_pass_ordering_independent_of_registration_order() {
-        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
         // Register in REVERSE order: Chrome first, then Background, then Content.
