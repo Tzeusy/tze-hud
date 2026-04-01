@@ -1392,8 +1392,8 @@ impl HudSession for HudSessionImpl {
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                                 // Missed input events under backpressure. Transactional
                                 // events (ClickEvent, CommandInputEvent) must not be
-                                // dropped; in production this should emit a metric.
-                                // For v1 we log and continue — the session remains open.
+                                // dropped; in production this should emit a metric/alert.
+                                // For v1 we continue silently — the session remains open.
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 // Runtime shutting down — treat as ungraceful disconnect.

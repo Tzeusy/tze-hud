@@ -202,7 +202,11 @@ fn click_event_batch(
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: interaction_id.to_string(),
-                timestamp_mono_us: now_wall_us(),
+                // Use 0 for _mono_us in tests: this is a monotonic-clock field
+                // (elapsed microseconds since process start, not wall time).
+                // A deterministic zero keeps tests stable and avoids semantic confusion
+                // with now_wall_us() (Unix epoch µs).
+                timestamp_mono_us: 0,
                 device_id: "pointer-0".to_string(),
                 local_x,
                 local_y,
@@ -226,7 +230,8 @@ fn activate_event_batch(
                 tile_id: tile_id_bytes,
                 node_id: node_id_bytes,
                 interaction_id: interaction_id.to_string(),
-                timestamp_mono_us: now_wall_us(),
+                // Use 0 for _mono_us: deterministic monotonic placeholder (not wall time).
+                timestamp_mono_us: 0,
                 device_id: "keyboard-0".to_string(),
                 action: CommandAction::Activate as i32,
                 source: CommandSource::Keyboard as i32,
@@ -642,7 +647,8 @@ async fn pointer_free_navigate_next_then_activate_delivers_same_callback_as_clic
                 tile_id: tile_id_bytes.clone(),
                 node_id: refresh_node_id_bytes.clone(),
                 interaction_id: "refresh-button".to_string(),
-                timestamp_mono_us: now_wall_us(),
+                // Use 0 for _mono_us: deterministic monotonic placeholder (not wall time).
+                timestamp_mono_us: 0,
                 device_id: "keyboard-0".to_string(),
                 action: CommandAction::Activate as i32,
                 source: CommandSource::Keyboard as i32,
