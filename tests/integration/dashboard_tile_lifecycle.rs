@@ -64,7 +64,7 @@ use tze_hud_resource::{
 };
 use tze_hud_scene::{
     Capability, Clock, HitResult, LeaseState, ResourceId, SceneGraph, SceneId, TestClock,
-    lease::{TileVisualHint, ORPHAN_GRACE_PERIOD_MS},
+    lease::{ORPHAN_GRACE_PERIOD_MS, TileVisualHint},
     mutation::{MutationBatch, SceneMutation},
     types::{
         CursorStyle, FontFamily, HitRegionNode, ImageFitMode, InputMode, LeaseExpiry, Node,
@@ -93,7 +93,12 @@ const ICON_H: u32 = 48;
 
 // ─── Spec-mandated node geometry ─────────────────────────────────────────────
 
-const BG_COLOR: Rgba = Rgba { r: 0.07, g: 0.07, b: 0.07, a: 0.90 };
+const BG_COLOR: Rgba = Rgba {
+    r: 0.07,
+    g: 0.07,
+    b: 0.07,
+    a: 0.90,
+};
 
 const ICON_X: f32 = 16.0;
 const ICON_Y: f32 = 16.0;
@@ -137,7 +142,10 @@ fn make_icon_png() -> Vec<u8> {
 // ─── Resource upload helper ───────────────────────────────────────────────────
 
 fn unlimited_budget() -> AgentBudget {
-    AgentBudget { texture_bytes_total_limit: 0, texture_bytes_total_used: 0 }
+    AgentBudget {
+        texture_bytes_total_limit: 0,
+        texture_bytes_total_used: 0,
+    }
 }
 
 /// Upload a PNG and return `(raw_hash_bytes, scene_ResourceId)`.
@@ -219,7 +227,12 @@ fn make_header_node() -> Node {
             bounds: Rect::new(HEADER_X, HEADER_Y, HEADER_W, HEADER_H),
             font_size_px: 18.0,
             font_family: FontFamily::SystemSansSerif,
-            color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            color: Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
@@ -236,7 +249,12 @@ fn make_body_node(content: &str) -> Node {
             bounds: Rect::new(BODY_X, BODY_Y, BODY_W, BODY_H),
             font_size_px: 14.0,
             font_family: FontFamily::SystemSansSerif,
-            color: Rgba { r: 0.78, g: 0.78, b: 0.78, a: 1.0 },
+            color: Rgba {
+                r: 0.78,
+                g: 0.78,
+                b: 0.78,
+                a: 1.0,
+            },
             background: None,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Ellipsis,
@@ -316,8 +334,7 @@ fn setup_scene() -> (SceneGraph, SceneId, SceneId) {
 /// Returns `(scene, clock, tab_id, lease_id)`.
 fn setup_scene_with_clock() -> (SceneGraph, TestClock, SceneId, SceneId) {
     let clock = TestClock::new(1_000);
-    let mut scene =
-        SceneGraph::new_with_clock(DISPLAY_W, DISPLAY_H, Arc::new(clock.clone()));
+    let mut scene = SceneGraph::new_with_clock(DISPLAY_W, DISPLAY_H, Arc::new(clock.clone()));
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
     let lease_id = scene.grant_lease(
@@ -350,13 +367,40 @@ fn apply_initial_node_batch(
         DASHBOARD_NS,
         Some(lease_id),
         vec![
-            SceneMutation::AddNode { tile_id, parent_id: None, node: bg },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: icon },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: header },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: body },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: refresh },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: dismiss },
-            SceneMutation::UpdateTileOpacity { tile_id, opacity: 1.0 },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: bg,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: icon,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: header,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: body,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: refresh,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: dismiss,
+            },
+            SceneMutation::UpdateTileOpacity {
+                tile_id,
+                opacity: 1.0,
+            },
             SceneMutation::UpdateTileInputMode {
                 tile_id,
                 input_mode: InputMode::Passthrough,
@@ -391,12 +435,35 @@ fn apply_content_update(
         DASHBOARD_NS,
         Some(lease_id),
         vec![
-            SceneMutation::AddNode { tile_id, parent_id: None, node: new_icon },
-            SceneMutation::AddNode { tile_id, parent_id: None, node: new_header },
-            SceneMutation::AddNode { tile_id, parent_id: None, node: new_body },
-            SceneMutation::AddNode { tile_id, parent_id: None, node: new_refresh },
-            SceneMutation::AddNode { tile_id, parent_id: None, node: new_dismiss },
-            SceneMutation::SetTileRoot { tile_id, node: new_bg },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: new_icon,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: new_header,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: new_body,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: new_refresh,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: new_dismiss,
+            },
+            SceneMutation::SetTileRoot {
+                tile_id,
+                node: new_bg,
+            },
         ],
     ))
 }
@@ -425,8 +492,15 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
     // ── Phase 1: Connect + Lease (session proxy) ──────────────────────────────
     let (mut scene, tab_id, lease_id) = setup_scene();
 
-    let lease = scene.leases.get(&lease_id).expect("lease must exist after grant");
-    assert_eq!(lease.state, LeaseState::Active, "Phase 1: lease must be ACTIVE after grant");
+    let lease = scene
+        .leases
+        .get(&lease_id)
+        .expect("lease must exist after grant");
+    assert_eq!(
+        lease.state,
+        LeaseState::Active,
+        "Phase 1: lease must be ACTIVE after grant"
+    );
     assert!(
         lease.capabilities.contains(&Capability::CreateTiles),
         "Phase 1: lease must have CreateTiles capability"
@@ -441,7 +515,11 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
     let (raw_hash, resource_id) = upload_icon_png(&store, DASHBOARD_NS).await;
 
     // Verify BLAKE3 ResourceId is 32 bytes.
-    assert_eq!(raw_hash.len(), blake3::OUT_LEN, "Phase 2: BLAKE3 hash must be 32 bytes");
+    assert_eq!(
+        raw_hash.len(),
+        blake3::OUT_LEN,
+        "Phase 2: BLAKE3 hash must be 32 bytes"
+    );
 
     // ── Phase 3: Atomic Tile Creation ─────────────────────────────────────────
     let create_result = scene.apply_batch(&make_batch(
@@ -467,8 +545,13 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
     );
     let tile_id = create_result.created_ids[0];
 
-    let (bg_id, node_result) =
-        apply_initial_node_batch(&mut scene, tile_id, lease_id, resource_id, "Status: OK\nUptime: 0s");
+    let (bg_id, node_result) = apply_initial_node_batch(
+        &mut scene,
+        tile_id,
+        lease_id,
+        resource_id,
+        "Status: OK\nUptime: 0s",
+    );
     assert!(
         node_result.applied,
         "Phase 3b: 6-node batch must be accepted; rejection: {:?}",
@@ -476,10 +559,18 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
     );
 
     // Verify 6 nodes, tile root, opacity, input_mode.
-    assert_eq!(scene.node_count(), 6, "Phase 3: scene must have exactly 6 nodes");
+    assert_eq!(
+        scene.node_count(),
+        6,
+        "Phase 3: scene must have exactly 6 nodes"
+    );
     {
         let tile = scene.tiles.get(&tile_id).expect("tile must exist");
-        assert_eq!(tile.root_node, Some(bg_id), "Phase 3: tile root must be bg node");
+        assert_eq!(
+            tile.root_node,
+            Some(bg_id),
+            "Phase 3: tile root must be bg node"
+        );
         assert_eq!(tile.opacity, 1.0, "Phase 3: tile opacity must be 1.0");
         assert_eq!(
             tile.input_mode,
@@ -493,8 +584,13 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
     }
 
     // ── Phase 4: Periodic Content Update ─────────────────────────────────────
-    let update_result =
-        apply_content_update(&mut scene, tile_id, lease_id, resource_id, "Status: OK\nUptime: 5s");
+    let update_result = apply_content_update(
+        &mut scene,
+        tile_id,
+        lease_id,
+        resource_id,
+        "Status: OK\nUptime: 5s",
+    );
     assert!(
         update_result.applied,
         "Phase 4: content update (SetTileRoot) must be accepted; rejection: {:?}",
@@ -509,9 +605,17 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
 
     // Verify new body text.
     {
-        let updated_tile = scene.tiles.get(&tile_id).expect("tile must still exist after update");
-        let new_root_id = updated_tile.root_node.expect("tile must still have a root node");
-        let new_root = scene.nodes.get(&new_root_id).expect("new root node must exist");
+        let updated_tile = scene
+            .tiles
+            .get(&tile_id)
+            .expect("tile must still exist after update");
+        let new_root_id = updated_tile
+            .root_node
+            .expect("tile must still have a root node");
+        let new_root = scene
+            .nodes
+            .get(&new_root_id)
+            .expect("new root node must exist");
         // children[2] = body TextMarkdownNode (painter's model: StaticImage, Header, Body, ...)
         assert!(
             new_root.children.len() > 2,
@@ -519,7 +623,10 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
             new_root.children.len()
         );
         let body_cid = new_root.children[2];
-        let body = scene.nodes.get(&body_cid).expect("Phase 4: body node must exist");
+        let body = scene
+            .nodes
+            .get(&body_cid)
+            .expect("Phase 4: body node must exist");
         let NodeData::TextMarkdown(ref tm) = body.data else {
             panic!("Phase 4: body node at children[2] must be a TextMarkdownNode");
         };
@@ -552,7 +659,11 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
     );
 
     // ── Phase 6: Dismiss click → LeaseRelease → tile removed ─────────────────
-    assert_eq!(scene.tile_count(), 1, "Phase 6: one tile must exist before dismiss");
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "Phase 6: one tile must exist before dismiss"
+    );
     scene
         .revoke_lease(lease_id)
         .expect("Phase 6: LeaseRelease (revoke_lease) must succeed");
@@ -568,7 +679,10 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
         "Phase 6: all nodes must be removed after LeaseRelease"
     );
 
-    let released_lease = scene.leases.get(&lease_id).expect("lease record must still exist");
+    let released_lease = scene
+        .leases
+        .get(&lease_id)
+        .expect("lease record must still exist");
     assert!(
         released_lease.state.is_terminal(),
         "Phase 6: lease must be in a terminal state after release; got {:?}",
@@ -619,7 +733,10 @@ fn disconnect_during_lifecycle_orphans_tile_with_badge() {
     let set_result = scene.apply_batch(&make_batch(
         DASHBOARD_NS,
         Some(lease_id),
-        vec![SceneMutation::SetTileRoot { tile_id, node: root }],
+        vec![SceneMutation::SetTileRoot {
+            tile_id,
+            node: root,
+        }],
     ));
     assert!(set_result.applied, "SetTileRoot must be accepted");
     assert_eq!(scene.tile_count(), 1, "one tile exists before disconnect");
@@ -696,14 +813,21 @@ fn grace_period_expiry_removes_tile_after_disconnect() {
     scene.apply_batch(&make_batch(
         DASHBOARD_NS,
         Some(lease_id),
-        vec![SceneMutation::SetTileRoot { tile_id, node: root }],
+        vec![SceneMutation::SetTileRoot {
+            tile_id,
+            node: root,
+        }],
     ));
 
     // Disconnect.
     scene
         .disconnect_lease(&lease_id, clock.now_millis())
         .expect("disconnect_lease must succeed");
-    assert_eq!(scene.tile_count(), 1, "tile must still exist at disconnect time");
+    assert_eq!(
+        scene.tile_count(),
+        1,
+        "tile must still exist at disconnect time"
+    );
 
     // ── Advance clock past grace period ───────────────────────────────────────
     // ORPHAN_GRACE_PERIOD_MS = 30_000 ms; add 1 ms margin.
@@ -711,7 +835,11 @@ fn grace_period_expiry_removes_tile_after_disconnect() {
 
     let expiries: Vec<LeaseExpiry> = scene.expire_leases();
 
-    assert_eq!(expiries.len(), 1, "exactly one lease must expire after grace period");
+    assert_eq!(
+        expiries.len(),
+        1,
+        "exactly one lease must expire after grace period"
+    );
     assert_eq!(
         expiries[0].lease_id, lease_id,
         "the dashboard agent's lease must be the one that expired"
@@ -726,8 +854,16 @@ fn grace_period_expiry_removes_tile_after_disconnect() {
         "tile_id must be in removed_tiles"
     );
 
-    assert_eq!(scene.tile_count(), 0, "tile must be removed after grace period expiry");
-    assert_eq!(scene.node_count(), 0, "all nodes must be removed after grace period expiry");
+    assert_eq!(
+        scene.tile_count(),
+        0,
+        "tile must be removed after grace period expiry"
+    );
+    assert_eq!(
+        scene.node_count(),
+        0,
+        "all nodes must be removed after grace period expiry"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -759,7 +895,10 @@ fn second_agent_cannot_mutate_dashboard_tile() {
             z_order: TILE_Z_ORDER,
         }],
     ));
-    assert!(create_result.applied, "CreateTile must succeed for dashboard agent");
+    assert!(
+        create_result.applied,
+        "CreateTile must succeed for dashboard agent"
+    );
     let tile_id = create_result.created_ids[0];
 
     // Second agent acquires a separate lease.
@@ -781,7 +920,12 @@ fn second_agent_cannot_mutate_dashboard_tile() {
                 id: SceneId::new(),
                 children: vec![],
                 data: NodeData::SolidColor(SolidColorNode {
-                    color: Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+                    color: Rgba {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
                     bounds: Rect::new(0.0, 0.0, TILE_W, TILE_H),
                 }),
             },
@@ -926,17 +1070,28 @@ async fn headless_tile_creation_produces_6_nodes_in_correct_tree_order() {
     );
     assert_eq!(root.children.len(), 5, "root must have exactly 5 children");
 
-    let expected_types =
-        ["StaticImage", "TextMarkdown", "TextMarkdown", "HitRegion", "HitRegion"];
+    let expected_types = [
+        "StaticImage",
+        "TextMarkdown",
+        "TextMarkdown",
+        "HitRegion",
+        "HitRegion",
+    ];
     for (i, &expected) in expected_types.iter().enumerate() {
-        let child = scene.nodes.get(&root.children[i]).expect("child node must exist");
+        let child = scene
+            .nodes
+            .get(&root.children[i])
+            .expect("child node must exist");
         let actual = match &child.data {
             NodeData::SolidColor(_) => "SolidColor",
             NodeData::StaticImage(_) => "StaticImage",
             NodeData::TextMarkdown(_) => "TextMarkdown",
             NodeData::HitRegion(_) => "HitRegion",
         };
-        assert_eq!(actual, expected, "child[{i}] must be {expected}, got {actual}");
+        assert_eq!(
+            actual, expected,
+            "child[{i}] must be {expected}, got {actual}"
+        );
     }
 
     // Verify HitRegionNode interaction_ids.
@@ -1002,9 +1157,21 @@ fn headless_pointer_down_at_refresh_bounds_returns_node_hit() {
         DASHBOARD_NS,
         Some(lease_id),
         vec![
-            SceneMutation::AddNode { tile_id, parent_id: None, node: bg },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: refresh },
-            SceneMutation::AddNode { tile_id, parent_id: Some(bg_id), node: dismiss },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: None,
+                node: bg,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: refresh,
+            },
+            SceneMutation::AddNode {
+                tile_id,
+                parent_id: Some(bg_id),
+                node: dismiss,
+            },
         ],
     ));
 
@@ -1017,7 +1184,11 @@ fn headless_pointer_down_at_refresh_bounds_returns_node_hit() {
     let hit = scene.hit_test(ptr_x, ptr_y);
 
     match hit {
-        HitResult::NodeHit { tile_id: hit_tile_id, node_id, interaction_id } => {
+        HitResult::NodeHit {
+            tile_id: hit_tile_id,
+            node_id,
+            interaction_id,
+        } => {
             assert_eq!(
                 hit_tile_id, tile_id,
                 "hit tile_id must match the dashboard tile"
@@ -1051,8 +1222,7 @@ fn headless_pointer_down_at_refresh_bounds_returns_node_hit() {
 #[test]
 fn headless_lease_expiry_advances_to_expired_and_removes_tile() {
     let clock = TestClock::new(1_000);
-    let mut scene =
-        SceneGraph::new_with_clock(DISPLAY_W, DISPLAY_H, Arc::new(clock.clone()));
+    let mut scene = SceneGraph::new_with_clock(DISPLAY_W, DISPLAY_H, Arc::new(clock.clone()));
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
 
@@ -1103,6 +1273,14 @@ fn headless_lease_expiry_advances_to_expired_and_removes_tile() {
         "tile_id must appear in removed_tiles"
     );
 
-    assert_eq!(scene.tile_count(), 0, "tile must be removed after TTL expiry");
-    assert_eq!(scene.node_count(), 0, "all nodes must be removed after TTL expiry");
+    assert_eq!(
+        scene.tile_count(),
+        0,
+        "tile must be removed after TTL expiry"
+    );
+    assert_eq!(
+        scene.node_count(),
+        0,
+        "all nodes must be removed after TTL expiry"
+    );
 }
