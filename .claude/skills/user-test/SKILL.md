@@ -238,12 +238,18 @@ The gauge should visually cycle through: blue 25% "Low" → yellow 50% "Medium" 
 
 ### Step 6: Widget Reactivity Test (Status Indicator)
 
-After the gauge cycle, run the status-indicator enum cycle to verify discrete color binding and re-rasterization on param change.
+After the gauge cycle, confirm that a `status-indicator` widget instance is registered before proceeding. Use the `--list-widgets` output from Step 4 (or re-run it) to verify that a widget named `status-indicator` appears in the list. If no such instance is present, skip the sub-steps below and report that the status-indicator widget is not deployed.
+
+Run the status-indicator enum cycle to verify discrete color binding and re-rasterization on param change.
 
 Use `scripts/status-indicator-enum-cycle-test.json` from this skill with `--delay-ms 1000`:
 
 ```bash
-python3 .claude/skills/user-test/scripts/publish_widget_batch.py   --url "$MCP_HTTP_URL"   --psk-env MCP_TEST_PSK   --messages-file .claude/skills/user-test/scripts/status-indicator-enum-cycle-test.json   --delay-ms 1000
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/status-indicator-enum-cycle-test.json \
+  --delay-ms 1000
 ```
 
 The status indicator should visually cycle through:
@@ -257,7 +263,11 @@ Each transition is a discrete snap (no interpolation). Require human visual conf
 Next, run the label-update sequence to verify text-content binding:
 
 ```bash
-python3 .claude/skills/user-test/scripts/publish_widget_batch.py   --url "$MCP_HTTP_URL"   --psk-env MCP_TEST_PSK   --messages-file .claude/skills/user-test/scripts/status-indicator-label-update-test.json   --delay-ms 1000
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/status-indicator-label-update-test.json \
+  --delay-ms 1000
 ```
 
 Expected label progression: "Butler" → "Codex" → (empty, no visible text). The dot remains green (online) throughout. Require human confirmation that the label text updates below the dot on each step, and clears on the final step.
@@ -265,7 +275,10 @@ Expected label progression: "Butler" → "Codex" → (empty, no visible text). T
 Finally, run the validation fixture to confirm invalid enum rejection at the MCP surface:
 
 ```bash
-python3 .claude/skills/user-test/scripts/publish_widget_batch.py   --url "$MCP_HTTP_URL"   --psk-env MCP_TEST_PSK   --messages-file .claude/skills/user-test/scripts/status-indicator-validation-test.json
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/status-indicator-validation-test.json
 ```
 
 Expected result: MCP returns an error response (`WIDGET_PARAMETER_INVALID_VALUE`) for `status=do-not-disturb`. The widget display must not change. Report whether the error response matches expectation.
