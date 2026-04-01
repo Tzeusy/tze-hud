@@ -892,18 +892,18 @@ impl Compositor {
 
             // Emit TextItems based on contention policy.
             //
-            // Stack: each publication occupies a vertically-stacked slot (oldest at top,
-            //   newest at bottom).  slot_h = zh / max_depth.
+            // Stack: each publication occupies a vertically-stacked slot (newest at top,
+            //   slot 0 = newest).  slot_h via Self::stack_slot_height().
             //
             // MergeByKey: collect ALL StatusBar publications, merge their entries
             //   (last write wins per key), render the merged set as one text item.
             //
             // LatestWins / Replace: render only the most-recent publication.
             match zone_def.contention_policy {
-                ContentionPolicy::Stack { max_depth } => {
-                    let slot_h = (zh / (max_depth.max(1) as f32)).max(1.0);
-                    // Publishes are oldest-first; slot 0 = oldest (top of stack).
-                    for (slot_idx, record) in publishes.iter().enumerate() {
+                ContentionPolicy::Stack { .. } => {
+                    let slot_h = Self::stack_slot_height(policy);
+                    // Render newest-first: slot_index 0 = newest (top of zone).
+                    for (slot_idx, record) in publishes.iter().rev().enumerate() {
                         let slot_y = zy + slot_idx as f32 * slot_h;
                         // Clip to zone bounds.
                         if slot_y >= zy + zh {
@@ -1831,18 +1831,20 @@ impl Compositor {
             // Resolve and emit backdrop quads based on the zone's contention policy.
             //
             // Stack zones: each publication gets its own vertically-stacked slot.
-            //   Publishes are stored oldest-first; slot 0 = oldest (top of stack).
-            //   slot_h = zone_height / max_depth (floored, ≥1 px).
+            //   Publishes are rendered newest-first (slot 0 = newest, at top of zone).
+            //   slot_h via Self::stack_slot_height() — content-sized, policy-driven.
+            //   This gives each notification a content-sized slot rather than dividing
+            //   zone height uniformly by max_depth.
             //
             // MergeByKey zones: single backdrop for the full zone (entries are merged
             //   at the data level; visually one unified strip).
             //
             // LatestWins / Replace: single backdrop from the most-recent publish only.
             match zone_def.contention_policy {
-                ContentionPolicy::Stack { max_depth } => {
-                    let slot_h = (h / (max_depth.max(1) as f32)).max(1.0);
-                    // Render backdrop for each active publication, oldest-first (index 0).
-                    for (slot_idx, record) in publishes.iter().enumerate() {
+                ContentionPolicy::Stack { .. } => {
+                    let slot_h = Self::stack_slot_height(policy);
+                    // Render newest-first: slot_index 0 = newest (top of zone).
+                    for (slot_idx, record) in publishes.iter().rev().enumerate() {
                         let slot_y = y + slot_idx as f32 * slot_h;
                         // Clip to zone bounds.
                         if slot_y >= y + h {
@@ -1966,6 +1968,25 @@ impl Compositor {
                 vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, color));
             }
         }
+    }
+
+    /// Compute the per-slot height for a Stack zone.
+    ///
+    /// `slot_h = font_size_px + 2 * margin_v + SLOT_BASELINE_GAP`
+    ///
+    /// - `font_size_px` — from `RenderingPolicy`; defaults to 16.
+    /// - `margin_v` — from `margin_vertical` → `margin_px` → 8 px fallback chain.
+    /// - `SLOT_BASELINE_GAP` — a small constant gap (2 px) between successive slot
+    ///   backdrops so they don't bleed into each other visually. This is not a
+    ///   configurable policy field; it is a structural layout constant.
+    ///
+    /// Used by both `collect_text_items` and `render_zone_content` so both code
+    /// paths stay consistent.
+    fn stack_slot_height(policy: &RenderingPolicy) -> f32 {
+        const SLOT_BASELINE_GAP: f32 = 2.0;
+        let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
+        let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
+        (font_size_px + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
     }
 
     /// Resolve a zone's geometry policy to pixel bounds (x, y, w, h).
@@ -4085,21 +4106,25 @@ mod tests {
             items.len()
         );
 
-        // Items should be ordered oldest-first (same order as publishes vec).
+        // Items should be ordered newest-first (slot 0 = newest at top of zone).
         assert!(
-            items[0].text.contains("Alpha"),
-            "first TextItem should be the oldest publication"
+            items[0].text.contains("Gamma"),
+            "first TextItem should be the newest publication (Gamma), got: {}",
+            items[0].text
         );
         assert!(
             items[1].text.contains("Beta"),
-            "second TextItem should be the second publication"
+            "second TextItem should be Beta, got: {}",
+            items[1].text
         );
         assert!(
-            items[2].text.contains("Gamma"),
-            "third TextItem should be the newest publication"
+            items[2].text.contains("Alpha"),
+            "third TextItem should be the oldest publication (Alpha), got: {}",
+            items[2].text
         );
 
-        // Each item should occupy a different vertical slot.
+        // Each item should occupy a different vertical slot; slot 0 is at top
+        // (lowest y), slot 1 below it, slot 2 below that.
         assert!(
             items[1].pixel_y > items[0].pixel_y,
             "slot 1 y ({}) must be below slot 0 y ({})",
@@ -4111,6 +4136,263 @@ mod tests {
             "slot 2 y ({}) must be below slot 1 y ({})",
             items[2].pixel_y,
             items[1].pixel_y
+        );
+    }
+
+    // ── Slot layout: content-sized slots, newest-first ───────────────────────
+
+    /// 5 stacked notifications must each appear at a distinct y-position.
+    /// slot_height = font_size_px(16) + 18 = 34 px.
+    /// Zone is tall enough to accommodate all 5 slots.
+    /// Verifies newest-first ordering: slot 0 = newest at zone top.
+    #[tokio::test]
+    async fn test_stack_slot_layout_five_notifications_distinct_y() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Zone: 300px wide × 300px tall — enough for 5 × 34px slots (170px).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "slot layout test zone".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,    // 320 px at 1280 wide
+                height_pct: 0.4167, // ~300 px at 720 tall
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(16.0),
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 5,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish 5 notifications (oldest to newest: "N1" .. "N5").
+        for i in 1..=5 {
+            scene
+                .publish_to_zone(
+                    "notification-area",
+                    ZoneContent::Notification(NotificationPayload {
+                        text: format!("N{i}"),
+                        icon: String::new(),
+                        urgency: 1,
+                    }),
+                    &format!("agent-{i}"),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 5, "5 notifications must produce 5 TextItems");
+
+        // With font_size_px=16 → slot_h = 34.  margin_v defaults to 8.
+        // pixel_y for slot i = zone_y + i*slot_h + margin_v.
+        // Check all 5 y-values are strictly increasing (slot 0 = newest = top).
+        let ys: Vec<f32> = items.iter().map(|it| it.pixel_y).collect();
+        for w in ys.windows(2) {
+            assert!(
+                w[1] > w[0],
+                "slots must have strictly increasing y; got consecutive y={:.2} then {:.2}",
+                w[0],
+                w[1]
+            );
+        }
+
+        // Newest notification is "N5" — must be slot 0 (lowest y).
+        assert!(
+            items[0].text.contains("N5"),
+            "slot 0 must be the newest notification (N5), got: {}",
+            items[0].text
+        );
+        // Oldest is "N1" — must be slot 4 (highest y).
+        assert!(
+            items[4].text.contains("N1"),
+            "slot 4 must be the oldest notification (N1), got: {}",
+            items[4].text
+        );
+    }
+
+    /// When a 6th notification is published to a Stack zone with max_depth=5,
+    /// the oldest notification must be evicted.  After eviction, only 5 items
+    /// remain and the evicted notification is absent.
+    #[tokio::test]
+    async fn test_stack_slot_sixth_notification_evicts_oldest() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "eviction test zone".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(16.0),
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 6,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish 6 notifications; "oldest" is "Oldest" (first published).
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Oldest".to_owned(),
+                    icon: String::new(),
+                    urgency: 0,
+                }),
+                "agent-0",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        for i in 1..=5 {
+            scene
+                .publish_to_zone(
+                    "notification-area",
+                    ZoneContent::Notification(NotificationPayload {
+                        text: format!("N{i}"),
+                        icon: String::new(),
+                        urgency: 1,
+                    }),
+                    &format!("agent-{i}"),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // Only 5 items after eviction (max_depth=5).
+        assert_eq!(
+            items.len(),
+            5,
+            "after 6th publish with max_depth=5, must have 5 TextItems; got {}",
+            items.len()
+        );
+
+        // "Oldest" must have been evicted — not present in any item.
+        let has_oldest = items.iter().any(|it| it.text.contains("Oldest"));
+        assert!(
+            !has_oldest,
+            "oldest notification must be evicted after 6th publish"
+        );
+
+        // "N5" (newest) must be present as slot 0.
+        assert!(
+            items[0].text.contains("N5"),
+            "newest notification (N5) must be slot 0 after eviction, got: {}",
+            items[0].text
+        );
+    }
+
+    /// Stack notifications clip at zone boundary: slots whose top-left y is at or
+    /// beyond zone_bottom are fully clipped and produce no TextItem. Partial slots
+    /// (y < zone_bottom but y+slot_h > zone_bottom) are emitted with clamped height.
+    #[tokio::test]
+    async fn test_stack_slot_clips_at_zone_boundary() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Zone height: 72px at 720 tall → height_pct = 72/720 = 0.1.
+        // font_size_px=16, default margin_v=8 → slot_h = 16+2*8+2 = 34px.
+        // 2 full slots fit (slots 0,1: 2*34=68 < 72); slot 2 partial (y=68 < 72); slot 3 clipped.
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "clipping test zone".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.1, // 72 px at 720 tall
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(16.0),
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 5,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish 4 notifications; only the 2 newest should be visible (newest-first).
+        for i in 1..=4 {
+            scene
+                .publish_to_zone(
+                    "notification-area",
+                    ZoneContent::Notification(NotificationPayload {
+                        text: format!("M{i}"),
+                        icon: String::new(),
+                        urgency: 1,
+                    }),
+                    &format!("agent-{i}"),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // Zone height = 72px, slot_h = 34px.
+        // slot 0 at y=0  (fits: 0+34=34 ≤ 72 → emitted).
+        // slot 1 at y=34 (fits: 34+34=68 ≤ 72 → emitted).
+        // slot 2 at y=68 (partial: y=68 < 72, effective_slot_h = 4 → still emitted,
+        //   clamped; text may not visually render but the TextItem is produced).
+        // slot 3 at y=102 → y ≥ zone_bottom(72) → loop breaks, no item.
+        // Exactly 3 items (slots 0, 1, 2) are emitted.
+        assert_eq!(
+            items.len(),
+            3,
+            "with 72px zone and 34px slots, exactly 3 items should be emitted; got {}",
+            items.len()
+        );
+
+        // The newest notification (M4) must be in slot 0.
+        assert!(
+            !items.is_empty() && items[0].text.contains("M4"),
+            "newest notification (M4) must be slot 0 (top of zone), got: {}",
+            if items.is_empty() {
+                "empty"
+            } else {
+                &items[0].text
+            }
         );
     }
 

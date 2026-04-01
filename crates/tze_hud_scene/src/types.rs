@@ -2123,10 +2123,10 @@ impl ZoneRegistry {
             },
             accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
             rendering_policy: RenderingPolicy::default(),
-            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
             max_publishers: 16,
             transport_constraint: None,
-            auto_clear_ms: Some(5_000),
+            auto_clear_ms: Some(8_000),
             ephemeral: false,
             layer_attachment: LayerAttachment::Chrome,
         });
