@@ -256,10 +256,19 @@ impl HeadlessRuntime {
             if let Some(toml_str) = &config.config_toml {
                 match toml::from_str::<tze_hud_config::raw::RawConfig>(toml_str) {
                     Ok(raw) => {
-                        let startup_result =
+                        let mut startup_result =
                             run_component_startup(&raw, None, Some("headless"), &mut scene);
                         // Step 9b: register profile-scoped widget bundles
                         register_profile_widgets(&mut scene, &startup_result);
+                        // Step 9c: register global widget SVG assets with the headless widget renderer,
+                        // mirroring the windowed runtime so bundled SVG-based widgets render correctly.
+                        if let Some(wr) = compositor.widget_renderer_mut() {
+                            for (type_id, filename, bytes) in
+                                startup_result.widget_svg_assets.drain(..)
+                            {
+                                wr.register_svg(&type_id, &filename, bytes);
+                            }
+                        }
                         tracing::debug!(
                             token_count = startup_result.global_tokens.len(),
                             "headless: component startup complete — design tokens and zone registry applied"
@@ -267,9 +276,10 @@ impl HeadlessRuntime {
                         startup_result.global_tokens
                     }
                     Err(e) => {
-                        // Parsing already succeeded above (build_runtime_context), but
-                        // raw deserialization may fail for different reasons. Fall back
-                        // to canonical zone defaults with no token derivation.
+                        // Even when a RuntimeContext has been constructed (potentially via
+                        // fallbacks in build_runtime_context), raw deserialization into
+                        // RawConfig may still fail. Fall back to canonical zone defaults
+                        // with no token derivation.
                         tracing::warn!(
                             error = %e,
                             "headless: component startup skipped — raw config parse failed; \
