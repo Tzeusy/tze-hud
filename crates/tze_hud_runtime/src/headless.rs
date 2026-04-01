@@ -252,48 +252,48 @@ impl HeadlessRuntime {
         //
         // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
         let mut scene = SceneGraph::new(config.width as f32, config.height as f32);
-        let global_tokens: std::collections::HashMap<String, String> =
-            if let Some(toml_str) = &config.config_toml {
-                match toml::from_str::<tze_hud_config::raw::RawConfig>(toml_str) {
-                    Ok(raw) => {
-                        let mut startup_result =
-                            run_component_startup(&raw, None, Some("headless"), &mut scene);
-                        // Step 9b: register profile-scoped widget bundles
-                        register_profile_widgets(&mut scene, &startup_result);
-                        // Step 9c: register global widget SVG assets with the headless widget renderer,
-                        // mirroring the windowed runtime so bundled SVG-based widgets render correctly.
-                        if let Some(wr) = compositor.widget_renderer_mut() {
-                            for (type_id, filename, bytes) in
-                                startup_result.widget_svg_assets.drain(..)
-                            {
-                                wr.register_svg(&type_id, &filename, bytes);
-                            }
+        let global_tokens: std::collections::HashMap<String, String> = if let Some(toml_str) =
+            &config.config_toml
+        {
+            match toml::from_str::<tze_hud_config::raw::RawConfig>(toml_str) {
+                Ok(raw) => {
+                    let mut startup_result =
+                        run_component_startup(&raw, None, Some("headless"), &mut scene);
+                    // Step 9b: register profile-scoped widget bundles
+                    register_profile_widgets(&mut scene, &startup_result);
+                    // Step 9c: register global widget SVG assets with the headless widget renderer,
+                    // mirroring the windowed runtime so bundled SVG-based widgets render correctly.
+                    if let Some(wr) = compositor.widget_renderer_mut() {
+                        for (type_id, filename, bytes) in startup_result.widget_svg_assets.drain(..)
+                        {
+                            wr.register_svg(&type_id, &filename, bytes);
                         }
-                        tracing::debug!(
-                            token_count = startup_result.global_tokens.len(),
-                            "headless: component startup complete — design tokens and zone registry applied"
-                        );
-                        startup_result.global_tokens
                     }
-                    Err(e) => {
-                        // Even when a RuntimeContext has been constructed (potentially via
-                        // fallbacks in build_runtime_context), raw deserialization into
-                        // RawConfig may still fail. Fall back to canonical zone defaults
-                        // with no token derivation.
-                        tracing::warn!(
-                            error = %e,
-                            "headless: component startup skipped — raw config parse failed; \
-                             zone registry will use defaults, no design tokens applied"
-                        );
-                        scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
-                        std::collections::HashMap::new()
-                    }
+                    tracing::debug!(
+                        token_count = startup_result.global_tokens.len(),
+                        "headless: component startup complete — design tokens and zone registry applied"
+                    );
+                    startup_result.global_tokens
                 }
-            } else {
-                // No config provided — bootstrap with canonical zone defaults.
-                scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
-                std::collections::HashMap::new()
-            };
+                Err(e) => {
+                    // Even when a RuntimeContext has been constructed (potentially via
+                    // fallbacks in build_runtime_context), raw deserialization into
+                    // RawConfig may still fail. Fall back to canonical zone defaults
+                    // with no token derivation.
+                    tracing::warn!(
+                        error = %e,
+                        "headless: component startup skipped — raw config parse failed; \
+                         zone registry will use defaults, no design tokens applied"
+                    );
+                    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            // No config provided — bootstrap with canonical zone defaults.
+            scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+            std::collections::HashMap::new()
+        };
 
         // Apply resolved design tokens to the compositor so severity colors and
         // other token-driven properties are resolved at render time.
@@ -887,13 +887,21 @@ default_tab = true
         // The compositor's token_map must contain the tokens from config_toml.
         // color.text.primary was set to "#FF0000" in the config.
         assert_eq!(
-            runtime.compositor.token_map.get("color.text.primary").map(String::as_str),
+            runtime
+                .compositor
+                .token_map
+                .get("color.text.primary")
+                .map(String::as_str),
             Some("#FF0000"),
             "compositor token_map should contain color.text.primary from config_toml"
         );
         // color.severity.warning was set to "#00FF00".
         assert_eq!(
-            runtime.compositor.token_map.get("color.severity.warning").map(String::as_str),
+            runtime
+                .compositor
+                .token_map
+                .get("color.severity.warning")
+                .map(String::as_str),
             Some("#00FF00"),
             "compositor token_map should contain color.severity.warning from config_toml"
         );
