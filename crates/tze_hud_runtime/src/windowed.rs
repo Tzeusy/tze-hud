@@ -669,6 +669,13 @@ impl ApplicationHandler for WinitApp {
                         scene.drain_expired_zone_publications();
                         scene.drain_expired_widget_publications();
 
+                        // ── Per-publication TTL fade-out sweep ───────────
+                        // update_publication_animations seeds new state and ticks
+                        // existing ones; prune_faded_publications removes any
+                        // publications whose 150ms fade-out has completed.
+                        compositor.update_publication_animations(&scene);
+                        compositor.prune_faded_publications(&mut scene);
+
                         let new_snap = crate::pipeline::HitTestSnapshot::from_scene(&scene);
                         hit_test_snapshot.store(Arc::new(new_snap));
 

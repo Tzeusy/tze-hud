@@ -295,6 +295,12 @@ impl HeadlessRuntime {
         // publications MUST be cleared before the next frame.
         scene_guard.drain_expired_zone_publications();
         scene_guard.drain_expired_widget_publications();
+
+        // Per-publication TTL fade-out sweep: seed/tick animation states and
+        // prune publications whose 150ms fade-out has completed.
+        self.compositor.update_publication_animations(&scene_guard);
+        self.compositor.prune_faded_publications(&mut scene_guard);
+
         let scene = &*scene_guard;
 
         // ── Capture compositor render work upfront ────────────────────────────
