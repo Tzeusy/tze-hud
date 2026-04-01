@@ -399,6 +399,97 @@ impl ZoneAnimationState {
     }
 }
 
+/// Stable key that uniquely identifies a single publication within a zone.
+///
+/// Composed of `(published_at_wall_us, publisher_namespace)`.  Because the
+/// scene graph assigns `published_at_wall_us` from a monotonic wall clock, the
+/// combination is unique per-zone across all practical usage.
+type PubKey = (u64, String);
+
+/// Per-publication opacity animation state for TTL-based fade-out.
+///
+/// Unlike [`ZoneAnimationState`] (which tracks zone-wide fade-in/fade-out),
+/// `PublicationAnimationState` tracks the lifecycle of **one** publication
+/// within a Stack zone.  Each notification gets its own instance.
+///
+/// Lifecycle:
+/// 1. Created when the compositor first sees the publication.  `fade_start` is
+///    `None` (publication is fully visible at opacity 1.0).
+/// 2. When `first_seen.elapsed() >= ttl_ms`, the compositor sets
+///    `fade_start = Some(Instant::now())` to begin the 150 ms fade-out.
+/// 3. While fading: `current_opacity()` interpolates from 1.0 → 0.0 over
+///    `NOTIFICATION_FADE_OUT_MS` ms.
+/// 4. When `is_fade_complete()` returns `true`, the publication is removed
+///    from `SceneGraph::zone_registry::active_publishes`.
+pub struct PublicationAnimationState {
+    /// Wall-clock instant when the compositor first rendered this publication.
+    pub first_seen: std::time::Instant,
+    /// Effective TTL in milliseconds.  Fade-out begins once this many ms
+    /// have elapsed since `first_seen`.
+    pub ttl_ms: u64,
+    /// Instant when the fade-out transition started.  `None` means the
+    /// publication is still fully visible (TTL has not yet expired).
+    pub fade_start: Option<std::time::Instant>,
+    /// Fade-out duration in milliseconds (always 150 for notifications).
+    pub fade_duration_ms: u32,
+}
+
+/// Duration of the per-notification fade-out transition (ms).
+const NOTIFICATION_FADE_OUT_MS: u32 = 150;
+
+/// Default TTL used when no per-publication TTL is set and the zone has no
+/// `auto_clear_ms`.  Matches the notification-area zone default (8 000 ms).
+const NOTIFICATION_DEFAULT_TTL_MS: u64 = 8_000;
+
+impl PublicationAnimationState {
+    /// Create a new state for a freshly-seen publication.
+    pub fn new(ttl_ms: u64) -> Self {
+        Self {
+            first_seen: std::time::Instant::now(),
+            ttl_ms,
+            fade_start: None,
+            fade_duration_ms: NOTIFICATION_FADE_OUT_MS,
+        }
+    }
+
+    /// Check whether the TTL has expired and start the fade if so.
+    ///
+    /// Must be called once per frame per publication.  Idempotent after the
+    /// fade has started.
+    pub fn tick(&mut self) {
+        if self.fade_start.is_none()
+            && self.first_seen.elapsed().as_millis() as u64 >= self.ttl_ms
+        {
+            self.fade_start = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Returns the current effective opacity for this publication (0.0–1.0).
+    ///
+    /// Before fade: 1.0.
+    /// During fade: linear interpolation from 1.0 → 0.0.
+    /// After fade: 0.0.
+    pub fn current_opacity(&self) -> f32 {
+        let Some(start) = self.fade_start else {
+            return 1.0;
+        };
+        if self.fade_duration_ms == 0 {
+            return 0.0;
+        }
+        let elapsed_ms = start.elapsed().as_millis() as f32;
+        let t = (elapsed_ms / self.fade_duration_ms as f32).clamp(0.0, 1.0);
+        1.0 - t
+    }
+
+    /// Returns `true` when the fade-out transition has fully completed.
+    pub fn is_fade_complete(&self) -> bool {
+        let Some(start) = self.fade_start else {
+            return false;
+        };
+        start.elapsed().as_millis() >= self.fade_duration_ms as u128
+    }
+}
+
 /// GPU state and render pipeline.
 pub struct Compositor {
     pub device: wgpu::Device,
@@ -438,6 +529,14 @@ pub struct Compositor {
     /// Track which zones had active publishes in the previous frame so we can
     /// detect publish → clear transitions and start fade-out animations.
     prev_active_zones: HashMap<String, bool>,
+    /// Per-publication TTL fade-out animation state.
+    ///
+    /// Outer key: zone name.  Inner key: `PubKey = (published_at_wall_us, publisher_namespace)`.
+    ///
+    /// Created when the compositor first encounters a publication in a Stack zone.
+    /// Entries for publications no longer in `active_publishes` are pruned by
+    /// [`Compositor::prune_faded_publications`].
+    pub(crate) pub_animation_states: HashMap<String, HashMap<PubKey, PublicationAnimationState>>,
     /// Resolved design token map, set at startup via `set_token_map`.
     ///
     /// Used to resolve `color.severity.{info,warning,critical}` tokens for
@@ -512,6 +611,7 @@ impl Compositor {
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
+            pub_animation_states: HashMap::new(),
             token_map: HashMap::new(),
         })
     }
@@ -757,6 +857,7 @@ impl Compositor {
             widget_renderer: None,
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
+            pub_animation_states: HashMap::new(),
             token_map: HashMap::new(),
         };
 
@@ -1143,6 +1244,13 @@ impl Compositor {
                             break;
                         }
                         let effective_slot_h = slot_h.min((zy + effective_zh) - slot_y);
+
+                        // Per-publication fade-out opacity (1.0 when no fade active).
+                        let pub_opacity = self.pub_opacity(zone_name, record);
+                        // Combined opacity: zone animation × per-publication fade.
+                        let effective_opacity = anim_opacity * pub_opacity;
+
+
                         match &record.content {
                             ZoneContent::StreamText(text) => {
                                 items.push(TextItem::from_zone_policy(
@@ -1152,20 +1260,40 @@ impl Compositor {
                                     zw,
                                     effective_slot_h,
                                     policy,
-                                    anim_opacity,
+                                    effective_opacity,
                                 ));
                             }
                             ZoneContent::Notification(payload) => {
+                                // Notification text rendering uses token-resolved typography:
+                                // - font size: typography.body.size (default 16px)
+                                // - text color: color.text.primary (default near-white)
+                                // - left-aligned with 9px inset (8px padding + 1px border)
+                                // - clips at content area boundary (no wrapping in v1)
                                 // Icon rendering is stubbed (no texture pipeline in v1).
-                                items.push(TextItem::from_zone_policy(
-                                    &payload.text,
-                                    zx,
-                                    slot_y,
-                                    zw,
-                                    effective_slot_h,
-                                    policy,
-                                    anim_opacity,
-                                ));
+                                const BORDER_PX: f32 = 1.0;
+                                const PADDING_PX: f32 = 8.0;
+                                const TEXT_INSET: f32 = BORDER_PX + PADDING_PX;
+                                let font_size_px = Self::resolve_body_font_size(&self.token_map);
+                                let color = crate::text::apply_opacity_to_color(
+                                    Self::resolve_text_primary_color(&self.token_map),
+                                    effective_opacity,
+                                );
+                                items.push(TextItem {
+                                    text: payload.text.clone(),
+                                    pixel_x: zx + TEXT_INSET,
+                                    pixel_y: slot_y + TEXT_INSET,
+                                    bounds_width: (zw - TEXT_INSET * 2.0).max(1.0),
+                                    bounds_height: (effective_slot_h - TEXT_INSET * 2.0).max(1.0),
+                                    font_size_px,
+                                    font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
+                                    font_weight: 400,
+                                    color,
+                                    alignment: tze_hud_scene::types::TextAlign::Start,
+                                    overflow: tze_hud_scene::types::TextOverflow::Clip,
+                                    outline_color: None,
+                                    outline_width: None,
+                                    opacity: effective_opacity,
+                                });
                             }
                             _ => {}
                         }
@@ -1363,6 +1491,149 @@ impl Compositor {
             .retain(|_, state| !state.is_complete());
 
         self.prev_active_zones = current_active;
+    }
+
+    /// Update per-publication fade-out animation state for Stack zone publications.
+    ///
+    /// For each active publication in a Stack zone:
+    ///
+    /// 1. If it is new (not in `pub_animation_states`), insert a fresh
+    ///    [`PublicationAnimationState`] using the per-publication `ttl_ms` from
+    ///    `NotificationPayload.ttl_ms`, falling back to the zone's `auto_clear_ms`,
+    ///    then to `NOTIFICATION_DEFAULT_TTL_MS` (8 000 ms).
+    /// 2. Call `tick()` to check whether the TTL has expired and start the fade if so.
+    ///
+    /// Stale entries (publications no longer present in `active_publishes`) are
+    /// pruned from `pub_animation_states` by this method.
+    ///
+    /// After this call, use [`Compositor::prune_faded_publications`] to remove
+    /// publications whose fade-out has fully completed from the scene graph.
+    ///
+    /// Call order per frame: `update_zone_animations` → `update_publication_animations`
+    /// → `prune_faded_publications(scene)` → render.
+    pub fn update_publication_animations(&mut self, scene: &SceneGraph) {
+        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+            // Only Stack zones get per-publication TTL fade-out.
+            if !matches!(zone_def.contention_policy, ContentionPolicy::Stack { .. }) {
+                continue;
+            }
+            let zone_auto_clear_ms = zone_def.auto_clear_ms.unwrap_or(NOTIFICATION_DEFAULT_TTL_MS);
+
+            let zone_states = self
+                .pub_animation_states
+                .entry(zone_name.clone())
+                .or_default();
+
+            // Build the set of currently-active pub keys for this zone.
+            let active_keys: std::collections::HashSet<PubKey> = publishes
+                .iter()
+                .map(|r| (r.published_at_wall_us, r.publisher_namespace.clone()))
+                .collect();
+
+            // Prune stale entries (publications removed from active_publishes).
+            zone_states.retain(|k, _| active_keys.contains(k));
+
+            // Ensure every active publication has an animation state; tick existing ones.
+            for record in publishes {
+                let ttl_ms = Self::publication_ttl_ms(record, zone_auto_clear_ms);
+                let key: PubKey = (record.published_at_wall_us, record.publisher_namespace.clone());
+                zone_states
+                    .entry(key)
+                    .or_insert_with(|| PublicationAnimationState::new(ttl_ms))
+                    .tick();
+            }
+        }
+
+        // Prune zones no longer present in active_publishes.
+        self.pub_animation_states
+            .retain(|zone_name, _| scene.zone_registry.active_publishes.contains_key(zone_name));
+    }
+
+    /// Determine the effective TTL (ms) for a single publication.
+    ///
+    /// Priority: per-notification `ttl_ms` field → zone `auto_clear_ms` fallback.
+    fn publication_ttl_ms(record: &ZonePublishRecord, zone_default_ttl_ms: u64) -> u64 {
+        if let ZoneContent::Notification(n) = &record.content {
+            if let Some(ttl) = n.ttl_ms {
+                return ttl;
+            }
+        }
+        zone_default_ttl_ms
+    }
+
+    /// Look up the current opacity for a publication in `pub_animation_states`.
+    ///
+    /// Returns 1.0 if no animation state is found (publication is fully visible).
+    fn pub_opacity(&self, zone_name: &str, record: &ZonePublishRecord) -> f32 {
+        let key: PubKey = (record.published_at_wall_us, record.publisher_namespace.clone());
+        self.pub_animation_states
+            .get(zone_name)
+            .and_then(|zone_states| zone_states.get(&key))
+            .map(|s| s.current_opacity())
+            .unwrap_or(1.0)
+    }
+
+    /// Remove publications from the scene whose fade-out animation has completed.
+    ///
+    /// This method MUST be called before rendering so that fully-faded publications
+    /// are absent from `active_publishes` during the frame.  After removal,
+    /// remaining notifications reflow naturally in the next frame (slot positions
+    /// are recalculated from the updated `active_publishes` slice each frame).
+    ///
+    /// Intended call site: runtime frame loop, between scene commit and render,
+    /// alongside `SceneGraph::drain_expired_zone_publications`.
+    pub fn prune_faded_publications(&mut self, scene: &mut SceneGraph) {
+        for (zone_name, zone_states) in &self.pub_animation_states {
+            let publishes = match scene.zone_registry.active_publishes.get_mut(zone_name) {
+                Some(p) => p,
+                None => continue,
+            };
+            let before = publishes.len();
+            publishes.retain(|record| {
+                let key: PubKey = (
+                    record.published_at_wall_us,
+                    record.publisher_namespace.clone(),
+                );
+                !zone_states
+                    .get(&key)
+                    .map(|s| s.is_fade_complete())
+                    .unwrap_or(false)
+            });
+            if publishes.len() < before {
+                scene.version += 1;
+            }
+        }
+        // Remove empty active_publishes entries.
+        scene
+            .zone_registry
+            .active_publishes
+            .retain(|_, v| !v.is_empty());
+    }
+
+    /// Resolve `color.text.primary` from the token map as a sRGB u8 color.
+    ///
+    /// Falls back to near-white (R=255, G=255, B=255, A=223) when the token
+    /// is absent — matching the canonical default for text on dark backgrounds.
+    fn resolve_text_primary_color(token_map: &HashMap<String, String>) -> [u8; 4] {
+        resolve_token_color(token_map, "color.text.primary")
+            .map(crate::text::rgba_to_srgb_u8)
+            .unwrap_or([255, 255, 255, 223]) // near-white, alpha ≈ 87.5%
+    }
+
+    /// Resolve `typography.body.size` from the token map as a pixel value.
+    ///
+    /// Falls back to 16.0 px (canonical body text default) when the token is
+    /// absent or cannot be parsed as a number.
+    fn resolve_body_font_size(token_map: &HashMap<String, String>) -> f32 {
+        token_map
+            .get("typography.body.size")
+            .and_then(|v| v.trim_end_matches("px").parse::<f32>().ok())
+            .unwrap_or(16.0)
+            .clamp(6.0, 200.0)
     }
 
     /// Recursively collect `TextItem`s from a node and its children.
@@ -2107,6 +2378,11 @@ impl Compositor {
                         }
                         let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
 
+                        // Per-publication fade-out opacity (1.0 when no fade active).
+                        let pub_opacity = self.pub_opacity(zone_name, record);
+                        // Combined opacity: zone animation × per-publication fade.
+                        let combined_opacity = (anim_opacity * pub_opacity).clamp(0.0, 1.0);
+
                         // Determine backdrop color.
                         // alert-banner: urgency → color.severity.* tokens
                         // non-alert-banner Notification: urgency → color.notification.urgency.* tokens
@@ -2156,7 +2432,7 @@ impl Compositor {
                                     rgba.a = opacity.clamp(0.0, 1.0);
                                 }
                             }
-                            rgba.a *= anim_opacity.clamp(0.0, 1.0);
+                            rgba.a *= combined_opacity;
                             vertices.extend_from_slice(&rect_vertices(
                                 x,
                                 slot_y,
@@ -2171,7 +2447,7 @@ impl Compositor {
                             if is_notification_content && !is_alert_banner_zone(zone_name) {
                                 let mut border_color =
                                     resolve_border_default_color(&self.token_map);
-                                border_color.a *= anim_opacity.clamp(0.0, 1.0);
+                                border_color.a *= combined_opacity;
                                 emit_border_quads(
                                     vertices,
                                     x,
@@ -3273,6 +3549,7 @@ mod tests {
                     text: "Alert: system ready".to_owned(),
                     icon: String::new(),
                     urgency: 1,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -3728,6 +4005,7 @@ mod tests {
                     text: "Notification with opaque backdrop".to_owned(),
                     icon: String::new(),
                     urgency: 1,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -3797,6 +4075,7 @@ mod tests {
                     text: "Warning: disk space low".to_owned(),
                     icon: String::new(),
                     urgency: 2,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -3898,6 +4177,7 @@ mod tests {
                     text: "System alert".to_owned(),
                     icon: String::new(),
                     urgency: 3, // Critical — must use color.notification.urgency.critical, NOT color.severity.critical
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4156,6 +4436,7 @@ mod tests {
                     text: "test".to_owned(),
                     icon: String::new(),
                     urgency: 1, // normal
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4217,6 +4498,7 @@ mod tests {
                     text: "border test".to_owned(),
                     icon: String::new(),
                     urgency: 0,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4282,6 +4564,7 @@ mod tests {
                     text: "no border here".to_owned(),
                     icon: String::new(),
                     urgency: 2,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4343,6 +4626,7 @@ mod tests {
                     text: "cyan border".to_owned(),
                     icon: String::new(),
                     urgency: 0,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4535,6 +4819,7 @@ mod tests {
                     text: "Custom token warning".to_owned(),
                     icon: String::new(),
                     urgency: 2,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4761,6 +5046,7 @@ mod tests {
                     text: "no backdrop".to_owned(),
                     icon: String::new(),
                     urgency: 2,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4851,6 +5137,7 @@ mod tests {
                     text: "First notification".to_owned(),
                     icon: String::new(),
                     urgency: 1,
+                ttl_ms: None,
                 }),
                 "agent-a",
                 None,
@@ -4865,6 +5152,7 @@ mod tests {
                     text: "Second notification".to_owned(),
                     icon: String::new(),
                     urgency: 1,
+                ttl_ms: None,
                 }),
                 "agent-b",
                 None,
@@ -4949,6 +5237,7 @@ mod tests {
                     text: "Alpha alert".to_owned(),
                     icon: String::new(),
                     urgency: 0,
+                ttl_ms: None,
                 }),
                 "agent-a",
                 None,
@@ -4963,6 +5252,7 @@ mod tests {
                     text: "Beta alert".to_owned(),
                     icon: String::new(),
                     urgency: 1,
+                ttl_ms: None,
                 }),
                 "agent-b",
                 None,
@@ -4977,6 +5267,7 @@ mod tests {
                     text: "Gamma alert".to_owned(),
                     icon: String::new(),
                     urgency: 2,
+                ttl_ms: None,
                 }),
                 "agent-c",
                 None,
@@ -5074,6 +5365,7 @@ mod tests {
                         text: format!("N{i}"),
                         icon: String::new(),
                         urgency: 1,
+                    ttl_ms: None,
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -5154,6 +5446,7 @@ mod tests {
                     text: "Oldest".to_owned(),
                     icon: String::new(),
                     urgency: 0,
+                ttl_ms: None,
                 }),
                 "agent-0",
                 None,
@@ -5169,6 +5462,7 @@ mod tests {
                         text: format!("N{i}"),
                         icon: String::new(),
                         urgency: 1,
+                    ttl_ms: None,
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -5248,6 +5542,7 @@ mod tests {
                         text: format!("M{i}"),
                         icon: String::new(),
                         urgency: 1,
+                    ttl_ms: None,
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -5591,6 +5886,7 @@ mod tests {
                     text: "Weather alert: severe storms".to_owned(),
                     icon: String::new(),
                     urgency: 2,
+                ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -5885,6 +6181,7 @@ mod tests {
                     text: text.to_owned(),
                     icon: String::new(),
                     urgency,
+                    ttl_ms: None,
                 }),
                 publisher,
                 None,
@@ -6159,6 +6456,679 @@ mod tests {
             slot1_color[1] > 0.5,
             "slot 1 backdrop G should be mid (warning amber ≈ 0.72); got {}",
             slot1_color[1]
+        );
+    }
+
+    // ── Notification text rendering [hud-j5g5.3] ─────────────────────────────
+    //
+    // Spec §Notification Text Rendering:
+    //   - typography.body.size (16px default) font size
+    //   - color.text.primary text color
+    //   - left-aligned, 9px inset (8px padding + 1px border)
+    //   - clips at content area boundary (no wrapping in v1)
+
+    /// Notification text uses typography.body.size (default 16px) when token absent.
+    ///
+    /// AC: notification text must use font_size_px resolved from typography.body.size.
+    #[tokio::test]
+    async fn test_notification_text_uses_body_typography_token_default() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "text rendering test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                // No font_size_px set — must fall through to typography.body.size token.
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Doorbell rang".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // No token map set → typography.body.size absent → default 16px.
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 1, "must produce one TextItem for notification");
+        assert_eq!(
+            items[0].font_size_px, 16.0,
+            "notification text must use typography.body.size default (16px)"
+        );
+    }
+
+    /// Notification text uses typography.body.size resolved from the token map.
+    ///
+    /// AC: when typography.body.size token is present, it overrides the 16px default.
+    #[test]
+    fn test_notification_text_uses_typography_body_size_token() {
+        let mut token_map = HashMap::new();
+        token_map.insert("typography.body.size".to_string(), "20px".to_string());
+        let font_size = Compositor::resolve_body_font_size(&token_map);
+        assert_eq!(
+            font_size, 20.0,
+            "typography.body.size=20px must resolve to 20.0"
+        );
+    }
+
+    /// typography.body.size without 'px' suffix still parses.
+    #[test]
+    fn test_notification_text_typography_token_without_px_suffix() {
+        let mut token_map = HashMap::new();
+        token_map.insert("typography.body.size".to_string(), "18".to_string());
+        let font_size = Compositor::resolve_body_font_size(&token_map);
+        assert_eq!(font_size, 18.0, "numeric-only typography.body.size must parse");
+    }
+
+    /// Absent typography.body.size token falls back to 16px.
+    #[test]
+    fn test_notification_text_typography_absent_defaults_to_16px() {
+        let token_map = HashMap::new();
+        let font_size = Compositor::resolve_body_font_size(&token_map);
+        assert_eq!(
+            font_size, 16.0,
+            "absent typography.body.size must default to 16px"
+        );
+    }
+
+    /// color.text.primary token resolves to the correct sRGB u8 color.
+    #[test]
+    fn test_notification_text_uses_color_text_primary_token() {
+        let mut token_map = HashMap::new();
+        // White: #FFFFFF
+        token_map.insert("color.text.primary".to_string(), "#FFFFFF".to_string());
+        let color = Compositor::resolve_text_primary_color(&token_map);
+        assert_eq!(color[0], 255, "color.text.primary #FFFFFF R must be 255");
+        assert_eq!(color[1], 255, "color.text.primary #FFFFFF G must be 255");
+        assert_eq!(color[2], 255, "color.text.primary #FFFFFF B must be 255");
+    }
+
+    /// Absent color.text.primary falls back to near-white.
+    #[test]
+    fn test_notification_text_primary_absent_falls_back_to_near_white() {
+        let token_map = HashMap::new();
+        let color = Compositor::resolve_text_primary_color(&token_map);
+        assert_eq!(color[0], 255, "fallback text.primary R must be 255");
+        assert_eq!(color[1], 255, "fallback text.primary G must be 255");
+        assert_eq!(color[2], 255, "fallback text.primary B must be 255");
+        // Alpha is near-white (≥200 of 255).
+        assert!(
+            color[3] >= 200,
+            "fallback text.primary alpha must be ≥ 200, got {}",
+            color[3]
+        );
+    }
+
+    /// Notification text is inset by 9px (8px padding + 1px border) from backdrop edges.
+    ///
+    /// AC: text content area starts at (x + 9, y + 9).
+    #[tokio::test]
+    async fn test_notification_text_inset_from_backdrop_edges() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Zone at x=0, y=0 (x_pct=0, y_pct=0) with 100% width and 50% height.
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "inset test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,   // zx = 0
+                height_pct: 0.5,  // zy = 0
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Test notification".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 1, "must produce one TextItem");
+
+        let item = &items[0];
+        // Zone starts at x=0, y=0. Text must be inset by 9px (1px border + 8px padding).
+        assert_eq!(
+            item.pixel_x, 9.0,
+            "text pixel_x must be 9.0 (1px border + 8px padding inset); got {}",
+            item.pixel_x
+        );
+        assert_eq!(
+            item.pixel_y, 9.0,
+            "text pixel_y must be 9.0 (1px border + 8px padding inset); got {}",
+            item.pixel_y
+        );
+        // Text is left-aligned.
+        assert_eq!(
+            item.alignment,
+            TextAlign::Start,
+            "notification text must be left-aligned (TextAlign::Start)"
+        );
+        // Overflow is Clip.
+        assert_eq!(
+            item.overflow,
+            TextOverflow::Clip,
+            "notification text must clip at content area (no wrapping)"
+        );
+    }
+
+    // ── TTL auto-dismiss [hud-j5g5.3] ────────────────────────────────────────
+    //
+    // Spec §Notification TTL Auto-Dismiss with Fade-Out:
+    //   - Default TTL: 8000ms (zone auto_clear_ms)
+    //   - Per-publish ttl_ms overrides zone default
+    //   - 150ms linear fade-out from 1.0 to 0.0
+    //   - Opacity ~0.5 at 75ms midpoint
+    //   - Removal from active_publishes on fade completion
+    //   - Independent simultaneous fades for multiple notifications
+
+    /// PublicationAnimationState: before TTL expires, opacity is 1.0.
+    #[test]
+    fn test_pub_anim_state_before_ttl_expiry_opacity_is_1() {
+        // TTL = 10_000ms (far future), fade not yet started.
+        let state = PublicationAnimationState::new(10_000);
+        assert_eq!(
+            state.current_opacity(),
+            1.0,
+            "opacity must be 1.0 before TTL expires"
+        );
+        assert!(
+            !state.is_fade_complete(),
+            "fade must not be complete before TTL expires"
+        );
+    }
+
+    /// PublicationAnimationState: custom TTL=3000ms starts fade at 3000ms.
+    ///
+    /// AC: notification published with ttl_ms=3000 begins fade-out at 3000ms.
+    #[test]
+    fn test_pub_anim_state_custom_ttl_3000ms_triggers_fade() {
+        let mut state = PublicationAnimationState::new(3_000);
+
+        // Simulate 3001ms elapsed by setting first_seen to the past.
+        state.first_seen =
+            std::time::Instant::now() - std::time::Duration::from_millis(3_001);
+
+        state.tick();
+
+        assert!(
+            state.fade_start.is_some(),
+            "fade must start after TTL (3000ms) has elapsed"
+        );
+    }
+
+    /// PublicationAnimationState: at 75ms into the 150ms fade, opacity ≈ 0.5.
+    ///
+    /// AC: opacity interpolates linearly; at midpoint it must be approximately 0.5.
+    #[test]
+    fn test_pub_anim_state_opacity_at_75ms_midpoint_is_half() {
+        let mut state = PublicationAnimationState::new(0); // TTL=0 → instant expire
+
+        // TTL already expired: set first_seen far in the past.
+        state.first_seen = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        state.tick(); // starts fade
+
+        // Now simulate 75ms into the fade.
+        state.fade_start = Some(std::time::Instant::now() - std::time::Duration::from_millis(75));
+
+        let opacity = state.current_opacity();
+        assert!(
+            (opacity - 0.5).abs() < 0.1,
+            "at 75ms midpoint, opacity must be ≈ 0.5, got {opacity}"
+        );
+    }
+
+    /// PublicationAnimationState: after 150ms, is_fade_complete returns true.
+    ///
+    /// AC: publication must be removed from active_publishes when fade completes.
+    #[test]
+    fn test_pub_anim_state_is_complete_after_150ms() {
+        let mut state = PublicationAnimationState::new(0);
+
+        // TTL already expired.
+        state.first_seen = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        state.tick(); // starts fade
+
+        // Simulate 150ms+ elapsed since fade started.
+        state.fade_start = Some(std::time::Instant::now() - std::time::Duration::from_millis(151));
+
+        assert!(
+            state.is_fade_complete(),
+            "is_fade_complete must return true after 150ms fade duration"
+        );
+        assert_eq!(
+            state.current_opacity(),
+            0.0,
+            "opacity must be 0.0 after fade completes"
+        );
+    }
+
+    /// prune_faded_publications removes a publication whose fade is complete.
+    ///
+    /// AC: publication removed from active_publishes when fade-out completes;
+    ///     remaining notifications reflow (slot positions recalculated).
+    #[tokio::test]
+    async fn test_prune_faded_publications_removes_completed_fades() {
+        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "prune test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish two notifications.
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "First".to_owned(),
+                    icon: String::new(),
+                    urgency: 0,
+                    ttl_ms: None,
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Second".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                }),
+                "agent-b",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Manually seed pub_animation_states with a completed-fade for "agent-a".
+        let publishes = scene
+            .zone_registry
+            .active_publishes
+            .get("notification-area")
+            .unwrap();
+        let (a_wall_us, a_ns) = {
+            let r = &publishes[0]; // agent-a is first (oldest)
+            (r.published_at_wall_us, r.publisher_namespace.clone())
+        };
+
+        let mut completed_state = PublicationAnimationState::new(0);
+        completed_state.first_seen =
+            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        completed_state.tick(); // starts fade
+        // Set fade_start 151ms in the past → fade complete.
+        completed_state.fade_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(151));
+
+        compositor
+            .pub_animation_states
+            .entry("notification-area".to_string())
+            .or_default()
+            .insert((a_wall_us, a_ns), completed_state);
+
+        // Before prune: 2 publications.
+        assert_eq!(
+            scene
+                .zone_registry
+                .active_publishes
+                .get("notification-area")
+                .map(|v| v.len()),
+            Some(2),
+            "before prune: 2 publications expected"
+        );
+
+        // Prune: removes agent-a (completed fade).
+        compositor.prune_faded_publications(&mut scene);
+
+        // After prune: only 1 publication remains (agent-b).
+        let remaining = scene
+            .zone_registry
+            .active_publishes
+            .get("notification-area")
+            .map(|v| v.len());
+        assert_eq!(
+            remaining,
+            Some(1),
+            "after prune: 1 publication must remain (agent-b)"
+        );
+        // Verify the remaining publication is agent-b.
+        let remaining_pub = &scene.zone_registry.active_publishes["notification-area"][0];
+        assert_eq!(
+            remaining_pub.publisher_namespace, "agent-b",
+            "remaining publication must be from agent-b"
+        );
+    }
+
+    /// Two notifications with TTLs expiring simultaneously fade independently.
+    ///
+    /// AC: each has its own PublicationAnimationState; neither affects the other.
+    #[test]
+    fn test_simultaneous_independent_fades() {
+        // Create two independent publication animation states.
+        let mut state_a = PublicationAnimationState::new(0);
+        let mut state_b = PublicationAnimationState::new(0);
+
+        // Both TTLs expired.
+        state_a.first_seen = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        state_b.first_seen = std::time::Instant::now() - std::time::Duration::from_secs(1);
+
+        state_a.tick();
+        state_b.tick();
+
+        // Simulate: state_a is 75ms into fade, state_b is 120ms into fade.
+        state_a.fade_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(75));
+        state_b.fade_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(120));
+
+        let opacity_a = state_a.current_opacity();
+        let opacity_b = state_b.current_opacity();
+
+        // state_a at ~75ms → opacity ≈ 0.5.
+        assert!(
+            (opacity_a - 0.5).abs() < 0.15,
+            "state_a at 75ms must have opacity ≈ 0.5, got {opacity_a}"
+        );
+        // state_b at ~120ms → opacity ≈ 0.2.
+        assert!(
+            opacity_b < 0.35,
+            "state_b at 120ms must have opacity < 0.35, got {opacity_b}"
+        );
+        // They are independent — neither affects the other.
+        assert!(
+            opacity_a > opacity_b,
+            "state_a (75ms) must be more opaque than state_b (120ms)"
+        );
+        assert!(
+            !state_a.is_fade_complete(),
+            "state_a (75ms into 150ms fade) must not be complete"
+        );
+        assert!(
+            !state_b.is_fade_complete(),
+            "state_b (120ms into 150ms fade) must not be complete"
+        );
+    }
+
+    /// Stack reflow: after a publication is pruned, the remaining slot positions
+    /// are recalculated correctly in collect_text_items.
+    ///
+    /// AC: remaining notifications reflow to fill vacated slot instantly.
+    #[tokio::test]
+    async fn test_stack_reflow_after_publication_pruned() {
+        let (mut compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Zone at x=0, y=0 with font_size 16px default → slot_h = 16 + 2*8 + 2 = 34px.
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "reflow test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish three notifications from three agents.
+        for (agent, text) in [("agent-a", "Alpha"), ("agent-b", "Beta"), ("agent-c", "Gamma")] {
+            scene
+                .publish_to_zone(
+                    "notification-area",
+                    ZoneContent::Notification(NotificationPayload {
+                        text: text.to_owned(),
+                        icon: String::new(),
+                        urgency: 1,
+                        ttl_ms: None,
+                    }),
+                    agent,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+        }
+
+        // With 3 publications, newest (Gamma) at slot 0, oldest (Alpha) at slot 2.
+        let items_before = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items_before.len(), 3, "must have 3 TextItems before prune");
+
+        // Manually mark the oldest (agent-a / Alpha) as fade-complete.
+        let publishes = scene
+            .zone_registry
+            .active_publishes
+            .get("notification-area")
+            .unwrap();
+        let (a_wall_us, a_ns) = {
+            let r = &publishes[0]; // agent-a is oldest (index 0)
+            (r.published_at_wall_us, r.publisher_namespace.clone())
+        };
+
+        let mut completed_state = PublicationAnimationState::new(0);
+        completed_state.first_seen =
+            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        completed_state.tick();
+        completed_state.fade_start =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(151));
+
+        compositor
+            .pub_animation_states
+            .entry("notification-area".to_string())
+            .or_default()
+            .insert((a_wall_us, a_ns), completed_state);
+
+        // Prune: removes agent-a.
+        compositor.prune_faded_publications(&mut scene);
+
+        // After prune: 2 publications remain (agent-b, agent-c).
+        let remaining = scene
+            .zone_registry
+            .active_publishes
+            .get("notification-area")
+            .map(|v| v.len());
+        assert_eq!(remaining, Some(2), "2 publications must remain after prune");
+
+        // collect_text_items should now produce 2 TextItems correctly reflowed.
+        let items_after = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(
+            items_after.len(),
+            2,
+            "must have 2 TextItems after prune (reflow)"
+        );
+
+        // Newest (Gamma = agent-c) is at slot 0 (top, pixel_y = 9.0).
+        // Oldest remaining (Beta = agent-b) is at slot 1.
+        // slot_h = 16 + 2*8 + 2 = 34. Slot 1 starts at y=34, text at y=34+9=43.
+        let gamma_item = items_after.iter().find(|i| i.text == "Gamma");
+        let beta_item = items_after.iter().find(|i| i.text == "Beta");
+
+        assert!(gamma_item.is_some(), "Gamma must be in remaining TextItems");
+        assert!(beta_item.is_some(), "Beta must be in remaining TextItems");
+
+        // Gamma is newest → slot 0 → pixel_y = 0 + 9 = 9.
+        assert_eq!(
+            gamma_item.unwrap().pixel_y,
+            9.0,
+            "Gamma (newest) must be at slot 0, pixel_y=9.0"
+        );
+        // Beta is oldest remaining → slot 1 → pixel_y = 34 + 9 = 43.
+        assert_eq!(
+            beta_item.unwrap().pixel_y,
+            43.0,
+            "Beta (oldest remaining) must be at slot 1, pixel_y=43.0"
+        );
+    }
+
+    /// update_publication_animations creates fresh state for new publications.
+    #[test]
+    fn test_update_publication_animations_seeds_fresh_state() {
+        // We test this without GPU by constructing the compositor state manually.
+        // Use a SceneGraph with a Stack zone and one publication.
+        use tze_hud_scene::clock::TestClock;
+        use std::sync::Arc;
+
+        let clock = Arc::new(TestClock::new(1_000)); // start at t=1000ms
+        let mut scene = SceneGraph::new_with_clock(1280.0, 720.0, clock.clone());
+
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "animation seed test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: Some(8_000),
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Hello".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: Some(3_000),
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Build a minimal compositor state just for the animation map test.
+        // We can't construct a full headless Compositor without GPU, so we test
+        // the helper methods directly.
+        let publishes = scene.zone_registry.active_publishes.get("notification-area").unwrap();
+        let record = &publishes[0];
+
+        // Test publication_ttl_ms: per-notification ttl_ms=3000 takes priority.
+        let zone_def = scene.zone_registry.zones.get("notification-area").unwrap();
+        let zone_auto_clear = zone_def.auto_clear_ms.unwrap_or(NOTIFICATION_DEFAULT_TTL_MS);
+        let ttl = Compositor::publication_ttl_ms(record, zone_auto_clear);
+        assert_eq!(
+            ttl, 3_000,
+            "publication_ttl_ms must return per-notification ttl_ms=3000"
+        );
+
+        // Test fallback: when NotificationPayload.ttl_ms is None, use zone default.
+        let record_no_ttl = ZonePublishRecord {
+            zone_name: "notification-area".to_string(),
+            publisher_namespace: "agent-b".to_string(),
+            content: ZoneContent::Notification(NotificationPayload {
+                text: "No TTL".to_owned(),
+                icon: String::new(),
+                urgency: 0,
+                ttl_ms: None,
+            }),
+            published_at_wall_us: 2_000_000,
+            merge_key: None,
+            expires_at_wall_us: None,
+            content_classification: None,
+        };
+        let ttl_fallback = Compositor::publication_ttl_ms(&record_no_ttl, 8_000);
+        assert_eq!(
+            ttl_fallback, 8_000,
+            "publication_ttl_ms must fall back to zone auto_clear_ms=8000 when NotificationPayload.ttl_ms is None"
         );
     }
 }

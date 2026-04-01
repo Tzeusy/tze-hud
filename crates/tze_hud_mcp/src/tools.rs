@@ -430,10 +430,12 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                         .unwrap_or_default()
                         .to_string();
                     let urgency = obj.get("urgency").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                    let ttl_ms = obj.get("ttl_ms").and_then(|v| v.as_u64());
                     Ok(ZoneContent::Notification(NotificationPayload {
                         text,
                         icon,
                         urgency,
+                        ttl_ms,
                     }))
                 }
                 "status_bar" => {

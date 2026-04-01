@@ -166,6 +166,7 @@ pub fn proto_zone_content_to_scene(c: &proto::ZoneContent) -> Option<ZoneContent
             text: n.text.clone(),
             icon: n.icon.clone(),
             urgency: n.urgency,
+            ttl_ms: None,
         })),
         Payload::StatusBar(sb) => Some(ZoneContent::StatusBar(StatusBarPayload {
             entries: sb.entries.clone(),
