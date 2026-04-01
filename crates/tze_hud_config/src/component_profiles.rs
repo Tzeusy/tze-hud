@@ -1899,4 +1899,113 @@ component_type = "subtitle"
                  (backdrop_opacity >= 0.3, outline_width >= 1.0)",
         );
     }
+
+    // ── exemplar-alert-banner profile integration tests ────────────────────────
+    //
+    // These tests load the actual `profiles/exemplar-alert-banner/` directory from
+    // the repository root and verify:
+    //   1. Profile loads without validation errors.
+    //   2. OpaqueBackdrop readability passes (backdrop_opacity 0.9 >= 0.8).
+    //
+    // Source: hud-w3o6.1
+
+    /// Returns the path to `profiles/exemplar-alert-banner/` relative to the
+    /// workspace root.  `CARGO_MANIFEST_DIR` points to `crates/tze_hud_config/`,
+    /// so we go up two levels to reach the workspace root, then into `profiles/`.
+    fn exemplar_alert_banner_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("profiles")
+            .join("exemplar-alert-banner")
+    }
+
+    /// Build the token map that the exemplar-alert-banner profile expects to resolve against.
+    ///
+    /// These are the canonical fallback values the profile overrides; supplying
+    /// them here mimics what the runtime injects from global tokens + canonical
+    /// fallbacks during startup.
+    fn exemplar_alert_banner_tokens() -> DesignTokenMap {
+        let mut tokens = DesignTokenMap::new();
+        // Required by alert-banner component type contract (component_types.rs)
+        tokens.insert("color.text.primary".to_string(), "#FFFFFF".to_string());
+        tokens.insert("color.backdrop.default".to_string(), "#1A1A2E".to_string());
+        tokens.insert("opacity.backdrop.opaque".to_string(), "0.9".to_string());
+        tokens.insert("color.severity.info".to_string(), "#1A3A5C".to_string());
+        tokens.insert("color.severity.warning".to_string(), "#4A3000".to_string());
+        tokens.insert("color.severity.error".to_string(), "#4A1A00".to_string());
+        tokens.insert("color.severity.critical".to_string(), "#3A0000".to_string());
+        tokens.insert(
+            "typography.heading.family".to_string(),
+            "system-ui".to_string(),
+        );
+        tokens.insert("typography.heading.size".to_string(), "20".to_string());
+        tokens.insert("typography.heading.weight".to_string(), "700".to_string());
+        // Used in zone override token references
+        tokens.insert("spacing.padding.medium".to_string(), "8".to_string());
+        tokens
+    }
+
+    /// hud-w3o6.1 — profile loads without errors.
+    ///
+    /// WHEN the runtime scans `profiles/exemplar-alert-banner/`
+    /// THEN the profile SHALL load successfully with `component_type = "alert-banner"`.
+    #[test]
+    fn exemplar_alert_banner_profile_loads_without_errors() {
+        let path = exemplar_alert_banner_dir();
+        let tokens = exemplar_alert_banner_tokens();
+
+        let result = load_profile_dir(&path, &tokens);
+        let profile = result.expect("exemplar-alert-banner profile should load without errors");
+
+        assert_eq!(profile.name, "exemplar-alert-banner");
+        assert_eq!(profile.version, "1.0.0");
+        assert_eq!(profile.component_type, ComponentType::AlertBanner);
+        assert!(
+            profile.zone_overrides.contains_key("alert-banner"),
+            "zone override keyed 'alert-banner' should be present"
+        );
+    }
+
+    /// hud-w3o6.1 — OpaqueBackdrop readability passes.
+    ///
+    /// WHEN the exemplar profile is loaded and its effective zone override is
+    /// inspected THEN backdrop_opacity = 0.9 (>= 0.8) satisfies OpaqueBackdrop.
+    #[test]
+    fn exemplar_alert_banner_opaque_backdrop_readability_passes() {
+        use crate::component_types::ReadabilityTechnique;
+        use crate::readability::check_zone_readability;
+        use tze_hud_scene::types::{RenderingPolicy, Rgba};
+
+        let path = exemplar_alert_banner_dir();
+        let tokens = exemplar_alert_banner_tokens();
+
+        let profile =
+            load_profile_dir(&path, &tokens).expect("exemplar-alert-banner should load");
+
+        let zone_override = profile
+            .zone_overrides
+            .get("alert-banner")
+            .expect("alert-banner zone override must be present");
+
+        // Confirm backdrop_opacity = 0.9 was parsed correctly.
+        let opacity = zone_override
+            .backdrop_opacity
+            .expect("backdrop_opacity must be Some");
+        assert!(
+            opacity >= 0.8,
+            "OpaqueBackdrop requires backdrop_opacity >= 0.8, got {opacity}"
+        );
+
+        // Build a minimal RenderingPolicy that mirrors what the compositor would
+        // assemble from the zone override, then run the readability check.
+        let policy = RenderingPolicy {
+            backdrop: Some(Rgba::BLACK), // non-None is all that matters for OpaqueBackdrop check
+            backdrop_opacity: Some(opacity),
+            ..RenderingPolicy::default()
+        };
+
+        check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop)
+            .expect("OpaqueBackdrop check must pass for exemplar-alert-banner (opacity >= 0.8)");
+    }
 }
