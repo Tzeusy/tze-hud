@@ -1,0 +1,29 @@
+[
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "online",
+      "label": "Butler"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "online",
+      "label": "Codex"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "online",
+      "label": ""
+    },
+    "ttl_us": 60000000,
+    "namespace": "user-test"
+  }
+]

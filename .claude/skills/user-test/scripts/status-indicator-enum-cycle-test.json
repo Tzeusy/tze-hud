@@ -1,0 +1,34 @@
+[
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "online"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "away"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "busy"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "offline"
+    },
+    "ttl_us": 60000000,
+    "namespace": "user-test"
+  }
+]

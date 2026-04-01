@@ -1,0 +1,10 @@
+[
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "do-not-disturb"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  }
+]
