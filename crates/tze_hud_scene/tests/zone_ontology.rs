@@ -2008,3 +2008,338 @@ mod proptests {
         }
     }
 }
+
+// ─── Ambient-background TTL semantics ────────────────────────────────────────
+//
+// Spec: openspec/changes/exemplar-ambient-background/specs/exemplar-ambient-background/spec.md
+// Requirement "Ambient Background TTL Semantics"
+// Design: openspec/changes/exemplar-ambient-background/design.md — Decision 4
+//   "TTL semantics: 0 = persistent until replaced"
+//
+// The ambient-background zone uses contention_policy: Replace and
+// auto_clear_ms: None (no zone-level auto-clear).
+//
+// TTL mapping to scene graph API:
+//   ttl_us == 0  (zero)    → expires_at_wall_us: None  (indefinite persistence)
+//   ttl_us omitted         → expires_at_wall_us: None  (same as zero)
+//   ttl_us > 0  (non-zero) → expires_at_wall_us: Some(now_us + ttl_us)
+//
+// These tests exercise all four scenarios defined in the spec.
+
+/// Helper: dark-blue solid color payload for ambient-background tests.
+fn dark_blue() -> ZoneContent {
+    ZoneContent::SolidColor(Rgba {
+        r: 0.05,
+        g: 0.05,
+        b: 0.30,
+        a: 1.0,
+    })
+}
+
+/// Helper: warm-amber solid color payload for ambient-background tests.
+fn warm_amber() -> ZoneContent {
+    ZoneContent::SolidColor(Rgba {
+        r: 1.0,
+        g: 0.75,
+        b: 0.20,
+        a: 1.0,
+    })
+}
+
+/// Helper: forest-green solid color for republish tests.
+fn forest_green() -> ZoneContent {
+    ZoneContent::SolidColor(Rgba {
+        r: 0.13,
+        g: 0.55,
+        b: 0.13,
+        a: 1.0,
+    })
+}
+
+/// Helper: build a SceneGraph with a simulated clock and the default zone registry.
+///
+/// Returns `(scene, clock)` so the caller can advance time independently.
+fn make_ambient_scene(
+    start_us: u64,
+) -> (SceneGraph, std::sync::Arc<tze_hud_scene::SimulatedClock>) {
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+    let clock = Arc::new(SimulatedClock::new(start_us));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+    (scene, clock)
+}
+
+// ── Precondition: ambient-background auto_clear_ms is None ───────────────────
+//
+// The TTL=0-persists guarantee depends on the zone having no zone-level
+// auto-clear timer.  This test locks that invariant in place.
+
+#[test]
+fn ambient_background_auto_clear_ms_is_none() {
+    // [hud-gwhr.3]: ambient-background zone must have auto_clear_ms: None so
+    // that zero-TTL publications persist indefinitely.
+    let registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+    let zone = registry
+        .get_by_name("ambient-background")
+        .expect("ambient-background must be present in with_defaults()");
+    assert!(
+        zone.auto_clear_ms.is_none(),
+        "ambient-background auto_clear_ms must be None (zone has no auto-clear timer); \
+         got {:?}",
+        zone.auto_clear_ms
+    );
+}
+
+// ── Scenario 1: Zero TTL persists until replaced ──────────────────────────────
+//
+// Spec scenario "Zero TTL persists until replaced":
+//   Publish SolidColor with ttl_us == 0 (→ expires_at_wall_us: None).
+//   Advance simulated time by 60 s.
+//   Verify the publication is still active — no auto-expiry.
+
+#[test]
+fn test_ambient_background_zero_ttl_persists() {
+    // [hud-gwhr.3]: Zero TTL must persist; ambient-background has no auto-clear.
+    let (mut scene, clock) = make_ambient_scene(1_000_000); // t=1 s
+
+    // Publish with ttl_us == 0: maps to expires_at_wall_us: None.
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            dark_blue(),
+            "mood-agent",
+            None,
+            None, // None ↔ ttl_us: 0 (indefinite)
+            None,
+        )
+        .expect("publish with zero-TTL (None expires) must succeed");
+
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        1,
+        "ambient-background must have 1 active publication immediately after publish"
+    );
+
+    // Advance 60 seconds.
+    clock.set_us(1_000_000 + 60_000_000);
+
+    // drain_expired_zone_publications must not remove this publication.
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(
+        removed, 0,
+        "zero-TTL (indefinite) publication must not be removed after 60 s"
+    );
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        1,
+        "ambient-background publication must persist 60 s after publish (zero TTL = indefinite)"
+    );
+
+    // The stored expiry must be None (no deadline set).
+    let pubs = scene.zone_registry.active_for_zone("ambient-background");
+    assert!(
+        pubs[0].expires_at_wall_us.is_none(),
+        "zero-TTL publication expires_at_wall_us must be None"
+    );
+}
+
+// ── Scenario 2: Omitted TTL persists (same as zero TTL) ──────────────────────
+//
+// Spec scenario "Zero TTL persists until replaced" (omission variant):
+//   Publish SolidColor without specifying ttl_us at all (→ expires_at_wall_us: None).
+//   Advance simulated time by 60 s.
+//   Verify same persistence as ttl_us: 0.
+
+#[test]
+fn test_ambient_background_omitted_ttl_persists() {
+    // [hud-gwhr.3]: Omitting TTL defaults to persistent (same as ttl_us: 0).
+    let (mut scene, clock) = make_ambient_scene(1_000_000);
+
+    // Publish without specifying any expiry — same as ttl_us not provided.
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            dark_blue(),
+            "mood-agent",
+            None,
+            None, // ttl_us field omitted → expires_at_wall_us: None
+            None,
+        )
+        .expect("publish without TTL must succeed");
+
+    // Advance well past any reasonable timeout.
+    clock.set_us(999_999_999_999);
+
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(
+        removed, 0,
+        "omitted-TTL publication must never expire via drain_expired_zone_publications"
+    );
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        1,
+        "omitted-TTL ambient-background publication must survive indefinitely"
+    );
+}
+
+// ── Scenario 3: Non-zero TTL expires ─────────────────────────────────────────
+//
+// Spec scenario "Non-zero TTL expires":
+//   Publish SolidColor(warm_amber) with ttl_us: 2_000_000 (2 s).
+//   Verify present immediately.
+//   Advance past TTL.
+//   Verify zone active_for_zone is empty (reverted to transparent/clear).
+
+#[test]
+fn test_ambient_background_nonzero_ttl_expires() {
+    // [hud-gwhr.3]: Non-zero TTL expires; ambient-background reverts to clear.
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let start_us = 1_000_000u64; // t=1 s
+    let ttl_us = 2_000_000u64; // 2 s TTL
+    let expiry_us = start_us + ttl_us; // t=3 s
+
+    let clock = Arc::new(SimulatedClock::new(start_us));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+
+    // Publish with absolute expiry derived from ttl_us.
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            warm_amber(),
+            "mood-agent",
+            None,
+            Some(expiry_us),
+            None,
+        )
+        .expect("publish with non-zero TTL must succeed");
+
+    // Immediately present.
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        1,
+        "ambient-background must have 1 active publication immediately after publish"
+    );
+
+    // Verify the stored expiry matches what we set.
+    let pubs = scene.zone_registry.active_for_zone("ambient-background");
+    assert_eq!(
+        pubs[0].expires_at_wall_us,
+        Some(expiry_us),
+        "non-zero TTL publication must store expiry_us = start_us + ttl_us"
+    );
+
+    // Before expiry: drain is a no-op.
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 0, "publication must not expire before TTL elapses");
+    assert_eq!(scene.zone_registry.active_for_zone("ambient-background").len(), 1);
+
+    // Advance past the TTL expiry.
+    clock.set_us(expiry_us + 1);
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(
+        removed, 1,
+        "non-zero-TTL ambient-background publication must be removed after expiry"
+    );
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        0,
+        "ambient-background must be empty after TTL expiry (reverts to transparent/clear)"
+    );
+}
+
+// ── Scenario 4: TTL expiry then republish ────────────────────────────────────
+//
+// Spec scenario "Non-zero TTL expires" (republish variant):
+//   Publish with non-zero TTL, let it expire.
+//   Publish a new persistent color.
+//   Verify new color renders and persists.
+
+#[test]
+fn test_ambient_background_ttl_expiry_then_republish() {
+    // [hud-gwhr.3]: After TTL expiry, ambient-background accepts a new persistent publish.
+    use std::sync::Arc;
+    use tze_hud_scene::SimulatedClock;
+
+    let start_us = 1_000_000u64;
+    let ttl_us = 2_000_000u64;
+    let expiry_us = start_us + ttl_us;
+
+    let clock = Arc::new(SimulatedClock::new(start_us));
+    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+
+    // Phase 1: publish warm_amber with a short TTL.
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            warm_amber(),
+            "mood-agent",
+            None,
+            Some(expiry_us),
+            None,
+        )
+        .expect("initial publish with non-zero TTL must succeed");
+
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        1,
+        "warm_amber publication must be present immediately"
+    );
+
+    // Phase 2: advance past TTL and drain.
+    clock.set_us(expiry_us + 1);
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(removed, 1, "warm_amber TTL publication must expire");
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        0,
+        "ambient-background must be empty after TTL expiry"
+    );
+
+    // Phase 3: republish a persistent color (forest_green, ttl_us = 0 → None).
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            forest_green(),
+            "mood-agent",
+            None,
+            None, // persistent (ttl_us: 0)
+            None,
+        )
+        .expect("republish after expiry must succeed");
+
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        1,
+        "forest_green republish must produce exactly 1 active publication"
+    );
+
+    // Verify the new publication is forest_green.
+    let pubs = scene.zone_registry.active_for_zone("ambient-background");
+    match &pubs[0].content {
+        ZoneContent::SolidColor(rgba) => {
+            assert!(
+                (rgba.g - 0.55_f32).abs() < 0.01,
+                "republished color must be forest_green (g≈0.55); got {rgba:?}"
+            );
+        }
+        other => panic!("expected SolidColor after republish, got {other:?}"),
+    }
+
+    // Phase 4: advance far into the future — republished persistent color must survive.
+    clock.set_us(expiry_us + 60_000_000 + 1); // 60 s after the initial expiry
+    let removed = scene.drain_expired_zone_publications();
+    assert_eq!(
+        removed, 0,
+        "persistent republish must not expire regardless of elapsed time"
+    );
+    assert_eq!(
+        scene.zone_registry.active_for_zone("ambient-background").len(),
+        1,
+        "forest_green persistent publication must still be active 60 s after republish"
+    );
+}
