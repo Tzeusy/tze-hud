@@ -246,8 +246,9 @@ fn resolve_border_default_color(token_map: &HashMap<String, String>) -> Rgba {
 ///   - right:  (x+w-1, y+1, 1, h-2)
 ///
 /// The border is drawn inside the backdrop bounds (does not extend outside).
-/// When `h < 2` or `w < 2`, the degenerate dimension quads are skipped (size ≤ 0
-/// after the inset).
+/// When `h < 2` or `w < 1`, the degenerate dimension quads are skipped (size ≤ 0
+/// after the inset). Top/bottom edges require `w >= 1` to avoid degenerate quads
+/// with zero or negative width.
 ///
 /// `sw`/`sh` are the screen dimensions passed through to `rect_vertices`.
 fn emit_border_quads(
@@ -262,11 +263,11 @@ fn emit_border_quads(
 ) {
     const BORDER_PX: f32 = 1.0;
     // Top edge.
-    if h >= BORDER_PX {
+    if h >= BORDER_PX && w >= BORDER_PX {
         vertices.extend_from_slice(&rect_vertices(x, y, w, BORDER_PX, sw, sh, border_color));
     }
     // Bottom edge.
-    if h >= BORDER_PX * 2.0 {
+    if h >= BORDER_PX * 2.0 && w >= BORDER_PX {
         vertices.extend_from_slice(&rect_vertices(
             x,
             y + h - BORDER_PX,
@@ -2038,19 +2039,31 @@ impl Compositor {
                         let backdrop_rgba: Option<Rgba> = match &record.content {
                             ZoneContent::SolidColor(rgba) => Some(*rgba),
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
-                                // alert-banner: severity tokens (color.severity.*)
-                                let severity_color =
-                                    urgency_to_severity_color(n.urgency, &self.token_map);
-                                Some(severity_color)
+                                // alert-banner: severity tokens (color.severity.*).
+                                // Respect policy.backdrop contract: only override the color when
+                                // a backdrop is enabled; skip entirely when backdrop is None.
+                                if policy.backdrop.is_some() {
+                                    let severity_color =
+                                        urgency_to_severity_color(n.urgency, &self.token_map);
+                                    Some(severity_color)
+                                } else {
+                                    None
+                                }
                             }
                             ZoneContent::Notification(n) => {
                                 // Non-alert-banner notification: urgency-tinted backdrop
                                 // using color.notification.urgency.* tokens.
                                 // Per spec: urgency >3 clamped to 3 (critical).
-                                let mut color =
-                                    urgency_to_notification_color(n.urgency, &self.token_map);
-                                color.a = NOTIFICATION_BACKDROP_OPACITY;
-                                Some(color)
+                                // Respect policy.backdrop contract: only emit a backdrop (and
+                                // border) when a backdrop is enabled; skip entirely when None.
+                                if policy.backdrop.is_some() {
+                                    let mut color =
+                                        urgency_to_notification_color(n.urgency, &self.token_map);
+                                    color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                    Some(color)
+                                } else {
+                                    None
+                                }
                             }
                             _ => policy.backdrop,
                         };
@@ -2118,18 +2131,30 @@ impl Compositor {
                             // Token-resolved values take precedence over hardcoded constants;
                             // falls back to SEVERITY_* when the token map is empty or the
                             // key is absent.
-                            let severity_color =
-                                urgency_to_severity_color(n.urgency, &self.token_map);
-                            Some(severity_color)
+                            // Respect policy.backdrop contract: only override when backdrop
+                            // is enabled; skip entirely when backdrop is None.
+                            if policy.backdrop.is_some() {
+                                let severity_color =
+                                    urgency_to_severity_color(n.urgency, &self.token_map);
+                                Some(severity_color)
+                            } else {
+                                None
+                            }
                         }
                         ZoneContent::Notification(n) => {
                             // Non-alert-banner notification: urgency-tinted backdrop using
                             // color.notification.urgency.* tokens.
                             // Per spec: urgency >3 clamped to 3 (critical).
-                            let mut color =
-                                urgency_to_notification_color(n.urgency, &self.token_map);
-                            color.a = NOTIFICATION_BACKDROP_OPACITY;
-                            Some(color)
+                            // Respect policy.backdrop contract: only emit a backdrop (and
+                            // border) when a backdrop is enabled; skip entirely when None.
+                            if policy.backdrop.is_some() {
+                                let mut color =
+                                    urgency_to_notification_color(n.urgency, &self.token_map);
+                                color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                Some(color)
+                            } else {
+                                None
+                            }
                         }
                         _ => {
                             // All other content: use policy.backdrop.
@@ -4603,6 +4628,63 @@ mod tests {
         assert!(
             vertices.is_empty(),
             "no backdrop quad should be rendered when policy.backdrop is None"
+        );
+    }
+
+    /// backdrop=None with Notification content: no backdrop or border quads rendered.
+    ///
+    /// Even though Notification content in a non-alert-banner zone overrides the
+    /// backdrop color with urgency-tinted tokens, the override must respect the
+    /// policy.backdrop contract: when backdrop is None, nothing is emitted.
+    #[tokio::test]
+    async fn test_notification_no_backdrop_when_backdrop_is_none() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "notification area with backdrop=None".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.02,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: None,
+                backdrop_opacity: Some(0.9),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "no backdrop".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+        assert!(
+            vertices.is_empty(),
+            "no backdrop or border quads should be rendered when policy.backdrop is None, got {} vertices",
+            vertices.len()
         );
     }
 
