@@ -4639,4 +4639,302 @@ mod tests {
             items[0].text
         );
     }
+
+    // ── Alert-banner heading typography tests [hud-w3o6.2] ───────────────────
+    //
+    // Acceptance criteria from spec §Alert-Banner Heading Typography:
+    //   1. font_size_px = 24px
+    //   2. font_weight = 700 (bold)
+    //   3. font_family = SystemSansSerif
+    //   4. text_color = #FFFFFF white
+    //   5. margin_horizontal inset applied
+
+    /// Alert-banner RenderingPolicy carries heading typography:
+    /// 24px font, weight 700, SystemSansSerif, white text, margin_horizontal=8.
+    ///
+    /// Acceptance criterion 3.1–3.3: heading typography wired to alert-banner zone.
+    #[tokio::test]
+    async fn test_alert_banner_heading_typography_in_rendering_policy() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Register alert-banner with heading-typography RenderingPolicy (spec values).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_owned(),
+            description: "heading typography test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.06,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(24.0),
+                font_family: Some(FontFamily::SystemSansSerif),
+                font_weight: Some(700),
+                text_color: Some(Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                }),
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.16, 0.9)),
+                backdrop_opacity: Some(0.9),
+                margin_horizontal: Some(8.0),
+                margin_vertical: Some(0.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish a notification payload.
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Weather alert: severe storms".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                }),
+                "test",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // collect_text_items uses the RenderingPolicy fields for TextItem construction.
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 1, "expected one TextItem for alert-banner notification");
+
+        let item = &items[0];
+
+        // AC 3.1: font_size_px = 24.0
+        assert_eq!(
+            item.font_size_px, 24.0,
+            "alert-banner text must be 24px per spec §Alert-Banner Heading Typography"
+        );
+
+        // AC 3.1: font_family = SystemSansSerif
+        assert_eq!(
+            item.font_family,
+            FontFamily::SystemSansSerif,
+            "alert-banner text must use system sans-serif family"
+        );
+
+        // AC 3.1: font_weight = 700
+        assert_eq!(
+            item.font_weight, 700,
+            "alert-banner text must be weight 700 (bold)"
+        );
+
+        // AC 3.2: text_color = #FFFFFF (white)
+        // White in linear sRGB: R=1.0 → 255u8, G=1.0 → 255u8, B=1.0 → 255u8.
+        assert_eq!(item.color[0], 255, "text R should be 255 (white)");
+        assert_eq!(item.color[1], 255, "text G should be 255 (white)");
+        assert_eq!(item.color[2], 255, "text B should be 255 (white)");
+
+        // AC 3.3: text is inset from x=0 by margin_horizontal=8
+        // Zone geometry: zx = (sw - sw*1.0)/2 = 0.0, so pixel_x = 0 + 8 = 8.
+        assert_eq!(
+            item.pixel_x, 8.0,
+            "text must be inset by margin_horizontal=8 from backdrop edge"
+        );
+    }
+
+    /// Alert-banner zone has LayerAttachment::Chrome — renders above all agent content.
+    ///
+    /// Acceptance criterion: chrome-layer z-order verified by checking ZoneDefinition.
+    #[test]
+    fn test_alert_banner_default_zone_has_chrome_layer_attachment() {
+        use tze_hud_scene::types::ZoneRegistry;
+
+        let registry = ZoneRegistry::with_defaults();
+        let zone = registry
+            .get_by_name("alert-banner")
+            .expect("alert-banner must be in default zone registry");
+
+        assert_eq!(
+            zone.layer_attachment,
+            LayerAttachment::Chrome,
+            "alert-banner zone must be attached to chrome layer (above all agent content)"
+        );
+    }
+
+    /// Alert-banner zone spans full display width (width_pct = 1.0).
+    ///
+    /// Acceptance criterion: backdrop quad spans from x=0 to x=display_width.
+    #[test]
+    fn test_alert_banner_default_zone_is_full_width() {
+        use tze_hud_scene::types::ZoneRegistry;
+
+        let registry = ZoneRegistry::with_defaults();
+        let zone = registry
+            .get_by_name("alert-banner")
+            .expect("alert-banner must be in default zone registry");
+
+        match zone.geometry_policy {
+            GeometryPolicy::EdgeAnchored { width_pct, .. } => {
+                assert_eq!(
+                    width_pct, 1.0,
+                    "alert-banner must span full display width (width_pct=1.0)"
+                );
+            }
+            _ => panic!("alert-banner must use EdgeAnchored geometry for full-width positioning"),
+        }
+    }
+
+    /// Alert-banner zone resolve_zone_geometry gives backdrop width = display width.
+    ///
+    /// At 1920×1080, the backdrop must span from x=0 to x=1920.
+    #[test]
+    fn test_alert_banner_backdrop_spans_full_display_width() {
+        use tze_hud_scene::types::ZoneRegistry;
+
+        let registry = ZoneRegistry::with_defaults();
+        let zone = registry
+            .get_by_name("alert-banner")
+            .expect("alert-banner zone must exist");
+
+        let (x, _y, w, _h) = Compositor::resolve_zone_geometry(&zone.geometry_policy, 1920.0, 1080.0);
+        assert_eq!(x, 0.0, "alert-banner left edge must be at x=0");
+        assert_eq!(w, 1920.0, "alert-banner width must equal display width (1920)");
+    }
+
+    /// Alert-banner zone height accommodates 24px heading + vertical padding.
+    ///
+    /// At 720p, height_pct=0.06 → 43.2px > 24px + 2×8px = 40px minimum.
+    #[test]
+    fn test_alert_banner_zone_height_accommodates_heading_typography() {
+        use tze_hud_scene::types::ZoneRegistry;
+
+        let registry = ZoneRegistry::with_defaults();
+        let zone = registry
+            .get_by_name("alert-banner")
+            .expect("alert-banner zone must exist");
+
+        // Check that resolved height at 720p is sufficient for 24px + 2×8px margin.
+        let (_x, _y, _w, h) = Compositor::resolve_zone_geometry(&zone.geometry_policy, 1280.0, 720.0);
+        let min_required = 24.0 + 2.0 * 8.0; // font_size + 2×margin_vertical (default)
+        assert!(
+            h >= min_required,
+            "alert-banner height {h}px must accommodate heading (24px) + margins (≥{min_required}px)"
+        );
+    }
+
+    /// When no alert-banner publications are active, render_zone_content emits zero
+    /// backdrop vertices — the zone occupies zero visible space.
+    ///
+    /// Acceptance criterion §Alert-Banner Chrome-Layer Positioning:
+    ///   "When no alerts are active, the alert-banner zone MUST occupy zero vertical space."
+    #[tokio::test]
+    async fn test_alert_banner_zero_height_when_inactive() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Register alert-banner zone with a visible backdrop so it would render if active.
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_owned(),
+            description: "zero-height-when-inactive test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.06,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(24.0),
+                backdrop: Some(Rgba::new(1.0, 0.0, 0.0, 1.0)), // bright red — visible if leaked
+                backdrop_opacity: Some(0.9),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // No publications — zone is inactive.
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // Zero vertices emitted → zone occupies zero visible space.
+        assert!(
+            vertices.is_empty(),
+            "no backdrop quad must be emitted for inactive alert-banner zone (zero visible space)"
+        );
+
+        // Also verify no TextItems produced.
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert!(
+            items.is_empty(),
+            "no text must be rendered for inactive alert-banner zone"
+        );
+    }
+
+    /// Alert-banner RenderingPolicy in ZoneRegistry::with_defaults() carries
+    /// heading typography: 24px, weight 700, white text, margin_horizontal=8.
+    #[test]
+    fn test_alert_banner_default_zone_rendering_policy_has_heading_typography() {
+        use tze_hud_scene::types::ZoneRegistry;
+
+        let registry = ZoneRegistry::with_defaults();
+        let zone = registry
+            .get_by_name("alert-banner")
+            .expect("alert-banner must be in default zone registry");
+
+        let policy = &zone.rendering_policy;
+
+        assert_eq!(
+            policy.font_size_px,
+            Some(24.0),
+            "alert-banner default rendering policy must have font_size_px=24"
+        );
+        assert_eq!(
+            policy.font_weight,
+            Some(700),
+            "alert-banner default rendering policy must have font_weight=700 (bold)"
+        );
+        assert_eq!(
+            policy.font_family,
+            Some(FontFamily::SystemSansSerif),
+            "alert-banner default rendering policy must use SystemSansSerif"
+        );
+        // text_color must be white (R=1.0, G=1.0, B=1.0).
+        let tc = policy
+            .text_color
+            .expect("alert-banner default rendering policy must have text_color set");
+        assert!(
+            (tc.r - 1.0).abs() < 0.01,
+            "text_color R must be 1.0 (white), got {}",
+            tc.r
+        );
+        assert!(
+            (tc.g - 1.0).abs() < 0.01,
+            "text_color G must be 1.0 (white), got {}",
+            tc.g
+        );
+        assert!(
+            (tc.b - 1.0).abs() < 0.01,
+            "text_color B must be 1.0 (white), got {}",
+            tc.b
+        );
+        assert_eq!(
+            policy.margin_horizontal,
+            Some(8.0),
+            "alert-banner default rendering policy must have margin_horizontal=8"
+        );
+    }
 }
