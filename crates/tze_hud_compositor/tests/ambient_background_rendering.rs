@@ -44,7 +44,7 @@
 
 use tze_hud_compositor::{Compositor, surface::HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::{ZoneContent, ZoneRegistry, Rgba};
+use tze_hud_scene::types::{Rgba, ZoneContent, ZoneRegistry};
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
@@ -303,16 +303,66 @@ async fn test_ambient_background_rapid_replacement() {
     // Publish 10 different solid colors in rapid succession (no frame render between them).
     // The last published color (index 9) is saturated green.
     let colors: Vec<Rgba> = vec![
-        Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }, // 0: red
-        Rgba { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }, // 1: blue
-        Rgba { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }, // 2: yellow
-        Rgba { r: 1.0, g: 0.0, b: 1.0, a: 1.0 }, // 3: magenta
-        Rgba { r: 0.0, g: 1.0, b: 1.0, a: 1.0 }, // 4: cyan
-        Rgba { r: 0.5, g: 0.5, b: 0.5, a: 1.0 }, // 5: gray
-        Rgba { r: 1.0, g: 0.5, b: 0.0, a: 1.0 }, // 6: orange
-        Rgba { r: 0.5, g: 0.0, b: 0.5, a: 1.0 }, // 7: purple
-        Rgba { r: 0.0, g: 0.5, b: 0.0, a: 1.0 }, // 8: dark green
-        Rgba { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }, // 9: bright green (last)
+        Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }, // 0: red
+        Rgba {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        }, // 1: blue
+        Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        }, // 2: yellow
+        Rgba {
+            r: 1.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        }, // 3: magenta
+        Rgba {
+            r: 0.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }, // 4: cyan
+        Rgba {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        }, // 5: gray
+        Rgba {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+            a: 1.0,
+        }, // 6: orange
+        Rgba {
+            r: 0.5,
+            g: 0.0,
+            b: 0.5,
+            a: 1.0,
+        }, // 7: purple
+        Rgba {
+            r: 0.0,
+            g: 0.5,
+            b: 0.0,
+            a: 1.0,
+        }, // 8: dark green
+        Rgba {
+            r: 0.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        }, // 9: bright green (last)
     ];
 
     for color in &colors {
