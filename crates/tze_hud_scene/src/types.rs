@@ -1406,6 +1406,9 @@ pub struct RenderingPolicy {
     /// Duration of the exit/dismiss transition in milliseconds; None = no transition.
     #[serde(default)]
     pub transition_out_ms: Option<u32>,
+    /// Text overflow mode; None = falls back to Clip.
+    #[serde(default)]
+    pub overflow: Option<TextOverflow>,
 }
 
 /// Contention policy — what happens when multiple agents publish to the same zone.

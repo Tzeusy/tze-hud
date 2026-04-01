@@ -438,7 +438,7 @@ impl TextItem {
             font_weight,
             color,
             alignment,
-            overflow: TextOverflow::Clip,
+            overflow: policy.overflow.unwrap_or(TextOverflow::Clip),
             outline_color,
             outline_width,
             opacity,
@@ -854,6 +854,44 @@ mod tests {
         assert_eq!(
             item.font_weight, 400,
             "from_text_markdown_node must default font_weight to 400"
+        );
+    }
+
+    /// from_zone_policy defaults overflow to Clip when policy.overflow is None.
+    #[test]
+    fn from_zone_policy_overflow_defaults_to_clip() {
+        let policy = RenderingPolicy::default();
+        let item = TextItem::from_zone_policy("text", 0.0, 0.0, 200.0, 40.0, &policy, 1.0);
+        assert_eq!(
+            item.overflow,
+            TextOverflow::Clip,
+            "overflow should default to Clip when policy.overflow is None"
+        );
+    }
+
+    /// from_zone_policy propagates Ellipsis overflow from policy.
+    #[test]
+    fn from_zone_policy_overflow_ellipsis_propagated() {
+        let mut policy = RenderingPolicy::default();
+        policy.overflow = Some(TextOverflow::Ellipsis);
+        let item = TextItem::from_zone_policy("text", 0.0, 0.0, 200.0, 40.0, &policy, 1.0);
+        assert_eq!(
+            item.overflow,
+            TextOverflow::Ellipsis,
+            "overflow should be Ellipsis when policy.overflow is Some(Ellipsis)"
+        );
+    }
+
+    /// from_zone_policy propagates explicit Clip overflow from policy.
+    #[test]
+    fn from_zone_policy_overflow_clip_explicit_propagated() {
+        let mut policy = RenderingPolicy::default();
+        policy.overflow = Some(TextOverflow::Clip);
+        let item = TextItem::from_zone_policy("text", 0.0, 0.0, 200.0, 40.0, &policy, 1.0);
+        assert_eq!(
+            item.overflow,
+            TextOverflow::Clip,
+            "overflow should be Clip when policy.overflow is Some(Clip)"
         );
     }
 }

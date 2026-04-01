@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 
 use tze_hud_scene::config::{ConfigError, ConfigErrorCode};
-use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba, TextAlign};
+use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba, TextAlign, TextOverflow};
 
 use crate::component_profiles::ComponentProfile;
 use crate::component_types::ComponentType;
@@ -89,6 +89,7 @@ fn token_font_family(tokens: &DesignTokenMap, key: &str) -> Option<FontFamily> {
 /// - `outline_width` ← `stroke.outline.width`
 /// - `text_align` ← `Center` (hardcoded, not token-driven)
 /// - `margin_vertical` ← `spacing.padding.medium`
+/// - `overflow` ← `Ellipsis` (hardcoded per subtitle exemplar spec)
 pub fn apply_subtitle_token_defaults(policy: &mut RenderingPolicy, tokens: &DesignTokenMap) {
     if policy.text_color.is_none() {
         policy.text_color = token_color(tokens, "color.text.primary");
@@ -120,6 +121,10 @@ pub fn apply_subtitle_token_defaults(policy: &mut RenderingPolicy, tokens: &Desi
     }
     if policy.margin_vertical.is_none() {
         policy.margin_vertical = token_f32(tokens, "spacing.padding.medium");
+    }
+    // overflow: Ellipsis per subtitle exemplar spec (hardcoded, not token-driven)
+    if policy.overflow.is_none() {
+        policy.overflow = Some(TextOverflow::Ellipsis);
     }
 }
 
@@ -510,6 +515,40 @@ mod tests {
 
         // outline_color should be set
         assert!(policy.outline_color.is_some());
+
+        // overflow should be Ellipsis (subtitle exemplar spec)
+        assert_eq!(
+            policy.overflow,
+            Some(TextOverflow::Ellipsis),
+            "subtitle zone must default to TextOverflow::Ellipsis"
+        );
+    }
+
+    #[test]
+    fn test_subtitle_overflow_not_overwritten_when_explicit() {
+        let tokens = default_tokens();
+        let mut policy = RenderingPolicy::default();
+        // Pre-set overflow to Clip (explicit config override)
+        policy.overflow = Some(TextOverflow::Clip);
+        apply_token_defaults_for_zone("subtitle", &mut policy, &tokens);
+        // overflow should remain Clip — token default must not overwrite explicit values
+        assert_eq!(
+            policy.overflow,
+            Some(TextOverflow::Clip),
+            "explicit overflow must not be overwritten by token default"
+        );
+    }
+
+    #[test]
+    fn test_non_subtitle_zones_do_not_set_overflow() {
+        let tokens = default_tokens();
+        let mut policy = RenderingPolicy::default();
+        apply_token_defaults_for_zone("notification-area", &mut policy, &tokens);
+        // notification-area has no overflow token default
+        assert!(
+            policy.overflow.is_none(),
+            "notification-area must not set overflow"
+        );
     }
 
     #[test]

@@ -7257,25 +7257,32 @@ mod tests {
         compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
 
         // At least one backdrop quad must be emitted.
-        assert!(!vertices.is_empty(), "StaticImage zone must emit backdrop vertices");
+        assert!(
+            !vertices.is_empty(),
+            "StaticImage zone must emit backdrop vertices"
+        );
 
         // The first vertex color must be warm-gray (R≈0.3, G≈0.3, B≈0.3, A≈1.0).
         let color = vertices[0].color;
         assert!(
             (color[0] - 0.3).abs() < 0.01,
-            "StaticImage placeholder R must be ~0.3, got {}", color[0]
+            "StaticImage placeholder R must be ~0.3, got {}",
+            color[0]
         );
         assert!(
             (color[1] - 0.3).abs() < 0.01,
-            "StaticImage placeholder G must be ~0.3, got {}", color[1]
+            "StaticImage placeholder G must be ~0.3, got {}",
+            color[1]
         );
         assert!(
             (color[2] - 0.3).abs() < 0.01,
-            "StaticImage placeholder B must be ~0.3, got {}", color[2]
+            "StaticImage placeholder B must be ~0.3, got {}",
+            color[2]
         );
         assert!(
             color[3] > 0.5,
-            "StaticImage placeholder must be substantially opaque (A > 0.5), got {}", color[3]
+            "StaticImage placeholder must be substantially opaque (A > 0.5), got {}",
+            color[3]
         );
     }
 }
