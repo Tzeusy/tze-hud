@@ -243,6 +243,8 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
                 Mutation::PublishToZone(_) => {}
                 Mutation::ClearZone(_) => {}
                 Mutation::ClearWidget(_) => {}
+                // UpdateNodeContent is a content update — StateStream
+                Mutation::UpdateNodeContent(_) => {}
             }
         }
     }
@@ -2337,6 +2339,35 @@ async fn handle_mutation_batch(
                     instance_id,
                 });
             }
+            Some(crate::proto::mutation_proto::Mutation::UpdateNodeContent(unc)) => {
+                match (bytes_to_scene_id(&unc.tile_id), bytes_to_scene_id(&unc.node_id)) {
+                    (Ok(tile_id), Ok(node_id)) => {
+                        if let Some(ref d) = unc.data
+                            && let Some(data) =
+                                convert::proto_update_node_content_data_to_scene(d)
+                        {
+                            scene_mutations.push(SceneMutation::UpdateNodeContent {
+                                tile_id,
+                                node_id,
+                                data,
+                            });
+                        } else {
+                            tracing::warn!(
+                                "UpdateNodeContent: missing or unrecognised data variant; \
+                                 mutation skipped"
+                            );
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            tile_id_len = unc.tile_id.len(),
+                            node_id_len = unc.node_id.len(),
+                            "UpdateNodeContent: invalid tile_id or node_id length (expected 16 \
+                             bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             None => {}
         }
     }
@@ -2543,6 +2574,35 @@ async fn apply_queued_batch_to_scene(
                     widget_name: cw.widget_name.clone(),
                     instance_id,
                 });
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateNodeContent(unc)) => {
+                match (bytes_to_scene_id(&unc.tile_id), bytes_to_scene_id(&unc.node_id)) {
+                    (Ok(tile_id), Ok(node_id)) => {
+                        if let Some(ref d) = unc.data
+                            && let Some(data) =
+                                convert::proto_update_node_content_data_to_scene(d)
+                        {
+                            scene_mutations.push(SceneMutation::UpdateNodeContent {
+                                tile_id,
+                                node_id,
+                                data,
+                            });
+                        } else {
+                            tracing::warn!(
+                                "UpdateNodeContent (queued): missing or unrecognised data \
+                                 variant; mutation skipped"
+                            );
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            tile_id_len = unc.tile_id.len(),
+                            node_id_len = unc.node_id.len(),
+                            "UpdateNodeContent (queued): invalid tile_id or node_id length \
+                             (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
             }
             None => {}
         }

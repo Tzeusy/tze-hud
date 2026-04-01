@@ -1660,6 +1660,116 @@ impl SceneGraph {
         Ok(())
     }
 
+    /// Atomically replace the `data` of an existing node (unchecked form).
+    ///
+    /// The node must already exist in the scene graph and belong to `tile_id`.
+    /// The replacement `data` discriminant must match the existing node's discriminant.
+    pub fn update_node_content(
+        &mut self,
+        tile_id: SceneId,
+        node_id: SceneId,
+        data: NodeData,
+    ) -> Result<(), ValidationError> {
+        self.update_node_content_impl(tile_id, node_id, data, None)
+    }
+
+    /// Atomically replace the `data` of an existing node (checked form).
+    ///
+    /// Enforces namespace isolation (`agent_namespace` must match the tile's namespace)
+    /// and the `ModifyOwnTiles` capability, then delegates to `update_node_content_impl`.
+    pub fn update_node_content_checked(
+        &mut self,
+        tile_id: SceneId,
+        node_id: SceneId,
+        data: NodeData,
+        agent_namespace: &str,
+    ) -> Result<(), ValidationError> {
+        self.update_node_content_impl(tile_id, node_id, data, Some(agent_namespace))
+    }
+
+    fn update_node_content_impl(
+        &mut self,
+        tile_id: SceneId,
+        node_id: SceneId,
+        data: NodeData,
+        agent_namespace: Option<&str>,
+    ) -> Result<(), ValidationError> {
+        // Stage 4: Lease + capability check (when namespace is provided).
+        if let Some(ns) = agent_namespace {
+            let lease_id = self.get_tile_lease_checked(tile_id, ns)?;
+            self.require_active_lease(lease_id)?;
+            self.require_capability(lease_id, Capability::ModifyOwnTiles)?;
+        } else if !self.tiles.contains_key(&tile_id) {
+            return Err(ValidationError::TileNotFound { id: tile_id });
+        }
+
+        // Stage 4: Node must exist in the scene graph.
+        {
+            let existing = self
+                .nodes
+                .get(&node_id)
+                .ok_or(ValidationError::NodeNotFound { id: node_id })?;
+
+            // Stage 4: Node must be reachable from this tile's root.
+            let tile = self.tiles.get(&tile_id).unwrap();
+            let root = tile.root_node.ok_or(ValidationError::NodeNotFound { id: node_id })?;
+            if !self.is_node_in_subtree(root, node_id) {
+                return Err(ValidationError::InvalidField {
+                    field: "node_id".into(),
+                    reason: format!(
+                        "node {} does not belong to tile {}",
+                        node_id, tile_id
+                    ),
+                });
+            }
+
+            // Stage 4: Type discriminant must match.
+            let type_matches = matches!(
+                (&existing.data, &data),
+                (NodeData::TextMarkdown(_), NodeData::TextMarkdown(_))
+                    | (NodeData::SolidColor(_), NodeData::SolidColor(_))
+                    | (NodeData::HitRegion(_), NodeData::HitRegion(_))
+                    | (NodeData::StaticImage(_), NodeData::StaticImage(_))
+            );
+            if !type_matches {
+                return Err(ValidationError::InvalidField {
+                    field: "data".into(),
+                    reason: format!(
+                        "cannot change node type: existing node {} has a different variant",
+                        node_id
+                    ),
+                });
+            }
+        }
+
+        // Content constraints (e.g. markdown byte limit).
+        if let Some(err) = validate_text_markdown_node_data(&data) {
+            return Err(err);
+        }
+
+        // Apply the update — replace data in-place, preserving id and children.
+        let node = self.nodes.get_mut(&node_id).unwrap();
+        node.data = data;
+        self.version += 1;
+        Ok(())
+    }
+
+    /// Return `true` if `target` is reachable from `start` (inclusive) by
+    /// following the children list in the flat node map.
+    fn is_node_in_subtree(&self, start: SceneId, target: SceneId) -> bool {
+        if start == target {
+            return true;
+        }
+        if let Some(node) = self.nodes.get(&start) {
+            for &child_id in &node.children {
+                if self.is_node_in_subtree(child_id, target) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // ─── Sync group operations ───────────────────────────────────────────
 
     /// Maximum sync groups per agent namespace (RFC 0003 §2.5).
