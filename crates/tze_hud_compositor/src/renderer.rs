@@ -457,8 +457,7 @@ impl PublicationAnimationState {
     /// Must be called once per frame per publication.  Idempotent after the
     /// fade has started.
     pub fn tick(&mut self) {
-        if self.fade_start.is_none()
-            && self.first_seen.elapsed().as_millis() as u64 >= self.ttl_ms
+        if self.fade_start.is_none() && self.first_seen.elapsed().as_millis() as u64 >= self.ttl_ms
         {
             self.fade_start = Some(std::time::Instant::now());
         }
@@ -1250,7 +1249,6 @@ impl Compositor {
                         // Combined opacity: zone animation × per-publication fade.
                         let effective_opacity = anim_opacity * pub_opacity;
 
-
                         match &record.content {
                             ZoneContent::StreamText(text) => {
                                 items.push(TextItem::from_zone_policy(
@@ -1521,7 +1519,9 @@ impl Compositor {
             if !matches!(zone_def.contention_policy, ContentionPolicy::Stack { .. }) {
                 continue;
             }
-            let zone_auto_clear_ms = zone_def.auto_clear_ms.unwrap_or(NOTIFICATION_DEFAULT_TTL_MS);
+            let zone_auto_clear_ms = zone_def
+                .auto_clear_ms
+                .unwrap_or(NOTIFICATION_DEFAULT_TTL_MS);
 
             let zone_states = self
                 .pub_animation_states
@@ -1540,7 +1540,10 @@ impl Compositor {
             // Ensure every active publication has an animation state; tick existing ones.
             for record in publishes {
                 let ttl_ms = Self::publication_ttl_ms(record, zone_auto_clear_ms);
-                let key: PubKey = (record.published_at_wall_us, record.publisher_namespace.clone());
+                let key: PubKey = (
+                    record.published_at_wall_us,
+                    record.publisher_namespace.clone(),
+                );
                 zone_states
                     .entry(key)
                     .or_insert_with(|| PublicationAnimationState::new(ttl_ms))
@@ -1569,7 +1572,10 @@ impl Compositor {
     ///
     /// Returns 1.0 if no animation state is found (publication is fully visible).
     fn pub_opacity(&self, zone_name: &str, record: &ZonePublishRecord) -> f32 {
-        let key: PubKey = (record.published_at_wall_us, record.publisher_namespace.clone());
+        let key: PubKey = (
+            record.published_at_wall_us,
+            record.publisher_namespace.clone(),
+        );
         self.pub_animation_states
             .get(zone_name)
             .and_then(|zone_states| zone_states.get(&key))
@@ -3549,7 +3555,7 @@ mod tests {
                     text: "Alert: system ready".to_owned(),
                     icon: String::new(),
                     urgency: 1,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4005,7 +4011,7 @@ mod tests {
                     text: "Notification with opaque backdrop".to_owned(),
                     icon: String::new(),
                     urgency: 1,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4075,7 +4081,7 @@ mod tests {
                     text: "Warning: disk space low".to_owned(),
                     icon: String::new(),
                     urgency: 2,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4498,7 +4504,7 @@ mod tests {
                     text: "border test".to_owned(),
                     icon: String::new(),
                     urgency: 0,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4564,7 +4570,7 @@ mod tests {
                     text: "no border here".to_owned(),
                     icon: String::new(),
                     urgency: 2,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4626,7 +4632,7 @@ mod tests {
                     text: "cyan border".to_owned(),
                     icon: String::new(),
                     urgency: 0,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -4819,7 +4825,7 @@ mod tests {
                     text: "Custom token warning".to_owned(),
                     icon: String::new(),
                     urgency: 2,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -5046,7 +5052,7 @@ mod tests {
                     text: "no backdrop".to_owned(),
                     icon: String::new(),
                     urgency: 2,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -5137,7 +5143,7 @@ mod tests {
                     text: "First notification".to_owned(),
                     icon: String::new(),
                     urgency: 1,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "agent-a",
                 None,
@@ -5152,7 +5158,7 @@ mod tests {
                     text: "Second notification".to_owned(),
                     icon: String::new(),
                     urgency: 1,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "agent-b",
                 None,
@@ -5237,7 +5243,7 @@ mod tests {
                     text: "Alpha alert".to_owned(),
                     icon: String::new(),
                     urgency: 0,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "agent-a",
                 None,
@@ -5252,7 +5258,7 @@ mod tests {
                     text: "Beta alert".to_owned(),
                     icon: String::new(),
                     urgency: 1,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "agent-b",
                 None,
@@ -5267,7 +5273,7 @@ mod tests {
                     text: "Gamma alert".to_owned(),
                     icon: String::new(),
                     urgency: 2,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "agent-c",
                 None,
@@ -5365,7 +5371,7 @@ mod tests {
                         text: format!("N{i}"),
                         icon: String::new(),
                         urgency: 1,
-                    ttl_ms: None,
+                        ttl_ms: None,
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -5446,7 +5452,7 @@ mod tests {
                     text: "Oldest".to_owned(),
                     icon: String::new(),
                     urgency: 0,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "agent-0",
                 None,
@@ -5462,7 +5468,7 @@ mod tests {
                         text: format!("N{i}"),
                         icon: String::new(),
                         urgency: 1,
-                    ttl_ms: None,
+                        ttl_ms: None,
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -5542,7 +5548,7 @@ mod tests {
                         text: format!("M{i}"),
                         icon: String::new(),
                         urgency: 1,
-                    ttl_ms: None,
+                        ttl_ms: None,
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -5886,7 +5892,7 @@ mod tests {
                     text: "Weather alert: severe storms".to_owned(),
                     icon: String::new(),
                     urgency: 2,
-                ttl_ms: None,
+                    ttl_ms: None,
                 }),
                 "test",
                 None,
@@ -6544,7 +6550,10 @@ mod tests {
         let mut token_map = HashMap::new();
         token_map.insert("typography.body.size".to_string(), "18".to_string());
         let font_size = Compositor::resolve_body_font_size(&token_map);
-        assert_eq!(font_size, 18.0, "numeric-only typography.body.size must parse");
+        assert_eq!(
+            font_size, 18.0,
+            "numeric-only typography.body.size must parse"
+        );
     }
 
     /// Absent typography.body.size token falls back to 16px.
@@ -6602,8 +6611,8 @@ mod tests {
             geometry_policy: GeometryPolicy::Relative {
                 x_pct: 0.0,
                 y_pct: 0.0,
-                width_pct: 1.0,   // zx = 0
-                height_pct: 0.5,  // zy = 0
+                width_pct: 1.0,  // zx = 0
+                height_pct: 0.5, // zy = 0
             },
             accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
             rendering_policy: RenderingPolicy {
@@ -6697,8 +6706,7 @@ mod tests {
         let mut state = PublicationAnimationState::new(3_000);
 
         // Simulate 3001ms elapsed by setting first_seen to the past.
-        state.first_seen =
-            std::time::Instant::now() - std::time::Duration::from_millis(3_001);
+        state.first_seen = std::time::Instant::now() - std::time::Duration::from_millis(3_001);
 
         state.tick();
 
@@ -6830,8 +6838,7 @@ mod tests {
         };
 
         let mut completed_state = PublicationAnimationState::new(0);
-        completed_state.first_seen =
-            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        completed_state.first_seen = std::time::Instant::now() - std::time::Duration::from_secs(1);
         completed_state.tick(); // starts fade
         // Set fade_start 151ms in the past → fade complete.
         completed_state.fade_start =
@@ -6893,8 +6900,7 @@ mod tests {
         state_b.tick();
 
         // Simulate: state_a is 75ms into fade, state_b is 120ms into fade.
-        state_a.fade_start =
-            Some(std::time::Instant::now() - std::time::Duration::from_millis(75));
+        state_a.fade_start = Some(std::time::Instant::now() - std::time::Duration::from_millis(75));
         state_b.fade_start =
             Some(std::time::Instant::now() - std::time::Duration::from_millis(120));
 
@@ -6960,7 +6966,11 @@ mod tests {
         });
 
         // Publish three notifications from three agents.
-        for (agent, text) in [("agent-a", "Alpha"), ("agent-b", "Beta"), ("agent-c", "Gamma")] {
+        for (agent, text) in [
+            ("agent-a", "Alpha"),
+            ("agent-b", "Beta"),
+            ("agent-c", "Gamma"),
+        ] {
             scene
                 .publish_to_zone(
                     "notification-area",
@@ -6994,8 +7004,7 @@ mod tests {
         };
 
         let mut completed_state = PublicationAnimationState::new(0);
-        completed_state.first_seen =
-            std::time::Instant::now() - std::time::Duration::from_secs(1);
+        completed_state.first_seen = std::time::Instant::now() - std::time::Duration::from_secs(1);
         completed_state.tick();
         completed_state.fade_start =
             Some(std::time::Instant::now() - std::time::Duration::from_millis(151));
@@ -7053,8 +7062,8 @@ mod tests {
     fn test_update_publication_animations_seeds_fresh_state() {
         // We test this without GPU by constructing the compositor state manually.
         // Use a SceneGraph with a Stack zone and one publication.
-        use tze_hud_scene::clock::TestClock;
         use std::sync::Arc;
+        use tze_hud_scene::clock::TestClock;
 
         let clock = Arc::new(TestClock::new(1_000)); // start at t=1000ms
         let mut scene = SceneGraph::new_with_clock(1280.0, 720.0, clock.clone());
@@ -7098,12 +7107,18 @@ mod tests {
         // Build a minimal compositor state just for the animation map test.
         // We can't construct a full headless Compositor without GPU, so we test
         // the helper methods directly.
-        let publishes = scene.zone_registry.active_publishes.get("notification-area").unwrap();
+        let publishes = scene
+            .zone_registry
+            .active_publishes
+            .get("notification-area")
+            .unwrap();
         let record = &publishes[0];
 
         // Test publication_ttl_ms: per-notification ttl_ms=3000 takes priority.
         let zone_def = scene.zone_registry.zones.get("notification-area").unwrap();
-        let zone_auto_clear = zone_def.auto_clear_ms.unwrap_or(NOTIFICATION_DEFAULT_TTL_MS);
+        let zone_auto_clear = zone_def
+            .auto_clear_ms
+            .unwrap_or(NOTIFICATION_DEFAULT_TTL_MS);
         let ttl = Compositor::publication_ttl_ms(record, zone_auto_clear);
         assert_eq!(
             ttl, 3_000,
