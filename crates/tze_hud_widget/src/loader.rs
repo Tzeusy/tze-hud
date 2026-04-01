@@ -108,8 +108,9 @@ pub enum BundleScanResult {
 ///
 /// - `bundle_roots`: directories to scan; each immediate subdirectory is a
 ///   potential bundle.
-/// - `tokens`: design-token map used to resolve `{{token.key}}` placeholders in
-///   SVG files.  Pass an empty map when no token substitution is needed.
+/// - `tokens`: design-token map used to resolve `{{key}}` / `{{token.key}}`
+///   placeholders in SVG files.  Pass an empty map when no token substitution
+///   is needed.
 ///
 /// Source: widget-system/spec.md §Requirement: Widget Asset Bundle Format.
 pub fn scan_bundle_dirs(
@@ -349,7 +350,7 @@ fn load_bundle_dir_inner(
             detail: format!("file is not valid UTF-8: {e}"),
         })?;
 
-        // Step 5b-post: Resolve {{token.key}} placeholders BEFORE SVG parse/scan.
+        // Step 5b-post: Resolve {{key}} / {{token.key}} placeholders BEFORE SVG parse/scan.
         let svg_text_resolved = resolve_token_placeholders(svg_text, tokens).map_err(|key| {
             BundleError::UnresolvedToken {
                 path: path_str.to_string(),
@@ -796,16 +797,22 @@ fn parse_rendering_policy(
 
 // ─── Token placeholder resolution ────────────────────────────────────────────
 
-/// Resolve `{{token.key}}` mustache-style placeholders in SVG text.
+/// Resolve token mustache-style placeholders in SVG text.
 ///
 /// # Syntax
 ///
-/// - A placeholder has the form `{{token.key}}` where `key` matches the pattern
-///   `[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)*` — no whitespace inside the braces.
-/// - The token lookup key is the full dotted path after `token.` (e.g. the
-///   placeholder `{{token.color.primary}}` looks up the key `color.primary`).
-/// - The function performs a single left-to-right pass with no recursive
-///   re-scanning of substituted values.
+/// Two equivalent placeholder forms are accepted:
+///
+/// - **Bare form** (preferred, per spec): `{{key}}` where `key` is a dotted
+///   token path matching `[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)*`.  The key is
+///   looked up directly in the token map.  Example: `{{color.text.primary}}`
+///   looks up the key `color.text.primary`.
+/// - **Prefixed form** (legacy, backward-compatible): `{{token.key}}` where
+///   `key` matches the same pattern.  The `token.` prefix is stripped before
+///   the map lookup, so `{{token.color.primary}}` also looks up `color.primary`.
+///
+/// Both forms perform no whitespace inside the braces and a single
+/// left-to-right pass with no recursive re-scanning of substituted values.
 ///
 /// # Escape sequences
 ///
@@ -856,20 +863,35 @@ pub(crate) fn resolve_token_placeholders(
         if let Some(close_offset) = after_open.find("}}") {
             let inner = &after_open[..close_offset];
 
-            // Validate: must be `token.<key>` with no whitespace.
-            if let Some(key_part) = inner.strip_prefix("token.") {
-                if is_valid_token_key(key_part) {
-                    // Resolve against the token map.
-                    match tokens.get(key_part) {
-                        Some(value) => {
-                            result.push_str(value);
-                            remaining = &after_open[close_offset + 2..]; // skip past `}}`
-                            continue;
-                        }
-                        None => {
-                            // Unresolved token — return the key as the error.
-                            return Err(key_part.to_string());
-                        }
+            // Resolve the placeholder key using two accepted forms:
+            //   1. Prefixed form: `{{token.<key>}}` — strip "token." prefix.
+            //   2. Bare form:     `{{<key>}}`        — use the inner text directly.
+            // Both forms require the key to pass `is_valid_token_key`.
+            let key_part = if let Some(stripped) = inner.strip_prefix("token.") {
+                // Prefixed form: validate the part after "token.".
+                if is_valid_token_key(stripped) {
+                    Some(stripped)
+                } else {
+                    None
+                }
+            } else if is_valid_token_key(inner) {
+                // Bare form: inner text is the key directly.
+                Some(inner)
+            } else {
+                None
+            };
+
+            if let Some(key_part) = key_part {
+                // Resolve against the token map.
+                match tokens.get(key_part) {
+                    Some(value) => {
+                        result.push_str(value);
+                        remaining = &after_open[close_offset + 2..]; // skip past `}}`
+                        continue;
+                    }
+                    None => {
+                        // Unresolved token — return the key as the error.
+                        return Err(key_part.to_string());
                     }
                 }
             }
@@ -902,7 +924,8 @@ pub(crate) fn resolve_token_placeholders(
 /// - Each additional segment: `[a-z][a-z0-9_]*` — lowercase letter followed by
 ///   lowercase letters, digits, and underscores.
 ///
-/// This is the allowed token key syntax within `{{token.<key>}}` placeholders.
+/// This is the allowed token key syntax for both the bare `{{key}}` form and
+/// the prefixed `{{token.<key>}}` form of SVG token placeholders.
 fn is_valid_token_key(key: &str) -> bool {
     if key.is_empty() {
         return false;
@@ -1099,13 +1122,17 @@ mod tests {
         assert_eq!(result, input);
     }
 
-    /// A placeholder whose key is not under `token.` namespace is passed through unchanged.
+    /// A bare-form placeholder with a valid key that is absent from the map yields an error.
+    ///
+    /// Previously `{{other.key}}` was passed through unchanged because it lacked the
+    /// `token.` prefix.  With bare-key support, ANY valid-syntax `{{key}}` is treated
+    /// as a token placeholder and produces an error when the key is absent.
     #[test]
-    fn non_token_namespace_passed_through() {
+    fn bare_key_absent_from_map_yields_error() {
         let tokens = token_map(&[]);
         let input = "{{other.key}} stays put";
-        let result = resolve_token_placeholders(input, &tokens).unwrap();
-        assert_eq!(result, "{{other.key}} stays put");
+        let err = resolve_token_placeholders(input, &tokens).unwrap_err();
+        assert_eq!(err, "other.key");
     }
 
     /// A bare `{{}}` (empty inner) is passed through unchanged.
@@ -1155,5 +1182,105 @@ mod tests {
         let input = "<!-- caf\u{00e9} -->{{token.color.primary}}";
         let result = resolve_token_placeholders(input, &tokens).unwrap();
         assert_eq!(result, "<!-- caf\u{00e9} -->red");
+    }
+
+    // ─── Bare-key form (no `token.` prefix) ──────────────────────────────────────
+
+    /// Bare `{{key}}` form (spec-preferred) resolves directly against the token map.
+    #[test]
+    fn bare_key_single_placeholder_substituted() {
+        let tokens = token_map(&[("color.text.primary", "#ffffff")]);
+        let input = r##"<text fill="{{color.text.primary}}">hi</text>"##;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, r##"<text fill="#ffffff">hi</text>"##);
+    }
+
+    /// Bare-form and prefixed-form placeholders are resolved identically when they
+    /// reference the same token key.
+    #[test]
+    fn bare_key_and_prefixed_key_equivalent() {
+        let tokens = token_map(&[("color.primary", "#ff0000")]);
+        let bare = resolve_token_placeholders(r##"<rect fill="{{color.primary}}"/>"##, &tokens)
+            .unwrap();
+        let prefixed =
+            resolve_token_placeholders(r##"<rect fill="{{token.color.primary}}"/>"##, &tokens)
+                .unwrap();
+        assert_eq!(bare, r##"<rect fill="#ff0000"/>"##);
+        assert_eq!(prefixed, r##"<rect fill="#ff0000"/>"##);
+    }
+
+    /// Multiple bare-form placeholders in one SVG attribute are all substituted.
+    #[test]
+    fn bare_key_multiple_placeholders() {
+        let tokens = token_map(&[("fg", "white"), ("bg", "black")]);
+        let input = r#"<text fill="{{fg}}" stroke="{{bg}}">x</text>"#;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, r#"<text fill="white" stroke="black">x</text>"#);
+    }
+
+    /// Bare-form placeholder inside a `<style>` block is resolved identically.
+    #[test]
+    fn bare_key_inside_style_block() {
+        let tokens = token_map(&[("color.accent", "blue")]);
+        let input = "<style>.cls { fill: {{color.accent}}; }</style>";
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, "<style>.cls { fill: blue; }</style>");
+    }
+
+    /// A bare-form placeholder whose key has an underscore in the first segment is
+    /// NOT a valid placeholder (passes through unchanged / treated as not a placeholder).
+    ///
+    /// Note: since an invalid-syntax inner text is passed through as `{{...}}`, the
+    /// outer caller sees unchanged output rather than an error.
+    #[test]
+    fn bare_key_underscore_in_first_segment_not_a_placeholder() {
+        let tokens = token_map(&[("my_key", "SHOULD_NOT_APPEAR")]);
+        let input = "{{my_key}} stays put";
+        // `my_key` fails the first-segment rule (underscore not allowed there),
+        // so the `{{my_key}}` sequence is passed through literally.
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, "{{my_key}} stays put");
+    }
+
+    /// A mix of bare-form and prefixed-form placeholders in the same SVG are both resolved.
+    #[test]
+    fn bare_and_prefixed_mix_both_resolved() {
+        let tokens = token_map(&[
+            ("color.text.primary", "#ffffff"),
+            ("color.backdrop.default", "#000000"),
+        ]);
+        let input =
+            r##"fill="{{color.text.primary}}" stroke="{{token.color.backdrop.default}}""##;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, r##"fill="#ffffff" stroke="#000000""##);
+    }
+
+    /// Reference subtitle SVG uses bare-form token placeholders — all must resolve.
+    ///
+    /// This mirrors the real reference profile SVG pattern used in production.
+    #[test]
+    fn reference_profile_bare_tokens_resolve() {
+        let tokens = token_map(&[
+            ("color.text.primary", "#ffffff"),
+            ("color.outline.default", "#000000"),
+            ("typography.subtitle.family", "sans-serif"),
+            ("typography.subtitle.size", "48"),
+            ("typography.subtitle.weight", "700"),
+            ("stroke.outline.width", "2"),
+        ]);
+        // Simulate a simplified version of the reference subtitle outlined-text SVG.
+        let input = r#"<text
+  font-family="{{typography.subtitle.family}}"
+  font-size="{{typography.subtitle.size}}"
+  font-weight="{{typography.subtitle.weight}}"
+  fill="{{color.text.primary}}"
+  stroke="{{color.outline.default}}"
+  stroke-width="{{stroke.outline.width}}">Subtitle</text>"#;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert!(result.contains(r#"font-family="sans-serif""#));
+        assert!(result.contains(r#"font-size="48""#));
+        assert!(result.contains(r##"fill="#ffffff""##));
+        assert!(result.contains(r##"stroke="#000000""##));
+        assert!(!result.contains("{{"));
     }
 }
