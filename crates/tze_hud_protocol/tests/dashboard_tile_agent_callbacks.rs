@@ -275,14 +275,11 @@ async fn click_on_refresh_delivers_click_event_with_refresh_interaction_id() {
     let _ = input_event_tx.send(("refresh-click-agent".to_string(), batch));
 
     // Agent must receive EventBatch containing exactly one ClickEvent.
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream.next(),
-    )
-    .await
-    .expect("timed out waiting for EventBatch")
-    .unwrap()
-    .unwrap();
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for EventBatch")
+        .unwrap()
+        .unwrap();
 
     match msg.payload {
         Some(ServerPayload::EventBatch(batch)) => {
@@ -374,14 +371,11 @@ async fn activate_on_dismiss_delivers_command_input_event_with_activate_and_keyb
     let _ = input_event_tx.send(("dismiss-activate-agent".to_string(), batch));
 
     // Agent must receive EventBatch with a CommandInputEvent.
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream.next(),
-    )
-    .await
-    .expect("timed out waiting for EventBatch")
-    .unwrap()
-    .unwrap();
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for EventBatch")
+        .unwrap()
+        .unwrap();
 
     match msg.payload {
         Some(ServerPayload::EventBatch(batch)) => {
@@ -449,14 +443,11 @@ async fn dismiss_callback_triggers_lease_release_and_tile_removal() {
     let _ = input_event_tx.send(("dismiss-release-agent".to_string(), batch));
 
     // Agent receives the EventBatch and extracts interaction_id = "dismiss-button".
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream.next(),
-    )
-    .await
-    .expect("timed out waiting for EventBatch (dismiss)")
-    .unwrap()
-    .unwrap();
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for EventBatch (dismiss)")
+        .unwrap()
+        .unwrap();
 
     let received_interaction_id = match msg.payload {
         Some(ServerPayload::EventBatch(batch)) => {
@@ -546,14 +537,11 @@ async fn refresh_callback_triggers_mutation_batch_content_update() {
     let _ = input_event_tx.send(("refresh-update-agent".to_string(), batch));
 
     // Agent receives the EventBatch.
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream.next(),
-    )
-    .await
-    .expect("timed out waiting for EventBatch (refresh update)")
-    .unwrap()
-    .unwrap();
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for EventBatch (refresh update)")
+        .unwrap()
+        .unwrap();
 
     let received_interaction_id = match msg.payload {
         Some(ServerPayload::EventBatch(batch)) => {
@@ -658,14 +646,11 @@ async fn pointer_free_navigate_next_then_activate_delivers_same_callback_as_clic
     let _ = input_event_tx.send(("pointer-free-agent".to_string(), activate_batch));
 
     // Agent must receive EventBatch with CommandInputEvent(ACTIVATE, refresh-button).
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream.next(),
-    )
-    .await
-    .expect("timed out waiting for pointer-free ACTIVATE EventBatch")
-    .unwrap()
-    .unwrap();
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("timed out waiting for pointer-free ACTIVATE EventBatch")
+        .unwrap()
+        .unwrap();
 
     match msg.payload {
         Some(ServerPayload::EventBatch(batch)) => {
@@ -677,8 +662,11 @@ async fn pointer_free_navigate_next_then_activate_delivers_same_callback_as_clic
                         "ACTIVATE via keyboard must carry refresh-button interaction_id"
                     );
                     assert_eq!(ev.action, CommandAction::Activate as i32);
-                    assert_eq!(ev.source, CommandSource::Keyboard as i32,
-                        "source must be KEYBOARD for pointer-free activation");
+                    assert_eq!(
+                        ev.source,
+                        CommandSource::Keyboard as i32,
+                        "source must be KEYBOARD for pointer-free activation"
+                    );
                     assert_eq!(ev.tile_id, tile_id_bytes);
                     assert_eq!(ev.node_id, refresh_node_id_bytes);
                 }
@@ -728,14 +716,11 @@ async fn event_batch_not_delivered_to_wrong_namespace_session() {
     let _ = input_event_tx.send(("namespace-a-agent".to_string(), batch));
 
     // Session A must receive the EventBatch.
-    let msg_a = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream_a.next(),
-    )
-    .await
-    .expect("namespace-a-agent should receive the EventBatch")
-    .unwrap()
-    .unwrap();
+    let msg_a = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream_a.next())
+        .await
+        .expect("namespace-a-agent should receive the EventBatch")
+        .unwrap()
+        .unwrap();
 
     assert!(
         matches!(msg_a.payload, Some(ServerPayload::EventBatch(_))),
@@ -756,14 +741,11 @@ async fn event_batch_not_delivered_to_wrong_namespace_session() {
     .await
     .unwrap();
 
-    let msg_b = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream_b.next(),
-    )
-    .await
-    .expect("namespace-b-agent should receive heartbeat echo, not EventBatch")
-    .unwrap()
-    .unwrap();
+    let msg_b = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream_b.next())
+        .await
+        .expect("namespace-b-agent should receive heartbeat echo, not EventBatch")
+        .unwrap()
+        .unwrap();
 
     assert!(
         matches!(msg_b.payload, Some(ServerPayload::Heartbeat(_))),
@@ -842,14 +824,11 @@ async fn event_batch_not_delivered_without_input_events_subscription() {
     .await
     .unwrap();
 
-    let msg = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        stream.next(),
-    )
-    .await
-    .expect("expected heartbeat echo, not timeout")
-    .unwrap()
-    .unwrap();
+    let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+        .await
+        .expect("expected heartbeat echo, not timeout")
+        .unwrap()
+        .unwrap();
 
     assert!(
         matches!(msg.payload, Some(ServerPayload::Heartbeat(_))),

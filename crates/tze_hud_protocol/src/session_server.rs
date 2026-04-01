@@ -806,8 +806,7 @@ pub struct HudSessionImpl {
     ///
     /// Used by `inject_input_event` to push runtime-assembled ClickEvent /
     /// CommandInputEvent batches to the owning agent session.
-    pub input_event_tx:
-        tokio::sync::broadcast::Sender<(String, crate::proto::EventBatch)>,
+    pub input_event_tx: tokio::sync::broadcast::Sender<(String, crate::proto::EventBatch)>,
 }
 
 impl HudSessionImpl {
