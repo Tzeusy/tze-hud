@@ -403,8 +403,11 @@ pub struct PublishToZoneParams {
     /// Per spec §Subtitle Streaming Word-by-Word Reveal:
     ///   - `[3, 9, 15]` for `"The quick brown"` → reveals "The", "The quick",
     ///     "The quick brown", then the full text.
+    ///
+    /// `u64` is used for platform-stable JSON serialization (rather than
+    /// `usize`, which is architecture-dependent).
     #[serde(default)]
-    pub breakpoints: Vec<usize>,
+    pub breakpoints: Vec<u64>,
 }
 
 /// Parse the polymorphic `content` field into a `ZoneContent`.
@@ -600,6 +603,15 @@ pub fn handle_publish_to_zone(
         ttl_ms,
         vec![Capability::PublishZone(p.zone_name.clone())],
     );
+
+    // Validate that breakpoints are only used with StreamText content.
+    // Breakpoints are a StreamText-specific feature; sending them alongside
+    // other content types is a caller error.
+    if !p.breakpoints.is_empty() && !matches!(content, ZoneContent::StreamText(_)) {
+        return Err(McpError::InvalidParams(
+            "breakpoints are only valid for StreamText content".to_string(),
+        ));
+    }
 
     // Delegate to the real zone engine. This enforces contention policy
     // (LatestWins / Stack / MergeByKey), validates accepted_media_types,

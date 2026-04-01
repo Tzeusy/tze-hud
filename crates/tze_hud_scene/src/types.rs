@@ -1541,8 +1541,12 @@ pub struct ZonePublishRecord {
     ///
     /// Only meaningful when `content` is `ZoneContent::StreamText`.  Ignored for
     /// all other content types.
+    ///
+    /// `u64` is used (rather than `usize`) so that the wire format is stable
+    /// across 32-bit and 64-bit platforms.  Callers convert to `usize` at
+    /// indexing time (e.g., `bp as usize`).
     #[serde(default)]
-    pub breakpoints: Vec<usize>,
+    pub breakpoints: Vec<u64>,
 }
 
 /// Type alias for `ZonePublishRecord` — the canonical name for the publication

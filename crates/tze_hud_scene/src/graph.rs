@@ -2656,7 +2656,7 @@ impl SceneGraph {
         content: ZoneContent,
         publisher_namespace: &str,
         merge_key: Option<String>,
-        breakpoints: Vec<usize>,
+        breakpoints: Vec<u64>,
     ) -> Result<(), ValidationError> {
         use crate::lease::orphan::ZonePublishResult;
 
@@ -2740,7 +2740,7 @@ impl SceneGraph {
         merge_key: Option<String>,
         expires_at_wall_us: Option<u64>,
         content_classification: Option<String>,
-        breakpoints: Vec<usize>,
+        breakpoints: Vec<u64>,
     ) -> Result<(), ValidationError> {
         // Check zone exists and content type is accepted
         let (contention_policy, max_publishers, accepted) = {

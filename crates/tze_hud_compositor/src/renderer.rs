@@ -545,7 +545,9 @@ const STREAM_REVEAL_FRAMES_PER_SEGMENT: u32 = 1;
 pub struct StreamRevealState {
     /// The publication this state tracks.
     pub pub_key: PubKey,
-    /// Sorted byte-offset breakpoints copied from the publication record.
+    /// Byte-offset breakpoints copied from the publication record.
+    /// Expected to be non-decreasing (callers should validate before constructing),
+    /// but not enforced here — the compositor is safe regardless of order.
     pub breakpoints: Vec<usize>,
     /// Index into `breakpoints` of the currently-visible segment boundary.
     /// A value of `breakpoints.len()` means the full text is visible.
@@ -556,10 +558,13 @@ pub struct StreamRevealState {
 
 impl StreamRevealState {
     /// Create reveal state for a new publication.
-    pub fn new(pub_key: PubKey, breakpoints: Vec<usize>) -> Self {
+    ///
+    /// Accepts `Vec<u64>` breakpoints (wire format from `ZonePublishRecord`) and
+    /// converts to `Vec<usize>` for internal indexing arithmetic.
+    pub fn new(pub_key: PubKey, breakpoints: Vec<u64>) -> Self {
         Self {
             pub_key,
-            breakpoints,
+            breakpoints: breakpoints.into_iter().map(|b| b as usize).collect(),
             segment_idx: 0,
             frames_in_segment: 0,
         }
@@ -1528,9 +1533,16 @@ impl Compositor {
                                     if offset == usize::MAX {
                                         text.as_str()
                                     } else {
-                                        // Clamp to a valid UTF-8 boundary (byte offset
-                                        // from the ZonePublishRecord must be valid).
-                                        let safe_offset = offset.min(text.len());
+                                        // Clamp to string length, then walk backward to
+                                        // a valid UTF-8 character boundary.  Breakpoints
+                                        // come from external input and may not be on a
+                                        // char boundary; slicing at a non-boundary panics.
+                                        let mut safe_offset = offset.min(text.len());
+                                        while safe_offset > 0
+                                            && !text.is_char_boundary(safe_offset)
+                                        {
+                                            safe_offset -= 1;
+                                        }
                                         &text[..safe_offset]
                                     }
                                 } else {
@@ -8385,7 +8397,7 @@ mod tests {
     fn test_stream_reveal_no_breakpoints_reveals_all() {
         let state = StreamRevealState::new(
             (1_000_000, "agent".to_owned()),
-            vec![], // no breakpoints
+            vec![] as Vec<u64>, // no breakpoints
         );
         assert_eq!(
             state.visible_byte_offset(),
