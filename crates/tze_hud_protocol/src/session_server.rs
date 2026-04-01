@@ -796,6 +796,17 @@ pub struct HudSessionImpl {
     /// and processes revocations for leases it owns, applying the scene-graph
     /// mutation and delivering the `CapabilityNotice` + `LeaseStateChange` responses.
     pub capability_revocation_tx: tokio::sync::broadcast::Sender<CapabilityRevocationEvent>,
+
+    /// Broadcast sender for runtime-injected input event batches (hud-i6yd.6).
+    ///
+    /// Carries `(namespace, EventBatch)` tuples. Each session handler subscribes
+    /// and delivers the batch only if `namespace` matches its own namespace AND the
+    /// agent has at least one of `INPUT_EVENTS` / `FOCUS_EVENTS` active. The batch
+    /// is filtered through `subscriptions::filter_event_batch` before delivery.
+    ///
+    /// Used by `inject_input_event` to push runtime-assembled ClickEvent /
+    /// CommandInputEvent batches to the owning agent session.
+    pub input_event_tx: tokio::sync::broadcast::Sender<(String, crate::proto::EventBatch)>,
 }
 
 impl HudSessionImpl {
@@ -807,6 +818,7 @@ impl HudSessionImpl {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (input_event_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state: Arc::new(Mutex::new(SharedState {
                 scene: Arc::new(Mutex::new(scene)),
@@ -821,6 +833,7 @@ impl HudSessionImpl {
             fallback_unrestricted: true,
             degradation_tx,
             capability_revocation_tx,
+            input_event_tx,
         }
     }
 
@@ -832,6 +845,7 @@ impl HudSessionImpl {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (input_event_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
@@ -839,6 +853,7 @@ impl HudSessionImpl {
             fallback_unrestricted: true,
             degradation_tx,
             capability_revocation_tx,
+            input_event_tx,
         }
     }
 
@@ -860,6 +875,7 @@ impl HudSessionImpl {
         let (degradation_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (capability_revocation_tx, _) =
             tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
+        let (input_event_tx, _) = tokio::sync::broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             state,
             psk: psk.to_string(),
@@ -867,6 +883,7 @@ impl HudSessionImpl {
             fallback_unrestricted,
             degradation_tx,
             capability_revocation_tx,
+            input_event_tx,
         }
     }
 
@@ -937,6 +954,34 @@ impl HudSessionImpl {
             .send(event)
             .unwrap_or_default()
     }
+
+    /// Inject an `EventBatch` into the gRPC stream of the session owning `namespace`.
+    ///
+    /// Used by the runtime to push ClickEvent / CommandInputEvent batches produced by
+    /// the compositor input pipeline (Stage 2) to the owning agent (hud-i6yd.6).
+    ///
+    /// The batch is broadcast to all session handler tasks; each task delivers it only
+    /// if its namespace matches AND the event passes subscription filtering
+    /// (`INPUT_EVENTS` / `FOCUS_EVENTS` gates).
+    ///
+    /// Returns the number of session handlers that received the broadcast (0 if no
+    /// sessions are currently connected, regardless of namespace match).
+    ///
+    /// # Subscription gate
+    ///
+    /// ClickEvent and CommandInputEvent are `INPUT_EVENTS` variants. The session handler
+    /// will silently drop the batch if the agent is not subscribed to `INPUT_EVENTS`.
+    /// Callers that need a guaranteed delivery path should ensure the agent subscribes
+    /// to `INPUT_EVENTS` / `access_input_events` at handshake time.
+    pub fn inject_input_event(
+        &self,
+        namespace: impl Into<String>,
+        batch: crate::proto::EventBatch,
+    ) -> usize {
+        self.input_event_tx
+            .send((namespace.into(), batch))
+            .unwrap_or_default()
+    }
 }
 
 #[tonic::async_trait]
@@ -962,6 +1007,10 @@ impl HudSession for HudSessionImpl {
         // Subscribing here ensures the session handler receives revocations issued
         // immediately after it is spawned (before the task subscribes itself).
         let mut capability_revocation_rx = self.capability_revocation_tx.subscribe();
+
+        // Subscribe to the input event broadcast channel (hud-i6yd.6).
+        // Each session handler delivers only batches addressed to its own namespace.
+        let mut input_event_rx = self.input_event_tx.subscribe();
 
         // Create outbound channel
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<ServerMessage, Status>>(
@@ -1297,6 +1346,53 @@ impl HudSession for HudSessionImpl {
                                 // Missed revocation events. Log and continue; the capability
                                 // scope may be stale for those dropped events.
                                 // In production: emit a metric and re-query the live scope.
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                // Runtime shutting down — treat as ungraceful disconnect.
+                                session.transition(SessionState::Closed);
+                                break;
+                            }
+                        }
+                    }
+
+                    // ── Runtime-injected input EventBatch (hud-i6yd.6) ───────────
+                    //
+                    // The compositor input pipeline (Stage 2) assembles ClickEvent /
+                    // CommandInputEvent batches for the owning agent and injects them
+                    // here via `HudSessionImpl::inject_input_event`. Only batches
+                    // addressed to this session's namespace are forwarded; others are
+                    // silently discarded.
+                    //
+                    // Delivery is gated on subscription: the batch is filtered through
+                    // `subscriptions::filter_event_batch` before sending. If the agent
+                    // is not subscribed to INPUT_EVENTS / FOCUS_EVENTS the batch is
+                    // dropped silently (no error response).
+                    input_event_result = input_event_rx.recv() => {
+                        match input_event_result {
+                            Ok((target_namespace, batch)) => {
+                                // Namespace filter: only deliver to the owning session.
+                                if target_namespace == session.namespace {
+                                    // Subscription filter: gate on INPUT_EVENTS / FOCUS_EVENTS.
+                                    if let Some(filtered) = crate::subscriptions::filter_event_batch(
+                                        batch,
+                                        &session.subscriptions,
+                                    ) {
+                                        let seq = session.next_server_seq();
+                                        let _ = tx
+                                            .send(Ok(ServerMessage {
+                                                sequence: seq,
+                                                timestamp_wall_us: now_wall_us(),
+                                                payload: Some(ServerPayload::EventBatch(filtered)),
+                                            }))
+                                            .await;
+                                    }
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                // Missed input events under backpressure. Transactional
+                                // events (ClickEvent, CommandInputEvent) must not be
+                                // dropped; in production this should emit a metric/alert.
+                                // For v1 we continue silently — the session remains open.
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 // Runtime shutting down — treat as ungraceful disconnect.
