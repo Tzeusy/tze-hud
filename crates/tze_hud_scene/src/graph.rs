@@ -1038,6 +1038,12 @@ impl SceneGraph {
             }
         }
 
+        // Running projected texture total for the batch.  We accumulate deltas
+        // across SetTileRoot and UpdateNodeContent mutations so that a batch
+        // with multiple texture swaps is evaluated against the cumulative
+        // projected usage, not independently against the initial snapshot.
+        let mut projected_tex = usage.texture_bytes;
+
         // Count new nodes per tile (AddNode / SetTileRoot)
         for mutation in &batch.mutations {
             match mutation {
@@ -1065,16 +1071,16 @@ impl SceneGraph {
                             requested: new_count as u64,
                         });
                     }
-                    // Check texture bytes in new tree
+                    // Check texture bytes in new tree against the running projected total.
                     let new_tex = Self::count_texture_bytes_in_node(node);
-                    let other_tex = usage.texture_bytes
-                        - self
-                            .tiles
-                            .get(tile_id)
-                            .and_then(|t| t.root_node)
-                            .map(|r| self.sum_texture_bytes(r))
-                            .unwrap_or(0);
-                    if other_tex + new_tex > budget.max_texture_bytes {
+                    let old_tile_tex = self
+                        .tiles
+                        .get(tile_id)
+                        .and_then(|t| t.root_node)
+                        .map(|r| self.sum_texture_bytes(r))
+                        .unwrap_or(0);
+                    let other_tex = projected_tex.saturating_sub(old_tile_tex);
+                    if other_tex.saturating_add(new_tex) > budget.max_texture_bytes {
                         return Err(BudgetError {
                             resource: "texture_bytes".to_string(),
                             current: other_tex,
@@ -1082,6 +1088,8 @@ impl SceneGraph {
                             requested: new_tex,
                         });
                     }
+                    // Advance the running projected total for subsequent mutations.
+                    projected_tex = other_tex.saturating_add(new_tex);
                 }
                 crate::mutation::SceneMutation::UpdateNodeContent {
                     node_id,
@@ -1090,8 +1098,8 @@ impl SceneGraph {
                 } => {
                     // UpdateNodeContent on a StaticImage node swaps the texture.
                     // Compute the old texture bytes for this specific node (if any),
-                    // subtract them from current usage, and check whether the
-                    // replacement fits within the budget.
+                    // subtract them from the running projected total, and check
+                    // whether the replacement fits within the budget.
                     //
                     // If the resource_id is unchanged and decoded_bytes == 0, the
                     // preservation logic in update_node_content_impl will restore the
@@ -1108,8 +1116,8 @@ impl SceneGraph {
                                 _ => 0,
                             })
                             .unwrap_or(0);
-                        let other_tex = usage.texture_bytes.saturating_sub(old_tex);
-                        if other_tex + new_tex > budget.max_texture_bytes {
+                        let other_tex = projected_tex.saturating_sub(old_tex);
+                        if other_tex.saturating_add(new_tex) > budget.max_texture_bytes {
                             return Err(BudgetError {
                                 resource: "texture_bytes".to_string(),
                                 current: other_tex,
@@ -1117,6 +1125,8 @@ impl SceneGraph {
                                 requested: new_tex,
                             });
                         }
+                        // Advance the running projected total for subsequent mutations.
+                        projected_tex = other_tex.saturating_add(new_tex);
                     }
                 }
                 _ => {}
