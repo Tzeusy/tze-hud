@@ -1172,17 +1172,12 @@ impl SceneGraph {
         self.count_node_subtree_inner(node_id, &mut visited)
     }
 
-    fn count_node_subtree_inner(
-        &self,
-        node_id: SceneId,
-        visited: &mut HashSet<SceneId>,
-    ) -> u32 {
+    fn count_node_subtree_inner(&self, node_id: SceneId, visited: &mut HashSet<SceneId>) -> u32 {
         if !visited.insert(node_id) {
             // Cycle detected — skip this node to avoid infinite recursion.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during count_node_subtree",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during count_node_subtree"
             );
             return 0;
         }
@@ -1203,17 +1198,12 @@ impl SceneGraph {
         self.sum_texture_bytes_inner(node_id, &mut visited)
     }
 
-    fn sum_texture_bytes_inner(
-        &self,
-        node_id: SceneId,
-        visited: &mut HashSet<SceneId>,
-    ) -> u64 {
+    fn sum_texture_bytes_inner(&self, node_id: SceneId, visited: &mut HashSet<SceneId>) -> u64 {
         if !visited.insert(node_id) {
             // Cycle detected — skip this node to avoid infinite recursion.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during sum_texture_bytes",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during sum_texture_bytes"
             );
             return 0;
         }
@@ -2325,8 +2315,7 @@ impl SceneGraph {
             // Cycle detected — skip this node to avoid infinite recursion.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during hit_test_node",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during hit_test_node"
             );
             return None;
         }
@@ -2367,8 +2356,7 @@ impl SceneGraph {
             // Cycle detected — stop traversal.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during is_node_in_subtree",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during is_node_in_subtree"
             );
             return false;
         }
@@ -2475,6 +2463,7 @@ impl SceneGraph {
             merge_key: merge_key.clone(),
             expires_at_wall_us: effective_expires_at,
             content_classification,
+            breakpoints: Vec::new(),
         };
 
         let publishes = self
@@ -2635,6 +2624,194 @@ impl SceneGraph {
             None,
             None,
         )
+    }
+
+    /// Publish streaming `StreamText` content to a zone with breakpoints and
+    /// lease-state enforcement.
+    ///
+    /// This is the breakpoint-aware variant of `publish_to_zone_with_lease`. It
+    /// performs the same lease validation and then stores the breakpoints in the
+    /// `ZonePublishRecord` so the compositor can reveal the text progressively.
+    ///
+    /// Per spec §Subtitle Streaming Word-by-Word Reveal: breakpoints are
+    /// byte-offset indices in the UTF-8 text where the compositor pauses reveal.
+    /// An empty `breakpoints` vec reveals all text immediately.
+    ///
+    /// Non-`StreamText` content types MUST pass `breakpoints = Vec::new()`.
+    pub fn publish_to_zone_with_lease_and_breakpoints(
+        &mut self,
+        zone_name: &str,
+        content: ZoneContent,
+        publisher_namespace: &str,
+        merge_key: Option<String>,
+        breakpoints: Vec<u64>,
+    ) -> Result<(), ValidationError> {
+        use crate::lease::orphan::ZonePublishResult;
+
+        let all_leases_for_ns: Vec<_> = self
+            .leases
+            .values()
+            .filter(|l| l.namespace == publisher_namespace)
+            .map(|l| l.state)
+            .collect();
+
+        let lease_state = if all_leases_for_ns.is_empty() {
+            None
+        } else {
+            all_leases_for_ns
+                .iter()
+                .copied()
+                .find(|&s| s == LeaseState::Active)
+                .or_else(|| all_leases_for_ns.iter().copied().find(|s| !s.is_terminal()))
+                .or_else(|| all_leases_for_ns.first().copied())
+        };
+
+        match lease_state {
+            None => {
+                return Err(ValidationError::ZonePublishLeaseNotFound {
+                    namespace: publisher_namespace.to_string(),
+                });
+            }
+            Some(state) => {
+                let result = match state {
+                    LeaseState::Active => ZonePublishResult::Accepted,
+                    LeaseState::Orphaned | LeaseState::Disconnected => {
+                        ZonePublishResult::RejectedLeaseOrphaned
+                    }
+                    LeaseState::Suspended => ZonePublishResult::RejectedSafeModeActive,
+                    _ => ZonePublishResult::RejectedLeaseTerminal,
+                };
+                match result {
+                    ZonePublishResult::Accepted => {}
+                    ZonePublishResult::RejectedLeaseOrphaned => {
+                        return Err(ValidationError::ZonePublishLeaseOrphaned {
+                            namespace: publisher_namespace.to_string(),
+                        });
+                    }
+                    ZonePublishResult::RejectedSafeModeActive => {
+                        return Err(ValidationError::ZonePublishSafeModeActive {
+                            namespace: publisher_namespace.to_string(),
+                        });
+                    }
+                    ZonePublishResult::RejectedLeaseTerminal => {
+                        return Err(ValidationError::ZonePublishLeaseNotActive {
+                            namespace: publisher_namespace.to_string(),
+                            state: format!("{state:?}"),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Lease is Active — publish with breakpoints.
+        self.publish_to_zone_with_breakpoints(
+            zone_name,
+            content,
+            publisher_namespace,
+            merge_key,
+            None,
+            None,
+            breakpoints,
+        )
+    }
+
+    /// Publish content to a zone with optional streaming breakpoints (unchecked).
+    ///
+    /// Like `publish_to_zone` but stores breakpoints in the publish record.
+    /// Breakpoints identify byte offsets in the StreamText where the compositor
+    /// pauses progressive reveal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_to_zone_with_breakpoints(
+        &mut self,
+        zone_name: &str,
+        content: ZoneContent,
+        publisher_namespace: &str,
+        merge_key: Option<String>,
+        expires_at_wall_us: Option<u64>,
+        content_classification: Option<String>,
+        breakpoints: Vec<u64>,
+    ) -> Result<(), ValidationError> {
+        // Check zone exists and content type is accepted
+        let (contention_policy, max_publishers, accepted) = {
+            let zone = self.zone_registry.get_by_name(zone_name).ok_or_else(|| {
+                ValidationError::ZoneNotFound {
+                    name: zone_name.to_string(),
+                }
+            })?;
+            let accepted = Self::content_media_type(&content)
+                .map(|mt| zone.accepted_media_types.contains(&mt))
+                .unwrap_or(true);
+            (zone.contention_policy, zone.max_publishers, accepted)
+        };
+
+        if !accepted {
+            return Err(ValidationError::ZoneMediaTypeMismatch {
+                zone: zone_name.to_string(),
+            });
+        }
+
+        let now_us = self.clock.now_us();
+        let record = ZonePublishRecord {
+            zone_name: zone_name.to_string(),
+            publisher_namespace: publisher_namespace.to_string(),
+            content,
+            published_at_wall_us: now_us,
+            merge_key: merge_key.clone(),
+            expires_at_wall_us,
+            content_classification,
+            breakpoints,
+        };
+
+        let publishes = self
+            .zone_registry
+            .active_publishes
+            .entry(zone_name.to_string())
+            .or_default();
+
+        match contention_policy {
+            ContentionPolicy::LatestWins => {
+                *publishes = vec![record];
+            }
+            ContentionPolicy::Replace => {
+                *publishes = vec![record];
+            }
+            ContentionPolicy::Stack { max_depth } => {
+                let publisher_count = publishes
+                    .iter()
+                    .filter(|r| r.publisher_namespace == publisher_namespace)
+                    .count() as u32;
+                if publisher_count >= max_publishers {
+                    return Err(ValidationError::ZoneMaxPublishersReached {
+                        zone: zone_name.to_string(),
+                        max: max_publishers,
+                    });
+                }
+                publishes.push(record);
+                let max = max_depth as usize;
+                if publishes.len() > max {
+                    let excess = publishes.len() - max;
+                    publishes.drain(0..excess);
+                }
+            }
+            ContentionPolicy::MergeByKey { max_keys } => {
+                let key = merge_key.clone().unwrap_or_default();
+                if let Some(pos) = publishes
+                    .iter()
+                    .position(|r| r.merge_key.as_deref().unwrap_or("") == key.as_str())
+                {
+                    publishes[pos] = record;
+                } else {
+                    let max = max_keys as usize;
+                    if max > 0 && publishes.len() >= max {
+                        publishes.remove(0);
+                    }
+                    publishes.push(record);
+                }
+            }
+        }
+
+        self.version += 1;
+        Ok(())
     }
 
     /// Publish parameter values to a named widget instance.
@@ -8579,7 +8756,10 @@ mod spec_scenarios {
 
         // Must not hang; no StaticImage nodes so result is 0.
         let bytes = scene.sum_texture_bytes(id_a);
-        assert_eq!(bytes, 0, "cycle should terminate; no texture bytes in solid-color nodes");
+        assert_eq!(
+            bytes, 0,
+            "cycle should terminate; no texture bytes in solid-color nodes"
+        );
     }
 
     /// hit_test_node: cycle terminates; HitRegion nodes in a cycle are still tested.
@@ -8594,7 +8774,10 @@ mod spec_scenarios {
 
         // Point (50,50) is inside both nodes' bounds (0,0,100,100). Must not hang.
         let hit = scene.hit_test_node(id_a, 50.0, 50.0);
-        assert!(hit.is_some(), "a HitRegion node should be found before cycle is detected");
+        assert!(
+            hit.is_some(),
+            "a HitRegion node should be found before cycle is detected"
+        );
     }
 
     /// hit_test_node: no hit when point is outside all node bounds.
@@ -8608,7 +8791,10 @@ mod spec_scenarios {
 
         // Point (200, 200) is outside bounds (0,0,100,100). Must not hang.
         let hit = scene.hit_test_node(id_a, 200.0, 200.0);
-        assert!(hit.is_none(), "point outside all bounds should yield no hit");
+        assert!(
+            hit.is_none(),
+            "point outside all bounds should yield no hit"
+        );
     }
 
     /// is_node_in_subtree: returns true for a direct child.

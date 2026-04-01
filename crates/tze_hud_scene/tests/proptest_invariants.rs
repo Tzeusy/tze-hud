@@ -407,6 +407,7 @@ proptest! {
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
+                    breakpoints: Vec::new(),
                 }],
             );
         }

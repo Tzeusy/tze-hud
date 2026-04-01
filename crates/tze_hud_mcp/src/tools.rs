@@ -392,6 +392,22 @@ pub struct PublishToZoneParams {
     /// Merge key for idempotent zone publishes (optional).
     #[serde(default)]
     pub merge_key: Option<String>,
+    /// Byte-offset breakpoints for streaming word-by-word reveal (optional).
+    ///
+    /// Only meaningful when `content` is a `StreamText` publish (plain string or
+    /// `{"type":"stream_text","text":"..."}`).  Breakpoints identify byte offsets
+    /// in the UTF-8 text string at which the compositor pauses reveal.
+    ///
+    /// An empty array (the default) reveals the full text immediately.
+    ///
+    /// Per spec §Subtitle Streaming Word-by-Word Reveal:
+    ///   - `[3, 9, 15]` for `"The quick brown"` → reveals "The", "The quick",
+    ///     "The quick brown", then the full text.
+    ///
+    /// `u64` is used for platform-stable JSON serialization (rather than
+    /// `usize`, which is architecture-dependent).
+    #[serde(default)]
+    pub breakpoints: Vec<u64>,
 }
 
 /// Parse the polymorphic `content` field into a `ZoneContent`.
@@ -588,10 +604,37 @@ pub fn handle_publish_to_zone(
         vec![Capability::PublishZone(p.zone_name.clone())],
     );
 
+    // Validate that breakpoints are only used with StreamText content.
+    // Breakpoints are a StreamText-specific feature; sending them alongside
+    // other content types is a caller error.
+    if !p.breakpoints.is_empty() && !matches!(content, ZoneContent::StreamText(_)) {
+        return Err(McpError::InvalidParams(
+            "breakpoints are only valid for StreamText content".to_string(),
+        ));
+    }
+
     // Delegate to the real zone engine. This enforces contention policy
     // (LatestWins / Stack / MergeByKey), validates accepted_media_types,
     // and stores the record in zone_registry.active_publishes.
-    scene.publish_to_zone_with_lease(&p.zone_name, content, &p.namespace, p.merge_key.clone())?;
+    //
+    // When breakpoints are provided (StreamText streaming reveal), use the
+    // breakpoint-aware variant so the compositor can reveal text progressively.
+    if !p.breakpoints.is_empty() {
+        scene.publish_to_zone_with_lease_and_breakpoints(
+            &p.zone_name,
+            content,
+            &p.namespace,
+            p.merge_key.clone(),
+            p.breakpoints,
+        )?;
+    } else {
+        scene.publish_to_zone_with_lease(
+            &p.zone_name,
+            content,
+            &p.namespace,
+            p.merge_key.clone(),
+        )?;
+    }
 
     Ok(PublishToZoneResult {
         zone_name: p.zone_name,

@@ -37,6 +37,11 @@ outline_width = "{{stroke.outline.width}}"        # resolved: 3.0 px — satisfi
 # Margins
 margin_vertical = 8.0                             # pixels from top/bottom zone edges
 
+# Overflow — truncate with ellipsis when text exceeds zone vertical bounds
+# Per spec §Subtitle Multi-Line Overflow Handling: "compositor MUST truncate
+# the last visible line with an ellipsis character (...)".
+overflow = "ellipsis"
+
 # Fade transitions
 transition_in_ms  = 200                           # ms — opacity 0 -> 1 on content publish
 transition_out_ms = 150                           # ms — opacity 1 -> 0 on content clear

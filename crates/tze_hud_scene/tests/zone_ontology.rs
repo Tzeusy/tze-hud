@@ -1093,6 +1093,7 @@ fn zone_occupancy_query_returns_correct_state() {
             merge_key: None,
             expires_at_wall_us: None,
             content_classification: None,
+            breakpoints: Vec::new(),
         });
 
     let occupancy = registry.get_occupancy("subtitle", tab_id).unwrap();
