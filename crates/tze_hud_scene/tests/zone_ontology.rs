@@ -2194,16 +2194,11 @@ fn test_ambient_background_omitted_ttl_persists() {
 #[test]
 fn test_ambient_background_nonzero_ttl_expires() {
     // [hud-gwhr.3]: Non-zero TTL expires; ambient-background reverts to clear.
-    use std::sync::Arc;
-    use tze_hud_scene::SimulatedClock;
-
     let start_us = 1_000_000u64; // t=1 s
     let ttl_us = 2_000_000u64; // 2 s TTL
     let expiry_us = start_us + ttl_us; // t=3 s
 
-    let clock = Arc::new(SimulatedClock::new(start_us));
-    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
-    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+    let (mut scene, clock) = make_ambient_scene(start_us);
 
     // Publish with absolute expiry derived from ttl_us.
     scene
@@ -2261,16 +2256,11 @@ fn test_ambient_background_nonzero_ttl_expires() {
 #[test]
 fn test_ambient_background_ttl_expiry_then_republish() {
     // [hud-gwhr.3]: After TTL expiry, ambient-background accepts a new persistent publish.
-    use std::sync::Arc;
-    use tze_hud_scene::SimulatedClock;
-
     let start_us = 1_000_000u64;
     let ttl_us = 2_000_000u64;
     let expiry_us = start_us + ttl_us;
 
-    let clock = Arc::new(SimulatedClock::new(start_us));
-    let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
-    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+    let (mut scene, clock) = make_ambient_scene(start_us);
 
     // Phase 1: publish warm_amber with a short TTL.
     scene
@@ -2320,15 +2310,11 @@ fn test_ambient_background_ttl_expiry_then_republish() {
 
     // Verify the new publication is forest_green.
     let pubs = scene.zone_registry.active_for_zone("ambient-background");
-    match &pubs[0].content {
-        ZoneContent::SolidColor(rgba) => {
-            assert!(
-                (rgba.g - 0.55_f32).abs() < 0.01,
-                "republished color must be forest_green (g≈0.55); got {rgba:?}"
-            );
-        }
-        other => panic!("expected SolidColor after republish, got {other:?}"),
-    }
+    assert_eq!(
+        pubs[0].content,
+        forest_green(),
+        "republished color must be forest_green"
+    );
 
     // Phase 4: advance far into the future — republished persistent color must survive.
     clock.set_us(expiry_us + 60_000_000 + 1); // 60 s after the initial expiry
