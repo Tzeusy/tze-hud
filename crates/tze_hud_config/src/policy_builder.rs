@@ -263,7 +263,9 @@ pub fn merge_zone_override(
         policy.font_size_px = Some(sz);
     }
     if let Some(fw) = override_.font_weight {
-        policy.font_weight = Some(fw as u16);
+        // font_weight is already Option<u16> in ZoneRenderingOverride — clamping and
+        // rounding to the nearest 100 happened at parse time in component_profiles.rs.
+        policy.font_weight = Some(fw);
     }
     if let Some(ref color_str) = override_.text_color {
         if let Some(c) = parse_color_hex(color_str) {
@@ -679,5 +681,45 @@ mod tests {
             errors[0].code
         );
         assert!(selection.is_empty());
+    }
+
+    // ── merge_zone_override: font_weight ──────────────────────────────────────
+
+    /// font_weight in ZoneRenderingOverride is Option<u16>; merge_zone_override
+    /// must assign it directly to policy.font_weight without re-conversion.
+    #[test]
+    fn test_merge_zone_override_font_weight_assigned() {
+        use crate::component_profiles::ZoneRenderingOverride;
+
+        let mut policy = RenderingPolicy::default();
+        let override_ = ZoneRenderingOverride {
+            font_weight: Some(700_u16),
+            ..ZoneRenderingOverride::default()
+        };
+        merge_zone_override(&mut policy, &override_);
+        assert_eq!(
+            policy.font_weight,
+            Some(700_u16),
+            "merge_zone_override must pass font_weight u16 through unchanged"
+        );
+    }
+
+    /// When font_weight override is None, policy.font_weight is unchanged.
+    #[test]
+    fn test_merge_zone_override_font_weight_none_leaves_policy_unchanged() {
+        use crate::component_profiles::ZoneRenderingOverride;
+
+        let mut policy = RenderingPolicy::default();
+        policy.font_weight = Some(400_u16);
+        let override_ = ZoneRenderingOverride {
+            font_weight: None,
+            ..ZoneRenderingOverride::default()
+        };
+        merge_zone_override(&mut policy, &override_);
+        assert_eq!(
+            policy.font_weight,
+            Some(400_u16),
+            "None font_weight override must leave existing policy.font_weight intact"
+        );
     }
 }
