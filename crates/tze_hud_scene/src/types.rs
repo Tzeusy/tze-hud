@@ -2214,7 +2214,7 @@ impl ZoneRegistry {
         // Chrome-layer positioning per spec §Alert-Banner Chrome-Layer Positioning:
         //   layer_attachment = Chrome — renders above all agent content
         //   width_pct = 1.0 — full display width
-        //   height_pct = 0.06 — accommodates 24px font + 2×8px vertical padding (~40px at 720p)
+        //   height_pct = 0.06 — at 720p: 0.06×720=43.2px, which exceeds 24px font + natural line-height space
         //   Zero-height when inactive: compositor skips backdrop/text for empty zones;
         //   no visible pixels are emitted when no alerts are active.
         //
@@ -2227,7 +2227,7 @@ impl ZoneRegistry {
             description: "Alert banner — top edge, chrome layer, heading typography".to_string(),
             geometry_policy: GeometryPolicy::EdgeAnchored {
                 edge: DisplayEdge::Top,
-                // 6% accommodates 24px heading + 2×8px vertical padding at common resolutions.
+                // 6% of display height: at 720p this gives 43.2px, comfortably above the 24px heading.
                 height_pct: 0.06,
                 width_pct: 1.0,
                 margin_px: 0.0,

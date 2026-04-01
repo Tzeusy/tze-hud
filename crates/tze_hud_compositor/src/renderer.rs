@@ -4820,12 +4820,15 @@ mod tests {
             .get_by_name("alert-banner")
             .expect("alert-banner zone must exist");
 
-        // Check that resolved height at 720p is sufficient for 24px + 2×8px margin.
+        // Check that resolved height at 720p is sufficient for 24px heading.
+        // margin_vertical=0.0 (flush to edge), so minimum is font_size_px only.
+        // height_pct=0.06 → 0.06×720=43.2px, well above the 24px minimum.
         let (_x, _y, _w, h) = Compositor::resolve_zone_geometry(&zone.geometry_policy, 1280.0, 720.0);
-        let min_required = 24.0 + 2.0 * 8.0; // font_size + 2×margin_vertical (default)
+        let font_size_px = zone.rendering_policy.font_size_px.unwrap_or(24.0);
+        let min_required = font_size_px; // margin_vertical=0.0; height must cover font at minimum
         assert!(
             h >= min_required,
-            "alert-banner height {h}px must accommodate heading (24px) + margins (≥{min_required}px)"
+            "alert-banner height {h}px must accommodate heading ({font_size_px}px)"
         );
     }
 
