@@ -2340,11 +2340,13 @@ async fn handle_mutation_batch(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::UpdateNodeContent(unc)) => {
-                match (bytes_to_scene_id(&unc.tile_id), bytes_to_scene_id(&unc.node_id)) {
+                match (
+                    bytes_to_scene_id(&unc.tile_id),
+                    bytes_to_scene_id(&unc.node_id),
+                ) {
                     (Ok(tile_id), Ok(node_id)) => {
                         if let Some(ref d) = unc.data
-                            && let Some(data) =
-                                convert::proto_update_node_content_data_to_scene(d)
+                            && let Some(data) = convert::proto_update_node_content_data_to_scene(d)
                         {
                             scene_mutations.push(SceneMutation::UpdateNodeContent {
                                 tile_id,
@@ -2576,11 +2578,13 @@ async fn apply_queued_batch_to_scene(
                 });
             }
             Some(crate::proto::mutation_proto::Mutation::UpdateNodeContent(unc)) => {
-                match (bytes_to_scene_id(&unc.tile_id), bytes_to_scene_id(&unc.node_id)) {
+                match (
+                    bytes_to_scene_id(&unc.tile_id),
+                    bytes_to_scene_id(&unc.node_id),
+                ) {
                     (Ok(tile_id), Ok(node_id)) => {
                         if let Some(ref d) = unc.data
-                            && let Some(data) =
-                                convert::proto_update_node_content_data_to_scene(d)
+                            && let Some(data) = convert::proto_update_node_content_data_to_scene(d)
                         {
                             scene_mutations.push(SceneMutation::UpdateNodeContent {
                                 tile_id,

@@ -1283,10 +1283,7 @@ mod tests {
         let result = scene.apply_batch(&batch);
         assert!(!result.applied, "unknown node should be rejected");
         let rej = result.rejection.unwrap();
-        assert_eq!(
-            rej.primary_code(),
-            Some(ValidationErrorCode::NodeNotFound)
-        );
+        assert_eq!(rej.primary_code(), Some(ValidationErrorCode::NodeNotFound));
     }
 
     #[test]
@@ -1301,7 +1298,13 @@ mod tests {
 
         // Tile A with a text node.
         let tile_a = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 100.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                1,
+            )
             .unwrap();
         let node_a = Node {
             id: SceneId::new(),
@@ -1311,7 +1314,12 @@ mod tests {
                 bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
                 font_size_px: 14.0,
                 font_family: FontFamily::SystemSansSerif,
-                color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                color: Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
                 background: None,
                 alignment: TextAlign::Start,
                 overflow: TextOverflow::Clip,
@@ -1322,7 +1330,13 @@ mod tests {
 
         // Tile B (separate tile).
         let tile_b = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(300.0, 0.0, 200.0, 100.0), 2)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(300.0, 0.0, 200.0, 100.0),
+                2,
+            )
             .unwrap();
 
         // Try to update node_a using tile_b as the tile_id — must be rejected.
@@ -1337,7 +1351,12 @@ mod tests {
                     bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
                     font_size_px: 14.0,
                     font_family: FontFamily::SystemSansSerif,
-                    color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                    color: Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
                     background: None,
                     alignment: TextAlign::Start,
                     overflow: TextOverflow::Clip,
@@ -1372,7 +1391,12 @@ mod tests {
                     bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
                     font_size_px: 14.0,
                     font_family: FontFamily::SystemSansSerif,
-                    color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                    color: Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
                     background: None,
                     alignment: TextAlign::Start,
                     overflow: TextOverflow::Clip,

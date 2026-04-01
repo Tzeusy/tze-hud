@@ -1712,14 +1712,13 @@ impl SceneGraph {
 
             // Stage 4: Node must be reachable from this tile's root.
             let tile = self.tiles.get(&tile_id).unwrap();
-            let root = tile.root_node.ok_or(ValidationError::NodeNotFound { id: node_id })?;
+            let root = tile
+                .root_node
+                .ok_or(ValidationError::NodeNotFound { id: node_id })?;
             if !self.is_node_in_subtree(root, node_id) {
                 return Err(ValidationError::InvalidField {
                     field: "node_id".into(),
-                    reason: format!(
-                        "node {} does not belong to tile {}",
-                        node_id, tile_id
-                    ),
+                    reason: format!("node {node_id} does not belong to tile {tile_id}"),
                 });
             }
 
@@ -1735,8 +1734,7 @@ impl SceneGraph {
                 return Err(ValidationError::InvalidField {
                     field: "data".into(),
                     reason: format!(
-                        "cannot change node type: existing node {} has a different variant",
-                        node_id
+                        "cannot change node type: existing node {node_id} has a different variant"
                     ),
                 });
             }
