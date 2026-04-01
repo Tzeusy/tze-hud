@@ -5,7 +5,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::types::*;
 use crate::validation::ValidationError;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1168,12 +1168,30 @@ impl SceneGraph {
     }
 
     pub(crate) fn count_node_subtree(&self, node_id: SceneId) -> u32 {
+        let mut visited = HashSet::new();
+        self.count_node_subtree_inner(node_id, &mut visited)
+    }
+
+    fn count_node_subtree_inner(
+        &self,
+        node_id: SceneId,
+        visited: &mut HashSet<SceneId>,
+    ) -> u32 {
+        if !visited.insert(node_id) {
+            // Cycle detected — skip this node to avoid infinite recursion.
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[tze_hud_scene] cycle detected in node graph at {:?} during count_node_subtree",
+                node_id
+            );
+            return 0;
+        }
         match self.nodes.get(&node_id) {
             Some(node) => {
                 1 + node
                     .children
                     .iter()
-                    .map(|c| self.count_node_subtree(*c))
+                    .map(|c| self.count_node_subtree_inner(*c, visited))
                     .sum::<u32>()
             }
             None => 0,
@@ -1181,6 +1199,24 @@ impl SceneGraph {
     }
 
     fn sum_texture_bytes(&self, node_id: SceneId) -> u64 {
+        let mut visited = HashSet::new();
+        self.sum_texture_bytes_inner(node_id, &mut visited)
+    }
+
+    fn sum_texture_bytes_inner(
+        &self,
+        node_id: SceneId,
+        visited: &mut HashSet<SceneId>,
+    ) -> u64 {
+        if !visited.insert(node_id) {
+            // Cycle detected — skip this node to avoid infinite recursion.
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[tze_hud_scene] cycle detected in node graph at {:?} during sum_texture_bytes",
+                node_id
+            );
+            return 0;
+        }
         match self.nodes.get(&node_id) {
             Some(node) => {
                 let self_bytes = match &node.data {
@@ -1191,7 +1227,7 @@ impl SceneGraph {
                     + node
                         .children
                         .iter()
-                        .map(|c| self.sum_texture_bytes(*c))
+                        .map(|c| self.sum_texture_bytes_inner(*c, visited))
                         .sum::<u64>()
             }
             None => 0,
@@ -1832,22 +1868,6 @@ impl SceneGraph {
         Ok(())
     }
 
-    /// Return `true` if `target` is reachable from `start` (inclusive) by
-    /// following the children list in the flat node map.
-    fn is_node_in_subtree(&self, start: SceneId, target: SceneId) -> bool {
-        if start == target {
-            return true;
-        }
-        if let Some(node) = self.nodes.get(&start) {
-            for &child_id in &node.children {
-                if self.is_node_in_subtree(child_id, target) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     // ─── Sync group operations ───────────────────────────────────────────
 
     /// Maximum sync groups per agent namespace (RFC 0003 §2.5).
@@ -2290,11 +2310,31 @@ impl SceneGraph {
     }
 
     fn hit_test_node(&self, node_id: SceneId, x: f32, y: f32) -> Option<SceneId> {
+        let mut visited = HashSet::new();
+        self.hit_test_node_inner(node_id, x, y, &mut visited)
+    }
+
+    fn hit_test_node_inner(
+        &self,
+        node_id: SceneId,
+        x: f32,
+        y: f32,
+        visited: &mut HashSet<SceneId>,
+    ) -> Option<SceneId> {
+        if !visited.insert(node_id) {
+            // Cycle detected — skip this node to avoid infinite recursion.
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[tze_hud_scene] cycle detected in node graph at {:?} during hit_test_node",
+                node_id
+            );
+            return None;
+        }
         let node = self.nodes.get(&node_id)?;
 
         // Check children in reverse order (last child = front-most) — depth first.
         for child_id in node.children.iter().rev() {
-            if let Some(hit) = self.hit_test_node(*child_id, x, y) {
+            if let Some(hit) = self.hit_test_node_inner(*child_id, x, y, visited) {
                 return Some(hit);
             }
         }
@@ -2305,6 +2345,42 @@ impl SceneGraph {
                 Some(node_id)
             }
             _ => None,
+        }
+    }
+
+    /// Returns `true` if `target_id` is reachable from `root_id` in the node graph.
+    ///
+    /// Uses a visited set to guard against cycles — if a cycle is detected, traversal
+    /// returns early rather than recursing indefinitely.
+    pub(crate) fn is_node_in_subtree(&self, root_id: SceneId, target_id: SceneId) -> bool {
+        let mut visited = HashSet::new();
+        self.is_node_in_subtree_inner(root_id, target_id, &mut visited)
+    }
+
+    fn is_node_in_subtree_inner(
+        &self,
+        node_id: SceneId,
+        target_id: SceneId,
+        visited: &mut HashSet<SceneId>,
+    ) -> bool {
+        if !visited.insert(node_id) {
+            // Cycle detected — stop traversal.
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[tze_hud_scene] cycle detected in node graph at {:?} during is_node_in_subtree",
+                node_id
+            );
+            return false;
+        }
+        if node_id == target_id {
+            return true;
+        }
+        match self.nodes.get(&node_id) {
+            Some(node) => node
+                .children
+                .iter()
+                .any(|c| self.is_node_in_subtree_inner(*c, target_id, visited)),
+            None => false,
         }
     }
 
@@ -8431,6 +8507,158 @@ mod spec_scenarios {
             "agent.a's publication should be cleared"
         );
         assert_eq!(remaining[0].publisher_namespace, "agent.b");
+    }
+
+    // ─── Cycle-guard tests ───────────────────────────────────────────────────
+    //
+    // These tests inject synthetic cycles directly into `scene.nodes` (bypassing
+    // the public API which would normally prevent cycles) to verify that each DFS
+    // traversal function terminates instead of recursing indefinitely.
+
+    /// Helper: build a SolidColor node with explicit id and children list.
+    fn solid_node(id: SceneId, children: Vec<SceneId>) -> Node {
+        Node {
+            id,
+            children,
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::WHITE,
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+            }),
+        }
+    }
+
+    /// Helper: build a HitRegion node with explicit id and children list.
+    fn hit_node(id: SceneId, children: Vec<SceneId>) -> Node {
+        Node {
+            id,
+            children,
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                interaction_id: "cycle-test".to_string(),
+                accepts_pointer: true,
+                accepts_focus: false,
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// count_node_subtree: cycle A→B→A terminates and returns a finite count.
+    #[test]
+    fn count_node_subtree_cycle_terminates() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        let id_b = SceneId::new();
+        // A points to B, B points back to A — a direct 2-node cycle.
+        scene.nodes.insert(id_a, solid_node(id_a, vec![id_b]));
+        scene.nodes.insert(id_b, solid_node(id_b, vec![id_a]));
+
+        // Must not hang; result should be finite (2: A + B, cycle back to A is skipped).
+        let count = scene.count_node_subtree(id_a);
+        assert_eq!(count, 2, "cycle should be detected; each node counted once");
+    }
+
+    /// count_node_subtree: self-referencing node (A→A) terminates.
+    #[test]
+    fn count_node_subtree_self_loop_terminates() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        scene.nodes.insert(id_a, solid_node(id_a, vec![id_a]));
+
+        let count = scene.count_node_subtree(id_a);
+        assert_eq!(count, 1, "self-loop: node counted once, cycle skipped");
+    }
+
+    /// sum_texture_bytes: cycle terminates and returns zero (no StaticImage nodes).
+    #[test]
+    fn sum_texture_bytes_cycle_terminates() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        let id_b = SceneId::new();
+        scene.nodes.insert(id_a, solid_node(id_a, vec![id_b]));
+        scene.nodes.insert(id_b, solid_node(id_b, vec![id_a]));
+
+        // Must not hang; no StaticImage nodes so result is 0.
+        let bytes = scene.sum_texture_bytes(id_a);
+        assert_eq!(bytes, 0, "cycle should terminate; no texture bytes in solid-color nodes");
+    }
+
+    /// hit_test_node: cycle terminates; HitRegion nodes in a cycle are still tested.
+    #[test]
+    fn hit_test_node_cycle_terminates() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        let id_b = SceneId::new();
+        // Both nodes are HitRegion with accepts_pointer=true; A→B→A forms a cycle.
+        scene.nodes.insert(id_a, hit_node(id_a, vec![id_b]));
+        scene.nodes.insert(id_b, hit_node(id_b, vec![id_a]));
+
+        // Point (50,50) is inside both nodes' bounds (0,0,100,100). Must not hang.
+        let hit = scene.hit_test_node(id_a, 50.0, 50.0);
+        assert!(hit.is_some(), "a HitRegion node should be found before cycle is detected");
+    }
+
+    /// hit_test_node: no hit when point is outside all node bounds.
+    #[test]
+    fn hit_test_node_cycle_no_hit_outside_bounds() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        let id_b = SceneId::new();
+        scene.nodes.insert(id_a, hit_node(id_a, vec![id_b]));
+        scene.nodes.insert(id_b, hit_node(id_b, vec![id_a]));
+
+        // Point (200, 200) is outside bounds (0,0,100,100). Must not hang.
+        let hit = scene.hit_test_node(id_a, 200.0, 200.0);
+        assert!(hit.is_none(), "point outside all bounds should yield no hit");
+    }
+
+    /// is_node_in_subtree: returns true for a direct child.
+    #[test]
+    fn is_node_in_subtree_direct_child() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        let id_b = SceneId::new();
+        scene.nodes.insert(id_a, solid_node(id_a, vec![id_b]));
+        scene.nodes.insert(id_b, solid_node(id_b, vec![]));
+
+        assert!(scene.is_node_in_subtree(id_a, id_b));
+        assert!(!scene.is_node_in_subtree(id_b, id_a));
+    }
+
+    /// is_node_in_subtree: returns true when target equals root.
+    #[test]
+    fn is_node_in_subtree_root_equals_target() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        scene.nodes.insert(id_a, solid_node(id_a, vec![]));
+
+        assert!(scene.is_node_in_subtree(id_a, id_a));
+    }
+
+    /// is_node_in_subtree: cycle A→B→A terminates; B is reachable from A.
+    #[test]
+    fn is_node_in_subtree_cycle_terminates() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        let id_b = SceneId::new();
+        scene.nodes.insert(id_a, solid_node(id_a, vec![id_b]));
+        scene.nodes.insert(id_b, solid_node(id_b, vec![id_a]));
+
+        // Must not hang; B is reachable from A.
+        assert!(scene.is_node_in_subtree(id_a, id_b));
+    }
+
+    /// is_node_in_subtree: cycle terminates when target is not in the subgraph.
+    #[test]
+    fn is_node_in_subtree_cycle_unreachable_node() {
+        let mut scene = make_scene();
+        let id_a = SceneId::new();
+        let id_b = SceneId::new();
+        let id_c = SceneId::new(); // not inserted — unreachable
+        scene.nodes.insert(id_a, solid_node(id_a, vec![id_b]));
+        scene.nodes.insert(id_b, solid_node(id_b, vec![id_a]));
+
+        // Must not hang; C is not reachable from A.
+        assert!(!scene.is_node_in_subtree(id_a, id_c));
     }
 }
 
