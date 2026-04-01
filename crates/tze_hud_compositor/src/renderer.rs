@@ -1262,29 +1262,67 @@ impl Compositor {
                                 ));
                             }
                             ZoneContent::Notification(payload) => {
-                                // Notification text rendering uses token-resolved typography:
-                                // - font size: typography.body.size (default 16px)
-                                // - text color: color.text.primary (default near-white)
-                                // - left-aligned with 9px inset (8px padding + 1px border)
-                                // - clips at content area boundary (no wrapping in v1)
+                                // Notification text rendering priority:
+                                // 1. RenderingPolicy explicit values (set by zone configuration)
+                                // 2. Token-resolved values (typography.body.size, color.text.primary)
+                                // 3. Hardcoded defaults (16px, near-white)
+                                //
+                                // This allows alert-banner and other configured zones to override
+                                // the defaults via RenderingPolicy while notification-area falls
+                                // through to the token/default path.
+                                //
+                                // Layout: left-aligned with 9px inset (8px padding + 1px border),
+                                // clips at content area boundary (no wrapping in v1).
                                 // Icon rendering is stubbed (no texture pipeline in v1).
-                                const BORDER_PX: f32 = 1.0;
-                                const PADDING_PX: f32 = 8.0;
-                                const TEXT_INSET: f32 = BORDER_PX + PADDING_PX;
-                                let font_size_px = Self::resolve_body_font_size(&self.token_map);
+                                // Spec-defined inset for notification-area zones:
+                                // 1px border + 8px padding = 9px from backdrop edges.
+                                // When the zone's RenderingPolicy explicitly sets
+                                // margin_horizontal/margin_vertical, those values take
+                                // precedence (e.g. alert-banner uses margin_horizontal=8).
+                                const NOTIFICATION_BORDER_PX: f32 = 1.0;
+                                const NOTIFICATION_PADDING_PX: f32 = 8.0;
+                                const NOTIFICATION_INSET: f32 =
+                                    NOTIFICATION_BORDER_PX + NOTIFICATION_PADDING_PX;
+                                // Horizontal inset: policy margin_horizontal > margin_px > 9px
+                                let inset_h = policy
+                                    .margin_horizontal
+                                    .or(policy.margin_px)
+                                    .unwrap_or(NOTIFICATION_INSET);
+                                // Vertical inset: policy margin_vertical > margin_px > 9px
+                                let inset_v = policy
+                                    .margin_vertical
+                                    .or(policy.margin_px)
+                                    .unwrap_or(NOTIFICATION_INSET);
+                                // Font size: policy explicit > typography.body.size token > 16px
+                                let font_size_px = policy.font_size_px.unwrap_or_else(|| {
+                                    Self::resolve_body_font_size(&self.token_map)
+                                });
+                                // Font family: policy explicit > SystemSansSerif default
+                                let font_family = policy
+                                    .font_family
+                                    .unwrap_or(tze_hud_scene::types::FontFamily::SystemSansSerif);
+                                // Font weight: policy explicit > 400 default
+                                let font_weight = policy.font_weight.unwrap_or(400);
+                                // Text color: policy explicit > color.text.primary token > near-white
+                                let base_color = policy
+                                    .text_color
+                                    .map(crate::text::rgba_to_srgb_u8)
+                                    .unwrap_or_else(|| {
+                                        Self::resolve_text_primary_color(&self.token_map)
+                                    });
                                 let color = crate::text::apply_opacity_to_color(
-                                    Self::resolve_text_primary_color(&self.token_map),
+                                    base_color,
                                     effective_opacity,
                                 );
                                 items.push(TextItem {
                                     text: payload.text.clone(),
-                                    pixel_x: zx + TEXT_INSET,
-                                    pixel_y: slot_y + TEXT_INSET,
-                                    bounds_width: (zw - TEXT_INSET * 2.0).max(1.0),
-                                    bounds_height: (effective_slot_h - TEXT_INSET * 2.0).max(1.0),
+                                    pixel_x: zx + inset_h,
+                                    pixel_y: slot_y + inset_v,
+                                    bounds_width: (zw - inset_h * 2.0).max(1.0),
+                                    bounds_height: (effective_slot_h - inset_v * 2.0).max(1.0),
                                     font_size_px,
-                                    font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
-                                    font_weight: 400,
+                                    font_family,
+                                    font_weight,
                                     color,
                                     alignment: tze_hud_scene::types::TextAlign::Start,
                                     overflow: tze_hud_scene::types::TextOverflow::Clip,
