@@ -251,6 +251,7 @@ fn resolve_border_default_color(token_map: &HashMap<String, String>) -> Rgba {
 /// with zero or negative width.
 ///
 /// `sw`/`sh` are the screen dimensions passed through to `rect_vertices`.
+#[allow(clippy::too_many_arguments)]
 fn emit_border_quads(
     vertices: &mut Vec<crate::pipeline::RectVertex>,
     x: f32,
