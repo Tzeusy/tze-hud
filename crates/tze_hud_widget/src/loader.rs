@@ -865,7 +865,13 @@ pub(crate) fn resolve_token_placeholders(
 
             // Resolve the placeholder key using two accepted forms:
             //   1. Prefixed form: `{{token.<key>}}` — strip "token." prefix.
-            //   2. Bare form:     `{{<key>}}`        — use the inner text directly.
+            //      If the stripped part is a valid key, use it.  If the stripped
+            //      part is NOT a valid key (e.g. contains an underscore in the first
+            //      segment), the prefixed-form prefix has precedence and the whole
+            //      `{{...}}` is treated as unrecognised (passed through).
+            //   2. Bare form:     `{{<key>}}`        — use the inner text directly,
+            //      only when the text does NOT start with "token." (i.e. is not
+            //      mistaken for an attempted-but-malformed prefixed form).
             // Both forms require the key to pass `is_valid_token_key`.
             let key_part = if let Some(stripped) = inner.strip_prefix("token.") {
                 // Prefixed form: validate the part after "token.".
@@ -1163,6 +1169,26 @@ mod tests {
         // Should pass through unchanged — `my_key` fails the first-segment rule.
         let result = resolve_token_placeholders(input, &tokens).unwrap();
         assert_eq!(result, "{{token.my_key}} stays put");
+    }
+
+    /// When `{{token.<key>}}` has a `token.` prefix but the stripped key is invalid,
+    /// the whole sequence is passed through — it is NOT re-interpreted as a bare
+    /// key `token.<key>`.  The `token.` prefix has priority: once the prefix is
+    /// detected, only the stripped part is validated, and bare-form fallback is
+    /// suppressed.
+    ///
+    /// This means `{{token.foo_bar}}` and `{{token.my_key}}` are both passed through
+    /// unchanged even though `token.foo_bar` and `token.my_key` would pass
+    /// `is_valid_token_key` as bare keys.
+    #[test]
+    fn prefixed_form_with_invalid_stripped_key_does_not_fall_back_to_bare() {
+        // `foo_bar` has underscore in its first (and only) segment — invalid as a
+        // stripped key.  `token.foo_bar` would be a valid bare key, but the
+        // `token.` prefix precludes bare-form fallback.
+        let tokens = token_map(&[("token.foo_bar", "SHOULD_NOT_APPEAR")]);
+        let input = "{{token.foo_bar}} stays put";
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, "{{token.foo_bar}} stays put");
     }
 
     /// Underscores in a subsequent (non-first) segment are valid.
