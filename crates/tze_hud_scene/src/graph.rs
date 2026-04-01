@@ -1868,22 +1868,6 @@ impl SceneGraph {
         Ok(())
     }
 
-    /// Return `true` if `target` is reachable from `start` (inclusive) by
-    /// following the children list in the flat node map.
-    fn is_node_in_subtree(&self, start: SceneId, target: SceneId) -> bool {
-        if start == target {
-            return true;
-        }
-        if let Some(node) = self.nodes.get(&start) {
-            for &child_id in &node.children {
-                if self.is_node_in_subtree(child_id, target) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
     // ─── Sync group operations ───────────────────────────────────────────
 
     /// Maximum sync groups per agent namespace (RFC 0003 §2.5).
