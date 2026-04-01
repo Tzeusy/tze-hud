@@ -7584,15 +7584,18 @@ mod tests {
             .unwrap();
         let record = &publishes[0];
 
-        // Test publication_ttl_ms: per-notification ttl_ms=3000 takes priority.
+        // Test publication_ttl_ms: urgency-derived expires_at_wall_us takes highest
+        // priority.  urgency=1 auto-derives expires_at = now + 8_000_000µs, so
+        // publication_ttl_ms = 8_000 - NOTIFICATION_FADE_OUT_MS(150) = 7_850.
+        // The per-notification ttl_ms=3_000 is superseded by expires_at_wall_us.
         let zone_def = scene.zone_registry.zones.get("notification-area").unwrap();
         let zone_auto_clear = zone_def
             .auto_clear_ms
             .unwrap_or(NOTIFICATION_DEFAULT_TTL_MS);
         let ttl = Compositor::publication_ttl_ms(record, zone_auto_clear);
         assert_eq!(
-            ttl, 3_000,
-            "publication_ttl_ms must return per-notification ttl_ms=3000"
+            ttl, 7_850,
+            "publication_ttl_ms must use urgency-derived expires_at_wall_us (8_000ms - 150ms fade = 7_850ms)"
         );
 
         // Test fallback: when NotificationPayload.ttl_ms is None, use zone default.
