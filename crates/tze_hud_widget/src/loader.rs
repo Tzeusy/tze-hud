@@ -1381,7 +1381,8 @@ mod tests {
     #[test]
     fn comment_between_live_tokens() {
         let tokens = token_map(&[("fg", "white"), ("bg", "black")]);
-        let input = r#"<text fill="{{fg}}"><!-- note: {{bg}} is backdrop --></text><rect fill="{{bg}}"/>"#;
+        let input =
+            r#"<text fill="{{fg}}"><!-- note: {{bg}} is backdrop --></text><rect fill="{{bg}}"/>"#;
         let result = resolve_token_placeholders(input, &tokens).unwrap();
         assert_eq!(
             result,
