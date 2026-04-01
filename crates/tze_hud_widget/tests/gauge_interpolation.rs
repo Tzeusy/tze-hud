@@ -24,13 +24,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use tze_hud_compositor::widget::{
-    compute_transition_t, interpolate_param, resolve_binding_value,
-};
+use tze_hud_compositor::widget::{compute_transition_t, interpolate_param, resolve_binding_value};
 use tze_hud_scene::DegradationLevel;
 use tze_hud_scene::types::{
-    ContentionPolicy, GeometryPolicy, RenderingPolicy, Rgba, WidgetInstance,
-    WidgetParameterValue,
+    ContentionPolicy, GeometryPolicy, RenderingPolicy, Rgba, WidgetInstance, WidgetParameterValue,
 };
 use tze_hud_widget::loader::{BundleScanResult, load_bundle_dir_with_tokens};
 
@@ -78,10 +75,7 @@ fn load_gauge_bundle() -> tze_hud_widget::loader::LoadedBundle {
 
 /// Build a `SceneGraph` with the production gauge definition and one "gauge"
 /// instance registered.  Returns `(scene, tab_id)`.
-fn scene_with_production_gauge() -> (
-    tze_hud_scene::SceneGraph,
-    tze_hud_scene::types::SceneId,
-) {
+fn scene_with_production_gauge() -> (tze_hud_scene::SceneGraph, tze_hud_scene::types::SceneId) {
     let bundle = load_gauge_bundle();
     let mut definition = bundle.definition.clone();
     definition.default_contention_policy = ContentionPolicy::LatestWins;
@@ -125,7 +119,9 @@ fn level_constraints() -> HashMap<String, (f32, f32)> {
 }
 
 /// Look up the `bar` height binding from the production gauge fill layer.
-fn bar_height_binding(bundle: &tze_hud_widget::loader::LoadedBundle) -> tze_hud_scene::types::WidgetBinding {
+fn bar_height_binding(
+    bundle: &tze_hud_widget::loader::LoadedBundle,
+) -> tze_hud_scene::types::WidgetBinding {
     let fill_layer = bundle
         .definition
         .layers
@@ -141,7 +137,9 @@ fn bar_height_binding(bundle: &tze_hud_widget::loader::LoadedBundle) -> tze_hud_
 }
 
 /// Look up the `bar` fill binding (fill_color → fill).
-fn bar_fill_binding(bundle: &tze_hud_widget::loader::LoadedBundle) -> tze_hud_scene::types::WidgetBinding {
+fn bar_fill_binding(
+    bundle: &tze_hud_widget::loader::LoadedBundle,
+) -> tze_hud_scene::types::WidgetBinding {
     let fill_layer = bundle
         .definition
         .layers
@@ -157,7 +155,9 @@ fn bar_fill_binding(bundle: &tze_hud_widget::loader::LoadedBundle) -> tze_hud_sc
 }
 
 /// Look up the `label-text` text-content binding.
-fn label_binding(bundle: &tze_hud_widget::loader::LoadedBundle) -> tze_hud_scene::types::WidgetBinding {
+fn label_binding(
+    bundle: &tze_hud_widget::loader::LoadedBundle,
+) -> tze_hud_scene::types::WidgetBinding {
     let fill_layer = bundle
         .definition
         .layers
@@ -173,7 +173,9 @@ fn label_binding(bundle: &tze_hud_widget::loader::LoadedBundle) -> tze_hud_scene
 }
 
 /// Look up the `indicator` severity binding.
-fn severity_binding(bundle: &tze_hud_widget::loader::LoadedBundle) -> tze_hud_scene::types::WidgetBinding {
+fn severity_binding(
+    bundle: &tze_hud_widget::loader::LoadedBundle,
+) -> tze_hud_scene::types::WidgetBinding {
     let fill_layer = bundle
         .definition
         .layers
@@ -228,7 +230,10 @@ fn f32_level_interpolation_midpoint_is_05() {
     let new_level = WidgetParameterValue::F32(0.8);
 
     let t = compute_transition_t(150.0, 300.0, DegradationLevel::Nominal);
-    assert!((t - 0.5).abs() < 1e-6, "elapsed=150ms / duration=300ms should give t=0.5, got {t}");
+    assert!(
+        (t - 0.5).abs() < 1e-6,
+        "elapsed=150ms / duration=300ms should give t=0.5, got {t}"
+    );
 
     let effective = interpolate_param(&old_level, &new_level, t);
 
@@ -285,7 +290,10 @@ fn f32_level_interpolation_at_t1_equals_target() {
     let new_level = WidgetParameterValue::F32(0.8);
 
     let t = compute_transition_t(300.0, 300.0, DegradationLevel::Nominal);
-    assert!((t - 1.0).abs() < 1e-6, "elapsed=300ms / duration=300ms should give t=1.0, got {t}");
+    assert!(
+        (t - 1.0).abs() < 1e-6,
+        "elapsed=300ms / duration=300ms should give t=1.0, got {t}"
+    );
 
     let effective = interpolate_param(&old_level, &new_level, t);
 
@@ -386,8 +394,16 @@ fn color_fill_color_at_t0_equals_start_color() {
 
     match effective {
         WidgetParameterValue::Color(c) => {
-            assert!((c.r - 0.0).abs() < 1e-6, "R should be 0.0 at t=0, got {}", c.r);
-            assert!((c.b - 1.0).abs() < 1e-6, "B should be 1.0 at t=0, got {}", c.b);
+            assert!(
+                (c.r - 0.0).abs() < 1e-6,
+                "R should be 0.0 at t=0, got {}",
+                c.r
+            );
+            assert!(
+                (c.b - 1.0).abs() < 1e-6,
+                "B should be 1.0 at t=0, got {}",
+                c.b
+            );
         }
         other => panic!("expected Color at t=0, got {other:?}"),
     }
@@ -531,7 +547,11 @@ fn string_label_publish_stores_new_value_immediately() {
 
     // LatestWins: only one publication is active.
     let pubs = scene.widget_registry.active_for_widget("gauge");
-    assert_eq!(pubs.len(), 1, "LatestWins: exactly one publication expected");
+    assert_eq!(
+        pubs.len(),
+        1,
+        "LatestWins: exactly one publication expected"
+    );
 
     match pubs[0].params.get("label") {
         Some(WidgetParameterValue::String(s)) => {
@@ -643,7 +663,10 @@ fn direct_color_interpolates_while_enum_snaps_in_same_transition() {
     sev_params.insert("severity".to_string(), effective_severity);
     let sev_fill = resolve_binding_value(&severity_b, &sev_params, &HashMap::new())
         .expect("severity binding should resolve");
-    assert_eq!(sev_fill, "#FF4444", "severity snap at t=0.5 should be #FF4444");
+    assert_eq!(
+        sev_fill, "#FF4444",
+        "severity snap at t=0.5 should be #FF4444"
+    );
 
     // fill_color: still mid-transition (not yet red)
     let mut fill_params = HashMap::new();
@@ -719,7 +742,10 @@ fn zero_transition_all_params_immediately_final() {
 
     let pubs = scene.widget_registry.active_for_widget("gauge");
     assert_eq!(pubs.len(), 1, "LatestWins: exactly one publication");
-    assert_eq!(pubs[0].transition_ms, 0, "transition_ms should be 0 in the record");
+    assert_eq!(
+        pubs[0].transition_ms, 0,
+        "transition_ms should be 0 in the record"
+    );
 
     match pubs[0].params.get("level") {
         Some(WidgetParameterValue::F32(v)) => {
@@ -973,8 +999,7 @@ fn mixed_snap_and_interpolate_label_severity_snap_at_t0() {
     );
 
     assert_eq!(
-        eff_fill,
-        old_fill,
+        eff_fill, old_fill,
         "fill_color should still be at start (cyan-blue) at t=0 in mixed publish"
     );
 }
@@ -1100,10 +1125,7 @@ fn mixed_publish_svg_attributes_at_t05() {
         fill_str, "#0000ff",
         "fill at t=0.5 should not be starting blue"
     );
-    assert_ne!(
-        fill_str, "#ff0000",
-        "fill at t=0.5 should not be final red"
-    );
+    assert_ne!(fill_str, "#ff0000", "fill at t=0.5 should not be final red");
 
     // label: "Memory" (snapped)
     let label_str = resolve_binding_value(&label_b, &params, &HashMap::new())
