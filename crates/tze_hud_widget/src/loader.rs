@@ -689,7 +689,7 @@ fn resolve_bindings(
         }
 
         let param_type = *param_types.get(param).unwrap(); // checked above
-        let enum_allowed = *param_enum_values.get(param).unwrap_or(&&[][..]); // checked above
+        let enum_allowed = *param_enum_values.get(param).unwrap(); // checked above
 
         // Validate and parse the mapping.
         let mapping = parse_binding_mapping(
@@ -787,7 +787,7 @@ fn parse_binding_mapping(
             let extra: Vec<&str> = raw_b
                 .value_map
                 .keys()
-                .filter(|k| !enum_allowed.iter().any(|v| v == *k))
+                .filter(|k| !enum_allowed.contains(*k))
                 .map(String::as_str)
                 .collect();
             if !extra.is_empty() {

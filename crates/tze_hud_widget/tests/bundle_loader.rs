@@ -896,6 +896,9 @@ name = "status"
 type = "enum"
 default = ""
 
+[parameter_schema.constraints]
+enum_allowed_values = []
+
 [[layers]]
 svg_file = "fill.svg"
 
