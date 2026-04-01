@@ -3504,6 +3504,7 @@ mod tests {
                 text: "Hello".to_string(),
                 icon: "".to_string(),
                 urgency: 1,
+                ttl_ms: None,
             }),
             "agent",
             None,
@@ -3561,6 +3562,7 @@ mod tests {
                 text: text.to_string(),
                 icon: "".to_string(),
                 urgency: 1,
+                ttl_ms: None,
             })
         };
 

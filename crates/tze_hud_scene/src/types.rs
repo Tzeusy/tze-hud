@@ -1469,13 +1469,21 @@ pub struct ZonePublishToken {
 // ─── Zone content ────────────────────────────────────────────────────────────
 
 /// Notification payload: text + optional icon + urgency.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NotificationPayload {
     pub text: String,
     /// Resource name or empty string.
     pub icon: String,
     /// 0=low, 1=normal, 2=urgent, 3=critical.
     pub urgency: u32,
+    /// Per-publication TTL in milliseconds.
+    ///
+    /// When `Some`, the compositor begins a 150ms fade-out this many milliseconds
+    /// after the publication is first rendered.  When `None`, the zone's
+    /// `auto_clear_ms` is used as the default TTL (typically 8 000 ms for the
+    /// `notification-area` zone).
+    #[serde(default)]
+    pub ttl_ms: Option<u64>,
 }
 
 /// Status-bar payload: key → display string map.

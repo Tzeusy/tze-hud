@@ -347,6 +347,7 @@ fn contention_stack_evicts_oldest_at_max_depth() {
             text: text.to_string(),
             icon: "".to_string(),
             urgency: 1,
+            ttl_ms: None,
         })
     };
 

@@ -780,6 +780,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                     text: "Vertical slice started".to_string(),
                     icon: "info".to_string(),
                     urgency: 1,
+                    ttl_ms: None,
                 }),
                 &namespace,
                 None, // no merge key — stacks alongside other notifications
