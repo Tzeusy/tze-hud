@@ -1200,8 +1200,8 @@ mod tests {
     #[test]
     fn bare_key_and_prefixed_key_equivalent() {
         let tokens = token_map(&[("color.primary", "#ff0000")]);
-        let bare = resolve_token_placeholders(r##"<rect fill="{{color.primary}}"/>"##, &tokens)
-            .unwrap();
+        let bare =
+            resolve_token_placeholders(r##"<rect fill="{{color.primary}}"/>"##, &tokens).unwrap();
         let prefixed =
             resolve_token_placeholders(r##"<rect fill="{{token.color.primary}}"/>"##, &tokens)
                 .unwrap();
@@ -1249,8 +1249,7 @@ mod tests {
             ("color.text.primary", "#ffffff"),
             ("color.backdrop.default", "#000000"),
         ]);
-        let input =
-            r##"fill="{{color.text.primary}}" stroke="{{token.color.backdrop.default}}""##;
+        let input = r##"fill="{{color.text.primary}}" stroke="{{token.color.backdrop.default}}""##;
         let result = resolve_token_placeholders(input, &tokens).unwrap();
         assert_eq!(result, r##"fill="#ffffff" stroke="#000000""##);
     }
