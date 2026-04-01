@@ -2359,13 +2359,36 @@ impl SceneGraph {
         }
 
         let now_us = self.clock.now_us();
+
+        // Auto-dismiss: if no explicit expires_at is provided and the content is a
+        // Notification, derive expires_at from the urgency level.
+        //
+        // Urgency → default TTL mapping (per alert-banner spec):
+        //   0, 1 (info)     → 8 s
+        //   2 (warning)     → 15 s
+        //   3+ (critical)   → 30 s
+        //
+        // A publisher-supplied expires_at always takes precedence.
+        let effective_expires_at = expires_at_wall_us.or_else(|| {
+            if let ZoneContent::Notification(ref payload) = content {
+                let ttl_us: u64 = match payload.urgency {
+                    0 | 1 => 8_000_000,  // 8 seconds
+                    2 => 15_000_000,     // 15 seconds
+                    _ => 30_000_000,     // 30 seconds (critical / unknown)
+                };
+                Some(now_us + ttl_us)
+            } else {
+                None
+            }
+        });
+
         let record = ZonePublishRecord {
             zone_name: zone_name.to_string(),
             publisher_namespace: publisher_namespace.to_string(),
             content,
             published_at_wall_us: now_us,
             merge_key: merge_key.clone(),
-            expires_at_wall_us,
+            expires_at_wall_us: effective_expires_at,
             content_classification,
         };
 
@@ -3806,6 +3829,163 @@ mod tests {
         } else {
             panic!("expected Notification");
         }
+    }
+
+    // ─── Alert-Banner Auto-Dismiss Tests ────────────────────────────────
+
+    /// Helper: build a zone definition that accepts ShortTextWithIcon
+    /// (Notification content) with Stack contention policy.
+    fn make_alert_banner_zone() -> ZoneDefinition {
+        ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_string(),
+            description: "Alert banner zone".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 0.1,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        }
+    }
+
+    fn publish_notification(
+        scene: &mut SceneGraph,
+        urgency: u32,
+        expires_at: Option<u64>,
+    ) {
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: format!("urgency-{urgency}"),
+                    icon: "".to_string(),
+                    urgency,
+                    ttl_ms: None,
+                }),
+                "test-agent",
+                None,
+                expires_at,
+                None,
+            )
+            .unwrap();
+    }
+
+    /// urgency 1 (info) → expires_at = now + 8 s
+    #[test]
+    fn test_notification_auto_dismiss_urgency_info_low() {
+        let (mut scene, _clock) = scene_with_test_clock(); // clock at t=1000ms = 1_000_000 µs
+        scene.register_zone(make_alert_banner_zone());
+
+        publish_notification(&mut scene, 0, None);
+
+        let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
+        let expected = 1_000_000u64 + 8_000_000u64; // now + 8 s
+        assert_eq!(
+            record.expires_at_wall_us,
+            Some(expected),
+            "urgency 0 (info) should auto-dismiss after 8 s"
+        );
+    }
+
+    /// urgency 1 (normal) → expires_at = now + 8 s
+    #[test]
+    fn test_notification_auto_dismiss_urgency_info_normal() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        scene.register_zone(make_alert_banner_zone());
+
+        publish_notification(&mut scene, 1, None);
+
+        let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
+        let expected = 1_000_000u64 + 8_000_000u64;
+        assert_eq!(
+            record.expires_at_wall_us,
+            Some(expected),
+            "urgency 1 (info/normal) should auto-dismiss after 8 s"
+        );
+    }
+
+    /// urgency 2 (warning) → expires_at = now + 15 s
+    #[test]
+    fn test_notification_auto_dismiss_urgency_warning() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        scene.register_zone(make_alert_banner_zone());
+
+        publish_notification(&mut scene, 2, None);
+
+        let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
+        let expected = 1_000_000u64 + 15_000_000u64; // now + 15 s
+        assert_eq!(
+            record.expires_at_wall_us,
+            Some(expected),
+            "urgency 2 (warning) should auto-dismiss after 15 s"
+        );
+    }
+
+    /// urgency 3 (critical) → expires_at = now + 30 s
+    #[test]
+    fn test_notification_auto_dismiss_urgency_critical() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        scene.register_zone(make_alert_banner_zone());
+
+        publish_notification(&mut scene, 3, None);
+
+        let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
+        let expected = 1_000_000u64 + 30_000_000u64; // now + 30 s
+        assert_eq!(
+            record.expires_at_wall_us,
+            Some(expected),
+            "urgency 3 (critical) should auto-dismiss after 30 s"
+        );
+    }
+
+    /// Publisher-supplied expires_at takes precedence over the urgency default.
+    #[test]
+    fn test_notification_auto_dismiss_publisher_override() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        scene.register_zone(make_alert_banner_zone());
+
+        let publisher_expires_at = 9_999_999u64;
+        publish_notification(&mut scene, 1, Some(publisher_expires_at));
+
+        let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
+        assert_eq!(
+            record.expires_at_wall_us,
+            Some(publisher_expires_at),
+            "publisher-supplied expires_at must take precedence over urgency default"
+        );
+    }
+
+    /// Non-Notification content (StreamText) must NOT have expires_at auto-set.
+    #[test]
+    fn test_non_notification_content_no_auto_dismiss() {
+        let (mut scene, _clock) = scene_with_test_clock();
+        scene.register_zone(make_subtitle_zone()); // subtitle zone accepts StreamText
+
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("hello".to_string()),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let record = &scene.zone_registry.active_for_zone("subtitle")[0];
+        assert_eq!(
+            record.expires_at_wall_us, None,
+            "non-Notification content must not have auto-dismiss expires_at"
+        );
     }
 
     // ─── Sync Group Tests ────────────────────────────────────────────────
