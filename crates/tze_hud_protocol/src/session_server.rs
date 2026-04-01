@@ -2688,26 +2688,40 @@ async fn apply_queued_batch_to_scene(
                 }
             }
             Some(crate::proto::mutation_proto::Mutation::AddNode(an)) => {
-                if let Ok(tile_id) = bytes_to_scene_id(&an.tile_id) {
-                    let parent_id = if an.parent_id.is_empty() {
-                        None
-                    } else {
-                        bytes_to_scene_id(&an.parent_id).ok()
-                    };
-                    if let Some(ref node_proto) = an.node
-                        && let Some(node) = convert::proto_node_to_scene(node_proto)
-                    {
-                        scene_mutations.push(SceneMutation::AddNode {
-                            tile_id,
-                            parent_id,
-                            node,
-                        });
+                match bytes_to_scene_id(&an.tile_id) {
+                    Ok(tile_id) => {
+                        let parent_id_result = if an.parent_id.is_empty() {
+                            Ok(None)
+                        } else {
+                            bytes_to_scene_id(&an.parent_id).map(Some)
+                        };
+                        match parent_id_result {
+                            Ok(parent_id) => {
+                                if let Some(ref node_proto) = an.node
+                                    && let Some(node) = convert::proto_node_to_scene(node_proto)
+                                {
+                                    scene_mutations.push(SceneMutation::AddNode {
+                                        tile_id,
+                                        parent_id,
+                                        node,
+                                    });
+                                }
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    parent_id_len = an.parent_id.len(),
+                                    "AddNode (queued): invalid parent_id length (expected 16 \
+                                     bytes); mutation skipped — SDK bug or wire corruption"
+                                );
+                            }
+                        }
                     }
-                } else {
-                    tracing::warn!(
-                        tile_id_len = an.tile_id.len(),
-                        "AddNode (queued): invalid tile_id length; mutation skipped"
-                    );
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = an.tile_id.len(),
+                            "AddNode (queued): invalid tile_id length; mutation skipped"
+                        );
+                    }
                 }
             }
             Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(uto)) => {
