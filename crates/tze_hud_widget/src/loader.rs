@@ -313,6 +313,18 @@ fn load_bundle_dir_inner(
         .iter()
         .map(|p| (p.name.as_str(), p.param_type))
         .collect();
+    // Build a map from param name to enum_allowed_values for discrete binding validation.
+    let param_enum_values: HashMap<&str, &[String]> = parameter_schema
+        .iter()
+        .map(|p| {
+            let allowed: &[String] = p
+                .constraints
+                .as_ref()
+                .map(|c| c.enum_allowed_values.as_slice())
+                .unwrap_or(&[]);
+            (p.name.as_str(), allowed)
+        })
+        .collect();
 
     // Step 5: Load SVG files and resolve bindings.
     let mut svg_contents: HashMap<String, Vec<u8>> = HashMap::new();
@@ -395,6 +407,7 @@ fn load_bundle_dir_inner(
             &element_ids,
             &param_names,
             &param_types,
+            &param_enum_values,
             path_str,
         )?;
 
@@ -606,6 +619,7 @@ fn resolve_bindings(
     element_ids: &HashSet<String>,
     param_names: &HashSet<&str>,
     param_types: &HashMap<&str, WidgetParamType>,
+    param_enum_values: &HashMap<&str, &[String]>,
     path_str: &str,
 ) -> Result<Vec<WidgetBinding>, BundleError> {
     let mut bindings = Vec::new();
@@ -675,10 +689,18 @@ fn resolve_bindings(
         }
 
         let param_type = *param_types.get(param).unwrap(); // checked above
+        let enum_allowed = *param_enum_values.get(param).unwrap(); // checked above
 
         // Validate and parse the mapping.
-        let mapping =
-            parse_binding_mapping(mapping_str, raw_b, param, param_type, svg_file, path_str)?;
+        let mapping = parse_binding_mapping(
+            mapping_str,
+            raw_b,
+            param,
+            param_type,
+            enum_allowed,
+            svg_file,
+            path_str,
+        )?;
 
         bindings.push(WidgetBinding {
             param: param.to_string(),
@@ -697,11 +719,16 @@ fn resolve_bindings(
 /// - `linear` is only valid for f32 parameters.
 /// - `direct` is valid for string and color parameters.
 /// - `discrete` is only valid for enum parameters.
+///
+/// For `discrete` mappings, also validates that `value_map` exactly covers
+/// `enum_allowed_values`: every allowed enum value must have an entry, and no
+/// extra entries beyond the allowed values may be present.
 fn parse_binding_mapping(
     mapping_str: &str,
     raw_b: &RawBinding,
     param: &str,
     param_type: WidgetParamType,
+    enum_allowed: &[String],
     svg_file: &str,
     path_str: &str,
 ) -> Result<WidgetBindingMapping, BundleError> {
@@ -739,6 +766,40 @@ fn parse_binding_mapping(
                     ),
                 });
             }
+
+            // Validate that value_map covers all enum_allowed_values (no missing entries).
+            let missing: Vec<&str> = enum_allowed
+                .iter()
+                .filter(|v| !raw_b.value_map.contains_key(v.as_str()))
+                .map(String::as_str)
+                .collect();
+            if !missing.is_empty() {
+                return Err(BundleError::BindingUnresolvable {
+                    path: path_str.to_string(),
+                    detail: format!(
+                        "layer '{svg_file}': discrete binding for param '{param}' is missing value_map entries for enum values: {:?}",
+                        missing
+                    ),
+                });
+            }
+
+            // Validate that value_map has no extra entries beyond enum_allowed_values.
+            let extra: Vec<&str> = raw_b
+                .value_map
+                .keys()
+                .filter(|k| !enum_allowed.contains(*k))
+                .map(String::as_str)
+                .collect();
+            if !extra.is_empty() {
+                return Err(BundleError::BindingUnresolvable {
+                    path: path_str.to_string(),
+                    detail: format!(
+                        "layer '{svg_file}': discrete binding for param '{param}' has value_map entries not in enum_allowed_values: {:?}",
+                        extra
+                    ),
+                });
+            }
+
             Ok(WidgetBindingMapping::Discrete {
                 value_map: raw_b.value_map.clone(),
             })

@@ -833,6 +833,199 @@ error = "red"
     }
 }
 
+// ─── Discrete binding value_map coverage validation ──────────────────────────
+
+/// A discrete binding whose value_map exactly covers all enum_allowed_values passes.
+#[test]
+fn discrete_value_map_complete_coverage_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "coverage-ok"
+version = "1.0.0"
+description = "complete coverage"
+
+[[parameter_schema]]
+name = "status"
+type = "enum"
+default = "on"
+
+[parameter_schema.constraints]
+enum_allowed_values = ["on", "off"]
+
+[[layers]]
+svg_file = "fill.svg"
+
+[[layers.bindings]]
+param = "status"
+target_element = "indicator"
+target_attribute = "fill"
+mapping = "discrete"
+
+[layers.bindings.value_map]
+on = "green"
+off = "red"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("fill.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle id=\"indicator\"/></svg>",
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    assert!(
+        matches!(result, BundleScanResult::Ok(_)),
+        "expected Ok, got: {result:?}"
+    );
+}
+
+/// Empty enum_allowed_values with empty value_map passes validation.
+#[test]
+fn discrete_empty_enum_and_empty_value_map_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "empty-enum"
+version = "1.0.0"
+description = "empty enum"
+
+[[parameter_schema]]
+name = "status"
+type = "enum"
+default = ""
+
+[parameter_schema.constraints]
+enum_allowed_values = []
+
+[[layers]]
+svg_file = "fill.svg"
+
+[[layers.bindings]]
+param = "status"
+target_element = "indicator"
+target_attribute = "fill"
+mapping = "discrete"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("fill.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle id=\"indicator\"/></svg>",
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    assert!(
+        matches!(result, BundleScanResult::Ok(_)),
+        "expected Ok, got: {result:?}"
+    );
+}
+
+/// A discrete binding whose value_map is missing an enum value fails with BindingUnresolvable.
+#[test]
+fn discrete_value_map_missing_enum_value_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "missing-value"
+version = "1.0.0"
+description = "missing enum value"
+
+[[parameter_schema]]
+name = "severity"
+type = "enum"
+default = "info"
+
+[parameter_schema.constraints]
+enum_allowed_values = ["info", "warning", "error"]
+
+[[layers]]
+svg_file = "fill.svg"
+
+[[layers.bindings]]
+param = "severity"
+target_element = "indicator"
+target_attribute = "fill"
+mapping = "discrete"
+
+[layers.bindings.value_map]
+info = "green"
+warning = "yellow"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("fill.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle id=\"indicator\"/></svg>",
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    match result {
+        BundleScanResult::Err(BundleError::BindingUnresolvable { detail, .. }) => {
+            assert!(
+                detail.contains("error"),
+                "error message should mention the missing enum value 'error', got: {detail}"
+            );
+        }
+        other => panic!("expected BindingUnresolvable error, got: {other:?}"),
+    }
+}
+
+/// A discrete binding whose value_map has extra entries beyond enum_allowed_values fails.
+#[test]
+fn discrete_value_map_extra_entries_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "extra-entries"
+version = "1.0.0"
+description = "extra value_map entries"
+
+[[parameter_schema]]
+name = "severity"
+type = "enum"
+default = "info"
+
+[parameter_schema.constraints]
+enum_allowed_values = ["info", "warning"]
+
+[[layers]]
+svg_file = "fill.svg"
+
+[[layers.bindings]]
+param = "severity"
+target_element = "indicator"
+target_attribute = "fill"
+mapping = "discrete"
+
+[layers.bindings.value_map]
+info = "green"
+warning = "yellow"
+critical = "purple"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("fill.svg"),
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle id=\"indicator\"/></svg>",
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    match result {
+        BundleScanResult::Err(BundleError::BindingUnresolvable { detail, .. }) => {
+            assert!(
+                detail.contains("critical"),
+                "error message should mention the extra key 'critical', got: {detail}"
+            );
+        }
+        other => panic!("expected BindingUnresolvable error, got: {other:?}"),
+    }
+}
+
 // ─── Rejected bundle does not prevent others from loading ─────────────────────
 
 /// Spec: A rejected bundle MUST NOT prevent other valid bundles from loading.
