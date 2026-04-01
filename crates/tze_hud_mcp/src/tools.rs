@@ -628,7 +628,12 @@ pub fn handle_publish_to_zone(
             p.breakpoints,
         )?;
     } else {
-        scene.publish_to_zone_with_lease(&p.zone_name, content, &p.namespace, p.merge_key.clone())?;
+        scene.publish_to_zone_with_lease(
+            &p.zone_name,
+            content,
+            &p.namespace,
+            p.merge_key.clone(),
+        )?;
     }
 
     Ok(PublishToZoneResult {

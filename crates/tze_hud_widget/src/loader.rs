@@ -777,8 +777,7 @@ fn parse_binding_mapping(
                 return Err(BundleError::BindingUnresolvable {
                     path: path_str.to_string(),
                     detail: format!(
-                        "layer '{svg_file}': discrete binding for param '{param}' is missing value_map entries for enum values: {:?}",
-                        missing
+                        "layer '{svg_file}': discrete binding for param '{param}' is missing value_map entries for enum values: {missing:?}"
                     ),
                 });
             }
@@ -794,8 +793,7 @@ fn parse_binding_mapping(
                 return Err(BundleError::BindingUnresolvable {
                     path: path_str.to_string(),
                     detail: format!(
-                        "layer '{svg_file}': discrete binding for param '{param}' has value_map entries not in enum_allowed_values: {:?}",
-                        extra
+                        "layer '{svg_file}': discrete binding for param '{param}' has value_map entries not in enum_allowed_values: {extra:?}"
                     ),
                 });
             }

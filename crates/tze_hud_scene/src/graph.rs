@@ -1172,17 +1172,12 @@ impl SceneGraph {
         self.count_node_subtree_inner(node_id, &mut visited)
     }
 
-    fn count_node_subtree_inner(
-        &self,
-        node_id: SceneId,
-        visited: &mut HashSet<SceneId>,
-    ) -> u32 {
+    fn count_node_subtree_inner(&self, node_id: SceneId, visited: &mut HashSet<SceneId>) -> u32 {
         if !visited.insert(node_id) {
             // Cycle detected — skip this node to avoid infinite recursion.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during count_node_subtree",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during count_node_subtree"
             );
             return 0;
         }
@@ -1203,17 +1198,12 @@ impl SceneGraph {
         self.sum_texture_bytes_inner(node_id, &mut visited)
     }
 
-    fn sum_texture_bytes_inner(
-        &self,
-        node_id: SceneId,
-        visited: &mut HashSet<SceneId>,
-    ) -> u64 {
+    fn sum_texture_bytes_inner(&self, node_id: SceneId, visited: &mut HashSet<SceneId>) -> u64 {
         if !visited.insert(node_id) {
             // Cycle detected — skip this node to avoid infinite recursion.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during sum_texture_bytes",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during sum_texture_bytes"
             );
             return 0;
         }
@@ -2325,8 +2315,7 @@ impl SceneGraph {
             // Cycle detected — skip this node to avoid infinite recursion.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during hit_test_node",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during hit_test_node"
             );
             return None;
         }
@@ -2367,8 +2356,7 @@ impl SceneGraph {
             // Cycle detected — stop traversal.
             #[cfg(debug_assertions)]
             eprintln!(
-                "[tze_hud_scene] cycle detected in node graph at {:?} during is_node_in_subtree",
-                node_id
+                "[tze_hud_scene] cycle detected in node graph at {node_id:?} during is_node_in_subtree"
             );
             return false;
         }
@@ -2732,6 +2720,7 @@ impl SceneGraph {
     /// Like `publish_to_zone` but stores breakpoints in the publish record.
     /// Breakpoints identify byte offsets in the StreamText where the compositor
     /// pauses progressive reveal.
+    #[allow(clippy::too_many_arguments)]
     pub fn publish_to_zone_with_breakpoints(
         &mut self,
         zone_name: &str,
@@ -8767,7 +8756,10 @@ mod spec_scenarios {
 
         // Must not hang; no StaticImage nodes so result is 0.
         let bytes = scene.sum_texture_bytes(id_a);
-        assert_eq!(bytes, 0, "cycle should terminate; no texture bytes in solid-color nodes");
+        assert_eq!(
+            bytes, 0,
+            "cycle should terminate; no texture bytes in solid-color nodes"
+        );
     }
 
     /// hit_test_node: cycle terminates; HitRegion nodes in a cycle are still tested.
@@ -8782,7 +8774,10 @@ mod spec_scenarios {
 
         // Point (50,50) is inside both nodes' bounds (0,0,100,100). Must not hang.
         let hit = scene.hit_test_node(id_a, 50.0, 50.0);
-        assert!(hit.is_some(), "a HitRegion node should be found before cycle is detected");
+        assert!(
+            hit.is_some(),
+            "a HitRegion node should be found before cycle is detected"
+        );
     }
 
     /// hit_test_node: no hit when point is outside all node bounds.
@@ -8796,7 +8791,10 @@ mod spec_scenarios {
 
         // Point (200, 200) is outside bounds (0,0,100,100). Must not hang.
         let hit = scene.hit_test_node(id_a, 200.0, 200.0);
-        assert!(hit.is_none(), "point outside all bounds should yield no hit");
+        assert!(
+            hit.is_none(),
+            "point outside all bounds should yield no hit"
+        );
     }
 
     /// is_node_in_subtree: returns true for a direct child.
