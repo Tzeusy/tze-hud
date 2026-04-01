@@ -851,10 +851,38 @@ pub(crate) fn resolve_token_placeholders(
     // Step 2: Single left-to-right scan using string-level find().
     // This is UTF-8 safe: `find` returns byte positions at character
     // boundaries; we only slice at those positions.
+    //
+    // XML comments (`<!-- ... -->`) are skipped verbatim: placeholders inside
+    // comment regions are NOT resolved.  This allows SVG authors to include
+    // documentation examples such as `<!-- use {{token.valid-key}} here -->`
+    // without triggering resolution or spurious unresolved-token errors.
     let mut result = String::with_capacity(work.len());
     let mut remaining = work.as_str();
 
     while let Some(open_pos) = remaining.find("{{") {
+        // Before treating `{{` as a placeholder, check whether there is an XML
+        // comment start (`<!--`) that precedes it in the current `remaining`
+        // slice.  If so, the `{{` is inside a comment and must be skipped.
+        if let Some(comment_start) = remaining.find("<!--") {
+            if comment_start < open_pos {
+                // A comment opens before the `{{`.  Emit everything up to and
+                // including the comment end marker (`-->`), then continue.
+                let comment_body_start = comment_start + 4; // skip past `<!--`
+                let comment_suffix = &remaining[comment_body_start..];
+                if let Some(comment_end_offset) = comment_suffix.find("-->") {
+                    // Emit the entire comment (including delimiters) unchanged.
+                    let comment_end_abs = comment_body_start + comment_end_offset + 3;
+                    result.push_str(&remaining[..comment_end_abs]);
+                    remaining = &remaining[comment_end_abs..];
+                } else {
+                    // Unclosed comment — emit the rest of the input verbatim.
+                    result.push_str(remaining);
+                    remaining = "";
+                }
+                continue;
+            }
+        }
+
         // Append everything before the `{{`.
         result.push_str(&remaining[..open_pos]);
         let after_open = &remaining[open_pos + 2..];
@@ -1307,5 +1335,110 @@ mod tests {
         assert!(result.contains(r##"fill="#ffffff""##));
         assert!(result.contains(r##"stroke="#000000""##));
         assert!(!result.contains("{{"));
+    }
+
+    // ─── XML comment skipping ─────────────────────────────────────────────────────
+
+    /// A token placeholder inside an XML comment is NOT resolved.
+    ///
+    /// SVG authors use `<!-- {{token.key}} -->` for documentation examples.
+    /// The resolver must leave such regions verbatim to avoid spurious errors.
+    #[test]
+    fn token_inside_xml_comment_not_resolved() {
+        // The token IS in the map, but the placeholder is inside a comment.
+        let tokens = token_map(&[("color.primary", "#ff0000")]);
+        let input = r#"<!-- use {{token.color.primary}} here -->"#;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        // Comment must be preserved verbatim — no substitution.
+        assert_eq!(result, input);
+    }
+
+    /// A token placeholder outside an XML comment IS resolved normally.
+    #[test]
+    fn token_outside_xml_comment_is_resolved() {
+        let tokens = token_map(&[("color.primary", "#ff0000")]);
+        let input = r##"<!-- doc comment --><rect fill="{{token.color.primary}}"/>"##;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, r##"<!-- doc comment --><rect fill="#ff0000"/>"##);
+    }
+
+    /// Comment before AND after a live token: the comment is preserved; the
+    /// token that precedes the second comment and the token that follows are
+    /// both resolved.
+    #[test]
+    fn comment_between_live_tokens() {
+        let tokens = token_map(&[("fg", "white"), ("bg", "black")]);
+        let input = r#"<text fill="{{fg}}"><!-- note: {{bg}} is backdrop --></text><rect fill="{{bg}}"/>"#;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(
+            result,
+            r#"<text fill="white"><!-- note: {{bg}} is backdrop --></text><rect fill="black"/>"#
+        );
+    }
+
+    /// Multi-line XML comment containing a token placeholder: the entire
+    /// comment region (including newlines) is emitted verbatim.
+    #[test]
+    fn multiline_comment_with_token_not_resolved() {
+        let tokens = token_map(&[("color.text.primary", "#ffffff")]);
+        let input = "<!--\n  Example: fill=\"{{token.color.text.primary}}\"\n--><rect/>";
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(
+            result,
+            "<!--\n  Example: fill=\"{{token.color.text.primary}}\"\n--><rect/>"
+        );
+    }
+
+    /// An unclosed XML comment (`<!--` with no `-->`) causes the rest of the
+    /// input to be emitted verbatim — no token resolution, no panic.
+    #[test]
+    fn unclosed_xml_comment_emits_rest_verbatim() {
+        let tokens = token_map(&[("color.primary", "#ff0000")]);
+        let input = "<!-- unclosed {{token.color.primary}}";
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, input);
+    }
+
+    /// A bare-form token placeholder inside an XML comment is also NOT resolved.
+    #[test]
+    fn bare_token_inside_xml_comment_not_resolved() {
+        let tokens = token_map(&[("color.text.primary", "#ffffff")]);
+        let input = r#"<!-- e.g. {{color.text.primary}} -->"#;
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, input);
+    }
+
+    /// Multiple sequential XML comments, each with a token placeholder, are
+    /// all emitted verbatim.
+    #[test]
+    fn multiple_xml_comments_none_resolved() {
+        let tokens = token_map(&[("a", "AAA"), ("b", "BBB")]);
+        let input = "<!-- {{a}} --><!-- {{b}} -->";
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(result, input);
+    }
+
+    /// Tokens before, inside, and after a comment: only the outside tokens
+    /// are resolved; the inside one is preserved.
+    #[test]
+    fn tokens_before_inside_and_after_comment() {
+        let tokens = token_map(&[
+            ("color.text.primary", "#ffffff"),
+            ("color.backdrop.default", "#000000"),
+        ]);
+        let input = concat!(
+            r##"<rect fill="{{color.backdrop.default}}"/>"##,
+            r##"<!-- doc: {{color.text.primary}} -->"##,
+            r##"<text fill="{{color.text.primary}}">hi</text>"##,
+        );
+        let result = resolve_token_placeholders(input, &tokens).unwrap();
+        assert_eq!(
+            result,
+            concat!(
+                r##"<rect fill="#000000"/>"##,
+                r##"<!-- doc: {{color.text.primary}} -->"##,
+                r##"<text fill="#ffffff">hi</text>"##,
+            )
+        );
     }
 }
