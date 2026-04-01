@@ -3866,11 +3866,7 @@ mod tests {
         }
     }
 
-    fn publish_notification(
-        scene: &mut SceneGraph,
-        urgency: u32,
-        expires_at: Option<u64>,
-    ) {
+    fn publish_notification(scene: &mut SceneGraph, urgency: u32, expires_at: Option<u64>) {
         scene
             .publish_to_zone(
                 "alert-banner",
@@ -4016,10 +4012,7 @@ mod tests {
         clock.advance(SceneGraph::NOTIFICATION_TTL_INFO_US / 1_000 - 1); // advance in ms
         let drained = scene.drain_expired_zone_publications();
         assert_eq!(drained, 0, "must not expire before TTL elapses");
-        assert_eq!(
-            scene.zone_registry.active_for_zone("alert-banner").len(),
-            1,
-        );
+        assert_eq!(scene.zone_registry.active_for_zone("alert-banner").len(), 1,);
 
         // Advance past the TTL boundary — must be removed.
         clock.advance(2); // total elapsed > 8 s
@@ -4874,7 +4867,7 @@ mod tests {
                 resource_id,
                 width: 64,
                 height: 48,
-                decoded_bytes: 0, // proto ingest always zeros this
+                decoded_bytes: 0,              // proto ingest always zeros this
                 fit_mode: ImageFitMode::Cover, // changed fit mode
                 bounds: Rect::new(10.0, 10.0, 380.0, 280.0),
             }),
