@@ -4377,7 +4377,11 @@ mod tests {
         assert!(
             !items.is_empty() && items[0].text.contains("M4"),
             "newest notification (M4) must be slot 0 (top of zone), got: {}",
-            if items.is_empty() { "empty" } else { &items[0].text }
+            if items.is_empty() {
+                "empty"
+            } else {
+                &items[0].text
+            }
         );
     }
 
