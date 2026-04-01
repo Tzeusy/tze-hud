@@ -238,8 +238,12 @@ fn classify_inbound_batch(batch: &MutationBatch) -> InboundTrafficClass {
             use crate::proto::mutation_proto::Mutation;
             match mutation {
                 Mutation::CreateTile(_) => return InboundTrafficClass::Transactional,
-                // SetTileRoot is StateStream — keep looking for Transactional
+                // AddNode is structural — marks the batch as Transactional.
+                Mutation::AddNode(_) => return InboundTrafficClass::Transactional,
+                // SetTileRoot, UpdateTileOpacity, UpdateTileInputMode are StateStream.
                 Mutation::SetTileRoot(_) => {}
+                Mutation::UpdateTileOpacity(_) => {}
+                Mutation::UpdateTileInputMode(_) => {}
                 Mutation::PublishToZone(_) => {}
                 Mutation::ClearZone(_) => {}
                 Mutation::ClearWidget(_) => {}
@@ -2370,6 +2374,81 @@ async fn handle_mutation_batch(
                     }
                 }
             }
+            Some(crate::proto::mutation_proto::Mutation::AddNode(an)) => {
+                match bytes_to_scene_id(&an.tile_id) {
+                    Ok(tile_id) => {
+                        let parent_id = if an.parent_id.is_empty() {
+                            None
+                        } else {
+                            match bytes_to_scene_id(&an.parent_id) {
+                                Ok(id) => Some(id),
+                                Err(_) => {
+                                    tracing::warn!(
+                                        parent_id_len = an.parent_id.len(),
+                                        "AddNode: invalid parent_id length (expected 16 bytes); \
+                                         mutation skipped — SDK bug or wire corruption"
+                                    );
+                                    continue;
+                                }
+                            }
+                        };
+                        if let Some(ref node_proto) = an.node
+                            && let Some(node) = convert::proto_node_to_scene(node_proto)
+                        {
+                            scene_mutations.push(SceneMutation::AddNode {
+                                tile_id,
+                                parent_id,
+                                node,
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = an.tile_id.len(),
+                            "AddNode: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(uto)) => {
+                match bytes_to_scene_id(&uto.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::UpdateTileOpacity {
+                            tile_id,
+                            opacity: uto.opacity,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = uto.tile_id.len(),
+                            "UpdateTileOpacity: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateTileInputMode(utim)) => {
+                match bytes_to_scene_id(&utim.tile_id) {
+                    Ok(tile_id) => {
+                        let input_mode = convert::proto_input_mode_to_scene(
+                            crate::proto::TileInputModeProto::try_from(utim.input_mode)
+                                .unwrap_or(crate::proto::TileInputModeProto::TileInputModeUnspecified),
+                        );
+                        scene_mutations.push(SceneMutation::UpdateTileInputMode {
+                            tile_id,
+                            input_mode,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = utim.tile_id.len(),
+                            "UpdateTileInputMode: invalid tile_id length (expected 16 bytes); \
+                             mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
             None => {}
         }
     }
@@ -2604,6 +2683,67 @@ async fn apply_queued_batch_to_scene(
                             node_id_len = unc.node_id.len(),
                             "UpdateNodeContent (queued): invalid tile_id or node_id length \
                              (expected 16 bytes); mutation skipped — SDK bug or wire corruption"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::AddNode(an)) => {
+                if let Ok(tile_id) = bytes_to_scene_id(&an.tile_id) {
+                    let parent_id = if an.parent_id.is_empty() {
+                        None
+                    } else {
+                        bytes_to_scene_id(&an.parent_id).ok()
+                    };
+                    if let Some(ref node_proto) = an.node
+                        && let Some(node) = convert::proto_node_to_scene(node_proto)
+                    {
+                        scene_mutations.push(SceneMutation::AddNode {
+                            tile_id,
+                            parent_id,
+                            node,
+                        });
+                    }
+                } else {
+                    tracing::warn!(
+                        tile_id_len = an.tile_id.len(),
+                        "AddNode (queued): invalid tile_id length; mutation skipped"
+                    );
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateTileOpacity(uto)) => {
+                match bytes_to_scene_id(&uto.tile_id) {
+                    Ok(tile_id) => {
+                        scene_mutations.push(SceneMutation::UpdateTileOpacity {
+                            tile_id,
+                            opacity: uto.opacity,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = uto.tile_id.len(),
+                            "UpdateTileOpacity (queued): invalid tile_id length; mutation skipped"
+                        );
+                    }
+                }
+            }
+            Some(crate::proto::mutation_proto::Mutation::UpdateTileInputMode(utim)) => {
+                match bytes_to_scene_id(&utim.tile_id) {
+                    Ok(tile_id) => {
+                        let input_mode = convert::proto_input_mode_to_scene(
+                            crate::proto::TileInputModeProto::try_from(utim.input_mode)
+                                .unwrap_or(
+                                    crate::proto::TileInputModeProto::TileInputModeUnspecified,
+                                ),
+                        );
+                        scene_mutations.push(SceneMutation::UpdateTileInputMode {
+                            tile_id,
+                            input_mode,
+                        });
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            tile_id_len = utim.tile_id.len(),
+                            "UpdateTileInputMode (queued): invalid tile_id length; mutation skipped"
                         );
                     }
                 }
