@@ -4712,7 +4712,11 @@ mod tests {
 
         // collect_text_items uses the RenderingPolicy fields for TextItem construction.
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
-        assert_eq!(items.len(), 1, "expected one TextItem for alert-banner notification");
+        assert_eq!(
+            items.len(),
+            1,
+            "expected one TextItem for alert-banner notification"
+        );
 
         let item = &items[0];
 
@@ -4803,9 +4807,13 @@ mod tests {
             .get_by_name("alert-banner")
             .expect("alert-banner zone must exist");
 
-        let (x, _y, w, _h) = Compositor::resolve_zone_geometry(&zone.geometry_policy, 1920.0, 1080.0);
+        let (x, _y, w, _h) =
+            Compositor::resolve_zone_geometry(&zone.geometry_policy, 1920.0, 1080.0);
         assert_eq!(x, 0.0, "alert-banner left edge must be at x=0");
-        assert_eq!(w, 1920.0, "alert-banner width must equal display width (1920)");
+        assert_eq!(
+            w, 1920.0,
+            "alert-banner width must equal display width (1920)"
+        );
     }
 
     /// Alert-banner zone height accommodates 24px heading + vertical padding.
@@ -4823,7 +4831,8 @@ mod tests {
         // Check that resolved height at 720p is sufficient for 24px heading.
         // margin_vertical=0.0 (flush to edge), so minimum is font_size_px only.
         // height_pct=0.06 → 0.06×720=43.2px, well above the 24px minimum.
-        let (_x, _y, _w, h) = Compositor::resolve_zone_geometry(&zone.geometry_policy, 1280.0, 720.0);
+        let (_x, _y, _w, h) =
+            Compositor::resolve_zone_geometry(&zone.geometry_policy, 1280.0, 720.0);
         let font_size_px = zone.rendering_policy.font_size_px.unwrap_or(24.0);
         let min_required = font_size_px; // margin_vertical=0.0; height must cover font at minimum
         assert!(
