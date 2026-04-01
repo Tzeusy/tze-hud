@@ -1615,20 +1615,33 @@ impl Compositor {
 
     /// Determine the effective TTL (ms) for a single publication.
     ///
+    /// `ttl_ms` is the delay **until the fade-out animation begins**; the fade
+    /// itself then lasts `NOTIFICATION_FADE_OUT_MS` ms.  Total visible duration
+    /// is therefore `ttl_ms + NOTIFICATION_FADE_OUT_MS`.
+    ///
     /// Priority (highest to lowest):
     /// 1. `ZonePublishRecord.expires_at_wall_us` — urgency-derived absolute expiry
-    ///    set by the publishing path.  TTL is computed as
-    ///    `(expires_at_wall_us - published_at_wall_us) / 1_000`.
-    ///    This ensures the visual fade-out aligns with the actual record expiry
-    ///    (e.g., 15 s for warning, 30 s for critical).
+    ///    set by the publishing path.  TTL is derived so the fade-out **starts**
+    ///    `NOTIFICATION_FADE_OUT_MS` before the drain deadline:
+    ///    `((expires_at_wall_us - published_at_wall_us) / 1_000)
+    ///        .saturating_sub(NOTIFICATION_FADE_OUT_MS as u64)`.
+    ///    If `expires_at_wall_us <= published_at_wall_us` (already expired or
+    ///    invalid), the TTL is `0` (immediate fade-out).
+    ///    This ensures the visual fade-out completes before `drain_expired_zone_publications`
+    ///    removes the record (e.g., ~14 850 ms TTL for a 15 s warning).
     /// 2. `NotificationPayload.ttl_ms` — per-notification override.
     /// 3. Zone `auto_clear_ms` fallback (supplied by the caller).
     fn publication_ttl_ms(record: &ZonePublishRecord, zone_default_ttl_ms: u64) -> u64 {
         // Highest priority: absolute wall-clock expiry on the record.
+        // Derive TTL so the fade starts NOTIFICATION_FADE_OUT_MS before the drain boundary.
         if let Some(exp_us) = record.expires_at_wall_us {
-            if exp_us > record.published_at_wall_us {
-                return (exp_us - record.published_at_wall_us) / 1_000;
-            }
+            let duration_ms = if exp_us > record.published_at_wall_us {
+                (exp_us - record.published_at_wall_us) / 1_000
+            } else {
+                // Already expired or invalid: immediate fade-out.
+                0
+            };
+            return duration_ms.saturating_sub(NOTIFICATION_FADE_OUT_MS as u64);
         }
         // Next: per-notification explicit TTL.
         if let ZoneContent::Notification(n) = &record.content {
@@ -7828,13 +7841,16 @@ mod tests {
         );
     }
 
-    /// publication_ttl_ms derives TTL from expires_at_wall_us when present (highest priority).
+    /// publication_ttl_ms derives TTL (delay until fade starts) from expires_at_wall_us
+    /// when present (highest priority), subtracting NOTIFICATION_FADE_OUT_MS so the
+    /// fade completes before the drain boundary.
     ///
-    /// This ensures the visual fade-out aligns with the urgency-derived expiry set
-    /// by the publishing path (e.g., 15 000 ms for warning, 30 000 ms for critical).
+    /// For a 15 s warning: ttl_ms = 15_000 - 150 = 14_850.
+    /// For a 30 s critical: ttl_ms = 30_000 - 150 = 29_850.
     #[test]
     fn test_publication_ttl_ms_uses_expires_at_wall_us() {
         // Warning notification (urgency 2): published at t=0, expires at t=15s.
+        // Expected: 15_000 ms - 150 ms fade = 14_850 ms until fade starts.
         let record_warning = ZonePublishRecord {
             zone_name: "alert-banner".to_string(),
             publisher_namespace: "agent-warn".to_string(),
@@ -7851,11 +7867,12 @@ mod tests {
         };
         let ttl = Compositor::publication_ttl_ms(&record_warning, 8_000);
         assert_eq!(
-            ttl, 15_000,
-            "publication_ttl_ms must derive 15 000 ms from expires_at_wall_us=15_000_000 µs for warning"
+            ttl, 14_850,
+            "publication_ttl_ms must derive 14_850 ms (15_000 - 150 fade) for a 15s warning"
         );
 
         // Critical notification (urgency 3): published at t=0, expires at t=30s.
+        // Expected: 30_000 ms - 150 ms fade = 29_850 ms until fade starts.
         let record_critical = ZonePublishRecord {
             zone_name: "alert-banner".to_string(),
             publisher_namespace: "agent-crit".to_string(),
@@ -7872,11 +7889,12 @@ mod tests {
         };
         let ttl_crit = Compositor::publication_ttl_ms(&record_critical, 8_000);
         assert_eq!(
-            ttl_crit, 30_000,
-            "publication_ttl_ms must derive 30 000 ms from expires_at_wall_us=30_000_000 µs for critical"
+            ttl_crit, 29_850,
+            "publication_ttl_ms must derive 29_850 ms (30_000 - 150 fade) for a 30s critical"
         );
 
         // expires_at_wall_us takes priority over per-notification ttl_ms.
+        // published=1s, expires=16s → duration=15s → 15_000 - 150 = 14_850 ms until fade.
         let record_both = ZonePublishRecord {
             zone_name: "alert-banner".to_string(),
             publisher_namespace: "agent-both".to_string(),
@@ -7893,8 +7911,8 @@ mod tests {
         };
         let ttl_both = Compositor::publication_ttl_ms(&record_both, 8_000);
         assert_eq!(
-            ttl_both, 15_000,
-            "publication_ttl_ms must prefer expires_at_wall_us over per-notification ttl_ms"
+            ttl_both, 14_850,
+            "publication_ttl_ms must prefer expires_at_wall_us over per-notification ttl_ms (14_850 ms = 15_000 - 150)"
         );
 
         // Info notification (urgency 1, no expires_at): falls back to ttl_ms then zone default.
