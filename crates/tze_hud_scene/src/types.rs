@@ -2202,7 +2202,7 @@ impl ZoneRegistry {
             layer_attachment: LayerAttachment::Background,
         });
 
-        // 6. alert-banner: edge-anchored top, Replace, Chrome layer
+        // 6. alert-banner: edge-anchored top, Stack-by-severity, Chrome layer.
         //
         // Heading typography per spec §Alert-Banner Heading Typography:
         //   font_size_px = 24px (typography.heading.size)
@@ -2214,9 +2214,16 @@ impl ZoneRegistry {
         // Chrome-layer positioning per spec §Alert-Banner Chrome-Layer Positioning:
         //   layer_attachment = Chrome — renders above all agent content
         //   width_pct = 1.0 — full display width
-        //   height_pct = 0.06 — at 720p: 0.06×720=43.2px, which exceeds 24px font + natural line-height space
+        //   height_pct = 0.06 — nominal single-slot height for edge anchoring and debug geometry.
+        //   Runtime slot height is derived from RenderingPolicy (stack_slot_height); total stack
+        //   height = active_count × slot_h, not height_pct × screen_height.
         //   Zero-height when inactive: compositor skips backdrop/text for empty zones;
         //   no visible pixels are emitted when no alerts are active.
+        //
+        // Multiple banners stack vertically ordered by severity (critical at top,
+        // warning below, info at bottom).  Within the same severity level, newer
+        // banners appear above older ones.  Zone height grows dynamically:
+        // slot_height × active_count; zero height when no banners are active.
         //
         // backdrop + backdrop_opacity provide the dark fallback color for non-severity
         // content (e.g. StreamText) and are overridden by severity token colors for
@@ -2224,7 +2231,7 @@ impl ZoneRegistry {
         registry.register(ZoneDefinition {
             id: SceneId::new(),
             name: "alert-banner".to_string(),
-            description: "Alert banner — top edge, chrome layer, heading typography".to_string(),
+            description: "Alert banner — top edge, severity-stacked multi-occupant, chrome layer, heading typography".to_string(),
             geometry_policy: GeometryPolicy::EdgeAnchored {
                 edge: DisplayEdge::Top,
                 // 6% of display height: at 720p this gives 43.2px, comfortably above the 24px heading.
@@ -2259,7 +2266,11 @@ impl ZoneRegistry {
                 margin_vertical: Some(0.0),
                 ..RenderingPolicy::default()
             },
-            contention_policy: ContentionPolicy::Replace,
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            // max_publishers is enforced per publisher_namespace (one active banner
+            // per agent).  max_depth=8 allows up to 8 simultaneous banners from
+            // 8 different agents; keeping max_publishers=1 ensures no single agent
+            // can flood the stack.
             max_publishers: 1,
             transport_constraint: None,
             auto_clear_ms: Some(10_000),
