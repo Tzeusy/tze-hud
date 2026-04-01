@@ -2032,10 +2032,8 @@ impl Compositor {
                         //   with fixed 0.9 opacity and 1px 4-quad border
                         // SolidColor: always its own color
                         // Other: policy.backdrop
-                        let is_notification_content = matches!(
-                            &record.content,
-                            ZoneContent::Notification(_)
-                        );
+                        let is_notification_content =
+                            matches!(&record.content, ZoneContent::Notification(_));
                         let backdrop_rgba: Option<Rgba> = match &record.content {
                             ZoneContent::SolidColor(rgba) => Some(*rgba),
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
@@ -2113,10 +2111,8 @@ impl Compositor {
                     // For MergeByKey and single-publish policies: render a single backdrop
                     // for the zone using the latest publication's content type.
                     let latest = &publishes[publishes.len() - 1];
-                    let is_notification_content = matches!(
-                        &latest.content,
-                        ZoneContent::Notification(_)
-                    );
+                    let is_notification_content =
+                        matches!(&latest.content, ZoneContent::Notification(_));
                     let backdrop_rgba: Option<Rgba> = match &latest.content {
                         ZoneContent::SolidColor(rgba) => {
                             // SolidColor always renders its own color (no policy override).
@@ -3792,7 +3788,8 @@ mod tests {
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
             name: "notification-area".to_owned(),
-            description: "notification area - uses notification urgency tokens, not severity".to_owned(),
+            description: "notification area - uses notification urgency tokens, not severity"
+                .to_owned(),
             geometry_policy: GeometryPolicy::Relative {
                 x_pct: 0.75,
                 y_pct: 0.02,
@@ -3964,10 +3961,22 @@ mod tests {
         let critical3 = urgency_to_notification_color(3, &no_tokens);
         let clamped4 = urgency_to_notification_color(4, &no_tokens);
         let clamped100 = urgency_to_notification_color(100, &no_tokens);
-        assert_eq!(critical3.r, clamped4.r, "urgency=4 should clamp to urgency=3");
-        assert_eq!(critical3.g, clamped4.g, "urgency=4 should clamp to urgency=3");
-        assert_eq!(critical3.b, clamped4.b, "urgency=4 should clamp to urgency=3");
-        assert_eq!(critical3.r, clamped100.r, "urgency=100 should clamp to urgency=3");
+        assert_eq!(
+            critical3.r, clamped4.r,
+            "urgency=4 should clamp to urgency=3"
+        );
+        assert_eq!(
+            critical3.g, clamped4.g,
+            "urgency=4 should clamp to urgency=3"
+        );
+        assert_eq!(
+            critical3.b, clamped4.b,
+            "urgency=4 should clamp to urgency=3"
+        );
+        assert_eq!(
+            critical3.r, clamped100.r,
+            "urgency=100 should clamp to urgency=3"
+        );
     }
 
     /// Profile token override: color.notification.urgency.low overrides fallback.
