@@ -1916,7 +1916,13 @@ impl Compositor {
 
         // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
         // Background zones render first so agent tiles occlude them.
-        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Background));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            sw,
+            sh,
+            Some(LayerAttachment::Background),
+        );
 
         for tile in &tiles {
             // Render tile background
@@ -2021,7 +2027,13 @@ impl Compositor {
 
         // ── Layer ordering: Background → Tiles → Content zones → Chrome zones ─
         // Background zones render first so agent tiles occlude them.
-        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Background));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            sw,
+            sh,
+            Some(LayerAttachment::Background),
+        );
 
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
@@ -7755,8 +7767,14 @@ mod tests {
         // indices 0–5 = Background (blue), 6–11 = Content (red), 12–17 = Chrome (yellow).
         let bg_r = vertices[0].color[0];
         let bg_b = vertices[0].color[2];
-        assert!(bg_r < 0.1, "First quad (background) must be blue (R≈0.0); got R={bg_r}");
-        assert!(bg_b > 0.9, "First quad (background) must be blue (B≈1.0); got B={bg_b}");
+        assert!(
+            bg_r < 0.1,
+            "First quad (background) must be blue (R≈0.0); got R={bg_r}"
+        );
+        assert!(
+            bg_b > 0.9,
+            "First quad (background) must be blue (B≈1.0); got B={bg_b}"
+        );
 
         let content_r = vertices[6].color[0];
         let content_b = vertices[6].color[2];
