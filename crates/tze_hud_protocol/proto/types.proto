@@ -121,14 +121,56 @@ message UpdateNodeContentMutation {
   }
 }
 
+// Add a child node to an existing tile.
+//
+// parent_id semantics:
+//   - Empty (0 bytes): the runtime attaches the node to the tile root if the
+//     tile has no root yet; if a root already exists, parent_id MUST be set to
+//     an explicit parent to ensure the node is reachable.
+//   - Non-empty (16 bytes): the node is inserted as a child of that parent.
+//     Use MutationResult.created_ids or the tile root node ID from a snapshot.
+//
+// Byte order: parent_id uses the same big-endian RFC 4122 wire encoding as
+// tile_id and all other SceneId bytes fields in MutationProto (i.e. the raw
+// uuid::Uuid::as_bytes() encoding, NOT the little-endian NodeProto.id encoding).
+// Use MutationResult.created_ids to obtain parent node IDs in the correct order.
+message AddNodeMutation {
+  bytes tile_id   = 1;  // 16-byte UUIDv7 SceneId of the target tile (big-endian)
+  bytes parent_id = 2;  // 16-byte UUIDv7 SceneId of the parent node (big-endian); empty = see comment
+  NodeProto node  = 3;
+}
+
+// Update a tile's opacity in [0.0, 1.0].
+message UpdateTileOpacityMutation {
+  bytes tile_id = 1;  // 16-byte UUIDv7 SceneId of the tile
+  float opacity = 2;  // Must be in [0.0, 1.0]
+}
+
+// Input handling mode for a tile.
+enum TileInputModeProto {
+  TILE_INPUT_MODE_UNSPECIFIED = 0;
+  TILE_INPUT_MODE_PASSTHROUGH = 1;  // Input events pass through to layers below
+  TILE_INPUT_MODE_CAPTURE     = 2;  // Tile captures and consumes input events
+  TILE_INPUT_MODE_LOCAL_ONLY  = 3;  // Input handled locally, not forwarded to agent
+}
+
+// Update a tile's input handling mode.
+message UpdateTileInputModeMutation {
+  bytes tile_id              = 1;  // 16-byte UUIDv7 SceneId of the tile
+  TileInputModeProto input_mode = 2;
+}
+
 message MutationProto {
   oneof mutation {
-    CreateTileMutation        create_tile        = 1;
-    SetTileRootMutation       set_tile_root      = 2;
-    PublishToZoneMutation     publish_to_zone    = 3;
-    ClearZoneMutation         clear_zone         = 4;
-    ClearWidgetMutation       clear_widget       = 5;
-    UpdateNodeContentMutation update_node_content = 6;
+    CreateTileMutation          create_tile            = 1;
+    SetTileRootMutation         set_tile_root          = 2;
+    PublishToZoneMutation       publish_to_zone        = 3;
+    ClearZoneMutation           clear_zone             = 4;
+    ClearWidgetMutation         clear_widget           = 5;
+    UpdateNodeContentMutation   update_node_content    = 6;
+    AddNodeMutation             add_node               = 7;
+    UpdateTileOpacityMutation   update_tile_opacity    = 8;
+    UpdateTileInputModeMutation update_tile_input_mode = 9;
   }
 }
 

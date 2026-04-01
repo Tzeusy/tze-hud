@@ -244,6 +244,27 @@ pub fn proto_update_node_content_data_to_scene(
     }
 }
 
+// ─── Mutation conversions ─────────────────────────────────────────────────────
+
+/// Convert a `TileInputModeProto` to the scene `InputMode`.
+pub fn proto_input_mode_to_scene(m: proto::TileInputModeProto) -> InputMode {
+    match m {
+        proto::TileInputModeProto::TileInputModePassthrough => InputMode::Passthrough,
+        proto::TileInputModeProto::TileInputModeCapture
+        | proto::TileInputModeProto::TileInputModeUnspecified => InputMode::Capture,
+        proto::TileInputModeProto::TileInputModeLocalOnly => InputMode::LocalOnly,
+    }
+}
+
+/// Convert a scene `InputMode` to a `TileInputModeProto`.
+pub fn scene_input_mode_to_proto(m: InputMode) -> proto::TileInputModeProto {
+    match m {
+        InputMode::Passthrough => proto::TileInputModeProto::TileInputModePassthrough,
+        InputMode::Capture => proto::TileInputModeProto::TileInputModeCapture,
+        InputMode::LocalOnly => proto::TileInputModeProto::TileInputModeLocalOnly,
+    }
+}
+
 // ─── Zone conversions ─────────────────────────────────────────────────────────
 
 /// Convert a protobuf ZoneContent to a scene ZoneContent.
@@ -1751,6 +1772,56 @@ mod tests {
         assert!(
             snapshot.widget_registry.widget_types.contains_key("gauge"),
             "snapshot widget_registry must contain 'gauge' key"
+        );
+    }
+
+    // ── InputMode proto round-trips ───────────────────────────────────────────
+
+    #[test]
+    fn input_mode_passthrough_round_trip() {
+        let mode = InputMode::Passthrough;
+        let proto = scene_input_mode_to_proto(mode);
+        assert_eq!(
+            proto,
+            crate::proto::TileInputModeProto::TileInputModePassthrough
+        );
+        let restored = proto_input_mode_to_scene(proto);
+        assert_eq!(restored, mode);
+    }
+
+    #[test]
+    fn input_mode_capture_round_trip() {
+        let mode = InputMode::Capture;
+        let proto = scene_input_mode_to_proto(mode);
+        assert_eq!(
+            proto,
+            crate::proto::TileInputModeProto::TileInputModeCapture
+        );
+        let restored = proto_input_mode_to_scene(proto);
+        assert_eq!(restored, mode);
+    }
+
+    #[test]
+    fn input_mode_local_only_round_trip() {
+        let mode = InputMode::LocalOnly;
+        let proto = scene_input_mode_to_proto(mode);
+        assert_eq!(
+            proto,
+            crate::proto::TileInputModeProto::TileInputModeLocalOnly
+        );
+        let restored = proto_input_mode_to_scene(proto);
+        assert_eq!(restored, mode);
+    }
+
+    #[test]
+    fn input_mode_unspecified_maps_to_capture() {
+        // UNSPECIFIED (0) must default to Capture for forward-compat.
+        let restored =
+            proto_input_mode_to_scene(crate::proto::TileInputModeProto::TileInputModeUnspecified);
+        assert_eq!(
+            restored,
+            InputMode::Capture,
+            "UNSPECIFIED input mode must map to Capture (safe default)"
         );
     }
 }
