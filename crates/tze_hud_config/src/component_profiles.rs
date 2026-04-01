@@ -76,8 +76,11 @@ pub struct ZoneRenderingOverride {
     /// Font size in pixels (positive).
     pub font_size_px: Option<f32>,
 
-    /// CSS numeric font weight (100–900).
-    pub font_weight: Option<f32>,
+    /// CSS numeric font weight (100–900), rounded to the nearest multiple of 100.
+    ///
+    /// TOML source values may be integers or floats; they are clamped to [100, 900]
+    /// and rounded to the nearest 100 at parse time.
+    pub font_weight: Option<u16>,
 
     /// Text color as `#RRGGBB` or `#RRGGBBAA`.
     pub text_color: Option<String>,
@@ -766,7 +769,17 @@ fn validate_zone_override(
     out.font_size_px = resolve_numeric_field!(raw.font_size_px, "font_size_px");
 
     // ── font_weight ──────────────────────────────────────────────────────────
-    out.font_weight = resolve_numeric_field!(raw.font_weight, "font_weight");
+    // font_weight is Option<u16> in ZoneRenderingOverride (CSS numeric weight, 100–900).
+    // TOML values (float or integer) are converted with explicit clamping to [100, 900]
+    // and rounding to the nearest 100.
+    if let Some(val) = &raw.font_weight {
+        out.font_weight = Some(resolve_font_weight_value(
+            val,
+            scoped_tokens,
+            profile_name,
+            zone_type_name,
+        )?);
+    }
 
     // ── text_color (color hex string) ────────────────────────────────────────
     if let Some(val) = &raw.text_color {
@@ -1106,6 +1119,34 @@ fn resolve_u32_value(
             ),
         }),
     }
+}
+
+/// Resolve a `font_weight` value from a `toml::Value`.
+///
+/// Accepts TOML float, integer, or a `{{token.key}}` string. The resolved numeric
+/// value is clamped to `[100.0, 900.0]` and rounded to the nearest multiple of 100,
+/// then stored as `u16`. This matches the CSS font-weight scale (100–900).
+///
+/// Examples:
+/// - `700` → `700_u16`
+/// - `650.0` → `700_u16` (rounds to nearest 100)
+/// - `50.0` → `100_u16` (clamped to minimum)
+/// - `950.0` → `900_u16` (clamped to maximum)
+fn resolve_font_weight_value(
+    val: &toml::Value,
+    scoped_tokens: &DesignTokenMap,
+    profile_name: &str,
+    zone_type_name: &str,
+) -> Result<u16, ConfigError> {
+    let field_name = "font_weight";
+
+    // Parse raw numeric value as f32 (reuse existing helper).
+    let raw_f32 = resolve_numeric_value(val, scoped_tokens, profile_name, zone_type_name, field_name)?;
+
+    // Clamp to [100.0, 900.0], then round to nearest 100.
+    let clamped = raw_f32.clamp(100.0, 900.0);
+    let rounded = (clamped / 100.0).round() * 100.0;
+    Ok(rounded as u16)
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -2006,5 +2047,115 @@ component_type = "subtitle"
 
         check_zone_readability(&policy, ReadabilityTechnique::OpaqueBackdrop)
             .expect("OpaqueBackdrop check must pass for exemplar-alert-banner (opacity >= 0.8)");
+    }
+
+    // ── font_weight clamping and rounding ─────────────────────────────────────
+
+    /// TOML integer font_weight is stored as u16.
+    #[test]
+    fn font_weight_integer_parsed_as_u16() {
+        let (_dir, path) = make_profile_dir_with_zone(
+            r#"name = "fw-int"
+version = "1.0.0"
+component_type = "subtitle"
+"#,
+            "subtitle",
+            "font_weight = 700",
+        );
+        let result = load_profile_dir(&path, &empty_tokens());
+        let profile = result.expect("font_weight integer should load");
+        let zone_override = profile.zone_overrides.get("subtitle").unwrap();
+        assert_eq!(
+            zone_override.font_weight,
+            Some(700_u16),
+            "font_weight = 700 should parse to 700_u16"
+        );
+    }
+
+    /// TOML float font_weight is rounded to the nearest 100.
+    #[test]
+    fn font_weight_float_rounds_to_nearest_100() {
+        let (_dir, path) = make_profile_dir_with_zone(
+            r#"name = "fw-float"
+version = "1.0.0"
+component_type = "subtitle"
+"#,
+            "subtitle",
+            "font_weight = 650.0",
+        );
+        let result = load_profile_dir(&path, &empty_tokens());
+        let profile = result.expect("font_weight float should load");
+        let zone_override = profile.zone_overrides.get("subtitle").unwrap();
+        assert_eq!(
+            zone_override.font_weight,
+            Some(700_u16),
+            "font_weight = 650.0 should round to 700_u16"
+        );
+    }
+
+    /// font_weight below 100 is clamped to 100.
+    #[test]
+    fn font_weight_clamped_to_minimum_100() {
+        let (_dir, path) = make_profile_dir_with_zone(
+            r#"name = "fw-clamp-min"
+version = "1.0.0"
+component_type = "subtitle"
+"#,
+            "subtitle",
+            "font_weight = 50",
+        );
+        let result = load_profile_dir(&path, &empty_tokens());
+        let profile = result.expect("font_weight below minimum should clamp, not error");
+        let zone_override = profile.zone_overrides.get("subtitle").unwrap();
+        assert_eq!(
+            zone_override.font_weight,
+            Some(100_u16),
+            "font_weight = 50 should clamp to 100_u16"
+        );
+    }
+
+    /// font_weight above 900 is clamped to 900.
+    #[test]
+    fn font_weight_clamped_to_maximum_900() {
+        let (_dir, path) = make_profile_dir_with_zone(
+            r#"name = "fw-clamp-max"
+version = "1.0.0"
+component_type = "subtitle"
+"#,
+            "subtitle",
+            "font_weight = 950",
+        );
+        let result = load_profile_dir(&path, &empty_tokens());
+        let profile = result.expect("font_weight above maximum should clamp, not error");
+        let zone_override = profile.zone_overrides.get("subtitle").unwrap();
+        assert_eq!(
+            zone_override.font_weight,
+            Some(900_u16),
+            "font_weight = 950 should clamp to 900_u16"
+        );
+    }
+
+    /// font_weight token reference resolves correctly and is converted to u16.
+    #[test]
+    fn font_weight_token_reference_resolves_to_u16() {
+        let mut config_tokens = DesignTokenMap::new();
+        config_tokens.insert("typography.subtitle.weight".to_string(), "600".to_string());
+
+        let (_dir, path) = make_profile_dir_with_zone(
+            r#"name = "fw-token"
+version = "1.0.0"
+component_type = "subtitle"
+"#,
+            "subtitle",
+            r#"font_weight = "{{typography.subtitle.weight}}""#,
+        );
+        let result = load_profile_dir(&path, &config_tokens);
+        let profile = result.expect("font_weight token reference should resolve");
+        let zone_override = profile.zone_overrides.get("subtitle").unwrap();
+        assert_eq!(
+            zone_override.font_weight,
+            Some(600_u16),
+            "font_weight token '600' should resolve to 600_u16"
+        );
     }
 }
