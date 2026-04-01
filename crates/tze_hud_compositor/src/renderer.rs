@@ -104,6 +104,18 @@ const NOTIFICATION_URGENCY_CRITICAL: Rgba = Rgba {
 /// It overrides the token color's alpha channel.
 const NOTIFICATION_BACKDROP_OPACITY: f32 = 0.9;
 
+/// Warm-gray placeholder color rendered for `ZoneContent::StaticImage` zones.
+///
+/// Full GPU texture upload (wgpu sampler pipeline) is deferred to a follow-up
+/// iteration. This constant is intentionally shared between the Stack and
+/// non-Stack contention-policy branches so both render the same placeholder.
+const STATIC_IMAGE_PLACEHOLDER_COLOR: Rgba = Rgba {
+    r: 0.3,
+    g: 0.3,
+    b: 0.3,
+    a: 1.0,
+};
+
 /// Fallback color for `color.border.default` when the token is absent.
 ///
 /// Matches the default value in built-in component startup tokens (#444466).
@@ -2441,7 +2453,7 @@ impl Compositor {
                             ZoneContent::StaticImage(_) => {
                                 // Placeholder warm-gray backdrop — full GPU texture upload
                                 // (wgpu sampler pipeline) is deferred to a follow-up iteration.
-                                Some(Rgba { r: 0.3, g: 0.3, b: 0.3, a: 1.0 })
+                                Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
                             }
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                                 // alert-banner: severity tokens (color.severity.*).
@@ -2528,7 +2540,7 @@ impl Compositor {
                         ZoneContent::StaticImage(_) => {
                             // Placeholder warm-gray backdrop — full GPU texture upload
                             // (wgpu sampler pipeline) is deferred to a follow-up iteration.
-                            Some(Rgba { r: 0.3, g: 0.3, b: 0.3, a: 1.0 })
+                            Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
                         }
                         ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                             // alert-banner: map urgency to severity token color.

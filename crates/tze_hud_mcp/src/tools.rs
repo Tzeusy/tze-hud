@@ -483,17 +483,15 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                     }
                     let mut raw = [0u8; 32];
                     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-                        let hi = char::from(chunk[0])
-                            .to_digit(16)
-                            .ok_or_else(|| McpError::InvalidParams(format!(
+                        let hi = char::from(chunk[0]).to_digit(16);
+                        let lo = char::from(chunk[1]).to_digit(16);
+                        if let (Some(hi), Some(lo)) = (hi, lo) {
+                            raw[i] = (hi * 16 + lo) as u8;
+                        } else {
+                            return Err(McpError::InvalidParams(format!(
                                 "static_image \"resource_id\" is not valid hex: \"{hex}\""
-                            )))?;
-                        let lo = char::from(chunk[1])
-                            .to_digit(16)
-                            .ok_or_else(|| McpError::InvalidParams(format!(
-                                "static_image \"resource_id\" is not valid hex: \"{hex}\""
-                            )))?;
-                        raw[i] = (hi * 16 + lo) as u8;
+                            )));
+                        }
                     }
                     Ok(ZoneContent::StaticImage(ResourceId::from_bytes(raw)))
                 }
@@ -2796,10 +2794,25 @@ mod tests {
         assert_eq!(result.zone_name, zone);
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
         assert_eq!(publishes.len(), 1);
-        assert!(
-            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StaticImage(_)),
-            "static_image content must produce ZoneContent::StaticImage, got: {:?}", &publishes[0].content
-        );
+        // Verify the correct variant was produced and that the hex was decoded correctly.
+        if let tze_hud_scene::types::ZoneContent::StaticImage(resource_id) = &publishes[0].content {
+            let expected: [u8; 32] = [
+                0x48, 0x78, 0xca, 0x04, 0x25, 0xc7, 0x39, 0xfa,
+                0x42, 0x7f, 0x7e, 0xda, 0x20, 0xfe, 0x84, 0x5f,
+                0x6b, 0x2f, 0x46, 0xba, 0x5f, 0xe5, 0xac, 0x7d,
+                0x6b, 0x85, 0xad, 0xd8, 0xdb, 0x6b, 0xb0, 0x8f,
+            ];
+            assert_eq!(
+                resource_id.as_bytes(),
+                &expected,
+                "parsed ResourceId bytes must match expected value for provided hex"
+            );
+        } else {
+            panic!(
+                "static_image content must produce ZoneContent::StaticImage, got: {:?}",
+                &publishes[0].content
+            );
+        }
     }
 
     #[test]
@@ -2849,7 +2862,7 @@ mod tests {
     fn test_parse_zone_content_static_image_invalid_hex_chars_rejected() {
         // Non-hex characters must return InvalidParams.
         let (mut scene, zone) = scene_with_static_image_zone();
-        // 64 chars with a 'g' which is not a valid hex digit.
+        // 64 chars with "XXXX" at the end, which are not valid hex digits.
         let bad_hex = "4878ca0425c739fa427f7eda20fe845f6b2f46ba5fe5ac7d6b85add8db6bXXXX";
         let err = handle_publish_to_zone(
             json!({"zone_name": zone, "content": {"type": "static_image", "resource_id": bad_hex}}),
