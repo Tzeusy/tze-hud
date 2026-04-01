@@ -105,13 +105,30 @@ message SetTileRootMutation {
   NodeProto node = 2;
 }
 
+// Atomically replace the data of an existing node.
+// The node must already exist, belong to tile_id, and the data variant must
+// match the existing node's variant.  Children and node id are preserved.
+message UpdateNodeContentMutation {
+  bytes tile_id = 1;  // 16-byte UUIDv7 SceneId of the owning tile
+  bytes node_id = 2;  // 16-byte UUIDv7 SceneId of the node to update
+  // Replacement data — exactly one variant must be set; it must match the
+  // existing node's variant (type-change is rejected).
+  oneof data {
+    SolidColorNodeProto  solid_color   = 10;
+    TextMarkdownNodeProto text_markdown = 11;
+    HitRegionNodeProto   hit_region    = 12;
+    StaticImageNodeProto static_image  = 13;
+  }
+}
+
 message MutationProto {
   oneof mutation {
-    CreateTileMutation    create_tile      = 1;
-    SetTileRootMutation   set_tile_root    = 2;
-    PublishToZoneMutation publish_to_zone  = 3;
-    ClearZoneMutation     clear_zone       = 4;
-    ClearWidgetMutation   clear_widget     = 5;
+    CreateTileMutation        create_tile        = 1;
+    SetTileRootMutation       set_tile_root      = 2;
+    PublishToZoneMutation     publish_to_zone    = 3;
+    ClearZoneMutation         clear_zone         = 4;
+    ClearWidgetMutation       clear_widget       = 5;
+    UpdateNodeContentMutation update_node_content = 6;
   }
 }
 

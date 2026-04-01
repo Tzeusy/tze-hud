@@ -164,6 +164,25 @@ pub enum SceneMutation {
         parent_id: Option<SceneId>,
         node: Node,
     },
+    /// Atomically replace the content of an existing node.
+    ///
+    /// The node must already exist in the scene graph, belong to `tile_id`,
+    /// and the replacement `data` must match the node's current type
+    /// (e.g. `TextMarkdown` can only be updated with `TextMarkdown` data).
+    /// This allows periodic in-place content updates (e.g. live text refresh)
+    /// without the overhead of RemoveNode + AddNode or SetTileRoot.
+    ///
+    /// Validation (Stage 4):
+    /// - `tile_id` must exist and be owned by the calling agent namespace.
+    /// - `node_id` must exist in the scene graph.
+    /// - `node_id` must be reachable from `tile_id`'s root node.
+    /// - The discriminant of `data` must match the existing node's discriminant.
+    /// - Content constraints (e.g. markdown byte limit) are re-enforced.
+    UpdateNodeContent {
+        tile_id: SceneId,
+        node_id: SceneId,
+        data: NodeData,
+    },
     // ── Zone mutations ────────────────────────────────────────────────────
     /// Publish content to a zone.
     PublishToZone {
@@ -243,6 +262,7 @@ impl SceneMutation {
             SceneMutation::DeleteTile { .. } => "DeleteTile",
             SceneMutation::SetTileRoot { .. } => "SetTileRoot",
             SceneMutation::AddNode { .. } => "AddNode",
+            SceneMutation::UpdateNodeContent { .. } => "UpdateNodeContent",
             SceneMutation::PublishToZone { .. } => "PublishToZone",
             SceneMutation::ClearZone { .. } => "ClearZone",
             SceneMutation::ClearWidget { .. } => "ClearWidget",
@@ -481,9 +501,9 @@ impl SceneGraph {
     /// For tile-targeting mutations (`UpdateTileBounds`, `UpdateTileZOrder`,
     /// `UpdateTileOpacity`, `UpdateTileInputMode`, `UpdateTileSyncGroup`,
     /// `UpdateTileExpiry`, `DeleteTile`, `SetTileRoot`, `AddNode`,
-    /// `JoinSyncGroup`, `LeaveSyncGroup`) the lease is derived from the
-    /// tile in the graph. This enables Stage 1 to catch expired/revoked
-    /// leases for all mutation types, not just `CreateTile`.
+    /// `UpdateNodeContent`, `JoinSyncGroup`, `LeaveSyncGroup`) the lease is
+    /// derived from the tile in the graph. This enables Stage 1 to catch
+    /// expired/revoked leases for all mutation types, not just `CreateTile`.
     fn lease_id_for_mutation(
         mutation: &SceneMutation,
         tiles: &std::collections::HashMap<SceneId, Tile>,
@@ -500,6 +520,7 @@ impl SceneGraph {
             | SceneMutation::DeleteTile { tile_id }
             | SceneMutation::SetTileRoot { tile_id, .. }
             | SceneMutation::AddNode { tile_id, .. }
+            | SceneMutation::UpdateNodeContent { tile_id, .. }
             | SceneMutation::JoinSyncGroup { tile_id, .. }
             | SceneMutation::LeaveSyncGroup { tile_id } => tiles.get(tile_id).map(|t| t.lease_id),
             // Tab mutations, zone mutations, sync group mutations other than
@@ -698,6 +719,15 @@ impl SceneGraph {
                 // Use checked variant to enforce namespace isolation and ModifyOwnTiles capability.
                 self.add_node_to_tile_checked(*tile_id, *parent_id, node.clone(), namespace)?;
                 Ok(vec![node.id])
+            }
+            SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id,
+                data,
+            } => {
+                // Use checked variant to enforce namespace isolation and ModifyOwnTiles capability.
+                self.update_node_content_checked(*tile_id, *node_id, data.clone(), namespace)?;
+                Ok(vec![])
             }
             // ── Zone mutations ────────────────────────────────────────────────
             SceneMutation::PublishToZone {
@@ -1106,6 +1136,280 @@ mod tests {
         assert!(result.rejection.is_some());
         // Tile should remain without a sync group
         assert_eq!(scene.tiles[&tile_id].sync_group, None);
+    }
+
+    // ── UpdateNodeContent tests ──────────────────────────────────────────
+
+    /// Helper: create a scene, tab, lease (with ModifyOwnTiles), tile, and text root node.
+    fn make_scene_with_text_node() -> (SceneGraph, SceneId, SceneId, SceneId, SceneId) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 400.0, 300.0),
+                1,
+            )
+            .unwrap();
+        let node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "hello".to_string(),
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+        let node_id = node.id;
+        scene.set_tile_root(tile_id, node).unwrap();
+        (scene, tab_id, lease_id, tile_id, node_id)
+    }
+
+    #[test]
+    fn test_update_node_content_text_happy_path() {
+        let (mut scene, _tab, lease_id, tile_id, node_id) = make_scene_with_text_node();
+
+        let batch = make_batch_with_lease(
+            "agent",
+            lease_id,
+            vec![SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id,
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: "updated content".to_string(),
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                    font_size_px: 16.0,
+                    font_family: FontFamily::SystemSansSerif,
+                    color: Rgba {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    background: None,
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Clip,
+                }),
+            }],
+        );
+        let result = scene.apply_batch(&batch);
+        assert!(result.applied, "UpdateNodeContent should succeed");
+        assert!(result.created_ids.is_empty(), "no new nodes created");
+
+        // Verify the content was updated in-place.
+        match &scene.nodes[&node_id].data {
+            NodeData::TextMarkdown(tm) => {
+                assert_eq!(tm.content, "updated content");
+                assert_eq!(tm.font_size_px, 16.0);
+            }
+            _ => panic!("unexpected node data variant"),
+        }
+    }
+
+    #[test]
+    fn test_update_node_content_wrong_type_rejected() {
+        let (mut scene, _tab, lease_id, tile_id, node_id) = make_scene_with_text_node();
+
+        // Try to swap a TextMarkdown node for a SolidColor node — must be rejected.
+        let batch = make_batch_with_lease(
+            "agent",
+            lease_id,
+            vec![SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id,
+                data: NodeData::SolidColor(SolidColorNode {
+                    color: Rgba {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                }),
+            }],
+        );
+        let result = scene.apply_batch(&batch);
+        assert!(!result.applied, "type-change should be rejected");
+        let rej = result.rejection.unwrap();
+        // Must be an InvalidField error targeting the data discriminant mismatch.
+        assert_eq!(rej.errors[0].mutation_type, "UpdateNodeContent");
+        assert_eq!(
+            rej.primary_code(),
+            Some(ValidationErrorCode::InvalidField),
+            "type-change must produce an InvalidField error code"
+        );
+    }
+
+    #[test]
+    fn test_update_node_content_nonexistent_node_rejected() {
+        let (mut scene, _tab, lease_id, tile_id, _node_id) = make_scene_with_text_node();
+        let ghost_node_id = SceneId::new();
+
+        let batch = make_batch_with_lease(
+            "agent",
+            lease_id,
+            vec![SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id: ghost_node_id,
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: "nope".to_string(),
+                    bounds: Rect::new(0.0, 0.0, 100.0, 100.0),
+                    font_size_px: 14.0,
+                    font_family: FontFamily::SystemSansSerif,
+                    color: Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    background: None,
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Clip,
+                }),
+            }],
+        );
+        let result = scene.apply_batch(&batch);
+        assert!(!result.applied, "unknown node should be rejected");
+        let rej = result.rejection.unwrap();
+        assert_eq!(rej.primary_code(), Some(ValidationErrorCode::NodeNotFound));
+    }
+
+    #[test]
+    fn test_update_node_content_node_in_wrong_tile_rejected() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            60_000,
+            vec![Capability::CreateTile, Capability::ModifyOwnTiles],
+        );
+
+        // Tile A with a text node.
+        let tile_a = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 100.0),
+                1,
+            )
+            .unwrap();
+        let node_a = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "A".to_string(),
+                bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                font_size_px: 14.0,
+                font_family: FontFamily::SystemSansSerif,
+                color: Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                background: None,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }),
+        };
+        let node_a_id = node_a.id;
+        scene.set_tile_root(tile_a, node_a).unwrap();
+
+        // Tile B (separate tile).
+        let tile_b = scene
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(300.0, 0.0, 200.0, 100.0),
+                2,
+            )
+            .unwrap();
+
+        // Try to update node_a using tile_b as the tile_id — must be rejected.
+        let batch = make_batch_with_lease(
+            "agent",
+            lease_id,
+            vec![SceneMutation::UpdateNodeContent {
+                tile_id: tile_b,
+                node_id: node_a_id,
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: "hijacked".to_string(),
+                    bounds: Rect::new(0.0, 0.0, 200.0, 100.0),
+                    font_size_px: 14.0,
+                    font_family: FontFamily::SystemSansSerif,
+                    color: Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    background: None,
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Clip,
+                }),
+            }],
+        );
+        let result = scene.apply_batch(&batch);
+        assert!(!result.applied, "cross-tile node access must be rejected");
+        // Node A content must be unchanged.
+        match &scene.nodes[&node_a_id].data {
+            NodeData::TextMarkdown(tm) => assert_eq!(tm.content, "A"),
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn test_update_node_content_content_size_enforced() {
+        use crate::graph::MAX_MARKDOWN_BYTES;
+        let (mut scene, _tab, lease_id, tile_id, node_id) = make_scene_with_text_node();
+
+        // Create a string that exceeds the markdown byte limit.
+        let oversized = "x".repeat(MAX_MARKDOWN_BYTES + 1);
+
+        let batch = make_batch_with_lease(
+            "agent",
+            lease_id,
+            vec![SceneMutation::UpdateNodeContent {
+                tile_id,
+                node_id,
+                data: NodeData::TextMarkdown(TextMarkdownNode {
+                    content: oversized,
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                    font_size_px: 14.0,
+                    font_family: FontFamily::SystemSansSerif,
+                    color: Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    background: None,
+                    alignment: TextAlign::Start,
+                    overflow: TextOverflow::Clip,
+                }),
+            }],
+        );
+        let result = scene.apply_batch(&batch);
+        assert!(!result.applied, "oversized content must be rejected");
     }
 
     #[test]

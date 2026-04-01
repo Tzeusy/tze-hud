@@ -155,6 +155,95 @@ pub fn proto_node_to_scene(n: &proto::NodeProto) -> Option<Node> {
     })
 }
 
+/// Convert the `oneof data` from an `UpdateNodeContentMutation` proto to a
+/// scene `NodeData`.  Returns `None` if the variant is missing or malformed.
+pub fn proto_update_node_content_data_to_scene(
+    d: &proto::update_node_content_mutation::Data,
+) -> Option<NodeData> {
+    use proto::update_node_content_mutation::Data;
+    match d {
+        Data::SolidColor(sc) => {
+            let color = sc
+                .color
+                .as_ref()
+                .map(proto_rgba_to_scene)
+                .unwrap_or(Rgba::WHITE);
+            let bounds = sc
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            Some(NodeData::SolidColor(SolidColorNode { color, bounds }))
+        }
+        Data::TextMarkdown(tm) => {
+            let color = tm
+                .color
+                .as_ref()
+                .map(proto_rgba_to_scene)
+                .unwrap_or(Rgba::WHITE);
+            let bg = tm.background.as_ref().map(proto_rgba_to_scene);
+            let bounds = tm
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            Some(NodeData::TextMarkdown(TextMarkdownNode {
+                content: tm.content.clone(),
+                bounds,
+                font_size_px: if tm.font_size_px > 0.0 {
+                    tm.font_size_px
+                } else {
+                    16.0
+                },
+                font_family: FontFamily::SystemSansSerif,
+                color,
+                background: bg,
+                alignment: TextAlign::Start,
+                overflow: TextOverflow::Clip,
+            }))
+        }
+        Data::HitRegion(hr) => {
+            let bounds = hr
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 50.0));
+            Some(NodeData::HitRegion(HitRegionNode {
+                bounds,
+                interaction_id: hr.interaction_id.clone(),
+                accepts_focus: hr.accepts_focus,
+                accepts_pointer: hr.accepts_pointer,
+                ..Default::default()
+            }))
+        }
+        Data::StaticImage(si) => {
+            let bounds = si
+                .bounds
+                .as_ref()
+                .map(proto_rect_to_scene)
+                .unwrap_or(Rect::new(0.0, 0.0, 100.0, 100.0));
+            let fit_mode = match proto::ImageFitModeProto::try_from(si.fit_mode)
+                .unwrap_or(proto::ImageFitModeProto::ImageFitModeUnspecified)
+            {
+                proto::ImageFitModeProto::ImageFitModeContain
+                | proto::ImageFitModeProto::ImageFitModeUnspecified => ImageFitMode::Contain,
+                proto::ImageFitModeProto::ImageFitModeCover => ImageFitMode::Cover,
+                proto::ImageFitModeProto::ImageFitModeFill => ImageFitMode::Fill,
+                proto::ImageFitModeProto::ImageFitModeScaleDown => ImageFitMode::ScaleDown,
+            };
+            let resource_id = ResourceId::from_slice(&si.resource_id)?;
+            Some(NodeData::StaticImage(StaticImageNode {
+                resource_id,
+                width: si.width,
+                height: si.height,
+                decoded_bytes: 0,
+                fit_mode,
+                bounds,
+            }))
+        }
+    }
+}
+
 // ─── Zone conversions ─────────────────────────────────────────────────────────
 
 /// Convert a protobuf ZoneContent to a scene ZoneContent.
