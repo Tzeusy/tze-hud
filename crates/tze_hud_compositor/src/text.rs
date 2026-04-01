@@ -35,7 +35,7 @@ use std::collections::HashSet;
 
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use tze_hud_scene::types::{
     FontFamily, RenderingPolicy, Rgba, TextAlign, TextMarkdownNode, TextOverflow,
@@ -200,7 +200,10 @@ impl TextRasterizer {
                     FontFamily::SystemMonospace => Family::Monospace,
                     FontFamily::SystemSerif => Family::Serif,
                 };
-                let attrs = Attrs::new().family(family);
+                // Map CSS-style weight (100–900) to glyphon Weight.
+                // Clamp to [100, 900]; Weight(0) would select arbitrary fallback fonts.
+                let weight = Weight(item.font_weight.clamp(100, 900));
+                let attrs = Attrs::new().family(family).weight(weight);
                 buf.set_text(&mut self.font_system, &item.text, attrs, Shaping::Basic);
                 buf.shape_until_scroll(&mut self.font_system, false);
                 buf
@@ -317,6 +320,10 @@ pub struct TextItem {
     pub font_size_px: f32,
     /// Font family selection.
     pub font_family: FontFamily,
+    /// Font weight (CSS-style: 100–900); 400 = regular, 700 = bold.
+    ///
+    /// Mapped to `glyphon::Weight` at rasterization time.
+    pub font_weight: u16,
     /// Text color as sRGB u8 bytes: [r, g, b, a].
     pub color: [u8; 4],
     /// Alignment (used for cosmic-text alignment).
@@ -360,6 +367,7 @@ impl TextItem {
             bounds_height: h,
             font_size_px: node.font_size_px.clamp(6.0, 200.0),
             font_family: node.font_family,
+            font_weight: 400, // TextMarkdownNode does not carry weight; default regular.
             color: [r, g, b, a],
             alignment: node.alignment,
             overflow: node.overflow,
@@ -397,6 +405,8 @@ impl TextItem {
 
         let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
         let font_family = policy.font_family.unwrap_or(FontFamily::SystemSansSerif);
+        // font_weight: use policy value clamped to CSS weight range [100, 900]; default 400.
+        let font_weight = policy.font_weight.unwrap_or(400).clamp(100, 900);
         let alignment = policy.text_align.unwrap_or(TextAlign::Start);
 
         // text_color: policy.text_color if present, else white.
@@ -425,6 +435,7 @@ impl TextItem {
             bounds_height: (h - margin_v * 2.0).max(1.0),
             font_size_px,
             font_family,
+            font_weight,
             color,
             alignment,
             overflow: TextOverflow::Clip,
@@ -461,6 +472,7 @@ impl TextItem {
             bounds_height: (h - margin * 2.0).max(1.0),
             font_size_px: font_size_px.clamp(6.0, 200.0),
             font_family: FontFamily::SystemSansSerif,
+            font_weight: 400,
             color,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
@@ -496,6 +508,7 @@ impl TextItem {
             bounds_height: (h - margin * 2.0).max(1.0),
             font_size_px: font_size_px.clamp(6.0, 200.0),
             font_family: FontFamily::SystemSansSerif,
+            font_weight: 400,
             color,
             alignment: TextAlign::Start,
             overflow: TextOverflow::Clip,
@@ -789,5 +802,58 @@ mod tests {
         assert_eq!(result[2], 50);
         // 200 * 0.5 = 100.
         assert_eq!(result[3], 100, "alpha halved");
+    }
+
+    // ── font_weight tests [hud-w3o6.2] ───────────────────────────────────────
+
+    /// font_weight=700 is propagated from RenderingPolicy to TextItem.
+    ///
+    /// Acceptance criterion §Alert-Banner Heading Typography:
+    ///   "typography.heading.weight (700/bold)"
+    #[test]
+    fn from_zone_policy_font_weight_bold_propagated() {
+        use tze_hud_scene::types::RenderingPolicy;
+        let policy = RenderingPolicy {
+            font_weight: Some(700),
+            ..Default::default()
+        };
+        let item = TextItem::from_zone_policy("bold text", 0.0, 0.0, 300.0, 60.0, &policy, 1.0);
+        assert_eq!(
+            item.font_weight, 700,
+            "font_weight=700 (bold) must be propagated from RenderingPolicy to TextItem"
+        );
+    }
+
+    /// font_weight defaults to 400 (regular) when not set in RenderingPolicy.
+    #[test]
+    fn from_zone_policy_font_weight_defaults_to_regular() {
+        use tze_hud_scene::types::RenderingPolicy;
+        let policy = RenderingPolicy::default(); // font_weight = None
+        let item = TextItem::from_zone_policy("regular text", 0.0, 0.0, 300.0, 60.0, &policy, 1.0);
+        assert_eq!(
+            item.font_weight, 400,
+            "font_weight must default to 400 (regular) when not set"
+        );
+    }
+
+    /// from_text_markdown_node defaults font_weight to 400 (regular).
+    #[test]
+    fn from_text_markdown_node_font_weight_defaults_to_regular() {
+        use tze_hud_scene::types::{Rect, Rgba, TextMarkdownNode};
+        let node = TextMarkdownNode {
+            content: "Plain text".to_owned(),
+            bounds: Rect::new(0.0, 0.0, 200.0, 60.0),
+            font_size_px: 16.0,
+            font_family: FontFamily::SystemSansSerif,
+            color: Rgba::WHITE,
+            background: None,
+            alignment: TextAlign::Start,
+            overflow: TextOverflow::Clip,
+        };
+        let item = TextItem::from_text_markdown_node(&node, 0.0, 0.0);
+        assert_eq!(
+            item.font_weight, 400,
+            "from_text_markdown_node must default font_weight to 400"
+        );
     }
 }

@@ -19,7 +19,7 @@
 
 # Typography — bold heading for urgency and immediate attention
 font_family  = "{{typography.heading.family}}"    # resolved: "system-ui"
-font_size_px = "{{typography.heading.size}}"      # resolved: 20px (token override)
+font_size_px = "{{typography.heading.size}}"      # resolved: 24px per spec §Alert-Banner Heading Typography
 font_weight  = "{{typography.heading.weight}}"    # resolved: 700 (bold)
 
 # Text — white for high contrast against all severity backdrop colors

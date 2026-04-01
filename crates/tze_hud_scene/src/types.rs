@@ -2203,18 +2203,62 @@ impl ZoneRegistry {
         });
 
         // 6. alert-banner: edge-anchored top, Replace, Chrome layer
+        //
+        // Heading typography per spec §Alert-Banner Heading Typography:
+        //   font_size_px = 24px (typography.heading.size)
+        //   font_family  = SystemSansSerif (typography.heading.family)
+        //   font_weight  = 700/bold (typography.heading.weight)
+        //   text_color   = #FFFFFF white (color.text.primary) — max contrast vs severity backdrops
+        //   margin_horizontal = 8px inset from backdrop edges
+        //
+        // Chrome-layer positioning per spec §Alert-Banner Chrome-Layer Positioning:
+        //   layer_attachment = Chrome — renders above all agent content
+        //   width_pct = 1.0 — full display width
+        //   height_pct = 0.06 — at 720p: 0.06×720=43.2px, which exceeds 24px font + natural line-height space
+        //   Zero-height when inactive: compositor skips backdrop/text for empty zones;
+        //   no visible pixels are emitted when no alerts are active.
+        //
+        // backdrop + backdrop_opacity provide the dark fallback color for non-severity
+        // content (e.g. StreamText) and are overridden by severity token colors for
+        // NotificationPayload in render_zone_content.
         registry.register(ZoneDefinition {
             id: SceneId::new(),
             name: "alert-banner".to_string(),
-            description: "Alert banner — top edge, single occupant".to_string(),
+            description: "Alert banner — top edge, chrome layer, heading typography".to_string(),
             geometry_policy: GeometryPolicy::EdgeAnchored {
                 edge: DisplayEdge::Top,
-                height_pct: 0.05,
+                // 6% of display height: at 720p this gives 43.2px, comfortably above the 24px heading.
+                height_pct: 0.06,
                 width_pct: 1.0,
                 margin_px: 0.0,
             },
             accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon, ZoneMediaType::StreamText],
-            rendering_policy: RenderingPolicy::default(),
+            rendering_policy: RenderingPolicy {
+                // Heading typography — §Alert-Banner Heading Typography
+                font_size_px: Some(24.0),
+                font_family: Some(FontFamily::SystemSansSerif),
+                font_weight: Some(700),
+                // White text (#FFFFFF) — max contrast against severity backdrops
+                text_color: Some(Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                }),
+                // Dark backdrop fallback (used for non-Notification content + default)
+                backdrop: Some(Rgba {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.16,
+                    a: 0.9,
+                }),
+                backdrop_opacity: Some(0.9),
+                // Horizontal inset from backdrop edges
+                margin_horizontal: Some(8.0),
+                // Flush to anchored edge — no vertical margin
+                margin_vertical: Some(0.0),
+                ..RenderingPolicy::default()
+            },
             contention_policy: ContentionPolicy::Replace,
             max_publishers: 1,
             transport_constraint: None,
