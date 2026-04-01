@@ -1619,7 +1619,9 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
 #[test]
 fn roundtrip_rendering_policy_convert_all_fields_populated() {
     use tze_hud_protocol::convert::{proto_to_rendering_policy, rendering_policy_to_proto};
-    use tze_hud_scene::types::{FontFamily, RenderingPolicy, Rgba as SceneRgba, TextAlign, TextOverflow};
+    use tze_hud_scene::types::{
+        FontFamily, RenderingPolicy, Rgba as SceneRgba, TextAlign, TextOverflow,
+    };
 
     let original = RenderingPolicy {
         font_size_px: Some(20.0),
