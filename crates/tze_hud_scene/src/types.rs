@@ -2202,7 +2202,7 @@ impl ZoneRegistry {
             layer_attachment: LayerAttachment::Background,
         });
 
-        // 6. alert-banner: edge-anchored top, Replace, Chrome layer
+        // 6. alert-banner: edge-anchored top, Stack-by-severity, Chrome layer.
         //
         // Heading typography per spec §Alert-Banner Heading Typography:
         //   font_size_px = 24px (typography.heading.size)
@@ -2214,9 +2214,14 @@ impl ZoneRegistry {
         // Chrome-layer positioning per spec §Alert-Banner Chrome-Layer Positioning:
         //   layer_attachment = Chrome — renders above all agent content
         //   width_pct = 1.0 — full display width
-        //   height_pct = 0.06 — at 720p: 0.06×720=43.2px, which exceeds 24px font + natural line-height space
+        //   height_pct = 0.06 — per-slot height; compositor scales total to active_count × slot_h
         //   Zero-height when inactive: compositor skips backdrop/text for empty zones;
         //   no visible pixels are emitted when no alerts are active.
+        //
+        // Multiple banners stack vertically ordered by severity (critical at top,
+        // warning below, info at bottom).  Within the same severity level, newer
+        // banners appear above older ones.  Zone height grows dynamically:
+        // slot_height × active_count; zero height when no banners are active.
         //
         // backdrop + backdrop_opacity provide the dark fallback color for non-severity
         // content (e.g. StreamText) and are overridden by severity token colors for
@@ -2224,7 +2229,7 @@ impl ZoneRegistry {
         registry.register(ZoneDefinition {
             id: SceneId::new(),
             name: "alert-banner".to_string(),
-            description: "Alert banner — top edge, chrome layer, heading typography".to_string(),
+            description: "Alert banner — top edge, severity-stacked multi-occupant, chrome layer, heading typography".to_string(),
             geometry_policy: GeometryPolicy::EdgeAnchored {
                 edge: DisplayEdge::Top,
                 // 6% of display height: at 720p this gives 43.2px, comfortably above the 24px heading.
@@ -2259,8 +2264,8 @@ impl ZoneRegistry {
                 margin_vertical: Some(0.0),
                 ..RenderingPolicy::default()
             },
-            contention_policy: ContentionPolicy::Replace,
-            max_publishers: 1,
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 16,
             transport_constraint: None,
             auto_clear_ms: Some(10_000),
             ephemeral: false,

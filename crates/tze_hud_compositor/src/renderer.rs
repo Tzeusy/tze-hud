@@ -69,6 +69,41 @@ fn is_alert_banner_zone(zone_name: &str) -> bool {
     zone_name == "alert-banner"
 }
 
+/// Extract the urgency from a `ZonePublishRecord` if it carries `Notification` content.
+///
+/// Returns `0` for non-Notification content (treated as lowest severity for sort).
+#[inline]
+fn publish_urgency(record: &ZonePublishRecord) -> u32 {
+    match &record.content {
+        ZoneContent::Notification(n) => n.urgency,
+        _ => 0,
+    }
+}
+
+/// Sort alert-banner publications into display order: severity-descending (critical first),
+/// then recency-descending (newer first) within the same severity level.
+///
+/// Returns indices into `publishes` in the order they should occupy slots 0, 1, 2, …
+/// (slot 0 = topmost = highest severity / newest).
+///
+/// This is a pure helper so both `collect_text_items` and `render_zone_content` use
+/// the same ordering without duplicating logic.
+fn sort_alert_banner_indices(publishes: &[ZonePublishRecord]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..publishes.len()).collect();
+    // Primary key: urgency descending (3=critical at top).
+    // Secondary key: published_at_wall_us descending (newer above older).
+    indices.sort_by(|&a, &b| {
+        let ua = publish_urgency(&publishes[a]);
+        let ub = publish_urgency(&publishes[b]);
+        ub.cmp(&ua).then_with(|| {
+            publishes[b]
+                .published_at_wall_us
+                .cmp(&publishes[a].published_at_wall_us)
+        })
+    });
+    indices
+}
+
 /// Parse a `#RRGGBB` or `#RRGGBBAA` hex string into `Rgba`.
 ///
 /// This is a minimal, allocation-free parser used to resolve token color
@@ -892,8 +927,12 @@ impl Compositor {
 
             // Emit TextItems based on contention policy.
             //
-            // Stack: each publication occupies a vertically-stacked slot (newest at top,
-            //   slot 0 = newest).  slot_h via Self::stack_slot_height().
+            // Stack: each publication occupies a vertically-stacked slot.
+            //   For generic Stack zones: newest at top (slot 0 = newest).
+            //   For alert-banner zones: severity-descending (critical first),
+            //   then recency-descending (newer first) within the same severity.
+            //   slot_h via Self::stack_slot_height().
+            //   Dynamic height: alert-banner zone height = active_count × slot_h.
             //
             // MergeByKey: collect ALL StatusBar publications, merge their entries
             //   (last write wins per key), render the merged set as one text item.
@@ -902,40 +941,90 @@ impl Compositor {
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
                     let slot_h = Self::stack_slot_height(policy);
-                    // Render newest-first: slot_index 0 = newest (top of zone).
-                    for (slot_idx, record) in publishes.iter().rev().enumerate() {
-                        let slot_y = zy + slot_idx as f32 * slot_h;
-                        // Clip to zone bounds.
-                        if slot_y >= zy + zh {
-                            break;
-                        }
-                        let effective_slot_h = slot_h.min((zy + zh) - slot_y);
 
-                        match &record.content {
-                            ZoneContent::StreamText(text) => {
-                                items.push(TextItem::from_zone_policy(
-                                    text,
-                                    zx,
-                                    slot_y,
-                                    zw,
-                                    effective_slot_h,
-                                    policy,
-                                    anim_opacity,
-                                ));
+                    // For alert-banner: dynamic zone height = active_count × slot_h.
+                    // Height grows with each active banner; no cap at the configured
+                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
+                    // For other Stack zones: use the configured zone height (zh).
+                    let effective_zh = if is_alert_banner_zone(zone_name) {
+                        publishes.len() as f32 * slot_h
+                    } else {
+                        zh
+                    };
+
+                    // Build the ordered iteration: alert-banner uses severity sort,
+                    // other Stack zones use newest-first (iter().rev()).
+                    if is_alert_banner_zone(zone_name) {
+                        let order = sort_alert_banner_indices(publishes);
+                        for (slot_idx, &pub_idx) in order.iter().enumerate() {
+                            let record = &publishes[pub_idx];
+                            let slot_y = zy + slot_idx as f32 * slot_h;
+                            if slot_y >= zy + effective_zh {
+                                break;
                             }
-                            ZoneContent::Notification(payload) => {
-                                // Icon rendering is stubbed (no texture pipeline in v1).
-                                items.push(TextItem::from_zone_policy(
-                                    &payload.text,
-                                    zx,
-                                    slot_y,
-                                    zw,
-                                    effective_slot_h,
-                                    policy,
-                                    anim_opacity,
-                                ));
+                            let effective_slot_h = slot_h.min((zy + effective_zh) - slot_y);
+                            match &record.content {
+                                ZoneContent::StreamText(text) => {
+                                    items.push(TextItem::from_zone_policy(
+                                        text,
+                                        zx,
+                                        slot_y,
+                                        zw,
+                                        effective_slot_h,
+                                        policy,
+                                        anim_opacity,
+                                    ));
+                                }
+                                ZoneContent::Notification(payload) => {
+                                    items.push(TextItem::from_zone_policy(
+                                        &payload.text,
+                                        zx,
+                                        slot_y,
+                                        zw,
+                                        effective_slot_h,
+                                        policy,
+                                        anim_opacity,
+                                    ));
+                                }
+                                _ => {}
                             }
-                            _ => {}
+                        }
+                    } else {
+                        // Non-alert-banner Stack: newest-first.
+                        for (slot_idx, record) in publishes.iter().rev().enumerate() {
+                            let slot_y = zy + slot_idx as f32 * slot_h;
+                            // Clip to zone bounds.
+                            if slot_y >= zy + effective_zh {
+                                break;
+                            }
+                            let effective_slot_h = slot_h.min((zy + effective_zh) - slot_y);
+
+                            match &record.content {
+                                ZoneContent::StreamText(text) => {
+                                    items.push(TextItem::from_zone_policy(
+                                        text,
+                                        zx,
+                                        slot_y,
+                                        zw,
+                                        effective_slot_h,
+                                        policy,
+                                        anim_opacity,
+                                    ));
+                                }
+                                ZoneContent::Notification(payload) => {
+                                    // Icon rendering is stubbed (no texture pipeline in v1).
+                                    items.push(TextItem::from_zone_policy(
+                                        &payload.text,
+                                        zx,
+                                        slot_y,
+                                        zw,
+                                        effective_slot_h,
+                                        policy,
+                                        anim_opacity,
+                                    ));
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -1831,10 +1920,11 @@ impl Compositor {
             // Resolve and emit backdrop quads based on the zone's contention policy.
             //
             // Stack zones: each publication gets its own vertically-stacked slot.
-            //   Publishes are rendered newest-first (slot 0 = newest, at top of zone).
+            //   For alert-banner: severity-descending (critical first), then
+            //   recency-descending within the same severity.  Dynamic zone height:
+            //   active_count × slot_h (zero when empty, capped at configured max).
+            //   For other Stack zones: newest-first (slot 0 = newest, at top of zone).
             //   slot_h via Self::stack_slot_height() — content-sized, policy-driven.
-            //   This gives each notification a content-sized slot rather than dividing
-            //   zone height uniformly by max_depth.
             //
             // MergeByKey zones: single backdrop for the full zone (entries are merged
             //   at the data level; visually one unified strip).
@@ -1843,39 +1933,91 @@ impl Compositor {
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
                     let slot_h = Self::stack_slot_height(policy);
-                    // Render newest-first: slot_index 0 = newest (top of zone).
-                    for (slot_idx, record) in publishes.iter().rev().enumerate() {
-                        let slot_y = y + slot_idx as f32 * slot_h;
-                        // Clip to zone bounds.
-                        if slot_y >= y + h {
-                            break;
+
+                    // alert-banner: dynamic height = active_count × slot_h.
+                    // Height grows with each active banner; no cap at the configured
+                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
+                    // For other Stack zones: use the configured zone height (h).
+                    let effective_h = if is_alert_banner_zone(zone_name) {
+                        publishes.len() as f32 * slot_h
+                    } else {
+                        h
+                    };
+
+                    if is_alert_banner_zone(zone_name) {
+                        // Severity-aware ordering: critical (urgency 3) at top,
+                        // warning (2) below, info (0-1) at bottom.
+                        // Same severity: newer above older.
+                        let order = sort_alert_banner_indices(publishes);
+                        for (slot_idx, &pub_idx) in order.iter().enumerate() {
+                            let record = &publishes[pub_idx];
+                            let slot_y = y + slot_idx as f32 * slot_h;
+                            if slot_y >= y + effective_h {
+                                break;
+                            }
+                            let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
+
+                            let backdrop_rgba: Option<Rgba> = match &record.content {
+                                ZoneContent::SolidColor(rgba) => Some(*rgba),
+                                ZoneContent::Notification(n) => {
+                                    let severity_color =
+                                        urgency_to_severity_color(n.urgency, &self.token_map);
+                                    Some(severity_color)
+                                }
+                                _ => policy.backdrop,
+                            };
+
+                            if let Some(mut rgba) = backdrop_rgba {
+                                if let Some(opacity) = policy.backdrop_opacity {
+                                    rgba.a = opacity.clamp(0.0, 1.0);
+                                }
+                                rgba.a *= anim_opacity.clamp(0.0, 1.0);
+                                vertices.extend_from_slice(&rect_vertices(
+                                    x,
+                                    slot_y,
+                                    w,
+                                    effective_slot_h,
+                                    sw,
+                                    sh,
+                                    rgba.to_array(),
+                                ));
+                            }
                         }
-                        let effective_slot_h = slot_h.min((y + h) - slot_y);
-
-                        let backdrop_rgba: Option<Rgba> = match &record.content {
-                            ZoneContent::SolidColor(rgba) => Some(*rgba),
-                            ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
-                                let severity_color =
-                                    urgency_to_severity_color(n.urgency, &self.token_map);
-                                Some(severity_color)
+                    } else {
+                        // Non-alert-banner Stack: render newest-first.
+                        for (slot_idx, record) in publishes.iter().rev().enumerate() {
+                            let slot_y = y + slot_idx as f32 * slot_h;
+                            // Clip to zone bounds.
+                            if slot_y >= y + effective_h {
+                                break;
                             }
-                            _ => policy.backdrop,
-                        };
+                            let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
 
-                        if let Some(mut rgba) = backdrop_rgba {
-                            if let Some(opacity) = policy.backdrop_opacity {
-                                rgba.a = opacity.clamp(0.0, 1.0);
+                            let backdrop_rgba: Option<Rgba> = match &record.content {
+                                ZoneContent::SolidColor(rgba) => Some(*rgba),
+                                ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                                    let severity_color =
+                                        urgency_to_severity_color(n.urgency, &self.token_map);
+                                    Some(severity_color)
+                                }
+                                _ => policy.backdrop,
+                            };
+
+                            if let Some(mut rgba) = backdrop_rgba {
+                                if let Some(opacity) = policy.backdrop_opacity {
+                                    rgba.a = opacity.clamp(0.0, 1.0);
+                                }
+                                rgba.a *= anim_opacity.clamp(0.0, 1.0);
+                                vertices.extend_from_slice(&rect_vertices(
+                                    x,
+                                    slot_y,
+                                    w,
+                                    effective_slot_h,
+                                    sw,
+                                    sh,
+                                    rgba.to_array(),
+                                ));
                             }
-                            rgba.a *= anim_opacity.clamp(0.0, 1.0);
-                            vertices.extend_from_slice(&rect_vertices(
-                                x,
-                                slot_y,
-                                w,
-                                effective_slot_h,
-                                sw,
-                                sh,
-                                rgba.to_array(),
-                            ));
                         }
                     }
                 }
@@ -4686,8 +4828,8 @@ mod tests {
                 margin_vertical: Some(0.0),
                 ..Default::default()
             },
-            contention_policy: ContentionPolicy::Replace,
-            max_publishers: 1,
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 16,
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
@@ -4947,6 +5089,307 @@ mod tests {
             policy.margin_horizontal,
             Some(8.0),
             "alert-banner default rendering policy must have margin_horizontal=8"
+        );
+    }
+
+    // ─── Alert-banner severity-stack tests ───────────────────────────────────
+
+    /// Helper: build a SceneGraph with an alert-banner Stack zone for severity tests.
+    ///
+    /// Zone: full-width, EdgeAnchored top, height_pct=0.05 (36px at 720p).
+    /// font_size_px=16, default margin_v=8 → slot_h = 16 + 2×8 + 2 = 34px.
+    /// max_depth=8, max_publishers=16.
+    fn make_alert_banner_scene() -> SceneGraph {
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "alert-banner".to_owned(),
+            description: "alert-banner severity-stack test zone".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.05,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                font_size_px: Some(16.0),
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)),
+                backdrop_opacity: Some(1.0),
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 16,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+        scene
+    }
+
+    /// Helper: publish an alert banner notification.
+    fn publish_alert(
+        scene: &mut SceneGraph,
+        text: &str,
+        urgency: u32,
+        publisher: &str,
+    ) {
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: text.to_owned(),
+                    icon: String::new(),
+                    urgency,
+                }),
+                publisher,
+                None,
+                None,
+                None,
+            )
+            .expect("alert-banner publish must succeed");
+    }
+
+    /// Critical (urgency=3) banner must appear above warning (urgency=2).
+    ///
+    /// With two banners, slot 0 (top) must be the critical one regardless of
+    /// publication order (warning published before critical).
+    #[tokio::test]
+    async fn test_alert_banner_critical_above_warning() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = make_alert_banner_scene();
+
+        // Publish warning first, then critical.
+        publish_alert(&mut scene, "Warning: disk space low", 2, "agent-a");
+        publish_alert(&mut scene, "Critical: system failure", 3, "agent-b");
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 2, "two banners → two TextItems");
+
+        // Slot 0 (pixel_y=0) must be the critical banner (urgency 3).
+        // Slot 1 (pixel_y=slot_h) must be the warning banner (urgency 2).
+        // The critical banner is at a lower pixel_y value (top of the zone).
+        let y_first = items[0].pixel_y;
+        let y_second = items[1].pixel_y;
+        assert!(
+            y_first < y_second,
+            "slot 0 (critical) must be above slot 1 (warning): y0={y_first} y1={y_second}"
+        );
+        assert!(
+            items[0].text.contains("Critical"),
+            "slot 0 must be the critical banner; got: {}",
+            items[0].text
+        );
+        assert!(
+            items[1].text.contains("Warning"),
+            "slot 1 must be the warning banner; got: {}",
+            items[1].text
+        );
+    }
+
+    /// Warning (urgency=2) banner must appear above info (urgency=0-1).
+    ///
+    /// Info published before warning — severity sort must override arrival order.
+    #[tokio::test]
+    async fn test_alert_banner_warning_above_info() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = make_alert_banner_scene();
+
+        // Publish info first, then warning.
+        publish_alert(&mut scene, "Info: update available", 1, "agent-a");
+        publish_alert(&mut scene, "Warning: memory pressure", 2, "agent-b");
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 2, "two banners → two TextItems");
+
+        assert!(
+            items[0].text.contains("Warning"),
+            "slot 0 must be the warning banner; got: {}",
+            items[0].text
+        );
+        assert!(
+            items[1].text.contains("Info"),
+            "slot 1 must be the info banner; got: {}",
+            items[1].text
+        );
+        assert!(
+            items[0].pixel_y < items[1].pixel_y,
+            "warning slot must be above info slot"
+        );
+    }
+
+    /// Three-level severity stack: critical → warning → info (top to bottom).
+    ///
+    /// Published in reverse order (info, warning, critical) to confirm severity
+    /// sort overrides arrival order.
+    #[tokio::test]
+    async fn test_alert_banner_three_level_severity_stack() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = make_alert_banner_scene();
+
+        // Publish info first, then warning, then critical.
+        publish_alert(&mut scene, "Info: routine scan complete", 0, "agent-a");
+        publish_alert(&mut scene, "Warning: high load", 2, "agent-b");
+        publish_alert(&mut scene, "Critical: disk full", 3, "agent-c");
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 3, "three banners → three TextItems");
+
+        // Verify order: critical (slot 0), warning (slot 1), info (slot 2).
+        assert!(
+            items[0].text.contains("Critical"),
+            "slot 0 must be critical; got: {}",
+            items[0].text
+        );
+        assert!(
+            items[1].text.contains("Warning"),
+            "slot 1 must be warning; got: {}",
+            items[1].text
+        );
+        assert!(
+            items[2].text.contains("Info"),
+            "slot 2 must be info; got: {}",
+            items[2].text
+        );
+        // Pixel positions must decrease (slot 0 < slot 1 < slot 2 in pixel_y).
+        assert!(items[0].pixel_y < items[1].pixel_y, "critical above warning");
+        assert!(items[1].pixel_y < items[2].pixel_y, "warning above info");
+    }
+
+    /// Same-severity banners: the newer one must appear above the older one.
+    ///
+    /// Two warnings: first published at t=100, second at t=200.  Slot 0 must be
+    /// the newer one (t=200, "Warning B").
+    #[tokio::test]
+    async fn test_alert_banner_same_severity_recency_order() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = make_alert_banner_scene();
+
+        // Publish two warnings — graph clock advances monotonically per publish.
+        publish_alert(&mut scene, "Warning A (older)", 2, "agent-a");
+        publish_alert(&mut scene, "Warning B (newer)", 2, "agent-b");
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert_eq!(items.len(), 2, "two warnings → two TextItems");
+
+        // Newer publish must be slot 0 (top).
+        assert!(
+            items[0].text.contains("Warning B"),
+            "slot 0 must be the newer warning (B); got: {}",
+            items[0].text
+        );
+        assert!(
+            items[1].text.contains("Warning A"),
+            "slot 1 must be the older warning (A); got: {}",
+            items[1].text
+        );
+    }
+
+    /// Alert-banner zone height grows dynamically with active banner count.
+    ///
+    /// slot_h = font_size_px(16) + 2 × margin_v(8) + SLOT_BASELINE_GAP(2) = 34px.
+    ///
+    /// - 0 banners → 0 vertices (zero height, nothing rendered).
+    /// - 1 banner  → quads occupying 1 × slot_h = 34px.
+    /// - 2 banners → quads occupying 2 × slot_h = 68px.
+    #[tokio::test]
+    async fn test_alert_banner_zone_height_grows_with_active_count() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        // ── 0 banners: no vertices emitted ──────────────────────────────────
+        {
+            let scene = make_alert_banner_scene();
+            let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+            assert!(
+                vertices.is_empty(),
+                "0 banners → 0 vertices (zero height); got {} vertices",
+                vertices.len()
+            );
+        }
+
+        // ── 1 banner: one backdrop quad (6 vertices) ────────────────────────
+        {
+            let mut scene = make_alert_banner_scene();
+            publish_alert(&mut scene, "Single banner", 2, "agent-a");
+            let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+            assert_eq!(
+                vertices.len(),
+                6,
+                "1 banner → 1 backdrop quad (6 vertices); got {}",
+                vertices.len()
+            );
+        }
+
+        // ── 2 banners: two backdrop quads (12 vertices) ─────────────────────
+        {
+            let mut scene = make_alert_banner_scene();
+            publish_alert(&mut scene, "Banner A", 2, "agent-a");
+            publish_alert(&mut scene, "Banner B", 3, "agent-b");
+            let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+            assert_eq!(
+                vertices.len(),
+                12,
+                "2 banners → 2 backdrop quads (12 vertices); got {}",
+                vertices.len()
+            );
+        }
+    }
+
+    /// render_zone_content for alert-banner uses severity-ordered backdropcolors.
+    ///
+    /// With critical (urgency=3) and warning (urgency=2), the first backdrop quad
+    /// (slot 0, top) must be red (critical color), and the second must be amber
+    /// (warning color).
+    #[tokio::test]
+    async fn test_alert_banner_backdrop_colors_ordered_by_severity() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+        let mut scene = make_alert_banner_scene();
+
+        // Publish warning first, then critical (to confirm severity overrides arrival).
+        publish_alert(&mut scene, "Warning", 2, "agent-a");
+        publish_alert(&mut scene, "Critical", 3, "agent-b");
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // 2 backdrop quads → 12 vertices.
+        assert_eq!(vertices.len(), 12, "2 banners → 12 vertices");
+
+        // Slot 0 (vertices 0-5) must be critical red: R > 0.9, G < 0.1, B < 0.1.
+        let slot0_color = vertices[0].color;
+        assert!(
+            slot0_color[0] > 0.9,
+            "slot 0 backdrop R should be ~1.0 (critical red); got {}",
+            slot0_color[0]
+        );
+        assert!(
+            slot0_color[1] < 0.1,
+            "slot 0 backdrop G should be ~0.0 (critical red); got {}",
+            slot0_color[1]
+        );
+
+        // Slot 1 (vertices 6-11) must be warning amber: R > 0.9, G mid, B < 0.1.
+        let slot1_color = vertices[6].color;
+        assert!(
+            slot1_color[0] > 0.9,
+            "slot 1 backdrop R should be ~1.0 (warning amber); got {}",
+            slot1_color[0]
+        );
+        assert!(
+            slot1_color[2] < 0.1,
+            "slot 1 backdrop B should be ~0.0 (warning amber); got {}",
+            slot1_color[2]
+        );
+        // Amber has non-trivial G (0.5–0.9), while critical has G < 0.1.
+        assert!(
+            slot1_color[1] > 0.5,
+            "slot 1 backdrop G should be mid (warning amber ≈ 0.72); got {}",
+            slot1_color[1]
         );
     }
 }
