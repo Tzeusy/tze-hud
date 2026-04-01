@@ -42,8 +42,9 @@ use tze_hud_widget::loader::{BundleScanResult, load_bundle_dir_with_tokens};
 /// Lenient CI threshold: 500ms allows ample headroom for debug builds and
 /// software renderers (llvmpipe).
 ///
-/// The strict 2ms spec requirement is enforced by the Criterion benchmark:
-///   `cargo bench --bench widget_rasterize`
+/// The strict 2ms spec requirement is enforced by the Criterion benchmark in
+/// the compositor crate:
+///   `cargo bench -p tze_hud_compositor --bench widget_rasterize`
 const CI_THRESHOLD_MS: u64 = 500;
 
 /// Spec target documented for reference (not enforced in this test).
@@ -447,13 +448,41 @@ fn indicator_48x48_rasterize_within_ci_budget() {
         "pixmap must contain 48×48×4 bytes (RGBA)"
     );
 
-    // Verify the discrete binding was applied: at least some pixels should be
-    // non-zero (circle fill + stroke rendered into the pixmap).
-    let non_zero = pixmap.data().iter().any(|&b| b != 0);
-    assert!(
-        non_zero,
-        "rasterized 48×48 pixmap must contain non-zero pixels (binding must be applied)"
-    );
+    // Verify the discrete `status` binding was applied by sampling the center
+    // pixel of the circle (cx=24, cy=20) and checking it is close to the
+    // expected busy color (#FF4444).  A small per-channel tolerance accounts
+    // for antialiasing differences between renderers.
+    {
+        let width = pixmap.width() as usize;
+        // Circle center at (24, 20) in the 48×48 canvas.
+        let cx = 24_usize;
+        let cy = 20_usize;
+        let idx = (cy * width + cx) * 4;
+        let data = pixmap.data();
+        let r = data[idx];
+        let g = data[idx + 1];
+        let b = data[idx + 2];
+        let a = data[idx + 3];
+
+        // Expected busy color: #FF4444 (red=255, green=68, blue=68).
+        let expected_r: u8 = 0xFF;
+        let expected_g: u8 = 0x44;
+        let expected_b: u8 = 0x44;
+        let tolerance: u8 = 16;
+
+        assert!(
+            a > 0,
+            "center pixel alpha must be non-zero: discrete status binding for 'busy' must render"
+        );
+        assert!(
+            r.abs_diff(expected_r) <= tolerance
+                && g.abs_diff(expected_g) <= tolerance
+                && b.abs_diff(expected_b) <= tolerance,
+            "center pixel color ({r}, {g}, {b}, {a}) must be close to busy status color \
+             #{expected_r:02X}{expected_g:02X}{expected_b:02X} (±{tolerance} per channel); \
+             discrete binding may not have been applied"
+        );
+    }
 
     eprintln!(
         "[status_indicator_perf] 48×48 re-rasterize: {}µs ({} ms) \
@@ -462,14 +491,15 @@ fn indicator_48x48_rasterize_within_ci_budget() {
     );
 
     // Budget assertion: lenient CI threshold catches catastrophic regressions.
-    // For the strict 2ms spec target, run: cargo bench --bench widget_rasterize
+    // For the strict 2ms spec target, run:
+    //   cargo bench -p tze_hud_compositor --bench widget_rasterize
     assert!(
         elapsed_ms < CI_THRESHOLD_MS,
         "48×48 indicator SVG re-rasterization took {}ms, exceeds lenient CI threshold of {}ms \
          (spec target for reference hardware is {}ms). \
          This likely indicates a catastrophic regression. \
-         Run `cargo bench --bench widget_rasterize` on optimised reference hardware \
-         to verify the 2ms spec requirement.",
+         Run `cargo bench -p tze_hud_compositor --bench widget_rasterize` on optimised reference \
+         hardware to verify the 2ms spec requirement.",
         elapsed_ms,
         CI_THRESHOLD_MS,
         SPEC_TARGET_MS,
