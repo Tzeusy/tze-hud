@@ -513,15 +513,20 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
         let new_root_id = updated_tile.root_node.expect("tile must still have a root node");
         let new_root = scene.nodes.get(&new_root_id).expect("new root node must exist");
         // children[2] = body TextMarkdownNode (painter's model: StaticImage, Header, Body, ...)
-        if let Some(&body_cid) = new_root.children.get(2) {
-            let body = scene.nodes.get(&body_cid).expect("body node must exist");
-            if let NodeData::TextMarkdown(ref tm) = body.data {
-                assert!(
-                    tm.content.contains("5s"),
-                    "Phase 4: body TextMarkdownNode must contain updated uptime '5s'"
-                );
-            }
-        }
+        assert!(
+            new_root.children.len() > 2,
+            "Phase 4: new root node must have at least 3 children; found {}",
+            new_root.children.len()
+        );
+        let body_cid = new_root.children[2];
+        let body = scene.nodes.get(&body_cid).expect("Phase 4: body node must exist");
+        let NodeData::TextMarkdown(ref tm) = body.data else {
+            panic!("Phase 4: body node at children[2] must be a TextMarkdownNode");
+        };
+        assert!(
+            tm.content.contains("5s"),
+            "Phase 4: body TextMarkdownNode must contain updated uptime '5s'"
+        );
     }
 
     // ── Phase 5: Refresh click → agent submits content update ─────────────────
@@ -935,18 +940,21 @@ async fn headless_tile_creation_produces_6_nodes_in_correct_tree_order() {
     }
 
     // Verify HitRegionNode interaction_ids.
-    if let NodeData::HitRegion(ref hr) = scene.nodes[&root.children[3]].data {
-        assert_eq!(
-            hr.interaction_id, REFRESH_ID,
-            "child[3] must have interaction_id=refresh-button"
-        );
-    }
-    if let NodeData::HitRegion(ref hr) = scene.nodes[&root.children[4]].data {
-        assert_eq!(
-            hr.interaction_id, DISMISS_ID,
-            "child[4] must have interaction_id=dismiss-button"
-        );
-    }
+    let NodeData::HitRegion(ref hr) = scene.nodes[&root.children[3]].data else {
+        panic!("child[3] must be a HitRegionNode");
+    };
+    assert_eq!(
+        hr.interaction_id, REFRESH_ID,
+        "child[3] must have interaction_id=refresh-button"
+    );
+
+    let NodeData::HitRegion(ref hr) = scene.nodes[&root.children[4]].data else {
+        panic!("child[4] must be a HitRegionNode");
+    };
+    assert_eq!(
+        hr.interaction_id, DISMISS_ID,
+        "child[4] must have interaction_id=dismiss-button"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

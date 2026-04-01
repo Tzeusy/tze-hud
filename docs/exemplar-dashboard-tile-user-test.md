@@ -64,9 +64,14 @@ The agent must:
 
 1. Upload the 48×48 PNG icon via the resource upload path. Confirm a BLAKE3
    `ResourceId` (32 bytes) is returned.
-2. Submit an atomic `MutationBatch` containing:
+2. Submit **Batch A** — `CreateTile` only:
    - `CreateTile` with bounds `(x=50, y=50, width=400, height=300)`,
      `z_order=100`, the namespace assigned at handshake, and `lease_id`.
+   Confirm `MutationResult { accepted: true, created_ids: [<tile_id>] }`.
+   (Note: `CreateTile` does not carry a client-specified `tile_id`; the
+   runtime-assigned `tile_id` is returned in `created_ids[0]` and must be
+   captured before the node batch can reference it.)
+3. Submit **Batch B** — atomic 6-node composition using the returned `tile_id`:
    - `AddNode(None, SolidColorNode)` — background root,
      `rgba(0.07, 0.07, 0.07, 0.90)`, bounds `(0, 0, 400, 300)`.
    - `AddNode(bg, StaticImageNode)` — 48×48 icon at `(16, 16)`, fit=Contain.
@@ -80,7 +85,7 @@ The agent must:
      `interaction_id="dismiss-button"`.
    - `UpdateTileOpacity(1.0)`.
    - `UpdateTileInputMode(Passthrough)`.
-3. Confirm `MutationResult { accepted: true }` is received.
+4. Confirm `MutationResult { accepted: true }` is received for Batch B.
 
 **Pass criteria:**
 - `MutationResult.accepted = true`.
@@ -107,7 +112,7 @@ The agent must:
 With the tile visible, perform a detailed visual inspection.
 
 **Pass criteria:**
-- Tile is exactly 400×400 visible area (bounds 400×300).
+- Tile is exactly 400×300 visible area (bounds 400×300).
 - Tile origin is at approximately (50, 50) from the display top-left.
 - Background is a dark, semi-transparent rectangle (not fully opaque).
 - Icon is rendered at approximately (16, 16) within the tile, 48×48 px.
@@ -277,7 +282,7 @@ second agent process (intruder) with different credentials:
 
 This user-test scenario has automated equivalents in:
 
-- `tests/integration/dashboard_tile_lifecycle.rs` — all 7 headless test
+- `tests/integration/dashboard_tile_lifecycle.rs` — all 8 headless test
   functions covering lifecycle, disconnect, namespace isolation, and the three
   headless spec scenarios.
 - `crates/tze_hud_protocol/tests/dashboard_tile_agent.rs` — gRPC session and
