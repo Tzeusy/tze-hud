@@ -79,6 +79,14 @@ pub const MAX_MARKDOWN_BYTES: usize = 65_535;
 pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
 
 impl SceneGraph {
+    // ─── Notification auto-dismiss TTL constants ─────────────────────────
+    /// Default auto-dismiss TTL (µs) for low/normal notifications (urgency 0, 1).
+    pub const NOTIFICATION_TTL_INFO_US: u64 = 8_000_000; // 8 seconds
+    /// Default auto-dismiss TTL (µs) for urgent notifications (urgency 2).
+    pub const NOTIFICATION_TTL_WARNING_US: u64 = 15_000_000; // 15 seconds
+    /// Default auto-dismiss TTL (µs) for critical notifications (urgency 3+).
+    pub const NOTIFICATION_TTL_CRITICAL_US: u64 = 30_000_000; // 30 seconds
+
     /// Create a new empty scene graph using the real system clock.
     pub fn new(width: f32, height: f32) -> Self {
         Self::new_with_clock(width, height, Arc::new(SystemClock::new()))
@@ -2363,20 +2371,21 @@ impl SceneGraph {
         // Auto-dismiss: if no explicit expires_at is provided and the content is a
         // Notification, derive expires_at from the urgency level.
         //
-        // Urgency → default TTL mapping (per alert-banner spec):
-        //   0, 1 (info)     → 8 s
-        //   2 (warning)     → 15 s
+        // Urgency → default TTL mapping (per NotificationPayload semantics):
+        //   0 (low)         → 8 s
+        //   1 (normal)      → 8 s
+        //   2 (urgent)      → 15 s
         //   3+ (critical)   → 30 s
         //
         // A publisher-supplied expires_at always takes precedence.
         let effective_expires_at = expires_at_wall_us.or_else(|| {
             if let ZoneContent::Notification(ref payload) = content {
                 let ttl_us: u64 = match payload.urgency {
-                    0 | 1 => 8_000_000,  // 8 seconds
-                    2 => 15_000_000,     // 15 seconds
-                    _ => 30_000_000,     // 30 seconds (critical / unknown)
+                    0 | 1 => Self::NOTIFICATION_TTL_INFO_US,
+                    2 => Self::NOTIFICATION_TTL_WARNING_US,
+                    _ => Self::NOTIFICATION_TTL_CRITICAL_US,
                 };
-                Some(now_us + ttl_us)
+                Some(now_us.saturating_add(ttl_us))
             } else {
                 None
             }
@@ -3879,67 +3888,67 @@ mod tests {
             .unwrap();
     }
 
-    /// urgency 1 (info) → expires_at = now + 8 s
+    /// urgency 0 (low) → expires_at = now + 8 s
     #[test]
     fn test_notification_auto_dismiss_urgency_info_low() {
-        let (mut scene, _clock) = scene_with_test_clock(); // clock at t=1000ms = 1_000_000 µs
+        let (mut scene, clock) = scene_with_test_clock();
         scene.register_zone(make_alert_banner_zone());
 
         publish_notification(&mut scene, 0, None);
 
         let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
-        let expected = 1_000_000u64 + 8_000_000u64; // now + 8 s
+        let expected = clock.now_us() + SceneGraph::NOTIFICATION_TTL_INFO_US;
         assert_eq!(
             record.expires_at_wall_us,
             Some(expected),
-            "urgency 0 (info) should auto-dismiss after 8 s"
+            "urgency 0 (low) should auto-dismiss after 8 s"
         );
     }
 
     /// urgency 1 (normal) → expires_at = now + 8 s
     #[test]
     fn test_notification_auto_dismiss_urgency_info_normal() {
-        let (mut scene, _clock) = scene_with_test_clock();
+        let (mut scene, clock) = scene_with_test_clock();
         scene.register_zone(make_alert_banner_zone());
 
         publish_notification(&mut scene, 1, None);
 
         let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
-        let expected = 1_000_000u64 + 8_000_000u64;
+        let expected = clock.now_us() + SceneGraph::NOTIFICATION_TTL_INFO_US;
         assert_eq!(
             record.expires_at_wall_us,
             Some(expected),
-            "urgency 1 (info/normal) should auto-dismiss after 8 s"
+            "urgency 1 (normal) should auto-dismiss after 8 s"
         );
     }
 
-    /// urgency 2 (warning) → expires_at = now + 15 s
+    /// urgency 2 (urgent) → expires_at = now + 15 s
     #[test]
     fn test_notification_auto_dismiss_urgency_warning() {
-        let (mut scene, _clock) = scene_with_test_clock();
+        let (mut scene, clock) = scene_with_test_clock();
         scene.register_zone(make_alert_banner_zone());
 
         publish_notification(&mut scene, 2, None);
 
         let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
-        let expected = 1_000_000u64 + 15_000_000u64; // now + 15 s
+        let expected = clock.now_us() + SceneGraph::NOTIFICATION_TTL_WARNING_US;
         assert_eq!(
             record.expires_at_wall_us,
             Some(expected),
-            "urgency 2 (warning) should auto-dismiss after 15 s"
+            "urgency 2 (urgent) should auto-dismiss after 15 s"
         );
     }
 
     /// urgency 3 (critical) → expires_at = now + 30 s
     #[test]
     fn test_notification_auto_dismiss_urgency_critical() {
-        let (mut scene, _clock) = scene_with_test_clock();
+        let (mut scene, clock) = scene_with_test_clock();
         scene.register_zone(make_alert_banner_zone());
 
         publish_notification(&mut scene, 3, None);
 
         let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
-        let expected = 1_000_000u64 + 30_000_000u64; // now + 30 s
+        let expected = clock.now_us() + SceneGraph::NOTIFICATION_TTL_CRITICAL_US;
         assert_eq!(
             record.expires_at_wall_us,
             Some(expected),
@@ -3950,10 +3959,11 @@ mod tests {
     /// Publisher-supplied expires_at takes precedence over the urgency default.
     #[test]
     fn test_notification_auto_dismiss_publisher_override() {
-        let (mut scene, _clock) = scene_with_test_clock();
+        let (mut scene, clock) = scene_with_test_clock();
         scene.register_zone(make_alert_banner_zone());
 
-        let publisher_expires_at = 9_999_999u64;
+        // Use a custom expiry that differs from both the default and the clock.
+        let publisher_expires_at = clock.now_us() + 60_000_000u64; // 60 s
         publish_notification(&mut scene, 1, Some(publisher_expires_at));
 
         let record = &scene.zone_registry.active_for_zone("alert-banner")[0];
@@ -3985,6 +3995,40 @@ mod tests {
         assert_eq!(
             record.expires_at_wall_us, None,
             "non-Notification content must not have auto-dismiss expires_at"
+        );
+    }
+
+    /// End-to-end: advance clock past expiry and verify drain removes the publication.
+    #[test]
+    fn test_notification_auto_dismiss_drain_removes_after_expiry() {
+        let (mut scene, clock) = scene_with_test_clock();
+        scene.register_zone(make_alert_banner_zone());
+
+        // Publish a low-urgency notification (auto-dismiss after 8 s).
+        publish_notification(&mut scene, 0, None);
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            1,
+            "notification must be present before expiry"
+        );
+
+        // Advance clock to just before the TTL boundary — must still be visible.
+        clock.advance(SceneGraph::NOTIFICATION_TTL_INFO_US / 1_000 - 1); // advance in ms
+        let drained = scene.drain_expired_zone_publications();
+        assert_eq!(drained, 0, "must not expire before TTL elapses");
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            1,
+        );
+
+        // Advance past the TTL boundary — must be removed.
+        clock.advance(2); // total elapsed > 8 s
+        let drained = scene.drain_expired_zone_publications();
+        assert_eq!(drained, 1, "expired notification must be drained");
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            0,
+            "zone must be empty after auto-dismiss drain"
         );
     }
 
