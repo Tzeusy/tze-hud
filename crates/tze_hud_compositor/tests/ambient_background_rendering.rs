@@ -33,7 +33,7 @@
 //! ## sRGB note
 //!
 //! The headless surface uses `Rgba8UnormSrgb`. wgpu applies linear→sRGB gamma
-//! conversion automatically when writing to the framebuffer. Tolerances of ±4
+//! conversion automatically when writing to the framebuffer. Tolerances of ±8
 //! are used to accommodate software-renderer (llvmpipe / WARP) rounding differences.
 //!
 //! ## References
@@ -131,39 +131,32 @@ async fn test_ambient_background_solid_color_renders() {
         "pixel buffer must be 64×64×4 bytes"
     );
 
-    // Check centre pixel: blue channel dominant relative to red/green channels,
-    // confirming the ambient-background quad covers the full surface.
+    // Sample corners and centre to confirm the ambient-background quad covers the full surface.
     // Expected sRGB bytes: R≈89, G≈89, B≈148 (linear 0.1,0.1,0.3 → sRGB gamma).
-    let cx = 32u32;
-    let cy = 32u32;
-    let p = HeadlessSurface::pixel_at(&pixels, 64, cx, cy);
+    //
+    // Sampling only the centre would pass even if the zone quad were incorrectly
+    // sized/positioned yet still covered the centre.  Corners + centre together
+    // validate full-screen coverage.
+    let sample_points: &[(u32, u32)] = &[
+        (0, 0),   // top-left corner
+        (63, 0),  // top-right corner
+        (0, 63),  // bottom-left corner
+        (63, 63), // bottom-right corner
+        (32, 32), // centre
+    ];
 
-    assert!(
-        p[2] > p[0],
-        "ambient-background SolidColor: blue channel (B={}) must exceed red channel (R={}) at centre pixel ({cx},{cy})",
-        p[2],
-        p[0]
-    );
-    assert!(
-        p[2] > p[1],
-        "ambient-background SolidColor: blue channel (B={}) must exceed green channel (G={}) at centre pixel ({cx},{cy})",
-        p[2],
-        p[1]
-    );
-
-    // Confirm the pixel is distinctly different from the clear color.
-    // The clear color has r≈g≈62, b≈89 (linear 0.05,0.05,0.1 → sRGB).
-    // Our dark-blue zone has b≈148 — well above the clear color's b≈89.
-    let expected_b: u8 = 148;
-    assert!(
-        p[2] > 100,
-        "ambient-background blue channel ({}) must be significantly above clear-color blue (~89) \
-         — expected ~{expected_b}",
-        p[2]
-    );
-
-    // Alpha must be fully opaque.
-    assert_eq!(p[3], 255, "alpha must be 255 (fully opaque)");
+    for &(cx, cy) in sample_points {
+        HeadlessSurface::assert_pixel_color(
+            &pixels,
+            64,
+            cx,
+            cy,
+            [89, 89, 148, 255],
+            TOLERANCE,
+            "ambient-background SolidColor",
+        )
+        .unwrap_or_else(|e| panic!("pixel assertion failed at ({cx},{cy}): {e}"));
+    }
 }
 
 /// Requirement: Ambient Background Zone Visual Contract
@@ -202,23 +195,19 @@ async fn test_ambient_background_no_publication_empty() {
 
     // With no zone publication, the centre pixel should match the runtime clear color.
     // Clear color: linear {r:0.05, g:0.05, b:0.1, a:1.0} → sRGB ≈ {R≈62, G≈62, B≈89}.
-    // The blue channel should be relatively small (close to clear color, not a vivid blue).
+    // A published dark-blue zone would give ≈{R:89, G:89, B:148} — well above clear.
     let cx = 32u32;
     let cy = 32u32;
-    let p = HeadlessSurface::pixel_at(&pixels, 64, cx, cy);
-
-    // Clear-color blue ≈ 89 in sRGB. A published dark-blue would give ≈148.
-    // Without a zone publication, blue must stay near the clear color value.
-    let expected_clear_b: u8 = 89;
-    assert!(
-        p[2] < expected_clear_b + TOLERANCE + 20,
-        "without ambient-background publication, blue channel ({}) must stay near clear-color blue (~{expected_clear_b}) \
-         — an unexpected zone quad would push it much higher",
-        p[2]
-    );
-
-    // The overall alpha must still be 255 (headless mode, non-overlay).
-    assert_eq!(p[3], 255, "alpha must be 255 in headless non-overlay mode");
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        64,
+        cx,
+        cy,
+        [62, 62, 89, 255],
+        TOLERANCE,
+        "clear color (no ambient-background publication)",
+    )
+    .expect("rendered pixel must match the runtime clear color when no ambient-background content is published");
 }
 
 /// Requirement: Ambient Background Latest-Wins Contention
@@ -282,23 +271,20 @@ async fn test_ambient_background_replacement_contention() {
     compositor.render_frame_headless(&scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
-    // Centre pixel: blue channel must dominate; red channel must be near zero.
-    // linear (0,0,1) → sRGB blue ≈ 255.
+    // Centre pixel must show pure blue (second publication); red must not bleed through.
+    // linear (0,0,1) → sRGB blue ≈ 255; linear (1,0,0) → sRGB red = 255.
     let cx = 32u32;
     let cy = 32u32;
-    let p = HeadlessSurface::pixel_at(&pixels, 64, cx, cy);
-
-    assert!(
-        p[2] > 200,
-        "ambient-background after blue-replaces-red: blue channel must be high (>200), got {}",
-        p[2]
-    );
-    assert!(
-        p[0] < 50,
-        "ambient-background after blue-replaces-red: red channel must be near zero (<50), got {} \
-         — first (red) publish must not bleed through",
-        p[0]
-    );
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        64,
+        cx,
+        cy,
+        [0, 0, 255, 255],
+        TOLERANCE,
+        "blue replaces red",
+    )
+    .expect("rendered pixel must be pure blue — first (red) publish must not bleed through");
 }
 
 /// Requirement: Ambient Background Latest-Wins Contention
@@ -360,29 +346,18 @@ async fn test_ambient_background_rapid_replacement() {
     compositor.render_frame_headless(&scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
+    // The last published color (index 9) is bright green: linear (0,1,0) → sRGB ≈ [0, 255, 0].
+    // All prior colors (red, blue, yellow, …) must not bleed through.
     let cx = 32u32;
     let cy = 32u32;
-    let p = HeadlessSurface::pixel_at(&pixels, 64, cx, cy);
-
-    // Green channel must dominate (last published was bright green).
-    assert!(
-        p[1] > 200,
-        "ambient-background after 10 rapid publishes: green channel must be high (>200), got {} \
-         — only the last (bright green) publish must be visible",
-        p[1]
-    );
-    // Red must be near zero (not the first-published red).
-    assert!(
-        p[0] < 50,
-        "ambient-background after 10 rapid publishes: red channel must be near zero (<50), got {} \
-         — earlier red publishes must not bleed through",
-        p[0]
-    );
-    // Blue must be near zero (not the second-published blue).
-    assert!(
-        p[2] < 50,
-        "ambient-background after 10 rapid publishes: blue channel must be near zero (<50), got {} \
-         — earlier blue publishes must not bleed through",
-        p[2]
-    );
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        64,
+        cx,
+        cy,
+        [0, 255, 0, 255],
+        TOLERANCE,
+        "rapid replacement green",
+    )
+    .expect("rendered pixel must match the last published color (bright green) — earlier publishes must not bleed through");
 }
