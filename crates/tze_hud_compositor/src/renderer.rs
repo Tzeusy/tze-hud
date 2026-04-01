@@ -433,6 +433,12 @@ type PubKey = (u64, String);
 ///    `NOTIFICATION_FADE_OUT_MS` ms.
 /// 4. When `is_fade_complete()` returns `true`, the publication is removed
 ///    from `SceneGraph::zone_registry::active_publishes`.
+///
+/// The effective `ttl_ms` is derived by [`Compositor::publication_ttl_ms`] with
+/// this priority order:
+/// - `ZonePublishRecord.expires_at_wall_us` (urgency-derived, highest priority)
+/// - `NotificationPayload.ttl_ms`
+/// - Zone `auto_clear_ms` / `NOTIFICATION_DEFAULT_TTL_MS` (fallback)
 pub struct PublicationAnimationState {
     /// Wall-clock instant when the compositor first rendered this publication.
     pub first_seen: std::time::Instant,
@@ -1546,9 +1552,10 @@ impl Compositor {
     /// For each active publication in a Stack zone:
     ///
     /// 1. If it is new (not in `pub_animation_states`), insert a fresh
-    ///    [`PublicationAnimationState`] using the per-publication `ttl_ms` from
-    ///    `NotificationPayload.ttl_ms`, falling back to the zone's `auto_clear_ms`,
-    ///    then to `NOTIFICATION_DEFAULT_TTL_MS` (8 000 ms).
+    ///    [`PublicationAnimationState`] using the effective TTL from
+    ///    [`Compositor::publication_ttl_ms`]: `expires_at_wall_us` (urgency-derived)
+    ///    takes highest priority, then `NotificationPayload.ttl_ms`, then the zone's
+    ///    `auto_clear_ms`, then `NOTIFICATION_DEFAULT_TTL_MS` (8 000 ms).
     /// 2. Call `tick()` to check whether the TTL has expired and start the fade if so.
     ///
     /// Stale entries (publications no longer present in `active_publishes`) are
@@ -1608,8 +1615,22 @@ impl Compositor {
 
     /// Determine the effective TTL (ms) for a single publication.
     ///
-    /// Priority: per-notification `ttl_ms` field → zone `auto_clear_ms` fallback.
+    /// Priority (highest to lowest):
+    /// 1. `ZonePublishRecord.expires_at_wall_us` — urgency-derived absolute expiry
+    ///    set by the publishing path.  TTL is computed as
+    ///    `(expires_at_wall_us - published_at_wall_us) / 1_000`.
+    ///    This ensures the visual fade-out aligns with the actual record expiry
+    ///    (e.g., 15 s for warning, 30 s for critical).
+    /// 2. `NotificationPayload.ttl_ms` — per-notification override.
+    /// 3. Zone `auto_clear_ms` fallback (supplied by the caller).
     fn publication_ttl_ms(record: &ZonePublishRecord, zone_default_ttl_ms: u64) -> u64 {
+        // Highest priority: absolute wall-clock expiry on the record.
+        if let Some(exp_us) = record.expires_at_wall_us {
+            if exp_us > record.published_at_wall_us {
+                return (exp_us - record.published_at_wall_us) / 1_000;
+            }
+        }
+        // Next: per-notification explicit TTL.
         if let ZoneContent::Notification(n) = &record.content {
             if let Some(ttl) = n.ttl_ms {
                 return ttl;
@@ -7804,6 +7825,97 @@ mod tests {
         assert!(
             chrome_g > 0.9,
             "Third quad (chrome) must be yellow (G≈1.0); got G={chrome_g}"
+        );
+    }
+
+    /// publication_ttl_ms derives TTL from expires_at_wall_us when present (highest priority).
+    ///
+    /// This ensures the visual fade-out aligns with the urgency-derived expiry set
+    /// by the publishing path (e.g., 15 000 ms for warning, 30 000 ms for critical).
+    #[test]
+    fn test_publication_ttl_ms_uses_expires_at_wall_us() {
+        // Warning notification (urgency 2): published at t=0, expires at t=15s.
+        let record_warning = ZonePublishRecord {
+            zone_name: "alert-banner".to_string(),
+            publisher_namespace: "agent-warn".to_string(),
+            content: ZoneContent::Notification(NotificationPayload {
+                text: "Disk space low".to_owned(),
+                icon: String::new(),
+                urgency: 2,
+                ttl_ms: None, // No per-notification TTL — urgency path sets expires_at
+            }),
+            published_at_wall_us: 0,
+            merge_key: None,
+            expires_at_wall_us: Some(15_000_000), // 15 s in µs
+            content_classification: None,
+        };
+        let ttl = Compositor::publication_ttl_ms(&record_warning, 8_000);
+        assert_eq!(
+            ttl, 15_000,
+            "publication_ttl_ms must derive 15 000 ms from expires_at_wall_us=15_000_000 µs for warning"
+        );
+
+        // Critical notification (urgency 3): published at t=0, expires at t=30s.
+        let record_critical = ZonePublishRecord {
+            zone_name: "alert-banner".to_string(),
+            publisher_namespace: "agent-crit".to_string(),
+            content: ZoneContent::Notification(NotificationPayload {
+                text: "System failure".to_owned(),
+                icon: String::new(),
+                urgency: 3,
+                ttl_ms: None,
+            }),
+            published_at_wall_us: 0,
+            merge_key: None,
+            expires_at_wall_us: Some(30_000_000), // 30 s in µs
+            content_classification: None,
+        };
+        let ttl_crit = Compositor::publication_ttl_ms(&record_critical, 8_000);
+        assert_eq!(
+            ttl_crit, 30_000,
+            "publication_ttl_ms must derive 30 000 ms from expires_at_wall_us=30_000_000 µs for critical"
+        );
+
+        // expires_at_wall_us takes priority over per-notification ttl_ms.
+        let record_both = ZonePublishRecord {
+            zone_name: "alert-banner".to_string(),
+            publisher_namespace: "agent-both".to_string(),
+            content: ZoneContent::Notification(NotificationPayload {
+                text: "Both set".to_owned(),
+                icon: String::new(),
+                urgency: 2,
+                ttl_ms: Some(5_000), // explicit 5 s TTL on the notification itself
+            }),
+            published_at_wall_us: 1_000_000, // published at t=1s
+            merge_key: None,
+            expires_at_wall_us: Some(16_000_000), // expires at t=16s → 15 s duration
+            content_classification: None,
+        };
+        let ttl_both = Compositor::publication_ttl_ms(&record_both, 8_000);
+        assert_eq!(
+            ttl_both, 15_000,
+            "publication_ttl_ms must prefer expires_at_wall_us over per-notification ttl_ms"
+        );
+
+        // Info notification (urgency 1, no expires_at): falls back to ttl_ms then zone default.
+        let record_info = ZonePublishRecord {
+            zone_name: "alert-banner".to_string(),
+            publisher_namespace: "agent-info".to_string(),
+            content: ZoneContent::Notification(NotificationPayload {
+                text: "All good".to_owned(),
+                icon: String::new(),
+                urgency: 1,
+                ttl_ms: Some(8_000),
+            }),
+            published_at_wall_us: 0,
+            merge_key: None,
+            expires_at_wall_us: None,
+            content_classification: None,
+        };
+        let ttl_info = Compositor::publication_ttl_ms(&record_info, 8_000);
+        assert_eq!(
+            ttl_info, 8_000,
+            "publication_ttl_ms must use NotificationPayload.ttl_ms when expires_at_wall_us is absent"
         );
     }
 }
