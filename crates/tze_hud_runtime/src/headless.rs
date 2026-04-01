@@ -40,6 +40,7 @@
 //! Setting `grpc_port = 0` in `HeadlessConfig` disables the gRPC server.
 //! Tests that don't exercise the session layer use this to skip server startup.
 
+use crate::component_startup::{register_profile_widgets, run_component_startup};
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};
@@ -243,10 +244,63 @@ impl HeadlessRuntime {
         compositor.init_widget_renderer(TextureFormat::Rgba8UnormSrgb);
         tracing::debug!("headless: text + widget renderers initialized");
 
-        let scene = Arc::new(Mutex::new(SceneGraph::new(
-            config.width as f32,
-            config.height as f32,
-        )));
+        // ── Component startup: design tokens + zone registry ──────────────
+        // When config_toml is provided, run the full component shape language
+        // startup sequence (steps 2-9) so that design tokens are applied to
+        // the compositor and the zone registry receives token-derived rendering
+        // policies.  Mirrors what the windowed runtime does in its initializer.
+        //
+        // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
+        let mut scene = SceneGraph::new(config.width as f32, config.height as f32);
+        let global_tokens: std::collections::HashMap<String, String> = if let Some(toml_str) =
+            &config.config_toml
+        {
+            match toml::from_str::<tze_hud_config::raw::RawConfig>(toml_str) {
+                Ok(raw) => {
+                    let mut startup_result =
+                        run_component_startup(&raw, None, Some("headless"), &mut scene);
+                    // Step 9b: register profile-scoped widget bundles
+                    register_profile_widgets(&mut scene, &startup_result);
+                    // Step 9c: register global widget SVG assets with the headless widget renderer,
+                    // mirroring the windowed runtime so bundled SVG-based widgets render correctly.
+                    if let Some(wr) = compositor.widget_renderer_mut() {
+                        for (type_id, filename, bytes) in startup_result.widget_svg_assets.drain(..)
+                        {
+                            wr.register_svg(&type_id, &filename, bytes);
+                        }
+                    }
+                    tracing::debug!(
+                        token_count = startup_result.global_tokens.len(),
+                        "headless: component startup complete — design tokens and zone registry applied"
+                    );
+                    startup_result.global_tokens
+                }
+                Err(e) => {
+                    // Even when a RuntimeContext has been constructed (potentially via
+                    // fallbacks in build_runtime_context), raw deserialization into
+                    // RawConfig may still fail. Fall back to canonical zone defaults
+                    // with no token derivation.
+                    tracing::warn!(
+                        error = %e,
+                        "headless: component startup skipped — raw config parse failed; \
+                         zone registry will use defaults, no design tokens applied"
+                    );
+                    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            // No config provided — bootstrap with canonical zone defaults.
+            scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+            std::collections::HashMap::new()
+        };
+
+        // Apply resolved design tokens to the compositor so severity colors and
+        // other token-driven properties are resolved at render time.
+        compositor.set_token_map(global_tokens);
+        tracing::debug!("headless: compositor token map applied");
+
+        let scene = Arc::new(Mutex::new(scene));
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&config.psk);
         let state = Arc::new(Mutex::new(SharedState {
             scene,
@@ -764,6 +818,142 @@ capabilities = ["read_telemetry", "read_scene_topology"]
         assert!(
             !fallback,
             "malformed TOML should fall back to guest policy (fallback_unrestricted = false), not dev mode"
+        );
+    }
+
+    /// Verify that design tokens from config_toml are applied to the compositor
+    /// when HeadlessRuntime is initialized.
+    ///
+    /// When config_toml contains a [design_tokens] section, the HeadlessRuntime
+    /// must call run_component_startup and compositor.set_token_map so that
+    /// token-driven properties (e.g. severity colors for alert-banner) are
+    /// resolved at render time rather than falling back to hardcoded constants.
+    ///
+    /// Regression test for hud-kz2l: HeadlessRuntime was not calling
+    /// run_component_startup, so design tokens were never applied even when
+    /// config_toml with [design_tokens] was supplied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_design_tokens_applied_when_config_toml_provided() {
+        let toml = r##"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+
+[design_tokens]
+"color.text.primary" = "#FF0000"
+"color.severity.warning" = "#00FF00"
+"color.backdrop.default" = "#0000FF"
+"opacity.backdrop.default" = "0.5"
+"stroke.outline.width" = "2.0"
+"color.outline.default" = "#FFFF00"
+"typography.subtitle.size" = "18"
+"typography.subtitle.weight" = "600"
+"typography.subtitle.family" = "system-ui"
+"typography.body.size" = "14"
+"typography.body.weight" = "400"
+"typography.body.family" = "system-ui"
+"spacing.padding.medium" = "8"
+"spacing.padding.large" = "16"
+"typography.status.size" = "12"
+"typography.status.weight" = "400"
+"typography.status.family" = "system-ui"
+"typography.alert.size" = "16"
+"typography.alert.weight" = "700"
+"typography.alert.family" = "system-ui"
+"typography.notification.size" = "14"
+"typography.notification.weight" = "500"
+"typography.notification.family" = "system-ui"
+"color.text.muted" = "#AAAAAA"
+"opacity.text.muted" = "0.7"
+"color.accent.primary" = "#3399FF"
+"color.accent.secondary" = "#33FF99"
+"color.surface.primary" = "#1A1A2E"
+"color.surface.secondary" = "#16213E"
+"color.border.default" = "#444466"
+"##;
+
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            psk: "test".to_string(),
+            config_toml: Some(toml.to_string()),
+        };
+        let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+
+        // The compositor's token_map must contain the tokens from config_toml.
+        // color.text.primary was set to "#FF0000" in the config.
+        assert_eq!(
+            runtime
+                .compositor
+                .token_map
+                .get("color.text.primary")
+                .map(String::as_str),
+            Some("#FF0000"),
+            "compositor token_map should contain color.text.primary from config_toml"
+        );
+        // color.severity.warning was set to "#00FF00".
+        assert_eq!(
+            runtime
+                .compositor
+                .token_map
+                .get("color.severity.warning")
+                .map(String::as_str),
+            Some("#00FF00"),
+            "compositor token_map should contain color.severity.warning from config_toml"
+        );
+
+        // The scene's zone_registry must contain token-derived rendering policies.
+        // Verify that the subtitle zone got a text_color derived from color.text.primary (#FF0000).
+        let state = runtime.state.lock().await;
+        let scene = state.scene.lock().await;
+        let subtitle_zone = scene
+            .zone_registry
+            .zones
+            .get("subtitle")
+            .expect("subtitle zone should be registered");
+        let text_color = subtitle_zone
+            .rendering_policy
+            .text_color
+            .expect("subtitle zone should have token-derived text_color after component startup");
+        // #FF0000 → R=1.0, G=0.0, B=0.0
+        assert!(
+            (text_color.r - 1.0).abs() < 1e-3,
+            "subtitle text_color.r should be 1.0 for #FF0000, got {}",
+            text_color.r
+        );
+        assert!(
+            text_color.g < 1e-3,
+            "subtitle text_color.g should be 0.0 for #FF0000, got {}",
+            text_color.g
+        );
+        assert!(
+            text_color.b < 1e-3,
+            "subtitle text_color.b should be 0.0 for #FF0000, got {}",
+            text_color.b
+        );
+    }
+
+    /// Verify that when config_toml is None, the compositor token_map is empty
+    /// (no design tokens, canonical zone defaults used).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_no_design_tokens_when_no_config_toml() {
+        let config = HeadlessConfig {
+            width: 64,
+            height: 64,
+            grpc_port: 0,
+            psk: "test".to_string(),
+            config_toml: None,
+        };
+        let runtime = HeadlessRuntime::new(config).await.expect("runtime init");
+
+        // Without config_toml, the compositor token_map should be empty.
+        assert!(
+            runtime.compositor.token_map.is_empty(),
+            "compositor token_map should be empty when config_toml is None"
         );
     }
 }
