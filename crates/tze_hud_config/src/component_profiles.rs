@@ -1980,8 +1980,7 @@ component_type = "subtitle"
         let path = exemplar_alert_banner_dir();
         let tokens = exemplar_alert_banner_tokens();
 
-        let profile =
-            load_profile_dir(&path, &tokens).expect("exemplar-alert-banner should load");
+        let profile = load_profile_dir(&path, &tokens).expect("exemplar-alert-banner should load");
 
         let zone_override = profile
             .zone_overrides
