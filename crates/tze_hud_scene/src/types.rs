@@ -1530,6 +1530,19 @@ pub struct ZonePublishRecord {
     /// Optional content classification tag (e.g., "public", "private", "pii").
     /// Used by policy and redaction layers; treated as opaque by the scene graph.
     pub content_classification: Option<String>,
+    /// Optional byte-offset breakpoints for `StreamText` word-by-word reveal.
+    ///
+    /// When non-empty, the compositor reveals text progressively: it shows text
+    /// up to `breakpoints[i]` bytes at frame `i`, then advances to the next
+    /// breakpoint on subsequent frames.  Breakpoints identify word boundaries in
+    /// the UTF-8 text string (byte offsets, not character indices).
+    ///
+    /// When empty (default), the full text is revealed immediately.
+    ///
+    /// Only meaningful when `content` is `ZoneContent::StreamText`.  Ignored for
+    /// all other content types.
+    #[serde(default)]
+    pub breakpoints: Vec<usize>,
 }
 
 /// Type alias for `ZonePublishRecord` — the canonical name for the publication

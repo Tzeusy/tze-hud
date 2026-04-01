@@ -383,6 +383,26 @@ impl ZoneAnimationState {
         }
     }
 
+    /// Create a fade-in state starting from `from_opacity` rather than 0.
+    ///
+    /// Used for **transition interrupt semantics**: when a new publish arrives
+    /// during an active fade-out, the fade-out is cancelled and a fade-in begins
+    /// from the current composite opacity (not from zero).  This prevents blank
+    /// frames during rapid replacement.
+    ///
+    /// Per spec §Subtitle Contention Policy — Latest Wins, Transition interrupt
+    /// semantics note: "the fade-out MUST be cancelled immediately and the new
+    /// content MUST begin its transition_in_ms fade-in from the current composite
+    /// opacity (not from zero)."
+    pub fn fade_in_from(duration_ms: u32, from_opacity: f32) -> Self {
+        Self {
+            transition_start: std::time::Instant::now(),
+            duration_ms,
+            from_opacity: from_opacity.clamp(0.0, 1.0),
+            target_opacity: 1.0,
+        }
+    }
+
     /// Create a fade-out state (opacity 1 → 0) with the given duration.
     pub fn fade_out(duration_ms: u32) -> Self {
         Self {
@@ -507,6 +527,72 @@ impl PublicationAnimationState {
     }
 }
 
+/// How many frames to display each breakpoint segment before advancing.
+///
+/// At 60fps, 1 frame ≈ 16ms between words — perceptible as word-by-word reveal.
+const STREAM_REVEAL_FRAMES_PER_SEGMENT: u32 = 1;
+
+/// Per-zone streaming reveal state.
+///
+/// Tracks progressive text reveal for `StreamText` publications that include
+/// breakpoints.  Each frame, `advance()` is called; when the dwell counter
+/// reaches [`STREAM_REVEAL_FRAMES_PER_SEGMENT`] the compositor moves to the
+/// next breakpoint.
+///
+/// The `pub_key` ties this state to a specific publication.  When the
+/// latest-wins publication changes, the old state is discarded and a new one
+/// starts from breakpoint index 0.
+pub struct StreamRevealState {
+    /// The publication this state tracks.
+    pub pub_key: PubKey,
+    /// Sorted byte-offset breakpoints copied from the publication record.
+    pub breakpoints: Vec<usize>,
+    /// Index into `breakpoints` of the currently-visible segment boundary.
+    /// A value of `breakpoints.len()` means the full text is visible.
+    pub segment_idx: usize,
+    /// Frame counter within the current segment.
+    pub frames_in_segment: u32,
+}
+
+impl StreamRevealState {
+    /// Create reveal state for a new publication.
+    pub fn new(pub_key: PubKey, breakpoints: Vec<usize>) -> Self {
+        Self {
+            pub_key,
+            breakpoints,
+            segment_idx: 0,
+            frames_in_segment: 0,
+        }
+    }
+
+    /// Return the byte offset up to which text should be visible this frame.
+    ///
+    /// Returns `usize::MAX` (reveal all) when no breakpoints are set or all
+    /// segments have been revealed.
+    pub fn visible_byte_offset(&self) -> usize {
+        if self.breakpoints.is_empty() || self.segment_idx >= self.breakpoints.len() {
+            usize::MAX
+        } else {
+            self.breakpoints[self.segment_idx]
+        }
+    }
+
+    /// Advance the reveal state by one frame.
+    ///
+    /// Returns `true` if the reveal is still in progress (more segments remain).
+    pub fn advance(&mut self) -> bool {
+        if self.segment_idx >= self.breakpoints.len() {
+            return false; // already fully revealed
+        }
+        self.frames_in_segment += 1;
+        if self.frames_in_segment >= STREAM_REVEAL_FRAMES_PER_SEGMENT {
+            self.frames_in_segment = 0;
+            self.segment_idx += 1;
+        }
+        self.segment_idx < self.breakpoints.len()
+    }
+}
+
 /// GPU state and render pipeline.
 pub struct Compositor {
     pub device: wgpu::Device,
@@ -554,6 +640,15 @@ pub struct Compositor {
     /// Entries for publications no longer in `active_publishes` are pruned by
     /// [`Compositor::prune_faded_publications`].
     pub(crate) pub_animation_states: HashMap<String, HashMap<PubKey, PublicationAnimationState>>,
+    /// Per-zone streaming word-by-word reveal state.
+    ///
+    /// Keyed by zone name.  Present only when the latest publication in that zone
+    /// has non-empty breakpoints.  Absent (or None) means reveal all at once.
+    ///
+    /// Per spec §Subtitle Streaming Word-by-Word Reveal: when a new publication
+    /// replaces the old one (latest-wins), the old reveal state is discarded and
+    /// a new one starts from the beginning of the new breakpoints.
+    pub(crate) stream_reveal_states: HashMap<String, StreamRevealState>,
     /// Resolved design token map, set at startup via `set_token_map`.
     ///
     /// Used to resolve `color.severity.{info,warning,critical}` tokens for
@@ -629,6 +724,7 @@ impl Compositor {
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
             pub_animation_states: HashMap::new(),
+            stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
         })
     }
@@ -875,6 +971,7 @@ impl Compositor {
             zone_animation_states: HashMap::new(),
             prev_active_zones: HashMap::new(),
             pub_animation_states: HashMap::new(),
+            stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
         };
 
@@ -1420,8 +1517,27 @@ impl Compositor {
                     for record in publishes.iter().rev() {
                         match &record.content {
                             ZoneContent::StreamText(text) => {
+                                // Apply streaming word-by-word reveal if active.
+                                // The reveal state truncates the visible text to a
+                                // byte offset (breakpoint boundary).  When no reveal
+                                // state exists, the full text is rendered immediately.
+                                let visible_text: &str = if let Some(state) =
+                                    self.stream_reveal_states.get(zone_name)
+                                {
+                                    let offset = state.visible_byte_offset();
+                                    if offset == usize::MAX {
+                                        text.as_str()
+                                    } else {
+                                        // Clamp to a valid UTF-8 boundary (byte offset
+                                        // from the ZonePublishRecord must be valid).
+                                        let safe_offset = offset.min(text.len());
+                                        &text[..safe_offset]
+                                    }
+                                } else {
+                                    text.as_str()
+                                };
                                 items.push(TextItem::from_zone_policy(
-                                    text,
+                                    visible_text,
                                     zx,
                                     zy,
                                     zw,
@@ -1512,11 +1628,34 @@ impl Compositor {
 
             if is_active && !was_active {
                 // Zone just received its first publish — start fade-in.
+                //
+                // Transition interrupt semantics: if a fade-out is currently in
+                // progress (target_opacity == 0.0), we MUST start the fade-in from
+                // the current composite opacity rather than from 0 to prevent a
+                // blank frame.  Per spec §Subtitle Contention Policy: "the fade-out
+                // MUST be cancelled immediately and the new content MUST begin its
+                // transition_in_ms fade-in from the current composite opacity (not
+                // from zero)."
                 if let Some(zone_def) = scene.zone_registry.zones.get(zone_name) {
                     if let Some(ms) = zone_def.rendering_policy.transition_in_ms {
                         if ms > 0 {
-                            self.zone_animation_states
-                                .insert(zone_name.clone(), ZoneAnimationState::fade_in(ms));
+                            let new_state = if let Some(existing) =
+                                self.zone_animation_states.get(zone_name)
+                            {
+                                if existing.target_opacity == 0.0 {
+                                    // Interrupt active fade-out: begin fade-in from
+                                    // current opacity so there is no blank frame.
+                                    ZoneAnimationState::fade_in_from(
+                                        ms,
+                                        existing.current_opacity(),
+                                    )
+                                } else {
+                                    ZoneAnimationState::fade_in(ms)
+                                }
+                            } else {
+                                ZoneAnimationState::fade_in(ms)
+                            };
+                            self.zone_animation_states.insert(zone_name.clone(), new_state);
                         }
                     }
                 }
@@ -1545,6 +1684,81 @@ impl Compositor {
             .retain(|_, state| !state.is_complete());
 
         self.prev_active_zones = current_active;
+    }
+
+    /// Update per-zone streaming word-by-word reveal state.
+    ///
+    /// Must be called once per frame (after `update_zone_animations`).
+    ///
+    /// For each zone with a `LatestWins` or `Replace` publication that has
+    /// non-empty breakpoints:
+    /// - If no reveal state exists or the current pub key doesn't match, start
+    ///   a fresh reveal from segment 0 (latest-wins cancels previous streaming).
+    /// - If reveal state exists for the current pub key, advance by one frame.
+    /// - Zones with empty breakpoints (or no StreamText) have their reveal state
+    ///   pruned so text renders at full immediately.
+    ///
+    /// Per spec §Subtitle Streaming Word-by-Word Reveal:
+    /// - Breakpoints identify byte offsets for progressive reveal.
+    /// - Empty breakpoints → reveal all at once.
+    /// - Replacement during streaming → cancel old reveal, start new.
+    pub fn update_stream_reveals(&mut self, scene: &SceneGraph) {
+        // Collect zones whose latest publish has breakpoints.
+        let mut active_keys: HashMap<String, PubKey> = HashMap::new();
+
+        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            if publishes.is_empty() {
+                continue;
+            }
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+            // Only LatestWins/Replace zones get streaming reveal (single occupant).
+            if !matches!(
+                zone_def.contention_policy,
+                ContentionPolicy::LatestWins | ContentionPolicy::Replace
+            ) {
+                continue;
+            }
+            let latest = &publishes[publishes.len() - 1];
+            // Only StreamText with non-empty breakpoints gets progressive reveal.
+            if !matches!(&latest.content, ZoneContent::StreamText(_))
+                || latest.breakpoints.is_empty()
+            {
+                continue;
+            }
+            let pub_key: PubKey = (
+                latest.published_at_wall_us,
+                latest.publisher_namespace.clone(),
+            );
+            active_keys.insert(zone_name.clone(), pub_key);
+        }
+
+        // Prune reveal states for zones no longer streaming.
+        self.stream_reveal_states
+            .retain(|zone_name, _| active_keys.contains_key(zone_name));
+
+        // Update or create reveal states.
+        for (zone_name, pub_key) in &active_keys {
+            let publishes = match scene.zone_registry.active_publishes.get(zone_name) {
+                Some(p) if !p.is_empty() => p,
+                _ => continue,
+            };
+            let latest = &publishes[publishes.len() - 1];
+
+            let state = self.stream_reveal_states.get(zone_name);
+            let need_reset = state.map(|s| &s.pub_key != pub_key).unwrap_or(true);
+
+            if need_reset {
+                // New publication (latest-wins replaced) or first reveal — start fresh.
+                let new_state = StreamRevealState::new(pub_key.clone(), latest.breakpoints.clone());
+                self.stream_reveal_states.insert(zone_name.clone(), new_state);
+            } else if let Some(state) = self.stream_reveal_states.get_mut(zone_name) {
+                // Advance existing reveal by one frame.
+                state.advance();
+            }
+        }
     }
 
     /// Update per-publication fade-out animation state for Stack zone publications.
@@ -1978,6 +2192,12 @@ impl Compositor {
             }
         }
 
+        // Update zone animation states (fade-in/fade-out) before rendering.
+        self.update_zone_animations(scene);
+
+        // Update streaming word-by-word reveal state.
+        self.update_stream_reveals(scene);
+
         // Content zones render as a batch after all tiles (above background, below chrome).
         self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
         // Chrome zones render last, above everything.
@@ -2086,6 +2306,12 @@ impl Compositor {
                 self.render_node(root_id, tile, scene, &mut vertices, sw, sh);
             }
         }
+
+        // Update zone animation states before rendering zone content.
+        self.update_zone_animations(scene);
+
+        // Update streaming word-by-word reveal state.
+        self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
         self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
@@ -2200,6 +2426,10 @@ impl Compositor {
                 self.render_node(root_id, tile, scene, &mut content_vertices, sw, sh);
             }
         }
+
+        // Update zone animation states, streaming reveal, and render zone content backdrops.
+        self.update_zone_animations(scene);
+        self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
         self.render_zone_content(
@@ -7369,6 +7599,7 @@ mod tests {
             merge_key: None,
             expires_at_wall_us: None,
             content_classification: None,
+            breakpoints: Vec::new(),
         };
         let ttl_fallback = Compositor::publication_ttl_ms(&record_no_ttl, 8_000);
         assert_eq!(
@@ -7454,6 +7685,7 @@ mod tests {
             color[3]
         );
     }
+
 
     // ── LayerAttachment rendering order tests ─────────────────────────────────
     //
@@ -7922,6 +8154,7 @@ mod tests {
             merge_key: None,
             expires_at_wall_us: Some(15_000_000), // 15 s in µs
             content_classification: None,
+            breakpoints: Vec::new(),
         };
         let ttl = Compositor::publication_ttl_ms(&record_warning, 8_000);
         assert_eq!(
@@ -7944,6 +8177,7 @@ mod tests {
             merge_key: None,
             expires_at_wall_us: Some(30_000_000), // 30 s in µs
             content_classification: None,
+            breakpoints: Vec::new(),
         };
         let ttl_crit = Compositor::publication_ttl_ms(&record_critical, 8_000);
         assert_eq!(
@@ -7966,6 +8200,7 @@ mod tests {
             merge_key: None,
             expires_at_wall_us: Some(16_000_000), // expires at t=16s → 15 s duration
             content_classification: None,
+            breakpoints: Vec::new(),
         };
         let ttl_both = Compositor::publication_ttl_ms(&record_both, 8_000);
         assert_eq!(
@@ -7987,11 +8222,398 @@ mod tests {
             merge_key: None,
             expires_at_wall_us: None,
             content_classification: None,
+            breakpoints: Vec::new(),
         };
         let ttl_info = Compositor::publication_ttl_ms(&record_info, 8_000);
         assert_eq!(
             ttl_info, 8_000,
             "publication_ttl_ms must use NotificationPayload.ttl_ms when expires_at_wall_us is absent"
+        );
+    }
+
+// ── Transition interrupt semantics [hud-hzub.2] ─────────────────────────
+
+    /// fade_in_from starts from a non-zero opacity.
+    ///
+    /// Acceptance criterion: transition interrupt semantics must begin fade-in
+    /// from current composite opacity, not from zero.
+    #[test]
+    fn test_fade_in_from_starts_at_given_opacity() {
+        // Simulate: fade-out was 50% complete → current_opacity = 0.5.
+        // Start a fade_in_from(0.5) — should begin at 0.5.
+        let state = ZoneAnimationState::fade_in_from(10_000, 0.5);
+        let opacity = state.current_opacity();
+        // Very shortly after creation, opacity should be ~0.5 (no time has elapsed).
+        assert!(
+            (opacity - 0.5).abs() < 0.05,
+            "fade_in_from(0.5) should start at ~0.5 opacity, got {opacity}"
+        );
+        assert_eq!(
+            state.target_opacity, 1.0,
+            "fade_in_from target must be 1.0"
+        );
+    }
+
+    /// fade_in_from clamps from_opacity to [0.0, 1.0].
+    #[test]
+    fn test_fade_in_from_clamps_opacity() {
+        let state_low = ZoneAnimationState::fade_in_from(1_000, -0.5);
+        assert_eq!(state_low.from_opacity, 0.0, "negative opacity clamped to 0");
+        let state_high = ZoneAnimationState::fade_in_from(1_000, 1.5);
+        assert_eq!(state_high.from_opacity, 1.0, "overflow opacity clamped to 1");
+    }
+
+    /// Transition interrupt: update_zone_animations starts fade-in from current
+    /// opacity when a new publish arrives during an active fade-out.
+    #[tokio::test]
+    async fn test_transition_interrupt_starts_fade_in_from_current_opacity() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "transition interrupt test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy {
+                transition_in_ms: Some(200),
+                transition_out_ms: Some(150),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // Step 1: publish content — this makes zone active.
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("First".to_owned()),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        compositor.update_zone_animations(&scene);
+
+        // Step 2: clear — marks zone inactive, starts fade-out.
+        scene.zone_registry.active_publishes.get_mut("subtitle").unwrap().clear();
+        compositor.update_zone_animations(&scene);
+
+        // The zone animation state should now be a fade-out (target = 0).
+        let has_fadeout = compositor
+            .zone_animation_states
+            .get("subtitle")
+            .map(|s| s.target_opacity == 0.0)
+            .unwrap_or(false);
+        assert!(has_fadeout, "expected fade-out state after zone clear");
+
+        // Inject a partially-complete fade-out (from_opacity=1, target=0, ~50% elapsed).
+        // We simulate 50% opacity by creating a state with from_opacity=1.0 and checking
+        // that after interrupt, from_opacity is NOT 0.0.
+        let partial_opacity = compositor
+            .zone_animation_states
+            .get("subtitle")
+            .map(|s| s.current_opacity())
+            .unwrap_or(0.0);
+        // At t=0 the fade-out just started, so opacity ≈ 1.0 still.
+        assert!(
+            partial_opacity > 0.5,
+            "fade-out just started, opacity should be > 0.5, got {partial_opacity}"
+        );
+
+        // Step 3: re-publish during fade-out — interrupt semantics must apply.
+        scene
+            .publish_to_zone(
+                "subtitle",
+                ZoneContent::StreamText("Second".to_owned()),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        // Record fade-out opacity just before interrupt.
+        let pre_interrupt_opacity = compositor
+            .zone_animation_states
+            .get("subtitle")
+            .map(|s| s.current_opacity())
+            .unwrap_or(0.0);
+
+        compositor.update_zone_animations(&scene);
+
+        // After interrupt: must be fade-in (target = 1.0).
+        let state = compositor
+            .zone_animation_states
+            .get("subtitle")
+            .expect("zone animation state must exist after interrupt fade-in");
+        assert_eq!(
+            state.target_opacity, 1.0,
+            "transition interrupt must produce a fade-in state (target = 1.0)"
+        );
+        // from_opacity must be the interrupted fade-out opacity, not 0.
+        // Pre-interrupt opacity is > 0.5 (fade-out just started), so from ≈ pre_interrupt.
+        assert!(
+            state.from_opacity > 0.0,
+            "fade_in_from must start from current opacity (> 0), got {}",
+            state.from_opacity
+        );
+        // The from_opacity should be ≈ the pre-interrupt value (fade-out just started).
+        assert!(
+            (state.from_opacity - pre_interrupt_opacity).abs() < 0.1,
+            "fade_in_from must start from current fade-out opacity (~{pre_interrupt_opacity}), got {}",
+            state.from_opacity
+        );
+    }
+
+    // ── Streaming word-by-word reveal [hud-hzub.2] ──────────────────────────
+
+    /// StreamRevealState.visible_byte_offset returns usize::MAX when no breakpoints.
+    #[test]
+    fn test_stream_reveal_no_breakpoints_reveals_all() {
+        let state = StreamRevealState::new(
+            (1_000_000, "agent".to_owned()),
+            vec![], // no breakpoints
+        );
+        assert_eq!(
+            state.visible_byte_offset(),
+            usize::MAX,
+            "empty breakpoints must reveal all text immediately"
+        );
+    }
+
+    /// StreamRevealState starts at segment 0 and reveals first breakpoint.
+    #[test]
+    fn test_stream_reveal_starts_at_first_breakpoint() {
+        let state = StreamRevealState::new(
+            (1_000_000, "agent".to_owned()),
+            vec![3, 9, 15], // "The" at 3, "The quick" at 9, etc.
+        );
+        assert_eq!(
+            state.visible_byte_offset(),
+            3,
+            "initial visible_byte_offset must be breakpoints[0]=3"
+        );
+    }
+
+    /// StreamRevealState.advance() progresses through breakpoints.
+    #[test]
+    fn test_stream_reveal_advance_progresses_breakpoints() {
+        let mut state = StreamRevealState::new(
+            (1_000_000, "agent".to_owned()),
+            vec![3, 9, 15],
+        );
+        assert_eq!(state.visible_byte_offset(), 3, "initially at breakpoint 0");
+
+        // Advance STREAM_REVEAL_FRAMES_PER_SEGMENT times to move to next.
+        for _ in 0..STREAM_REVEAL_FRAMES_PER_SEGMENT {
+            state.advance();
+        }
+        assert_eq!(state.visible_byte_offset(), 9, "after advance, at breakpoint 1");
+
+        for _ in 0..STREAM_REVEAL_FRAMES_PER_SEGMENT {
+            state.advance();
+        }
+        assert_eq!(state.visible_byte_offset(), 15, "after advance, at breakpoint 2");
+
+        for _ in 0..STREAM_REVEAL_FRAMES_PER_SEGMENT {
+            state.advance();
+        }
+        assert_eq!(
+            state.visible_byte_offset(),
+            usize::MAX,
+            "after all breakpoints revealed, must show full text (usize::MAX)"
+        );
+    }
+
+    /// update_stream_reveals creates state for StreamText with breakpoints.
+    #[tokio::test]
+    async fn test_update_stream_reveals_creates_state() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "streaming test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // Publish StreamText with breakpoints via publish_to_zone_with_breakpoints.
+        scene.publish_to_zone_with_breakpoints(
+            "subtitle",
+            ZoneContent::StreamText("The quick brown fox".to_owned()),
+            "agent",
+            None,
+            None,
+            None,
+            vec![3, 9, 15],
+        ).unwrap();
+
+        compositor.update_stream_reveals(&scene);
+
+        let reveal = compositor.stream_reveal_states.get("subtitle");
+        assert!(
+            reveal.is_some(),
+            "stream_reveal_states must have an entry for subtitle"
+        );
+        let reveal = reveal.unwrap();
+        assert_eq!(
+            reveal.breakpoints,
+            vec![3, 9, 15],
+            "breakpoints must match the publish record"
+        );
+        assert_eq!(reveal.segment_idx, 0, "reveal starts at segment 0");
+    }
+
+    /// update_stream_reveals resets state when a new publication replaces old.
+    /// Verifies latest-wins cancels in-progress streaming reveal.
+    #[tokio::test]
+    async fn test_update_stream_reveals_resets_on_new_publish() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "streaming reset test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // First publish with breakpoints.
+        scene.publish_to_zone_with_breakpoints(
+            "subtitle",
+            ZoneContent::StreamText("The quick brown fox".to_owned()),
+            "agent",
+            None,
+            None,
+            None,
+            vec![3, 9, 15],
+        ).unwrap();
+        compositor.update_stream_reveals(&scene);
+
+        // Advance a few frames to simulate partial reveal.
+        for _ in 0..(STREAM_REVEAL_FRAMES_PER_SEGMENT + 1) {
+            compositor.update_stream_reveals(&scene);
+        }
+        let partial_idx = compositor.stream_reveal_states.get("subtitle")
+            .map(|s| s.segment_idx)
+            .unwrap_or(0);
+        assert!(partial_idx > 0, "reveal should have advanced beyond 0");
+
+        // Second publish (different published_at_wall_us) — must reset reveal.
+        scene.publish_to_zone_with_breakpoints(
+            "subtitle",
+            ZoneContent::StreamText("New content streaming".to_owned()),
+            "agent",
+            None,
+            None,
+            None,
+            vec![4, 12],
+        ).unwrap();
+        compositor.update_stream_reveals(&scene);
+
+        let new_reveal = compositor.stream_reveal_states.get("subtitle").unwrap();
+        assert_eq!(
+            new_reveal.segment_idx, 0,
+            "replacement must reset reveal to segment 0 (latest-wins cancel)"
+        );
+        assert_eq!(
+            new_reveal.breakpoints,
+            vec![4, 12],
+            "new breakpoints must be from the replacement publication"
+        );
+    }
+
+    /// collect_text_items truncates text to current reveal byte offset.
+    #[tokio::test]
+    async fn test_collect_text_items_respects_stream_reveal() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "subtitle".to_owned(),
+            description: "streaming text item test".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 0.80,
+                margin_px: 16.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::StreamText],
+            rendering_policy: RenderingPolicy {
+                text_color: Some(Rgba::WHITE),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::LatestWins,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        // "The quick brown fox" — breakpoints at 3, 9, 15.
+        // Initially reveals only "The" (3 bytes).
+        scene.publish_to_zone_with_breakpoints(
+            "subtitle",
+            ZoneContent::StreamText("The quick brown fox".to_owned()),
+            "agent",
+            None,
+            None,
+            None,
+            vec![3, 9, 15],
+        ).unwrap();
+
+        // Create reveal state at segment 0 (reveals "The").
+        compositor.update_stream_reveals(&scene);
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+        assert!(!items.is_empty(), "must produce at least one TextItem");
+        let visible_text = &items[0].text;
+        assert_eq!(
+            visible_text, "The",
+            "initial reveal must show only text up to first breakpoint (\"The\")"
+
         );
     }
 }

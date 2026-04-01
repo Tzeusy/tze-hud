@@ -2122,6 +2122,7 @@ mod tests {
                 merge_key: None,
                 expires_at_wall_us: None,
                 content_classification: None,
+                breakpoints: Vec::new(),
             }],
         );
         let v = check_zone_active_publishes_reference_known_zones(&graph);
@@ -2172,6 +2173,7 @@ mod tests {
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
+                    breakpoints: Vec::new(),
                 },
                 ZonePublishRecord {
                     zone_name: zone_name.clone(),
@@ -2181,6 +2183,7 @@ mod tests {
                     merge_key: None,
                     expires_at_wall_us: None,
                     content_classification: None,
+                    breakpoints: Vec::new(),
                 },
             ],
         );
@@ -2347,6 +2350,7 @@ mod tests {
                 merge_key: None,
                 expires_at_wall_us: Some(5_000_000), // earlier than published_at_wall_us
                 content_classification: None,
+                breakpoints: Vec::new(),
             }],
         );
         let v = check_zone_publish_record_expires_at_valid(&graph);
