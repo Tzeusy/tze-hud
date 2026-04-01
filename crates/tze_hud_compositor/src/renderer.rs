@@ -893,7 +893,7 @@ impl Compositor {
             // Emit TextItems based on contention policy.
             //
             // Stack: each publication occupies a vertically-stacked slot (newest at top,
-            //   slot 0 = newest).  slot_h = font_size_px + 18 (content-sized).
+            //   slot 0 = newest).  slot_h = font_size_px + 2*margin_v + 2 (content-sized).
             //
             // MergeByKey: collect ALL StatusBar publications, merge their entries
             //   (last write wins per key), render the merged set as one text item.
@@ -902,8 +902,11 @@ impl Compositor {
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
                     let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
-                    // slot_height = font_size_px + 2*padding(8px) + 2*border_width(1px)
-                    let slot_h = (font_size_px + 18.0).max(1.0);
+                    // slot_height = font_size_px + 2*margin_v (from policy) + 2*border_width(1px).
+                    // Derive margin_v from RenderingPolicy (margin_vertical → margin_px → 8px)
+                    // rather than hardcoding 18.0, so per-zone policy overrides are respected.
+                    let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
+                    let slot_h = (font_size_px + 2.0 * margin_v + 2.0).max(1.0);
                     // Render newest-first: slot_index 0 = newest (top of zone).
                     for (slot_idx, record) in publishes.iter().rev().enumerate() {
                         let slot_y = zy + slot_idx as f32 * slot_h;
@@ -1834,7 +1837,7 @@ impl Compositor {
             //
             // Stack zones: each publication gets its own vertically-stacked slot.
             //   Publishes are rendered newest-first (slot 0 = newest, at top of zone).
-            //   slot_h = font_size_px + 2*padding(8px) + 2*border_width(1px) = font_size_px + 18.
+            //   slot_h = font_size_px + 2*margin_v (from RenderingPolicy) + 2*border_width(1px).
             //   This gives each notification a content-sized slot rather than dividing
             //   zone height uniformly by max_depth.
             //
@@ -1845,8 +1848,11 @@ impl Compositor {
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
                     let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
-                    // slot_height = font_size_px + 2*padding(8px) + 2*border_width(1px)
-                    let slot_h = (font_size_px + 18.0).max(1.0);
+                    // slot_height = font_size_px + 2*margin_v (from policy) + 2*border_width(1px).
+                    // Derive margin_v from RenderingPolicy (margin_vertical → margin_px → 8px)
+                    // rather than hardcoding 18.0, so per-zone policy overrides are respected.
+                    let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
+                    let slot_h = (font_size_px + 2.0 * margin_v + 2.0).max(1.0);
                     // Render newest-first: slot_index 0 = newest (top of zone).
                     for (slot_idx, record) in publishes.iter().rev().enumerate() {
                         let slot_y = y + slot_idx as f32 * slot_h;
