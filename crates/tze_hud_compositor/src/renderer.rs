@@ -104,6 +104,18 @@ const NOTIFICATION_URGENCY_CRITICAL: Rgba = Rgba {
 /// It overrides the token color's alpha channel.
 const NOTIFICATION_BACKDROP_OPACITY: f32 = 0.9;
 
+/// Warm-gray placeholder color rendered for `ZoneContent::StaticImage` zones.
+///
+/// Full GPU texture upload (wgpu sampler pipeline) is deferred to a follow-up
+/// iteration. This constant is intentionally shared between the Stack and
+/// non-Stack contention-policy branches so both render the same placeholder.
+const STATIC_IMAGE_PLACEHOLDER_COLOR: Rgba = Rgba {
+    r: 0.3,
+    g: 0.3,
+    b: 0.3,
+    a: 1.0,
+};
+
 /// Fallback color for `color.border.default` when the token is absent.
 ///
 /// Matches the default value in built-in component startup tokens (#444466).
@@ -2432,11 +2444,17 @@ impl Compositor {
                         // non-alert-banner Notification: urgency → color.notification.urgency.* tokens
                         //   with fixed 0.9 opacity and 1px 4-quad border
                         // SolidColor: always its own color
+                        // StaticImage: warm-gray placeholder quad (full GPU texture deferred)
                         // Other: policy.backdrop
                         let is_notification_content =
                             matches!(&record.content, ZoneContent::Notification(_));
                         let backdrop_rgba: Option<Rgba> = match &record.content {
                             ZoneContent::SolidColor(rgba) => Some(*rgba),
+                            ZoneContent::StaticImage(_) => {
+                                // Placeholder warm-gray backdrop — full GPU texture upload
+                                // (wgpu sampler pipeline) is deferred to a follow-up iteration.
+                                Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
+                            }
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                                 // alert-banner: severity tokens (color.severity.*).
                                 // Respect policy.backdrop contract: only override the color when
@@ -2518,6 +2536,11 @@ impl Compositor {
                         ZoneContent::SolidColor(rgba) => {
                             // SolidColor always renders its own color (no policy override).
                             Some(*rgba)
+                        }
+                        ZoneContent::StaticImage(_) => {
+                            // Placeholder warm-gray backdrop — full GPU texture upload
+                            // (wgpu sampler pipeline) is deferred to a follow-up iteration.
+                            Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
                         }
                         ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                             // alert-banner: map urgency to severity token color.
@@ -7182,6 +7205,77 @@ mod tests {
         assert_eq!(
             ttl_fallback, 8_000,
             "publication_ttl_ms must fall back to zone auto_clear_ms=8000 when NotificationPayload.ttl_ms is None"
+        );
+    }
+
+    // ── ZoneContent::StaticImage rendering ───────────────────────────────────
+
+    /// render_zone_content with ZoneContent::StaticImage must emit a warm-gray
+    /// placeholder quad (R≈0.3, G≈0.3, B≈0.3) regardless of the zone's policy
+    /// backdrop color.
+    ///
+    /// Full GPU texture upload (wgpu sampler pipeline) is deferred; this test
+    /// confirms the placeholder path is exercised.
+    #[tokio::test]
+    async fn test_static_image_zone_emits_warm_gray_placeholder() {
+        let (compositor, _surface) = make_compositor_and_surface(1280, 720).await;
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "pip".to_owned(),
+            description: "picture-in-picture zone".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.25,
+            },
+            accepted_media_types: vec![ZoneMediaType::StaticImage],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Replace,
+            max_publishers: 1,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Content,
+        });
+
+        let resource_id = ResourceId::of(b"placeholder-image-bytes");
+        scene
+            .publish_to_zone(
+                "pip",
+                ZoneContent::StaticImage(resource_id),
+                "test-agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0);
+
+        // At least one backdrop quad must be emitted.
+        assert!(!vertices.is_empty(), "StaticImage zone must emit backdrop vertices");
+
+        // The first vertex color must be warm-gray (R≈0.3, G≈0.3, B≈0.3, A≈1.0).
+        let color = vertices[0].color;
+        assert!(
+            (color[0] - 0.3).abs() < 0.01,
+            "StaticImage placeholder R must be ~0.3, got {}", color[0]
+        );
+        assert!(
+            (color[1] - 0.3).abs() < 0.01,
+            "StaticImage placeholder G must be ~0.3, got {}", color[1]
+        );
+        assert!(
+            (color[2] - 0.3).abs() < 0.01,
+            "StaticImage placeholder B must be ~0.3, got {}", color[2]
+        );
+        assert!(
+            color[3] > 0.5,
+            "StaticImage placeholder must be substantially opaque (A > 0.5), got {}", color[3]
         );
     }
 }
