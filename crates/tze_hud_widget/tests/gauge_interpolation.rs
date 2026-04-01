@@ -426,11 +426,11 @@ fn color_fill_color_midpoint_bar_fill_svg_attribute() {
         "midpoint fill should not equal end color #ff0000, got {fill_str:?}"
     );
 
-    // Verify it IS a valid hex color with midpoint-ish R and B values.
-    // At t=0.5: R channel = round(0.5 * 255) = 128 = 0x80; B = 0x80.
-    assert!(
-        fill_str.contains("80"),
-        "midpoint fill should contain '80' (≈128/255 hex) in both R and B channels; got {fill_str:?}"
+    // Verify it IS exactly the expected midpoint hex color "#800080".
+    // At t=0.5: R channel = round(0.5 * 255) = 128 = 0x80; B = 0x80; G = 0x00.
+    assert_eq!(
+        fill_str, "#800080",
+        "midpoint fill should be '#800080' (purple: r=0x80, g=0x00, b=0x80); got {fill_str:?}"
     );
 }
 
@@ -665,28 +665,30 @@ fn direct_color_interpolates_while_enum_snaps_in_same_transition() {
 // 7.5 — ZERO TRANSITION (all params in one frame)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// With transition_ms=0, `compute_transition_t` returns 1.0 immediately
-/// (elapsed=0 / duration=0 would be NaN; the spec uses duration=0 as snap).
-///
-/// In practice the compositor treats transition_ms=0 as "apply now" — all params
-/// jump directly to their final values on the very next frame.
+/// At t=1.0, `interpolate_param` returns the target (final) value for all
+/// continuous param types.  This models the fully-elapsed end-of-transition
+/// state where the compositor settles params to their final values.
 /// [hud-w17j]
 #[test]
-fn zero_transition_compute_t_returns_one() {
-    // With transition_ms=0 the animation is never started; the compositor
-    // applies params directly.  Simulate the t=1.0 snap for all param types.
-    let _t = compute_transition_t(0.0, 1.0, DegradationLevel::Nominal);
-    // elapsed=0, duration=1ms → t=0/1=0.0, but this is an f32=0.0 transition
-    // where the convention (transition_ms=0 means "no transition") is expressed
-    // by the compositor skipping WidgetAnimationState creation and applying the
-    // params directly.  Here we verify that t=1.0 is the value that gives final.
+fn interpolation_at_t1_yields_final_value() {
+    // f32: end of transition → final value
     let f32_old = WidgetParameterValue::F32(0.0);
     let f32_final = WidgetParameterValue::F32(0.9);
     let snapped = interpolate_param(&f32_old, &f32_final, 1.0);
     assert_eq!(
         snapped,
         WidgetParameterValue::F32(0.9),
-        "at t=1.0 (zero-transition snap), f32 level should equal final value 0.9"
+        "at t=1.0, f32 level should equal final value 0.9"
+    );
+
+    // Color: end of transition → final color
+    let color_old = WidgetParameterValue::Color(Rgba::new(0.0, 0.0, 1.0, 1.0));
+    let color_final = WidgetParameterValue::Color(Rgba::new(1.0, 0.0, 0.0, 1.0));
+    let color_snapped = interpolate_param(&color_old, &color_final, 1.0);
+    assert_eq!(
+        color_snapped,
+        WidgetParameterValue::Color(Rgba::new(1.0, 0.0, 0.0, 1.0)),
+        "at t=1.0, fill_color should equal final (red)"
     );
 }
 
@@ -889,10 +891,11 @@ fn transition_interruption_new_record_has_new_transition_ms() {
         "publish A should record transition_ms=300"
     );
 
-    // Publish B interrupts: level=0.4 with transition_ms=300 (new transition)
+    // Publish B interrupts: level=0.4 with a DIFFERENT transition_ms=500 to
+    // verify the stored value comes from publish B, not inherited from publish A.
     let params_b = HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.4))]);
     scene
-        .publish_to_widget("gauge", params_b, "agent.test", None, 300, None)
+        .publish_to_widget("gauge", params_b, "agent.test", None, 500, None)
         .expect("publish B (interruption) should succeed");
 
     let pubs_after_b = scene.widget_registry.active_for_widget("gauge");
@@ -903,8 +906,8 @@ fn transition_interruption_new_record_has_new_transition_ms() {
         "LatestWins: exactly one record after interruption"
     );
     assert_eq!(
-        pubs_after_b[0].transition_ms, 300,
-        "interrupting publish should record its own transition_ms=300"
+        pubs_after_b[0].transition_ms, 500,
+        "interrupting publish B should store its own transition_ms=500 (not inherited 300 from publish A)"
     );
 
     match pubs_after_b[0].params.get("level") {
@@ -969,16 +972,11 @@ fn mixed_snap_and_interpolate_label_severity_snap_at_t0() {
         "level should still be at start (0.0) at t=0 in mixed publish"
     );
 
-    match eff_fill {
-        WidgetParameterValue::Color(c) => {
-            assert!(
-                (c.r - 0.0).abs() < 1e-6,
-                "fill_color R should be at start (0.0) at t=0, got {}",
-                c.r
-            );
-        }
-        other => panic!("expected Color for fill_color at t=0, got {other:?}"),
-    }
+    assert_eq!(
+        eff_fill,
+        old_fill,
+        "fill_color should still be at start (cyan-blue) at t=0 in mixed publish"
+    );
 }
 
 /// At t=0.5 of the mixed publish:
