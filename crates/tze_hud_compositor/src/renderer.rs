@@ -1944,7 +1944,7 @@ impl Compositor {
             }
         }
 
-        // Content zones render in z-order with tiles (above background, below chrome).
+        // Content zones render as a batch after all tiles (above background, below chrome).
         self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
         // Chrome zones render last, above everything.
         self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Chrome));
@@ -2053,7 +2053,7 @@ impl Compositor {
             }
         }
 
-        // Content zones render in z-order with tiles (above background, below chrome).
+        // Content zones render as a batch after all tiles (above background, below chrome).
         self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
         // Chrome zones render last, above everything.
         self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Chrome));
@@ -2167,7 +2167,7 @@ impl Compositor {
             }
         }
 
-        // Content zones render in z-order with tiles (above background, below chrome).
+        // Content zones render as a batch after all tiles (above background, below chrome).
         self.render_zone_content(
             scene,
             &mut content_vertices,
@@ -2698,7 +2698,15 @@ impl Compositor {
         // backgrounds so developers can see zone geometry even when zones have
         // opaque content.  The overall background gets a subtle black tint;
         // each zone gets a rainbow-sampled color at low opacity.
-        if self.debug_zone_tints {
+        //
+        // Guard: only emit debug tints when there is no layer filter (legacy
+        // single-pass test usage) or on the final Chrome pass.  The three-pass
+        // frame-render methods call this function three times; without this
+        // guard the debug overlay would be drawn 3× per frame, tripling its
+        // effective opacity.
+        let emit_debug_tints =
+            self.debug_zone_tints && matches!(only_layer, None | Some(LayerAttachment::Chrome));
+        if emit_debug_tints {
             // 0.5% opacity black background tint over the full window.
             // In overlay mode, the clear_pipeline writes RGBA directly (no
             // GPU blending). DWM composites with premultiplied alpha, so RGB
