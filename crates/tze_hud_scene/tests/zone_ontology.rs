@@ -1699,24 +1699,23 @@ fn exemplar_status_bar_key_removal_ttl_expiry() {
     );
 }
 
-// ── Test 5: Max keys capacity — 33rd distinct key is rejected ─────────────────
+// ── Test 5: Max keys eviction — 33rd distinct key evicts the oldest ────────────
 //
-// NOTE: The current implementation returns Err(ZoneMaxKeysReached) when the key
-// limit is reached rather than evicting the oldest entry.  This test verifies
-// the actual enforcement semantics: publishing 33 distinct keys to a
-// max_keys=32 zone produces an error on the 33rd publish and the zone retains
-// exactly 32 active publications.
+// Spec: openspec/changes/exemplar-status-bar/tasks.md §2.5
+//   "publish 33 distinct merge_keys to status-bar zone (max_keys: 32);
+//    assert oldest key evicted and 32 keys remain"
 //
-// Reference: openspec/changes/exemplar-status-bar/tasks.md §2.5 (tasks.md
-// describes "oldest evicted"; the implementation rejects — this test documents
-// the implemented behaviour).
+// When a MergeByKey zone is at max_keys capacity and a new distinct key
+// arrives, the oldest (first-inserted) publication is evicted to make room.
+// The zone always retains exactly max_keys entries — never rejects.
 
 #[test]
-fn exemplar_status_bar_max_keys_capacity_enforced() {
-    // [hud-t1in.2]: MergeByKey max_keys=32 — 33rd distinct key is rejected.
+fn exemplar_status_bar_max_keys_eviction() {
+    // [hud-6v0t]: MergeByKey max_keys=32 — 33rd distinct key evicts oldest.
     let mut scene = make_scene_with_defaults();
 
-    // Publish 32 distinct keys — all must succeed.
+    // Publish 32 distinct keys — all must succeed.  key-00 is inserted first
+    // and is therefore the "oldest" that will be evicted.
     for i in 0..32u32 {
         let key = format!("key-{i:02}");
         scene
@@ -1737,25 +1736,39 @@ fn exemplar_status_bar_max_keys_capacity_enforced() {
         "32 distinct keys must all be stored"
     );
 
-    // The 33rd distinct key must be rejected (max_keys=32 reached).
-    let result = scene.publish_to_zone(
-        "status-bar",
-        status_bar_entry("overflow-key", "overflow"),
-        "overflow-agent",
-        Some("overflow-key".to_string()),
-        None,
-        None,
-    );
-    assert!(
-        result.is_err(),
-        "publishing a 33rd distinct key to a max_keys=32 zone must be rejected"
+    // Publishing the 33rd distinct key must SUCCEED — evicting the oldest entry.
+    scene
+        .publish_to_zone(
+            "status-bar",
+            status_bar_entry("overflow-key", "overflow"),
+            "overflow-agent",
+            Some("overflow-key".to_string()),
+            None,
+            None,
+        )
+        .expect("33rd key must succeed: oldest evicted, 32 remain");
+
+    // Zone must retain exactly 32 publications after eviction.
+    let pubs = scene.zone_registry.active_for_zone("status-bar");
+    assert_eq!(
+        pubs.len(),
+        32,
+        "zone must retain exactly 32 publications after oldest evicted"
     );
 
-    // The zone must still hold exactly 32 publications.
-    assert_eq!(
-        scene.zone_registry.active_for_zone("status-bar").len(),
-        32,
-        "zone must retain exactly 32 publications after rejected overflow"
+    // The oldest key ("key-00") must have been evicted.
+    assert!(
+        !pubs
+            .iter()
+            .any(|r| r.merge_key.as_deref() == Some("key-00")),
+        "key-00 (oldest) must have been evicted"
+    );
+
+    // The new key ("overflow-key") must be present.
+    assert!(
+        pubs.iter()
+            .any(|r| r.merge_key.as_deref() == Some("overflow-key")),
+        "overflow-key must be present after eviction"
     );
 }
 
@@ -2116,7 +2129,10 @@ fn test_ambient_background_zero_ttl_persists() {
         .expect("publish with zero-TTL (None expires) must succeed");
 
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "ambient-background must have 1 active publication immediately after publish"
     );
@@ -2131,7 +2147,10 @@ fn test_ambient_background_zero_ttl_persists() {
         "zero-TTL (indefinite) publication must not be removed after 60 s"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "ambient-background publication must persist 60 s after publish (zero TTL = indefinite)"
     );
@@ -2177,7 +2196,10 @@ fn test_ambient_background_omitted_ttl_persists() {
         "omitted-TTL publication must never expire via drain_expired_zone_publications"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "omitted-TTL ambient-background publication must survive indefinitely"
     );
@@ -2214,7 +2236,10 @@ fn test_ambient_background_nonzero_ttl_expires() {
 
     // Immediately present.
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "ambient-background must have 1 active publication immediately after publish"
     );
@@ -2230,7 +2255,13 @@ fn test_ambient_background_nonzero_ttl_expires() {
     // Before expiry: drain is a no-op.
     let removed = scene.drain_expired_zone_publications();
     assert_eq!(removed, 0, "publication must not expire before TTL elapses");
-    assert_eq!(scene.zone_registry.active_for_zone("ambient-background").len(), 1);
+    assert_eq!(
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
+        1
+    );
 
     // Advance past the TTL expiry.
     clock.set_us(expiry_us + 1);
@@ -2240,7 +2271,10 @@ fn test_ambient_background_nonzero_ttl_expires() {
         "non-zero-TTL ambient-background publication must be removed after expiry"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         0,
         "ambient-background must be empty after TTL expiry (reverts to transparent/clear)"
     );
@@ -2275,7 +2309,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
         .expect("initial publish with non-zero TTL must succeed");
 
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "warm_amber publication must be present immediately"
     );
@@ -2285,7 +2322,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
     let removed = scene.drain_expired_zone_publications();
     assert_eq!(removed, 1, "warm_amber TTL publication must expire");
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         0,
         "ambient-background must be empty after TTL expiry"
     );
@@ -2303,7 +2343,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
         .expect("republish after expiry must succeed");
 
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "forest_green republish must produce exactly 1 active publication"
     );
@@ -2324,7 +2367,10 @@ fn test_ambient_background_ttl_expiry_then_republish() {
         "persistent republish must not expire regardless of elapsed time"
     );
     assert_eq!(
-        scene.zone_registry.active_for_zone("ambient-background").len(),
+        scene
+            .zone_registry
+            .active_for_zone("ambient-background")
+            .len(),
         1,
         "forest_green persistent publication must still be active 60 s after republish"
     );
