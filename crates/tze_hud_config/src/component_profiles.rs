@@ -1141,7 +1141,8 @@ fn resolve_font_weight_value(
     let field_name = "font_weight";
 
     // Parse raw numeric value as f32 (reuse existing helper).
-    let raw_f32 = resolve_numeric_value(val, scoped_tokens, profile_name, zone_type_name, field_name)?;
+    let raw_f32 =
+        resolve_numeric_value(val, scoped_tokens, profile_name, zone_type_name, field_name)?;
 
     // Clamp to [100.0, 900.0], then round to nearest 100.
     let clamped = raw_f32.clamp(100.0, 900.0);
