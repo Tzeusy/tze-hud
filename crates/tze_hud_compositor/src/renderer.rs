@@ -5068,12 +5068,7 @@ mod tests {
     }
 
     /// Helper: publish an alert banner notification.
-    fn publish_alert(
-        scene: &mut SceneGraph,
-        text: &str,
-        urgency: u32,
-        publisher: &str,
-    ) {
+    fn publish_alert(scene: &mut SceneGraph, text: &str, urgency: u32, publisher: &str) {
         scene
             .publish_to_zone(
                 "alert-banner",
@@ -5192,7 +5187,10 @@ mod tests {
             items[2].text
         );
         // Pixel positions must decrease (slot 0 < slot 1 < slot 2 in pixel_y).
-        assert!(items[0].pixel_y < items[1].pixel_y, "critical above warning");
+        assert!(
+            items[0].pixel_y < items[1].pixel_y,
+            "critical above warning"
+        );
         assert!(items[1].pixel_y < items[2].pixel_y, "warning above info");
     }
 
