@@ -2214,7 +2214,9 @@ impl ZoneRegistry {
         // Chrome-layer positioning per spec §Alert-Banner Chrome-Layer Positioning:
         //   layer_attachment = Chrome — renders above all agent content
         //   width_pct = 1.0 — full display width
-        //   height_pct = 0.06 — per-slot height; compositor scales total to active_count × slot_h
+        //   height_pct = 0.06 — nominal single-slot height for edge anchoring and debug geometry.
+        //   Runtime slot height is derived from RenderingPolicy (stack_slot_height); total stack
+        //   height = active_count × slot_h, not height_pct × screen_height.
         //   Zero-height when inactive: compositor skips backdrop/text for empty zones;
         //   no visible pixels are emitted when no alerts are active.
         //
@@ -2265,7 +2267,11 @@ impl ZoneRegistry {
                 ..RenderingPolicy::default()
             },
             contention_policy: ContentionPolicy::Stack { max_depth: 8 },
-            max_publishers: 16,
+            // max_publishers is enforced per publisher_namespace (one active banner
+            // per agent).  max_depth=8 allows up to 8 simultaneous banners from
+            // 8 different agents; keeping max_publishers=1 ensures no single agent
+            // can flood the stack.
+            max_publishers: 1,
             transport_constraint: None,
             auto_clear_ms: Some(10_000),
             ephemeral: false,
