@@ -854,32 +854,45 @@ pub(crate) fn resolve_token_placeholders(
     //
     // XML comments (`<!-- ... -->`) are skipped verbatim: placeholders inside
     // comment regions are NOT resolved.  This allows SVG authors to include
-    // documentation examples such as `<!-- use {{token.valid-key}} here -->`
+    // documentation examples such as `<!-- use {{token.color.primary}} here -->`
     // without triggering resolution or spurious unresolved-token errors.
     let mut result = String::with_capacity(work.len());
     let mut remaining = work.as_str();
+    // Once no `<!--` remains in `remaining`, no further comment checks are
+    // needed.  This flag avoids the O(N·L) cost of re-scanning for `<!--` on
+    // every placeholder iteration in comment-free inputs.
+    let mut may_have_comments = remaining.contains("<!--");
 
     while let Some(open_pos) = remaining.find("{{") {
         // Before treating `{{` as a placeholder, check whether there is an XML
-        // comment start (`<!--`) that precedes it in the current `remaining`
-        // slice.  If so, the `{{` is inside a comment and must be skipped.
-        if let Some(comment_start) = remaining.find("<!--") {
-            if comment_start < open_pos {
-                // A comment opens before the `{{`.  Emit everything up to and
-                // including the comment end marker (`-->`), then continue.
-                let comment_body_start = comment_start + 4; // skip past `<!--`
-                let comment_suffix = &remaining[comment_body_start..];
-                if let Some(comment_end_offset) = comment_suffix.find("-->") {
-                    // Emit the entire comment (including delimiters) unchanged.
-                    let comment_end_abs = comment_body_start + comment_end_offset + 3;
-                    result.push_str(&remaining[..comment_end_abs]);
-                    remaining = &remaining[comment_end_abs..];
-                } else {
-                    // Unclosed comment — emit the rest of the input verbatim.
-                    result.push_str(remaining);
-                    remaining = "";
+        // comment start (`<!--`) that appears before the next `{{` scan
+        // position.  If so, emit that comment region verbatim before
+        // processing the placeholder scan position.
+        if may_have_comments {
+            if let Some(comment_start) = remaining.find("<!--") {
+                if comment_start < open_pos {
+                    // A comment opens before the `{{`.  Emit everything up to
+                    // and including the comment end marker (`-->`), then
+                    // continue.
+                    let comment_body_start = comment_start + 4; // skip past `<!--`
+                    let comment_suffix = &remaining[comment_body_start..];
+                    if let Some(comment_end_offset) = comment_suffix.find("-->") {
+                        // Emit the entire comment (including delimiters) unchanged.
+                        let comment_end_abs = comment_body_start + comment_end_offset + 3;
+                        result.push_str(&remaining[..comment_end_abs]);
+                        remaining = &remaining[comment_end_abs..];
+                        // Re-check whether any further comments remain.
+                        may_have_comments = remaining.contains("<!--");
+                    } else {
+                        // Unclosed comment — emit the rest of the input verbatim.
+                        result.push_str(remaining);
+                        remaining = "";
+                        may_have_comments = false;
+                    }
+                    continue;
                 }
-                continue;
+            } else {
+                may_have_comments = false;
             }
         }
 
