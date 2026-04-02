@@ -337,6 +337,55 @@ The bar cycles through: blue -> green -> yellow -> red -> blue (reset). Each tra
 
 Report pass/fail per step. A step fails if the tester observes: missing animation, wrong color, misaligned label, missing rounded end-caps, or visible artifacts after reset.
 
+## Notification Stack Exemplar Scenario
+
+Use `scripts/notification_exemplar.py` to exercise the notification-area zone
+on a live HUD. The script simulates 3 agents (alpha, beta, gamma) publishing
+notifications with mixed urgency levels across 4 phases.
+
+### CLI
+
+```bash
+python3 .claude/skills/user-test/scripts/notification_exemplar.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --psk-env TZE_HUD_PSK \
+  --ttl 8000
+```
+
+Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`), `--ttl` (ms, default 8000).
+
+### Phases
+
+| Phase | What happens | Pause |
+|-------|-------------|-------|
+| 1 — Initial burst | alpha (urgency 0), beta (urgency 1), gamma (urgency 2) published in order | 2s |
+| 2 — Stack growth | alpha (urgency 3), beta (urgency 1) — stack reaches max_depth=5 | 2s |
+| 3 — TTL expiry | waits `ttl + 650ms` for phase 1 batch to fade out (150ms per-notification fade-out) | 1s |
+| 4 — Max depth eviction | 6 rapid notifications; 1st is evicted instantly (no fade) when 6th arrives | 3s |
+
+### Visual Checklist (per phase)
+
+**Phase 1:** Three notifications stacked newest-at-top. gamma (amber), beta
+(dark blue), alpha (dark gray) backdrops with 1px border and body-font text.
+
+**Phase 2:** Five notifications. Top two are phase-2 publishes; bottom three
+are phase-1. All urgency-tinted correctly.
+
+**Phase 3:** Phase-1 batch (urgency 0/1/2) has faded out; only 2 phase-2
+notifications remain (urgency 3 and 1).
+
+**Phase 4:** Exactly 5 notifications visible. "Burst A1" (oldest, urgency 0)
+is gone with no fade — evicted instantly. "Burst C6" is at top.
+
+### Notification payload shape
+
+```json
+{"type": "notification", "text": "...", "icon": "...", "urgency": 0}
+```
+
+Published via MCP `publish_to_zone` to `notification-area` zone with `ttl_us`
+derived from `--ttl` and `namespace` set to the simulated agent name.
+
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
