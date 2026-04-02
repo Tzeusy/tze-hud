@@ -138,10 +138,7 @@ fn level_constraints() -> HashMap<String, (f32, f32)> {
 /// Build params representing a `level` change.
 fn params_level(level: f32) -> HashMap<String, WidgetParameterValue> {
     HashMap::from([
-        (
-            "level".to_string(),
-            WidgetParameterValue::F32(level),
-        ),
+        ("level".to_string(), WidgetParameterValue::F32(level)),
         (
             "fill_color".to_string(),
             WidgetParameterValue::Color(Rgba {
@@ -165,10 +162,7 @@ fn params_level(level: f32) -> HashMap<String, WidgetParameterValue> {
 /// Build params exercising all four gauge parameters.
 fn params_all_changed() -> HashMap<String, WidgetParameterValue> {
     HashMap::from([
-        (
-            "level".to_string(),
-            WidgetParameterValue::F32(0.65),
-        ),
+        ("level".to_string(), WidgetParameterValue::F32(0.65)),
         (
             "fill_color".to_string(),
             WidgetParameterValue::Color(Rgba {
@@ -280,7 +274,9 @@ fn single_param_level_change_rasterize_within_ci_budget() {
          Likely a catastrophic regression. \
          Run `cargo bench -p tze_hud_compositor --bench widget_rasterize` on optimised \
          reference hardware to verify the 2ms spec requirement.",
-        elapsed_ms, CI_THRESHOLD_MS, SPEC_TARGET_MS,
+        elapsed_ms,
+        CI_THRESHOLD_MS,
+        SPEC_TARGET_MS,
     );
 }
 
@@ -305,10 +301,7 @@ fn unchanged_params_signal_cache_hit() {
 
     // Initial publish — set the gauge to a known state.
     let params_initial = HashMap::from([
-        (
-            "level".to_string(),
-            WidgetParameterValue::F32(0.5),
-        ),
+        ("level".to_string(), WidgetParameterValue::F32(0.5)),
         (
             "fill_color".to_string(),
             WidgetParameterValue::Color(Rgba {
@@ -414,7 +407,9 @@ fn multi_param_change_rasterize_within_ci_budget() {
          (spec target for reference hardware is {}ms). \
          Run `cargo bench -p tze_hud_compositor --bench widget_rasterize` on optimised \
          reference hardware to verify the 2ms spec requirement.",
-        elapsed_ms, CI_THRESHOLD_MS, SPEC_TARGET_MS,
+        elapsed_ms,
+        CI_THRESHOLD_MS,
+        SPEC_TARGET_MS,
     );
 }
 
@@ -436,10 +431,7 @@ fn same_value_publish_is_cache_hit() {
     let (mut scene, _tab) = scene_with_production_gauge();
 
     // First publish: set level to 0.75.
-    let level_params = HashMap::from([(
-        "level".to_string(),
-        WidgetParameterValue::F32(0.75),
-    )]);
+    let level_params = HashMap::from([("level".to_string(), WidgetParameterValue::F32(0.75))]);
 
     scene
         .publish_to_widget("gauge", level_params.clone(), "agent.test", None, 0, None)
@@ -572,9 +564,7 @@ fn interpolation_frames_all_within_ci_budget() {
 
     // Log all frame timings for visibility.
     for (elapsed, frame_ms) in &frame_timings {
-        eprintln!(
-            "[gauge_perf] interpolation frame at t={elapsed:.0}ms: {frame_ms}ms"
-        );
+        eprintln!("[gauge_perf] interpolation frame at t={elapsed:.0}ms: {frame_ms}ms");
     }
     eprintln!(
         "[gauge_perf] interpolation frames (10 steps, 300ms transition): \
