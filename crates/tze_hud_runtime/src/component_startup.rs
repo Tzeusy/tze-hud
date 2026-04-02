@@ -47,6 +47,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use tze_hud_config::component_types::ComponentType;
 use tze_hud_config::policy_builder::{
     ProfileSelection, build_all_effective_policies, resolve_profile_selection,
 };
@@ -81,6 +82,13 @@ pub struct ComponentStartupResult {
     pub profile_widget_bundles: Vec<LoadedBundle>,
     /// SVG assets from global widget bundles for compositor registration.
     pub widget_svg_assets: Vec<crate::widget_startup::WidgetSvgAsset>,
+    /// Urgency token overrides extracted from the active notification profile.
+    ///
+    /// Contains only `color.notification.urgency.*` entries from the selected
+    /// notification profile's `[token_overrides]`. Empty when no notification
+    /// profile is active. The caller MUST merge these on top of `global_tokens`
+    /// before passing the map to `compositor.set_token_map()`.
+    pub notification_urgency_tokens: DesignTokenMap,
 }
 
 // ─── run_component_startup ────────────────────────────────────────────────────
@@ -323,11 +331,44 @@ pub fn run_component_startup(
         );
     }
 
+    // ── Extract notification profile urgency token overrides ──────────────
+    // If a notification profile is active, pull its `color.notification.urgency.*`
+    // token overrides so the caller can merge them into the compositor's token map.
+    // This allows profile-level urgency color customisation to reach the compositor's
+    // urgency_to_notification_color() function, which reads from compositor.token_map.
+    let notification_urgency_tokens: DesignTokenMap = profile_selection
+        .get(&ComponentType::Notification)
+        .map(|profile| {
+            let urgency_entries: DesignTokenMap = profile
+                .token_overrides
+                .iter()
+                .filter(|(k, _)| k.starts_with("color.notification.urgency."))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if urgency_entries.is_empty() {
+                tracing::debug!(
+                    profile = %profile.name,
+                    "component_startup: active notification profile has no urgency token overrides"
+                );
+            } else {
+                tracing::info!(
+                    profile = %profile.name,
+                    token_count = urgency_entries.len(),
+                    "component_startup: extracted {} urgency token override(s) from notification profile '{}'",
+                    urgency_entries.len(),
+                    profile.name
+                );
+            }
+            urgency_entries
+        })
+        .unwrap_or_default();
+
     ComponentStartupResult {
         global_tokens,
         zone_registry,
         profile_widget_bundles,
         widget_svg_assets,
+        notification_urgency_tokens,
     }
 }
 
@@ -643,6 +684,162 @@ default_tab = true
         assert!(
             result.profile_widget_bundles.is_empty(),
             "no profiles configured, so no profile widget bundles expected"
+        );
+    }
+
+    // ── Notification urgency token extraction ─────────────────────────────────
+
+    /// WHEN no notification profile is active THEN notification_urgency_tokens is empty.
+    #[test]
+    fn notification_urgency_tokens_empty_without_notification_profile() {
+        let raw = RawConfig::default();
+        let mut scene = make_scene();
+        let result = run_component_startup(&raw, None, Some("headless"), &mut scene);
+
+        assert!(
+            result.notification_urgency_tokens.is_empty(),
+            "notification_urgency_tokens should be empty when no notification profile is active"
+        );
+    }
+
+    /// WHEN the notification-stack-exemplar profile is active THEN notification_urgency_tokens
+    /// contains all four color.notification.urgency.* overrides.
+    ///
+    /// Note: [component_profile_bundles].paths points to the PARENT directory
+    /// (`profiles/`) that contains profile subdirectories — scan_profile_dirs
+    /// scans subdirectories of each listed path.
+    #[test]
+    fn notification_urgency_tokens_extracted_from_active_notification_profile() {
+        let profiles_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("profiles");
+
+        let exemplar_dir = profiles_root.join("notification-stack-exemplar");
+        if !exemplar_dir.exists() {
+            eprintln!(
+                "SKIP: notification-stack-exemplar profile not found at {:?}",
+                exemplar_dir
+            );
+            return;
+        }
+
+        let toml_str = format!(
+            r##"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+
+[component_profile_bundles]
+paths = ["{profiles_root}"]
+
+[component_profiles]
+notification = "notification-stack-exemplar"
+"##,
+            profiles_root = profiles_root.display()
+        );
+
+        let raw: RawConfig = toml::from_str(&toml_str).expect("TOML parse should succeed");
+        let mut scene = make_scene();
+        let result = run_component_startup(&raw, None, Some("headless"), &mut scene);
+
+        assert_eq!(
+            result.notification_urgency_tokens.len(),
+            4,
+            "expected 4 urgency token overrides, got {:?}",
+            result.notification_urgency_tokens
+        );
+        assert_eq!(
+            result
+                .notification_urgency_tokens
+                .get("color.notification.urgency.low")
+                .map(|s| s.as_str()),
+            Some("#2A2A2A"),
+            "urgency.low should be #2A2A2A"
+        );
+        assert_eq!(
+            result
+                .notification_urgency_tokens
+                .get("color.notification.urgency.normal")
+                .map(|s| s.as_str()),
+            Some("#1A1A3A"),
+            "urgency.normal should be #1A1A3A"
+        );
+        assert_eq!(
+            result
+                .notification_urgency_tokens
+                .get("color.notification.urgency.urgent")
+                .map(|s| s.as_str()),
+            Some("#8B6914"),
+            "urgency.urgent should be #8B6914"
+        );
+        assert_eq!(
+            result
+                .notification_urgency_tokens
+                .get("color.notification.urgency.critical")
+                .map(|s| s.as_str()),
+            Some("#8B1A1A"),
+            "urgency.critical should be #8B1A1A"
+        );
+    }
+
+    /// WHEN the notification-stack-exemplar profile is active THEN merged token map
+    /// contains urgency overrides on top of global tokens (simulates windowed/headless behavior).
+    #[test]
+    fn notification_urgency_tokens_override_global_when_merged() {
+        let profiles_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("profiles");
+
+        let exemplar_dir = profiles_root.join("notification-stack-exemplar");
+        if !exemplar_dir.exists() {
+            eprintln!(
+                "SKIP: notification-stack-exemplar profile not found at {:?}",
+                exemplar_dir
+            );
+            return;
+        }
+
+        let toml_str = format!(
+            r##"
+[runtime]
+profile = "headless"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+
+[design_tokens]
+"color.notification.urgency.low" = "#DEADBE"
+
+[component_profile_bundles]
+paths = ["{profiles_root}"]
+
+[component_profiles]
+notification = "notification-stack-exemplar"
+"##,
+            profiles_root = profiles_root.display()
+        );
+
+        let raw: RawConfig = toml::from_str(&toml_str).expect("TOML parse should succeed");
+        let mut scene = make_scene();
+        let result = run_component_startup(&raw, None, Some("headless"), &mut scene);
+
+        let mut merged = result.global_tokens;
+        for (k, v) in result.notification_urgency_tokens {
+            merged.insert(k, v);
+        }
+
+        assert_eq!(
+            merged
+                .get("color.notification.urgency.low")
+                .map(|s| s.as_str()),
+            Some("#2A2A2A"),
+            "profile urgency.low token should override global design_token value"
         );
     }
 }
