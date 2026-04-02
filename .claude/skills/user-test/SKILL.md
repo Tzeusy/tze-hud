@@ -333,9 +333,9 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --delay-ms 1000
 ```
 
-The bar cycles through: blue -> green -> yellow -> red -> blue (reset). Each transition should produce a visible smooth color animation over 300ms. Confirm that the fill color matches expectations at each step before the next publish fires.
+The bar cycles through: blue -> green -> yellow -> red -> blue (reset) -> clear (empty). Each transition should produce a visible smooth color animation over 300ms. Confirm that the fill color matches expectations at each step before the next publish fires, and that after the final clear action the bar is fully empty with no residual fill or label.
 
-Report pass/fail per step. A step fails if the tester observes: missing animation, wrong color, misaligned label, missing rounded end-caps, or visible artifacts after reset.
+Report pass/fail per step. A step fails if the tester observes: missing animation, wrong color, misaligned label, missing rounded end-caps, or visible artifacts after the reset/clear-to-empty step.
 
 ## Behavior Rules
 
