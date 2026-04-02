@@ -59,8 +59,13 @@
     "namespace": "user-test"
   },
   {
-    "action": "clear",
     "widget_name": "progress-bar",
+    "params": {
+      "progress": 0.0,
+      "label": ""
+    },
+    "transition_ms": 0,
+    "ttl_us": 10000000,
     "namespace": "user-test"
   }
 ]
