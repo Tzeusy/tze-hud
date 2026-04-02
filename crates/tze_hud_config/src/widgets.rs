@@ -16,8 +16,11 @@
 //! ## Bundle path resolution
 //!
 //! All paths in `[widget_bundles].paths` are resolved relative to the
-//! configuration file's parent directory (or the current working directory if
-//! `config_parent` is `None`).
+//! configuration file's parent directory when `config_parent` is `Some`.
+//! When `config_parent` is `None` (e.g. config loaded from an inlined string),
+//! absolute paths are still validated for existence; relative paths are
+//! **skipped** because there is no meaningful base to resolve them against
+//! (the runtime's `scan_bundle_dirs` handles absent directories gracefully).
 //!
 //! ## Spec references
 //!
@@ -63,7 +66,10 @@ pub struct LoadedWidgetType {
 ///
 /// - `raw`: The raw config document.
 /// - `config_parent`: Parent directory of the config file (for relative path resolution).
-///   Use `None` to resolve relative to the current working directory.
+///   When `Some`, relative paths in `[widget_bundles].paths` are resolved against this
+///   directory and checked for existence. When `None` (e.g. config inlined via
+///   `include_str!`), absolute paths are still validated but relative paths are skipped
+///   because no meaningful base is available to resolve them against.
 /// - `loaded_types`: Widget types already loaded by the bundle scanner (from the
 ///   `tze_hud_widget` crate). These are the types available for `[[tabs.widgets]]`
 ///   references. This is passed in to allow validation without re-scanning bundles
@@ -608,6 +614,31 @@ mod tests {
             errors.is_empty(),
             "relative path with no config_parent should not produce errors (unresolvable base), \
              got: {errors:?}"
+        );
+    }
+
+    /// WHEN [widget_bundles].paths contains a relative path AND config_parent IS provided
+    /// THEN the path is resolved against config_parent and a non-existent path produces an error.
+    ///
+    /// Regression guard: the skip-when-None guard must not suppress errors when a valid base
+    /// directory is available.
+    #[test]
+    fn relative_bundle_path_with_config_parent_is_still_validated() {
+        let mut raw = RawConfig::default();
+        raw.widget_bundles = Some(crate::raw::RawWidgetBundles {
+            paths: vec!["nonexistent_subdir_tze_hud_99999".into()],
+        });
+        let mut errors = Vec::new();
+        // Use a known-good base dir (e.g. "/tmp") so the relative path resolves
+        // to /tmp/nonexistent_subdir_tze_hud_99999, which should not exist.
+        let base = std::path::Path::new("/tmp");
+        validate_widget_bundles(&raw, Some(base), &[], &mut errors);
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e.code, ConfigErrorCode::WidgetBundlePathNotFound)),
+            "relative path with config_parent provided should still produce \
+             CONFIG_WIDGET_BUNDLE_PATH_NOT_FOUND for a non-existent path, got: {errors:?}"
         );
     }
 
