@@ -1,0 +1,58 @@
+[
+  {
+    "widget_name": "progress-bar",
+    "params": {
+      "progress": 0.6,
+      "label": "Blue",
+      "fill_color": {"r": 0.290, "g": 0.620, "b": 1.0, "a": 1.0}
+    },
+    "transition_ms": 300,
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "progress-bar",
+    "params": {
+      "fill_color": {"r": 0.0, "g": 0.784, "b": 0.325, "a": 1.0},
+      "label": "Green"
+    },
+    "transition_ms": 300,
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "progress-bar",
+    "params": {
+      "fill_color": {"r": 1.0, "g": 0.8, "b": 0.0, "a": 1.0},
+      "label": "Yellow"
+    },
+    "transition_ms": 300,
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "progress-bar",
+    "params": {
+      "fill_color": {"r": 1.0, "g": 0.15, "b": 0.1, "a": 1.0},
+      "label": "Red"
+    },
+    "transition_ms": 300,
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "progress-bar",
+    "params": {
+      "fill_color": {"r": 0.290, "g": 0.620, "b": 1.0, "a": 1.0},
+      "label": "Blue"
+    },
+    "transition_ms": 300,
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "action": "clear",
+    "widget_name": "progress-bar",
+    "namespace": "user-test"
+  }
+]
