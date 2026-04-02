@@ -381,13 +381,57 @@ async fn test_subtitle_no_backdrop_when_policy_is_default() {
 /// channels all > 180, indicating white/bright text rendered over the dark backdrop.
 ///
 /// This test requires the text renderer to be initialized (calls `init_text_renderer`).
+///
+/// ## Surface sizing
+///
+/// Uses a 512×512 surface so the subtitle zone has adequate height (51px) to
+/// render 28px glyphs without clipping. On the default 256×256 surface the zone
+/// is only ~26px tall — smaller than the 28px font — so glyphs are clipped and
+/// no bright pixels appear.
+///
+/// 512×512 subtitle zone geometry:
+///   zh = 512 × 0.10 = 51.2px
+///   zy = 512 − 51.2 − 48.0 = 412.8 → floor = 412
+///   Zone rows: 412..464  (scan margin: 412..465)
+///   Zone cols: 51..461   (zx = (512−409.6)/2 ≈ 51)
 #[tokio::test]
 async fn test_subtitle_text_color_white_from_policy() {
-    let (mut compositor, surface) =
-        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    // Use 512×512 so zone height (~51px) comfortably fits 28px glyphs.
+    const TW: u32 = 512;
+    const TH: u32 = 512;
+    let (mut compositor, surface) = gpu_or_skip!(make_compositor_and_surface(TW, TH).await);
     compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut scene = SceneGraph::new(SURFACE_W as f32, SURFACE_H as f32);
-    register_subtitle_zone_spec_policy(&mut scene);
+    let mut scene = SceneGraph::new(TW as f32, TH as f32);
+
+    // Register spec-compliant subtitle zone on the 512×512 scene.
+    scene.register_zone(ZoneDefinition {
+        id: SceneId::new(),
+        name: "subtitle".to_owned(),
+        description: "Subtitle zone — spec policy (text color test)".to_owned(),
+        geometry_policy: GeometryPolicy::EdgeAnchored {
+            edge: DisplayEdge::Bottom,
+            height_pct: 0.10,
+            width_pct: 0.80,
+            margin_px: 48.0,
+        },
+        accepted_media_types: vec![ZoneMediaType::StreamText],
+        rendering_policy: RenderingPolicy {
+            backdrop: Some(Rgba::BLACK),
+            backdrop_opacity: Some(0.6),
+            text_color: Some(Rgba::WHITE),
+            font_size_px: Some(28.0),
+            font_weight: Some(600),
+            outline_color: Some(Rgba::BLACK),
+            outline_width: Some(2.0),
+            ..Default::default()
+        },
+        contention_policy: ContentionPolicy::LatestWins,
+        max_publishers: 1,
+        transport_constraint: None,
+        auto_clear_ms: None,
+        ephemeral: false,
+        layer_attachment: LayerAttachment::Content,
+    });
 
     scene
         .publish_to_zone(
@@ -403,22 +447,17 @@ async fn test_subtitle_text_color_white_from_policy() {
     compositor.render_frame_headless(&scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
-    // Scan the subtitle zone area for bright pixels (white text glyphs).
-    // Zone: x ∈ [26..230], y ∈ [182..208] (approx, for 256×256 surface).
-    // White text on a dark backdrop: look for pixels with R,G,B all > 180.
-    //
-    // The zone spans rows 182–208 (25.6px height at zy≈182.4).
-    // Text starts at y = zy + margin_v = 182 + 8 = 190.
-    // Scan rows 182–208, cols 26–230.
-    let zone_x_start = 26usize;
-    let zone_x_end = 230usize;
-    let zone_y_start = 182usize;
-    let zone_y_end = 210usize;
+    // Scan subtitle zone area for bright pixels (white text glyphs).
+    // 512×512: zh=51.2, zy≈412, zone rows 412..464, cols 51..461.
+    let zone_x_start = 51usize;
+    let zone_x_end = 461usize;
+    let zone_y_start = 412usize;
+    let zone_y_end = 465usize;
 
     let mut found_bright = false;
     'outer: for row in zone_y_start..zone_y_end {
         for col in zone_x_start..zone_x_end {
-            let offset = (row * SURFACE_W as usize + col) * 4;
+            let offset = (row * TW as usize + col) * 4;
             if offset + 3 < pixels.len() {
                 let r = pixels[offset];
                 let g = pixels[offset + 1];
@@ -545,16 +584,28 @@ async fn test_subtitle_custom_token_override_backdrop_color() {
 /// This is a presence test: at least one pixel in the subtitle zone area MUST have
 /// R, G, B > 180 after rendering white text at 28px.
 ///
-/// The 28px font size is larger than the 16px default, which means glyphs occupy
-/// more pixels — making presence detection more reliable.
-///
 /// This test requires the text renderer to be initialized.
+///
+/// ## Surface sizing
+///
+/// Uses a 512×512 surface so the subtitle zone has adequate height (51px) to
+/// render 28px glyphs without clipping. On the default 256×256 surface the zone
+/// is only ~26px tall — smaller than the 28px font — so glyphs are clipped and
+/// no bright pixels appear.
+///
+/// 512×512 subtitle zone geometry:
+///   zh = 512 × 0.10 = 51.2px
+///   zy = 512 − 51.2 − 48.0 = 412.8 → floor = 412
+///   Zone rows: 412..464  (scan margin: 412..465)
+///   Zone cols: 51..461   (zx = (512−409.6)/2 ≈ 51)
 #[tokio::test]
 async fn test_subtitle_font_size_28px_from_policy() {
-    let (mut compositor, surface) =
-        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    // Use 512×512 so zone height (~51px) comfortably fits 28px glyphs.
+    const TW: u32 = 512;
+    const TH: u32 = 512;
+    let (mut compositor, surface) = gpu_or_skip!(make_compositor_and_surface(TW, TH).await);
     compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
-    let mut scene = SceneGraph::new(SURFACE_W as f32, SURFACE_H as f32);
+    let mut scene = SceneGraph::new(TW as f32, TH as f32);
 
     // Register a subtitle zone with spec-mandated 28px font size and 600 weight,
     // matching what `typography.subtitle.size = "28"` and `typography.subtitle.weight = "600"`
@@ -606,15 +657,16 @@ async fn test_subtitle_font_size_28px_from_policy() {
     let pixels = surface.read_pixels(&compositor.device);
 
     // Scan the subtitle zone area for bright pixels (white 28px text glyphs).
-    let zone_x_start = 26usize;
-    let zone_x_end = 230usize;
-    let zone_y_start = 182usize;
-    let zone_y_end = 210usize;
+    // 512×512: zh=51.2, zy≈412, zone rows 412..464, cols 51..461.
+    let zone_x_start = 51usize;
+    let zone_x_end = 461usize;
+    let zone_y_start = 412usize;
+    let zone_y_end = 465usize;
 
     let mut found_bright = false;
     'outer: for row in zone_y_start..zone_y_end {
         for col in zone_x_start..zone_x_end {
-            let offset = (row * SURFACE_W as usize + col) * 4;
+            let offset = (row * TW as usize + col) * 4;
             if offset + 3 < pixels.len() {
                 let r = pixels[offset];
                 let g = pixels[offset + 1];
