@@ -493,14 +493,16 @@ async fn test_alert_banner_stacking_order() {
 /// default `RenderingPolicy.backdrop` color, NOT the urgency-to-severity color mapping.
 ///
 /// The default alert-banner backdrop is `Rgba { r:0.1, g:0.1, b:0.16, a:0.9 }` (dark
-/// blue-tinted). After sRGB encoding the pixel must be dark (distinctly different from
-/// any severity color: not blue-dominant like info, not amber, not red).
+/// blue-tinted). After sRGB encoding the pixel must be dark and only slightly blue-tinted
+/// (distinctly different from any severity color: far from the bright blue used for
+/// info, not amber, not red).
 ///
 /// The key invariant checked:
-///   - B channel is not dominant over both R and G (rules out info/severity blue)
-///   - R channel is not dominant over B (rules out critical or warning)
-///   - All channels are in the dark range (< 150), confirming the default dark backdrop
-///     rather than a severity color.
+///   - Pixel is close to the expected default backdrop value (~[87, 87, 109]) within ±20,
+///     which distinguishes it from both the bare clear color (~[62, 62, 89]) and any
+///     severity color (all of which are much brighter in at least one channel).
+///   - B channel is slightly dominant over R (ensures the dark blue-tint, not red hue).
+///   - All channels are in the dark range (< 150), ruling out any severity color.
 #[tokio::test]
 async fn test_alert_banner_stream_text_uses_default_policy_color() {
     let (mut compositor, surface) =
@@ -526,8 +528,23 @@ async fn test_alert_banner_stream_text_uses_default_policy_color() {
     // After sRGB encoding over the clear color (linear 0.05, 0.05, 0.1):
     //   Final linear: r≈0.095, g≈0.095, b≈0.154
     //   sRGB×255: r≈87, g≈87, b≈109
-    // All channels are dark and B-tinted but NOT blue-dominant (not like severity info ~230).
-    // Use wide tolerance for the dark-color assertion; the key is all channels are < 150.
+    //
+    // Use assert_pixel_color with wide tolerance (±20) to:
+    //   (a) confirm the backdrop quad was actually rendered (distinguishes from bare clear
+    //       color ~[62, 62, 89] which is too dark to match [87, 87, 109] at ±20), and
+    //   (b) rule out any severity color (info ~[78,160,245], warning ~[244,211,26],
+    //       critical ~[244,15,26]).
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        SURFACE_W,
+        SAMPLE_X,
+        SLOT0_Y,
+        [87, 87, 109, 255],
+        20,
+        "alert-banner StreamText default policy backdrop",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
     let actual = HeadlessSurface::pixel_at(&pixels, SURFACE_W, SAMPLE_X, SLOT0_Y);
 
     // All channels must be dark (< 150), ruling out any severity color.
@@ -553,15 +570,6 @@ async fn test_alert_banner_stream_text_uses_default_policy_color() {
         "StreamText backdrop B ({}) must be >= R ({}) — dark blue-tint, not red",
         actual[2],
         actual[0]
-    );
-
-    // B must not be dramatically lower than clear-color-only baseline (~89 for blue channel
-    // of the clear color). A severity color would push B well above 200.
-    // Verify B is in the "dark" range, not "bright severity blue".
-    assert!(
-        actual[2] < 150,
-        "StreamText backdrop B must be dark (< 150), not severity blue (~230); got {}",
-        actual[2]
     );
 }
 
