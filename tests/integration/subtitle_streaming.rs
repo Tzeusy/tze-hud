@@ -196,7 +196,10 @@ async fn connect_agent_with_zone_publish_cap(
     };
 
     // Consume LeaseResponse (skipping any LeaseStateChange)
-    let msg = session.next_non_state_change().await.ok_or("no lease response")??;
+    let msg = session
+        .next_non_state_change()
+        .await
+        .ok_or("no lease response")??;
     match &msg.payload {
         Some(session_proto::server_message::Payload::LeaseResponse(resp)) if resp.granted => {}
         other => {
@@ -261,8 +264,8 @@ async fn zone_publish_stream_text(
 /// At the scene layer, this is verified by checking that breakpoints are stored
 /// in the ZonePublishRecord exactly as received.
 #[tokio::test]
-async fn test_grpc_zone_publish_with_breakpoints_forwarded() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn test_grpc_zone_publish_with_breakpoints_forwarded()
+-> Result<(), Box<dyn std::error::Error>> {
     let runtime = start_runtime_with_subtitle_zone(PORT_BREAKPOINTS_FORWARDED).await?;
     let _server_handle = runtime.start_grpc_server().await?;
 
@@ -275,8 +278,13 @@ async fn test_grpc_zone_publish_with_breakpoints_forwarded() -> Result<(), Box<d
 
     // "The quick brown fox" — breakpoints at word boundaries
     // byte offsets: after "The"=3, after "quick"=9, after "brown"=15
-    zone_publish_stream_text(&mut agent, "subtitle", "The quick brown fox", vec![3, 9, 15])
-        .await?;
+    zone_publish_stream_text(
+        &mut agent,
+        "subtitle",
+        "The quick brown fox",
+        vec![3, 9, 15],
+    )
+    .await?;
 
     let bps = {
         let state = runtime.shared_state().lock().await;
@@ -312,8 +320,8 @@ async fn test_grpc_zone_publish_with_breakpoints_forwarded() -> Result<(), Box<d
 /// Spec §"Stream-text without breakpoints reveals all at once":
 /// "THEN the compositor MUST display the full text immediately (no progressive reveal)."
 #[tokio::test]
-async fn test_grpc_zone_publish_empty_breakpoints_reveals_immediately(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_grpc_zone_publish_empty_breakpoints_reveals_immediately()
+-> Result<(), Box<dyn std::error::Error>> {
     let runtime = start_runtime_with_subtitle_zone(PORT_EMPTY_BREAKPOINTS).await?;
     let _server_handle = runtime.start_grpc_server().await?;
 
@@ -351,8 +359,8 @@ async fn test_grpc_zone_publish_empty_breakpoints_reveals_immediately(
 /// At the scene layer: publishing a second content replaces the first record (LatestWins),
 /// and if the second publish has no breakpoints, the breakpoints are empty in the new record.
 #[tokio::test]
-async fn test_grpc_zone_publish_replacement_cancels_breakpoints(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_grpc_zone_publish_replacement_cancels_breakpoints()
+-> Result<(), Box<dyn std::error::Error>> {
     let runtime = start_runtime_with_subtitle_zone(PORT_REPLACEMENT_CANCELS).await?;
     let _server_handle = runtime.start_grpc_server().await?;
 
@@ -409,8 +417,8 @@ async fn test_grpc_zone_publish_replacement_cancels_breakpoints(
 /// Verification: publish via gRPC with the same payload as subtitle-streaming.json fixture,
 /// verify the resulting ZonePublishRecord matches what the MCP path would store.
 #[tokio::test]
-async fn test_grpc_zone_publish_breakpoints_match_mcp_behavior(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_grpc_zone_publish_breakpoints_match_mcp_behavior()
+-> Result<(), Box<dyn std::error::Error>> {
     let runtime = start_runtime_with_subtitle_zone(PORT_MCP_PARITY).await?;
     let _server_handle = runtime.start_grpc_server().await?;
 

@@ -3605,7 +3605,11 @@ mod tests {
         .unwrap();
 
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(publishes.len(), 1, "LatestWins must have only one active record");
+        assert_eq!(
+            publishes.len(),
+            1,
+            "LatestWins must have only one active record"
+        );
         assert!(
             matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "Replacement content"),
             "replacement content must be the active record"
@@ -3685,7 +3689,9 @@ mod tests {
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
         assert!(
-            entry.accepted_media_types.contains(&"stream_text".to_string()),
+            entry
+                .accepted_media_types
+                .contains(&"stream_text".to_string()),
             "subtitle zone must include stream_text in accepted_media_types, got {:?}",
             entry.accepted_media_types
         );
@@ -3698,6 +3704,10 @@ mod tests {
         let result = handle_list_zones(json!(null), &scene).unwrap();
         let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
         assert_eq!(entry.contention_policy, "latest_wins");
-        assert!(entry.accepted_media_types.contains(&"stream_text".to_string()));
+        assert!(
+            entry
+                .accepted_media_types
+                .contains(&"stream_text".to_string())
+        );
     }
 }
