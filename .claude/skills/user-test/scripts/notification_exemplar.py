@@ -44,9 +44,9 @@ ZONE_NAME = "notification-area"
 
 # Simulated agent namespaces
 AGENTS = {
-    "alpha": "agent-alpha",
-    "beta": "agent-beta",
-    "gamma": "agent-gamma",
+    "alpha": "alpha",
+    "beta": "beta",
+    "gamma": "gamma",
 }
 
 # Urgency labels for display
@@ -217,13 +217,16 @@ def phase2_stack_growth(
     return req_id
 
 
-def phase3_ttl_expiry(ttl_ms: int) -> None:
+def phase3_ttl_expiry(ttl_ms: int, phase1_start: float) -> None:
     """
     Phase 3: TTL expiry — wait for the first batch to auto-dismiss.
-    Total wait = ttl_ms + 150ms fade-out + 500ms margin.
+    Computes remaining TTL from phase1_start timestamp so we wait only the
+    time left until phase-1 notifications expire, plus 150ms fade-out + 500ms margin.
     Pause 1s after for visual confirmation.
     """
-    wait_ms = ttl_ms + 150 + 500
+    elapsed_since_phase1_ms = (time.monotonic() - phase1_start) * 1000.0
+    remaining_ms = max(0.0, ttl_ms - elapsed_since_phase1_ms)
+    wait_ms = int(remaining_ms) + 150 + 500
     wait_s = wait_ms / 1000.0
 
     print(
@@ -231,7 +234,8 @@ def phase3_ttl_expiry(ttl_ms: int) -> None:
         flush=True,
     )
     print(
-        f"  TTL={ttl_ms}ms + 150ms fade-out + 500ms margin = {wait_ms}ms total wait",
+        f"  Elapsed since phase 1: {elapsed_since_phase1_ms:.0f}ms"
+        f"  Remaining TTL: {remaining_ms:.0f}ms + 150ms fade-out + 500ms margin = {wait_ms}ms total wait",
         flush=True,
     )
 
@@ -342,7 +346,9 @@ def parse_args() -> argparse.Namespace:
         metavar="MS",
         help=(
             f"Per-notification TTL in milliseconds (default: {DEFAULT_TTL_MS})."
-            " Phase 3 waits ttl + 650ms for auto-dismiss confirmation."
+            " Phase 3 waits until the initial batch reaches its TTL"
+            " (accounting for time already spent in phases 1-2, plus 150ms"
+            " fade-out and 500ms margin) for auto-dismiss confirmation."
         ),
     )
     return parser.parse_args()
@@ -373,13 +379,14 @@ def main() -> int:
 
     try:
         # Phase 1: Initial burst (3 notifications, urgency 0/1/2)
+        phase1_start = time.monotonic()
         req_id = phase1_initial_burst(url, token, ttl_ms, req_id)
 
         # Phase 2: Stack growth (2 more, reach max_depth=5)
         req_id = phase2_stack_growth(url, token, ttl_ms, req_id)
 
         # Phase 3: Wait for TTL expiry of phase 1 batch
-        phase3_ttl_expiry(ttl_ms)
+        phase3_ttl_expiry(ttl_ms, phase1_start)
 
         # Phase 4: Max depth eviction burst (6 notifications)
         req_id = phase4_max_depth_eviction(url, token, ttl_ms, req_id)

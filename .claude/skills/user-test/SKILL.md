@@ -360,7 +360,7 @@ Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`), `--ttl` (ms, d
 |-------|-------------|-------|
 | 1 — Initial burst | alpha (urgency 0), beta (urgency 1), gamma (urgency 2) published in order | 2s |
 | 2 — Stack growth | alpha (urgency 3), beta (urgency 1) — stack reaches max_depth=5 | 2s |
-| 3 — TTL expiry | waits `ttl + 650ms` for phase 1 batch to fade out (150ms per-notification fade-out) | 1s |
+| 3 — TTL expiry | waits remaining phase-1 TTL plus ~650ms (150ms fade-out + 500ms margin) for phase-1 batch to auto-dismiss | 1s |
 | 4 — Max depth eviction | 6 rapid notifications; 1st is evicted instantly (no fade) when 6th arrives | 3s |
 
 ### Visual Checklist (per phase)
@@ -384,7 +384,8 @@ is gone with no fade — evicted instantly. "Burst C6" is at top.
 ```
 
 Published via MCP `publish_to_zone` to `notification-area` zone with `ttl_us`
-derived from `--ttl` and `namespace` set to the simulated agent name.
+derived from `--ttl` and `namespace` set to the simulated agent namespace
+(`alpha`, `beta`, or `gamma`).
 
 ## Behavior Rules
 
