@@ -3076,7 +3076,10 @@ mod tests {
                 "alpha (oldest) must be at slot index 0"
             );
         } else {
-            panic!("expected Notification at index 0, got {:?}", &publishes[0].content);
+            panic!(
+                "expected Notification at index 0, got {:?}",
+                &publishes[0].content
+            );
         }
         if let tze_hud_scene::types::ZoneContent::Notification(n) = &publishes[2].content {
             assert_eq!(
@@ -3084,7 +3087,10 @@ mod tests {
                 "gamma (newest) must be at slot index 2"
             );
         } else {
-            panic!("expected Notification at index 2, got {:?}", &publishes[2].content);
+            panic!(
+                "expected Notification at index 2, got {:?}",
+                &publishes[2].content
+            );
         }
 
         // Publisher namespaces must reflect each agent's identity.
@@ -3136,7 +3142,10 @@ mod tests {
         // The newest (notification-6) must be present at the end.
         let last = &publishes[4];
         if let tze_hud_scene::types::ZoneContent::Notification(n) = &last.content {
-            assert_eq!(n.text, "notification-6", "notification-6 (newest) must be at end");
+            assert_eq!(
+                n.text, "notification-6",
+                "notification-6 (newest) must be at end"
+            );
         } else {
             panic!("expected Notification at index 4, got {:?}", last.content);
         }
@@ -3154,7 +3163,13 @@ mod tests {
             .collect();
         assert_eq!(
             texts,
-            vec!["notification-2", "notification-3", "notification-4", "notification-5", "notification-6"],
+            vec![
+                "notification-2",
+                "notification-3",
+                "notification-4",
+                "notification-5",
+                "notification-6"
+            ],
             "surviving records must be 2-6 in arrival order"
         );
     }
@@ -3189,7 +3204,11 @@ mod tests {
 
         // Confirm publication is present before expiry.
         let before = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(before.len(), 1, "notification must be present before TTL expires");
+        assert_eq!(
+            before.len(),
+            1,
+            "notification must be present before TTL expires"
+        );
         assert!(
             before[0].expires_at_wall_us.is_some(),
             "urgency=0 notification must have an auto-dismiss expiry set"
@@ -3198,14 +3217,24 @@ mod tests {
         // Advance clock to just before expiry — publication must still be present.
         clock.advance(SceneGraph::NOTIFICATION_TTL_INFO_US / 1_000 - 1);
         let removed_early = scene.drain_expired_zone_publications();
-        assert_eq!(removed_early, 0, "publication must not be removed before TTL expires");
+        assert_eq!(
+            removed_early, 0,
+            "publication must not be removed before TTL expires"
+        );
         let still_present = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(still_present.len(), 1, "notification must still be present 1ms before TTL");
+        assert_eq!(
+            still_present.len(),
+            1,
+            "notification must still be present 1ms before TTL"
+        );
 
         // Advance clock 2ms past expiry (now = 1000 + 8000 + 1ms = past TTL+fade).
         clock.advance(2);
         let removed = scene.drain_expired_zone_publications();
-        assert_eq!(removed, 1, "one notification must be removed after TTL expires");
+        assert_eq!(
+            removed, 1,
+            "one notification must be removed after TTL expires"
+        );
 
         // Zone must have no active publications.
         let after = scene.zone_registry.active_publishes.get(&zone);
@@ -3256,7 +3285,11 @@ mod tests {
         }
 
         let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
-        assert_eq!(publishes.len(), 4, "all 4 urgency-level notifications must be present");
+        assert_eq!(
+            publishes.len(),
+            4,
+            "all 4 urgency-level notifications must be present"
+        );
 
         // Verify each urgency value is stored unchanged in the payload.
         let urgency_by_ns: std::collections::HashMap<&str, u32> = publishes
@@ -3270,13 +3303,21 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(urgency_by_ns["agent-low"], 0, "urgency=0 (low) must be preserved");
-        assert_eq!(urgency_by_ns["agent-urgent"], 2, "urgency=2 (urgent) must be preserved");
-        assert_eq!(urgency_by_ns["agent-critical"], 3, "urgency=3 (critical) must be preserved");
+        assert_eq!(
+            urgency_by_ns["agent-low"], 0,
+            "urgency=0 (low) must be preserved"
+        );
+        assert_eq!(
+            urgency_by_ns["agent-urgent"], 2,
+            "urgency=2 (urgent) must be preserved"
+        );
+        assert_eq!(
+            urgency_by_ns["agent-critical"], 3,
+            "urgency=3 (critical) must be preserved"
+        );
         // urgency=5 is stored as-is; the compositor clamps it to 3 at render time.
         assert_eq!(
-            urgency_by_ns["agent-oob"],
-            5,
+            urgency_by_ns["agent-oob"], 5,
             "urgency=5 (out-of-range) must be stored as-is in the record; compositor clamps to critical=3"
         );
     }
@@ -3328,19 +3369,33 @@ mod tests {
 
         // Both notifications must be present before any TTL expires.
         let before = scene.zone_registry.active_for_zone(&zone);
-        assert_eq!(before.len(), 2, "both notifications must be active before any expiry");
+        assert_eq!(
+            before.len(),
+            2,
+            "both notifications must be active before any expiry"
+        );
 
         // Advance clock past alpha's 8s TTL (urgency=0 → NOTIFICATION_TTL_INFO_US).
         // Beta's 30s TTL (urgency=3 → NOTIFICATION_TTL_CRITICAL_US) must not have expired.
         clock.advance(SceneGraph::NOTIFICATION_TTL_INFO_US / 1_000 + 500); // +8500ms
         let removed = scene.drain_expired_zone_publications();
-        assert_eq!(removed, 1, "only alpha's notification must be removed at t=8500ms");
+        assert_eq!(
+            removed, 1,
+            "only alpha's notification must be removed at t=8500ms"
+        );
 
         // Beta's notification must remain unaffected.
         let after = scene.zone_registry.active_for_zone(&zone);
-        assert_eq!(after.len(), 1, "beta's notification must survive alpha's TTL expiry");
+        assert_eq!(
+            after.len(),
+            1,
+            "beta's notification must survive alpha's TTL expiry"
+        );
         if let tze_hud_scene::types::ZoneContent::Notification(n) = &after[0].content {
-            assert_eq!(n.text, "Beta message", "surviving notification must be beta's");
+            assert_eq!(
+                n.text, "Beta message",
+                "surviving notification must be beta's"
+            );
             assert_eq!(
                 after[0].publisher_namespace, "agent-beta",
                 "surviving record must belong to agent-beta"
