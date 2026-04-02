@@ -3678,6 +3678,20 @@ async fn handle_zone_publish(
             .and_then(crate::convert::proto_zone_content_to_scene);
 
         if let Some(content) = content {
+            // Validate: breakpoints are only meaningful for StreamText content.
+            // Reject non-StreamText publishes that carry non-empty breakpoints so
+            // gRPC behaves consistently with the MCP path (which also rejects this).
+            if !publish.breakpoints.is_empty()
+                && !matches!(content, tze_hud_scene::types::ZoneContent::StreamText(_))
+            {
+                (
+                    false,
+                    "INVALID_ARGUMENT".to_string(),
+                    "breakpoints are only valid for StreamText content".to_string(),
+                    zone_is_ephemeral,
+                )
+            } else {
+
             let merge_key = if publish.merge_key.is_empty() {
                 None
             } else {
@@ -3742,6 +3756,7 @@ async fn handle_zone_publish(
                 // even on failure. The client must not expect a response.
                 (false, code, msg, zone_is_ephemeral)
             }
+            } // close else { (breakpoints valid for content type)
         } else {
             (
                 false,

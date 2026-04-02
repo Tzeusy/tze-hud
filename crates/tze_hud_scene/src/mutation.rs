@@ -746,16 +746,9 @@ impl SceneGraph {
                 content_classification,
                 breakpoints,
             } => {
-                if breakpoints.is_empty() {
-                    self.publish_to_zone(
-                        zone_name,
-                        content.clone(),
-                        namespace,
-                        merge_key.clone(),
-                        *expires_at_wall_us,
-                        content_classification.clone(),
-                    )?;
-                } else {
+                if !breakpoints.is_empty()
+                    && matches!(content, ZoneContent::StreamText(_))
+                {
                     self.publish_to_zone_with_breakpoints(
                         zone_name,
                         content.clone(),
@@ -764,6 +757,15 @@ impl SceneGraph {
                         *expires_at_wall_us,
                         content_classification.clone(),
                         breakpoints.clone(),
+                    )?;
+                } else {
+                    self.publish_to_zone(
+                        zone_name,
+                        content.clone(),
+                        namespace,
+                        merge_key.clone(),
+                        *expires_at_wall_us,
+                        content_classification.clone(),
                     )?;
                 }
                 Ok(vec![])

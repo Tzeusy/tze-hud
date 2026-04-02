@@ -660,7 +660,8 @@ pub struct ZoneEntry {
     pub description: String,
     /// Stable UUID for the zone definition.
     pub id: String,
-    /// Whether the zone currently has any tiles visible on the active tab.
+    /// Whether the zone currently has any active publications (from `zone_registry.active_publishes`).
+    /// This reflects occupancy from publish records, not tile visibility on the active tab.
     pub has_content: bool,
     /// Contention policy for this zone (e.g., "latest_wins", "stack", "merge_by_key", "replace").
     pub contention_policy: String,
