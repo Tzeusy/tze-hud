@@ -35,9 +35,9 @@
 //! - `openspec/changes/exemplar-dashboard-tile/tasks.md` §1 (1.1–1.2)
 //! - `openspec/changes/exemplar-dashboard-tile/specs/exemplar-dashboard-tile/spec.md`
 
+use tze_hud_protocol::proto::session as session_proto;
 #[allow(deprecated)]
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
-use tze_hud_protocol::proto::session as session_proto;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 
@@ -96,9 +96,7 @@ fn now_wall_us() -> u64 {
 /// **NEVER use dev mode in production deployments.**
 async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> {
     if dev_mode {
-        println!(
-            "=== Dashboard Tile Agent (DEV MODE — unrestricted caps, TEST/DEV ONLY) ===\n"
-        );
+        println!("=== Dashboard Tile Agent (DEV MODE — unrestricted caps, TEST/DEV ONLY) ===\n");
     } else {
         println!("=== Dashboard Tile Agent (production config) ===\n");
     }
@@ -120,9 +118,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     let runtime = HeadlessRuntime::new(config).await?;
     let _server = runtime.start_grpc_server().await?;
-    println!(
-        "Runtime initialized: 1920x1080, gRPC on [::1]:{GRPC_PORT}\n"
-    );
+    println!("Runtime initialized: 1920x1080, gRPC on [::1]:{GRPC_PORT}\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 1: Session Establishment (tasks.md §1.1–1.2)
@@ -143,16 +139,18 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     println!("  Phase 1 PASSED: session established.");
     println!("    namespace  = {}", session_state.namespace);
-    println!("    session_id = {} bytes (non-empty)", session_state.session_id.len());
-    println!("    protocol   = v{}.{}",
+    println!(
+        "    session_id = {} bytes (non-empty)",
+        session_state.session_id.len()
+    );
+    println!(
+        "    protocol   = v{}.{}",
         session_state.negotiated_protocol_version / 1000,
         session_state.negotiated_protocol_version % 1000,
     );
 
     println!("\n=== Exemplar Phase 1 complete ===");
-    println!(
-        "Next: implement Phase 2 (lease acquisition) in tasks.md §2 [hud-rqea]."
-    );
+    println!("Next: implement Phase 2 (lease acquisition) in tasks.md §2 [hud-rqea].");
 
     Ok(())
 }
@@ -236,8 +234,7 @@ async fn establish_session_with(
     // All session traffic — handshake, mutations, events, heartbeats,
     // lease management — flows over this one stream per agent.
     #[allow(deprecated)]
-    let mut session_client =
-        HudSessionClient::connect(format!("http://[::1]:{port}")).await?;
+    let mut session_client = HudSessionClient::connect(format!("http://[::1]:{port}")).await?;
 
     // Channel for client → server messages.  Buffer = 64 gives the agent
     // headroom during bursts (e.g., mutation batches) without unbounded growth.
@@ -279,10 +276,8 @@ async fn establish_session_with(
                     "access_input_events".to_string(), // receive pointer/keyboard events
                 ],
                 // LEASE_CHANGES is mandatory; listing it explicitly is idiomatic.
-                initial_subscriptions: vec![
-                    "LEASE_CHANGES".to_string(),
-                ],
-                resume_token: Vec::new(),   // new session, no prior resume token
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: Vec::new(), // new session, no prior resume token
                 agent_timestamp_wall_us: now_us,
                 min_protocol_version: 1000, // v1.0
                 max_protocol_version: 1001, // v1.1
@@ -297,7 +292,9 @@ async fn establish_session_with(
     // The runtime processes SessionInit and responds with either
     // SessionEstablished (success) or SessionError (auth failure, version
     // mismatch, duplicate agent_id, etc.).
-    let msg = response_stream.next().await
+    let msg = response_stream
+        .next()
+        .await
         .ok_or("stream closed before SessionEstablished")??;
 
     let established = match msg.payload {
@@ -318,7 +315,10 @@ async fn establish_session_with(
                 );
             }
 
-            println!("  session_id           = {} bytes (UUIDv7)", e.session_id.len());
+            println!(
+                "  session_id           = {} bytes (UUIDv7)",
+                e.session_id.len()
+            );
             println!("  namespace            = {}", e.namespace);
             println!("  heartbeat_ms         = {}", e.heartbeat_interval_ms);
             println!("  granted_capabilities = {:?}", e.granted_capabilities);
@@ -352,7 +352,9 @@ async fn establish_session_with(
     // Per spec §Session Establishment: "Followed immediately by a SceneSnapshot."
     // The exemplar does not consume the snapshot at this phase; drain it so the
     // stream is ready for subsequent phase messages.
-    let snapshot_msg = response_stream.next().await
+    let snapshot_msg = response_stream
+        .next()
+        .await
         .ok_or("stream closed before SceneSnapshot")??;
     match snapshot_msg.payload {
         Some(session_proto::server_message::Payload::SceneSnapshot(ref snap)) => {
@@ -363,10 +365,9 @@ async fn establish_session_with(
             );
         }
         other => {
-            return Err(format!(
-                "Expected SceneSnapshot after SessionEstablished, got: {other:?}"
-            )
-            .into());
+            return Err(
+                format!("Expected SceneSnapshot after SessionEstablished, got: {other:?}").into(),
+            );
         }
     }
 
@@ -418,10 +419,9 @@ mod tests {
         port
     }
 
-    async fn start_test_runtime(port: u16) -> Result<
-        tokio::task::JoinHandle<()>,
-        Box<dyn std::error::Error>,
-    > {
+    async fn start_test_runtime(
+        port: u16,
+    ) -> Result<tokio::task::JoinHandle<()>, Box<dyn std::error::Error>> {
         let config = HeadlessConfig {
             width: 800,
             height: 600,
@@ -446,9 +446,10 @@ mod tests {
         // Allow the server a moment to bind before the client connects.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let state = crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
-            .await
-            .expect("establish_session_with");
+        let state =
+            crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
+                .await
+                .expect("establish_session_with");
 
         assert!(
             !state.session_id.is_empty(),
@@ -469,9 +470,10 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let state = crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
-            .await
-            .expect("establish_session_with");
+        let state =
+            crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
+                .await
+                .expect("establish_session_with");
 
         assert!(
             !state.namespace.is_empty(),
