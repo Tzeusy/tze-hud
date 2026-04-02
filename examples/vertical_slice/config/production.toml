@@ -28,3 +28,9 @@ capabilities = [
     "read_scene_topology",
     "publish_zone:status-bar",
 ]
+
+# Widget bundle directories scanned at startup.
+# Paths are resolved relative to this config file's parent directory
+# (examples/vertical_slice/config/).
+[widget_bundles]
+paths = ["../../../assets/widget_bundles"]

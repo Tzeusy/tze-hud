@@ -1,0 +1,75 @@
+# Production progress-bar widget bundle — token-driven exemplar.
+#
+# This is the canonical production-quality progress-bar widget, demonstrating:
+# - Three binding types: linear (progress→width), direct (fill_color→fill),
+#   text-content (label→text-content)
+# - All colors via {{token.key}} placeholders — zero hardcoded hex values
+# - Horizontal pill-shaped bar at 300x20 default geometry
+# - 2px inset fill bar sits visually inside the track
+#
+# Registered as "progress-bar" in the WidgetRegistry when loaded from
+# assets/widget_bundles/.
+#
+# Parameters:
+#   progress   - Fill level (f32, 0.0-1.0); drives bar width via linear mapping
+#   label      - Display label centered on the bar (string, max 32 bytes)
+#   fill_color - Override fill color for the bar (color param)
+#
+# Token placeholders ({{token.key}}) in layer SVGs are resolved against the
+# global token map at bundle load time — never at render time.
+
+name        = "progress-bar"
+version     = "1.0.0"
+description = "Horizontal progress bar with configurable fill and label"
+
+[[parameter_schema]]
+name    = "progress"
+type    = "f32"
+default = 0.0
+
+[parameter_schema.constraints]
+f32_min = 0.0
+f32_max = 1.0
+
+[[parameter_schema]]
+name    = "label"
+type    = "string"
+default = ""
+
+[parameter_schema.constraints]
+string_max_bytes = 32
+
+[[parameter_schema]]
+name    = "fill_color"
+type    = "color"
+default = [74, 158, 255, 255]
+
+# Track layer: static SVG background track. Zero bindings.
+# Must appear first (painter's model) so fill layer renders on top.
+[[layers]]
+svg_file = "track.svg"
+
+# Fill layer: dynamic fill bar and centered label text.
+# Three bindings drive all visual state from widget parameters.
+[[layers]]
+svg_file = "fill.svg"
+
+[[layers.bindings]]
+param            = "progress"
+target_element   = "fill-bar"
+target_attribute = "width"
+mapping          = "linear"
+attr_min         = 0.0
+attr_max         = 296.0
+
+[[layers.bindings]]
+param            = "fill_color"
+target_element   = "fill-bar"
+target_attribute = "fill"
+mapping          = "direct"
+
+[[layers.bindings]]
+param            = "label"
+target_element   = "label-text"
+target_attribute = "text-content"
+mapping          = "direct"
