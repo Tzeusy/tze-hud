@@ -61,8 +61,8 @@
 //! At 0.9 alpha composited over the compositor's dark clear color
 //! (linear {r:0.05, g:0.05, b:0.1, a:1.0}), calibrated from llvmpipe output:
 //!   urgency 0 (low)      → sRGB ≈ (104, 104, 106)  [near-neutral dark gray]
-//!   urgency 1 (normal)   → sRGB ≈ (80, 80, 122)    [dark blue-tinted]
-//!   urgency 2 (urgent)   → sRGB ≈ (184, 161, 72)   [amber/olive]
+//!   urgency 1 (normal)   → sRGB ≈ (80, 80, 133)    [dark blue-tinted]
+//!   urgency 2 (urgent)   → sRGB ≈ (184, 166, 72)   [amber/olive]
 //!   urgency 3 (critical) → sRGB ≈ (184, 80, 82)    [dark red]
 //!
 //! Tolerances of ±12 accommodate software-renderer (llvmpipe / WARP) rounding
@@ -426,7 +426,7 @@ async fn test_notification_urgency3_critical_backdrop() {
 ///
 /// The key channel distinctions:
 ///   - urgency 2 (urgent) and urgency 3 (critical) share similar R (~184) but
-///     differ significantly in G (161 vs 80) and B (72 vs 82).
+///     differ significantly in G (166 vs 80) and B (72 vs 82).
 ///   - urgency 0 (low) and urgency 1 (normal) share similar R/G but differ in
 ///     B (106 vs 133, a ~27-unit gap — well outside ±12 tolerance).
 #[tokio::test]
@@ -497,13 +497,13 @@ async fn test_notification_urgency_distinct_colors() {
                 .max()
                 .unwrap_or(0);
             assert!(
-                max_diff > TOLERANCE as u16,
+                max_diff > 2 * TOLERANCE as u16,
                 "urgency={i} and urgency={j} are indistinguishable: \
-                 pixels {:?} vs {:?} max_diff={} must exceed TOLERANCE={}",
+                 pixels {:?} vs {:?} max_diff={} must exceed 2*TOLERANCE={}",
                 a,
                 b,
                 max_diff,
-                TOLERANCE
+                2 * TOLERANCE
             );
         }
     }
