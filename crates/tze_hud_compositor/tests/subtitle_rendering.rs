@@ -562,7 +562,8 @@ async fn test_subtitle_font_size_28px_from_policy() {
     scene.register_zone(ZoneDefinition {
         id: SceneId::new(),
         name: "subtitle".to_owned(),
-        description: "Subtitle zone — 28px font size from typography.subtitle.size token".to_owned(),
+        description: "Subtitle zone — 28px font size from typography.subtitle.size token"
+            .to_owned(),
         geometry_policy: GeometryPolicy::EdgeAnchored {
             edge: DisplayEdge::Bottom,
             height_pct: 0.10,
