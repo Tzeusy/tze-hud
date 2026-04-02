@@ -435,6 +435,88 @@ amber for warning (urgency=2), red for critical (urgency=3).
 Published via MCP `publish_to_zone` to `alert-banner` zone with `ttl_us`
 set to `--ttl` (ms) × 1000 (e.g. `--ttl 15000` → `ttl_us = 15000000`), and `namespace` set to `alert-<level>` (e.g. `alert-critical`).
 
+## Status-Bar Exemplar Scenario
+
+Use `scripts/status_bar_exemplar.py` to exercise the status-bar zone on a live
+HUD. The script simulates three independent agents (`agent-weather`, `agent-power`,
+`agent-clock`) publishing merge-keyed entries, validating multi-agent coexistence,
+key replacement, empty-value removal, and TTL-driven sweep.
+
+### CLI
+
+```bash
+python3 .claude/skills/user-test/scripts/status_bar_exemplar.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --psk-env TZE_HUD_PSK \
+  --battery-ttl 5000
+```
+
+Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`),
+`--ttl` (ms, default 60000 — long TTL for weather/time entries),
+`--battery-ttl` (ms, default 5000 — short TTL used to demonstrate step-9 expiry).
+
+### 10-Step Sequence
+
+| Step | Agent | Action | Pause |
+|------|-------|--------|-------|
+| 1 | agent-weather | publish `weather` → `"72F Sunny"` | — |
+| 2 | agent-power | publish `battery` → `"85%"` (short TTL) | — |
+| 3 | agent-clock | publish `time` → `"3:42 PM"` | — |
+| 4 | — | VISUAL CHECK: all 3 visible | 3s |
+| 5 | agent-weather | update `weather` → `"75F Cloudy"` (key replacement) | — |
+| 6 | — | VISUAL CHECK: weather updated; battery/time unchanged | 3s |
+| 7 | agent-weather | publish empty value for `weather` (key removal) | — |
+| 8 | — | VISUAL CHECK: weather gone; battery/time remain | 3s |
+| 9 | — | wait for battery TTL to expire (~5s + 500ms margin) | — |
+| 10 | — | VISUAL CHECK: battery gone; time remains | 3s |
+
+### Visual Checklist
+
+**Step 4:** Status bar shows all three key-value pairs in a horizontal row at the
+bottom edge of the display with a dark opaque backdrop. Entries display in
+monospace font using secondary text color. Order may vary by insertion time.
+
+**Step 6:** Status bar still shows three entries. The `weather` value reads
+`75F Cloudy` (replaced). `battery: 85%` and `time: 3:42 PM` are unchanged.
+
+**Step 8:** Status bar shows two entries. The `weather` key is no longer visible
+(empty-value convention suppresses rendering). `battery` and `time` remain.
+
+**Step 10:** Status bar shows one entry. The `battery` key has been swept by
+`sweep_expired_zone_publications` after its TTL elapsed. Only `time: 3:42 PM`
+remains visible.
+
+### Human Acceptance Criteria
+
+| # | Criterion | Step |
+|---|-----------|------|
+| AC1 | Three distinct keys coexist — no key overwrites another | 4 |
+| AC2 | Key replacement updates only the target key's value | 6 |
+| AC3 | Empty-value publish removes that key from the visible display | 8 |
+| AC4 | TTL expiry removes the key without explicit publish | 10 |
+| AC5 | Chrome-layer bar is always visible above content tiles | all visual steps |
+| AC6 | Monospace font and dark opaque backdrop visible throughout | all visual steps |
+
+All six criteria must pass for the status-bar exemplar to be accepted.
+
+### Status-bar payload shape
+
+```json
+{
+  "zone_name": "status-bar",
+  "content": {"type": "status_bar", "entries": {"weather": "72F Sunny"}},
+  "merge_key": "weather",
+  "ttl_us": 60000000,
+  "namespace": "agent-weather"
+}
+```
+
+Each agent uses a distinct `namespace` (`agent-weather`, `agent-power`,
+`agent-clock`). The `merge_key` matches the single entry key in `entries`.
+Published via MCP `publish_to_zone`.
+
+---
+
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
