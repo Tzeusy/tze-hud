@@ -1,6 +1,35 @@
-# tze_hud Build/Test/Run Commands
+# tze_hud
 
-This README is command-first and focused on four workflows:
+A local, high-performance display runtime that gives LLMs safe, synchronized, live presence on real screens — wall displays, bathroom mirrors, kitchen panels, smart glasses.
+
+## The Problem
+
+LLMs today are stuck in three forms: the CLI, the chat transcript, and generated webpages. None of these let a model hold a region of a shared physical screen, update it continuously, stream media into it, react to touch, or coordinate with other agents on the same display. There is no substrate for LLM presence on surfaces people actually look at.
+
+Household screens make this harder. A wall display is visible to the homeowner, their partner, kids, guests, and service workers — all with different information access needs. Privacy, attention governance, and human override have to be structural, built into the rendering and protocol layers.
+
+## What tze_hud Does
+
+tze_hud owns the screen. The runtime handles compositing, timing, input routing, permissions, and resource budgets. LLMs connect over three protocol planes (MCP for compatibility, gRPC for resident control, WebRTC for media) and request presence through leases with TTL, capability scopes, and revocation semantics.
+
+Agents publish semantic intent — "put this text in the subtitle zone," "bind these parameters to the CPU gauge widget" — and the runtime handles layout, visual identity, and rendering at 60fps. Agents never sit in the frame loop. Arrival time is decoupled from presentation time; every payload carries timing semantics.
+
+Key properties:
+
+- **Governed presence.** Agents occupy presence levels (guest, resident, embodied) with escalating trust requirements. Every surface lease has a TTL, capability scope, and resource budget. Humans always override.
+- **Attention as a finite resource.** The runtime enforces attention budgets and interruption policies. Quiet hours, contention resolution, and classification ceilings prevent notification spam.
+- **Viewer-aware privacy.** Content classification (public, household, private, sensitive) is enforced based on who is looking at the screen. Private content is redacted when a guest is present.
+- **Graceful degradation.** Under resource pressure, the system degrades along explicit axes — coalescing updates, reducing media quality, shedding tiles — rather than crashing or stuttering.
+- **Swappable visual identity.** Design tokens, component types, and component profiles separate visual styling from agent code and runtime logic. An operator changes the look of the entire display by swapping a configuration directory.
+- **Multi-agent coordination.** When agents compete for screen territory, the runtime arbitrates based on space, budgets, priorities, and lease state. Agents negotiate through the runtime, never directly.
+
+~100k lines of Rust across 15 crates. Tokio async runtime, tonic for gRPC, wgpu + winit for cross-platform GPU rendering. See `about/heart-and-soul/` for full doctrine, `about/law-and-lore/` for design contracts (11 RFCs), and `openspec/` for capability specs.
+
+---
+
+# Build/Test/Run Commands
+
+The rest of this README is command-first and focused on four workflows:
 
 1. Build on Linux and Windows
 2. Build/run on Linux inside TigerVNC and connect from Windows
