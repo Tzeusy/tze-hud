@@ -310,7 +310,7 @@ At each step, prompt the tester to confirm the expected visual state:
 | 3 | `progress=0.5, label="50%"` | Fill animates smoothly to 50%; label reads "50%" |
 | 4 | `progress=0.75, label="75%"` | Fill animates smoothly to 75%; label reads "75%" |
 | 5 | `progress=1.0, label="100%"` | Fill animates smoothly to full width; label reads "100%" |
-| 6 | `fill_color=[0,200,83,255]` | Fill color transitions from blue to green over 300ms; progress/label unchanged |
+| 6 | `fill_color={r:0.0, g:0.784, b:0.325, a:1.0}` | Fill color transitions from blue to green (equivalent to RGBA `[0,200,83,255]`) over 300ms; progress/label unchanged |
 | 7 | clear | Bar resets to empty with no visual artifacts |
 
 **Human acceptance criteria at each step:**
