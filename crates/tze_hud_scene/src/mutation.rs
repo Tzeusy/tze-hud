@@ -746,9 +746,7 @@ impl SceneGraph {
                 content_classification,
                 breakpoints,
             } => {
-                if !breakpoints.is_empty()
-                    && matches!(content, ZoneContent::StreamText(_))
-                {
+                if !breakpoints.is_empty() && matches!(content, ZoneContent::StreamText(_)) {
                     self.publish_to_zone_with_breakpoints(
                         zone_name,
                         content.clone(),

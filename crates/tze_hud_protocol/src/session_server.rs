@@ -3691,71 +3691,70 @@ async fn handle_zone_publish(
                     zone_is_ephemeral,
                 )
             } else {
-
-            let merge_key = if publish.merge_key.is_empty() {
-                None
-            } else {
-                Some(publish.merge_key.clone())
-            };
-
-            let mutation = tze_hud_scene::mutation::SceneMutation::PublishToZone {
-                zone_name: publish.zone_name.clone(),
-                content,
-                publish_token: tze_hud_scene::types::ZonePublishToken { token: Vec::new() },
-                merge_key,
-                // expires_at_wall_us and content_classification are not yet present in
-                // the ZonePublish proto message (post-v1 wire extensions).
-                expires_at_wall_us: None,
-                content_classification: None,
-                // Wire breakpoints from the ZonePublish proto for StreamText streaming reveal.
-                // Per spec §Subtitle Streaming Word-by-Word Reveal.
-                breakpoints: publish.breakpoints.clone(),
-            };
-
-            // Apply as a single-mutation batch.
-            // Use the session's first active lease for budget validation; if the
-            // session holds no lease yet, lease_id is None and budget checks are
-            // skipped (ZonePublish does not require a lease per RFC 0005 §8.6).
-            let zone_publish_lease_id = session.lease_ids.first().copied();
-            let batch = tze_hud_scene::mutation::MutationBatch {
-                batch_id: tze_hud_scene::SceneId::new(),
-                agent_namespace: session.namespace.clone(),
-                mutations: vec![mutation],
-                timing_hints: None,
-                lease_id: zone_publish_lease_id,
-            };
-            let result = scene.apply_batch(&batch);
-            if result.applied {
-                (true, String::new(), String::new(), zone_is_ephemeral)
-            } else {
-                let (code, msg) = match &result.error {
-                    Some(tze_hud_scene::ValidationError::ZoneNotFound { name }) => (
-                        "ZONE_NOT_FOUND".to_string(),
-                        format!("Zone not found: {name}"),
-                    ),
-                    Some(tze_hud_scene::ValidationError::ZonePublishTokenInvalid { zone }) => (
-                        "TOKEN_INVALID".to_string(),
-                        format!("Publish token invalid for zone '{zone}'"),
-                    ),
-                    Some(tze_hud_scene::ValidationError::BudgetExceeded { resource }) => (
-                        "BUDGET_EXCEEDED".to_string(),
-                        format!("Budget exceeded: {resource}"),
-                    ),
-                    Some(tze_hud_scene::ValidationError::CapabilityMissing { capability }) => (
-                        "CAPABILITY_MISSING".to_string(),
-                        format!("Capability missing: {capability}"),
-                    ),
-                    Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
-                    None => (
-                        "ZONE_PUBLISH_FAILED".to_string(),
-                        "Zone publish failed".to_string(),
-                    ),
+                let merge_key = if publish.merge_key.is_empty() {
+                    None
+                } else {
+                    Some(publish.merge_key.clone())
                 };
-                // On failure, preserve the zone's ephemeral flag for consistent fire-and-forget
-                // semantics (RFC 0005 §8.6): ephemeral zones never send ZonePublishResult,
-                // even on failure. The client must not expect a response.
-                (false, code, msg, zone_is_ephemeral)
-            }
+
+                let mutation = tze_hud_scene::mutation::SceneMutation::PublishToZone {
+                    zone_name: publish.zone_name.clone(),
+                    content,
+                    publish_token: tze_hud_scene::types::ZonePublishToken { token: Vec::new() },
+                    merge_key,
+                    // expires_at_wall_us and content_classification are not yet present in
+                    // the ZonePublish proto message (post-v1 wire extensions).
+                    expires_at_wall_us: None,
+                    content_classification: None,
+                    // Wire breakpoints from the ZonePublish proto for StreamText streaming reveal.
+                    // Per spec §Subtitle Streaming Word-by-Word Reveal.
+                    breakpoints: publish.breakpoints.clone(),
+                };
+
+                // Apply as a single-mutation batch.
+                // Use the session's first active lease for budget validation; if the
+                // session holds no lease yet, lease_id is None and budget checks are
+                // skipped (ZonePublish does not require a lease per RFC 0005 §8.6).
+                let zone_publish_lease_id = session.lease_ids.first().copied();
+                let batch = tze_hud_scene::mutation::MutationBatch {
+                    batch_id: tze_hud_scene::SceneId::new(),
+                    agent_namespace: session.namespace.clone(),
+                    mutations: vec![mutation],
+                    timing_hints: None,
+                    lease_id: zone_publish_lease_id,
+                };
+                let result = scene.apply_batch(&batch);
+                if result.applied {
+                    (true, String::new(), String::new(), zone_is_ephemeral)
+                } else {
+                    let (code, msg) = match &result.error {
+                        Some(tze_hud_scene::ValidationError::ZoneNotFound { name }) => (
+                            "ZONE_NOT_FOUND".to_string(),
+                            format!("Zone not found: {name}"),
+                        ),
+                        Some(tze_hud_scene::ValidationError::ZonePublishTokenInvalid { zone }) => (
+                            "TOKEN_INVALID".to_string(),
+                            format!("Publish token invalid for zone '{zone}'"),
+                        ),
+                        Some(tze_hud_scene::ValidationError::BudgetExceeded { resource }) => (
+                            "BUDGET_EXCEEDED".to_string(),
+                            format!("Budget exceeded: {resource}"),
+                        ),
+                        Some(tze_hud_scene::ValidationError::CapabilityMissing { capability }) => (
+                            "CAPABILITY_MISSING".to_string(),
+                            format!("Capability missing: {capability}"),
+                        ),
+                        Some(err) => ("ZONE_PUBLISH_FAILED".to_string(), err.to_string()),
+                        None => (
+                            "ZONE_PUBLISH_FAILED".to_string(),
+                            "Zone publish failed".to_string(),
+                        ),
+                    };
+                    // On failure, preserve the zone's ephemeral flag for consistent fire-and-forget
+                    // semantics (RFC 0005 §8.6): ephemeral zones never send ZonePublishResult,
+                    // even on failure. The client must not expect a response.
+                    (false, code, msg, zone_is_ephemeral)
+                }
             } // close else { (breakpoints valid for content type)
         } else {
             (
