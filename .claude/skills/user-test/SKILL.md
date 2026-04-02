@@ -433,7 +433,7 @@ amber for warning (urgency=2), red for critical (urgency=3).
 ```
 
 Published via MCP `publish_to_zone` to `alert-banner` zone with `ttl_us`
-derived from `--ttl` and `namespace` set to `alert-<level>` (e.g. `alert-critical`).
+set to `--ttl` (ms) × 1000 (e.g. `--ttl 15000` → `ttl_us = 15000000`), and `namespace` set to `alert-<level>` (e.g. `alert-critical`).
 
 ## Behavior Rules
 

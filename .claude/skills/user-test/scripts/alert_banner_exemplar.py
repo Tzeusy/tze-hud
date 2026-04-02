@@ -60,7 +60,7 @@ ALERTS: list[tuple[str, str, int]] = [
 ]
 
 # ---------------------------------------------------------------------------
-# MCP RPC helper (same framing as publish.py)
+# MCP RPC helper (same framing as publish_zone_batch.py)
 # ---------------------------------------------------------------------------
 
 
