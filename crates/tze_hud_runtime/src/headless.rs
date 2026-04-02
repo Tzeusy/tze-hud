@@ -269,11 +269,17 @@ impl HeadlessRuntime {
                             wr.register_svg(&type_id, &filename, bytes);
                         }
                     }
+                    // Merge notification profile urgency token overrides on top of global tokens
+                    // so the compositor's urgency_to_notification_color() uses profile-scoped colors.
+                    let mut merged = startup_result.global_tokens;
+                    for (k, v) in startup_result.notification_urgency_tokens {
+                        merged.insert(k, v);
+                    }
                     tracing::debug!(
-                        token_count = startup_result.global_tokens.len(),
+                        token_count = merged.len(),
                         "headless: component startup complete — design tokens and zone registry applied"
                     );
-                    startup_result.global_tokens
+                    merged
                 }
                 Err(e) => {
                     // Even when a RuntimeContext has been constructed (potentially via
