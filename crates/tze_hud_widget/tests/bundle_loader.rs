@@ -186,10 +186,7 @@ fn status_indicator_fixture_loads_successfully() {
 
             // Contention policy must be LatestWins as declared in widget.toml.
             assert!(
-                matches!(
-                    def.default_contention_policy,
-                    ContentionPolicy::LatestWins
-                ),
+                matches!(def.default_contention_policy, ContentionPolicy::LatestWins),
                 "default_contention_policy must be ContentionPolicy::LatestWins"
             );
 

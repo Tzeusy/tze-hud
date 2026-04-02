@@ -2949,4 +2949,461 @@ mod tests {
             "error for unknown type must mention static_image, got: {err:?}"
         );
     }
+
+    // ── Notification stack exemplar — MCP integration tests ─────────────────
+    //
+    // These 5 tests exercise the notification-area zone (max_depth=5,
+    // auto_clear_ms=8000, Stack contention policy) via the MCP
+    // `publish_to_zone` path, verifying the scenarios required by
+    // openspec/changes/exemplar-notification/specs/exemplar-notification/spec.md
+    // §Requirement: Notification Exemplar MCP Integration Test.
+
+    /// Build a scene with the canonical notification-area zone (max_depth=5,
+    /// ShortTextWithIcon, Stack contention, auto_clear_ms=8000).
+    fn scene_with_notification_area() -> (SceneGraph, String) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone_name = "notification-area".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Notification overlay area".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.75,
+                    y_pct: 0.02,
+                    width_pct: 0.24,
+                    height_pct: 0.30,
+                },
+                accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+                max_publishers: 16,
+                transport_constraint: None,
+                auto_clear_ms: Some(8_000),
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Chrome,
+            },
+        );
+        (scene, zone_name)
+    }
+
+    /// Build a notification-area-backed scene using an injectable TestClock.
+    ///
+    /// The TestClock allows deterministic TTL expiry tests without real sleeps.
+    fn scene_with_notification_area_and_clock() -> (SceneGraph, tze_hud_scene::TestClock, String) {
+        use std::sync::Arc;
+        let clock = tze_hud_scene::TestClock::new(1_000); // start at 1 second
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let zone_name = "notification-area".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Notification overlay area".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.75,
+                    y_pct: 0.02,
+                    width_pct: 0.24,
+                    height_pct: 0.30,
+                },
+                accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+                max_publishers: 16,
+                transport_constraint: None,
+                auto_clear_ms: Some(8_000),
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Chrome,
+            },
+        );
+        (scene, clock, zone_name)
+    }
+
+    /// Test 1: Multi-agent stack ordering.
+    ///
+    /// Three agents publish notifications to the notification-area zone.
+    /// Verifies that:
+    /// - All 3 records accumulate in active_publishes (Stack policy).
+    /// - Arrival order is preserved: alpha first (index 0), then beta, then gamma (index 2, newest).
+    /// - The newest publication (gamma) is at the end of the Vec (rendered at top per spec).
+    #[test]
+    fn test_notification_stack_multi_agent_arrival_order() {
+        let (mut scene, zone) = scene_with_notification_area();
+
+        // Three agents publish in order: alpha → beta → gamma.
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "namespace": "alpha",
+                "content": {"type": "notification", "text": "System idle", "icon": "", "urgency": 0}
+            }),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "namespace": "beta",
+                "content": {"type": "notification", "text": "Update available", "icon": "update", "urgency": 1}
+            }),
+            &mut scene,
+        )
+        .unwrap();
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "namespace": "gamma",
+                "content": {"type": "notification", "text": "Security alert", "icon": "shield", "urgency": 3}
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            publishes.len(),
+            3,
+            "all 3 agent notifications must be present in the stack"
+        );
+
+        // Slot assignment: oldest at index 0, newest at index 2 (rendered at top).
+        // Spec §Three notifications stack vertically newest-on-top: gamma (newest) at top.
+        if let tze_hud_scene::types::ZoneContent::Notification(n) = &publishes[0].content {
+            assert_eq!(
+                n.text, "System idle",
+                "alpha (oldest) must be at slot index 0"
+            );
+        } else {
+            panic!(
+                "expected Notification at index 0, got {:?}",
+                &publishes[0].content
+            );
+        }
+        if let tze_hud_scene::types::ZoneContent::Notification(n) = &publishes[2].content {
+            assert_eq!(
+                n.text, "Security alert",
+                "gamma (newest) must be at slot index 2"
+            );
+        } else {
+            panic!(
+                "expected Notification at index 2, got {:?}",
+                &publishes[2].content
+            );
+        }
+
+        // Publisher namespaces must reflect each agent's identity.
+        assert_eq!(publishes[0].publisher_namespace, "alpha");
+        assert_eq!(publishes[1].publisher_namespace, "beta");
+        assert_eq!(publishes[2].publisher_namespace, "gamma");
+    }
+
+    /// Test 2: Max depth eviction.
+    ///
+    /// Publishing 6 notifications to a max_depth=5 zone must evict the oldest
+    /// (first) record immediately with no fade-out, leaving exactly 5 records.
+    /// Spec §Sixth notification evicts oldest and §Evicted notification has no fade-out.
+    #[test]
+    fn test_notification_stack_max_depth_eviction() {
+        let (mut scene, zone) = scene_with_notification_area();
+
+        // Publish 6 notifications from 6 distinct agents.
+        for i in 1..=6u32 {
+            handle_publish_to_zone(
+                json!({
+                    "zone_name": zone,
+                    "namespace": format!("agent-{i}"),
+                    "content": {
+                        "type": "notification",
+                        "text": format!("notification-{i}"),
+                        "icon": "",
+                        "urgency": 1
+                    }
+                }),
+                &mut scene,
+            )
+            .unwrap();
+        }
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            publishes.len(),
+            5,
+            "max_depth=5: only 5 newest notifications must remain after 6th publish"
+        );
+
+        // The oldest (notification-1) must be evicted.
+        let has_first = publishes.iter().any(|r| {
+            matches!(&r.content, tze_hud_scene::types::ZoneContent::Notification(n) if n.text == "notification-1")
+        });
+        assert!(!has_first, "notification-1 (oldest) must be evicted");
+
+        // The newest (notification-6) must be present at the end.
+        let last = &publishes[4];
+        if let tze_hud_scene::types::ZoneContent::Notification(n) = &last.content {
+            assert_eq!(
+                n.text, "notification-6",
+                "notification-6 (newest) must be at end"
+            );
+        } else {
+            panic!("expected Notification at index 4, got {:?}", last.content);
+        }
+
+        // The 5 surviving records must be notifications 2 through 6.
+        let texts: Vec<&str> = publishes
+            .iter()
+            .filter_map(|r| {
+                if let tze_hud_scene::types::ZoneContent::Notification(n) = &r.content {
+                    Some(n.text.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "notification-2",
+                "notification-3",
+                "notification-4",
+                "notification-5",
+                "notification-6"
+            ],
+            "surviving records must be 2-6 in arrival order"
+        );
+    }
+
+    /// Test 3: TTL auto-dismiss.
+    ///
+    /// A notification published with urgency=0 receives an auto-dismiss expiry of
+    /// NOTIFICATION_TTL_INFO_US (8 s) from the scene graph. Advancing the clock
+    /// past that expiry and calling drain_expired_zone_publications must remove it.
+    ///
+    /// Spec §Notification auto-dismisses after 8 seconds and
+    ///      §Notification removed after fade-out completes.
+    #[test]
+    fn test_notification_stack_ttl_auto_dismiss() {
+        let (mut scene, clock, zone) = scene_with_notification_area_and_clock();
+
+        // Publish a low-urgency notification (urgency=0 → 8s auto-dismiss).
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "namespace": "agent-ttl",
+                "content": {
+                    "type": "notification",
+                    "text": "Will expire",
+                    "icon": "",
+                    "urgency": 0
+                }
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        // Confirm publication is present before expiry.
+        let before = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            before.len(),
+            1,
+            "notification must be present before TTL expires"
+        );
+        assert!(
+            before[0].expires_at_wall_us.is_some(),
+            "urgency=0 notification must have an auto-dismiss expiry set"
+        );
+
+        // Advance clock to just before expiry — publication must still be present.
+        clock.advance(SceneGraph::NOTIFICATION_TTL_INFO_US / 1_000 - 1);
+        let removed_early = scene.drain_expired_zone_publications();
+        assert_eq!(
+            removed_early, 0,
+            "publication must not be removed before TTL expires"
+        );
+        let still_present = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            still_present.len(),
+            1,
+            "notification must still be present 1ms before TTL"
+        );
+
+        // Advance clock 2ms past expiry (now = 1000 + 8000 + 1ms = past the TTL boundary).
+        // drain_expired_zone_publications removes records as soon as expires_at_wall_us <= now_us;
+        // no fade state is tracked at the scene-graph layer (fade is a compositor concern).
+        clock.advance(2);
+        let removed = scene.drain_expired_zone_publications();
+        assert_eq!(
+            removed, 1,
+            "one notification must be removed after TTL expires"
+        );
+
+        // Zone must have no active publications.
+        let after = scene.zone_registry.active_publishes.get(&zone);
+        assert!(
+            after.is_none() || after.unwrap().is_empty(),
+            "notification-area must be empty after TTL expiry and drain"
+        );
+    }
+
+    /// Test 4: Urgency backdrop colors.
+    ///
+    /// Publishes notifications with urgency 0, 2, and 3, and verifies that the
+    /// urgency values are correctly preserved in active_publishes (the renderer
+    /// maps urgency → backdrop color; the MCP/scene layer preserves urgency as-is).
+    ///
+    /// Also verifies that urgency=5 is stored in the payload without error (clamping
+    /// to critical=3 is the compositor's responsibility at render time, not the scene
+    /// graph's, so urgency=5 is accepted and stored unchanged).
+    ///
+    /// Spec §Urgency-Tinted Notification Backdrops and §Out-of-range urgency clamped to critical.
+    #[test]
+    fn test_notification_stack_urgency_backdrop_colors() {
+        let (mut scene, zone) = scene_with_notification_area();
+
+        // Publish urgency 0 (low → #2A2A2A backdrop), urgency 2 (urgent → #8B6914),
+        // urgency 3 (critical → #8B1A1A), and urgency 5 (out-of-range → clamped to critical
+        // at render time; stored as 5 in the record).
+        for (ns, urgency, label) in &[
+            ("agent-low", 0u32, "low"),
+            ("agent-urgent", 2u32, "urgent"),
+            ("agent-critical", 3u32, "critical"),
+            ("agent-oob", 5u32, "out-of-range"),
+        ] {
+            handle_publish_to_zone(
+                json!({
+                    "zone_name": zone,
+                    "namespace": ns,
+                    "content": {
+                        "type": "notification",
+                        "text": format!("urgency-{label}"),
+                        "icon": "",
+                        "urgency": urgency
+                    }
+                }),
+                &mut scene,
+            )
+            .unwrap_or_else(|e| panic!("publish urgency={urgency} failed: {e:?}"));
+        }
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            publishes.len(),
+            4,
+            "all 4 urgency-level notifications must be present"
+        );
+
+        // Verify each urgency value is stored unchanged in the payload.
+        let urgency_by_ns: std::collections::HashMap<&str, u32> = publishes
+            .iter()
+            .filter_map(|r| {
+                if let tze_hud_scene::types::ZoneContent::Notification(n) = &r.content {
+                    Some((r.publisher_namespace.as_str(), n.urgency))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            urgency_by_ns["agent-low"], 0,
+            "urgency=0 (low) must be preserved"
+        );
+        assert_eq!(
+            urgency_by_ns["agent-urgent"], 2,
+            "urgency=2 (urgent) must be preserved"
+        );
+        assert_eq!(
+            urgency_by_ns["agent-critical"], 3,
+            "urgency=3 (critical) must be preserved"
+        );
+        // urgency=5 is stored as-is; the compositor clamps it to 3 at render time.
+        assert_eq!(
+            urgency_by_ns["agent-oob"], 5,
+            "urgency=5 (out-of-range) must be stored as-is in the record; compositor clamps to critical=3"
+        );
+    }
+
+    /// Test 5: Agent independence.
+    ///
+    /// When one agent's notification TTL expires and is drained, the other agent's
+    /// notification must remain unaffected in the stack.
+    ///
+    /// Spec §Agents do not interfere with each other's notifications.
+    #[test]
+    fn test_notification_stack_agent_independence() {
+        let (mut scene, clock, zone) = scene_with_notification_area_and_clock();
+
+        // Agent-alpha publishes urgency=0 (8s TTL → expires at now+8000ms).
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "namespace": "agent-alpha",
+                "content": {
+                    "type": "notification",
+                    "text": "Alpha message",
+                    "icon": "",
+                    "urgency": 0
+                }
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        // Advance 1ms so beta's published_at_wall_us is distinct from alpha's.
+        clock.advance(1);
+
+        // Agent-beta publishes urgency=3 (critical → 30s TTL → expires at now+30000ms).
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "namespace": "agent-beta",
+                "content": {
+                    "type": "notification",
+                    "text": "Beta message",
+                    "icon": "",
+                    "urgency": 3
+                }
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        // Both notifications must be present before any TTL expires.
+        let before = scene.zone_registry.active_for_zone(&zone);
+        assert_eq!(
+            before.len(),
+            2,
+            "both notifications must be active before any expiry"
+        );
+
+        // Advance clock past alpha's 8s TTL (urgency=0 → NOTIFICATION_TTL_INFO_US).
+        // Beta's 30s TTL (urgency=3 → NOTIFICATION_TTL_CRITICAL_US) must not have expired.
+        clock.advance(SceneGraph::NOTIFICATION_TTL_INFO_US / 1_000 + 500); // +8500ms
+        let removed = scene.drain_expired_zone_publications();
+        assert_eq!(
+            removed, 1,
+            "only alpha's notification must be removed at t=8500ms"
+        );
+
+        // Beta's notification must remain unaffected.
+        let after = scene.zone_registry.active_for_zone(&zone);
+        assert_eq!(
+            after.len(),
+            1,
+            "beta's notification must survive alpha's TTL expiry"
+        );
+        if let tze_hud_scene::types::ZoneContent::Notification(n) = &after[0].content {
+            assert_eq!(
+                n.text, "Beta message",
+                "surviving notification must be beta's"
+            );
+            assert_eq!(
+                after[0].publisher_namespace, "agent-beta",
+                "surviving record must belong to agent-beta"
+            );
+        } else {
+            panic!("expected Notification, got {:?}", after[0].content);
+        }
+    }
 }
