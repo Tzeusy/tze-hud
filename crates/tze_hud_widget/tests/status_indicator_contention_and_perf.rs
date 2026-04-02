@@ -133,11 +133,11 @@ fn scene_with_status_indicator(
 /// replaced, so the performance test does not depend on the loader path.
 const INDICATOR_SVG_48: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
-  <circle id="indicator-fill" cx="24" cy="20" r="10"
-          fill="#00cc66"
-          stroke="#333333" stroke-width="2"/>
-  <text id="label-text" x="24" y="42" text-anchor="middle"
-        font-family="sans-serif" font-size="8"
+  <circle id="indicator-fill" cx="24" cy="20" r="14"
+          fill="#666666"
+          stroke="#333333" stroke-width="1.5"/>
+  <text id="label-text" x="24" y="44" text-anchor="middle"
+        font-family="sans-serif" font-size="10"
         fill="#B0B0B0"></text>
 </svg>"##;
 
