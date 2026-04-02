@@ -387,6 +387,54 @@ Published via MCP `publish_to_zone` to `notification-area` zone with `ttl_us`
 derived from `--ttl` and `namespace` set to the simulated agent namespace
 (`alpha`, `beta`, or `gamma`).
 
+## Alert-Banner Exemplar Scenario
+
+Use `scripts/alert_banner_exemplar.py` to exercise the alert-banner zone on a
+live HUD. The script publishes 3 alerts at increasing urgency levels with 3-second
+delays between each, validating urgency-driven visual differentiation and simultaneous
+multi-alert display.
+
+### CLI
+
+```bash
+python3 .claude/skills/user-test/scripts/alert_banner_exemplar.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --psk-env TZE_HUD_PSK \
+  --ttl 15000
+```
+
+Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`), `--ttl` (ms, default 15000).
+
+### Sequence
+
+| Step | Alert | Urgency | Text | Pause |
+|------|-------|---------|------|-------|
+| 1 | Info | 1 | "Info: system nominal" | 3s |
+| 2 | Warning | 2 | "Warning: disk space low" | 3s |
+| 3 | Critical | 3 | "CRITICAL: security breach detected" | — |
+
+### Visual Checklist
+
+After all 3 publishes, the alert-banner zone should show all three alerts
+simultaneously:
+
+- **Critical (red)** at top — "CRITICAL: security breach detected"
+- **Warning (amber)** in middle — "Warning: disk space low"
+- **Info (blue)** at bottom — "Info: system nominal"
+
+All three remain visible until their TTL elapses. Confirm urgency-derived
+color tinting is applied correctly at each level: blue for info (urgency=1),
+amber for warning (urgency=2), red for critical (urgency=3).
+
+### Alert payload shape
+
+```json
+{"type": "notification", "text": "...", "icon": "", "urgency": 1}
+```
+
+Published via MCP `publish_to_zone` to `alert-banner` zone with `ttl_us`
+derived from `--ttl` and `namespace` set to `alert-<level>` (e.g. `alert-critical`).
+
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
