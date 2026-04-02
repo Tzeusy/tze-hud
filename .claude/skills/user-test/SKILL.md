@@ -283,6 +283,60 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
 
 Expected result: MCP returns an error response (`WIDGET_PARAMETER_INVALID_VALUE`) for `status=do-not-disturb`. The widget display must not change. Report whether the error response matches expectation.
 
+### Step 7: Widget Reactivity Test (Progress Bar)
+
+After the status-indicator tests, confirm that a `progress-bar` widget instance is registered before proceeding. Use the `--list-widgets` output from Step 4 (or re-run it) to verify that a widget named `progress-bar` appears in the list. If no such instance is present, skip the sub-steps below and report that the progress-bar widget is not deployed.
+
+This is the **progress-bar-widget** user-test scenario. It animates a thin horizontal bar from 0 to 100% and confirms visual quality at each step.
+
+#### 7a: 7-Step Sequence
+
+Run `progress-bar-step.json` with `--delay-ms 1000` so the tester has ~1 second to observe each visual transition:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/progress-bar-step.json \
+  --delay-ms 1000
+```
+
+At each step, prompt the tester to confirm the expected visual state:
+
+| Step | Published params | What to confirm |
+|------|-----------------|-----------------|
+| 1 | `progress=0.0, label=""` | Bar is empty (zero width fill); no label text visible |
+| 2 | `progress=0.25, label="25%"` | Fill animates smoothly to 25%; label reads "25%" centered on bar |
+| 3 | `progress=0.5, label="50%"` | Fill animates smoothly to 50%; label reads "50%" |
+| 4 | `progress=0.75, label="75%"` | Fill animates smoothly to 75%; label reads "75%" |
+| 5 | `progress=1.0, label="100%"` | Fill animates smoothly to full width; label reads "100%" |
+| 6 | `fill_color={r:0.0, g:0.784, b:0.325, a:1.0}` | Fill color transitions from blue to green (equivalent to RGBA `[0,200,83,255]`) over 300ms; progress/label unchanged |
+| 7 | clear | Bar resets to empty with no visual artifacts |
+
+**Human acceptance criteria at each step:**
+
+- **(a) Pill/capsule shape** — The bar has visually rounded end-caps on both the track and the fill. No sharp corners.
+- **(b) Smooth fill animation** — Each step 2-5 fills with a visible 200ms animation. No jumps or jank.
+- **(c) Centered label** — Label text is horizontally and vertically centered on the bar at all non-empty steps.
+- **(d) Correct fill color** — Steps 1-5 use the accent blue (`#4A9EFF` or token override). Step 6 transitions to green.
+- **(e) Clean reset** — After the clear action, the bar is completely empty with no residual fill or label artifacts.
+
+#### 7b: Color Sweep (Optional)
+
+Optionally, run the color-sweep fixture to validate color interpolation across the full spectrum with `--delay-ms 1000`:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/progress-bar-color-sweep.json \
+  --delay-ms 1000
+```
+
+The bar cycles through: blue -> green -> yellow -> red -> blue (reset). Each transition should produce a visible smooth color animation over 300ms. Confirm that the fill color matches expectations at each step before the next publish fires.
+
+Report pass/fail per step. A step fails if the tester observes: missing animation, wrong color, misaligned label, missing rounded end-caps, or visible artifacts after reset.
+
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
