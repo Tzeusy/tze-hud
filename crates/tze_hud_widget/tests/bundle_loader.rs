@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use tze_hud_scene::types::ContentionPolicy;
 use tze_hud_widget::error::BundleError;
 use tze_hud_widget::loader::{
     BundleScanResult, BundleScope, load_bundle_dir, load_bundle_dir_scoped,
@@ -181,6 +182,15 @@ fn status_indicator_fixture_loads_successfully() {
             assert!(
                 !def.description.is_empty(),
                 "description should not be empty"
+            );
+
+            // Contention policy must be LatestWins as declared in widget.toml.
+            assert!(
+                matches!(
+                    def.default_contention_policy,
+                    ContentionPolicy::LatestWins
+                ),
+                "default_contention_policy must be ContentionPolicy::LatestWins"
             );
 
             // Parameter schema: status (enum) and label (string).
