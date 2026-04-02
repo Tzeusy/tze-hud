@@ -26,7 +26,7 @@
 //!    token set to a non-black color; backdrop pixels must reflect the override,
 //!    demonstrating token → RenderingPolicy → compositor pipeline end-to-end.
 //!
-//! 6. `test_subtitle_font_size_from_policy` — zone registered with the spec-mandated
+//! 6. `test_subtitle_font_size_28px_from_policy` — zone registered with the spec-mandated
 //!    `font_size_px = 28.0` and `font_weight = 600`; text rendering produces bright
 //!    pixels in the subtitle zone area (presence check).
 //!
@@ -450,7 +450,7 @@ async fn test_subtitle_text_color_white_from_policy() {
 /// then verifies that the rendered pixels match a red backdrop at 0.6 opacity.
 ///
 /// Red (linear 1.0, 0.0, 0.0) at 0.6 alpha over clear (0.05, 0.05, 0.10):
-///   r_lin = 1.0×0.6 + 0.05×0.4 = 0.62  → sRGB ≈ 196
+///   r_lin = 1.0×0.6 + 0.05×0.4 = 0.62  → sRGB ≈ 206
 ///   g_lin = 0.0×0.6 + 0.05×0.4 = 0.02  → sRGB ≈ 39
 ///   b_lin = 0.0×0.6 + 0.10×0.4 = 0.04  → sRGB ≈ 56
 #[tokio::test]
@@ -503,10 +503,10 @@ async fn test_subtitle_custom_token_override_backdrop_color() {
     let pixels = surface.read_pixels(&compositor.device);
 
     // Expected: red at 0.6 alpha over clear color.
-    // r_lin = 1.0×0.6 + 0.05×0.4 = 0.62 → sRGB ≈ 196
+    // r_lin = 1.0×0.6 + 0.05×0.4 = 0.62 → sRGB ≈ 206
     // g_lin = 0.0×0.6 + 0.05×0.4 = 0.02 → sRGB ≈ 39
     // b_lin = 0.0×0.6 + 0.10×0.4 = 0.04 → sRGB ≈ 56
-    let red_backdrop_expected: [u8; 4] = [196, 39, 56, 255];
+    let red_backdrop_expected: [u8; 4] = [206, 39, 56, 255];
 
     HeadlessSurface::assert_pixel_color(
         &pixels,
