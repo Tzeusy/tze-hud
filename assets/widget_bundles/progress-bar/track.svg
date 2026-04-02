@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Track layer for the production progress-bar widget exemplar.
+     Renders the static background track — a pill-shaped rounded rectangle
+     that forms the visual boundary of the progress bar. Contains no bindings —
+     this layer is resolved once at bundle load time.
+
+     viewBox="0 0 300 20" matches the default 300x20 geometry.
+
+     Token placeholders ({{...}}) are resolved at bundle load time against
+     the global token map — never at render time. Zero hardcoded hex colors.
+
+     IMPORTANT: This layer MUST appear before fill.svg in widget.toml layer
+     order (painter's model) so the dynamic fill layer renders on top. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 20" width="300" height="20">
+  <!-- Background track: full-width pill shape with rounded end-caps (rx=10).
+       fill-opacity="0.3" gives a muted background so the fill bar reads clearly.
+       Token-driven backdrop color — zero hardcoded hex values. -->
+  <rect
+    id="track-bg"
+    x="0" y="0"
+    width="300" height="20"
+    rx="10" ry="10"
+    fill="{{token.color.backdrop.default}}"
+    fill-opacity="0.3"/>
+</svg>
