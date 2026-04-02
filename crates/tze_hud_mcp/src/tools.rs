@@ -3228,7 +3228,9 @@ mod tests {
             "notification must still be present 1ms before TTL"
         );
 
-        // Advance clock 2ms past expiry (now = 1000 + 8000 + 1ms = past TTL+fade).
+        // Advance clock 2ms past expiry (now = 1000 + 8000 + 1ms = past the TTL boundary).
+        // drain_expired_zone_publications removes records as soon as expires_at_wall_us <= now_us;
+        // no fade state is tracked at the scene-graph layer (fade is a compositor concern).
         clock.advance(2);
         let removed = scene.drain_expired_zone_publications();
         assert_eq!(
