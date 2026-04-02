@@ -407,6 +407,7 @@ async fn publish_zone_content_via_grpc(
                     content: Some(content),
                     ttl_us: 0,
                     merge_key: String::new(),
+                    breakpoints: Vec::new(),
                 },
             )),
         })

@@ -468,6 +468,7 @@ async fn publish_to_zone(
                     }),
                     ttl_us: 0,
                     merge_key: String::new(),
+                    breakpoints: Vec::new(),
                 },
             )),
         })

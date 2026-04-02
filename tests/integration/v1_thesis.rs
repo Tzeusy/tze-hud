@@ -413,6 +413,7 @@ async fn publish_stream_text_to_zone_via_grpc(
                     }),
                     ttl_us: 0,
                     merge_key: String::new(),
+                    breakpoints: Vec::new(),
                 },
             )),
         })

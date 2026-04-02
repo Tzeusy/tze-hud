@@ -196,6 +196,13 @@ pub enum SceneMutation {
         expires_at_wall_us: Option<u64>,
         /// Optional opaque content classification tag (e.g., "public", "pii").
         content_classification: Option<String>,
+        /// Byte-offset breakpoints for StreamText word-by-word reveal.
+        ///
+        /// Only meaningful when `content` is `ZoneContent::StreamText`.
+        /// Empty = reveal full text immediately.
+        /// Per spec §Subtitle Streaming Word-by-Word Reveal.
+        #[serde(default)]
+        breakpoints: Vec<u64>,
     },
     /// Clear all publications by this agent in the specified zone.
     ///
@@ -737,15 +744,28 @@ impl SceneGraph {
                 merge_key,
                 expires_at_wall_us,
                 content_classification,
+                breakpoints,
             } => {
-                self.publish_to_zone(
-                    zone_name,
-                    content.clone(),
-                    namespace,
-                    merge_key.clone(),
-                    *expires_at_wall_us,
-                    content_classification.clone(),
-                )?;
+                if breakpoints.is_empty() {
+                    self.publish_to_zone(
+                        zone_name,
+                        content.clone(),
+                        namespace,
+                        merge_key.clone(),
+                        *expires_at_wall_us,
+                        content_classification.clone(),
+                    )?;
+                } else {
+                    self.publish_to_zone_with_breakpoints(
+                        zone_name,
+                        content.clone(),
+                        namespace,
+                        merge_key.clone(),
+                        *expires_at_wall_us,
+                        content_classification.clone(),
+                        breakpoints.clone(),
+                    )?;
+                }
                 Ok(vec![])
             }
             SceneMutation::ClearZone {
