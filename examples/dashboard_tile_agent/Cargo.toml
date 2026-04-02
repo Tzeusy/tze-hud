@@ -16,6 +16,12 @@ dev-mode = ["tze_hud_runtime/dev-mode"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
+# dev-mode is enabled here to support inline #[cfg(test)] tests that call
+# establish_session_with with config_toml: None (unrestricted capabilities).
+# The production binary path always loads production.toml and never passes
+# config_toml: None; dev-mode is a test-infrastructure concern here, not a
+# runtime behaviour change for the released binary.
+# NEVER ship a production binary without replacing this with a restricted config.
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
 tokio = { workspace = true }

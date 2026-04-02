@@ -77,8 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn now_wall_us() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_micros() as u64
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(1) // clock before UNIX epoch: return 1 (non-zero per timing-model spec)
 }
 
 /// Run the headless runtime and execute the dashboard tile exemplar phases.
@@ -215,6 +215,19 @@ pub struct SessionState {
 /// - configuration/spec.md §Capability Vocabulary (lines 149-164)
 /// - openspec/changes/exemplar-dashboard-tile/tasks.md §1.1, §1.2
 pub async fn establish_session() -> Result<SessionState, Box<dyn std::error::Error>> {
+    establish_session_with(GRPC_PORT, AGENT_PSK, AGENT_ID, AGENT_DISPLAY_NAME).await
+}
+
+/// Parameterized session-establishment helper used by tests and the public API.
+///
+/// Accepts connection parameters so tests can spin up isolated runtimes on
+/// ephemeral ports without conflicting with production constants.
+async fn establish_session_with(
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+) -> Result<SessionState, Box<dyn std::error::Error>> {
     use tokio_stream::StreamExt as _;
 
     // ── 1. Connect gRPC client to HudSession ──────────────────────────────
@@ -224,7 +237,7 @@ pub async fn establish_session() -> Result<SessionState, Box<dyn std::error::Err
     // lease management — flows over this one stream per agent.
     #[allow(deprecated)]
     let mut session_client =
-        HudSessionClient::connect(format!("http://[::1]:{GRPC_PORT}")).await?;
+        HudSessionClient::connect(format!("http://[::1]:{port}")).await?;
 
     // Channel for client → server messages.  Buffer = 64 gives the agent
     // headroom during bursts (e.g., mutation batches) without unbounded growth.
@@ -255,9 +268,9 @@ pub async fn establish_session() -> Result<SessionState, Box<dyn std::error::Err
         timestamp_wall_us: now_us,
         payload: Some(session_proto::client_message::Payload::SessionInit(
             session_proto::SessionInit {
-                agent_id: AGENT_ID.to_string(),
-                agent_display_name: AGENT_DISPLAY_NAME.to_string(),
-                pre_shared_key: AGENT_PSK.to_string(),
+                agent_id: agent_id.to_string(),
+                agent_display_name: agent_display_name.to_string(),
+                pre_shared_key: psk.to_string(),
                 // Canonical v1 capability names — non-canonical names are
                 // rejected with CONFIG_UNKNOWN_CAPABILITY.
                 requested_capabilities: vec![
@@ -294,14 +307,16 @@ pub async fn establish_session() -> Result<SessionState, Box<dyn std::error::Err
             // spec §SessionEstablished:
             //   field 1 (session_id): opaque UUIDv7, 16 bytes — MUST be non-empty
             //   field 2 (namespace):  agent's scene namespace   — MUST be non-empty
-            assert!(
-                !e.session_id.is_empty(),
-                "session_id MUST be non-empty (spec §SessionEstablished field 1)"
-            );
-            assert!(
-                !e.namespace.is_empty(),
-                "namespace MUST be non-empty (spec §SessionEstablished field 2)"
-            );
+            if e.session_id.is_empty() {
+                return Err(
+                    "session_id MUST be non-empty (spec §SessionEstablished field 1)".into(),
+                );
+            }
+            if e.namespace.is_empty() {
+                return Err(
+                    "namespace MUST be non-empty (spec §SessionEstablished field 2)".into(),
+                );
+            }
 
             println!("  session_id           = {} bytes (UUIDv7)", e.session_id.len());
             println!("  namespace            = {}", e.namespace);
@@ -374,19 +389,34 @@ mod tests {
     //! Integration tests for Phase 1 (tasks.md §1.1–1.2).
     //!
     //! - [`test_session_establishment_returns_nonempty_session_id`]
-    //!   Verifies that `establish_session` produces a non-empty session_id.
+    //!   Verifies that `establish_session_with` produces a non-empty session_id.
     //!
     //! - [`test_session_establishment_returns_nonempty_namespace`]
-    //!   Verifies that `establish_session` produces a non-empty namespace.
+    //!   Verifies that `establish_session_with` produces a non-empty namespace.
     //!
     //! Both tests spin up a `HeadlessRuntime` with `dev-mode` (unrestricted
-    //! capabilities; no registered-agent config required) and connect a real
-    //! gRPC client, exercising the full handshake path in headless CI.
+    //! capabilities; no registered-agent config required) on an ephemeral port,
+    //! then call `establish_session_with` to exercise the full handshake path.
+    //!
+    //! Ephemeral ports prevent port-conflict flakiness in parallel CI.
+    //! Each `server` JoinHandle is aborted after assertions complete.
 
     use tze_hud_runtime::HeadlessRuntime;
     use tze_hud_runtime::headless::HeadlessConfig;
 
     const TEST_PSK: &str = "dashboard-tile-test-key";
+    const TEST_AGENT_ID: &str = "test-dashboard-agent";
+    const TEST_AGENT_DISPLAY_NAME: &str = "Test Dashboard Agent";
+
+    /// Bind an ephemeral port and return it.  The listener is dropped before
+    /// the gRPC server starts; there is a brief TOCTOU window, but this is the
+    /// same pattern used across the integration test suite.
+    fn ephemeral_port() -> u16 {
+        let listener = std::net::TcpListener::bind("[::1]:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("get local addr").port();
+        drop(listener);
+        port
+    }
 
     async fn start_test_runtime(port: u16) -> Result<
         tokio::task::JoinHandle<()>,
@@ -410,67 +440,22 @@ mod tests {
     /// MUST be non-empty."
     #[tokio::test]
     async fn test_session_establishment_returns_nonempty_session_id() {
-        use tokio_stream::StreamExt as _;
-        use crate::session_proto;
-        #[allow(deprecated)]
-        use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
-
-        let port = 50053u16;
-        let _server = start_test_runtime(port).await.expect("runtime start");
+        let port = ephemeral_port();
+        let server = start_test_runtime(port).await.expect("runtime start");
 
         // Allow the server a moment to bind before the client connects.
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        #[allow(deprecated)]
-        let mut client = HudSessionClient::connect(format!("http://[::1]:{port}"))
+        let state = crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
             .await
-            .expect("gRPC connect");
+            .expect("establish_session_with");
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(16);
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        let mut resp = client.session(stream).await.expect("session RPC").into_inner();
+        assert!(
+            !state.session_id.is_empty(),
+            "session_id must be non-empty (tasks.md §1.2)"
+        );
 
-        let now_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
-
-        tx.send(session_proto::ClientMessage {
-            sequence: 1,
-            timestamp_wall_us: now_us,
-            payload: Some(session_proto::client_message::Payload::SessionInit(
-                session_proto::SessionInit {
-                    agent_id: "test-dashboard-agent".to_string(),
-                    agent_display_name: "Test Dashboard Agent".to_string(),
-                    pre_shared_key: TEST_PSK.to_string(),
-                    requested_capabilities: vec![
-                        "create_tiles".to_string(),
-                        "modify_own_tiles".to_string(),
-                        "access_input_events".to_string(),
-                    ],
-                    initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
-                    resume_token: Vec::new(),
-                    agent_timestamp_wall_us: now_us,
-                    min_protocol_version: 1000,
-                    max_protocol_version: 1001,
-                    auth_credential: None,
-                },
-            )),
-        })
-        .await
-        .expect("send SessionInit");
-
-        // First message must be SessionEstablished.
-        let msg = resp.next().await.expect("server message").expect("no error");
-        match msg.payload {
-            Some(session_proto::server_message::Payload::SessionEstablished(e)) => {
-                assert!(
-                    !e.session_id.is_empty(),
-                    "session_id must be non-empty (tasks.md §1.2)"
-                );
-            }
-            other => panic!("Expected SessionEstablished, got: {other:?}"),
-        }
+        server.abort();
     }
 
     /// Task 1.2 — verify namespace is non-empty after successful handshake.
@@ -479,64 +464,20 @@ mod tests {
     /// (RFC 0001 §1.2). MUST be non-empty."
     #[tokio::test]
     async fn test_session_establishment_returns_nonempty_namespace() {
-        use tokio_stream::StreamExt as _;
-        use crate::session_proto;
-        #[allow(deprecated)]
-        use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
-
-        let port = 50054u16;
-        let _server = start_test_runtime(port).await.expect("runtime start");
+        let port = ephemeral_port();
+        let server = start_test_runtime(port).await.expect("runtime start");
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        #[allow(deprecated)]
-        let mut client = HudSessionClient::connect(format!("http://[::1]:{port}"))
+        let state = crate::establish_session_with(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
             .await
-            .expect("gRPC connect");
+            .expect("establish_session_with");
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(16);
-        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        let mut resp = client.session(stream).await.expect("session RPC").into_inner();
+        assert!(
+            !state.namespace.is_empty(),
+            "namespace must be non-empty (tasks.md §1.2)"
+        );
 
-        let now_us = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_micros() as u64;
-
-        tx.send(session_proto::ClientMessage {
-            sequence: 1,
-            timestamp_wall_us: now_us,
-            payload: Some(session_proto::client_message::Payload::SessionInit(
-                session_proto::SessionInit {
-                    agent_id: "test-namespace-agent".to_string(),
-                    agent_display_name: "Test Namespace Agent".to_string(),
-                    pre_shared_key: TEST_PSK.to_string(),
-                    requested_capabilities: vec![
-                        "create_tiles".to_string(),
-                        "modify_own_tiles".to_string(),
-                        "access_input_events".to_string(),
-                    ],
-                    initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
-                    resume_token: Vec::new(),
-                    agent_timestamp_wall_us: now_us,
-                    min_protocol_version: 1000,
-                    max_protocol_version: 1001,
-                    auth_credential: None,
-                },
-            )),
-        })
-        .await
-        .expect("send SessionInit");
-
-        let msg = resp.next().await.expect("server message").expect("no error");
-        match msg.payload {
-            Some(session_proto::server_message::Payload::SessionEstablished(e)) => {
-                assert!(
-                    !e.namespace.is_empty(),
-                    "namespace must be non-empty (tasks.md §1.2)"
-                );
-            }
-            other => panic!("Expected SessionEstablished, got: {other:?}"),
-        }
+        server.abort();
     }
 }
