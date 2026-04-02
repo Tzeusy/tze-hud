@@ -87,6 +87,14 @@ path = "soak.rs"
 name = "v1_thesis"
 path = "v1_thesis.rs"
 
+# hud-hzub.4: Subtitle streaming breakpoint reveal — MCP and gRPC publish path verification.
+# Tests: gRPC ZonePublish with stream_text + breakpoints forwarded to compositor,
+# empty breakpoints = immediate reveal, replacement cancels streaming, gRPC/MCP parity,
+# list_zones subtitle zone metadata (contention_policy, accepted_media_types).
+[[test]]
+name = "subtitle_streaming"
+path = "subtitle_streaming.rs"
+
 # Integration tests always run headless (no display server required).
 # tze_hud_runtime is built with the headless feature unconditionally so
 # all tests run in CI without a display. The workspace-level `headless`

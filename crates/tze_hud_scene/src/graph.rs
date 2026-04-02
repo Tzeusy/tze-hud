@@ -4615,6 +4615,7 @@ mod tests {
                 merge_key: None,
                 expires_at_wall_us: None,
                 content_classification: None,
+                breakpoints: Vec::new(),
             }],
             timing_hints: None,
             lease_id: None,

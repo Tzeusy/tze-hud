@@ -660,8 +660,13 @@ pub struct ZoneEntry {
     pub description: String,
     /// Stable UUID for the zone definition.
     pub id: String,
-    /// Whether the zone currently has any tiles visible on the active tab.
+    /// Whether the zone currently has any active publications (from `zone_registry.active_publishes`).
+    /// This reflects occupancy from publish records, not tile visibility on the active tab.
     pub has_content: bool,
+    /// Contention policy for this zone (e.g., "latest_wins", "stack", "merge_by_key", "replace").
+    pub contention_policy: String,
+    /// Media types accepted by this zone (e.g., ["stream_text", "notification"]).
+    pub accepted_media_types: Vec<String>,
 }
 
 /// Response from `list_zones`.
@@ -690,18 +695,44 @@ pub fn handle_list_zones(params: Value, scene: &SceneGraph) -> McpResult<ListZon
         .zone_registry
         .zones
         .values()
-        .map(|z| ZoneEntry {
-            name: z.name.clone(),
-            description: z.description.clone(),
-            id: z.id.to_string(),
-            // A zone has content when zone_registry.active_publishes contains
-            // at least one record for it. This is the authoritative source of
-            // zone occupancy (not a tile-namespace heuristic).
-            has_content: scene
-                .zone_registry
-                .active_publishes
-                .get(&z.name)
-                .is_some_and(|v| !v.is_empty()),
+        .map(|z| {
+            use tze_hud_scene::types::{ContentionPolicy, ZoneMediaType};
+
+            let contention_policy = match z.contention_policy {
+                ContentionPolicy::LatestWins => "latest_wins".to_string(),
+                ContentionPolicy::Stack { .. } => "stack".to_string(),
+                ContentionPolicy::MergeByKey { .. } => "merge_by_key".to_string(),
+                ContentionPolicy::Replace => "replace".to_string(),
+            };
+
+            let accepted_media_types = z
+                .accepted_media_types
+                .iter()
+                .map(|mt| match mt {
+                    ZoneMediaType::StreamText => "stream_text".to_string(),
+                    ZoneMediaType::ShortTextWithIcon => "notification".to_string(),
+                    ZoneMediaType::KeyValuePairs => "status_bar".to_string(),
+                    ZoneMediaType::VideoSurfaceRef => "video_surface_ref".to_string(),
+                    ZoneMediaType::StaticImage => "static_image".to_string(),
+                    ZoneMediaType::SolidColor => "solid_color".to_string(),
+                })
+                .collect();
+
+            ZoneEntry {
+                name: z.name.clone(),
+                description: z.description.clone(),
+                id: z.id.to_string(),
+                // A zone has content when zone_registry.active_publishes contains
+                // at least one record for it. This is the authoritative source of
+                // zone occupancy (not a tile-namespace heuristic).
+                has_content: scene
+                    .zone_registry
+                    .active_publishes
+                    .get(&z.name)
+                    .is_some_and(|v| !v.is_empty()),
+                contention_policy,
+                accepted_media_types,
+            }
         })
         .collect();
 
@@ -3405,5 +3436,268 @@ mod tests {
         } else {
             panic!("expected Notification, got {:?}", after[0].content);
         }
+    }
+
+    // ── Streaming breakpoint reveal — MCP path (hud-hzub.4) ─────────────────
+
+    /// Build a scene with a subtitle zone (LatestWins, StreamText-only).
+    /// Used by streaming reveal and list_zones subtitle tests.
+    fn scene_with_subtitle_zone() -> (SceneGraph, String) {
+        let (mut scene, _) = scene_with_tab();
+        let zone_name = "subtitle".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Subtitle overlay".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.1,
+                    y_pct: 0.85,
+                    width_pct: 0.8,
+                    height_pct: 0.10,
+                },
+                accepted_media_types: vec![ZoneMediaType::StreamText],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::LatestWins,
+                max_publishers: 2,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+        (scene, zone_name)
+    }
+
+    /// MCP publish_to_zone with stream_text content containing breakpoints:
+    /// verify breakpoint indices are forwarded to the compositor.
+    ///
+    /// Spec §Subtitle Streaming Word-by-Word Reveal:
+    /// "The compositor MUST reveal the text progressively: first "The", then
+    ///  "The quick", then "The quick brown", then "The quick brown fox"."
+    #[test]
+    fn test_mcp_publish_to_zone_with_breakpoints_forwarded_to_record() {
+        let (mut scene, zone) = scene_with_subtitle_zone();
+        // "The quick brown fox" — breakpoints at word boundaries
+        // byte offsets: after "The"=3, after "quick"=9, after "brown"=15
+        let result = handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": "The quick brown fox",
+                "breakpoints": [3, 9, 15],
+                "namespace": "exemplar-test"
+            }),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(result.zone_name, zone);
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1);
+        // Content must be StreamText
+        assert!(
+            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "The quick brown fox"),
+            "content must be StreamText"
+        );
+        // Breakpoints must be forwarded to the publish record
+        assert_eq!(
+            publishes[0].breakpoints,
+            vec![3u64, 9, 15],
+            "breakpoints must be forwarded to the ZonePublishRecord for compositor reveal"
+        );
+    }
+
+    /// MCP publish_to_zone with stream_text via object syntax: verify breakpoints work
+    /// with the {"type":"stream_text","text":"..."} content form too.
+    #[test]
+    fn test_mcp_publish_to_zone_object_stream_text_with_breakpoints() {
+        let (mut scene, zone) = scene_with_subtitle_zone();
+        let result = handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": {"type": "stream_text", "text": "The quick brown fox"},
+                "breakpoints": [3, 9, 15],
+                "namespace": "exemplar-test"
+            }),
+            &mut scene,
+        )
+        .unwrap();
+        assert_eq!(result.zone_name, zone);
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes[0].breakpoints, vec![3u64, 9, 15]);
+    }
+
+    /// MCP publish_to_zone without breakpoints (empty array) must reveal all text immediately.
+    ///
+    /// Spec §"Stream-text without breakpoints reveals all at once":
+    /// "THEN the compositor MUST display the full text immediately (no progressive reveal)."
+    #[test]
+    fn test_mcp_publish_to_zone_empty_breakpoints_reveals_immediately() {
+        let (mut scene, zone) = scene_with_subtitle_zone();
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": "Instant display",
+                "breakpoints": [],
+                "namespace": "exemplar-test"
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1);
+        assert!(
+            publishes[0].breakpoints.is_empty(),
+            "empty breakpoints must result in empty breakpoints in the publish record"
+        );
+    }
+
+    /// MCP publish_to_zone without breakpoints field at all — same as empty (default).
+    #[test]
+    fn test_mcp_publish_to_zone_no_breakpoints_field_defaults_empty() {
+        let (mut scene, zone) = scene_with_subtitle_zone();
+        handle_publish_to_zone(
+            json!({"zone_name": zone, "content": "Hello world", "namespace": "exemplar-test"}),
+            &mut scene,
+        )
+        .unwrap();
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert!(
+            publishes[0].breakpoints.is_empty(),
+            "absent breakpoints field must default to empty"
+        );
+    }
+
+    /// Replacement during streaming cancels reveal — latest-wins applies.
+    ///
+    /// Spec §"Replacement during streaming cancels reveal":
+    /// "THEN the compositor MUST cancel the in-progress reveal and display the new content."
+    /// At the scene layer, latest-wins replaces the previous publish record (and its breakpoints).
+    #[test]
+    fn test_mcp_publish_to_zone_replacement_cancels_breakpoints() {
+        let (mut scene, zone) = scene_with_subtitle_zone();
+
+        // First publish: streaming with breakpoints
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": "Long streaming message",
+                "breakpoints": [4, 13],
+                "namespace": "exemplar-test"
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        // Second publish replaces first — latest-wins semantics
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": "Replacement content",
+                "namespace": "exemplar-test"
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(publishes.len(), 1, "LatestWins must have only one active record");
+        assert!(
+            matches!(&publishes[0].content, tze_hud_scene::types::ZoneContent::StreamText(s) if s == "Replacement content"),
+            "replacement content must be the active record"
+        );
+        assert!(
+            publishes[0].breakpoints.is_empty(),
+            "replacement without breakpoints must clear breakpoints (no streaming for new content)"
+        );
+    }
+
+    /// Breakpoints rejected for non-StreamText content.
+    #[test]
+    fn test_mcp_publish_to_zone_breakpoints_rejected_for_non_stream_text() {
+        let (mut scene, _) = scene_with_tab();
+        // Set up a notification zone
+        let zone_name = "notification-area".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Notification zone".to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.75,
+                    y_pct: 0.0,
+                    width_pct: 0.25,
+                    height_pct: 0.30,
+                },
+                accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Stack { max_depth: 3 },
+                max_publishers: 8,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Content,
+            },
+        );
+        let err = handle_publish_to_zone(
+            json!({
+                "zone_name": zone_name,
+                "content": {"type": "notification", "text": "Alert!", "icon": "", "urgency": 1},
+                "breakpoints": [3, 9],
+                "namespace": "exemplar-test"
+            }),
+            &mut scene,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, McpError::InvalidParams(_)),
+            "breakpoints on non-StreamText content must be rejected with InvalidParams"
+        );
+    }
+
+    // ── list_zones subtitle zone metadata (hud-hzub.4) ──────────────────────
+
+    /// list_zones reports subtitle zone with contention_policy: latest_wins.
+    ///
+    /// Spec §Subtitle Contention Policy — Latest Wins.
+    #[test]
+    fn test_list_zones_subtitle_contention_policy_latest_wins() {
+        let (scene, zone) = scene_with_subtitle_zone();
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert_eq!(
+            entry.contention_policy, "latest_wins",
+            "subtitle zone must report contention_policy = latest_wins"
+        );
+    }
+
+    /// list_zones reports subtitle zone with accepted_media_types including stream_text.
+    ///
+    /// Spec §Subtitle MCP Test Fixtures — zone_name: "subtitle".
+    #[test]
+    fn test_list_zones_subtitle_accepted_media_types_includes_stream_text() {
+        let (scene, zone) = scene_with_subtitle_zone();
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert!(
+            entry.accepted_media_types.contains(&"stream_text".to_string()),
+            "subtitle zone must include stream_text in accepted_media_types, got {:?}",
+            entry.accepted_media_types
+        );
+    }
+
+    /// list_zones exposes contention_policy and accepted_media_types for all zone types.
+    #[test]
+    fn test_list_zones_exposes_contention_policy_and_media_types() {
+        let (scene, _tab_id, zone) = scene_with_zone(); // main-overlay: LatestWins, StreamText
+        let result = handle_list_zones(json!(null), &scene).unwrap();
+        let entry = result.zones.iter().find(|z| z.name == zone).unwrap();
+        assert_eq!(entry.contention_policy, "latest_wins");
+        assert!(entry.accepted_media_types.contains(&"stream_text".to_string()));
     }
 }

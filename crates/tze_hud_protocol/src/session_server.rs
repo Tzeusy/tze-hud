@@ -2320,6 +2320,9 @@ async fn handle_mutation_batch(
                         // in the PublishToZoneMutation proto (post-v1 wire extensions).
                         expires_at_wall_us: None,
                         content_classification: None,
+                        // breakpoints are not in the MutationBatch PublishToZoneMutation proto
+                        // (post-v1 wire extension); use ZonePublish path for streaming.
+                        breakpoints: Vec::new(),
                     });
                 }
             }
@@ -2634,6 +2637,7 @@ async fn apply_queued_batch_to_scene(
                         merge_key,
                         expires_at_wall_us: None,
                         content_classification: None,
+                        breakpoints: Vec::new(),
                     });
                 }
             }
@@ -3674,6 +3678,20 @@ async fn handle_zone_publish(
             .and_then(crate::convert::proto_zone_content_to_scene);
 
         if let Some(content) = content {
+            // Validate: breakpoints are only meaningful for StreamText content.
+            // Reject non-StreamText publishes that carry non-empty breakpoints so
+            // gRPC behaves consistently with the MCP path (which also rejects this).
+            if !publish.breakpoints.is_empty()
+                && !matches!(content, tze_hud_scene::types::ZoneContent::StreamText(_))
+            {
+                (
+                    false,
+                    "INVALID_ARGUMENT".to_string(),
+                    "breakpoints are only valid for StreamText content".to_string(),
+                    zone_is_ephemeral,
+                )
+            } else {
+
             let merge_key = if publish.merge_key.is_empty() {
                 None
             } else {
@@ -3689,6 +3707,9 @@ async fn handle_zone_publish(
                 // the ZonePublish proto message (post-v1 wire extensions).
                 expires_at_wall_us: None,
                 content_classification: None,
+                // Wire breakpoints from the ZonePublish proto for StreamText streaming reveal.
+                // Per spec §Subtitle Streaming Word-by-Word Reveal.
+                breakpoints: publish.breakpoints.clone(),
             };
 
             // Apply as a single-mutation batch.
@@ -3735,6 +3756,7 @@ async fn handle_zone_publish(
                 // even on failure. The client must not expect a response.
                 (false, code, msg, zone_is_ephemeral)
             }
+            } // close else { (breakpoints valid for content type)
         } else {
             (
                 false,
@@ -4830,6 +4852,7 @@ mod tests {
                 }),
                 ttl_us: 0,
                 merge_key: String::new(),
+                breakpoints: Vec::new(),
             })),
         })
         .await
@@ -7643,6 +7666,7 @@ mod tests {
                 }),
                 ttl_us: 0,
                 merge_key: String::new(),
+                breakpoints: Vec::new(),
             })),
         })
         .await
@@ -7750,6 +7774,7 @@ mod tests {
                 }),
                 ttl_us: 0,
                 merge_key: String::new(),
+                breakpoints: Vec::new(),
             })),
         })
         .await
