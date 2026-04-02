@@ -5,8 +5,8 @@
 //!
 //!   1. Single-param re-rasterization at 512×512: CI budget (500ms); spec target 2ms.
 //!   2. Cache hit: `current_params` equality signals zero re-rasterization.
-//!   3. Multi-param change (level + fill_color + severity): CI budget (500ms).
-//!   4. Same-value publish: `current_params` unchanged → treated as cache hit.
+//!   3. Multi-param change (all four params): CI budget (500ms).
+//!   4. Same-value publish: `current_params` remains equal → treated as cache hit.
 //!   5. Interpolation frames: every frame within CI budget during a 300ms transition.
 //!
 //! Strategy
@@ -418,11 +418,18 @@ fn multi_param_change_rasterize_within_ci_budget() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// WHEN an agent publishes parameter values that are identical to the currently
-/// rendered values THEN the scene graph must leave current_params unchanged,
-/// causing the compositor to treat it as a cache hit and skip re-rasterization.
+/// rendered values THEN `current_params` remains effectively equal after the
+/// second publish, causing the compositor to treat it as a cache hit and skip
+/// re-rasterization.
+///
+/// Note: `publish_to_widget` always inserts validated values into `current_params`
+/// (even when the incoming value is identical).  The invariant being tested is
+/// that the resulting stored value compares equal, so the compositor's
+/// `last_rendered_params != effective_params` check would return false and
+/// skip re-rasterization.
 ///
 /// Exercises the case where `level=0.75` is published, then `level=0.75` is
-/// published again.  The second publish must not change `current_params`.
+/// published again.  The effective level in `current_params` must compare equal.
 ///
 /// Source: exemplar-gauge-widget/spec.md §Scenario: Unchanged parameters reuse cache
 /// [hud-cxgy]
@@ -471,8 +478,8 @@ fn same_value_publish_is_cache_hit() {
     // which causes it to skip re-rasterization (cache hit).
     assert_eq!(
         params_after_first, params_after_second,
-        "same-value publish must not change current_params for 'level'; \
-         differing value would cause spurious re-rasterization (cache miss)"
+        "same-value publish must leave current_params equal for 'level'; \
+         a differing stored value would cause a spurious cache miss in the compositor"
     );
 
     // Verify the value is the clamped 0.75 we published.
