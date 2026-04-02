@@ -13,6 +13,7 @@
 name = "status-indicator"
 version = "1.0.0"
 description = "Status indicator widget — reference fixture for discrete binding and text-content tests"
+default_contention_policy = "LatestWins"
 
 [[parameter_schema]]
 name = "status"
