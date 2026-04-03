@@ -608,6 +608,61 @@ Published via MCP `publish_to_zone`.
 
 ---
 
+## Ambient Background Exemplar Scenario
+
+Use `scripts/ambient_background_exemplar.py` to exercise the ambient-background
+zone on a live HUD. The script publishes across 4 phases: solid-color fill,
+latest-wins replacement, static-image placeholder, and rapid-replacement stress.
+
+### CLI
+
+```bash
+python3 .claude/skills/user-test/scripts/ambient_background_exemplar.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --psk-env TZE_HUD_PSK
+```
+
+Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`).
+
+### Phases
+
+| Phase | What happens | Pause |
+|-------|-------------|-------|
+| 1 — Dark blue | Publish `solid_color` dark navy blue (r=0.05, g=0.05, b=0.2) | 3s |
+| 2 — Warm amber | Replace with warm amber (r=0.9, g=0.6, b=0.2); latest-wins Replace policy evicts dark blue | 3s |
+| 3 — Static image | Publish `static_image` content type (64-char hex resource_id); runtime renders warm-gray placeholder in v1 | 2s |
+| 4 — Rapid replace | 10 different solid colors in sequence without delay; query `list_zones` to confirm `has_content=true` and visually confirm the final color is bright green | — |
+
+### Visual Checklist
+
+**Phase 1:** Entire HUD background should turn dark navy blue. No content tiles
+are affected — background is behind all content-layer zones.
+
+**Phase 2:** Background shifts instantly to warm amber. The previous dark blue
+must be gone (Replace policy: latest-wins, exactly 1 active publication).
+
+**Phase 3:** Background changes to a warm-gray placeholder quad (v1 behavior —
+GPU texture upload is deferred). The zone must accept the publication without
+error.
+
+**Phase 4:** After all 10 rapid publishes, the background should settle on
+bright green (last of the 10 colors). No other colors from the burst should
+bleed through. `list_zones` must report `has_content=true` for the
+`ambient-background` zone.
+
+### Background payload shapes
+
+```json
+{"type": "solid_color", "r": 0.05, "g": 0.05, "b": 0.2, "a": 1.0}
+{"type": "solid_color", "r": 0.9, "g": 0.6, "b": 0.2, "a": 1.0}
+{"type": "static_image", "resource_id": "<64-char-hex-blake3-hash>"}
+```
+
+All published via MCP `publish_to_zone` to `ambient-background` zone with
+`namespace` set to `ambient-test-p<N>` per phase. TTL is omitted (defaults to
+persistent — `auto_clear_ms=None` on this zone) for phases 1–3.
+
+
 ## Behavior Rules
 
 - Use automation-first deploy/launch by default.
