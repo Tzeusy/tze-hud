@@ -58,12 +58,12 @@ Message shape — `content` is either a plain string (StreamText) or a typed JSO
   },
   {
     "zone_name": "ambient-background",
-    "content": {"type": "solid_color", "r": 0.05, "g": 0.1, "b": 0.2, "a": 1.0},
+    "content": {"type": "solid_color", "r": 0.1, "g": 0.15, "b": 0.4, "a": 0.05},
     "ttl_us": 300000000
   },
   {
     "zone_name": "pip",
-    "content": {"type": "solid_color", "r": 0.2, "g": 0.8, "b": 0.2, "a": 0.9},
+    "content": {"type": "solid_color", "r": 0.2, "g": 0.8, "b": 0.2, "a": 0.05},
     "ttl_us": 60000000
   }
 ]

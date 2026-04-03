@@ -126,6 +126,26 @@ const BORDER_DEFAULT_FALLBACK: Rgba = Rgba {
     a: 1.0,
 };
 
+/// sRGB transfer: linear → sRGB (matches GPU hardware encoding on `*Srgb` surfaces).
+#[inline]
+fn linear_to_srgb(c: f32) -> f32 {
+    if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// sRGB transfer: sRGB → linear.
+#[inline]
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// Returns `true` if the zone name is an alert-banner zone.
 ///
 /// Per spec §V1 Component Type Definitions: the alert-banner zone name is
@@ -2192,7 +2212,7 @@ impl Compositor {
                 tile.bounds.height,
                 sw,
                 sh,
-                bg_color,
+                self.gpu_color_raw(bg_color),
             );
             vertices.extend_from_slice(&verts);
 
@@ -2604,6 +2624,50 @@ impl Compositor {
         telemetry
     }
 
+    /// Convert an Rgba to GPU-ready `[f32; 4]`.
+    ///
+    /// In overlay mode the clear_pipeline writes RGBA directly (no GPU blending);
+    /// DWM composites with premultiplied alpha **in sRGB space**.  The GPU
+    /// auto-encodes fragment output from linear→sRGB (`Bgra8UnormSrgb`), so we
+    /// must output the linear value that, after encoding, yields the correct
+    /// sRGB-premultiplied result:
+    ///
+    ///   stored_R = sRGB(R) × A          (what DWM expects)
+    ///   fragment_R = linear(sRGB(R) × A) (what we must output)
+    ///
+    /// In fullscreen mode the blend pipeline handles compositing, so straight
+    /// alpha is correct.
+    #[inline]
+    fn gpu_color(&self, rgba: Rgba) -> [f32; 4] {
+        if self.overlay_mode {
+            let a = rgba.a;
+            [
+                srgb_to_linear(linear_to_srgb(rgba.r) * a),
+                srgb_to_linear(linear_to_srgb(rgba.g) * a),
+                srgb_to_linear(linear_to_srgb(rgba.b) * a),
+                a,
+            ]
+        } else {
+            rgba.to_array()
+        }
+    }
+
+    /// Same as [`gpu_color`] but for raw `[f32; 4]` arrays (assumed linear).
+    #[inline]
+    fn gpu_color_raw(&self, color: [f32; 4]) -> [f32; 4] {
+        if self.overlay_mode {
+            let a = color[3];
+            [
+                srgb_to_linear(linear_to_srgb(color[0]) * a),
+                srgb_to_linear(linear_to_srgb(color[1]) * a),
+                srgb_to_linear(linear_to_srgb(color[2]) * a),
+                a,
+            ]
+        } else {
+            color
+        }
+    }
+
     /// Return the clear color for render passes. Transparent in overlay mode,
     /// dark background in fullscreen mode.
     fn clear_color(&self) -> wgpu::Color {
@@ -2845,7 +2909,7 @@ impl Compositor {
                                 effective_slot_h,
                                 sw,
                                 sh,
-                                rgba.to_array(),
+                                self.gpu_color(rgba),
                             ));
 
                             // For non-alert-banner Notification content: emit 1px 4-quad border.
@@ -2861,7 +2925,7 @@ impl Compositor {
                                     effective_slot_h,
                                     sw,
                                     sh,
-                                    border_color.to_array(),
+                                    self.gpu_color(border_color),
                                 );
                             }
                         }
@@ -2944,7 +3008,7 @@ impl Compositor {
                             h,
                             sw,
                             sh,
-                            rgba.to_array(),
+                            self.gpu_color(rgba),
                         ));
 
                         // For non-alert-banner Notification content: emit 1px 4-quad border.
@@ -2959,7 +3023,7 @@ impl Compositor {
                                 h,
                                 sw,
                                 sh,
-                                border_color.to_array(),
+                                self.gpu_color(border_color),
                             );
                         }
                     }
@@ -3125,7 +3189,7 @@ impl Compositor {
                     sc.bounds.height,
                     sw,
                     sh,
-                    sc.color.to_array(),
+                    self.gpu_color(sc.color),
                 );
                 vertices.extend_from_slice(&verts);
             }
@@ -3140,7 +3204,7 @@ impl Compositor {
                     tm.bounds.height,
                     sw,
                     sh,
-                    bg.to_array(),
+                    self.gpu_color(bg),
                 );
                 vertices.extend_from_slice(&verts);
 
@@ -3155,7 +3219,7 @@ impl Compositor {
                         (tm.font_size_px * 1.2).min(tm.bounds.height - text_margin * 2.0),
                         sw,
                         sh,
-                        tm.color.to_array(),
+                        self.gpu_color(tm.color),
                     );
                     vertices.extend_from_slice(&verts);
                 }
@@ -3181,7 +3245,7 @@ impl Compositor {
                     hr.bounds.height,
                     sw,
                     sh,
-                    color,
+                    self.gpu_color_raw(color),
                 );
                 vertices.extend_from_slice(&verts);
             }
@@ -3201,7 +3265,7 @@ impl Compositor {
                     img.bounds.height,
                     sw,
                     sh,
-                    outer_color,
+                    self.gpu_color_raw(outer_color),
                 );
                 vertices.extend_from_slice(&verts);
 
@@ -3216,7 +3280,7 @@ impl Compositor {
                         img.bounds.height - margin * 2.0,
                         sw,
                         sh,
-                        accent_color,
+                        self.gpu_color_raw(accent_color),
                     );
                     vertices.extend_from_slice(&verts);
                 }

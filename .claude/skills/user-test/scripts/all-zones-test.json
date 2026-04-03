@@ -40,10 +40,10 @@
     "zone_name": "ambient-background",
     "content": {
       "type": "solid_color",
-      "r": 0.05,
-      "g": 0.08,
-      "b": 0.15,
-      "a": 1.0
+      "r": 0.1,
+      "g": 0.15,
+      "b": 0.4,
+      "a": 0.05
     },
     "ttl_us": 300000000,
     "namespace": "user-test"
@@ -55,7 +55,7 @@
       "r": 0.2,
       "g": 0.6,
       "b": 0.9,
-      "a": 0.85
+      "a": 0.05
     },
     "ttl_us": 60000000,
     "namespace": "user-test"
