@@ -1644,9 +1644,7 @@ impl SceneGraph {
         if agent_namespace.is_some() {
             if let NodeData::StaticImage(ref si) = node.data {
                 if !self.registered_resources.contains(&si.resource_id) {
-                    return Err(ValidationError::ResourceNotFound {
-                        id: si.resource_id,
-                    });
+                    return Err(ValidationError::ResourceNotFound { id: si.resource_id });
                 }
             }
         }
@@ -1751,9 +1749,7 @@ impl SceneGraph {
         if agent_namespace.is_some() {
             if let NodeData::StaticImage(ref si) = node.data {
                 if !self.registered_resources.contains(&si.resource_id) {
-                    return Err(ValidationError::ResourceNotFound {
-                        id: si.resource_id,
-                    });
+                    return Err(ValidationError::ResourceNotFound { id: si.resource_id });
                 }
             }
         }
@@ -1893,9 +1889,7 @@ impl SceneGraph {
         if agent_namespace.is_some() {
             if let NodeData::StaticImage(ref si) = data {
                 if !self.registered_resources.contains(&si.resource_id) {
-                    return Err(ValidationError::ResourceNotFound {
-                        id: si.resource_id,
-                    });
+                    return Err(ValidationError::ResourceNotFound { id: si.resource_id });
                 }
             }
         }

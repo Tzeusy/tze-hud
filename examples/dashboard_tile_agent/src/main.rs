@@ -475,11 +475,10 @@ pub async fn request_lease(
     // We open a new session rather than sharing one from Phase 1 so that
     // each phase is independently testable in unit tests without coupling.
     #[allow(deprecated)]
-    let mut session_client =
-        session_proto::hud_session_client::HudSessionClient::connect(format!(
-            "http://[::1]:{port}"
-        ))
-        .await?;
+    let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
+        "http://[::1]:{port}"
+    ))
+    .await?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
@@ -519,10 +518,10 @@ pub async fn request_lease(
     match first.payload {
         Some(session_proto::server_message::Payload::SessionEstablished(_)) => {}
         other => {
-            return Err(
-                format!("Expected SessionEstablished as first server message, got: {other:?}")
-                    .into(),
-            );
+            return Err(format!(
+                "Expected SessionEstablished as first server message, got: {other:?}"
+            )
+            .into());
         }
     }
 
@@ -534,10 +533,9 @@ pub async fn request_lease(
     match second.payload {
         Some(session_proto::server_message::Payload::SceneSnapshot(_)) => {}
         other => {
-            return Err(format!(
-                "Expected SceneSnapshot after SessionEstablished, got: {other:?}"
-            )
-            .into());
+            return Err(
+                format!("Expected SceneSnapshot after SessionEstablished, got: {other:?}").into(),
+            );
         }
     }
 
@@ -554,10 +552,7 @@ pub async fn request_lease(
         payload: Some(session_proto::client_message::Payload::LeaseRequest(
             session_proto::LeaseRequest {
                 ttl_ms: 60_000,
-                capabilities: vec![
-                    "create_tiles".to_string(),
-                    "modify_own_tiles".to_string(),
-                ],
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
                 lease_priority: 2,
             },
         )),
@@ -593,7 +588,10 @@ pub async fn request_lease(
                     )
                     .into());
                 }
-                println!("  LeaseResponse: granted=true, ttl={}ms", resp.granted_ttl_ms);
+                println!(
+                    "  LeaseResponse: granted=true, ttl={}ms",
+                    resp.granted_ttl_ms
+                );
                 println!("    granted_capabilities = {:?}", resp.granted_capabilities);
                 println!("    granted_priority     = {}", resp.granted_priority);
                 // ── 5. Return lease_id ────────────────────────────────────
@@ -641,18 +639,15 @@ const ICON_H: u32 = 48;
 /// - resource-store/spec.md §Requirement: Resource Upload Before Tile Creation
 /// - resource-store/spec.md §Requirement: Content-Addressed Resource Identity
 /// - openspec/changes/exemplar-dashboard-tile/tasks.md §3.1
-pub async fn upload_icon(
-    agent_namespace: &str,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+pub async fn upload_icon(agent_namespace: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // ── 1. Generate a 48×48 solid-color PNG ───────────────────────────────
     //
     // Representative placeholder icon.  In production an agent would supply
     // its own brand asset here.  The test fixture uses a solid steel-blue fill.
     let png_bytes: Vec<u8> = {
         use image::{ImageBuffer, Rgb};
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(ICON_W, ICON_H, |_, _| {
-            Rgb([70u8, 130, 180])
-        });
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(ICON_W, ICON_H, |_, _| Rgb([70u8, 130, 180]));
         let mut buf = Vec::new();
         img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .map_err(|e| format!("PNG encoding failed: {e}"))?;
@@ -753,9 +748,7 @@ mod tests {
 
     /// Drain messages from `stream` until the first non-`LeaseStateChange` message.
     async fn next_non_state_change(
-        stream: &mut tonic::Streaming<
-            tze_hud_protocol::proto::session::ServerMessage,
-        >,
+        stream: &mut tonic::Streaming<tze_hud_protocol::proto::session::ServerMessage>,
     ) -> tze_hud_protocol::proto::session::ServerMessage {
         use tokio_stream::StreamExt as _;
         loop {
@@ -766,9 +759,7 @@ mod tests {
                 .expect("stream error");
             match &msg.payload {
                 Some(
-                    tze_hud_protocol::proto::session::server_message::Payload::LeaseStateChange(
-                        _,
-                    ),
+                    tze_hud_protocol::proto::session::server_message::Payload::LeaseStateChange(_),
                 ) => continue,
                 _ => return msg,
             }
@@ -866,8 +857,8 @@ mod tests {
     ///   LeaseResponse { granted: false, deny_code: "CONFIG_UNKNOWN_CAPABILITY" }.
     #[tokio::test]
     async fn test_lease_request_with_invalid_capability_is_denied() {
-        use tze_hud_protocol::proto::session as sp;
         use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
 
         let port = ephemeral_port();
         let server = start_test_runtime(port).await.expect("runtime start");
