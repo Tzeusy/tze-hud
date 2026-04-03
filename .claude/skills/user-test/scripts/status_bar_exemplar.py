@@ -16,14 +16,14 @@ multi-agent coexistence, key replacement, empty-value removal, and TTL expiry.
   Step 6  — VISUAL CHECK: weather updated, battery and time unchanged
   Step 7  — agent-weather publishes empty value for merge_key "weather"
   Step 8  — VISUAL CHECK: weather gone, battery and time remain
-  Step 9  — wait for agent-power TTL to expire (~5s + margin)
+  Step 9  — wait for agent-power TTL to expire (~15s default + margin)
   Step 10 — VISUAL CHECK: battery gone, time remains
 
 Distinct namespaces: "agent-weather", "agent-power", "agent-clock".
 
 Usage:
   status_bar_exemplar.py --url http://host:9090
-  status_bar_exemplar.py --url http://host:9090 --psk-env MY_PSK --battery-ttl 5000
+  status_bar_exemplar.py --url http://host:9090 --psk-env MY_PSK --battery-ttl 15000
 """
 
 from __future__ import annotations
@@ -46,8 +46,11 @@ DEFAULT_PSK_ENV = "TZE_HUD_PSK"
 # TTL for weather and clock entries — long enough to survive the whole sequence
 DEFAULT_LONG_TTL_MS = 60_000   # 60 seconds
 
-# TTL for the battery entry — short enough to observe expiry in step 9
-DEFAULT_BATTERY_TTL_MS = 5_000  # 5 seconds
+# TTL for the battery entry — must survive the three 3-second visual checks at
+# steps 4, 6, and 8 (9s of pauses) plus execution time between steps 2 and 8
+# (~2-3s), so a minimum of ~12s elapses before step 9 begins. 15s provides
+# enough margin to be alive through step 8 while still expiring during step 9.
+DEFAULT_BATTERY_TTL_MS = 15_000  # 15 seconds
 
 # Pause after each visual-check step so the operator can inspect the display
 VISUAL_PAUSE_S = 3.0
@@ -373,8 +376,11 @@ def parse_args() -> argparse.Namespace:
         metavar="MS",
         help=(
             f"TTL in milliseconds for the battery entry (default:"
-            f" {DEFAULT_BATTERY_TTL_MS}). Step 9 waits for this TTL to"
-            " expire to demonstrate key removal via sweep_expired_zone_publications."
+            f" {DEFAULT_BATTERY_TTL_MS}). Must be long enough to survive the"
+            " three visual-check pauses at steps 4, 6, and 8 (9s total at"
+            " default VISUAL_PAUSE_S=3s) but short enough to expire during"
+            " step 9. Step 9 waits for remaining TTL to demonstrate key"
+            " removal via sweep_expired_zone_publications."
         ),
     )
     return parser.parse_args()

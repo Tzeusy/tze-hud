@@ -453,7 +453,7 @@ python3 .claude/skills/user-test/scripts/status_bar_exemplar.py \
 
 Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`),
 `--ttl` (ms, default 60000 — long TTL for weather/time entries),
-`--battery-ttl` (ms, default 5000 — short TTL used to demonstrate step-9 expiry).
+`--battery-ttl` (ms, default 15000 — TTL for battery entry; long enough to survive steps 4/6/8 visual checks but expires during step 9).
 
 ### 10-Step Sequence
 
@@ -467,7 +467,7 @@ Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`),
 | 6 | — | VISUAL CHECK: weather updated; battery/time unchanged | 3s |
 | 7 | agent-weather | publish empty value for `weather` (key removal) | — |
 | 8 | — | VISUAL CHECK: weather gone; battery/time remain | 3s |
-| 9 | — | wait for battery TTL to expire (~5s + 500ms margin) | — |
+| 9 | — | wait for battery TTL to expire (remaining TTL + 500ms sweep margin) | — |
 | 10 | — | VISUAL CHECK: battery gone; time remains | 3s |
 
 ### Visual Checklist
