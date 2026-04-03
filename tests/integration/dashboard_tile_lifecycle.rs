@@ -521,6 +521,9 @@ async fn full_lifecycle_connect_lease_upload_create_update_refresh_dismiss() {
         "Phase 2: BLAKE3 hash must be 32 bytes"
     );
 
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
+
     // ── Phase 3: Atomic Tile Creation ─────────────────────────────────────────
     let create_result = scene.apply_batch(&make_batch(
         DASHBOARD_NS,
@@ -1023,6 +1026,8 @@ async fn headless_tile_creation_produces_6_nodes_in_correct_tree_order() {
     let (_, resource_id) = upload_icon_png(&store, DASHBOARD_NS).await;
 
     let (mut scene, tab_id, lease_id) = setup_scene();
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
 
     // CreateTile.
     let create_result = scene.apply_batch(&make_batch(

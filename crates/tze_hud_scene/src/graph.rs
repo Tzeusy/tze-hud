@@ -56,6 +56,14 @@ pub struct SceneGraph {
     /// Incremented by [`SceneGraph::next_sequence_number`] on every successful
     /// [`crate::mutation::MutationBatch`] commit. Per RFC 0001 §3.5.
     pub sequence_number: u64,
+    /// Set of ResourceIds that have been uploaded and are available for use in
+    /// StaticImageNode. An agent-submitted AddNode or SetTileRoot with a
+    /// StaticImageNode is rejected if the ResourceId is not in this set.
+    ///
+    /// Ephemeral: skipped during serialization (resources are in-memory only,
+    /// per RFC 0001 §2.4 and resource-store/spec.md §Requirement: V1 ephemerality).
+    #[serde(skip, default)]
+    pub registered_resources: HashSet<ResourceId>,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -111,7 +119,25 @@ impl SceneGraph {
             display_area: Rect::new(0.0, 0.0, width, height),
             version: 0,
             sequence_number: 0,
+            registered_resources: HashSet::new(),
         }
+    }
+
+    // ─── Resource registry ────────────────────────────────────────────────
+
+    /// Register a resource as available for use in [`NodeData::StaticImage`] nodes.
+    ///
+    /// Must be called after a successful resource upload before any agent-submitted
+    /// [`crate::mutation::SceneMutation::AddNode`] or
+    /// [`crate::mutation::SceneMutation::SetTileRoot`] referencing the resource.
+    /// Spec: resource-store/spec.md §Requirement: Resource Upload Before Tile Creation.
+    pub fn register_resource(&mut self, id: ResourceId) {
+        self.registered_resources.insert(id);
+    }
+
+    /// Returns `true` if the resource has been registered (uploaded).
+    pub fn is_resource_registered(&self, id: &ResourceId) -> bool {
+        self.registered_resources.contains(id)
     }
 
     // ─── Tab operations ──────────────────────────────────────────────────
@@ -1613,6 +1639,18 @@ impl SceneGraph {
             return Err(err);
         }
 
+        // Enforce resource registration for agent-submitted StaticImageNode mutations.
+        // Same gate as add_node_to_tile_impl; see that function's comment for spec refs.
+        if agent_namespace.is_some() {
+            if let NodeData::StaticImage(ref si) = node.data {
+                if !self.registered_resources.contains(&si.resource_id) {
+                    return Err(ValidationError::ResourceNotFound {
+                        id: si.resource_id,
+                    });
+                }
+            }
+        }
+
         // Node count limit: SetTileRoot replaces the whole tree.
         // Count nodes in the incoming tree (simple count; children are flat in our model).
         let incoming_count = self.count_node_tree_deep(&node);
@@ -1700,6 +1738,24 @@ impl SceneGraph {
         // Validate node data constraints (e.g. TextMarkdownNode content size limit)
         if let Some(err) = validate_text_markdown_node_data(&node.data) {
             return Err(err);
+        }
+
+        // Enforce resource registration for agent-submitted StaticImageNode mutations.
+        //
+        // Per spec resource-store/spec.md §Requirement: Resource Upload Before Tile
+        // Creation: "Any agent-submitted tile mutation that references a ResourceId not
+        // present in the resource store MUST be rejected."
+        //
+        // Only enforced for agent-submitted paths (agent_namespace.is_some()).
+        // Internal/test paths (unchecked variants, snapshot restore) bypass this gate.
+        if agent_namespace.is_some() {
+            if let NodeData::StaticImage(ref si) = node.data {
+                if !self.registered_resources.contains(&si.resource_id) {
+                    return Err(ValidationError::ResourceNotFound {
+                        id: si.resource_id,
+                    });
+                }
+            }
         }
 
         // Enforce per-tile node count limit (RFC 0001 §2.1: max 64 nodes)

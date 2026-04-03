@@ -24,6 +24,10 @@ tze_hud_scene = { path = "../../crates/tze_hud_scene" }
 # NEVER ship a production binary without replacing this with a restricted config.
 tze_hud_runtime = { path = "../../crates/tze_hud_runtime", features = ["dev-mode"] }
 tze_hud_protocol = { path = "../../crates/tze_hud_protocol" }
+tze_hud_resource = { path = "../../crates/tze_hud_resource" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+uuid = { workspace = true }
+blake3 = { workspace = true }
