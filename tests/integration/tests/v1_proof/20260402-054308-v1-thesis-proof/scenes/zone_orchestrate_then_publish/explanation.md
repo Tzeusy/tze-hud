@@ -11,7 +11,7 @@ Test scene 'zone_orchestrate_then_publish' — validates scene graph invariants 
 - Tabs: 1
 - Tiles: 3
 - Has hit regions: false
-- Has zones: false
+- Has zones: true
 
 ## What to look for
 

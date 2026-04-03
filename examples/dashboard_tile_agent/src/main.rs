@@ -439,7 +439,9 @@ async fn establish_session_with(
 ///
 /// # Lease request (tasks.md §2.1–2.2)
 ///
-/// 1. Establishes a fresh gRPC session via `establish_session_with`.
+/// 1. Opens a new gRPC session by duplicating the SessionInit handshake inline
+///    (not via `establish_session_with`) so that each phase remains independently
+///    testable without coupling to the Phase 1 session state.
 /// 2. Sends `LeaseRequest` with:
 ///    - `ttl_ms = 60000` (spec §Lease Request With AutoRenew: 60-second TTL)
 ///    - `capabilities = ["create_tiles", "modify_own_tiles"]`
@@ -447,6 +449,14 @@ async fn establish_session_with(
 /// 3. Reads the next non-state-change message and expects `LeaseResponse`.
 /// 4. Verifies `granted = true` (spec §Scenario: Lease granted with requested parameters).
 /// 5. Returns the 16-byte UUIDv7 `lease_id` for use in subsequent MutationBatch calls.
+///
+/// # Phase 4 integration note
+///
+/// This function opens a short-lived session and drops it after the lease is granted.
+/// In the current standalone Phase 2 test this is sufficient to verify the lease protocol.
+/// Phase 4 (tile creation batch, tasks.md §4) MUST reuse the established session stream
+/// from Phase 1 rather than calling this function, so that the lease remains attached to
+/// the live session used by MutationBatch calls and is not orphaned on session disconnect.
 ///
 /// # Spec references
 ///
@@ -576,11 +586,12 @@ pub async fn request_lease(
                     )
                     .into());
                 }
-                if resp.lease_id.is_empty() {
-                    return Err(
-                        "LeaseResponse granted but lease_id is empty (must be 16-byte UUIDv7)"
-                            .into(),
-                    );
+                if resp.lease_id.len() != 16 {
+                    return Err(format!(
+                        "LeaseResponse granted but lease_id is {} bytes (must be 16-byte UUIDv7)",
+                        resp.lease_id.len()
+                    )
+                    .into());
                 }
                 println!("  LeaseResponse: granted=true, ttl={}ms", resp.granted_ttl_ms);
                 println!("    granted_capabilities = {:?}", resp.granted_capabilities);
@@ -614,6 +625,16 @@ const ICON_H: u32 = 48;
 /// The `ResourceId` is content-addressed: identical bytes always yield the same id
 /// (deduplication contract, RFC 0011 §4).  The agent MUST pass this id in the
 /// `StaticImageNode.resource_id` field of the tile creation batch (Phase 4).
+///
+/// # Phase 4 integration note
+///
+/// This function uploads into a standalone in-memory `ResourceStore` to prove the
+/// resource upload protocol and content-addressed identity (tasks.md §3.1).
+/// Phase 4 (tile creation batch, tasks.md §4) MUST upload through the runtime-owned
+/// path (e.g. the session `upload_resource` RPC) so that the resource becomes
+/// registered in the runtime's `SceneGraph::registered_resources` set.  Without that
+/// registration, `add_node_to_tile_checked` / `set_tile_root_checked` will reject the
+/// `StaticImageNode` reference with `ResourceNotFound`.
 ///
 /// # Spec references
 ///

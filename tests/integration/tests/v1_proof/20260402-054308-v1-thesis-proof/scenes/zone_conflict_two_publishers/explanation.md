@@ -11,7 +11,7 @@ Test scene 'zone_conflict_two_publishers' — validates scene graph invariants (
 - Tabs: 1
 - Tiles: 2
 - Has hit regions: false
-- Has zones: false
+- Has zones: true
 
 ## What to look for
 

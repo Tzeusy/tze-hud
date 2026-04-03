@@ -11,7 +11,7 @@ Test scene 'zone_geometry_adapts_profile' — validates scene graph invariants (
 - Tabs: 1
 - Tiles: 1
 - Has hit regions: false
-- Has zones: false
+- Has zones: true
 
 ## What to look for
 

@@ -11,7 +11,7 @@ Test scene 'zone_disconnect_cleanup' — validates scene graph invariants (Layer
 - Tabs: 1
 - Tiles: 2
 - Has hit regions: false
-- Has zones: false
+- Has zones: true
 
 ## What to look for
 

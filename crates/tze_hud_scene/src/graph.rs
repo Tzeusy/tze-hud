@@ -1881,6 +1881,25 @@ impl SceneGraph {
             return Err(err);
         }
 
+        // Enforce resource registration for agent-submitted StaticImage content updates.
+        //
+        // Per spec resource-store/spec.md §Requirement: Resource Upload Before Tile
+        // Creation: "Any agent-submitted tile mutation that references a ResourceId not
+        // present in the resource store MUST be rejected."
+        //
+        // This gate closes the bypass where an agent could swap a StaticImageNode to an
+        // unregistered resource_id via UpdateNodeContent while passing the add/set_root
+        // checks.  Only applied for agent-submitted paths (agent_namespace.is_some()).
+        if agent_namespace.is_some() {
+            if let NodeData::StaticImage(ref si) = data {
+                if !self.registered_resources.contains(&si.resource_id) {
+                    return Err(ValidationError::ResourceNotFound {
+                        id: si.resource_id,
+                    });
+                }
+            }
+        }
+
         // Apply the update — replace data in-place, preserving id and children.
         let node = self.nodes.get_mut(&node_id).unwrap();
 

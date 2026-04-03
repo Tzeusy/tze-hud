@@ -11,7 +11,7 @@ Test scene 'zone_publish_subtitle' — validates scene graph invariants (Layer 0
 - Tabs: 1
 - Tiles: 1
 - Has hit regions: false
-- Has zones: false
+- Has zones: true
 
 ## What to look for
 
