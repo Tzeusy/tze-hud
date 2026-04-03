@@ -1,0 +1,20 @@
+[
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "online",
+      "label": "AgentA"
+    },
+    "ttl_us": 10000000,
+    "namespace": "agent-a"
+  },
+  {
+    "widget_name": "status-indicator",
+    "params": {
+      "status": "busy",
+      "label": "AgentB"
+    },
+    "ttl_us": 10000000,
+    "namespace": "agent-b"
+  }
+]

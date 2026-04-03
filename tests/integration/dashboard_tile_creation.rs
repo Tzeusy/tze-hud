@@ -545,6 +545,107 @@ async fn resource_upload_deduplicates_identical_content() {
     );
 }
 
+/// WHEN an AddNode mutation references a ResourceId that was NOT previously uploaded
+///      (and thus not registered with the scene graph)
+/// THEN the batch is rejected with ValidationErrorCode::ResourceNotFound and the tile
+///      remains empty (atomicity: zero nodes applied).
+///
+/// spec.md §Requirement: Resource Upload Before Tile Creation
+/// Scenario: Unknown resource rejected
+/// tasks.md §3.2
+#[test]
+fn static_image_node_with_unregistered_resource_id_is_rejected() {
+    let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
+
+    // Create the tile (no resource upload needed for CreateTile itself).
+    let create_result = scene.apply_batch(&make_batch(
+        "dashboard-agent",
+        Some(lease_id),
+        vec![SceneMutation::CreateTile {
+            tab_id,
+            namespace: "dashboard-agent".into(),
+            lease_id,
+            bounds: Rect::new(TILE_X, TILE_Y, TILE_W, TILE_H),
+            z_order: TILE_Z_ORDER,
+        }],
+    ));
+    assert!(
+        create_result.applied,
+        "CreateTile must succeed; rejection: {:?}",
+        create_result.rejection
+    );
+    let tile_id = create_result.created_ids[0];
+
+    // Construct a StaticImageNode referencing a random ResourceId that was never uploaded.
+    // The scene graph has no `register_resource` call for this ID, so the mutation must fail.
+    let unregistered_id = ResourceId::from_bytes([
+        0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ]);
+
+    let icon = Node {
+        id: SceneId::new(),
+        children: vec![],
+        data: NodeData::StaticImage(StaticImageNode {
+            resource_id: unregistered_id,
+            width: ICON_W,
+            height: ICON_H,
+            decoded_bytes: (ICON_W * ICON_H * 4) as u64,
+            fit_mode: ImageFitMode::Contain,
+            bounds: Rect::new(ICON_X, ICON_Y, ICON_W as f32, ICON_H as f32),
+        }),
+    };
+
+    // Submit an AddNode batch with the unregistered StaticImageNode.
+    let reject_result = scene.apply_batch(&make_batch(
+        "dashboard-agent",
+        Some(lease_id),
+        vec![SceneMutation::AddNode {
+            tile_id,
+            parent_id: None,
+            node: icon,
+        }],
+    ));
+
+    // The entire batch must be rejected.
+    assert!(
+        !reject_result.applied,
+        "batch with unregistered ResourceId must be rejected"
+    );
+
+    // created_ids must be empty — no node was inserted.
+    assert!(
+        reject_result.created_ids.is_empty(),
+        "created_ids must be empty on rejection"
+    );
+
+    // Structured rejection must be present and carry the ResourceNotFound code.
+    let rejection = reject_result
+        .rejection
+        .as_ref()
+        .expect("rejection details must be present");
+    assert_eq!(
+        rejection.errors.len(),
+        1,
+        "rejection must report exactly 1 error"
+    );
+    assert_eq!(
+        rejection.errors[0].code,
+        ValidationErrorCode::ResourceNotFound,
+        "code must be ResourceNotFound for unregistered resource; \
+         got: {:?}",
+        rejection.errors[0].code
+    );
+
+    // The tile must remain empty (no nodes were committed).
+    let tile = scene.tiles.get(&tile_id).expect("tile must still exist");
+    assert!(
+        tile.root_node.is_none(),
+        "tile root must remain None after rejected batch (atomicity)"
+    );
+}
+
 // ─── Atomic tile creation batch tests (Task 4) ───────────────────────────────
 
 /// WHEN the agent submits the full creation batch (bg root + 5 children via AddNode,
@@ -562,6 +663,8 @@ async fn atomic_tile_creation_batch_accepted() {
     let resource_id = ResourceId::from_bytes(*resource_id_raw.as_bytes());
 
     let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
 
     // CreateTile first (separate batch — tile_id not known until after creation)
     let create_result = scene.apply_batch(&make_batch(
@@ -632,6 +735,8 @@ async fn scene_graph_has_6_nodes_in_correct_tree_order() {
     let resource_id = ResourceId::from_bytes(*resource_id_raw.as_bytes());
 
     let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
 
     // Create tile
     let create_result = scene.apply_batch(&make_batch(
@@ -842,6 +947,8 @@ async fn content_update_with_active_lease_accepted() {
     let resource_id = ResourceId::from_bytes(*resource_id_raw.as_bytes());
 
     let (mut scene, tab_id, lease_id) = setup_scene_with_lease();
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
 
     // Create tile
     let create_result = scene.apply_batch(&make_batch(
@@ -912,6 +1019,8 @@ async fn content_update_with_expired_lease_rejected() {
     // TestClock lets us advance time past the lease TTL without sleeping.
     let clock = Arc::new(TestClock::new(1_000));
     let mut scene = SceneGraph::new_with_clock(DISPLAY_W, DISPLAY_H, clock.clone());
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
 

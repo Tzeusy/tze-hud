@@ -488,6 +488,8 @@ async fn node_tree_builder_three_nodes() {
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
     let lease_id = scene.grant_lease(
         "agent-0",
         120_000,
@@ -691,6 +693,8 @@ async fn full_presence_card_batch_visible_in_snapshot() {
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
     let lease_id = scene.grant_lease(
         "presence-agent",
         120_000,
@@ -914,6 +918,8 @@ async fn snapshot_is_deterministic_after_presence_card_assembly() {
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
+    // Register the uploaded resource so agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(resource_id);
     let lease_id = scene.grant_lease(
         "agent-det",
         120_000,

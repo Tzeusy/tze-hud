@@ -302,6 +302,9 @@ fn content_update_set_tile_root_accepted() {
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
+    // Register zeroed ResourceId used by make_placeholder_avatar_node() so
+    // agent-submitted StaticImageNode mutations succeed.
+    scene.register_resource(tze_hud_scene::ResourceId::from_bytes([0u8; 32]));
     let lease_id = scene.grant_lease(
         "agent-0",
         120_000,
@@ -461,6 +464,8 @@ fn content_update_time_progression() {
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
+    // Register zeroed ResourceId used by make_placeholder_avatar_node().
+    scene.register_resource(tze_hud_scene::ResourceId::from_bytes([0u8; 32]));
     let lease_id = scene.grant_lease(
         "agent-time",
         120_000,
@@ -546,6 +551,8 @@ fn set_tile_root_replaces_old_nodes() {
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
+    // Register zeroed ResourceId used by make_placeholder_avatar_node().
+    scene.register_resource(tze_hud_scene::ResourceId::from_bytes([0u8; 32]));
     let lease_id = scene.grant_lease(
         "agent-replace",
         120_000,
@@ -673,6 +680,8 @@ fn set_tile_root_is_namespace_isolated() {
     let mut scene = SceneGraph::new(DISPLAY_W, DISPLAY_H);
     let tab_id = scene.create_tab("Main", 0).unwrap();
     scene.active_tab = Some(tab_id);
+    // Register zeroed ResourceId used by make_placeholder_avatar_node().
+    scene.register_resource(tze_hud_scene::ResourceId::from_bytes([0u8; 32]));
 
     let agents = ["agent-alpha", "agent-beta", "agent-gamma"];
     let mut tile_ids = Vec::new();

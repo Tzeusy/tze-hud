@@ -38,6 +38,10 @@
 use tze_hud_protocol::proto::session as session_proto;
 #[allow(deprecated)]
 use tze_hud_protocol::proto::session::hud_session_client::HudSessionClient;
+use tze_hud_resource::{
+    AgentBudget, CAPABILITY_UPLOAD_RESOURCE, ResourceStore, ResourceStoreConfig, ResourceType,
+    UploadId, UploadStartRequest,
+};
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 
@@ -149,8 +153,54 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         session_state.negotiated_protocol_version % 1000,
     );
 
-    println!("\n=== Exemplar Phase 1 complete ===");
-    println!("Next: implement Phase 2 (lease acquisition) in tasks.md §2 [hud-rqea].");
+    // ─────────────────────────────────────────────────────────────────────────
+    // PHASE 2: Lease Acquisition (tasks.md §2.1–2.2)
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // Sends LeaseRequest with:
+    //   - ttl_ms = 60000 (60-second TTL per spec §Lease Request With AutoRenew)
+    //   - capabilities = [create_tiles, modify_own_tiles] (spec-mandated scope)
+    //   - lease_priority = 2 (default agent-owned band)
+    //
+    // Reads LeaseResponse and verifies granted = true and a 16-byte UUIDv7 lease_id.
+    // Stores the lease_id for use in tile creation batches (Phase 4+).
+    //
+    // Spec references:
+    //   lease-governance/spec.md §Requirement: Lease Request With AutoRenew
+    //   openspec/changes/exemplar-dashboard-tile/tasks.md §2.1–2.2
+    // ─────────────────────────────────────────────────────────────────────────
+    println!("\n=== Phase 2: Lease Acquisition ===\n");
+
+    let lease_id = request_lease(GRPC_PORT, AGENT_PSK, AGENT_ID, AGENT_DISPLAY_NAME).await?;
+
+    println!("  Phase 2 PASSED: lease granted.");
+    println!("    lease_id   = {} bytes (UUIDv7)", lease_id.len());
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PHASE 3: Resource Upload (tasks.md §3.1)
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // Uploads a 48×48 PNG icon via the ResourceStore inline fast path.
+    // Captures the returned BLAKE3 ResourceId (32 bytes) for use in StaticImageNode.
+    //
+    // The ResourceId is content-addressed: BLAKE3(raw_bytes) → unique 32-byte digest.
+    // Any two uploads of identical bytes return the same ResourceId (deduplication).
+    //
+    // Spec references:
+    //   resource-store/spec.md §Requirement: Resource Upload Before Tile Creation
+    //   openspec/changes/exemplar-dashboard-tile/tasks.md §3.1
+    // ─────────────────────────────────────────────────────────────────────────
+    println!("\n=== Phase 3: Resource Upload ===\n");
+
+    let resource_id = upload_icon(AGENT_ID).await?;
+
+    println!("  Phase 3 PASSED: icon uploaded.");
+    println!("    resource_id = {} bytes (BLAKE3)", resource_id.len());
+
+    println!("\n=== Exemplar Phases 1–3 complete ===");
+    println!("  lease_id    = {} bytes", lease_id.len());
+    println!("  resource_id = {} bytes", resource_id.len());
+    println!("Next: implement Phase 4 (atomic tile creation batch) in tasks.md §4 [hud-xerv].");
 
     Ok(())
 }
@@ -383,21 +433,281 @@ async fn establish_session_with(
     })
 }
 
+// ─── Phase 2: Lease Acquisition ──────────────────────────────────────────────
+
+/// Request a lease on a new gRPC session and return the granted `lease_id` bytes.
+///
+/// # Lease request (tasks.md §2.1–2.2)
+///
+/// 1. Opens a new gRPC session by duplicating the SessionInit handshake inline
+///    (not via `establish_session_with`) so that each phase remains independently
+///    testable without coupling to the Phase 1 session state.
+/// 2. Sends `LeaseRequest` with:
+///    - `ttl_ms = 60000` (spec §Lease Request With AutoRenew: 60-second TTL)
+///    - `capabilities = ["create_tiles", "modify_own_tiles"]`
+///    - `lease_priority = 2` (default agent-owned band)
+/// 3. Reads the next non-state-change message and expects `LeaseResponse`.
+/// 4. Verifies `granted = true` (spec §Scenario: Lease granted with requested parameters).
+/// 5. Returns the 16-byte UUIDv7 `lease_id` for use in subsequent MutationBatch calls.
+///
+/// # Phase 4 integration note
+///
+/// This function opens a short-lived session and drops it after the lease is granted.
+/// In the current standalone Phase 2 test this is sufficient to verify the lease protocol.
+/// Phase 4 (tile creation batch, tasks.md §4) MUST reuse the established session stream
+/// from Phase 1 rather than calling this function, so that the lease remains attached to
+/// the live session used by MutationBatch calls and is not orphaned on session disconnect.
+///
+/// # Spec references
+///
+/// - lease-governance/spec.md §Requirement: Lease Request With AutoRenew
+/// - openspec/changes/exemplar-dashboard-tile/tasks.md §2.1–2.2
+pub async fn request_lease(
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    use tokio_stream::StreamExt as _;
+
+    // ── 1. Establish a fresh gRPC session ──────────────────────────────────
+    //
+    // We open a new session rather than sharing one from Phase 1 so that
+    // each phase is independently testable in unit tests without coupling.
+    #[allow(deprecated)]
+    let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
+        "http://[::1]:{port}"
+    ))
+    .await?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let mut response_stream = session_client.session(stream).await?.into_inner();
+
+    // Send SessionInit.
+    let now_us = now_wall_us();
+    tx.send(session_proto::ClientMessage {
+        sequence: 1,
+        timestamp_wall_us: now_us,
+        payload: Some(session_proto::client_message::Payload::SessionInit(
+            session_proto::SessionInit {
+                agent_id: agent_id.to_string(),
+                agent_display_name: agent_display_name.to_string(),
+                pre_shared_key: psk.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                    "access_input_events".to_string(),
+                ],
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            },
+        )),
+    })
+    .await?;
+
+    // Drain SessionEstablished.
+    let first = response_stream
+        .next()
+        .await
+        .ok_or("stream closed before SessionEstablished")??;
+    match first.payload {
+        Some(session_proto::server_message::Payload::SessionEstablished(_)) => {}
+        other => {
+            return Err(format!(
+                "Expected SessionEstablished as first server message, got: {other:?}"
+            )
+            .into());
+        }
+    }
+
+    // Drain SceneSnapshot.
+    let second = response_stream
+        .next()
+        .await
+        .ok_or("stream closed before SceneSnapshot")??;
+    match second.payload {
+        Some(session_proto::server_message::Payload::SceneSnapshot(_)) => {}
+        other => {
+            return Err(
+                format!("Expected SceneSnapshot after SessionEstablished, got: {other:?}").into(),
+            );
+        }
+    }
+
+    // ── 2. Send LeaseRequest (tasks.md §2.1) ──────────────────────────────
+    //
+    // Spec §Requirement: Lease Request With AutoRenew:
+    //   ttl_ms = 60000, capabilities = [create_tiles, modify_own_tiles], lease_priority = 2.
+    //
+    // Note: renewal policy (AutoRenew) and resource budgets are server-side concerns;
+    // they are not fields on the LeaseRequest proto.
+    tx.send(session_proto::ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(session_proto::client_message::Payload::LeaseRequest(
+            session_proto::LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            },
+        )),
+    })
+    .await?;
+
+    // ── 3–4. Receive LeaseResponse and verify granted = true (tasks.md §2.2) ──
+    //
+    // Drain any interleaved LeaseStateChange messages (REQUESTED→ACTIVE)
+    // before asserting the LeaseResponse, consistent with the test-suite pattern.
+    loop {
+        let msg = response_stream
+            .next()
+            .await
+            .ok_or("stream closed before LeaseResponse")??;
+        match msg.payload {
+            Some(session_proto::server_message::Payload::LeaseStateChange(_)) => {
+                // Drain — not the response we're waiting for.
+                continue;
+            }
+            Some(session_proto::server_message::Payload::LeaseResponse(resp)) => {
+                if !resp.granted {
+                    return Err(format!(
+                        "LeaseResponse denied: code={}, reason={}",
+                        resp.deny_code, resp.deny_reason
+                    )
+                    .into());
+                }
+                if resp.lease_id.len() != 16 {
+                    return Err(format!(
+                        "LeaseResponse granted but lease_id is {} bytes (must be 16-byte UUIDv7)",
+                        resp.lease_id.len()
+                    )
+                    .into());
+                }
+                println!(
+                    "  LeaseResponse: granted=true, ttl={}ms",
+                    resp.granted_ttl_ms
+                );
+                println!("    granted_capabilities = {:?}", resp.granted_capabilities);
+                println!("    granted_priority     = {}", resp.granted_priority);
+                // ── 5. Return lease_id ────────────────────────────────────
+                return Ok(resp.lease_id);
+            }
+            other => {
+                return Err(format!("Expected LeaseResponse, got: {other:?}").into());
+            }
+        }
+    }
+}
+
+// ─── Phase 3: Resource Upload ─────────────────────────────────────────────────
+
+/// Icon dimensions per spec §Dashboard Tile Composition node 2.
+const ICON_W: u32 = 48;
+const ICON_H: u32 = 48;
+
+/// Upload the dashboard tile's 48×48 PNG icon and return the BLAKE3 `ResourceId` bytes.
+///
+/// # Resource upload (tasks.md §3.1)
+///
+/// Uses the `ResourceStore` inline fast path (≤ 64 KiB per RFC 0011 §3):
+/// 1. Generates a 48×48 solid-color PNG in memory (no filesystem I/O).
+/// 2. Computes the BLAKE3 content hash as the expected `ResourceId`.
+/// 3. Calls `ResourceStore::handle_upload_start` with `inline_data`.
+/// 4. Returns the 32-byte `ResourceId` bytes (the BLAKE3 digest of the raw PNG).
+///
+/// The `ResourceId` is content-addressed: identical bytes always yield the same id
+/// (deduplication contract, RFC 0011 §4).  The agent MUST pass this id in the
+/// `StaticImageNode.resource_id` field of the tile creation batch (Phase 4).
+///
+/// # Phase 4 integration note
+///
+/// This function uploads into a standalone in-memory `ResourceStore` to prove the
+/// resource upload protocol and content-addressed identity (tasks.md §3.1).
+/// Phase 4 (tile creation batch, tasks.md §4) MUST upload through the runtime-owned
+/// path (e.g. the session `upload_resource` RPC) so that the resource becomes
+/// registered in the runtime's `SceneGraph::registered_resources` set.  Without that
+/// registration, `add_node_to_tile_checked` / `set_tile_root_checked` will reject the
+/// `StaticImageNode` reference with `ResourceNotFound`.
+///
+/// # Spec references
+///
+/// - resource-store/spec.md §Requirement: Resource Upload Before Tile Creation
+/// - resource-store/spec.md §Requirement: Content-Addressed Resource Identity
+/// - openspec/changes/exemplar-dashboard-tile/tasks.md §3.1
+pub async fn upload_icon(agent_namespace: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // ── 1. Generate a 48×48 solid-color PNG ───────────────────────────────
+    //
+    // Representative placeholder icon.  In production an agent would supply
+    // its own brand asset here.  The test fixture uses a solid steel-blue fill.
+    let png_bytes: Vec<u8> = {
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(ICON_W, ICON_H, |_, _| Rgb([70u8, 130, 180]));
+        let mut buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .map_err(|e| format!("PNG encoding failed: {e}"))?;
+        buf
+    };
+
+    // ── 2. Compute expected BLAKE3 ResourceId ─────────────────────────────
+    let resource_id = tze_hud_resource::types::ResourceId::from_content(&png_bytes);
+
+    // ── 3. Upload via ResourceStore inline fast path ──────────────────────
+    let store = ResourceStore::new(ResourceStoreConfig::default());
+    let upload_id = UploadId::from_bytes(uuid::Uuid::now_v7().into_bytes());
+
+    let result = store
+        .handle_upload_start(UploadStartRequest {
+            agent_namespace: agent_namespace.to_string(),
+            // The `upload_resource` capability is required by the store.
+            agent_capabilities: vec![CAPABILITY_UPLOAD_RESOURCE.to_string()],
+            agent_budget: AgentBudget {
+                texture_bytes_total_limit: 0, // 0 = unlimited
+                texture_bytes_total_used: 0,
+            },
+            upload_id,
+            resource_type: ResourceType::ImagePng,
+            expected_hash: *resource_id.as_bytes(),
+            total_size: png_bytes.len(),
+            inline_data: png_bytes,
+            width: ICON_W,
+            height: ICON_H,
+        })
+        .await
+        .map_err(|e| format!("ResourceStore upload_start failed: {e:?}"))?
+        .ok_or("inline upload must return ResourceStored immediately")?;
+
+    // ── 4. Return 32-byte BLAKE3 ResourceId ──────────────────────────────
+    Ok(result.resource_id.as_bytes().to_vec())
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    //! Integration tests for Phase 1 (tasks.md §1.1–1.2).
+    //! Integration tests for Phases 1–3 (tasks.md §1.1–1.2, §2.1–2.3, §3.1).
     //!
+    //! Phase 1 (§1.1–1.2):
     //! - [`test_session_establishment_returns_nonempty_session_id`]
-    //!   Verifies that `establish_session_with` produces a non-empty session_id.
-    //!
     //! - [`test_session_establishment_returns_nonempty_namespace`]
-    //!   Verifies that `establish_session_with` produces a non-empty namespace.
     //!
-    //! Both tests spin up a `HeadlessRuntime` with `dev-mode` (unrestricted
-    //! capabilities; no registered-agent config required) on an ephemeral port,
-    //! then call `establish_session_with` to exercise the full handshake path.
+    //! Phase 2 (§2.1–2.3):
+    //! - [`test_lease_grant_returns_granted_true_and_16_byte_lease_id`]
+    //!   Verifies `request_lease` returns a 16-byte UUIDv7 lease_id with granted=true.
+    //! - [`test_lease_request_with_invalid_capability_is_denied`]
+    //!   Verifies that requesting a non-canonical capability denies the lease.
+    //!
+    //! Phase 3 (§3.1):
+    //! - [`test_upload_icon_returns_32_byte_blake3_resource_id`]
+    //!   Verifies `upload_icon` returns a 32-byte BLAKE3 ResourceId.
+    //!
+    //! All tests spin up a `HeadlessRuntime` with `dev-mode` (unrestricted
+    //! capabilities; no registered-agent config required) on an ephemeral port.
     //!
     //! Ephemeral ports prevent port-conflict flakiness in parallel CI.
     //! Each `server` JoinHandle is aborted after assertions complete.
@@ -432,6 +742,28 @@ mod tests {
         let runtime = HeadlessRuntime::new(config).await?;
         let server = runtime.start_grpc_server().await?;
         Ok(server)
+    }
+
+    // ── Phase 2 helpers ───────────────────────────────────────────────────────
+
+    /// Drain messages from `stream` until the first non-`LeaseStateChange` message.
+    async fn next_non_state_change(
+        stream: &mut tonic::Streaming<tze_hud_protocol::proto::session::ServerMessage>,
+    ) -> tze_hud_protocol::proto::session::ServerMessage {
+        use tokio_stream::StreamExt as _;
+        loop {
+            let msg = stream
+                .next()
+                .await
+                .expect("stream closed before LeaseResponse")
+                .expect("stream error");
+            match &msg.payload {
+                Some(
+                    tze_hud_protocol::proto::session::server_message::Payload::LeaseStateChange(_),
+                ) => continue,
+                _ => return msg,
+            }
+        }
     }
 
     /// Task 1.2 — verify session_id is non-empty after successful handshake.
@@ -481,5 +813,174 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    // ── Phase 2: Lease Acquisition tests ─────────────────────────────────────
+
+    /// Task 2.1–2.2 — `request_lease` returns granted=true and a 16-byte UUIDv7 lease_id.
+    ///
+    /// Spec §Requirement: Lease Request With AutoRenew — Scenario: Lease granted
+    /// with requested parameters.
+    /// tasks.md §2.1: send LeaseRequest { ttl_ms=60000, capabilities=[create_tiles,
+    ///   modify_own_tiles], lease_priority=2 }.
+    /// tasks.md §2.2: verify LeaseResponse.granted=true and store the 16-byte lease_id.
+    #[tokio::test]
+    async fn test_lease_grant_returns_granted_true_and_16_byte_lease_id() {
+        let port = ephemeral_port();
+        let server = start_test_runtime(port).await.expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let lease_id_bytes =
+            crate::request_lease(port, TEST_PSK, TEST_AGENT_ID, TEST_AGENT_DISPLAY_NAME)
+                .await
+                .expect("request_lease");
+
+        // tasks.md §2.2: lease_id MUST be exactly 16 bytes (UUIDv7 SceneId).
+        assert_eq!(
+            lease_id_bytes.len(),
+            16,
+            "lease_id must be 16 bytes (UUIDv7) — tasks.md §2.2"
+        );
+
+        server.abort();
+    }
+
+    /// Task 2.3 — LeaseRequest with a non-canonical capability is denied.
+    ///
+    /// Spec §Requirement: Lease Request With AutoRenew — Scenario: Tile creation
+    /// requires active lease (only valid capabilities may be requested).
+    /// tasks.md §2.3: add test — lease request without required capabilities is denied.
+    ///
+    /// "create_tile" (singular) is a legacy non-canonical name rejected since
+    /// RFC 0005 Round 14. The server MUST respond with:
+    ///   LeaseResponse { granted: false, deny_code: "CONFIG_UNKNOWN_CAPABILITY" }.
+    #[tokio::test]
+    async fn test_lease_request_with_invalid_capability_is_denied() {
+        use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
+
+        let port = ephemeral_port();
+        let server = start_test_runtime(port).await.expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // ── 1. Open a session ─────────────────────────────────────────────────
+        #[allow(deprecated)]
+        let mut session_client =
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+                .await
+                .expect("connect");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<sp::ClientMessage>(64);
+        let stream_req = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mut resp_stream = session_client
+            .session(stream_req)
+            .await
+            .expect("session rpc")
+            .into_inner();
+
+        let now_us = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_micros() as u64)
+            .unwrap_or(1);
+
+        // SessionInit with valid capabilities for the session.
+        tx.send(sp::ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_us,
+            payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
+                agent_id: "bad-cap-test-agent".to_string(),
+                agent_display_name: "Bad Cap Test".to_string(),
+                pre_shared_key: TEST_PSK.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Drain SessionEstablished + SceneSnapshot.
+        for _ in 0..2 {
+            resp_stream
+                .next()
+                .await
+                .expect("stream not closed")
+                .expect("no stream error");
+        }
+
+        // ── 2. Send a LeaseRequest with a non-canonical (legacy singular) capability ──
+        //
+        // "create_tile" (singular) was superseded by "create_tiles" (plural) in
+        // RFC 0005 Round 14.  The server must reject this with CONFIG_UNKNOWN_CAPABILITY.
+        tx.send(sp::ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_us,
+            payload: Some(sp::client_message::Payload::LeaseRequest(
+                sp::LeaseRequest {
+                    ttl_ms: 60_000,
+                    capabilities: vec!["create_tile".to_string()], // non-canonical singular form
+                    lease_priority: 2,
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        // ── 3. Assert denial ──────────────────────────────────────────────────
+        let resp_msg = next_non_state_change(&mut resp_stream).await;
+        match resp_msg.payload {
+            Some(sp::server_message::Payload::LeaseResponse(resp)) => {
+                assert!(
+                    !resp.granted,
+                    "LeaseResponse must NOT be granted for non-canonical capability — tasks.md §2.3"
+                );
+                assert_eq!(
+                    resp.deny_code, "CONFIG_UNKNOWN_CAPABILITY",
+                    "deny_code must be CONFIG_UNKNOWN_CAPABILITY for unknown capability, \
+                     got: {:?}",
+                    resp.deny_code
+                );
+                assert!(
+                    !resp.deny_reason.is_empty(),
+                    "deny_reason must be non-empty — tasks.md §2.3"
+                );
+            }
+            other => panic!(
+                "Expected LeaseResponse(denied) for non-canonical capability, got: {other:?}"
+            ),
+        }
+
+        server.abort();
+    }
+
+    // ── Phase 3: Resource Upload tests ───────────────────────────────────────
+
+    /// Task 3.1 — `upload_icon` returns a 32-byte BLAKE3 ResourceId.
+    ///
+    /// Spec §Requirement: Resource Upload Before Tile Creation — Content-Addressed
+    /// Resource Identity: ResourceId = BLAKE3(raw_bytes), 32 bytes.
+    /// tasks.md §3.1: upload 48×48 PNG icon, capture ResourceId (BLAKE3 hash).
+    #[tokio::test]
+    async fn test_upload_icon_returns_32_byte_blake3_resource_id() {
+        let resource_id_bytes = crate::upload_icon(TEST_AGENT_ID)
+            .await
+            .expect("upload_icon");
+
+        // tasks.md §3.1: ResourceId is a 32-byte BLAKE3 digest.
+        assert_eq!(
+            resource_id_bytes.len(),
+            blake3::OUT_LEN, // 32 bytes
+            "ResourceId must be 32 bytes (BLAKE3 digest) — tasks.md §3.1, got {} bytes",
+            resource_id_bytes.len()
+        );
     }
 }
