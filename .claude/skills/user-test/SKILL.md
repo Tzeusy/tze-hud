@@ -337,6 +337,97 @@ The bar cycles through: blue -> green -> yellow -> red -> blue (reset) -> clear 
 
 Report pass/fail per step. A step fails if the tester observes: missing animation, wrong color, misaligned label, missing rounded end-caps, or visible artifacts after the reset/clear-to-empty step.
 
+## Subtitle Exemplar Scenario
+
+Use `scripts/subtitle_exemplar.py` to exercise the subtitle zone on a live HUD.
+The script validates streaming breakpoint reveal, single-line baseline rendering,
+multi-line word-wrap, rapid-replacement contention, and TTL auto-clear — all using
+the `exemplar-test` namespace.
+
+### CLI
+
+```bash
+python3 .claude/skills/user-test/scripts/subtitle_exemplar.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --psk-env TZE_HUD_PSK \
+  --ttl 10000
+```
+
+Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`), `--ttl` (ms, default 10000).
+
+All messages are published to `zone_name: "subtitle"` with `namespace: "exemplar-test"`.
+
+### Phases
+
+| Phase | What happens | Pause |
+|-------|-------------|-------|
+| 1 — Streaming reveal | stream_text with breakpoints at word boundaries; compositor reveals word-by-word | TTL hold (10s default) |
+| 2 — Single line | "Hello world — exemplar subtitle test"; baseline rendering | 4s |
+| 3 — Multi-line | Long text forcing word-wrap and backdrop sizing | 4s |
+| 4 — Rapid replacement | 3 publishes 100ms apart; only the third survives | 3s |
+| 5 — TTL expiry | Subtitle with fixed 3s TTL; watch auto-clear fade-out | TTL + 0.3s safety + 1.0s margin + 2s confirmation (~6.3s total) |
+| 6 — Streaming repeat | Same streaming reveal again for final sign-off | TTL hold (10s default) |
+
+### Human Acceptance Criteria
+
+Verify each criterion visually during the run:
+
+| # | Criterion | Phase |
+|---|-----------|-------|
+| AC1 | White text with visible black outline on semi-transparent dark backdrop | 2 (single line) |
+| AC2 | Text centered horizontally near bottom of screen | 2 (single line) |
+| AC3 | Multi-line text wraps cleanly within backdrop bounds | 3 (multi-line) |
+| AC4 | Rapid replacement transitions are smooth (no blank frames) | 4 (rapid replace) |
+| AC5 | Content disappears after TTL with visible fade-out | 5 (TTL expiry) |
+| AC6 | Streaming text reveals word-by-word | 1 and 6 (streaming) |
+
+All six criteria must pass for the subtitle exemplar to be accepted.
+
+### Named Test Group: subtitle-full-sequence
+
+`subtitle-full-sequence.json` is provided as a batch sequence file and can be invoked
+alongside other zone tests. Use with `--delay-ms 4000` so each scenario group has time
+to render before the next publish fires:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/subtitle-full-sequence.json \
+  --delay-ms 4000 \
+  --list-zones
+```
+
+The sequence runs: single line → multi-line → rapid replacement (×3) → TTL expiry → streaming.
+All messages use `namespace: "exemplar-test"`.
+
+Use `--delay-ms 100` when running `subtitle-rapid-replace.json` alone to exercise
+contention at a speed that actually triggers the latest-wins logic.
+
+### Subtitle payload shape
+
+```json
+{"zone_name": "subtitle", "content": "Hello world", "ttl_us": 10000000, "namespace": "exemplar-test"}
+```
+
+For streaming with word-by-word breakpoints:
+
+```json
+{
+  "zone_name": "subtitle",
+  "content": "The quick brown fox jumps over the lazy dog",
+  "breakpoints": [3, 9, 15, 19, 25, 30, 34, 38],
+  "ttl_us": 10000000,
+  "namespace": "exemplar-test"
+}
+```
+
+The `breakpoints` array contains byte offsets of word boundaries in `content`. The
+compositor reveals text progressively at each breakpoint at its own frame rate — the
+agent does not control reveal timing.
+
+---
+
 ## Notification Stack Exemplar Scenario
 
 Use `scripts/notification_exemplar.py` to exercise the notification-area zone
