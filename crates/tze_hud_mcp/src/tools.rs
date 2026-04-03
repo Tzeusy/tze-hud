@@ -3710,4 +3710,353 @@ mod tests {
                 .contains(&"stream_text".to_string())
         );
     }
+
+    // ── Ambient-background MCP integration tests ─────────────────────────────
+    //
+    // These 4 tests exercise the ambient-background zone (Replace contention,
+    // Background layer, accepts SolidColor + StaticImage) via the MCP
+    // `publish_to_zone` path, verifying the scenarios required by
+    // openspec/changes/exemplar-ambient-background/specs/exemplar-ambient-background/spec.md
+    // §Requirements: "MCP StaticImage Content Type Dispatch" and
+    //                "Ambient Background User-Test Scenarios".
+    //
+    // Task references: hud-gwhr.4, tasks.md §4 (user-test integration),
+    //                  tasks.md §1.4 and §1.5 (MCP static_image tests).
+
+    /// Build a scene with the canonical ambient-background zone
+    /// (full-screen, Replace, Background layer, SolidColor + StaticImage).
+    fn scene_with_ambient_background() -> (SceneGraph, String) {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let zone_name = "ambient-background".to_string();
+        scene.zone_registry.zones.insert(
+            zone_name.clone(),
+            ZoneDefinition {
+                id: SceneId::new(),
+                name: zone_name.clone(),
+                description: "Ambient background zone — full display, behind all content"
+                    .to_string(),
+                geometry_policy: GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 1.0,
+                },
+                accepted_media_types: vec![
+                    ZoneMediaType::SolidColor,
+                    ZoneMediaType::StaticImage,
+                ],
+                rendering_policy: RenderingPolicy::default(),
+                contention_policy: ContentionPolicy::Replace,
+                max_publishers: 1,
+                transport_constraint: None,
+                auto_clear_ms: None,
+                ephemeral: false,
+                layer_attachment: LayerAttachment::Background,
+            },
+        );
+        (scene, zone_name)
+    }
+
+    /// Requirement: MCP StaticImage Content Type Dispatch / User-Test Scenarios
+    /// Scenario: "Solid color via MCP to ambient-background"
+    ///
+    /// Send `publish_to_zone` with `{"type": "solid_color", "r": 0.05, "g": 0.05, "b": 0.15, "a": 1.0}`.
+    /// Verify the zone's active publication contains `ZoneContent::SolidColor(Rgba{0.05, 0.05, 0.15, 1.0})`.
+    ///
+    /// Covers: spec.md §"Solid color via MCP to ambient-background",
+    ///         tasks.md §4.1 (ambient-background solid color user-test scenario).
+    #[test]
+    fn test_mcp_ambient_background_solid_color() {
+        let (mut scene, zone) = scene_with_ambient_background();
+
+        let result = handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": {"type": "solid_color", "r": 0.05, "g": 0.05, "b": 0.15, "a": 1.0}
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        assert_eq!(result.zone_name, zone);
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            publishes.len(),
+            1,
+            "ambient-background Replace policy must yield exactly 1 active publication"
+        );
+
+        match &publishes[0].content {
+            tze_hud_scene::types::ZoneContent::SolidColor(rgba) => {
+                assert!(
+                    (rgba.r - 0.05f32).abs() < 1e-4,
+                    "r must be 0.05, got {}",
+                    rgba.r
+                );
+                assert!(
+                    (rgba.g - 0.05f32).abs() < 1e-4,
+                    "g must be 0.05, got {}",
+                    rgba.g
+                );
+                assert!(
+                    (rgba.b - 0.15f32).abs() < 1e-4,
+                    "b must be 0.15, got {}",
+                    rgba.b
+                );
+                assert!(
+                    (rgba.a - 1.0f32).abs() < 1e-4,
+                    "a must be 1.0, got {}",
+                    rgba.a
+                );
+            }
+            other => panic!(
+                "expected ZoneContent::SolidColor, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Requirement: MCP StaticImage Content Type Dispatch
+    /// Scenario: "Publish static image via MCP"
+    ///
+    /// Send `publish_to_zone` with `{"type": "static_image", "resource_id": "abc123def456..."}`.
+    /// Verify the zone's active publication contains `ZoneContent::StaticImage(ResourceId)`.
+    ///
+    /// Covers: spec.md §"Publish static image via MCP",
+    ///         tasks.md §1.4, §4.3.
+    #[test]
+    fn test_mcp_ambient_background_static_image() {
+        let (mut scene, zone) = scene_with_ambient_background();
+
+        // A valid 64-char hex string (blake3 hash of b"ambient-background-test").
+        let resource_id_hex = "4878ca0425c739fa427f7eda20fe845f6b2f46ba5fe5ac7d6b85add8db6bb08f";
+
+        let result = handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": {"type": "static_image", "resource_id": resource_id_hex}
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        assert_eq!(result.zone_name, zone);
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            publishes.len(),
+            1,
+            "ambient-background Replace policy must yield exactly 1 active publication after static_image publish"
+        );
+
+        assert!(
+            matches!(
+                &publishes[0].content,
+                tze_hud_scene::types::ZoneContent::StaticImage(_)
+            ),
+            "publish with static_image content must produce ZoneContent::StaticImage, got: {:?}",
+            &publishes[0].content
+        );
+    }
+
+    /// Requirement: MCP StaticImage Content Type Dispatch
+    /// Scenario: "Missing resource_id returns error"
+    ///
+    /// Send `publish_to_zone` with `{"type": "static_image"}` (no `resource_id`).
+    /// Assert `invalid_params` error is returned.
+    ///
+    /// Covers: spec.md §"Missing resource_id returns error",
+    ///         tasks.md §1.5.
+    #[test]
+    fn test_mcp_ambient_background_static_image_missing_resource_id() {
+        let (mut scene, zone) = scene_with_ambient_background();
+
+        let err = handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": {"type": "static_image"}
+            }),
+            &mut scene,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, McpError::InvalidParams(msg) if msg.contains("resource_id")),
+            "missing resource_id must return InvalidParams mentioning resource_id, got: {err:?}"
+        );
+    }
+
+    /// Requirement: Ambient Background User-Test Scenarios
+    /// Scenario: "Agent replaces background with warm amber" / Rapid replacement
+    ///
+    /// Publish dark blue then warm amber via MCP. Verify only amber is in
+    /// active publications (latest-wins via Replace policy) and publication
+    /// count is exactly 1.
+    ///
+    /// Also covers the rapid-replacement stress scenario (tasks.md §4.2):
+    /// publish 10 different colors in sequence, assert exactly 1 active publication.
+    ///
+    /// Covers: spec.md §"Agent replaces background with warm amber",
+    ///         spec.md §"Rapid replacement stress test",
+    ///         tasks.md §4.1, §4.2.
+    #[test]
+    fn test_mcp_ambient_background_replacement_via_mcp() {
+        let (mut scene, zone) = scene_with_ambient_background();
+
+        // Phase 1: Publish 10 different colors in rapid succession to exercise
+        // rapid-replacement stress scenario (tasks.md §4.2).
+        let colors: &[(&str, f64, f64, f64)] = &[
+            ("red",        1.0, 0.0, 0.0),
+            ("green",      0.0, 1.0, 0.0),
+            ("blue",       0.0, 0.0, 1.0),
+            ("yellow",     1.0, 1.0, 0.0),
+            ("magenta",    1.0, 0.0, 1.0),
+            ("cyan",       0.0, 1.0, 1.0),
+            ("gray",       0.5, 0.5, 0.5),
+            ("orange",     1.0, 0.5, 0.0),
+            ("purple",     0.5, 0.0, 0.5),
+            // 9th: dark blue — initial anchor for the two-step replacement test.
+            ("dark-blue",  0.05, 0.05, 0.2),
+        ];
+
+        for (label, r, g, b) in colors {
+            handle_publish_to_zone(
+                json!({
+                    "zone_name": zone,
+                    "content": {"type": "solid_color", "r": r, "g": g, "b": b, "a": 1.0}
+                }),
+                &mut scene,
+            )
+            .unwrap_or_else(|e| panic!("publish {label} must succeed: {e:?}"));
+        }
+
+        // After 10 rapid publishes the Replace policy must keep exactly 1 record.
+        let pub_count_after_rapid = scene
+            .zone_registry
+            .active_publishes
+            .get(&zone)
+            .map(|v| v.len())
+            .unwrap_or(0);
+        assert_eq!(
+            pub_count_after_rapid, 1,
+            "ambient-background active publication count MUST be exactly 1 after 10 rapid Replace \
+             publishes (rapid-replacement stress scenario); got {pub_count_after_rapid}"
+        );
+
+        // Phase 2: Replace dark blue with warm amber — the canonical "agent replaces
+        // background" scenario (spec.md §"Agent replaces background with warm amber").
+        handle_publish_to_zone(
+            json!({
+                "zone_name": zone,
+                "content": {"type": "solid_color", "r": 0.9, "g": 0.6, "b": 0.2, "a": 1.0}
+            }),
+            &mut scene,
+        )
+        .unwrap();
+
+        let publishes = scene.zone_registry.active_publishes.get(&zone).unwrap();
+        assert_eq!(
+            publishes.len(),
+            1,
+            "active publication count must still be 1 after warm-amber replace"
+        );
+
+        // Verify the active publication is warm amber, not dark blue.
+        match &publishes[0].content {
+            tze_hud_scene::types::ZoneContent::SolidColor(rgba) => {
+                assert!(
+                    (rgba.r - 0.9f32).abs() < 1e-3,
+                    "r must be ~0.9 (warm amber), got {}",
+                    rgba.r
+                );
+                assert!(
+                    (rgba.g - 0.6f32).abs() < 1e-3,
+                    "g must be ~0.6 (warm amber), got {}",
+                    rgba.g
+                );
+                assert!(
+                    (rgba.b - 0.2f32).abs() < 1e-3,
+                    "b must be ~0.2 (warm amber), got {}",
+                    rgba.b
+                );
+            }
+            other => panic!(
+                "active publication must be warm amber SolidColor after replacement, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Requirement: Ambient Background User-Test Scenarios
+    /// Scenario: "Agent sets solid color background" — zone registry alignment check.
+    ///
+    /// Verify that `ZoneRegistry::with_defaults()` contains an `ambient-background`
+    /// zone with the expected spec properties:
+    /// - ContentionPolicy::Replace, max_publishers=1
+    /// - LayerAttachment::Background
+    /// - Full-screen geometry (Relative {0,0,1,1})
+    /// - accepted_media_types includes SolidColor and StaticImage
+    /// - auto_clear_ms = None (persistent until replaced)
+    ///
+    /// Covers: tasks.md §5.1 (zone registry alignment),
+    ///         spec.md §"Ambient Background Zone Visual Contract".
+    #[test]
+    fn test_ambient_background_zone_registry_alignment() {
+        use tze_hud_scene::types::ZoneRegistry;
+        let registry = ZoneRegistry::with_defaults();
+        let zone = registry
+            .zones
+            .get("ambient-background")
+            .expect("ambient-background zone must exist in ZoneRegistry::with_defaults()");
+
+        // Contention policy: Replace with max_publishers=1 (latest-wins).
+        assert!(
+            matches!(zone.contention_policy, ContentionPolicy::Replace),
+            "ambient-background must use ContentionPolicy::Replace, got: {:?}",
+            zone.contention_policy
+        );
+        assert_eq!(
+            zone.max_publishers, 1,
+            "ambient-background must have max_publishers=1"
+        );
+
+        // Layer: Background (behind all content-layer tiles).
+        assert!(
+            matches!(zone.layer_attachment, LayerAttachment::Background),
+            "ambient-background must use LayerAttachment::Background, got: {:?}",
+            zone.layer_attachment
+        );
+
+        // Geometry: full-screen (Relative 0,0,1,1).
+        assert!(
+            matches!(
+                zone.geometry_policy,
+                GeometryPolicy::Relative {
+                    x_pct,
+                    y_pct,
+                    width_pct,
+                    height_pct,
+                } if x_pct == 0.0 && y_pct == 0.0 && width_pct == 1.0 && height_pct == 1.0
+            ),
+            "ambient-background must have full-screen Relative geometry {{0,0,1,1}}, got: {:?}",
+            zone.geometry_policy
+        );
+
+        // Accepted media types: SolidColor and StaticImage (v1 mandatory).
+        assert!(
+            zone.accepted_media_types.contains(&ZoneMediaType::SolidColor),
+            "ambient-background must accept ZoneMediaType::SolidColor"
+        );
+        assert!(
+            zone.accepted_media_types.contains(&ZoneMediaType::StaticImage),
+            "ambient-background must accept ZoneMediaType::StaticImage"
+        );
+
+        // TTL: no auto-clear (persistent until replaced).
+        assert_eq!(
+            zone.auto_clear_ms, None,
+            "ambient-background must have auto_clear_ms=None (persistent until replaced)"
+        );
+    }
 }
