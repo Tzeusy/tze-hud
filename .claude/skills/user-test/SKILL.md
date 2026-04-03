@@ -365,7 +365,7 @@ All messages are published to `zone_name: "subtitle"` with `namespace: "exemplar
 | 2 — Single line | "Hello world — exemplar subtitle test"; baseline rendering | 4s |
 | 3 — Multi-line | Long text forcing word-wrap and backdrop sizing | 4s |
 | 4 — Rapid replacement | 3 publishes 100ms apart; only the third survives | 3s |
-| 5 — TTL expiry | Subtitle with fixed 3s TTL; watch auto-clear fade-out | 3s + 1s margin + 2s confirmation |
+| 5 — TTL expiry | Subtitle with fixed 3s TTL; watch auto-clear fade-out | TTL + 0.3s safety + 1.0s margin + 2s confirmation (~6.3s total) |
 | 6 — Streaming repeat | Same streaming reveal again for final sign-off | TTL hold (10s default) |
 
 ### Human Acceptance Criteria
@@ -385,7 +385,7 @@ All six criteria must pass for the subtitle exemplar to be accepted.
 
 ### Named Test Group: subtitle-full-sequence
 
-`subtitle-full-sequence.json` is registered as a named test group and can be invoked
+`subtitle-full-sequence.json` is provided as a batch sequence file and can be invoked
 alongside other zone tests. Use with `--delay-ms 4000` so each scenario group has time
 to render before the next publish fires:
 

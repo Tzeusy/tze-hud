@@ -8,9 +8,10 @@ progressive word-by-word reveal, rapid-replacement latest-wins, TTL auto-clear,
 and multi-line word-wrap — all with the exemplar-test namespace.
 
 Phases:
-  1. Streaming reveal  — stream_text with breakpoints at word boundaries,
-                         pausing 2s for each word group reveal before the
-                         next publish (via 1s inter-step delays in the fixture)
+  1. Streaming reveal  — stream_text with breakpoints at word boundaries;
+                         single publish held for the TTL while the compositor
+                         progressively reveals word groups at its own frame rate
+                         + TTL hold (10s default)
   2. Single line       — "Hello world — exemplar subtitle test" (10s TTL)
                          + 4s pause for visual inspection
   3. Multi-line        — long text to exercise word-wrap and backdrop sizing
@@ -19,10 +20,10 @@ Phases:
                          should remain visible
                          + 3s pause for visual inspection
   5. TTL expiry        — subtitle with 3s TTL; watch it fade out automatically
-                         + 4s pause so observer can see the auto-clear
+                         + TTL + 0.3s safety + 1.0s margin + 2s confirmation (~6.3s total)
   6. Streaming repeat  — stream_text breakpoint reveal again (explicitly, for
                          final human sign-off on word-by-word behaviour)
-                         + 12s hold for full reveal observation
+                         + TTL hold (10s default)
 
 All messages use namespace: "exemplar-test".
 
