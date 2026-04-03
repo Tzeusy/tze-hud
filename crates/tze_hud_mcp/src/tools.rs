@@ -3741,10 +3741,7 @@ mod tests {
                     width_pct: 1.0,
                     height_pct: 1.0,
                 },
-                accepted_media_types: vec![
-                    ZoneMediaType::SolidColor,
-                    ZoneMediaType::StaticImage,
-                ],
+                accepted_media_types: vec![ZoneMediaType::SolidColor, ZoneMediaType::StaticImage],
                 rendering_policy: RenderingPolicy::default(),
                 contention_policy: ContentionPolicy::Replace,
                 max_publishers: 1,
@@ -3810,10 +3807,7 @@ mod tests {
                     rgba.a
                 );
             }
-            other => panic!(
-                "expected ZoneContent::SolidColor, got: {:?}",
-                other
-            ),
+            other => panic!("expected ZoneContent::SolidColor, got: {:?}", other),
         }
     }
 
@@ -3907,17 +3901,17 @@ mod tests {
         // Phase 1: Publish 10 different colors in rapid succession to exercise
         // rapid-replacement stress scenario (tasks.md §4.2).
         let colors: &[(&str, f64, f64, f64)] = &[
-            ("red",        1.0, 0.0, 0.0),
-            ("green",      0.0, 1.0, 0.0),
-            ("blue",       0.0, 0.0, 1.0),
-            ("yellow",     1.0, 1.0, 0.0),
-            ("magenta",    1.0, 0.0, 1.0),
-            ("cyan",       0.0, 1.0, 1.0),
-            ("gray",       0.5, 0.5, 0.5),
-            ("orange",     1.0, 0.5, 0.0),
-            ("purple",     0.5, 0.0, 0.5),
+            ("red", 1.0, 0.0, 0.0),
+            ("green", 0.0, 1.0, 0.0),
+            ("blue", 0.0, 0.0, 1.0),
+            ("yellow", 1.0, 1.0, 0.0),
+            ("magenta", 1.0, 0.0, 1.0),
+            ("cyan", 0.0, 1.0, 1.0),
+            ("gray", 0.5, 0.5, 0.5),
+            ("orange", 1.0, 0.5, 0.0),
+            ("purple", 0.5, 0.0, 0.5),
             // 10th: dark blue — initial anchor for the two-step replacement test.
-            ("dark-blue",  0.05, 0.05, 0.2),
+            ("dark-blue", 0.05, 0.05, 0.2),
         ];
 
         for (label, r, g, b) in colors {
@@ -4045,11 +4039,13 @@ mod tests {
 
         // Accepted media types: SolidColor and StaticImage (v1 mandatory).
         assert!(
-            zone.accepted_media_types.contains(&ZoneMediaType::SolidColor),
+            zone.accepted_media_types
+                .contains(&ZoneMediaType::SolidColor),
             "ambient-background must accept ZoneMediaType::SolidColor"
         );
         assert!(
-            zone.accepted_media_types.contains(&ZoneMediaType::StaticImage),
+            zone.accepted_media_types
+                .contains(&ZoneMediaType::StaticImage),
             "ambient-background must accept ZoneMediaType::StaticImage"
         );
 
