@@ -479,18 +479,18 @@ async fn test_ambient_background_rapid_replacement() {
 // ─── sRGB expected values for z-order and StaticImage tests ──────────────────
 //
 // Z-order test background color: linear(0.0, 0.0, 0.5, 1.0) → sRGB blue channel:
-//   b: 1.055 × 0.5^(1/2.4) − 0.055 ≈ 1.055 × 0.7297 − 0.055 ≈ 0.714 → ~182
+//   b: 1.055 × 0.5^(1/2.4) − 0.055 ≈ 1.055 × 0.7492 − 0.055 ≈ 0.735 → ~188
 // Content zone (opaque red): linear(1.0, 0.0, 0.0, 1.0) → sRGB [255, 0, 0]
 //
 // StaticImage placeholder: STATIC_IMAGE_PLACEHOLDER_COLOR = linear(0.3, 0.3, 0.3, 1.0):
-//   1.055 × 0.3^(1/2.4) − 0.055 ≈ 1.055 × 0.5834 − 0.055 ≈ 0.560 → ~143
+//   1.055 × 0.3^(1/2.4) − 0.055 ≈ 1.055 × 0.6038 − 0.055 ≈ 0.584 → ~149
 //
 // All calibrated with ±8 tolerance for llvmpipe / software-renderer variance.
 
 /// Expected sRGB bytes for the dark blue background zone color.
 ///
-/// linear(0.0, 0.0, 0.5, 1.0): r=0, g=0, b≈182.
-const DARK_BLUE_BG_EXPECTED: [u8; 4] = [0, 0, 182, 255];
+/// linear(0.0, 0.0, 0.5, 1.0): r=0, g=0, b≈188.
+const DARK_BLUE_BG_EXPECTED: [u8; 4] = [0, 0, 188, 255];
 
 /// Expected sRGB bytes for pure red content zone.
 ///
@@ -499,8 +499,8 @@ const RED_CONTENT_EXPECTED: [u8; 4] = [255, 0, 0, 255];
 
 /// Expected sRGB bytes for StaticImage warm-gray placeholder.
 ///
-/// linear(0.3, 0.3, 0.3, 1.0): all channels ≈ 143.
-const STATIC_IMAGE_PLACEHOLDER_EXPECTED: [u8; 4] = [143, 143, 143, 255];
+/// linear(0.3, 0.3, 0.3, 1.0): all channels ≈ 149.
+const STATIC_IMAGE_PLACEHOLDER_EXPECTED: [u8; 4] = [149, 149, 149, 255];
 
 // Surface size for z-order and StaticImage tests.
 const SURFACE_W: u32 = 256;
