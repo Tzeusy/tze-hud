@@ -61,3 +61,28 @@ Design transport around these — they have different delivery semantics:
 - Treating graceful degradation as a bug
 - Hardcoded visual properties in the compositor (use design tokens and RenderingPolicy)
 - Monolithic visual implementations that can't be swapped (use component profiles)
+
+## Beads Database Routing
+
+This workspace has **two separate beads databases** on the Dolt server (port 3307):
+
+| Working directory | Database | Prefix | Contains |
+|---|---|---|---|
+| `tze_hud/` (project root) | `tze_hud` | `th-` | Structural beads only (rig identity, patrol molecules) |
+| `tze_hud/mayor/rig/` | `hud` | `hud-` | **All implementation work** (features, bugs, epics, tasks) |
+
+**Always run `bd` from `mayor/rig/`** to see implementation beads.
+
+## Worker Isolation for Rust Code Changes
+
+This repo (`mayor/rig/`) is a **nested git repo** inside the monorepo (`~/gt`). Monorepo worktrees created by `bd worktree create` do NOT contain the Rust crate code.
+
+For **Rust code workers**, use `git worktree` on the **tze-hud repo itself**:
+
+```bash
+# From mayor/rig/ (the tze-hud repo root):
+git worktree add .worktrees/agent-hud-XXXX -b agent/hud-XXXX
+# Worker operates in .worktrees/agent-hud-XXXX/
+```
+
+**Do NOT** have workers `git checkout -b agent/...` directly in the main checkout — this leaves `mayor/rig/` on a non-main branch and blocks other workers.
