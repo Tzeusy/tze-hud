@@ -236,8 +236,10 @@ def phase4_rapid_replacement(
     Phase 4: Rapid-replacement stress test — 10 colors in sequence.
 
     Publishes 10 different solid colors without delay between them, then
-    queries list_zones to confirm the zone has exactly 1 active publication
-    and that the final color (bright green) is the active one.
+    queries list_zones to confirm the zone is occupied (has_content=true).
+    list_zones reports a boolean occupancy flag, not a publication count;
+    the Replace policy guarantees at most 1 active publication.
+    Visual check: the final color (bright green) should be visible.
 
     Visual check: background should settle on bright green.
     """
@@ -264,15 +266,15 @@ def phase4_rapid_replacement(
         if bg_zone is not None:
             has_content = bg_zone.get("has_content", False)
             occupancy_ok = has_content
-            pub_count_display = "1 (has_content=true)" if has_content else "0 (has_content=false)"
+            occupancy_status = "Occupied (has_content=true)" if has_content else "Empty (has_content=false)"
         else:
-            pub_count_display = f"zone '{ZONE_NAME}' not found in list_zones response"
+            occupancy_status = f"zone '{ZONE_NAME}' not found in list_zones response"
     else:
-        pub_count_display = f"list_zones error: {zones_response.get('error')}"
+        occupancy_status = f"list_zones error: {zones_response.get('error')}"
         any_failed = True
 
     print(
-        f"\n  [occupancy check] list_zones reports ambient-background: {pub_count_display}",
+        f"\n  [occupancy check] list_zones reports ambient-background: {occupancy_status}",
         flush=True,
     )
     print(

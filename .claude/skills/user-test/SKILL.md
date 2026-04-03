@@ -631,7 +631,7 @@ Required: `--url`. Optional: `--psk-env` (default `TZE_HUD_PSK`).
 | 1 — Dark blue | Publish `solid_color` dark navy blue (r=0.05, g=0.05, b=0.2) | 3s |
 | 2 — Warm amber | Replace with warm amber (r=0.9, g=0.6, b=0.2); latest-wins Replace policy evicts dark blue | 3s |
 | 3 — Static image | Publish `static_image` content type (64-char hex resource_id); runtime renders warm-gray placeholder in v1 | 2s |
-| 4 — Rapid replace | 10 different solid colors in sequence without delay; query `list_zones` to confirm 1 active publication (bright green) | — |
+| 4 — Rapid replace | 10 different solid colors in sequence without delay; query `list_zones` to confirm `has_content=true` and visually confirm the final color is bright green | — |
 
 ### Visual Checklist
 

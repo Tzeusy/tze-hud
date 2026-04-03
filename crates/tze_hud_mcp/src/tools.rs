@@ -3713,7 +3713,7 @@ mod tests {
 
     // ── Ambient-background MCP integration tests ─────────────────────────────
     //
-    // These 4 tests exercise the ambient-background zone (Replace contention,
+    // These 5 tests exercise the ambient-background zone (Replace contention,
     // Background layer, accepts SolidColor + StaticImage) via the MCP
     // `publish_to_zone` path, verifying the scenarios required by
     // openspec/changes/exemplar-ambient-background/specs/exemplar-ambient-background/spec.md
@@ -3760,8 +3760,8 @@ mod tests {
     /// Requirement: MCP StaticImage Content Type Dispatch / User-Test Scenarios
     /// Scenario: "Solid color via MCP to ambient-background"
     ///
-    /// Send `publish_to_zone` with `{"type": "solid_color", "r": 0.05, "g": 0.05, "b": 0.15, "a": 1.0}`.
-    /// Verify the zone's active publication contains `ZoneContent::SolidColor(Rgba{0.05, 0.05, 0.15, 1.0})`.
+    /// Send `publish_to_zone` with `{"type": "solid_color", "r": 0.05, "g": 0.05, "b": 0.2, "a": 1.0}`.
+    /// Verify the zone's active publication contains `ZoneContent::SolidColor(Rgba{0.05, 0.05, 0.2, 1.0})`.
     ///
     /// Covers: spec.md §"Solid color via MCP to ambient-background",
     ///         tasks.md §4.1 (ambient-background solid color user-test scenario).
@@ -3772,7 +3772,7 @@ mod tests {
         let result = handle_publish_to_zone(
             json!({
                 "zone_name": zone,
-                "content": {"type": "solid_color", "r": 0.05, "g": 0.05, "b": 0.15, "a": 1.0}
+                "content": {"type": "solid_color", "r": 0.05, "g": 0.05, "b": 0.2, "a": 1.0}
             }),
             &mut scene,
         )
@@ -3800,8 +3800,8 @@ mod tests {
                     rgba.g
                 );
                 assert!(
-                    (rgba.b - 0.15f32).abs() < 1e-4,
-                    "b must be 0.15, got {}",
+                    (rgba.b - 0.2f32).abs() < 1e-4,
+                    "b must be 0.2, got {}",
                     rgba.b
                 );
                 assert!(
@@ -3829,7 +3829,7 @@ mod tests {
     fn test_mcp_ambient_background_static_image() {
         let (mut scene, zone) = scene_with_ambient_background();
 
-        // A valid 64-char hex string (blake3 hash of b"ambient-background-test").
+        // A valid 64-char hex string (blake3 hash of b"test").
         let resource_id_hex = "4878ca0425c739fa427f7eda20fe845f6b2f46ba5fe5ac7d6b85add8db6bb08f";
 
         let result = handle_publish_to_zone(
@@ -3916,7 +3916,7 @@ mod tests {
             ("gray",       0.5, 0.5, 0.5),
             ("orange",     1.0, 0.5, 0.0),
             ("purple",     0.5, 0.0, 0.5),
-            // 9th: dark blue — initial anchor for the two-step replacement test.
+            // 10th: dark blue — initial anchor for the two-step replacement test.
             ("dark-blue",  0.05, 0.05, 0.2),
         ];
 
