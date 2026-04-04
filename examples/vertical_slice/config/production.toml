@@ -34,3 +34,17 @@ capabilities = [
 # (examples/vertical_slice/config/).
 [widget_bundles]
 paths = ["../../../assets/widget_bundles"]
+
+# Widget instances declared on the Main tab.
+# progress-bar: horizontal progress bar at x=10, y=400, 300x20 pixels.
+# Driven by three bindings: progress→fill-bar.width (linear), fill_color→fill-bar.fill
+# (direct), label→label-text.text-content (direct).
+[[tabs.widgets]]
+widget_type = "progress-bar"
+instance_id  = "progress-bar"
+
+[tabs.widgets.geometry]
+x      = 10
+y      = 400
+width  = 300
+height = 20
