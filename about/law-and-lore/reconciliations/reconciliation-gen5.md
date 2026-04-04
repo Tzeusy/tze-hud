@@ -20,7 +20,7 @@ exemplar components, runtime app binary, input capture, resource management, and
 
 | Area | Status | Evidence |
 |------|--------|----------|
-| **Widget system** (5 delta specs) | FULL (functionally) | Widget ontology, parameter schema, SVG rasterization, publishing, contention all implemented. GAP-1 (ClearWidgetMutation) closed by hud-ziov (#249, 2026-03-30). GAP-2 (Widget TTL expiry) closed by hud-2c5g (#248, 2026-03-30). 2 P2 gaps remain: type ID validation missing, policy arbitration doc mismatch. |
+| **Widget system** (5 delta specs) | FULL (functionally) | Widget ontology, parameter schema, SVG rasterization, publishing, contention all implemented. GAP-1 (ClearWidgetMutation) closed by hud-ziov (#249, 2026-03-30). GAP-2 (Widget TTL expiry) closed by hud-2c5g (#248, 2026-03-30). GAP-3 (type ID validation) resolved by hud-qdmf (#349, 2026-04-05). 1 P2 gap remains: policy arbitration doc mismatch. |
 | **Component shape language** (RFC 0012, 3 delta specs) | FULL | Design tokens, component profiles, visual extensibility implemented. Exemplar profiles use the new token system. |
 | **Exemplar components** (10 exemplars) | FULL (functionally) | subtitle, alert-banner, notification, status-bar, status-indicator, progress-bar, dashboard-tile, gauge-widget, ambient-background, presence-card — all have component profiles, rendering, MCP fixtures, integration tests, user-test scenarios. **P3 gap**: subtitle and alert-banner profiles not wired into production config. |
 | **Runtime app binary** (3 specs) | FULL | Canonical `tze_hud_app` binary with windowed runtime, headless mode, fullscreen/overlay modes. Network services (gRPC, MCP) start with the runtime. |
@@ -33,8 +33,8 @@ exemplar components, runtime app binary, input capture, resource management, and
 
 | Status | Count | Percentage | Notes |
 |--------|-------|------------|-------|
-| FULL | 54 + new areas | ~95% | Gen-4 baseline + post-MVP features; widget system P1 gaps closed |
-| PARTIAL | 0 | 0% | No open P1 gaps; all widget system P1 gaps resolved |
+| FULL | 54 + new areas | ~95% | Gen-4 baseline + post-MVP features; widget system P1 gaps and GAP-3 closed |
+| PARTIAL | 0 | 0% | No open P1 gaps; widget system GAP-3 also resolved |
 | RFC-ONLY | 4 | ~5% | I2, Pl1-Pl3 (unchanged from gen-4) |
 | ABSENT | 0 | 0% | No gaps without spec coverage |
 
@@ -57,10 +57,17 @@ exemplar components, runtime app binary, input capture, resource management, and
 
 ## 4. Open P2 Gaps
 
-### GAP-3: Widget Type ID format validation (P2)
-- **Spec**: Type IDs must match `[a-z][a-z0-9-]*`
-- **Code**: Loader accepts any string without validation
-- **Bead**: hud-qdmf
+### ~~GAP-3: Widget Type ID format validation (P2)~~ — RESOLVED (hud-qdmf)
+
+**Resolution (2026-04-05)**: Validation was already implemented in the loader before this
+reconciliation was written. Assessment "Loader accepts any string" was incorrect.
+
+- `is_valid_widget_type_id()` in `crates/tze_hud_widget/src/loader.rs` enforces `[a-z][a-z0-9-]*`
+- Called in `load_bundle_dir_inner()` immediately after the `name` field is extracted
+- Returns `BundleError::InvalidName` with wire code `WIDGET_BUNDLE_INVALID_NAME` and a descriptive message for non-conforming names
+- Integration tests in `crates/tze_hud_widget/tests/bundle_loader.rs` cover: uppercase, digit-start, hyphen-start, underscore, space, special characters (e.g. `"My Gauge!"`), wire-code, and valid name acceptance
+- Unit tests in `crates/tze_hud_widget/src/loader.rs` (12 cases) verify the regex logic in isolation
+- **Bead**: hud-qdmf (closed)
 
 ### GAP-4: Governance authority doc/code mismatch (P2)
 - **Spec**: tze_hud_runtime lib.rs claims policy arbitration via tze_hud_policy
@@ -86,4 +93,4 @@ cargo check --workspace  # passes with zero errors
 cargo test --workspace   # all tests pass
 ```
 
-Gen-5 is a **progress snapshot**, not a closure point. All widget system P1 gaps (GAP-1: ClearWidgetMutation, GAP-2: Widget TTL expiry) were implemented prior to gen-5 initial authoring (both 2026-03-30) and are now correctly marked as closed. Remaining open items are P2 gaps (type ID validation, policy arbitration doc mismatch) and the long-standing P1 config contract decision (hud-gxny).
+Gen-5 is a **progress snapshot**, not a closure point. All widget system P1 gaps (GAP-1: ClearWidgetMutation, GAP-2: Widget TTL expiry) and the P2 GAP-3 (widget type ID validation) were already resolved prior to or during this generation and are now correctly marked as closed. The remaining open item is P2 GAP-4 (governance authority doc/code mismatch) and the long-standing P1 config contract decision (hud-gxny).
