@@ -4256,7 +4256,6 @@ mod tests {
     #[test]
     fn test_navigate_next_cycles_refresh_to_dismiss_to_refresh() {
         use tze_hud_input::FocusManager;
-        use tze_hud_scene::SceneId;
 
         let (mut scene, tile_id) = build_dashboard_scene();
         let tab_id = scene.active_tab.expect("active_tab must be set");
@@ -4279,8 +4278,8 @@ mod tests {
             Some(refresh_id),
             "first NAVIGATE_NEXT must focus Refresh — tasks.md §9.1"
         );
-        // Apply focus state to scene so the scene reflects the current focus.
-        apply_focus_gained_to_scene(&mut scene, &gained1.0);
+        // Apply focus transition to scene so the scene reflects the current focus.
+        apply_focus_transition(&mut scene, &t1);
 
         // ── Step 2: NAVIGATE_NEXT from Refresh → Dismiss ───────────────────────
         let t2 = fm.navigate_next(tab_id, &scene);
@@ -4293,7 +4292,7 @@ mod tests {
             Some(dismiss_id),
             "second NAVIGATE_NEXT must focus Dismiss — tasks.md §9.1"
         );
-        apply_focus_gained_to_scene(&mut scene, &gained2.0);
+        apply_focus_transition(&mut scene, &t2);
 
         // ── Step 3: NAVIGATE_NEXT from Dismiss → wraps back to Refresh ─────────
         let t3 = fm.navigate_next(tab_id, &scene);
@@ -4306,9 +4305,6 @@ mod tests {
             Some(refresh_id),
             "third NAVIGATE_NEXT must wrap back to Refresh — tasks.md §9.1"
         );
-
-        let _ = (refresh_id, dismiss_id); // used above
-        let _: SceneId = tile_id;        // suppress unused warning
     }
 
     /// Task 9.2 — Shift+Tab (NAVIGATE_PREV) cycles focus in reverse order.
@@ -4344,7 +4340,7 @@ mod tests {
             Some(dismiss_id),
             "first NAVIGATE_PREV must focus Dismiss (last in forward order) — tasks.md §9.2"
         );
-        apply_focus_gained_to_scene(&mut scene, &gained1.0);
+        apply_focus_transition(&mut scene, &t1);
 
         // ── Step 2: NAVIGATE_PREV from Dismiss → Refresh ───────────────────────
         let t2 = fm.navigate_prev(tab_id, &scene);
@@ -4357,7 +4353,7 @@ mod tests {
             Some(refresh_id),
             "second NAVIGATE_PREV must focus Refresh — tasks.md §9.2"
         );
-        apply_focus_gained_to_scene(&mut scene, &gained2.0);
+        apply_focus_transition(&mut scene, &t2);
 
         // ── Step 3: NAVIGATE_PREV from Refresh → wraps back to Dismiss ─────────
         let t3 = fm.navigate_prev(tab_id, &scene);
@@ -4370,8 +4366,6 @@ mod tests {
             Some(dismiss_id),
             "third NAVIGATE_PREV must wrap back to Dismiss — tasks.md §9.2"
         );
-
-        let _ = (refresh_id, dismiss_id, tile_id); // used above
     }
 
     /// Task 9.3 — FocusGainedEvent and FocusLostEvent dispatched on focus transitions.
@@ -4412,7 +4406,7 @@ mod tests {
             t1.lost.is_none(),
             "no FocusLostEvent when transitioning from None — tasks.md §9.3"
         );
-        apply_focus_gained_to_scene(&mut scene, &gained1.0);
+        apply_focus_transition(&mut scene, &t1);
 
         // ── Step 2: Refresh → Dismiss: both lost and gained events ─────────────
         let t2 = fm.navigate_next(tab_id, &scene);
@@ -4436,8 +4430,6 @@ mod tests {
             Some(dismiss_id),
             "FocusGainedEvent.node_id must be dismiss_id — tasks.md §9.3"
         );
-
-        let _ = (refresh_id, dismiss_id, tile_id);
     }
 
     // ── Focus cycling helper utilities ────────────────────────────────────────
@@ -4478,24 +4470,37 @@ mod tests {
         )
     }
 
-    /// Apply a FocusGainedEvent's `focused=true` state to the corresponding
-    /// `HitRegionLocalState` in the scene graph.
+    /// Apply a `FocusTransition`'s gained and lost states to the corresponding
+    /// `HitRegionLocalState`s in the scene graph.
     ///
     /// `FocusManager::navigate_next/prev` does not directly mutate the scene's
     /// `hit_region_states`; that update is the caller's responsibility.  This
     /// helper performs the update so subsequent test assertions on
     /// `hit_region_states` are accurate.
-    fn apply_focus_gained_to_scene(
+    ///
+    /// Both `lost` and `gained` are applied so the scene never has more than one
+    /// focused node per tab (preserving the `check_at_most_one_focused_node_per_tab`
+    /// invariant).
+    fn apply_focus_transition(
         scene: &mut tze_hud_scene::graph::SceneGraph,
-        gained: &tze_hud_input::focus::FocusGainedEvent,
+        transition: &tze_hud_input::focus::FocusTransition,
     ) {
         use tze_hud_scene::types::HitRegionLocalState;
-        if let Some(node_id) = gained.node_id {
-            let state = scene
-                .hit_region_states
-                .entry(node_id)
-                .or_insert_with(|| HitRegionLocalState::new(node_id));
-            state.focused = true;
+        if let Some((lost, _)) = &transition.lost {
+            if let Some(node_id) = lost.node_id {
+                if let Some(state) = scene.hit_region_states.get_mut(&node_id) {
+                    state.focused = false;
+                }
+            }
+        }
+        if let Some((gained, _)) = &transition.gained {
+            if let Some(node_id) = gained.node_id {
+                let state = scene
+                    .hit_region_states
+                    .entry(node_id)
+                    .or_insert_with(|| HitRegionLocalState::new(node_id));
+                state.focused = true;
+            }
         }
     }
 
@@ -4518,9 +4523,8 @@ mod tests {
         use tze_hud_scene::lease::{RenewalPolicy, TtlCheck, TtlState};
 
         let ttl_ms = 60_000u64;
-        let clock = SimulatedClock::new(0); // start at t=0 (ms)
-        let mut ttl =
-            TtlState::new_activated(ttl_ms, RenewalPolicy::AutoRenew, clock.clone());
+        let clock = SimulatedClock::new(0); // start at t=0 us
+        let mut ttl = TtlState::new_activated(ttl_ms, RenewalPolicy::AutoRenew, clock.clone());
 
         // Before 75%: poll returns Ok.
         clock.advance_us(44_999 * 1_000); // 44 999 ms
@@ -4562,18 +4566,14 @@ mod tests {
     ///   - Tile's `visual_hint` MUST be `DisconnectionBadge`.
     #[test]
     fn test_disconnect_transitions_lease_to_orphaned_and_sets_badge() {
+        use tze_hud_scene::Capability;
         use tze_hud_scene::lease::TileVisualHint;
         use tze_hud_scene::types::LeaseState;
-        use tze_hud_scene::Capability;
 
         let (mut scene, tile_id) = build_dashboard_scene();
 
         // Find the lease_id through the tile.
-        let lease_id = scene
-            .tiles
-            .get(&tile_id)
-            .expect("tile must exist")
-            .lease_id;
+        let lease_id = scene.tiles.get(&tile_id).expect("tile must exist").lease_id;
 
         // Simulate agent disconnect.
         let now_ms = 1_000u64;
@@ -4617,11 +4617,7 @@ mod tests {
         use tze_hud_scene::types::LeaseState;
 
         let (mut scene, tile_id) = build_dashboard_scene();
-        let lease_id = scene
-            .tiles
-            .get(&tile_id)
-            .expect("tile must exist")
-            .lease_id;
+        let lease_id = scene.tiles.get(&tile_id).expect("tile must exist").lease_id;
 
         let disconnect_ms = 1_000u64;
         scene
@@ -4672,8 +4668,7 @@ mod tests {
         use tze_hud_scene::{Capability, Rect};
 
         let clock = SimulatedClock::new(1_000 * 1_000); // start at 1 s in µs
-        let mut scene =
-            SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
 
         let tab_id = scene.create_tab("Test", 0).expect("create_tab");
         scene.active_tab = Some(tab_id);
@@ -4716,7 +4711,10 @@ mod tests {
         );
 
         // Lease state must be Expired.
-        let lease = scene.leases.get(&lease_id).expect("lease must still exist in map");
+        let lease = scene
+            .leases
+            .get(&lease_id)
+            .expect("lease must still exist in map");
         assert_eq!(
             lease.state,
             LeaseState::Expired,
@@ -4749,11 +4747,7 @@ mod tests {
         use tze_hud_scene::types::LeaseState;
 
         let (mut scene, tile_id) = build_dashboard_scene();
-        let lease_id = scene
-            .tiles
-            .get(&tile_id)
-            .expect("tile must exist")
-            .lease_id;
+        let lease_id = scene.tiles.get(&tile_id).expect("tile must exist").lease_id;
 
         // Simulate LeaseRelease (runtime revokes the lease on explicit agent release).
         scene
@@ -4767,7 +4761,10 @@ mod tests {
         );
 
         // Lease must be in a terminal state.
-        let lease = scene.leases.get(&lease_id).expect("lease must remain in map");
+        let lease = scene
+            .leases
+            .get(&lease_id)
+            .expect("lease must remain in map");
         assert!(
             lease.state.is_terminal(),
             "lease must be in terminal state after LeaseRelease — tasks.md §10.5; state={:?}",
@@ -4788,7 +4785,7 @@ mod tests {
     /// Spec §Requirement: Namespace Isolation: "agent B MUST NOT modify or delete
     ///   tiles belonging to agent A's namespace".
     /// tasks.md §11.1: a second agent session cannot mutate or delete the dashboard
-    ///   tile (rejected with CapabilityMissing or LeaseNotFound / NamespaceMismatch).
+    ///   tile (rejected with NamespaceMismatch — namespace check is first in validation order).
     ///
     /// Layer 0 test:
     ///   - Build the dashboard scene (tile owned by "test-agent").
@@ -4797,7 +4794,6 @@ mod tests {
     ///       b. `delete_tile`            → must fail with NamespaceMismatch.
     #[test]
     fn test_second_agent_cannot_mutate_or_delete_dashboard_tile() {
-        use tze_hud_scene::graph::SceneGraph;
         use tze_hud_scene::types::{Node, NodeData, Rect, SolidColorNode};
         use tze_hud_scene::{Rgba, SceneId, ValidationError};
 
@@ -4814,8 +4810,7 @@ mod tests {
             }),
         };
 
-        let result_set_root =
-            scene.set_tile_root_checked(tile_id, intruder_node, intruder);
+        let result_set_root = scene.set_tile_root_checked(tile_id, intruder_node, intruder);
         assert!(
             result_set_root.is_err(),
             "set_tile_root_checked by intruder must fail — tasks.md §11.1"
@@ -4835,9 +4830,7 @@ mod tests {
         );
         match result_delete.unwrap_err() {
             ValidationError::NamespaceMismatch { .. } => { /* expected */ }
-            other => panic!(
-                "delete_tile intruder error must be NamespaceMismatch, got: {other:?}"
-            ),
+            other => panic!("delete_tile intruder error must be NamespaceMismatch, got: {other:?}"),
         }
 
         // Tile must still exist (intruder's attempts were rejected).
@@ -4845,8 +4838,6 @@ mod tests {
             scene.tiles.contains_key(&tile_id),
             "tile must still exist after rejected intruder mutations — tasks.md §11.1"
         );
-
-        let _: &SceneGraph = &scene; // used above
     }
 
     /// Task 11.2 — the dashboard agent cannot mutate tiles owned by another namespace.
@@ -4896,8 +4887,7 @@ mod tests {
                 bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
             }),
         };
-        let r_set_root =
-            scene.set_tile_root_checked(other_tile_id, node_a, dashboard_ns);
+        let r_set_root = scene.set_tile_root_checked(other_tile_id, node_a, dashboard_ns);
         assert!(
             r_set_root.is_err(),
             "dashboard agent set_tile_root_checked on other tile must fail — tasks.md §11.2"
@@ -4932,8 +4922,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let r_add_node =
-            scene.add_node_to_tile_checked(other_tile_id, None, node_b, dashboard_ns);
+        let r_add_node = scene.add_node_to_tile_checked(other_tile_id, None, node_b, dashboard_ns);
         assert!(
             r_add_node.is_err(),
             "dashboard agent add_node_to_tile_checked on other tile must fail — tasks.md §11.2"
