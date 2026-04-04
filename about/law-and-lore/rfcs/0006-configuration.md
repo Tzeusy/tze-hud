@@ -519,6 +519,8 @@ This mode is appropriate for:
 | Pre-shared key | `--psk` | `TZE_HUD_PSK` | `tze-hud-key` |
 | Target FPS | `--fps` | `TZE_HUD_FPS` | `60` |
 
+> **Note on MCP port vs `mcp_bind`:** The `--mcp-port` CLI flag (default `9090`) controls the listen port for the app binary. The config file schema (§2.2) exposes a `mcp_bind` field with a full socket address (default `127.0.0.1:50052`). These are distinct: the CLI flag is port-only and binds to `0.0.0.0`; the config file field sets both address and port and is not yet wired to the app binary (v1 implementation uses CLI/env-var only).
+
 Without a config file, the runtime has no agent registrations, no pre-defined tabs, and no zone policies. The first agent to connect via gRPC or MCP can create tabs and publish content using the dynamic agent policy (§6.4).
 
 **Important:** The PSK default (`tze-hud-key`) is intentionally trivial. Production deployments MUST provide a strong PSK via `--psk` or `TZE_HUD_PSK`. See §6.5.

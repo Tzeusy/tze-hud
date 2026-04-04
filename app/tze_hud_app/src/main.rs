@@ -105,7 +105,7 @@ NOTES:
     the runtime starts with flag/env-var defaults (RFC 0006 §1.5). The config
     file (when present) provides the agent capability policy and tab layout.
     CLI flags override individual settings from the config file.
-    Passing --config with a path that does not exist is an error.
+    Passing --config with a path that does not exist or cannot be read is an error.
 "#,
     );
 }
@@ -375,7 +375,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(searched) => {
-                // No config file found — run with flag/env-var defaults.
+                // No config file found at any location.
+                if opts.config_path.is_some() {
+                    // --config was given explicitly but the file was not found.
+                    // This is a hard error (RFC 0006 §1.3).
+                    eprintln!(
+                        "error: config file not found: {}",
+                        searched.first().map(String::as_str).unwrap_or("(unknown path)")
+                    );
+                    std::process::exit(1);
+                }
                 // Config files are optional (RFC 0006 §1.5): the runtime starts
                 // successfully using flag/env-var defaults when no file is present.
                 tracing::debug!(
