@@ -305,12 +305,26 @@ async fn production_config_denies_unregistered_agent() {
     }
 }
 
+/// Return the text content of a TOML section (from after the `[section]` header
+/// to the start of the next section header or end of file).
+fn toml_section_contents<'a>(toml: &'a str, section_name: &str) -> Option<&'a str> {
+    let header = format!("[{section_name}]");
+    let start = toml.find(&header)?;
+    let after_header = &toml[start + header.len()..];
+    let section_end = after_header
+        .find("\n[")
+        .map(|idx| start + header.len() + idx)
+        .unwrap_or(toml.len());
+    Some(&toml[start + header.len()..section_end])
+}
+
 /// Verify that the production config declares the exemplar-subtitle and
 /// exemplar-alert-banner component profiles in [component_profiles].
 ///
 /// This test inspects the embedded TOML source directly (no TOML parser needed)
-/// and asserts that both profile declarations are present.  This is intentionally
-/// simple — if the TOML is malformed the other tests in this file would fail first.
+/// and asserts that both profile declarations are present inside the
+/// [component_profiles] section.  This is intentionally simple — if the TOML is
+/// malformed the other tests in this file would fail first.
 ///
 /// Why: hud-hzub (subtitle) and hud-w3o6 (alert-banner) both identified a P3 gap
 /// where the exemplar profiles were not wired into the production config.  This
@@ -318,25 +332,28 @@ async fn production_config_denies_unregistered_agent() {
 #[test]
 fn production_config_declares_exemplar_component_profiles() {
     assert!(
-        PRODUCTION_CONFIG.contains(r#"subtitle"#)
-            && PRODUCTION_CONFIG.contains(r#"exemplar-subtitle"#),
-        "production.toml must declare subtitle = \"exemplar-subtitle\" in [component_profiles]"
-    );
-
-    assert!(
-        PRODUCTION_CONFIG.contains(r#"alert-banner"#)
-            && PRODUCTION_CONFIG.contains(r#"exemplar-alert-banner"#),
-        "production.toml must declare alert-banner = \"exemplar-alert-banner\" in [component_profiles]"
-    );
-
-    assert!(
         PRODUCTION_CONFIG.contains("[component_profile_bundles]"),
         "production.toml must contain a [component_profile_bundles] section"
     );
 
+    let component_profiles = toml_section_contents(PRODUCTION_CONFIG, "component_profiles")
+        .expect("production.toml must contain a [component_profiles] section");
+
+    // Check that each key maps to the expected profile name within the section.
+    // We look for lines containing both the key and the value rather than an exact
+    // whitespace-sensitive match so the assertion is robust to TOML formatting changes.
     assert!(
-        PRODUCTION_CONFIG.contains("[component_profiles]"),
-        "production.toml must contain a [component_profiles] section"
+        component_profiles
+            .lines()
+            .any(|l| l.contains("subtitle") && l.contains("exemplar-subtitle") && !l.trim_start().starts_with('#')),
+        "production.toml must declare subtitle = \"exemplar-subtitle\" in [component_profiles]"
+    );
+
+    assert!(
+        component_profiles
+            .lines()
+            .any(|l| l.contains("alert-banner") && l.contains("exemplar-alert-banner") && !l.trim_start().starts_with('#')),
+        "production.toml must declare alert-banner = \"exemplar-alert-banner\" in [component_profiles]"
     );
 
     println!("PASS: production.toml declares exemplar-subtitle and exemplar-alert-banner profiles");
@@ -363,8 +380,14 @@ async fn production_config_exemplar_profiles_load_with_resolved_paths() {
     let abs_path = profiles_dir
         .canonicalize()
         .expect("profiles dir must be canonicalisable");
-    // Escape backslashes (Windows paths) for TOML string literals.
-    let abs_path_str = abs_path.to_string_lossy().replace('\\', "/");
+    // Escape backslashes and double-quotes for a TOML basic string literal.
+    // On Windows, canonicalize() returns UNC paths (\\?\C:\...) where replacing
+    // backslashes with forward-slashes produces an invalid //? prefix.
+    // Escaping preserves the path structure and produces valid TOML on all platforms.
+    let abs_path_str = abs_path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
 
     // Build a minimal config with the absolute profiles path wired in.
     let config_toml = format!(
