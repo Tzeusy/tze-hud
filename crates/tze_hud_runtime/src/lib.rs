@@ -9,17 +9,21 @@
 //!
 //! | Authority | Crate | Role |
 //! |-----------|-------|------|
-//! | Policy arbitration | `tze_hud_policy` | Pure read-only evaluator; no side effects |
+//! | Policy arbitration | `tze_hud_policy` | Pure read-only evaluator; **not wired in v1** |
 //! | Resource accounting | `tze_hud_resource` | Decoded-byte budget registry; GC; dedup |
 //! | Budget enforcement | `tze_hud_runtime::budget` | Enforcement ladder (Warning/Throttle/Revoke) |
 //! | Attention budgets | `tze_hud_runtime::attention_budget` | Stateful event-pipeline tracker |
 //! | Override state | `tze_hud_runtime::shell::SafeModeController` | Sole writer of freeze/safe-mode flags |
 //! | Scene orchestration | `tze_hud_runtime` (this crate) | Wires authority modules; drives pipeline |
 //!
-//! **The runtime builds `PolicyContext` snapshots and passes them to `tze_hud_policy`
-//! for evaluation. It then executes the resulting `ArbitrationOutcome`. Policy
-//! evaluation and execution are always kept separate — no policy decisions are
-//! embedded directly in the frame pipeline.**
+//! **Budget enforcement is self-contained in `tze_hud_runtime::budget`. The
+//! `BudgetEnforcer` owns the per-agent enforcement state machine
+//! (`Normal` → `Warning` → `Throttled` → `Revoked`), the enforcement ladder tick, the
+//! frame-time guardian, and the per-mutation admission gate. `tze_hud_policy`
+//! is a standalone reference design (pure evaluator, no side effects) and is
+//! NOT wired into the runtime for v1. No policy decisions flow through
+//! `PolicyContext` or `ArbitrationOutcome` at runtime — all enforcement
+//! decisions originate from `budget.rs` and `attention_budget/`.**
 //!
 //! See `budget.rs`, `attention_budget/`, and `shell/safe_mode.rs` for boundary
 //! doc comments in each authority module.
