@@ -23,8 +23,10 @@ runtime app binary, MCP stress testing, input capture, and resource ref-count tr
 
 **Open P1 gaps:**
 - ClearWidgetMutation not wired (hud-jliz)
-- Widget TTL expiry not enforced (hud-2c5g)
 - Config contract app/spec alignment decision needed (hud-gxny)
+
+**Closed P1 gaps (post gen-5):**
+- Widget TTL expiry not enforced (hud-2c5g) — CLOSED: `drain_expired_widget_publications()` was already implemented in commit `9eeb28a` (2026-03-30); gen-5 incorrectly assessed as open
 
 **Coverage (estimated):**
 
