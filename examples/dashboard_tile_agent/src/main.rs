@@ -4964,7 +4964,8 @@ mod tests {
 
         // Agent releases lease → tile removed from scene.
         {
-            let lease_id_arr: [u8; 16] = tile_state.lease_id.as_slice().try_into().expect("16 bytes");
+            let lease_id_arr: [u8; 16] =
+                tile_state.lease_id.as_slice().try_into().expect("16 bytes");
             let lease_uuid = uuid::Uuid::from_bytes(lease_id_arr);
             let lease_scene_id = tze_hud_scene::SceneId::from_uuid(lease_uuid);
 
@@ -4987,7 +4988,10 @@ mod tests {
             );
 
             // Lease must be in terminal state.
-            let lease = scene.leases.get(&lease_scene_id).expect("lease must remain in map");
+            let lease = scene
+                .leases
+                .get(&lease_scene_id)
+                .expect("lease must remain in map");
             assert!(
                 lease.state.is_terminal(),
                 "lease must be in terminal state after release — §12.1 step 7; state={:?}",
@@ -5046,12 +5050,7 @@ mod tests {
                 tab_id,
                 "disconnect-lifecycle-agent",
                 lease_id,
-                Rect::new(
-                    crate::TILE_X,
-                    crate::TILE_Y,
-                    crate::TILE_W,
-                    crate::TILE_H,
-                ),
+                Rect::new(crate::TILE_X, crate::TILE_Y, crate::TILE_W, crate::TILE_H),
                 crate::TILE_Z_ORDER,
             )
             .expect("create_tile — §12.2");
@@ -5090,7 +5089,10 @@ mod tests {
             );
         }
         {
-            let tile = scene.tiles.get(&tile_id).expect("tile must exist during orphan phase");
+            let tile = scene
+                .tiles
+                .get(&tile_id)
+                .expect("tile must exist during orphan phase");
             assert_eq!(
                 tile.visual_hint,
                 TileVisualHint::DisconnectionBadge,
@@ -5114,7 +5116,10 @@ mod tests {
 
         // Lease state must be Expired.
         {
-            let lease = scene.leases.get(&lease_id).expect("lease must remain in map");
+            let lease = scene
+                .leases
+                .get(&lease_id)
+                .expect("lease must remain in map");
             assert_eq!(
                 lease.state,
                 LeaseState::Expired,
