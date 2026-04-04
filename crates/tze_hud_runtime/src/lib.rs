@@ -9,7 +9,7 @@
 //!
 //! | Authority | Crate | Role |
 //! |-----------|-------|------|
-//! | Policy arbitration | `tze_hud_policy` | Pure read-only evaluator; no side effects |
+//! | Policy arbitration | `tze_hud_policy` | Pure read-only evaluator; **not wired in v1** |
 //! | Resource accounting | `tze_hud_resource` | Decoded-byte budget registry; GC; dedup |
 //! | Budget enforcement | `tze_hud_runtime::budget` | Enforcement ladder (Warning/Throttle/Revoke) |
 //! | Attention budgets | `tze_hud_runtime::attention_budget` | Stateful event-pipeline tracker |
