@@ -375,9 +375,11 @@ The runtime looks for configuration in the following order (first found wins):
 
 **Config file is optional.** When no config file is found in any of the above locations, the runtime starts with the flag/env-var defaults documented in §1.5. This is useful for quick-start, CI pipelines, and scripted invocations where all required settings are supplied via command-line flags or environment variables.
 
-**Explicit `--config` path is an error if missing.** When a path is given via the `--config` flag or `$TZE_HUD_CONFIG` environment variable and the file does not exist or cannot be read, the runtime refuses to start with an error listing the missing path.
+**Explicit `--config` path is an error if missing or unreadable.** When a path is given via the `--config` CLI flag and the file does not exist or cannot be read, the runtime refuses to start with an error listing the missing path.
 
-**Auto-resolved path read failure is a warning, not a fatal error.** If the runtime finds a file at an auto-resolved location (paths 3–5) but cannot read it (e.g., permissions error), it logs a warning and continues with defaults. Explicitly-provided paths (via `--config` flag) remain hard errors.
+**`$TZE_HUD_CONFIG` is treated as an auto-resolved location, not a hard error.** If `$TZE_HUD_CONFIG` is set but the file does not exist at that path, the runtime falls through to the remaining auto-resolved locations (paths 3–5) rather than aborting. This matches paths 2–5 semantics: the runtime tries each in order and starts with defaults if none are found.
+
+**Auto-resolved path read failure is a warning, not a fatal error.** If the runtime finds a file at an auto-resolved location (paths 2–5) but cannot read it (e.g., permissions error), it logs a warning and continues with defaults. Only explicitly-provided paths (via `--config` flag) are hard errors.
 
 A minimal valid config file (using all defaults) is:
 

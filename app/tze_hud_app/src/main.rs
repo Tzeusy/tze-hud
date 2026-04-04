@@ -37,11 +37,12 @@
 //! 4. `$XDG_CONFIG_HOME/tze_hud/config.toml` (Linux/macOS)
 //! 5. `%APPDATA%\tze_hud\config.toml` (Windows)
 //!
-//! **Config file is optional.** If no config file is found at any auto-resolved
-//! location the runtime starts with flag/env-var defaults (RFC 0006 §1.5).
-//! Passing `--config` with a path that does not exist is a hard error.
-//! An auto-resolved path that exists but cannot be read produces a warning and
-//! falls back to defaults.
+//! **Config file is optional.** If no config file is found at any location
+//! the runtime starts with flag/env-var defaults (RFC 0006 §1.5).
+//! Passing `--config` with a path that does not exist or cannot be read is a
+//! hard error. `$TZE_HUD_CONFIG` and auto-resolved paths (3–5) fall through to
+//! the next location when not found; a found-but-unreadable file at those
+//! locations logs a warning and falls back to defaults.
 //!
 //! ## Examples
 //!
