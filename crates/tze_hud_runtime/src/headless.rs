@@ -252,7 +252,9 @@ impl HeadlessRuntime {
         //
         // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
         let mut scene = SceneGraph::new(config.width as f32, config.height as f32);
-        let compositor_token_map: std::collections::HashMap<String, String> = if let Some(toml_str) =
+        let compositor_token_map: std::collections::HashMap<String, String> = if let Some(
+            toml_str,
+        ) =
             &config.config_toml
         {
             match toml::from_str::<tze_hud_config::raw::RawConfig>(toml_str) {
