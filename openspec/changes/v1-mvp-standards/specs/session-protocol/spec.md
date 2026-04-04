@@ -68,7 +68,7 @@ All tile_id/node_id fields in events.proto SHALL use raw 16-byte UUIDv7 (bytes),
 - `LeaseEvent` (string lease_id/namespace, `LeaseEventKind` enum, timestamp_wall_us)
 - `SceneEvent` (timestamp_wall_us, oneof of tile/input/lease events)
 
-This file exists solely because `session.proto` `SceneDelta` still references `LeaseEvent` from the legacy schema for backward compatibility. New agent code SHALL use the events.proto types exclusively. events_legacy.proto SHALL be removed when the SceneDelta migration is complete (post-v1).
+This file exists solely because `session.proto` `SceneDelta` still references the legacy tile and lease event types (`TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`, `LeaseEvent`) for backward compatibility. New agent code SHALL use the events.proto types exclusively. events_legacy.proto SHALL be removed when the SceneDelta migration is complete (post-v1).
 
 **`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, backpressure, input control, capability management, scene events, widget publishing, and runtime errors. SHALL import `types.proto`, `events.proto`, and `events_legacy.proto`. SHALL contain:
 - gRPC services: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`, and `RuntimeService` with `rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse)` for hot-reload (RFC 0006 §9)
@@ -88,7 +88,7 @@ This file exists solely because `session.proto` `SceneDelta` still references `L
 - Widget publishing: `WidgetPublish` (client-to-server), `WidgetPublishResult` (server-to-client)
 - Degradation: `DegradationNotice`
 - Runtime errors: `RuntimeError`
-- Event delivery: `EventBatch` (carries RFC 0004 InputEnvelope variants from `events.proto` on `ServerMessage` field 34)
+- Event delivery: `EventBatch` (defined in `events.proto`; imported into session.proto for use on `ServerMessage` field 34; carries RFC 0004 InputEnvelope variants)
 
 **Deleted — no new home:** The following MUST be removed from the v1 protobuf definitions and SHALL NOT be assigned to any of the four target files:
 - `SceneService` service definition (all unary RPCs: `Authenticate`, `AcquireLease`, `RenewLease`, `RevokeLease`, `ApplyMutations`, `QueryScene`, `QueryZoneRegistry`, `SubscribeEvents`)
@@ -143,7 +143,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: SessionInit Handshake
-The first message an agent sends on a new stream SHALL be SessionInit. It MUST arrive within handshake_timeout_ms (default: 5000ms) or the runtime SHALL close the stream with DEADLINE_EXCEEDED. SessionInit SHALL carry: agent_id, agent_display_name, min/max_protocol_version, auth_credential, requested_capabilities (from RFC 0006 §6.3), initial_subscriptions, presence_level, and agent_timestamp_wall_us (for clock sync per RFC 0003 §1.3).
+The first message an agent sends on a new stream SHALL be SessionInit. It MUST arrive within handshake_timeout_ms (default: 5000ms) or the runtime SHALL close the stream with DEADLINE_EXCEEDED. SessionInit SHALL carry: agent_id(1), agent_display_name(2), min_protocol_version(8)/max_protocol_version(9), auth_credential(13) (structured AuthCredential oneof; pre_shared_key(3) is the deprecated string fallback), requested_capabilities(4), initial_subscriptions(5), resume_token(6) (empty = new session; non-empty = resume attempt), and agent_timestamp_wall_us(7) (for clock sync per RFC 0003 §1.3). Note: presence_level is specified in RFC 0005 but is NOT present in the current proto; it is pending implementation.
 Source: RFC 0005 §1.2
 Scope: v1-mandatory
 
@@ -158,7 +158,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: SessionEstablished Response
-The runtime SHALL respond to a valid SessionInit with SessionEstablished containing: session_token (opaque, for resume), negotiated_protocol_version, granted_capabilities, heartbeat_interval_ms, namespace (agent's scene namespace per RFC 0001 §1.2), server_sequence (starting server-side sequence number), active_subscriptions (confirmed), denied_subscriptions (requested but denied due to missing capability), compositor_timestamp_wall_us, and estimated_skew_us.
+The runtime SHALL respond to a valid SessionInit with SessionEstablished containing: session_id (opaque UUIDv7 session identifier), resume_token (opaque token for future reconnect within grace period), negotiated_protocol_version, granted_capabilities, heartbeat_interval_ms, namespace (agent's scene namespace per RFC 0001 §1.2), server_sequence (starting server-side sequence number), active_subscriptions (confirmed), denied_subscriptions (requested but denied due to missing capability), compositor_timestamp_wall_us, and estimated_skew_us.
 Source: RFC 0005 §1.3
 Scope: v1-mandatory
 
@@ -370,7 +370,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: RuntimeError Structure
-All error responses SHALL follow the structured error model: error_code (string, canonical and stable), message (human-readable), context (invalid field/value), hint (machine-readable correction suggestion as JSON), and error_code_enum (typed enum for well-known codes). The well-known ErrorCode enum SHALL include: LEASE_EXPIRED, LEASE_NOT_FOUND, ZONE_TYPE_MISMATCH, ZONE_NOT_FOUND, BUDGET_EXCEEDED, MUTATION_REJECTED, PERMISSION_DENIED, RATE_LIMITED, INVALID_ARGUMENT, SESSION_EXPIRED, CLOCK_SKEW_HIGH, CLOCK_SKEW_EXCESSIVE, SAFE_MODE_ACTIVE, TIMESTAMP_TOO_OLD, TIMESTAMP_TOO_FUTURE, TIMESTAMP_EXPIRY_BEFORE_PRESENT, WIDGET_NOT_FOUND, WIDGET_PARAMETER_INVALID, WIDGET_PARAMETER_TYPE_MISMATCH, AGENT_EVENT_RATE_EXCEEDED, AGENT_EVENT_PAYLOAD_TOO_LARGE, AGENT_EVENT_CAPABILITY_MISSING, AGENT_EVENT_INVALID_NAME, AGENT_EVENT_RESERVED_PREFIX.
+All error responses SHALL follow the structured error model: error_code (string, canonical and stable), message (human-readable), context (invalid field/value), hint (machine-readable correction suggestion as JSON), and error_code_enum (typed enum for well-known codes). The well-known ErrorCode enum (defined in session.proto) SHALL include 21 named values: LEASE_EXPIRED(2), LEASE_NOT_FOUND(3), ZONE_TYPE_MISMATCH(4), ZONE_NOT_FOUND(5), BUDGET_EXCEEDED(6), MUTATION_REJECTED(7), PERMISSION_DENIED(8), RATE_LIMITED(9), INVALID_ARGUMENT(10), SESSION_EXPIRED(11), CLOCK_SKEW_HIGH(12), CLOCK_SKEW_EXCESSIVE(13), SAFE_MODE_ACTIVE(14), TIMESTAMP_TOO_OLD(15), TIMESTAMP_TOO_FUTURE(16), TIMESTAMP_EXPIRY_BEFORE_PRESENT(17), AGENT_EVENT_RATE_EXCEEDED(18), AGENT_EVENT_PAYLOAD_TOO_LARGE(19), AGENT_EVENT_CAPABILITY_MISSING(20), AGENT_EVENT_INVALID_NAME(21), AGENT_EVENT_RESERVED_PREFIX(22), plus ERROR_CODE_UNSPECIFIED(0) and ERROR_CODE_UNKNOWN(1) as sentinels. Note: widget-publish error codes (WIDGET_NOT_FOUND, WIDGET_UNKNOWN_PARAMETER, WIDGET_PARAMETER_TYPE_MISMATCH, WIDGET_PARAMETER_INVALID_VALUE, WIDGET_CAPABILITY_MISSING) are string-only codes carried in WidgetPublishResult.error_code and are NOT represented in the ErrorCode enum.
 Source: RFC 0005 §3.5, DR-SP5
 Scope: v1-mandatory
 
@@ -396,12 +396,12 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Session Token and Reconnection Grace Period
-On SessionEstablished, the runtime SHALL issue a session_token that is opaque, cryptographically random, single-use for resumption, bound to agent_id and namespace, and valid for the grace period duration (default: 30000ms from stream close). Tokens SHALL NOT be persisted across process restarts.
+On SessionEstablished, the runtime SHALL issue a resume_token (field 4) that is opaque, cryptographically random, single-use for resumption, bound to agent_id and namespace, and valid for the grace period duration (default: 30000ms from stream close). Tokens SHALL NOT be persisted across process restarts.
 Source: RFC 0005 §6.1
 Scope: v1-mandatory
 
 #### Scenario: Token validity within grace period
-- **WHEN** an agent disconnects and reconnects within 30 seconds with a valid session_token
+- **WHEN** an agent disconnects and reconnects within 30 seconds with a valid resume_token
 - **THEN** the token SHALL be accepted for session resumption
 
 #### Scenario: Token expired after grace period
@@ -411,7 +411,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: SessionResume Protocol
-When reconnecting within the grace period, the agent SHALL send SessionResume (not SessionInit) as the first message, carrying: agent_id, session_token, last_seen_server_sequence, and auth_credential (re-authentication required even on resume). SessionResume fields 9-10 in SessionInit are reserved and SHALL NOT be used for resume.
+When reconnecting within the grace period, the agent SHALL send SessionResume (not SessionInit) as the first message, carrying: agent_id(1), resume_token(2), last_seen_server_sequence(3), and auth_credential(5) (re-authentication required even on resume; pre_shared_key(4) is the deprecated fallback). SessionResume does not carry min/max_protocol_version; those fields are in SessionInit only.
 Source: RFC 0005 §6.2
 Scope: v1-mandatory
 
@@ -432,7 +432,7 @@ Scope: v1-mandatory
 
 #### Scenario: Successful resume
 - **WHEN** an agent sends SessionResume with a valid token within the grace period
-- **THEN** the runtime SHALL respond with SessionResumeResult(accepted=true) including a new session_token and the current subscription state
+- **THEN** the runtime SHALL respond with SessionResumeResult(accepted=true) including a new_session_token and the current subscription state
 
 ---
 
@@ -448,7 +448,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Post-Grace-Period Reconnect
-If the grace period expires before the agent reconnects, the runtime SHALL have evicted the agent's leases and cleared its tiles. The session_token SHALL be invalid. The agent MUST perform a full re-handshake via SessionInit. After SessionEstablished, the runtime SHALL send a SceneSnapshot.
+If the grace period expires before the agent reconnects, the runtime SHALL have evicted the agent's leases and cleared its tiles. The resume_token SHALL be invalid. The agent MUST perform a full re-handshake via SessionInit. After SessionEstablished, the runtime SHALL send a SceneSnapshot.
 Source: RFC 0005 §6.5
 Scope: v1-mandatory
 
@@ -464,7 +464,7 @@ Source: RFC 0005 §6.6
 Scope: v1-mandatory
 
 #### Scenario: Agent reconnects after runtime restart
-- **WHEN** the runtime process restarts and an agent attempts to resume with an old session_token
+- **WHEN** the runtime process restarts and an agent attempts to resume with an old resume_token
 - **THEN** the token SHALL be rejected and the agent MUST perform a full SessionInit handshake
 
 ---
@@ -485,7 +485,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Mid-Session Subscription Change
-Agents SHALL be able to add or remove subscriptions mid-session via SubscriptionChange (add/remove lists of SubscriptionCategory). The runtime SHALL acknowledge with SubscriptionChangeResult (echoing full active set and denied additions). The new subscription set SHALL take effect immediately after the ack is sent. SubscriptionChangeResult SHALL NOT reuse MutationResult.
+Agents SHALL be able to add or remove subscriptions mid-session via SubscriptionChange. SubscriptionChange SHALL carry: `subscribe` (repeated string category names to add with default prefix), `unsubscribe` (repeated string category names to remove), and `subscribe_filter` (repeated SubscriptionEntry, each pairing a category with an optional `filter_prefix` for finer-grained filtering, e.g., "scene.zone." within SCENE_TOPOLOGY). The runtime SHALL acknowledge with SubscriptionChangeResult (echoing full active set and denied additions). The new subscription set SHALL take effect immediately after the ack is sent. SubscriptionChangeResult SHALL NOT reuse MutationResult.
 Source: RFC 0005 §7.3
 Scope: v1-mandatory
 
@@ -649,19 +649,19 @@ Scope: v1-mandatory
 
 ---
 
-### Requirement: TelemetryFrame Delivery
-The runtime SHALL send TelemetryFrame messages to sessions subscribed to TELEMETRY_FRAMES (requires read_telemetry capability). TelemetryFrame SHALL include: sample_timestamp_wall_us, compositor_frame_rate, compositor_frame_budget_us, compositor_frame_time_us, active_sessions, active_leases, heap_used_bytes, and gpu_utilization_pct. TelemetryFrame SHALL be state-stream traffic class (coalesced under backpressure, latest-wins).
+### Requirement: TelemetryFrame (Client-Side) and RuntimeTelemetryFrame (Server-Side)
+Two distinct telemetry message types exist in the protocol. TelemetryFrame (ClientMessage field 26) is agent-side metrics pushed from client to server: sample_timestamp_wall_us, mutations_sent, mutations_acked, rtt_estimate_us. RuntimeTelemetryFrame (ServerMessage field 36) is compositor telemetry sent from runtime to agent, delivered to sessions subscribed to TELEMETRY_FRAMES (requires read_telemetry capability): sample_timestamp_wall_us, compositor_frame_rate, compositor_frame_budget_us, compositor_frame_time_us, active_sessions, active_leases, heap_used_bytes, gpu_utilization_pct. RuntimeTelemetryFrame SHALL be state-stream traffic class (coalesced under backpressure, latest-wins).
 Source: RFC 0005 §9, §3.2
 Scope: v1-mandatory
 
-#### Scenario: Telemetry delivered to subscribed agent
+#### Scenario: Runtime telemetry delivered to subscribed agent
 - **WHEN** an agent has the read_telemetry capability and is subscribed to TELEMETRY_FRAMES
-- **THEN** the runtime SHALL periodically deliver TelemetryFrame messages with compositor performance data
+- **THEN** the runtime SHALL periodically deliver RuntimeTelemetryFrame (ServerMessage field 36) with compositor performance data
 
 ---
 
 ### Requirement: SceneId for Scene-Object Identifiers
-All scene-object identifiers (batch_id, lease_id, created_ids in MutationBatch/MutationResult) SHALL use SceneId (16-byte little-endian UUIDv7, defined in types.proto). Session-level identifiers (agent_id, session_token, namespace) SHALL remain string.
+All scene-object identifiers (batch_id, lease_id, created_ids in MutationBatch/MutationResult) SHALL use SceneId (16-byte little-endian UUIDv7, defined in types.proto). Session-level string identifiers (agent_id, namespace) SHALL remain string; session_id and resume_token use bytes (UUIDv7 and opaque bytes respectively).
 Source: RFC 0005 §3.3, §9.1
 Scope: v1-mandatory
 
@@ -716,7 +716,7 @@ Scope: post-v1
 ---
 
 ### Requirement: Widget Publishing via Session Stream
-WidgetPublish (ClientMessage field 35) SHALL carry widget_name, instance_id, params (repeated WidgetParameterValueProto), transition_ms, ttl_us, and merge_key. Durable widget publishes SHALL be transactional and receive WidgetPublishResult (ServerMessage field 47) acknowledgement containing accepted flag, widget_name, error_code, and error_message. Ephemeral widget publishes SHALL be fire-and-forget (no WidgetPublishResult sent). Publishing to an unknown widget type SHALL be rejected with WIDGET_NOT_FOUND. Invalid parameter types SHALL be rejected with WIDGET_PARAMETER_TYPE_MISMATCH. Out-of-range parameter values SHALL be rejected with WIDGET_PARAMETER_INVALID.
+WidgetPublish (ClientMessage field 35) SHALL carry widget_name, instance_id, params (repeated WidgetParameterValueProto), transition_ms, ttl_us, and merge_key. Durable widget publishes SHALL be transactional and receive WidgetPublishResult (ServerMessage field 47) acknowledgement containing accepted flag, widget_name, error_code, and error_message. Ephemeral widget publishes SHALL be fire-and-forget (no WidgetPublishResult sent). WidgetPublishResult error codes are string-only (NOT in the ErrorCode enum): WIDGET_NOT_FOUND (unknown widget instance), WIDGET_UNKNOWN_PARAMETER (parameter name not in widget schema), WIDGET_PARAMETER_TYPE_MISMATCH (parameter value type mismatch), WIDGET_PARAMETER_INVALID_VALUE (out-of-range or constraint violation), WIDGET_CAPABILITY_MISSING (publish_widget:<name> capability not granted).
 Source: Widget System delta spec §session-protocol
 Scope: v1-mandatory
 
@@ -731,7 +731,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Scene Event Emission via Session Stream
-EmitSceneEvent (ClientMessage field 33) SHALL carry bare_name (validated against `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`), payload (bytes, max 4096 bytes), and interruption_class_hint. EmitSceneEventResult (ServerMessage field 45) SHALL carry request_sequence, accepted flag, delivered_event_type, error_code, and error_message. Emission requires the `emit_scene_event:<event_name>` or `emit_scene_event:*` capability. Events with the `system.` or `scene.` prefix SHALL be rejected with AGENT_EVENT_RESERVED_PREFIX. Rate-limited agents SHALL receive AGENT_EVENT_RATE_EXCEEDED. Oversized payloads SHALL receive AGENT_EVENT_PAYLOAD_TOO_LARGE.
+EmitSceneEvent (ClientMessage field 33) SHALL carry bare_name (validated against `[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+`, i.e., at least two dot-separated lowercase segments, each starting with a letter), payload (bytes, max 4096 bytes), and interruption_class_hint. EmitSceneEventResult (ServerMessage field 45) SHALL carry request_sequence, accepted flag, delivered_event_type, error_code, and error_message. Emission requires the `emit_scene_event:<event_name>` or `emit_scene_event:*` capability. Events with the `system.` or `scene.` prefix SHALL be rejected with AGENT_EVENT_RESERVED_PREFIX. Rate-limited agents SHALL receive AGENT_EVENT_RATE_EXCEEDED. Oversized payloads SHALL receive AGENT_EVENT_PAYLOAD_TOO_LARGE.
 Source: RFC 0010 §1.2, §7.2
 Scope: v1-mandatory
 
