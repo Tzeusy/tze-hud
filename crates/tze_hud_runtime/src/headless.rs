@@ -252,7 +252,7 @@ impl HeadlessRuntime {
         //
         // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
         let mut scene = SceneGraph::new(config.width as f32, config.height as f32);
-        let global_tokens: std::collections::HashMap<String, String> = if let Some(toml_str) =
+        let compositor_token_map: std::collections::HashMap<String, String> = if let Some(toml_str) =
             &config.config_toml
         {
             match toml::from_str::<tze_hud_config::raw::RawConfig>(toml_str) {
@@ -297,9 +297,9 @@ impl HeadlessRuntime {
             std::collections::HashMap::new()
         };
 
-        // Apply resolved design tokens to the compositor so severity colors and
-        // other token-driven properties are resolved at render time.
-        compositor.set_token_map(global_tokens);
+        // Apply resolved design tokens (global + all active profile overrides) to the
+        // compositor so token-driven properties are resolved at render time.
+        compositor.set_token_map(compositor_token_map);
         tracing::debug!("headless: compositor token map applied");
 
         let scene = Arc::new(Mutex::new(scene));

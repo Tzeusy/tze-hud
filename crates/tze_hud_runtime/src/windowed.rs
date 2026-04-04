@@ -279,7 +279,8 @@ struct WindowedRuntimeState {
     modifiers: winit::keyboard::ModifiersState,
     /// Current monitor index for Ctrl+Shift+F8/F9 cycling.
     current_monitor_index: usize,
-    /// Resolved design token map from component startup.
+    /// Pre-merged compositor token map from component startup (global tokens +
+    /// all active profile overrides).
     ///
     /// Stashed here after `run_component_startup` returns so it can be applied
     /// to the compositor via `set_token_map` when the compositor is created in
@@ -1151,7 +1152,7 @@ impl WindowedRuntime {
             .and_then(|toml| toml::from_str(toml).ok());
 
         let mut pending_widget_svgs: Vec<crate::widget_startup::WidgetSvgAsset> = Vec::new();
-        let (shared_scene, global_tokens_for_compositor) = {
+        let (shared_scene, startup_compositor_tokens) = {
             let mut scene = SceneGraph::new(width, height);
 
             // Resolve config file parent directory for path resolution.
@@ -1166,7 +1167,7 @@ impl WindowedRuntime {
             // validation, zone registry construction, and widget registry population.
             //
             // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
-            let startup_global_tokens = if let Some(raw) = &raw_config_for_startup {
+            let compositor_tokens = if let Some(raw) = &raw_config_for_startup {
                 let startup_result = run_component_startup(
                     raw,
                     config_parent_buf.as_deref(),
@@ -1205,7 +1206,7 @@ impl WindowedRuntime {
                     }
                 }
             }
-            (Arc::new(Mutex::new(scene)), startup_global_tokens)
+            (Arc::new(Mutex::new(scene)), compositor_tokens)
         };
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
         let shared_state = Arc::new(Mutex::new(SharedState {
@@ -1337,7 +1338,7 @@ impl WindowedRuntime {
             pending_widget_svgs,
             modifiers: winit::keyboard::ModifiersState::empty(),
             current_monitor_index: 0,
-            global_tokens: global_tokens_for_compositor,
+            global_tokens: startup_compositor_tokens,
         };
 
         let mut app = WinitApp { state: app_state };

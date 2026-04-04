@@ -358,6 +358,23 @@ pub fn run_component_startup(
                 profile.name
             );
             for (k, v) in &profile.token_overrides {
+                if let Some(existing) = compositor_tokens.get(k) {
+                    if existing != v {
+                        tracing::warn!(
+                            token = %k,
+                            profile = %profile.name,
+                            component = ?component_type,
+                            "component_startup: token '{}' overridden by {:?} profile '{}' \
+                             conflicts with a previously merged value ('{}' → '{}'); \
+                             last-write wins (HashMap iteration order is non-deterministic)",
+                            k,
+                            component_type,
+                            profile.name,
+                            existing,
+                            v
+                        );
+                    }
+                }
                 compositor_tokens.insert(k.clone(), v.clone());
             }
             total_override_count += override_count;
