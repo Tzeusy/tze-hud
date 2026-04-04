@@ -47,7 +47,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use tze_hud_config::component_types::ComponentType;
 use tze_hud_config::policy_builder::{
     ProfileSelection, build_all_effective_policies, resolve_profile_selection,
 };
@@ -82,13 +81,14 @@ pub struct ComponentStartupResult {
     pub profile_widget_bundles: Vec<LoadedBundle>,
     /// SVG assets from global widget bundles for compositor registration.
     pub widget_svg_assets: Vec<crate::widget_startup::WidgetSvgAsset>,
-    /// Urgency token overrides extracted from the active notification profile.
+    /// Pre-merged compositor token map: `global_tokens` with all active profile
+    /// `[token_overrides]` applied on top.
     ///
-    /// Contains only `color.notification.urgency.*` entries from the selected
-    /// notification profile's `[token_overrides]`. Empty when no notification
-    /// profile is active. The caller MUST merge these on top of `global_tokens`
-    /// before passing the map to `compositor.set_token_map()`.
-    pub notification_urgency_tokens: DesignTokenMap,
+    /// Covers every profile that is active (Notification, AlertBanner, etc.) and
+    /// every token those profiles override — not just `color.notification.urgency.*`.
+    /// Pass this directly to `compositor.set_token_map()` without any further
+    /// merging in the caller.
+    pub compositor_tokens: DesignTokenMap,
 }
 
 // ─── run_component_startup ────────────────────────────────────────────────────
@@ -331,44 +331,55 @@ pub fn run_component_startup(
         );
     }
 
-    // ── Extract notification profile urgency token overrides ──────────────
-    // If a notification profile is active, pull its `color.notification.urgency.*`
-    // token overrides so the caller can merge them into the compositor's token map.
-    // This allows profile-level urgency color customisation to reach the compositor's
-    // urgency_to_notification_color() function, which reads from compositor.token_map.
-    let notification_urgency_tokens: DesignTokenMap = profile_selection
-        .get(&ComponentType::Notification)
-        .map(|profile| {
-            let urgency_entries: DesignTokenMap = profile
-                .token_overrides
-                .iter()
-                .filter(|(k, _)| k.starts_with("color.notification.urgency."))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            if urgency_entries.is_empty() {
-                tracing::debug!(
-                    profile = %profile.name,
-                    "component_startup: active notification profile has no urgency token overrides"
-                );
-            } else {
-                tracing::info!(
-                    profile = %profile.name,
-                    token_count = urgency_entries.len(),
-                    "component_startup: extracted {} urgency token override(s) from notification profile '{}'",
-                    urgency_entries.len(),
-                    profile.name
-                );
+    // ── Build compositor_tokens: global tokens + all active profile overrides ──
+    // Merge token_overrides from every active profile on top of global_tokens.
+    // This covers all component types (Notification, AlertBanner, etc.) and all
+    // tokens those profiles override, giving the compositor a single pre-merged map.
+    let mut compositor_tokens: DesignTokenMap = global_tokens.clone();
+    let mut total_override_count = 0usize;
+    for (component_type, profile) in &profile_selection {
+        let override_count = profile.token_overrides.len();
+        if override_count == 0 {
+            tracing::debug!(
+                profile = %profile.name,
+                component = ?component_type,
+                "component_startup: active {:?} profile '{}' has no token overrides",
+                component_type,
+                profile.name
+            );
+        } else {
+            tracing::info!(
+                profile = %profile.name,
+                component = ?component_type,
+                token_count = override_count,
+                "component_startup: merging {} token override(s) from {:?} profile '{}'",
+                override_count,
+                component_type,
+                profile.name
+            );
+            for (k, v) in &profile.token_overrides {
+                compositor_tokens.insert(k.clone(), v.clone());
             }
-            urgency_entries
-        })
-        .unwrap_or_default();
+            total_override_count += override_count;
+        }
+    }
+
+    if total_override_count > 0 {
+        tracing::info!(
+            total_override_count,
+            profile_count = profile_selection.len(),
+            "component_startup: compositor_tokens built ({} global + {} profile overrides)",
+            global_tokens.len(),
+            total_override_count
+        );
+    }
 
     ComponentStartupResult {
         global_tokens,
         zone_registry,
         profile_widget_bundles,
         widget_svg_assets,
-        notification_urgency_tokens,
+        compositor_tokens,
     }
 }
 
@@ -687,29 +698,40 @@ default_tab = true
         );
     }
 
-    // ── Notification urgency token extraction ─────────────────────────────────
+    // ── compositor_tokens: pre-merged map from all active profiles ───────────
 
-    /// WHEN no notification profile is active THEN notification_urgency_tokens is empty.
+    /// WHEN no profiles are active THEN compositor_tokens equals global_tokens
+    /// (no profile overrides are blended in).
     #[test]
-    fn notification_urgency_tokens_empty_without_notification_profile() {
+    fn compositor_tokens_equal_global_tokens_without_active_profiles() {
         let raw = RawConfig::default();
         let mut scene = make_scene();
         let result = run_component_startup(&raw, None, Some("headless"), &mut scene);
 
-        assert!(
-            result.notification_urgency_tokens.is_empty(),
-            "notification_urgency_tokens should be empty when no notification profile is active"
+        // compositor_tokens should equal global_tokens: same keys and values.
+        assert_eq!(
+            result.compositor_tokens.len(),
+            result.global_tokens.len(),
+            "compositor_tokens should have the same length as global_tokens when no profiles are active"
         );
+        for (k, v) in &result.global_tokens {
+            assert_eq!(
+                result.compositor_tokens.get(k).map(|s| s.as_str()),
+                Some(v.as_str()),
+                "compositor_tokens[{k}] should equal global_tokens[{k}] with no active profiles"
+            );
+        }
     }
 
-    /// WHEN the notification-stack-exemplar profile is active THEN notification_urgency_tokens
-    /// contains all four color.notification.urgency.* overrides.
+    /// WHEN the notification-stack-exemplar profile is active THEN compositor_tokens
+    /// contains all four color.notification.urgency.* overrides pre-merged on top of
+    /// global_tokens (callers no longer need to merge manually).
     ///
     /// Note: [component_profile_bundles].paths points to the PARENT directory
     /// (`profiles/`) that contains profile subdirectories — scan_profile_dirs
     /// scans subdirectories of each listed path.
     #[test]
-    fn notification_urgency_tokens_extracted_from_active_notification_profile() {
+    fn compositor_tokens_include_notification_profile_urgency_overrides() {
         let profiles_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -746,50 +768,50 @@ notification = "notification-stack-exemplar"
         let mut scene = make_scene();
         let result = run_component_startup(&raw, None, Some("headless"), &mut scene);
 
-        assert_eq!(
-            result.notification_urgency_tokens.len(),
-            4,
-            "expected 4 urgency token overrides, got {:?}",
-            result.notification_urgency_tokens
-        );
+        // compositor_tokens must contain all 4 urgency overrides from the profile.
         assert_eq!(
             result
-                .notification_urgency_tokens
+                .compositor_tokens
                 .get("color.notification.urgency.low")
                 .map(|s| s.as_str()),
             Some("#2A2A2A"),
-            "urgency.low should be #2A2A2A"
+            "compositor_tokens: urgency.low should be #2A2A2A"
         );
         assert_eq!(
             result
-                .notification_urgency_tokens
+                .compositor_tokens
                 .get("color.notification.urgency.normal")
                 .map(|s| s.as_str()),
             Some("#1A1A3A"),
-            "urgency.normal should be #1A1A3A"
+            "compositor_tokens: urgency.normal should be #1A1A3A"
         );
         assert_eq!(
             result
-                .notification_urgency_tokens
+                .compositor_tokens
                 .get("color.notification.urgency.urgent")
                 .map(|s| s.as_str()),
             Some("#8B6914"),
-            "urgency.urgent should be #8B6914"
+            "compositor_tokens: urgency.urgent should be #8B6914"
         );
         assert_eq!(
             result
-                .notification_urgency_tokens
+                .compositor_tokens
                 .get("color.notification.urgency.critical")
                 .map(|s| s.as_str()),
             Some("#8B1A1A"),
-            "urgency.critical should be #8B1A1A"
+            "compositor_tokens: urgency.critical should be #8B1A1A"
+        );
+        // compositor_tokens must also contain global tokens (e.g. canonical text color).
+        assert!(
+            result.compositor_tokens.contains_key("color.text.primary"),
+            "compositor_tokens must also include global tokens"
         );
     }
 
-    /// WHEN the notification-stack-exemplar profile is active THEN merged token map
-    /// contains urgency overrides on top of global tokens (simulates windowed/headless behavior).
+    /// WHEN a profile overrides a token that is also set in [design_tokens] THEN
+    /// the profile override wins in compositor_tokens (profile > global > canonical).
     #[test]
-    fn notification_urgency_tokens_override_global_when_merged() {
+    fn compositor_tokens_profile_overrides_win_over_global_design_tokens() {
         let profiles_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -829,17 +851,14 @@ notification = "notification-stack-exemplar"
         let mut scene = make_scene();
         let result = run_component_startup(&raw, None, Some("headless"), &mut scene);
 
-        let mut merged = result.global_tokens;
-        for (k, v) in result.notification_urgency_tokens {
-            merged.insert(k, v);
-        }
-
+        // Profile override (#2A2A2A) must win over the [design_tokens] value (#DEADBE).
         assert_eq!(
-            merged
+            result
+                .compositor_tokens
                 .get("color.notification.urgency.low")
                 .map(|s| s.as_str()),
             Some("#2A2A2A"),
-            "profile urgency.low token should override global design_token value"
+            "profile urgency.low token should override global design_token value in compositor_tokens"
         );
     }
 }

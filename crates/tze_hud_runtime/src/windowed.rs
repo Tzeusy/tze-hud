@@ -1177,13 +1177,9 @@ impl WindowedRuntime {
                 register_profile_widgets(&mut scene, &startup_result);
                 // Stash SVG assets for compositor registration after init_widget_renderer.
                 pending_widget_svgs = startup_result.widget_svg_assets;
-                // Merge notification profile urgency token overrides on top of global tokens
-                // so the compositor's urgency_to_notification_color() uses profile-scoped colors.
-                let mut merged = startup_result.global_tokens;
-                for (k, v) in startup_result.notification_urgency_tokens {
-                    merged.insert(k, v);
-                }
-                merged
+                // compositor_tokens is pre-merged: global tokens + all active profile
+                // token overrides. Pass directly to compositor.set_token_map().
+                startup_result.compositor_tokens
             } else {
                 // No config provided — bootstrap with canonical zone defaults (no token derivation).
                 scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
