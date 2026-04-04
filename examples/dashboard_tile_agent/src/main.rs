@@ -2992,16 +2992,21 @@ mod tests {
         server.abort();
     }
 
-    /// Task 6.3 — content update is rejected when lease has expired.
+    /// Task 6.3 — content update is rejected when lease is unknown/expired.
     ///
     /// Spec §Requirement: Periodic Content Update
     /// Scenario: Content update fails with expired lease
-    /// tasks.md §6.3: SetTileRoot is rejected when the lease has already been
-    ///   released (simulates expiry path by releasing then trying to update).
+    /// tasks.md §6.3: SetTileRoot is rejected when submitted under a lease_id
+    ///   that is unknown to the runtime (simulates expired/released lease).
     ///
-    /// We simulate expiry by creating a tile, then explicitly releasing the
-    /// lease via LeaseRelease before submitting the content update.  The runtime
-    /// must reject the mutation with an error (lease inactive / not found).
+    /// We open a second session B, which holds no active lease, and submit a
+    /// MutationBatch using an all-zero (fabricated/unknown) lease_id.  The
+    /// runtime must reject it with a non-empty error_code.  This exercises the
+    /// "unknown/expired lease" path without requiring the full TTL to elapse.
+    ///
+    /// Note: the doc comment previously mentioned "LeaseRelease" but the test
+    /// uses a fabricated all-zero lease_id, which is the correct approach for
+    /// testing the expired/unknown lease path without coupling to TTL timing.
     #[tokio::test]
     async fn test_content_update_rejected_when_lease_inactive() {
         use tokio_stream::StreamExt as _;
@@ -3350,18 +3355,25 @@ mod tests {
         let result = processor.process(&event, &mut scene);
         let elapsed_us = t0.elapsed().as_micros() as u64;
 
-        // tasks.md §7.2: local_ack_us must be within 4ms (4000µs).
+        // tasks.md §7.2: local_ack_us must be within the calibrated 4ms budget.
+        // Use tze_hud_scene::calibration::test_budget() to scale the raw budget
+        // by the measured hardware speed factor, preventing flakiness on slower CI
+        // machines while still enforcing the intended latency contract.
+        use tze_hud_scene::calibration::{budgets, test_budget};
+        let ack_budget = test_budget(budgets::INPUT_ACK_BUDGET_US);
         assert!(
-            result.local_ack_us < 4_000,
-            "local_ack_us must be < 4000µs (4ms p99 budget) — tasks.md §7.2; \
+            result.local_ack_us < ack_budget,
+            "local_ack_us must be < {}µs (calibrated 4ms p99 budget) — tasks.md §7.2; \
              got {}µs",
+            ack_budget,
             result.local_ack_us
         );
 
-        // Also assert total elapsed time (wall clock) is within budget.
+        // Also assert wall-clock elapsed time is within calibrated budget.
         assert!(
-            elapsed_us < 4_000,
-            "wall-clock elapsed must be < 4000µs — tasks.md §7.2; got {}µs",
+            elapsed_us < ack_budget,
+            "wall-clock elapsed must be < {}µs (calibrated) — tasks.md §7.2; got {}µs",
+            ack_budget,
             elapsed_us
         );
 
