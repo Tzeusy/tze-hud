@@ -163,9 +163,20 @@ impl SceneGraph {
     /// Increment the ref count for a resource that is referenced by a scene node.
     ///
     /// Only called internally when a `StaticImageNode` is inserted into the scene.
+    /// Panics in debug builds if the resource has not been registered via
+    /// [`register_resource`] first, since incrementing an unknown resource
+    /// would silently bootstrap a registry entry and undermine the
+    /// upload-before-use invariant.
     fn inc_resource_ref(&mut self, id: ResourceId) {
-        let count = self.registered_resources.entry(id).or_insert(0);
-        *count += 1;
+        if let Some(count) = self.registered_resources.get_mut(&id) {
+            *count += 1;
+        } else {
+            debug_assert!(
+                false,
+                "attempted to increment ref count for unregistered resource: {:?}",
+                id
+            );
+        }
     }
 
     /// Decrement the ref count for a resource.  When the count reaches zero the
@@ -5035,6 +5046,7 @@ mod tests {
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(64, 48);
+        scene.register_resource(resource_id);
         let node = Node {
             id: SceneId::new(),
             children: vec![],
@@ -5113,6 +5125,7 @@ mod tests {
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(16, 16);
+        scene.register_resource(resource_id);
         let node = Node {
             id: SceneId::new(),
             children: vec![],
@@ -5171,6 +5184,7 @@ mod tests {
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(8, 8);
+        scene.register_resource(resource_id);
         let node1 = Node {
             id: SceneId::new(),
             children: vec![],
