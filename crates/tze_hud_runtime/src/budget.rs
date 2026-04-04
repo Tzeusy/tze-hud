@@ -20,9 +20,11 @@
 //!   frame-time guardian, and the per-mutation admission gate. This is stateful —
 //!   it tracks resource counters over time and escalates/de-escalates accordingly.
 //!
-//! - **`tze_hud_policy::resource`**: a stateless pure evaluator. It receives a
-//!   `ResourceContext` snapshot (populated from this module's state) and returns a
-//!   `ResourceDecision`. It does NOT own any resource state or counters.
+//! - **`tze_hud_policy::resource`** (forward design note, aspirational — not yet wired):
+//!   a stateless pure evaluator. It would receive a `ResourceContext` snapshot
+//!   (populated from this module's state) and return a `ResourceDecision`. It would NOT
+//!   own any resource state or counters. This describes a future integration point;
+//!   `tze_hud_policy` is not currently a dependency of `tze_hud_runtime`.
 //!
 //! - **`tze_hud_resource::budget::BudgetRegistry`**: owns decoded-byte accounting
 //!   for uploaded resources (textures). This module tracks tile counts, update rate,
