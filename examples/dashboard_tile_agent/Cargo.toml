@@ -16,7 +16,6 @@ dev-mode = ["tze_hud_runtime/dev-mode"]
 
 [dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
-tze_hud_input = { path = "../../crates/tze_hud_input" }
 # dev-mode is enabled here to support inline #[cfg(test)] tests that call
 # establish_session_with with config_toml: None (unrestricted capabilities).
 # The production binary path always loads production.toml and never passes
@@ -32,3 +31,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 uuid = { workspace = true }
 blake3 = { workspace = true }
+
+[dev-dependencies]
+tze_hud_input = { path = "../../crates/tze_hud_input" }
