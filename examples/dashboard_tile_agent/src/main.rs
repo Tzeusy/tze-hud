@@ -232,8 +232,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
             .as_slice()
             .try_into()
             .map_err(|_| "resource_id must be exactly 32 bytes")?;
-        let scene_resource_id =
-            tze_hud_scene::types::ResourceId::from_bytes(resource_id_bytes);
+        let scene_resource_id = tze_hud_scene::types::ResourceId::from_bytes(resource_id_bytes);
         let st = runtime.state.lock().await;
         let mut scene = st.scene.lock().await;
         let tab_id = scene.create_tab("Main", 0)?;
@@ -251,11 +250,20 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     .await?;
 
     println!("  Phase 4 PASSED: tile created with all 6 nodes.");
-    println!("    tile_id   = {} bytes (UUIDv7)", tile_state.tile_id.len());
-    println!("    node_ids  = {} nodes created", tile_state.node_ids.len());
+    println!(
+        "    tile_id   = {} bytes (UUIDv7)",
+        tile_state.tile_id.len()
+    );
+    println!(
+        "    node_ids  = {} nodes created",
+        tile_state.node_ids.len()
+    );
 
     println!("\n=== Exemplar Phases 1–4 complete ===");
-    println!("  lease_id    = {} bytes (Phase 4)", tile_state.lease_id.len());
+    println!(
+        "  lease_id    = {} bytes (Phase 4)",
+        tile_state.lease_id.len()
+    );
     println!("  resource_id = {} bytes", resource_id.len());
     println!("  tile_id     = {} bytes", tile_state.tile_id.len());
     println!("Next: implement Phase 5 (periodic content updates) in tasks.md §6 [hud-zkwx].");
@@ -918,7 +926,6 @@ pub async fn create_tile_batch(
                                     y: TILE_Y,
                                     width: TILE_W,
                                     height: TILE_H,
-                                    ..Default::default()
                                 }),
                                 z_order: TILE_Z_ORDER,
                             },
@@ -1001,8 +1008,8 @@ pub async fn create_tile_batch(
     //
     // We keep both encodings of bg_id to avoid mixing them up.
     let bg_uuid = uuid::Uuid::now_v7();
-    let bg_node_id_le = bg_uuid.to_bytes_le().to_vec();    // for NodeProto.id
-    let bg_parent_id_be = bg_uuid.as_bytes().to_vec();     // for AddNodeMutation.parent_id
+    let bg_node_id_le = bg_uuid.to_bytes_le().to_vec(); // for NodeProto.id
+    let bg_parent_id_be = bg_uuid.as_bytes().to_vec(); // for AddNodeMutation.parent_id
 
     let bg_node = tze_hud_protocol::proto::NodeProto {
         id: bg_node_id_le,
@@ -1019,7 +1026,6 @@ pub async fn create_tile_batch(
                     y: 0.0,
                     width: TILE_W,
                     height: TILE_H,
-                    ..Default::default()
                 }),
             },
         )),
@@ -1027,76 +1033,67 @@ pub async fn create_tile_batch(
 
     let icon_node = tze_hud_protocol::proto::NodeProto {
         id: vec![], // empty = server assigns a fresh UUIDv7
-        data: Some(
-            tze_hud_protocol::proto::node_proto::Data::StaticImage(
-                tze_hud_protocol::proto::StaticImageNodeProto {
-                    resource_id: resource_id_bytes,
-                    width: ICON_W as u32,
-                    height: ICON_H as u32,
-                    decoded_bytes: (ICON_W * ICON_H * 4) as u64,
-                    fit_mode: tze_hud_protocol::proto::ImageFitModeProto::ImageFitModeContain as i32,
-                    bounds: Some(tze_hud_protocol::proto::Rect {
-                        x: 16.0,
-                        y: 16.0,
-                        width: ICON_W as f32,
-                        height: ICON_H as f32,
-                        ..Default::default()
-                    }),
-                },
-            ),
-        ),
+        data: Some(tze_hud_protocol::proto::node_proto::Data::StaticImage(
+            tze_hud_protocol::proto::StaticImageNodeProto {
+                resource_id: resource_id_bytes,
+                width: ICON_W,
+                height: ICON_H,
+                decoded_bytes: (ICON_W * ICON_H * 4) as u64,
+                fit_mode: tze_hud_protocol::proto::ImageFitModeProto::ImageFitModeContain as i32,
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 16.0,
+                    y: 16.0,
+                    width: ICON_W as f32,
+                    height: ICON_H as f32,
+                }),
+            },
+        )),
     };
 
     let header_node = tze_hud_protocol::proto::NodeProto {
         id: vec![],
-        data: Some(
-            tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
-                tze_hud_protocol::proto::TextMarkdownNodeProto {
-                    content: "**Dashboard Agent**".to_string(),
-                    bounds: Some(tze_hud_protocol::proto::Rect {
-                        x: 76.0,
-                        y: 20.0,
-                        width: 308.0,
-                        height: 32.0,
-                        ..Default::default()
-                    }),
-                    font_size_px: 18.0,
-                    color: Some(tze_hud_protocol::proto::Rgba {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 1.0,
-                    }),
-                    background: None,
-                },
-            ),
-        ),
+        data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
+            tze_hud_protocol::proto::TextMarkdownNodeProto {
+                content: "**Dashboard Agent**".to_string(),
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 76.0,
+                    y: 20.0,
+                    width: 308.0,
+                    height: 32.0,
+                }),
+                font_size_px: 18.0,
+                color: Some(tze_hud_protocol::proto::Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                }),
+                background: None,
+            },
+        )),
     };
 
     let body_node = tze_hud_protocol::proto::NodeProto {
         id: vec![],
-        data: Some(
-            tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
-                tze_hud_protocol::proto::TextMarkdownNodeProto {
-                    content: "**Status**: operational\nUptime: 0s".to_string(),
-                    bounds: Some(tze_hud_protocol::proto::Rect {
-                        x: 16.0,
-                        y: 72.0,
-                        width: 368.0,
-                        height: 180.0,
-                        ..Default::default()
-                    }),
-                    font_size_px: 14.0,
-                    color: Some(tze_hud_protocol::proto::Rgba {
-                        r: 0.78,
-                        g: 0.78,
-                        b: 0.78,
-                        a: 1.0,
-                    }),
-                    background: None,
-                },
-            ),
-        ),
+        data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
+            tze_hud_protocol::proto::TextMarkdownNodeProto {
+                content: "**Status**: operational\nUptime: 0s".to_string(),
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 16.0,
+                    y: 72.0,
+                    width: 368.0,
+                    height: 180.0,
+                }),
+                font_size_px: 14.0,
+                color: Some(tze_hud_protocol::proto::Rgba {
+                    r: 0.78,
+                    g: 0.78,
+                    b: 0.78,
+                    a: 1.0,
+                }),
+                background: None,
+            },
+        )),
     };
 
     let refresh_node = tze_hud_protocol::proto::NodeProto {
@@ -1108,7 +1105,6 @@ pub async fn create_tile_batch(
                     y: 256.0,
                     width: 176.0,
                     height: 36.0,
-                    ..Default::default()
                 }),
                 interaction_id: "refresh-button".to_string(),
                 accepts_focus: true,
@@ -1126,7 +1122,6 @@ pub async fn create_tile_batch(
                     y: 256.0,
                     width: 176.0,
                     height: 36.0,
-                    ..Default::default()
                 }),
                 interaction_id: "dismiss-button".to_string(),
                 accepts_focus: true,
@@ -1289,9 +1284,7 @@ pub async fn create_tile_batch(
                 break result.created_ids;
             }
             other => {
-                return Err(
-                    format!("Expected MutationResult (node batch), got: {other:?}").into(),
-                );
+                return Err(format!("Expected MutationResult (node batch), got: {other:?}").into());
             }
         }
     };
@@ -1801,7 +1794,13 @@ mod tests {
 
         assert_eq!(
             child_types,
-            ["StaticImage", "TextMarkdown", "TextMarkdown", "HitRegion", "HitRegion"],
+            [
+                "StaticImage",
+                "TextMarkdown",
+                "TextMarkdown",
+                "HitRegion",
+                "HitRegion"
+            ],
             "children must be in painter's model order: StaticImage, TextMarkdown (header), \
              TextMarkdown (body), HitRegion (refresh), HitRegion (dismiss) — tasks.md §5.1"
         );
@@ -1845,8 +1844,8 @@ mod tests {
     ///   no tiles from the failed batch appear in the scene.
     #[tokio::test]
     async fn test_partial_batch_failure_rejects_atomically() {
-        use tze_hud_protocol::proto::session as sp;
         use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
 
         let port = ephemeral_port();
         let (server, state) = start_test_runtime_with_state(port)
@@ -1915,11 +1914,13 @@ mod tests {
         tx.send(sp::ClientMessage {
             sequence: 2,
             timestamp_wall_us: crate::now_wall_us(),
-            payload: Some(sp::client_message::Payload::LeaseRequest(sp::LeaseRequest {
-                ttl_ms: 60_000,
-                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
-                lease_priority: 2,
-            })),
+            payload: Some(sp::client_message::Payload::LeaseRequest(
+                sp::LeaseRequest {
+                    ttl_ms: 60_000,
+                    capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                    lease_priority: 2,
+                },
+            )),
         })
         .await
         .unwrap();
@@ -2098,8 +2099,8 @@ mod tests {
     ///   that batch are committed.  The tile from Batch A persists but has no root node.
     #[tokio::test]
     async fn test_node_batch_rejected_atomically_on_unregistered_resource() {
-        use tze_hud_protocol::proto::session as sp;
         use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
 
         let port = ephemeral_port();
         let (server, state) = start_test_runtime_with_state(port)
@@ -2168,11 +2169,13 @@ mod tests {
         tx.send(sp::ClientMessage {
             sequence: 2,
             timestamp_wall_us: crate::now_wall_us(),
-            payload: Some(sp::client_message::Payload::LeaseRequest(sp::LeaseRequest {
-                ttl_ms: 60_000,
-                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
-                lease_priority: 2,
-            })),
+            payload: Some(sp::client_message::Payload::LeaseRequest(
+                sp::LeaseRequest {
+                    ttl_ms: 60_000,
+                    capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                    lease_priority: 2,
+                },
+            )),
         })
         .await
         .unwrap();
@@ -2180,7 +2183,10 @@ mod tests {
         let lease_id_bytes: Vec<u8> = loop {
             let msg = next_non_state_change(&mut response_stream).await;
             if let Some(sp::server_message::Payload::LeaseResponse(resp)) = msg.payload {
-                assert!(resp.granted, "lease must be granted for node-atomicity test");
+                assert!(
+                    resp.granted,
+                    "lease must be granted for node-atomicity test"
+                );
                 break resp.lease_id;
             }
         };
@@ -2260,25 +2266,23 @@ mod tests {
         };
         let icon_node = tze_hud_protocol::proto::NodeProto {
             id: vec![],
-            data: Some(
-                tze_hud_protocol::proto::node_proto::Data::StaticImage(
-                    tze_hud_protocol::proto::StaticImageNodeProto {
-                        resource_id: unregistered_resource_id, // triggers ResourceNotFound
-                        width: 48,
-                        height: 48,
-                        decoded_bytes: (48u64 * 48 * 4),
-                        fit_mode:
-                            tze_hud_protocol::proto::ImageFitModeProto::ImageFitModeContain as i32,
-                        bounds: Some(tze_hud_protocol::proto::Rect {
-                            x: 16.0,
-                            y: 16.0,
-                            width: 48.0,
-                            height: 48.0,
-                            ..Default::default()
-                        }),
-                    },
-                ),
-            ),
+            data: Some(tze_hud_protocol::proto::node_proto::Data::StaticImage(
+                tze_hud_protocol::proto::StaticImageNodeProto {
+                    resource_id: unregistered_resource_id, // triggers ResourceNotFound
+                    width: 48,
+                    height: 48,
+                    decoded_bytes: (48u64 * 48 * 4),
+                    fit_mode: tze_hud_protocol::proto::ImageFitModeProto::ImageFitModeContain
+                        as i32,
+                    bounds: Some(tze_hud_protocol::proto::Rect {
+                        x: 16.0,
+                        y: 16.0,
+                        width: 48.0,
+                        height: 48.0,
+                        ..Default::default()
+                    }),
+                },
+            )),
         };
 
         let batch_b_id = uuid::Uuid::now_v7().as_bytes().to_vec();
