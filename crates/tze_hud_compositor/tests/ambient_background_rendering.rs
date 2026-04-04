@@ -77,7 +77,7 @@
 //! - hud-gwhr (parent epic: exemplar-ambient-background)
 //! - design.md §Decision 3: Tests validate renderer output, not just scene state
 
-use tze_hud_compositor::{surface::HeadlessSurface, Compositor, CompositorError};
+use tze_hud_compositor::{Compositor, CompositorError, surface::HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ResourceId, Rgba, SceneId,
