@@ -1225,7 +1225,10 @@ fn invalid_name_exclamation_mark_rejected() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("widget.toml"),
-        b"name = \"My Gauge!\"\nversion = \"1.0.0\"\ndescription = \"special chars not allowed\"\n",
+        br#"name = "My Gauge!"
+version = "1.0.0"
+description = "special chars not allowed"
+"#,
     )
     .unwrap();
 

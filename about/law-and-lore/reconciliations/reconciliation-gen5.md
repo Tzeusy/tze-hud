@@ -65,8 +65,8 @@ reconciliation was written. Assessment "Loader accepts any string" was incorrect
 - `is_valid_widget_type_id()` in `crates/tze_hud_widget/src/loader.rs` enforces `[a-z][a-z0-9-]*`
 - Called in `load_bundle_dir_inner()` immediately after the `name` field is extracted
 - Returns `BundleError::InvalidName` with wire code `WIDGET_BUNDLE_INVALID_NAME` and a descriptive message for non-conforming names
-- Integration tests in `crates/tze_hud_widget/tests/bundle_loader.rs` cover: uppercase, digit-start, hyphen-start, underscore, space, special characters (e.g. `"My Gauge!"`), wire-code, and valid name acceptance
-- Unit tests in `crates/tze_hud_widget/src/loader.rs` (12 cases) verify the regex logic in isolation
+- Integration tests in `crates/tze_hud_widget/tests/bundle_loader.rs` cover: uppercase, digit-start, underscore, space, special characters (e.g. `"My Gauge!"`), wire-code, and valid name acceptance
+- Unit tests in `crates/tze_hud_widget/src/loader.rs` (16 cases: 6 valid + 10 invalid) verify the regex logic in isolation
 - **Bead**: hud-qdmf (closed)
 
 ### GAP-4: Governance authority doc/code mismatch (P2)
