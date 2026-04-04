@@ -381,7 +381,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // This is a hard error (RFC 0006 §1.3).
                     eprintln!(
                         "error: config file not found: {}",
-                        searched.first().map(String::as_str).unwrap_or("(unknown path)")
+                        searched
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("(unknown path)")
                     );
                     std::process::exit(1);
                 }
