@@ -396,6 +396,9 @@ impl ApplicationHandler for WinitApp {
                         .with_transparent(true)
                         .with_decorations(false)
                         .with_window_level(WindowLevel::AlwaysOnTop)
+                        // Hide from taskbar so the overlay can't be
+                        // accidentally minimized or alt-tabbed to.
+                        .with_skip_taskbar(true)
                         // Set WS_EX_NOREDIRECTIONBITMAP at creation time —
                         // DWM will present the swapchain directly with
                         // per-pixel alpha from PreMultiplied mode.
