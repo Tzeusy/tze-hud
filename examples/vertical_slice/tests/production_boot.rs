@@ -47,10 +47,7 @@ const PRODUCTION_CONFIG: &str = include_str!("../config/production.toml");
 ///
 /// CARGO_MANIFEST_DIR is `examples/vertical_slice/` — two levels below the repo
 /// root — so `../../profiles` reaches `profiles/` at the repo root.
-const PROFILES_DIR: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../profiles"
-);
+const PROFILES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../profiles");
 
 /// Boot the runtime with the committed production config and verify startup
 /// succeeds.
@@ -343,16 +340,18 @@ fn production_config_declares_exemplar_component_profiles() {
     // We look for lines containing both the key and the value rather than an exact
     // whitespace-sensitive match so the assertion is robust to TOML formatting changes.
     assert!(
-        component_profiles
-            .lines()
-            .any(|l| l.contains("subtitle") && l.contains("exemplar-subtitle") && !l.trim_start().starts_with('#')),
+        component_profiles.lines().any(|l| l.contains("subtitle")
+            && l.contains("exemplar-subtitle")
+            && !l.trim_start().starts_with('#')),
         "production.toml must declare subtitle = \"exemplar-subtitle\" in [component_profiles]"
     );
 
     assert!(
         component_profiles
             .lines()
-            .any(|l| l.contains("alert-banner") && l.contains("exemplar-alert-banner") && !l.trim_start().starts_with('#')),
+            .any(|l| l.contains("alert-banner")
+                && l.contains("exemplar-alert-banner")
+                && !l.trim_start().starts_with('#')),
         "production.toml must declare alert-banner = \"exemplar-alert-banner\" in [component_profiles]"
     );
 
