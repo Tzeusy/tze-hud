@@ -2597,6 +2597,41 @@ impl SceneGraph {
         Ok(())
     }
 
+    /// Resolve the "best" lease state for a given namespace.
+    ///
+    /// Selection priority (per spec §Zone Publish Requires Active Lease):
+    ///
+    /// 1. `Active` — if any Active lease exists, return it immediately.
+    /// 2. First non-terminal lease — for accurate error reporting when no
+    ///    Active lease exists but the agent is still in-flight (e.g. Orphaned,
+    ///    Suspended).
+    /// 3. First terminal lease — for accurate error reporting when all leases
+    ///    are terminal.
+    /// 4. `None` — the namespace has never held a lease.
+    ///
+    /// This helper is the canonical source of namespace→lease-state resolution
+    /// used by all lease-enforcing zone publish paths.
+    fn resolve_lease_state_for_namespace(&self, publisher_namespace: &str) -> Option<LeaseState> {
+        let all_leases_for_ns: Vec<_> = self
+            .leases
+            .values()
+            .filter(|l| l.namespace == publisher_namespace)
+            .map(|l| l.state)
+            .collect();
+
+        if all_leases_for_ns.is_empty() {
+            None
+        } else {
+            // Prefer Active; fall back to the first non-terminal; otherwise use first terminal.
+            all_leases_for_ns
+                .iter()
+                .copied()
+                .find(|&s| s == LeaseState::Active)
+                .or_else(|| all_leases_for_ns.iter().copied().find(|s| !s.is_terminal()))
+                .or_else(|| all_leases_for_ns.first().copied())
+        }
+    }
+
     /// Publish content to a zone with lease-state enforcement.
     ///
     /// This is the lease-aware variant of `publish_to_zone`. It looks up the
@@ -2622,29 +2657,7 @@ impl SceneGraph {
     ) -> Result<(), ValidationError> {
         use crate::lease::orphan::ZonePublishResult;
 
-        // Prefer ACTIVE lease for this namespace. If no ACTIVE lease exists, find
-        // the first non-terminal lease for error reporting. If only terminal leases
-        // exist, return LEASE_NOT_ACTIVE (per spec line 214: inactive lease →
-        // LEASE_NOT_ACTIVE). Return LEASE_NOT_FOUND only if no lease at all.
-        let all_leases_for_ns: Vec<_> = self
-            .leases
-            .values()
-            .filter(|l| l.namespace == publisher_namespace)
-            .map(|l| l.state)
-            .collect();
-
-        let lease_state = if all_leases_for_ns.is_empty() {
-            // No lease at all.
-            None
-        } else {
-            // Prefer Active; fall back to the first non-terminal; otherwise use first terminal.
-            all_leases_for_ns
-                .iter()
-                .copied()
-                .find(|&s| s == LeaseState::Active)
-                .or_else(|| all_leases_for_ns.iter().copied().find(|s| !s.is_terminal()))
-                .or_else(|| all_leases_for_ns.first().copied())
-        };
+        let lease_state = self.resolve_lease_state_for_namespace(publisher_namespace);
 
         match lease_state {
             None => {
@@ -2717,23 +2730,7 @@ impl SceneGraph {
     ) -> Result<(), ValidationError> {
         use crate::lease::orphan::ZonePublishResult;
 
-        let all_leases_for_ns: Vec<_> = self
-            .leases
-            .values()
-            .filter(|l| l.namespace == publisher_namespace)
-            .map(|l| l.state)
-            .collect();
-
-        let lease_state = if all_leases_for_ns.is_empty() {
-            None
-        } else {
-            all_leases_for_ns
-                .iter()
-                .copied()
-                .find(|&s| s == LeaseState::Active)
-                .or_else(|| all_leases_for_ns.iter().copied().find(|s| !s.is_terminal()))
-                .or_else(|| all_leases_for_ns.first().copied())
-        };
+        let lease_state = self.resolve_lease_state_for_namespace(publisher_namespace);
 
         match lease_state {
             None => {

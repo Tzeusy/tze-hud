@@ -671,11 +671,11 @@ async fn test_ambient_background_static_image_renders_placeholder() {
     //
     // Sample multiple points to confirm full-screen coverage.
     let sample_points: &[(u32, u32)] = &[
-        (0, 0),       // top-left
-        (255, 0),     // top-right
-        (0, 255),     // bottom-left
-        (255, 255),   // bottom-right
-        (128, 128),   // centre
+        (0, 0),     // top-left
+        (255, 0),   // top-right
+        (0, 255),   // bottom-left
+        (255, 255), // bottom-right
+        (128, 128), // centre
     ];
 
     for &(cx, cy) in sample_points {
