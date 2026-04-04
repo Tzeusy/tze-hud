@@ -20,7 +20,7 @@ exemplar components, runtime app binary, input capture, resource management, and
 
 | Area | Status | Evidence |
 |------|--------|----------|
-| **Widget system** (5 delta specs) | FULL (functionally) | Widget ontology, parameter schema, SVG rasterization, publishing, contention all implemented. GAP-1 (ClearWidgetMutation) closed by hud-ziov (#249, 2026-03-30). GAP-2 (Widget TTL expiry) closed by hud-2c5g (#248, 2026-03-30). 2 P2 gaps remain: type ID validation missing, occupancy per-policy resolution partial. |
+| **Widget system** (5 delta specs) | FULL (functionally) | Widget ontology, parameter schema, SVG rasterization, publishing, contention all implemented. GAP-1 (ClearWidgetMutation) closed by hud-ziov (#249, 2026-03-30). GAP-2 (Widget TTL expiry) closed by hud-2c5g (#248, 2026-03-30). 2 P2 gaps remain: type ID validation missing, policy arbitration doc mismatch. |
 | **Component shape language** (RFC 0012, 3 delta specs) | FULL | Design tokens, component profiles, visual extensibility implemented. Exemplar profiles use the new token system. |
 | **Exemplar components** (10 exemplars) | FULL (functionally) | subtitle, alert-banner, notification, status-bar, status-indicator, progress-bar, dashboard-tile, gauge-widget, ambient-background, presence-card — all have component profiles, rendering, MCP fixtures, integration tests, user-test scenarios. **P3 gap**: subtitle and alert-banner profiles not wired into production config. |
 | **Runtime app binary** (3 specs) | FULL | Canonical `tze_hud_app` binary with windowed runtime, headless mode, fullscreen/overlay modes. Network services (gRPC, MCP) start with the runtime. |
