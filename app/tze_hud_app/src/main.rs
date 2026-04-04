@@ -37,7 +37,12 @@
 //! 4. `$XDG_CONFIG_HOME/tze_hud/config.toml` (Linux/macOS)
 //! 5. `%APPDATA%\tze_hud\config.toml` (Windows)
 //!
-//! If no config file is found, the runtime starts with flag/env-var defaults.
+//! **Config file is optional.** If no config file is found at any location
+//! the runtime starts with flag/env-var defaults (RFC 0006 §1.5).
+//! Passing `--config` with a path that does not exist or cannot be read is a
+//! hard error. `$TZE_HUD_CONFIG` and auto-resolved paths (3–5) fall through to
+//! the next location when not found; a found-but-unreadable file at those
+//! locations logs a warning and falls back to defaults.
 //!
 //! ## Examples
 //!
@@ -96,9 +101,11 @@ NOTES:
     For headless/CI usage, use the tze_hud_runtime crate directly with
     HeadlessRuntime.
 
-    The config file (if found) provides the agent capability policy and tab
-    layout. CLI flags override individual settings from the config file.
-    Passing --config with a path that does not exist is an error.
+    The config file is optional. If none is found at any auto-resolved location,
+    the runtime starts with flag/env-var defaults (RFC 0006 §1.5). The config
+    file (when present) provides the agent capability policy and tab layout.
+    CLI flags override individual settings from the config file.
+    Passing --config with a path that does not exist or cannot be read is an error.
 "#,
     );
 }
@@ -368,9 +375,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(searched) => {
-                // No config file found — run with flag/env-var defaults.
-                // This is not an error; config files are optional when all required
-                // settings are supplied via flags or defaults.
+                // No config file found at any location.
+                if opts.config_path.is_some() {
+                    // --config was given explicitly but the file was not found.
+                    // This is a hard error (RFC 0006 §1.3).
+                    eprintln!(
+                        "error: config file not found: {}",
+                        searched
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("(unknown path)")
+                    );
+                    std::process::exit(1);
+                }
+                // Config files are optional (RFC 0006 §1.5): the runtime starts
+                // successfully using flag/env-var defaults when no file is present.
                 tracing::debug!(
                     searched = ?searched,
                     "no config file found; using flag/env-var defaults"
