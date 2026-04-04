@@ -37,7 +37,11 @@
 //! 4. `$XDG_CONFIG_HOME/tze_hud/config.toml` (Linux/macOS)
 //! 5. `%APPDATA%\tze_hud\config.toml` (Windows)
 //!
-//! If no config file is found, the runtime starts with flag/env-var defaults.
+//! **Config file is optional.** If no config file is found at any auto-resolved
+//! location the runtime starts with flag/env-var defaults (RFC 0006 §1.5).
+//! Passing `--config` with a path that does not exist is a hard error.
+//! An auto-resolved path that exists but cannot be read produces a warning and
+//! falls back to defaults.
 //!
 //! ## Examples
 //!
@@ -96,8 +100,10 @@ NOTES:
     For headless/CI usage, use the tze_hud_runtime crate directly with
     HeadlessRuntime.
 
-    The config file (if found) provides the agent capability policy and tab
-    layout. CLI flags override individual settings from the config file.
+    The config file is optional. If none is found at any auto-resolved location,
+    the runtime starts with flag/env-var defaults (RFC 0006 §1.5). The config
+    file (when present) provides the agent capability policy and tab layout.
+    CLI flags override individual settings from the config file.
     Passing --config with a path that does not exist is an error.
 "#,
     );
@@ -369,8 +375,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(searched) => {
                 // No config file found — run with flag/env-var defaults.
-                // This is not an error; config files are optional when all required
-                // settings are supplied via flags or defaults.
+                // Config files are optional (RFC 0006 §1.5): the runtime starts
+                // successfully using flag/env-var defaults when no file is present.
                 tracing::debug!(
                     searched = ?searched,
                     "no config file found; using flag/env-var defaults"

@@ -373,7 +373,11 @@ The runtime looks for configuration in the following order (first found wins):
 4. `$XDG_CONFIG_HOME/tze_hud/config.toml` (Linux/macOS)
 5. `%APPDATA%\tze_hud\config.toml` (Windows)
 
-A config file is required. The runtime refuses to start without one. The error message includes the searched paths.
+**Config file is optional.** When no config file is found in any of the above locations, the runtime starts with the flag/env-var defaults documented in §1.5. This is useful for quick-start, CI pipelines, and scripted invocations where all required settings are supplied via command-line flags or environment variables.
+
+**Explicit `--config` path is an error if missing.** When a path is given via the `--config` flag or `$TZE_HUD_CONFIG` environment variable and the file does not exist or cannot be read, the runtime refuses to start with an error listing the missing path.
+
+**Auto-resolved path read failure is a warning, not a fatal error.** If the runtime finds a file at an auto-resolved location (paths 3–5) but cannot read it (e.g., permissions error), it logs a warning and continues with defaults. Explicitly-provided paths (via `--config` flag) remain hard errors.
 
 A minimal valid config file (using all defaults) is:
 
@@ -493,6 +497,29 @@ When layered composition is implemented, the following error codes will be added
 | `CONFIG_INCLUDES_PARSE_ERROR` | The base file has a TOML syntax error (line/column included) |
 
 These codes are not present in the v1 `ConfigErrorCode` enum. They will be added when the feature is implemented.
+
+### 1.5 Flag/Env-Var Defaults (Config-File-Free Startup)
+
+When the runtime starts without a config file (no file found at any auto-resolved location, and no `--config` flag provided), all settings fall back to the values listed below. These are the same defaults that apply to fields omitted from a config file.
+
+This mode is appropriate for:
+- Quick-start without creating a config file
+- CI pipelines (headless or scripted operation)
+- Integration tests that supply all settings programmatically via flags or environment variables
+
+| Setting | CLI flag | Env var | Default |
+|---------|----------|---------|---------|
+| Window mode | `--window-mode` | `TZE_HUD_WINDOW_MODE` | `fullscreen` |
+| Window width | `--width` | `TZE_HUD_WINDOW_WIDTH` | `1920` (fullscreen) / auto-detect (overlay) |
+| Window height | `--height` | `TZE_HUD_WINDOW_HEIGHT` | `1080` (fullscreen) / auto-detect (overlay) |
+| gRPC port | `--grpc-port` | `TZE_HUD_GRPC_PORT` | `50051` |
+| MCP port | `--mcp-port` | `TZE_HUD_MCP_PORT` | `9090` |
+| Pre-shared key | `--psk` | `TZE_HUD_PSK` | `tze-hud-key` |
+| Target FPS | `--fps` | `TZE_HUD_FPS` | `60` |
+
+Without a config file, the runtime has no agent registrations, no pre-defined tabs, and no zone policies. The first agent to connect via gRPC or MCP can create tabs and publish content using the dynamic agent policy (§6.4).
+
+**Important:** The PSK default (`tze-hud-key`) is intentionally trivial. Production deployments MUST provide a strong PSK via `--psk` or `TZE_HUD_PSK`. See §6.5.
 
 ---
 
