@@ -5152,6 +5152,9 @@ mod tests {
             )
             .unwrap();
         let (resource_id, decoded_bytes) = make_test_image_resource(w, h);
+        // Register the resource so that subsequent checked mutations (which
+        // enforce resource-upload-before-use) can reference it.
+        scene.register_resource(resource_id);
         let node = Node {
             id: SceneId::new(),
             children: vec![],
@@ -5231,6 +5234,9 @@ mod tests {
             make_test_image_resource(64, 48).0,
             "resources must differ for this test to be meaningful"
         );
+        // Register the new resource before the checked update (mirrors real-world
+        // flow where the session server uploads the resource before referencing it).
+        scene.register_resource(new_resource_id);
 
         let result = scene.update_node_content_checked(
             tile_id,
@@ -5280,6 +5286,10 @@ mod tests {
         let (mut scene, _lease_id, tile_id, node_id, _) = scene_with_static_image_node(64, 48);
 
         let (new_resource_id, _) = make_test_image_resource(128, 96);
+        // Register the new resource — even though decoded_bytes is 0 (simulating a
+        // caller bug), the resource itself must be registered for the checked path to
+        // accept the update.
+        scene.register_resource(new_resource_id);
 
         let result = scene.update_node_content_checked(
             tile_id,
