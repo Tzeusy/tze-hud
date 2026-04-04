@@ -322,6 +322,7 @@ fn snapshot_references_resource_ids_not_blob_data() {
     // Use a fake resource ID computed from fake blob data
     let fake_blob = b"fake image data bytes not stored in scene";
     let resource_id = ResourceId::of(fake_blob);
+    g.register_resource(resource_id);
 
     let image_node = Node {
         id: SceneId::new(),

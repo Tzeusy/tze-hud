@@ -56,14 +56,25 @@ pub struct SceneGraph {
     /// Incremented by [`SceneGraph::next_sequence_number`] on every successful
     /// [`crate::mutation::MutationBatch`] commit. Per RFC 0001 §3.5.
     pub sequence_number: u64,
-    /// Set of ResourceIds that have been uploaded and are available for use in
-    /// StaticImageNode. An agent-submitted AddNode or SetTileRoot with a
-    /// StaticImageNode is rejected if the ResourceId is not in this set.
+    /// Map of ResourceIds to their scene-node reference counts.
+    ///
+    /// A resource is available for use in [`NodeData::StaticImage`] nodes when it
+    /// has an entry in this map (regardless of the count value).  The count tracks
+    /// how many live scene nodes currently reference the resource:
+    ///
+    /// - `register_resource` inserts the entry (count = 0) if not already present.
+    /// - Inserting a `StaticImageNode` into the scene increments the count.
+    /// - Removing a `StaticImageNode` from the scene decrements the count; when the
+    ///   count reaches zero the entry is removed, freeing the resource from the
+    ///   registry.
+    ///
+    /// An agent-submitted AddNode or SetTileRoot with a StaticImageNode is rejected
+    /// if the ResourceId is not present in this map.
     ///
     /// Ephemeral: skipped during serialization (resources are in-memory only,
     /// per RFC 0001 §2.4 and resource-store/spec.md §Requirement: V1 ephemerality).
     #[serde(skip, default)]
-    pub registered_resources: HashSet<ResourceId>,
+    pub registered_resources: HashMap<ResourceId, u32>,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -119,7 +130,7 @@ impl SceneGraph {
             display_area: Rect::new(0.0, 0.0, width, height),
             version: 0,
             sequence_number: 0,
-            registered_resources: HashSet::new(),
+            registered_resources: HashMap::new(),
         }
     }
 
@@ -131,13 +142,55 @@ impl SceneGraph {
     /// [`crate::mutation::SceneMutation::AddNode`] or
     /// [`crate::mutation::SceneMutation::SetTileRoot`] referencing the resource.
     /// Spec: resource-store/spec.md §Requirement: Resource Upload Before Tile Creation.
+    ///
+    /// Calling this for an already-registered resource is a no-op: the existing
+    /// entry (with its current node ref count) is preserved.
     pub fn register_resource(&mut self, id: ResourceId) {
-        self.registered_resources.insert(id);
+        self.registered_resources.entry(id).or_insert(0);
     }
 
     /// Returns `true` if the resource has been registered (uploaded).
     pub fn is_resource_registered(&self, id: &ResourceId) -> bool {
-        self.registered_resources.contains(id)
+        self.registered_resources.contains_key(id)
+    }
+
+    /// Returns the current node reference count for a resource, or `None` if the
+    /// resource has not been registered.
+    pub fn resource_ref_count(&self, id: &ResourceId) -> Option<u32> {
+        self.registered_resources.get(id).copied()
+    }
+
+    /// Increment the ref count for a resource that is referenced by a scene node.
+    ///
+    /// Only called internally when a `StaticImageNode` is inserted into the scene.
+    /// Panics in debug builds if the resource has not been registered via
+    /// [`register_resource`] first, since incrementing an unknown resource
+    /// would silently bootstrap a registry entry and undermine the
+    /// upload-before-use invariant.
+    fn inc_resource_ref(&mut self, id: ResourceId) {
+        if let Some(count) = self.registered_resources.get_mut(&id) {
+            *count += 1;
+        } else {
+            debug_assert!(
+                false,
+                "attempted to increment ref count for unregistered resource: {:?}",
+                id
+            );
+        }
+    }
+
+    /// Decrement the ref count for a resource.  When the count reaches zero the
+    /// resource is removed from the registry entirely (freeing it).
+    ///
+    /// Only called internally when a `StaticImageNode` is removed from the scene.
+    fn dec_resource_ref(&mut self, id: &ResourceId) {
+        if let Some(count) = self.registered_resources.get_mut(id) {
+            if *count <= 1 {
+                self.registered_resources.remove(id);
+            } else {
+                *count -= 1;
+            }
+        }
     }
 
     // ─── Tab operations ──────────────────────────────────────────────────
@@ -1643,7 +1696,7 @@ impl SceneGraph {
         // Same gate as add_node_to_tile_impl; see that function's comment for spec refs.
         if agent_namespace.is_some() {
             if let NodeData::StaticImage(ref si) = node.data {
-                if !self.registered_resources.contains(&si.resource_id) {
+                if !self.registered_resources.contains_key(&si.resource_id) {
                     return Err(ValidationError::ResourceNotFound { id: si.resource_id });
                 }
             }
@@ -1748,7 +1801,7 @@ impl SceneGraph {
         // Internal/test paths (unchecked variants, snapshot restore) bypass this gate.
         if agent_namespace.is_some() {
             if let NodeData::StaticImage(ref si) = node.data {
-                if !self.registered_resources.contains(&si.resource_id) {
+                if !self.registered_resources.contains_key(&si.resource_id) {
                     return Err(ValidationError::ResourceNotFound { id: si.resource_id });
                 }
             }
@@ -1888,14 +1941,11 @@ impl SceneGraph {
         // checks.  Only applied for agent-submitted paths (agent_namespace.is_some()).
         if agent_namespace.is_some() {
             if let NodeData::StaticImage(ref si) = data {
-                if !self.registered_resources.contains(&si.resource_id) {
+                if !self.registered_resources.contains_key(&si.resource_id) {
                     return Err(ValidationError::ResourceNotFound { id: si.resource_id });
                 }
             }
         }
-
-        // Apply the update — replace data in-place, preserving id and children.
-        let node = self.nodes.get_mut(&node_id).unwrap();
 
         // Budget re-accounting for StaticImage replacement.
         //
@@ -1914,14 +1964,43 @@ impl SceneGraph {
         //     value.  The caller (session server or test) is responsible for
         //     populating decoded_bytes from the resource store when the resource
         //     changes.
-        if let (NodeData::StaticImage(old_si), NodeData::StaticImage(new_si)) =
-            (&node.data, &mut data)
         {
-            if new_si.resource_id == old_si.resource_id && new_si.decoded_bytes == 0 {
-                new_si.decoded_bytes = old_si.decoded_bytes;
+            let node = self.nodes.get_mut(&node_id).unwrap();
+            if let (NodeData::StaticImage(old_si), NodeData::StaticImage(new_si)) =
+                (&node.data, &mut data)
+            {
+                if new_si.resource_id == old_si.resource_id && new_si.decoded_bytes == 0 {
+                    new_si.decoded_bytes = old_si.decoded_bytes;
+                }
             }
         }
 
+        // Resource ref-count maintenance for StaticImage content swaps.
+        //
+        // Extract the old resource_id before re-borrowing mutably, then update
+        // ref counts and finally apply the data swap.  The borrow checker requires
+        // that the immutable borrow of `node.data` (to read old_id) ends before
+        // the mutable borrows of `self` (for dec/inc_resource_ref) begin.
+        //
+        // This correctly handles:
+        //   1. Same resource_id → net zero change; no update needed.
+        //   2. Different resource_id → old loses a ref, new gains one.
+        let old_resource_id = if let NodeData::StaticImage(ref old_si) = self.nodes[&node_id].data {
+            Some(old_si.resource_id)
+        } else {
+            None
+        };
+        if let (Some(old_id), NodeData::StaticImage(new_si)) = (old_resource_id, &data) {
+            let new_id = new_si.resource_id;
+            if old_id != new_id {
+                self.dec_resource_ref(&old_id);
+                self.inc_resource_ref(new_id);
+            }
+            // If resource_id is unchanged, ref count is unchanged.
+        }
+
+        // Apply the update — replace data in-place, preserving id and children.
+        let node = self.nodes.get_mut(&node_id).unwrap();
         node.data = data;
         self.version += 1;
         Ok(())
@@ -2162,11 +2241,19 @@ impl SceneGraph {
             // For the vertical slice, nodes are self-contained with their children
             let _ = child_id;
         }
+        // Increment the resource ref count if this node references an image resource.
+        if let NodeData::StaticImage(ref si) = node.data {
+            self.inc_resource_ref(si.resource_id);
+        }
         self.nodes.insert(node.id, node.clone());
     }
 
     pub(crate) fn remove_node_tree(&mut self, node_id: SceneId) {
         if let Some(node) = self.nodes.remove(&node_id) {
+            // Decrement the resource ref count if this node referenced an image resource.
+            if let NodeData::StaticImage(ref si) = node.data {
+                self.dec_resource_ref(&si.resource_id);
+            }
             for child_id in &node.children {
                 self.remove_node_tree(*child_id);
             }
@@ -4959,6 +5046,7 @@ mod tests {
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(64, 48);
+        scene.register_resource(resource_id);
         let node = Node {
             id: SceneId::new(),
             children: vec![],
@@ -5037,6 +5125,7 @@ mod tests {
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(16, 16);
+        scene.register_resource(resource_id);
         let node = Node {
             id: SceneId::new(),
             children: vec![],
@@ -5095,6 +5184,7 @@ mod tests {
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(8, 8);
+        scene.register_resource(resource_id);
         let node1 = Node {
             id: SceneId::new(),
             children: vec![],
@@ -5316,6 +5406,336 @@ mod tests {
             }
             _ => panic!("expected StaticImage node"),
         }
+    }
+
+    // ─── Resource ref-count tracking tests (hud-uar4) ────────────────────
+    //
+    // Spec: resource-store/spec.md §Requirement: Resource Freed On Last Tile Removal
+    // When the last tile referencing a resource is removed (via lease expiry,
+    // explicit DeleteTile, or SetTileRoot replacement), the resource MUST be freed
+    // from the registry.  If another tile still references the same resource the
+    // registry entry MUST be preserved.
+
+    /// Single tile with a StaticImage resource: removing the tile frees the resource.
+    #[test]
+    fn resource_freed_when_only_referencing_tile_is_removed() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+
+        let (resource_id, decoded_bytes) = make_test_image_resource(32, 32);
+        scene.register_resource(resource_id);
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::StaticImage(StaticImageNode {
+                        resource_id,
+                        width: 32,
+                        height: 32,
+                        decoded_bytes,
+                        fit_mode: ImageFitMode::Contain,
+                        bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                    }),
+                },
+            )
+            .unwrap();
+
+        // Resource must be registered and ref count = 1.
+        assert!(
+            scene.is_resource_registered(&resource_id),
+            "resource must be registered after tile is set"
+        );
+        assert_eq!(
+            scene.resource_ref_count(&resource_id),
+            Some(1),
+            "ref count must be 1 while one tile references it"
+        );
+
+        // Remove the tile (explicit delete).
+        scene.delete_tile(tile_id, "agent").unwrap();
+
+        // Resource must be freed.
+        assert!(
+            !scene.is_resource_registered(&resource_id),
+            "resource must be freed when the last referencing tile is removed"
+        );
+        assert_eq!(
+            scene.resource_ref_count(&resource_id),
+            None,
+            "resource_ref_count must return None after resource is freed"
+        );
+    }
+
+    /// Two tiles share the same resource: removing one preserves it; removing both frees it.
+    #[test]
+    fn resource_kept_alive_while_second_tile_references_it_then_freed() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease(
+            "agent",
+            300_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+
+        let tile_a = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+        let tile_b = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(200.0, 0.0, 200.0, 200.0), 2)
+            .unwrap();
+
+        let (resource_id, decoded_bytes) = make_test_image_resource(16, 16);
+        scene.register_resource(resource_id);
+
+        let make_image_node = || Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::StaticImage(StaticImageNode {
+                resource_id,
+                width: 16,
+                height: 16,
+                decoded_bytes,
+                fit_mode: ImageFitMode::Contain,
+                bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+            }),
+        };
+
+        scene.set_tile_root(tile_a, make_image_node()).unwrap();
+        scene.set_tile_root(tile_b, make_image_node()).unwrap();
+
+        assert_eq!(
+            scene.resource_ref_count(&resource_id),
+            Some(2),
+            "ref count must be 2 when two tiles reference the same resource"
+        );
+
+        // Remove first tile — resource must still be alive.
+        scene.delete_tile(tile_a, "agent").unwrap();
+        assert!(
+            scene.is_resource_registered(&resource_id),
+            "resource must still be registered while tile_b references it"
+        );
+        assert_eq!(
+            scene.resource_ref_count(&resource_id),
+            Some(1),
+            "ref count must drop to 1 after first tile is removed"
+        );
+
+        // Remove second tile — resource must be freed.
+        scene.delete_tile(tile_b, "agent").unwrap();
+        assert!(
+            !scene.is_resource_registered(&resource_id),
+            "resource must be freed after both tiles are removed"
+        );
+        assert_eq!(
+            scene.resource_ref_count(&resource_id),
+            None,
+            "resource_ref_count must return None after last tile removed"
+        );
+    }
+
+    /// Lease expiry path: tiles removed by `expire_leases` also decrement resource refs.
+    #[test]
+    fn resource_freed_on_lease_expiry() {
+        use crate::clock::TestClock;
+        let clock = Arc::new(TestClock::new(1_000));
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, clock.clone());
+
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        // Grant a short lease (100 ms TTL).
+        let lease_id = scene.grant_lease("agent", 100, vec![Capability::CreateTiles]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+
+        let (resource_id, decoded_bytes) = make_test_image_resource(8, 8);
+        scene.register_resource(resource_id);
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::StaticImage(StaticImageNode {
+                        resource_id,
+                        width: 8,
+                        height: 8,
+                        decoded_bytes,
+                        fit_mode: ImageFitMode::Contain,
+                        bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                    }),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(scene.resource_ref_count(&resource_id), Some(1));
+
+        // Advance past TTL and trigger lease expiry sweep.
+        clock.advance(200);
+        let expiries = scene.expire_leases();
+        assert_eq!(expiries.len(), 1, "one lease should have expired");
+        assert_eq!(expiries[0].removed_tiles.len(), 1, "one tile removed");
+
+        assert!(
+            !scene.is_resource_registered(&resource_id),
+            "resource must be freed when the lease expires and removes its tile"
+        );
+    }
+
+    /// SetTileRoot replacement: old resource loses a ref, new resource gains one.
+    #[test]
+    fn resource_refs_updated_on_set_tile_root_replacement() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).unwrap();
+        let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::ModifyOwnTiles]);
+        let tile_id = scene
+            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .unwrap();
+
+        let (res_a, bytes_a) = make_test_image_resource(4, 4);
+        let (res_b, bytes_b) = make_test_image_resource(8, 8);
+        scene.register_resource(res_a);
+        scene.register_resource(res_b);
+
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::StaticImage(StaticImageNode {
+                        resource_id: res_a,
+                        width: 4,
+                        height: 4,
+                        decoded_bytes: bytes_a,
+                        fit_mode: ImageFitMode::Contain,
+                        bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                    }),
+                },
+            )
+            .unwrap();
+        assert_eq!(scene.resource_ref_count(&res_a), Some(1));
+        assert_eq!(
+            scene.resource_ref_count(&res_b),
+            Some(0),
+            "res_b registered but not yet referenced by any node"
+        );
+
+        // Replace tile root with a node referencing res_b.
+        scene
+            .set_tile_root(
+                tile_id,
+                Node {
+                    id: SceneId::new(),
+                    children: vec![],
+                    data: NodeData::StaticImage(StaticImageNode {
+                        resource_id: res_b,
+                        width: 8,
+                        height: 8,
+                        decoded_bytes: bytes_b,
+                        fit_mode: ImageFitMode::Contain,
+                        bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+                    }),
+                },
+            )
+            .unwrap();
+
+        // res_a must have been freed (ref count 0 → removed).
+        assert!(
+            !scene.is_resource_registered(&res_a),
+            "res_a must be freed after its node is replaced"
+        );
+        // res_b must now have ref count 1.
+        assert_eq!(
+            scene.resource_ref_count(&res_b),
+            Some(1),
+            "res_b must have ref count 1 after becoming the tile root"
+        );
+    }
+
+    /// UpdateNodeContent with a different resource_id: ref counts are updated correctly.
+    #[test]
+    fn resource_refs_updated_on_update_node_content_resource_swap() {
+        let (mut scene, _lease_id, tile_id, node_id, _) = scene_with_static_image_node(32, 32);
+        let (old_resource_id, _) = make_test_image_resource(32, 32);
+
+        // old resource should have ref count 1 from the initial set_tile_root.
+        assert_eq!(scene.resource_ref_count(&old_resource_id), Some(1));
+
+        let (new_resource_id, new_decoded_bytes) = make_test_image_resource(64, 64);
+        scene.register_resource(new_resource_id);
+
+        scene
+            .update_node_content_checked(
+                tile_id,
+                node_id,
+                NodeData::StaticImage(StaticImageNode {
+                    resource_id: new_resource_id,
+                    width: 64,
+                    height: 64,
+                    decoded_bytes: new_decoded_bytes,
+                    fit_mode: ImageFitMode::Contain,
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                }),
+                "agent",
+            )
+            .unwrap();
+
+        // Old resource must be freed.
+        assert!(
+            !scene.is_resource_registered(&old_resource_id),
+            "old resource must be freed after UpdateNodeContent swaps it out"
+        );
+        // New resource must have ref count 1.
+        assert_eq!(
+            scene.resource_ref_count(&new_resource_id),
+            Some(1),
+            "new resource must have ref count 1 after node is updated"
+        );
+    }
+
+    /// UpdateNodeContent with the SAME resource_id must not change the ref count.
+    #[test]
+    fn resource_refs_unchanged_on_update_node_content_same_resource() {
+        let (mut scene, _lease_id, tile_id, node_id, decoded_bytes) =
+            scene_with_static_image_node(32, 32);
+        let (resource_id, _) = make_test_image_resource(32, 32);
+
+        assert_eq!(scene.resource_ref_count(&resource_id), Some(1));
+
+        // Update node content with the same resource_id (only fit_mode changes).
+        scene
+            .update_node_content_checked(
+                tile_id,
+                node_id,
+                NodeData::StaticImage(StaticImageNode {
+                    resource_id, // same
+                    width: 32,
+                    height: 32,
+                    decoded_bytes, // same
+                    fit_mode: ImageFitMode::Cover, // changed
+                    bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+                }),
+                "agent",
+            )
+            .unwrap();
+
+        // Ref count must be unchanged.
+        assert_eq!(
+            scene.resource_ref_count(&resource_id),
+            Some(1),
+            "ref count must remain 1 when UpdateNodeContent uses the same resource_id"
+        );
     }
 
     // ─── Lease State Machine Tests (RFC 0008) ───────────────────────────
