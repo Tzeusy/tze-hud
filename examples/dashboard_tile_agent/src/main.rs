@@ -4814,7 +4814,7 @@ mod tests {
     //       (no GPU compositing test — GPU path is explicitly excluded from Layer 0 scope)
     //     - §Spec "Lease Expiry Without Renewal Removes Tile" resource freed on expiry:
     //       resource ref-count tracking is not yet implemented in SceneGraph; cleanup
-    //       is structural (tile removed), not ref-counted (tracked as hud-XXXX)
+    //       is structural (tile removed), not ref-counted (tracked as hud-uar4)
 
     /// Task 12.1 — End-to-end lifecycle: connect → lease → upload → create → update → Refresh → Dismiss.
     ///
@@ -4827,9 +4827,10 @@ mod tests {
     ///
     /// This test exercises the full public API chain in order using a single
     /// HeadlessRuntime instance on an ephemeral port. Steps (1)-(5) use the
-    /// previously-tested helpers; steps (6)-(7) drive the inject path and verify
-    /// that handle_event_batch produces the right actions, then simulate the tile
-    /// removal via revoke_lease (the scene-layer equivalent of LeaseRelease).
+    /// previously-tested helpers; steps (6)-(7) construct an `EventBatch`
+    /// locally and call `handle_event_batch` directly to verify the resulting
+    /// actions, then simulate the tile removal via revoke_lease (the scene-layer
+    /// equivalent of LeaseRelease — Layer 0 scope).
     #[tokio::test]
     async fn test_full_lifecycle_end_to_end() {
         use tze_hud_protocol::proto::{
@@ -4908,7 +4909,7 @@ mod tests {
                     tile_id: tile_state.tile_id.clone(),
                     node_id: vec![],
                     interaction_id: "refresh-button".to_string(),
-                    timestamp_mono_us: crate::now_wall_us(),
+                    timestamp_mono_us: 1,
                     device_id: "mouse-0".to_string(),
                     local_x: 104.0,
                     local_y: 274.0,
@@ -4946,7 +4947,7 @@ mod tests {
                     tile_id: tile_state.tile_id.clone(),
                     node_id: vec![],
                     interaction_id: "dismiss-button".to_string(),
-                    timestamp_mono_us: crate::now_wall_us(),
+                    timestamp_mono_us: 2,
                     device_id: "mouse-0".to_string(),
                     local_x: 296.0,
                     local_y: 274.0,
