@@ -31,3 +31,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 uuid = { workspace = true }
 blake3 = { workspace = true }
+
+[dev-dependencies]
+tze_hud_input = { path = "../../crates/tze_hud_input" }
