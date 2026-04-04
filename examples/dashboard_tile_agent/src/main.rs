@@ -337,9 +337,9 @@ pub async fn do_content_update(
     use tokio_stream::StreamExt as _;
 
     #[allow(deprecated)]
-    let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(
-        format!("http://[::1]:{port}"),
-    )
+    let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
+        "http://[::1]:{port}"
+    ))
     .await?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
@@ -566,63 +566,53 @@ pub async fn do_content_update(
                     },
                     // 2. icon → child of new bg
                     tze_hud_protocol::proto::MutationProto {
-                        mutation: Some(
-                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
-                                tze_hud_protocol::proto::AddNodeMutation {
-                                    tile_id: tile_id_bytes.clone(),
-                                    parent_id: bg_parent_id_be.clone(),
-                                    node: Some(icon_node),
-                                },
-                            ),
-                        ),
+                        mutation: Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                            tze_hud_protocol::proto::AddNodeMutation {
+                                tile_id: tile_id_bytes.clone(),
+                                parent_id: bg_parent_id_be.clone(),
+                                node: Some(icon_node),
+                            },
+                        )),
                     },
                     // 3. header → child of new bg
                     tze_hud_protocol::proto::MutationProto {
-                        mutation: Some(
-                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
-                                tze_hud_protocol::proto::AddNodeMutation {
-                                    tile_id: tile_id_bytes.clone(),
-                                    parent_id: bg_parent_id_be.clone(),
-                                    node: Some(header_node),
-                                },
-                            ),
-                        ),
+                        mutation: Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                            tze_hud_protocol::proto::AddNodeMutation {
+                                tile_id: tile_id_bytes.clone(),
+                                parent_id: bg_parent_id_be.clone(),
+                                node: Some(header_node),
+                            },
+                        )),
                     },
                     // 4. body (updated) → child of new bg
                     tze_hud_protocol::proto::MutationProto {
-                        mutation: Some(
-                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
-                                tze_hud_protocol::proto::AddNodeMutation {
-                                    tile_id: tile_id_bytes.clone(),
-                                    parent_id: bg_parent_id_be.clone(),
-                                    node: Some(body_node),
-                                },
-                            ),
-                        ),
+                        mutation: Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                            tze_hud_protocol::proto::AddNodeMutation {
+                                tile_id: tile_id_bytes.clone(),
+                                parent_id: bg_parent_id_be.clone(),
+                                node: Some(body_node),
+                            },
+                        )),
                     },
                     // 5. refresh button → child of new bg
                     tze_hud_protocol::proto::MutationProto {
-                        mutation: Some(
-                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
-                                tze_hud_protocol::proto::AddNodeMutation {
-                                    tile_id: tile_id_bytes.clone(),
-                                    parent_id: bg_parent_id_be.clone(),
-                                    node: Some(refresh_node),
-                                },
-                            ),
-                        ),
+                        mutation: Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                            tze_hud_protocol::proto::AddNodeMutation {
+                                tile_id: tile_id_bytes.clone(),
+                                parent_id: bg_parent_id_be.clone(),
+                                node: Some(refresh_node),
+                            },
+                        )),
                     },
                     // 6. dismiss button → child of new bg
                     tze_hud_protocol::proto::MutationProto {
-                        mutation: Some(
-                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
-                                tze_hud_protocol::proto::AddNodeMutation {
-                                    tile_id: tile_id_bytes.clone(),
-                                    parent_id: bg_parent_id_be.clone(),
-                                    node: Some(dismiss_node),
-                                },
-                            ),
-                        ),
+                        mutation: Some(tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                            tze_hud_protocol::proto::AddNodeMutation {
+                                tile_id: tile_id_bytes.clone(),
+                                parent_id: bg_parent_id_be.clone(),
+                                node: Some(dismiss_node),
+                            },
+                        )),
                     },
                 ],
                 timing: None,
@@ -662,10 +652,9 @@ pub async fn do_content_update(
                 return Ok(());
             }
             other => {
-                return Err(format!(
-                    "Expected MutationResult (content update), got: {other:?}"
-                )
-                .into());
+                return Err(
+                    format!("Expected MutationResult (content update), got: {other:?}").into(),
+                );
             }
         }
     }
@@ -688,9 +677,7 @@ pub async fn do_content_update(
 ///
 /// Spec references:
 ///   openspec/changes/exemplar-dashboard-tile/tasks.md §8.1–8.3
-pub fn handle_event_batch(
-    batch: &tze_hud_protocol::proto::EventBatch,
-) -> Vec<AgentAction> {
+pub fn handle_event_batch(batch: &tze_hud_protocol::proto::EventBatch) -> Vec<AgentAction> {
     use tze_hud_protocol::proto::input_envelope::Event;
 
     let mut actions = Vec::new();
@@ -714,8 +701,8 @@ pub fn handle_event_batch(
             // tasks.md §8.1: extract CommandInputEvent, check action == ACTIVATE.
             // tasks.md §8.5: ACTIVATE on focused Dismiss → AgentAction::Dismiss.
             Some(Event::CommandInput(cmd)) => {
-                let is_activate = cmd.action
-                    == tze_hud_protocol::proto::CommandAction::Activate as i32;
+                let is_activate =
+                    cmd.action == tze_hud_protocol::proto::CommandAction::Activate as i32;
                 if is_activate {
                     if cmd.interaction_id == "refresh-button" {
                         actions.push(AgentAction::RefreshContent);
@@ -3604,18 +3591,17 @@ mod tests {
 
         // tasks.md §7.5: process_with_focus must return a FocusTransition with a
         // FocusGainedEvent for the clicked node.
-        let transition =
-            focus_transition.expect("click on HitRegionNode must produce FocusTransition — tasks.md §7.5");
+        let transition = focus_transition
+            .expect("click on HitRegionNode must produce FocusTransition — tasks.md §7.5");
 
         let (gained_ev, _) = transition
             .gained
             .as_ref()
             .expect("FocusTransition must have 'gained' — tasks.md §7.5");
 
-        let gained_node_id =
-            gained_ev
-                .node_id
-                .expect("FocusGainedEvent must carry node_id — tasks.md §7.5");
+        let gained_node_id = gained_ev
+            .node_id
+            .expect("FocusGainedEvent must carry node_id — tasks.md §7.5");
 
         // Verify focused state is reflected in HitRegionLocalState.
         let state = scene
@@ -3645,14 +3631,7 @@ mod tests {
         >,
         tokio::task::JoinHandle<()>,
         // Inject function: (namespace, EventBatch) → sent count
-        Box<
-            dyn Fn(
-                    String,
-                    tze_hud_protocol::proto::EventBatch,
-                ) -> usize
-                + Send
-                + Sync,
-        >,
+        Box<dyn Fn(String, tze_hud_protocol::proto::EventBatch) -> usize + Send + Sync>,
         std::sync::Arc<tokio::sync::Mutex<tze_hud_protocol::session::SharedState>>,
     ) {
         use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
@@ -3695,9 +3674,7 @@ mod tests {
         // Wrap the sender in a closure that mimics `inject_input_event`.
         let inject_fn = Box::new(
             move |namespace: String, batch: tze_hud_protocol::proto::EventBatch| -> usize {
-                input_event_tx
-                    .send((namespace, batch))
-                    .unwrap_or_default()
+                input_event_tx.send((namespace, batch)).unwrap_or_default()
             },
         );
 
@@ -3752,11 +3729,7 @@ mod tests {
 
         // Drain SessionEstablished + SceneSnapshot.
         for _ in 0..2 {
-            stream
-                .next()
-                .await
-                .expect("stream open")
-                .expect("no error");
+            stream.next().await.expect("stream open").expect("no error");
         }
 
         (tx, stream)
@@ -3775,10 +3748,10 @@ mod tests {
     #[tokio::test]
     async fn test_click_on_refresh_dispatches_click_event_with_correct_interaction_id() {
         use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
         use tze_hud_protocol::proto::{
             ClickEvent, EventBatch, InputEnvelope, input_envelope::Event,
         };
-        use tze_hud_protocol::proto::session as sp;
 
         let (mut client, server, inject_fn, state) = setup_test_with_inject().await;
 
@@ -3824,14 +3797,11 @@ mod tests {
         // Agent must receive EventBatch with the ClickEvent.
         // Drain messages; skip non-EventBatch messages (e.g. LeaseStateChange).
         let received_batch = loop {
-            let msg = tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                stream.next(),
-            )
-            .await
-            .expect("timed out waiting for EventBatch — tasks.md §8.4")
-            .expect("stream ended")
-            .expect("stream error");
+            let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+                .await
+                .expect("timed out waiting for EventBatch — tasks.md §8.4")
+                .expect("stream ended")
+                .expect("stream error");
 
             if let Some(sp::server_message::Payload::EventBatch(batch)) = msg.payload {
                 break batch;
@@ -3859,9 +3829,7 @@ mod tests {
                     "ClickEvent.node_id must match injected value — tasks.md §8.4"
                 );
             }
-            other => panic!(
-                "Expected ClickEvent in EventBatch, got: {other:?} — tasks.md §8.4"
-            ),
+            other => panic!("Expected ClickEvent in EventBatch, got: {other:?} — tasks.md §8.4"),
         }
 
         drop(tx);
@@ -3877,10 +3845,10 @@ mod tests {
     #[tokio::test]
     async fn test_activate_command_on_dismiss_dispatches_command_input_event() {
         use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
         use tze_hud_protocol::proto::{
             CommandAction, CommandInputEvent, EventBatch, InputEnvelope, input_envelope::Event,
         };
-        use tze_hud_protocol::proto::session as sp;
 
         let (mut client, server, inject_fn, state) = setup_test_with_inject().await;
 
@@ -3919,14 +3887,11 @@ mod tests {
 
         // Drain until EventBatch arrives.
         let received_batch = loop {
-            let msg = tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                stream.next(),
-            )
-            .await
-            .expect("timed out waiting for EventBatch — tasks.md §8.5")
-            .expect("stream ended")
-            .expect("stream error");
+            let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+                .await
+                .expect("timed out waiting for EventBatch — tasks.md §8.5")
+                .expect("stream ended")
+                .expect("stream error");
 
             if let Some(sp::server_message::Payload::EventBatch(b)) = msg.payload {
                 break b;
@@ -3972,10 +3937,10 @@ mod tests {
     #[tokio::test]
     async fn test_navigate_next_plus_activate_reaches_both_buttons() {
         use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
         use tze_hud_protocol::proto::{
             CommandAction, CommandInputEvent, EventBatch, InputEnvelope, input_envelope::Event,
         };
-        use tze_hud_protocol::proto::session as sp;
 
         let (mut client, server, inject_fn, state) = setup_test_with_inject().await;
 
@@ -4028,14 +3993,11 @@ mod tests {
 
         // Wait for EventBatch with NAVIGATE_NEXT + ACTIVATE for Refresh.
         let batch1 = loop {
-            let msg = tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                stream.next(),
-            )
-            .await
-            .expect("timed out waiting for nav-refresh batch — tasks.md §8.6")
-            .expect("stream ended")
-            .expect("stream error");
+            let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+                .await
+                .expect("timed out waiting for nav-refresh batch — tasks.md §8.6")
+                .expect("stream ended")
+                .expect("stream error");
 
             if let Some(sp::server_message::Payload::EventBatch(b)) = msg.payload {
                 break b;
@@ -4107,14 +4069,11 @@ mod tests {
         inject_fn(namespace.clone(), nav_dismiss_batch);
 
         let batch2 = loop {
-            let msg = tokio::time::timeout(
-                tokio::time::Duration::from_millis(500),
-                stream.next(),
-            )
-            .await
-            .expect("timed out waiting for nav-dismiss batch — tasks.md §8.6")
-            .expect("stream ended")
-            .expect("stream error");
+            let msg = tokio::time::timeout(tokio::time::Duration::from_millis(500), stream.next())
+                .await
+                .expect("timed out waiting for nav-dismiss batch — tasks.md §8.6")
+                .expect("stream ended")
+                .expect("stream error");
 
             if let Some(sp::server_message::Payload::EventBatch(b)) = msg.payload {
                 break b;
