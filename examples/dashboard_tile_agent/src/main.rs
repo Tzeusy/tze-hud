@@ -4241,4 +4241,727 @@ mod tests {
             "NAVIGATE_NEXT must NOT produce an AgentAction — tasks.md §8.6; got: {actions:?}"
         );
     }
+
+    // ── Phase 9: Focus Cycling ────────────────────────────────────────────────
+
+    /// Task 9.1 — Tab (NAVIGATE_NEXT) cycles focus from Refresh → Dismiss → wraps to Refresh.
+    ///
+    /// Spec §Requirement: Focus Cycling
+    /// Scenario: NAVIGATE_NEXT advances focus in order, wraps at end.
+    /// tasks.md §9.1: Tab key (NAVIGATE_NEXT) cycles focus from Refresh to Dismiss
+    ///   to next tile (or wraps to Refresh if only tile).
+    ///
+    /// Uses `FocusManager::navigate_next` on the dashboard scene (2 HitRegionNodes:
+    /// Refresh and Dismiss, both `accepts_focus=true`).
+    #[test]
+    fn test_navigate_next_cycles_refresh_to_dismiss_to_refresh() {
+        use tze_hud_input::FocusManager;
+        use tze_hud_scene::SceneId;
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let tab_id = scene.active_tab.expect("active_tab must be set");
+
+        // Collect the node IDs of the two HitRegionNodes by interaction_id.
+        // tile root is the SolidColorNode bg; its children are header, body, refresh, dismiss.
+        let (refresh_id, dismiss_id) = find_hit_region_ids(&scene, tile_id);
+
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // ── Step 1: NAVIGATE_NEXT from None → Refresh ──────────────────────────
+        let t1 = fm.navigate_next(tab_id, &scene);
+        let gained1 = t1
+            .gained
+            .as_ref()
+            .expect("first navigate_next must produce FocusGainedEvent — tasks.md §9.1");
+        assert_eq!(
+            gained1.0.node_id,
+            Some(refresh_id),
+            "first NAVIGATE_NEXT must focus Refresh — tasks.md §9.1"
+        );
+        // Apply focus state to scene so the scene reflects the current focus.
+        apply_focus_gained_to_scene(&mut scene, &gained1.0);
+
+        // ── Step 2: NAVIGATE_NEXT from Refresh → Dismiss ───────────────────────
+        let t2 = fm.navigate_next(tab_id, &scene);
+        let gained2 = t2
+            .gained
+            .as_ref()
+            .expect("second navigate_next must produce FocusGainedEvent — tasks.md §9.1");
+        assert_eq!(
+            gained2.0.node_id,
+            Some(dismiss_id),
+            "second NAVIGATE_NEXT must focus Dismiss — tasks.md §9.1"
+        );
+        apply_focus_gained_to_scene(&mut scene, &gained2.0);
+
+        // ── Step 3: NAVIGATE_NEXT from Dismiss → wraps back to Refresh ─────────
+        let t3 = fm.navigate_next(tab_id, &scene);
+        let gained3 = t3
+            .gained
+            .as_ref()
+            .expect("third navigate_next must wrap to Refresh — tasks.md §9.1");
+        assert_eq!(
+            gained3.0.node_id,
+            Some(refresh_id),
+            "third NAVIGATE_NEXT must wrap back to Refresh — tasks.md §9.1"
+        );
+
+        let _ = (refresh_id, dismiss_id); // used above
+        let _: SceneId = tile_id;        // suppress unused warning
+    }
+
+    /// Task 9.2 — Shift+Tab (NAVIGATE_PREV) cycles focus in reverse order.
+    ///
+    /// Spec §Requirement: Focus Cycling
+    /// Scenario: NAVIGATE_PREV reverses focus order.
+    /// tasks.md §9.2: Shift+Tab (NAVIGATE_PREV) cycles focus in reverse order.
+    ///
+    /// Starting from None, NAVIGATE_PREV visits Dismiss then Refresh (reverse of
+    /// the z-order traversal used by NAVIGATE_NEXT).
+    #[test]
+    fn test_navigate_prev_cycles_in_reverse_order() {
+        use tze_hud_input::FocusManager;
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let tab_id = scene.active_tab.expect("active_tab must be set");
+
+        let (refresh_id, dismiss_id) = find_hit_region_ids(&scene, tile_id);
+
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // ── Step 1: NAVIGATE_PREV from None → last focusable element (Dismiss) ─
+        // Reverse traversal wraps to the last element first.
+        let t1 = fm.navigate_prev(tab_id, &scene);
+        let gained1 = t1
+            .gained
+            .as_ref()
+            .expect("first navigate_prev must produce FocusGainedEvent — tasks.md §9.2");
+        // The last element in forward order is Dismiss → first in reverse.
+        assert_eq!(
+            gained1.0.node_id,
+            Some(dismiss_id),
+            "first NAVIGATE_PREV must focus Dismiss (last in forward order) — tasks.md §9.2"
+        );
+        apply_focus_gained_to_scene(&mut scene, &gained1.0);
+
+        // ── Step 2: NAVIGATE_PREV from Dismiss → Refresh ───────────────────────
+        let t2 = fm.navigate_prev(tab_id, &scene);
+        let gained2 = t2
+            .gained
+            .as_ref()
+            .expect("second navigate_prev must produce FocusGainedEvent — tasks.md §9.2");
+        assert_eq!(
+            gained2.0.node_id,
+            Some(refresh_id),
+            "second NAVIGATE_PREV must focus Refresh — tasks.md §9.2"
+        );
+        apply_focus_gained_to_scene(&mut scene, &gained2.0);
+
+        // ── Step 3: NAVIGATE_PREV from Refresh → wraps back to Dismiss ─────────
+        let t3 = fm.navigate_prev(tab_id, &scene);
+        let gained3 = t3
+            .gained
+            .as_ref()
+            .expect("third navigate_prev must wrap to Dismiss — tasks.md §9.2");
+        assert_eq!(
+            gained3.0.node_id,
+            Some(dismiss_id),
+            "third NAVIGATE_PREV must wrap back to Dismiss — tasks.md §9.2"
+        );
+
+        let _ = (refresh_id, dismiss_id, tile_id); // used above
+    }
+
+    /// Task 9.3 — FocusGainedEvent and FocusLostEvent dispatched on focus transitions.
+    ///
+    /// Spec §Requirement: Focus Events Dispatch
+    /// Scenario: FocusGainedEvent and FocusLostEvent emitted on each transition
+    /// tasks.md §9.3: FocusGainedEvent and FocusLostEvent are dispatched to the
+    ///   agent on focus transitions between the two buttons.
+    ///
+    /// We verify:
+    ///   1. First NAVIGATE_NEXT → FocusGainedEvent for Refresh, no FocusLostEvent.
+    ///   2. Second NAVIGATE_NEXT → FocusLostEvent for Refresh + FocusGainedEvent for Dismiss.
+    #[test]
+    fn test_focus_transitions_emit_gained_and_lost_events() {
+        use tze_hud_input::FocusManager;
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let tab_id = scene.active_tab.expect("active_tab must be set");
+
+        let (refresh_id, dismiss_id) = find_hit_region_ids(&scene, tile_id);
+
+        let mut fm = FocusManager::new();
+        fm.add_tab(tab_id);
+
+        // ── Step 1: None → Refresh: gained event only ──────────────────────────
+        let t1 = fm.navigate_next(tab_id, &scene);
+
+        let gained1 = t1
+            .gained
+            .as_ref()
+            .expect("first transition must have FocusGainedEvent — tasks.md §9.3");
+        assert_eq!(
+            gained1.0.node_id,
+            Some(refresh_id),
+            "FocusGainedEvent.node_id must be refresh_id — tasks.md §9.3"
+        );
+        assert!(
+            t1.lost.is_none(),
+            "no FocusLostEvent when transitioning from None — tasks.md §9.3"
+        );
+        apply_focus_gained_to_scene(&mut scene, &gained1.0);
+
+        // ── Step 2: Refresh → Dismiss: both lost and gained events ─────────────
+        let t2 = fm.navigate_next(tab_id, &scene);
+
+        let lost2 = t2
+            .lost
+            .as_ref()
+            .expect("second transition must have FocusLostEvent for Refresh — tasks.md §9.3");
+        assert_eq!(
+            lost2.0.node_id,
+            Some(refresh_id),
+            "FocusLostEvent.node_id must be refresh_id — tasks.md §9.3"
+        );
+
+        let gained2 = t2
+            .gained
+            .as_ref()
+            .expect("second transition must have FocusGainedEvent for Dismiss — tasks.md §9.3");
+        assert_eq!(
+            gained2.0.node_id,
+            Some(dismiss_id),
+            "FocusGainedEvent.node_id must be dismiss_id — tasks.md §9.3"
+        );
+
+        let _ = (refresh_id, dismiss_id, tile_id);
+    }
+
+    // ── Focus cycling helper utilities ────────────────────────────────────────
+
+    /// Find the SceneIds of the Refresh and Dismiss HitRegionNodes in the scene.
+    ///
+    /// Returns `(refresh_id, dismiss_id)` in focus-cycle order (Refresh comes
+    /// first in tree order since it is added to the tile before Dismiss).
+    fn find_hit_region_ids(
+        scene: &tze_hud_scene::graph::SceneGraph,
+        tile_id: tze_hud_scene::SceneId,
+    ) -> (tze_hud_scene::SceneId, tze_hud_scene::SceneId) {
+        use tze_hud_scene::{NodeData, SceneId};
+
+        let tile = scene.tiles.get(&tile_id).expect("tile must exist");
+        let root_id = tile.root_node.expect("tile must have root node");
+
+        // The root is the SolidColorNode bg; iterate its children for HitRegions.
+        let root_node = scene.nodes.get(&root_id).expect("root node must exist");
+        let mut refresh: Option<SceneId> = None;
+        let mut dismiss: Option<SceneId> = None;
+
+        for &child_id in &root_node.children {
+            if let Some(node) = scene.nodes.get(&child_id) {
+                if let NodeData::HitRegion(hr) = &node.data {
+                    if hr.interaction_id == "refresh-button" {
+                        refresh = Some(child_id);
+                    } else if hr.interaction_id == "dismiss-button" {
+                        dismiss = Some(child_id);
+                    }
+                }
+            }
+        }
+
+        (
+            refresh.expect("refresh HitRegionNode must exist"),
+            dismiss.expect("dismiss HitRegionNode must exist"),
+        )
+    }
+
+    /// Apply a FocusGainedEvent's `focused=true` state to the corresponding
+    /// `HitRegionLocalState` in the scene graph.
+    ///
+    /// `FocusManager::navigate_next/prev` does not directly mutate the scene's
+    /// `hit_region_states`; that update is the caller's responsibility.  This
+    /// helper performs the update so subsequent test assertions on
+    /// `hit_region_states` are accurate.
+    fn apply_focus_gained_to_scene(
+        scene: &mut tze_hud_scene::graph::SceneGraph,
+        gained: &tze_hud_input::focus::FocusGainedEvent,
+    ) {
+        use tze_hud_scene::types::HitRegionLocalState;
+        if let Some(node_id) = gained.node_id {
+            let state = scene
+                .hit_region_states
+                .entry(node_id)
+                .or_insert_with(|| HitRegionLocalState::new(node_id));
+            state.focused = true;
+        }
+    }
+
+    // ── Phase 10: Lease Governance Lifecycle ──────────────────────────────────
+
+    /// Task 10.1 — auto-renewal fires at 75% TTL (45 s for a 60 s lease).
+    ///
+    /// Spec §Requirement: Auto-Renewal Policy: "runtime auto-renews at 75% TTL elapsed".
+    /// tasks.md §10.1: auto-renewal fires at 75% TTL (45 seconds) — agent receives
+    ///   LeaseResponse with granted=true and updated expiry.
+    ///
+    /// Layer 0 test using `TtlState` with an injected `SimulatedClock`:
+    ///   - Create a `TtlState` with `ttl_ms=60_000` and `AutoRenew` policy.
+    ///   - Advance clock to 44 999 ms (just below 75%) → poll returns Ok.
+    ///   - Advance clock to 45 000 ms (exactly 75%) → poll returns AutoRenewDue.
+    ///   - Reset renewal window and advance to 90 000 ms → fires again.
+    #[test]
+    fn test_auto_renewal_fires_at_75_percent_ttl() {
+        use tze_hud_scene::clock::SimulatedClock;
+        use tze_hud_scene::lease::{RenewalPolicy, TtlCheck, TtlState};
+
+        let ttl_ms = 60_000u64;
+        let clock = SimulatedClock::new(0); // start at t=0 (ms)
+        let mut ttl =
+            TtlState::new_activated(ttl_ms, RenewalPolicy::AutoRenew, clock.clone());
+
+        // Before 75%: poll returns Ok.
+        clock.advance_us(44_999 * 1_000); // 44 999 ms
+        assert_eq!(
+            ttl.poll(),
+            TtlCheck::Ok,
+            "poll must return Ok before 75% threshold — tasks.md §10.1"
+        );
+
+        // At exactly 75% (45 000 ms elapsed): poll must return AutoRenewDue.
+        clock.advance_us(1 * 1_000); // advance 1 ms → total 45 000 ms
+        assert_eq!(
+            ttl.poll(),
+            TtlCheck::AutoRenewDue,
+            "poll must return AutoRenewDue at 75% TTL elapsed — tasks.md §10.1"
+        );
+
+        // After the first renewal, reset the window (simulates a new TTL grant).
+        // Then advance to 75% of the remaining TTL and verify renewal fires again.
+        ttl.reset_renewal_window(ttl_ms);
+        clock.advance_us(ttl_ms * 3 / 4 * 1_000); // advance another 45 s
+        assert_eq!(
+            ttl.poll(),
+            TtlCheck::AutoRenewDue,
+            "auto-renewal must fire again after reset_renewal_window — tasks.md §10.1"
+        );
+    }
+
+    /// Task 10.2 — agent disconnect transitions lease to ORPHANED; tile gets badge within 1 frame.
+    ///
+    /// Spec §Requirement: Orphan Handling Grace Period: "tile is frozen, disconnection badge
+    ///   appears within 1 frame".
+    /// tasks.md §10.2: agent disconnect transitions lease to ORPHANED, tile is frozen,
+    ///   disconnection badge appears within 1 frame.
+    ///
+    /// Layer 0 test on `SceneGraph::disconnect_lease`:
+    ///   - Build a scene with a tile attached to a lease.
+    ///   - Call `disconnect_lease` → lease state MUST be Orphaned.
+    ///   - Tile's `visual_hint` MUST be `DisconnectionBadge`.
+    #[test]
+    fn test_disconnect_transitions_lease_to_orphaned_and_sets_badge() {
+        use tze_hud_scene::lease::TileVisualHint;
+        use tze_hud_scene::types::LeaseState;
+        use tze_hud_scene::Capability;
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+
+        // Find the lease_id through the tile.
+        let lease_id = scene
+            .tiles
+            .get(&tile_id)
+            .expect("tile must exist")
+            .lease_id;
+
+        // Simulate agent disconnect.
+        let now_ms = 1_000u64;
+        scene
+            .disconnect_lease(&lease_id, now_ms)
+            .expect("disconnect_lease must succeed — tasks.md §10.2");
+
+        // Verify lease transitioned to Orphaned.
+        let lease = scene.leases.get(&lease_id).expect("lease must exist");
+        assert_eq!(
+            lease.state,
+            LeaseState::Orphaned,
+            "lease state must be Orphaned after disconnect — tasks.md §10.2"
+        );
+
+        // Verify disconnection badge appeared on the tile (within 1 frame — synchronous).
+        let tile = scene.tiles.get(&tile_id).expect("tile must exist");
+        assert_eq!(
+            tile.visual_hint,
+            TileVisualHint::DisconnectionBadge,
+            "tile visual_hint must be DisconnectionBadge after disconnect — tasks.md §10.2"
+        );
+
+        let _ = Capability::CreateTiles; // suppress unused import warning
+    }
+
+    /// Task 10.3 — agent reconnect within grace period restores ACTIVE and clears badge.
+    ///
+    /// Spec §Requirement: Orphan Handling Grace Period: "ORPHANED → ACTIVE; badges cleared
+    ///   within 1 frame".
+    /// tasks.md §10.3: agent reconnect within 30-second grace period restores ACTIVE
+    ///   lease and clears badge.
+    ///
+    /// Layer 0 test:
+    ///   - Disconnect the lease (→ ORPHANED).
+    ///   - Reconnect within the grace period (< 30 000 ms elapsed).
+    ///   - Lease state MUST be Active; tile visual_hint MUST be None.
+    #[test]
+    fn test_reconnect_within_grace_period_restores_active_and_clears_badge() {
+        use tze_hud_scene::lease::TileVisualHint;
+        use tze_hud_scene::types::LeaseState;
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let lease_id = scene
+            .tiles
+            .get(&tile_id)
+            .expect("tile must exist")
+            .lease_id;
+
+        let disconnect_ms = 1_000u64;
+        scene
+            .disconnect_lease(&lease_id, disconnect_ms)
+            .expect("disconnect_lease must succeed");
+
+        // Reconnect at 10 s (well within 30 s grace period).
+        let reconnect_ms = disconnect_ms + 10_000;
+        scene
+            .reconnect_lease(&lease_id, reconnect_ms)
+            .expect("reconnect_lease must succeed within grace — tasks.md §10.3");
+
+        // Lease must be ACTIVE again.
+        let lease = scene.leases.get(&lease_id).expect("lease must exist");
+        assert_eq!(
+            lease.state,
+            LeaseState::Active,
+            "lease must be ACTIVE after reconnect within grace — tasks.md §10.3"
+        );
+
+        // Disconnection badge must be cleared.
+        let tile = scene.tiles.get(&tile_id).expect("tile must exist");
+        assert_eq!(
+            tile.visual_hint,
+            TileVisualHint::None,
+            "tile visual_hint must be None after reconnect — tasks.md §10.3"
+        );
+    }
+
+    /// Task 10.4 — grace period expiry (no reconnect within 30 s) removes tile.
+    ///
+    /// Spec §Requirement: Orphan Handling Grace Period: "after 30 s, lease is EXPIRED
+    ///   and tile is removed".
+    /// tasks.md §10.4: grace period expiry (no reconnect within 30 seconds) transitions
+    ///   lease to EXPIRED and removes tile.
+    ///
+    /// Layer 0 test using `SceneGraph::expire_leases` on a `SceneGraph` with an
+    /// injected `SimulatedClock`:
+    ///   - Disconnect the lease at t=1 000 ms.
+    ///   - Advance clock to t=1 000 + 30 000 + 1 = 31 001 ms (grace expired).
+    ///   - Call `expire_leases` → lease MUST be Expired; tile MUST be removed.
+    #[test]
+    fn test_grace_expiry_removes_tile() {
+        use std::sync::Arc;
+        use tze_hud_scene::clock::SimulatedClock;
+        use tze_hud_scene::graph::SceneGraph;
+        use tze_hud_scene::types::LeaseState;
+        use tze_hud_scene::{Capability, Rect};
+
+        let clock = SimulatedClock::new(1_000 * 1_000); // start at 1 s in µs
+        let mut scene =
+            SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+
+        let tab_id = scene.create_tab("Test", 0).expect("create_tab");
+        scene.active_tab = Some(tab_id);
+
+        // Grant a lease with TTL 120 s (longer than grace period, so TTL is not the cause).
+        let lease_id = scene.grant_lease(
+            "grace-expiry-agent",
+            120_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "grace-expiry-agent",
+                lease_id,
+                Rect::new(50.0, 50.0, 400.0, 300.0),
+                100,
+            )
+            .expect("create_tile");
+
+        // Disconnect at t=1 000 ms.
+        let disconnect_ms = 1_000u64;
+        scene
+            .disconnect_lease(&lease_id, disconnect_ms)
+            .expect("disconnect_lease must succeed");
+
+        // Advance clock past the grace period (30 001 ms after disconnect).
+        // SimulatedClock uses µs; current = 1 000 000 µs. Target = 31 001 ms.
+        let target_us = (disconnect_ms + 30_001) * 1_000;
+        clock.set_us(target_us);
+
+        // expire_leases uses the injected clock.
+        let expiries = scene.expire_leases();
+
+        // Must have expired this lease.
+        assert!(
+            expiries.iter().any(|e| e.lease_id == lease_id),
+            "grace-expired lease must appear in expire_leases result — tasks.md §10.4"
+        );
+
+        // Lease state must be Expired.
+        let lease = scene.leases.get(&lease_id).expect("lease must still exist in map");
+        assert_eq!(
+            lease.state,
+            LeaseState::Expired,
+            "lease state must be Expired after grace expiry — tasks.md §10.4"
+        );
+
+        // Tile must be removed from the scene.
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile must be removed after grace expiry — tasks.md §10.4"
+        );
+    }
+
+    /// Task 10.5 — explicit LeaseRelease transitions lease to RELEASED and removes tile.
+    ///
+    /// Spec §Requirement: Explicit Lease Release: "LeaseRelease → RELEASED; tile removed".
+    /// tasks.md §10.5: explicit LeaseRelease transitions lease to RELEASED and removes
+    ///   tile cleanly.
+    ///
+    /// Layer 0 test using `SceneGraph::revoke_lease` which models the runtime's cleanup
+    /// on receiving a `LeaseRelease` message.  The lease state is set to REVOKED (the
+    /// scene graph uses REVOKED for explicit release — there is no separate RELEASED state
+    /// in the scene model; the session layer emits a LeaseStateChange(RELEASED) on the wire).
+    ///
+    /// Verification:
+    ///   - Tile must be removed from the scene.
+    ///   - Lease state must be terminal (Revoked).
+    #[test]
+    fn test_explicit_lease_release_removes_tile() {
+        use tze_hud_scene::types::LeaseState;
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let lease_id = scene
+            .tiles
+            .get(&tile_id)
+            .expect("tile must exist")
+            .lease_id;
+
+        // Simulate LeaseRelease (runtime revokes the lease on explicit agent release).
+        scene
+            .revoke_lease(lease_id)
+            .expect("revoke_lease must succeed on ACTIVE lease — tasks.md §10.5");
+
+        // Tile must be removed from the scene.
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile must be removed after LeaseRelease — tasks.md §10.5"
+        );
+
+        // Lease must be in a terminal state.
+        let lease = scene.leases.get(&lease_id).expect("lease must remain in map");
+        assert!(
+            lease.state.is_terminal(),
+            "lease must be in terminal state after LeaseRelease — tasks.md §10.5; state={:?}",
+            lease.state
+        );
+        // The concrete terminal state after revoke_lease is Revoked (models explicit release).
+        assert_eq!(
+            lease.state,
+            LeaseState::Revoked,
+            "lease state must be Revoked after explicit release — tasks.md §10.5"
+        );
+    }
+
+    // ── Phase 11: Namespace Isolation ────────────────────────────────────────
+
+    /// Task 11.1 — a second agent cannot mutate or delete the dashboard tile.
+    ///
+    /// Spec §Requirement: Namespace Isolation: "agent B MUST NOT modify or delete
+    ///   tiles belonging to agent A's namespace".
+    /// tasks.md §11.1: a second agent session cannot mutate or delete the dashboard
+    ///   tile (rejected with CapabilityMissing or LeaseNotFound / NamespaceMismatch).
+    ///
+    /// Layer 0 test:
+    ///   - Build the dashboard scene (tile owned by "test-agent").
+    ///   - A second agent ("intruder-agent") attempts:
+    ///       a. `set_tile_root_checked` → must fail with NamespaceMismatch.
+    ///       b. `delete_tile`            → must fail with NamespaceMismatch.
+    #[test]
+    fn test_second_agent_cannot_mutate_or_delete_dashboard_tile() {
+        use tze_hud_scene::graph::SceneGraph;
+        use tze_hud_scene::types::{Node, NodeData, Rect, SolidColorNode};
+        use tze_hud_scene::{Rgba, SceneId, ValidationError};
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let intruder = "intruder-agent";
+
+        // ── Attempt a: set_tile_root_checked by intruder ──────────────────────
+        let intruder_node = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(1.0, 0.0, 0.0, 1.0),
+                bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
+            }),
+        };
+
+        let result_set_root =
+            scene.set_tile_root_checked(tile_id, intruder_node, intruder);
+        assert!(
+            result_set_root.is_err(),
+            "set_tile_root_checked by intruder must fail — tasks.md §11.1"
+        );
+        match result_set_root.unwrap_err() {
+            ValidationError::NamespaceMismatch { .. } => { /* expected */ }
+            other => panic!(
+                "set_tile_root_checked intruder error must be NamespaceMismatch, got: {other:?}"
+            ),
+        }
+
+        // ── Attempt b: delete_tile by intruder ────────────────────────────────
+        let result_delete = scene.delete_tile(tile_id, intruder);
+        assert!(
+            result_delete.is_err(),
+            "delete_tile by intruder must fail — tasks.md §11.1"
+        );
+        match result_delete.unwrap_err() {
+            ValidationError::NamespaceMismatch { .. } => { /* expected */ }
+            other => panic!(
+                "delete_tile intruder error must be NamespaceMismatch, got: {other:?}"
+            ),
+        }
+
+        // Tile must still exist (intruder's attempts were rejected).
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "tile must still exist after rejected intruder mutations — tasks.md §11.1"
+        );
+
+        let _: &SceneGraph = &scene; // used above
+    }
+
+    /// Task 11.2 — the dashboard agent cannot mutate tiles owned by another namespace.
+    ///
+    /// Spec §Requirement: Namespace Isolation: "agent A MUST NOT modify tiles in
+    ///   another agent's namespace".
+    /// tasks.md §11.2: the dashboard agent cannot mutate tiles owned by another namespace.
+    ///
+    /// Layer 0 test:
+    ///   - Build a scene with a tile owned by "other-agent" (separate lease).
+    ///   - The dashboard agent ("test-agent") attempts:
+    ///       a. `set_tile_root_checked` on other-agent's tile → NamespaceMismatch.
+    ///       b. `add_node_to_tile_checked` on other-agent's tile → NamespaceMismatch.
+    ///       c. `delete_tile` on other-agent's tile → NamespaceMismatch.
+    #[test]
+    fn test_dashboard_agent_cannot_mutate_other_agent_tile() {
+        use tze_hud_scene::types::{HitRegionNode, Node, NodeData, Rect, SolidColorNode};
+        use tze_hud_scene::{Capability, Rgba, SceneId, ValidationError};
+
+        let (mut scene, dashboard_tile_id) = build_dashboard_scene();
+        let dashboard_ns = "test-agent";
+        let other_ns = "other-agent";
+
+        // Create a tile for "other-agent" on the same tab.
+        let tab_id = scene.active_tab.expect("active_tab must be set");
+        let other_lease_id = scene.grant_lease(
+            other_ns,
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+        let other_tile_id = scene
+            .create_tile(
+                tab_id,
+                other_ns,
+                other_lease_id,
+                Rect::new(500.0, 50.0, 200.0, 200.0),
+                101,
+            )
+            .expect("create other-agent tile");
+
+        // ── Attempt a: dashboard agent sets root of other-agent's tile ────────
+        let node_a = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.0, 1.0, 0.0, 1.0),
+                bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+            }),
+        };
+        let r_set_root =
+            scene.set_tile_root_checked(other_tile_id, node_a, dashboard_ns);
+        assert!(
+            r_set_root.is_err(),
+            "dashboard agent set_tile_root_checked on other tile must fail — tasks.md §11.2"
+        );
+        match r_set_root.unwrap_err() {
+            ValidationError::NamespaceMismatch { .. } => { /* expected */ }
+            other => panic!("Expected NamespaceMismatch (set_tile_root), got: {other:?}"),
+        }
+
+        // ── Attempt b: dashboard agent adds a node to other-agent's tile ──────
+        // Set a root on other_tile first so we can attempt AddNode.
+        let other_root = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.1, 0.1, 0.1, 1.0),
+                bounds: Rect::new(0.0, 0.0, 200.0, 200.0),
+            }),
+        };
+        scene
+            .set_tile_root_checked(other_tile_id, other_root, other_ns)
+            .expect("other-agent must be able to set its own tile root");
+
+        let node_b = Node {
+            id: SceneId::new(),
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(10.0, 10.0, 50.0, 30.0),
+                interaction_id: "injected-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        };
+        let r_add_node =
+            scene.add_node_to_tile_checked(other_tile_id, None, node_b, dashboard_ns);
+        assert!(
+            r_add_node.is_err(),
+            "dashboard agent add_node_to_tile_checked on other tile must fail — tasks.md §11.2"
+        );
+        match r_add_node.unwrap_err() {
+            ValidationError::NamespaceMismatch { .. } => { /* expected */ }
+            other => panic!("Expected NamespaceMismatch (add_node), got: {other:?}"),
+        }
+
+        // ── Attempt c: dashboard agent deletes other-agent's tile ─────────────
+        let r_delete = scene.delete_tile(other_tile_id, dashboard_ns);
+        assert!(
+            r_delete.is_err(),
+            "dashboard agent delete_tile on other tile must fail — tasks.md §11.2"
+        );
+        match r_delete.unwrap_err() {
+            ValidationError::NamespaceMismatch { .. } => { /* expected */ }
+            other => panic!("Expected NamespaceMismatch (delete_tile), got: {other:?}"),
+        }
+
+        // Both tiles must still exist.
+        assert!(
+            scene.tiles.contains_key(&dashboard_tile_id),
+            "dashboard tile must still exist — tasks.md §11.2"
+        );
+        assert!(
+            scene.tiles.contains_key(&other_tile_id),
+            "other-agent tile must still exist — tasks.md §11.2"
+        );
+    }
 }
