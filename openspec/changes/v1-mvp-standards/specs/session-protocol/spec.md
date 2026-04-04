@@ -432,7 +432,7 @@ Scope: v1-mandatory
 
 #### Scenario: Successful resume
 - **WHEN** an agent sends SessionResume with a valid token within the grace period
-- **THEN** the runtime SHALL respond with SessionResumeResult(accepted=true) including a new session_token and the current subscription state
+- **THEN** the runtime SHALL respond with SessionResumeResult(accepted=true) including a new_session_token and the current subscription state
 
 ---
 
@@ -448,7 +448,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Post-Grace-Period Reconnect
-If the grace period expires before the agent reconnects, the runtime SHALL have evicted the agent's leases and cleared its tiles. The session_token SHALL be invalid. The agent MUST perform a full re-handshake via SessionInit. After SessionEstablished, the runtime SHALL send a SceneSnapshot.
+If the grace period expires before the agent reconnects, the runtime SHALL have evicted the agent's leases and cleared its tiles. The resume_token SHALL be invalid. The agent MUST perform a full re-handshake via SessionInit. After SessionEstablished, the runtime SHALL send a SceneSnapshot.
 Source: RFC 0005 §6.5
 Scope: v1-mandatory
 
@@ -464,7 +464,7 @@ Source: RFC 0005 §6.6
 Scope: v1-mandatory
 
 #### Scenario: Agent reconnects after runtime restart
-- **WHEN** the runtime process restarts and an agent attempts to resume with an old session_token
+- **WHEN** the runtime process restarts and an agent attempts to resume with an old resume_token
 - **THEN** the token SHALL be rejected and the agent MUST perform a full SessionInit handshake
 
 ---
@@ -661,7 +661,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: SceneId for Scene-Object Identifiers
-All scene-object identifiers (batch_id, lease_id, created_ids in MutationBatch/MutationResult) SHALL use SceneId (16-byte little-endian UUIDv7, defined in types.proto). Session-level identifiers (agent_id, session_token, namespace) SHALL remain string.
+All scene-object identifiers (batch_id, lease_id, created_ids in MutationBatch/MutationResult) SHALL use SceneId (16-byte little-endian UUIDv7, defined in types.proto). Session-level string identifiers (agent_id, namespace) SHALL remain string; session_id and resume_token use bytes (UUIDv7 and opaque bytes respectively).
 Source: RFC 0005 §3.3, §9.1
 Scope: v1-mandatory
 
