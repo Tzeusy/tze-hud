@@ -4778,6 +4778,356 @@ mod tests {
         );
     }
 
+    // ── Phase 12: Full Lifecycle User-Test ───────────────────────────────────
+    //
+    // §12.1 — End-to-end happy path
+    // §12.2 — Disconnect-during-lifecycle triggers orphan path
+    // §12.3 — All tests headless (verified: all tests above run headless via
+    //          HeadlessRuntime / SceneGraph layer with no GPU or display server)
+    //
+    // Spec reconciliation notes (gen-1):
+    //   Covered by existing tests:
+    //     - Session establishment (§1): test_session_establishment_*
+    //     - Lease acquisition (§2): test_lease_grant_*, test_lease_request_with_invalid_*
+    //     - Resource upload (§3): test_upload_icon_*, test_node_batch_rejected_atomically_*
+    //     - Atomic tile creation (§4): test_create_tile_batch_*, test_partial_batch_*,
+    //       test_node_batch_rejected_atomically_*
+    //     - Intra-tile compositing/z-order (§5): test_scene_has_6_nodes_in_painters_model_order,
+    //       test_z_order_100_*, test_chrome_z_order_*
+    //     - Content update (§6): test_content_update_succeeds_*, test_content_update_rejected_*
+    //     - Input capture/local feedback (§7): test_pointer_down_at_refresh_*, test_pointer_down_sets_pressed_*,
+    //       test_hovered_state_*, test_pointer_up_with_release_*, test_focus_ring_*
+    //     - Agent event callbacks (§8): test_click_on_refresh_*, test_activate_command_*,
+    //       test_navigate_next_plus_activate_*, test_handle_event_batch_*
+    //     - Focus cycling (§9): test_navigate_next_cycles_*, test_navigate_prev_*,
+    //       test_focus_transitions_*
+    //     - Lease governance lifecycle (§10): test_auto_renewal_*, test_disconnect_transitions_*,
+    //       test_reconnect_within_grace_*, test_grace_expiry_*, test_explicit_lease_release_*
+    //     - Namespace isolation (§11): test_second_agent_*, test_dashboard_agent_*
+    //     - Full lifecycle user-test (§12): test_full_lifecycle_end_to_end (§12.1),
+    //       test_disconnect_during_lifecycle_triggers_orphan_path (§12.2)
+    //
+    //   Gaps / coverage notes:
+    //     - §7.2 p99 < 4ms budget: tested via calibrated headless budget (passes on CI)
+    //     - §10.1 auto-renewal: tested at the TtlState layer (no 45s wall-clock wait)
+    //     - §5.2/5.3 chrome rendering above: tested via z-order arithmetic only
+    //       (no GPU compositing test — GPU path is explicitly excluded from Layer 0 scope)
+    //     - §Spec "Lease Expiry Without Renewal Removes Tile" resource freed on expiry:
+    //       resource ref-count tracking is not yet implemented in SceneGraph; cleanup
+    //       is structural (tile removed), not ref-counted (tracked as hud-XXXX)
+
+    /// Task 12.1 — End-to-end lifecycle: connect → lease → upload → create → update → Refresh → Dismiss.
+    ///
+    /// Spec §Requirement: Full Lifecycle User-Test Scenario
+    /// Scenario: End-to-end lifecycle completes successfully
+    /// tasks.md §12.1: complete happy path:
+    ///   (1) session connect, (2) lease request, (3) resource upload,
+    ///   (4) atomic tile creation, (5) content update, (6) Refresh click callback,
+    ///   (7) Dismiss click callback → tile removed from scene.
+    ///
+    /// This test exercises the full public API chain in order using a single
+    /// HeadlessRuntime instance on an ephemeral port. Steps (1)-(5) use the
+    /// previously-tested helpers; steps (6)-(7) drive the inject path and verify
+    /// that handle_event_batch produces the right actions, then simulate the tile
+    /// removal via revoke_lease (the scene-layer equivalent of LeaseRelease).
+    #[tokio::test]
+    async fn test_full_lifecycle_end_to_end() {
+        use tze_hud_protocol::proto::{
+            ClickEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+        use tze_hud_scene::types::LeaseState;
+
+        // ── Setup: start runtime ──────────────────────────────────────────────
+        let port = ephemeral_port();
+        let (server, state) = start_test_runtime_with_state(port)
+            .await
+            .expect("runtime start — §12.1");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // ── Step 1: Resource upload ───────────────────────────────────────────
+        // §12.1(3): upload icon before tile creation
+        let resource_id_bytes = crate::upload_icon(TEST_AGENT_ID)
+            .await
+            .expect("upload_icon — §12.1 step 3");
+
+        // ── Step 2: Prepare scene ─────────────────────────────────────────────
+        setup_scene_with_resource(&state, &resource_id_bytes).await;
+
+        // ── Step 3: Session connect + lease + tile creation ───────────────────
+        // §12.1(1): session connect, §12.1(2): lease request, §12.1(4): atomic tile creation.
+        // These are combined in create_tile_batch which opens a fresh session.
+        let tile_state = crate::create_tile_batch(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            resource_id_bytes.clone(),
+        )
+        .await
+        .expect("create_tile_batch — §12.1 steps 1-4");
+
+        // Verify tile exists in scene after creation.
+        {
+            let st = state.lock().await;
+            let scene = st.scene.lock().await;
+            let tile_id_arr: [u8; 16] = tile_state.tile_id.as_slice().try_into().expect("16 bytes");
+            let tile_uuid = uuid::Uuid::from_bytes(tile_id_arr);
+            let tile_scene_id = tze_hud_scene::SceneId::from_uuid(tile_uuid);
+            assert!(
+                scene.tiles.contains_key(&tile_scene_id),
+                "tile must exist in scene after creation — §12.1 step 4"
+            );
+            assert!(
+                scene.node_count() >= 6,
+                "scene must have at least 6 nodes — §12.1 step 4"
+            );
+        }
+
+        // ── Step 4: Content update ────────────────────────────────────────────
+        // §12.1(5): periodic content update.
+        crate::do_content_update(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            tile_state.tile_id.clone(),
+            resource_id_bytes.clone(),
+            1,
+        )
+        .await
+        .expect("content update — §12.1 step 5");
+
+        // ── Step 5: Refresh click → agent receives callback, content refreshed ──
+        // §12.1(6): simulate Refresh click via handle_event_batch.
+        let refresh_click_batch = EventBatch {
+            frame_number: 10,
+            batch_ts_us: crate::now_wall_us(),
+            events: vec![InputEnvelope {
+                event: Some(Event::Click(ClickEvent {
+                    tile_id: tile_state.tile_id.clone(),
+                    node_id: vec![],
+                    interaction_id: "refresh-button".to_string(),
+                    timestamp_mono_us: crate::now_wall_us(),
+                    device_id: "mouse-0".to_string(),
+                    local_x: 104.0,
+                    local_y: 274.0,
+                    button: 0,
+                })),
+            }],
+        };
+        let actions_on_refresh = crate::handle_event_batch(&refresh_click_batch);
+        assert_eq!(
+            actions_on_refresh,
+            vec![crate::AgentAction::RefreshContent],
+            "Refresh click must produce RefreshContent action — §12.1 step 6"
+        );
+
+        // Agent performs the refresh: submit a content update (cycle 2).
+        crate::do_content_update(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            tile_state.tile_id.clone(),
+            resource_id_bytes.clone(),
+            2,
+        )
+        .await
+        .expect("refresh-triggered content update — §12.1 step 6");
+
+        // ── Step 6: Dismiss click → agent receives callback, tile removed ─────
+        // §12.1(7): simulate Dismiss click. Agent should LeaseRelease → tile gone.
+        let dismiss_click_batch = EventBatch {
+            frame_number: 11,
+            batch_ts_us: crate::now_wall_us(),
+            events: vec![InputEnvelope {
+                event: Some(Event::Click(ClickEvent {
+                    tile_id: tile_state.tile_id.clone(),
+                    node_id: vec![],
+                    interaction_id: "dismiss-button".to_string(),
+                    timestamp_mono_us: crate::now_wall_us(),
+                    device_id: "mouse-0".to_string(),
+                    local_x: 296.0,
+                    local_y: 274.0,
+                    button: 0,
+                })),
+            }],
+        };
+        let actions_on_dismiss = crate::handle_event_batch(&dismiss_click_batch);
+        assert_eq!(
+            actions_on_dismiss,
+            vec![crate::AgentAction::Dismiss],
+            "Dismiss click must produce Dismiss action — §12.1 step 7"
+        );
+
+        // Agent releases lease → tile removed from scene.
+        {
+            let lease_id_arr: [u8; 16] = tile_state.lease_id.as_slice().try_into().expect("16 bytes");
+            let lease_uuid = uuid::Uuid::from_bytes(lease_id_arr);
+            let lease_scene_id = tze_hud_scene::SceneId::from_uuid(lease_uuid);
+
+            let tile_id_arr: [u8; 16] = tile_state.tile_id.as_slice().try_into().expect("16 bytes");
+            let tile_uuid = uuid::Uuid::from_bytes(tile_id_arr);
+            let tile_scene_id = tze_hud_scene::SceneId::from_uuid(tile_uuid);
+
+            let st = state.lock().await;
+            let mut scene = st.scene.lock().await;
+
+            // Revoke the lease — scene-layer equivalent of agent LeaseRelease.
+            scene
+                .revoke_lease(lease_scene_id)
+                .expect("revoke_lease must succeed — §12.1 step 7");
+
+            // Tile must no longer be in the scene (cleanly removed on dismiss).
+            assert!(
+                !scene.tiles.contains_key(&tile_scene_id),
+                "tile must be removed from scene after Dismiss/LeaseRelease — §12.1 step 7"
+            );
+
+            // Lease must be in terminal state.
+            let lease = scene.leases.get(&lease_scene_id).expect("lease must remain in map");
+            assert!(
+                lease.state.is_terminal(),
+                "lease must be in terminal state after release — §12.1 step 7; state={:?}",
+                lease.state
+            );
+            assert_eq!(
+                lease.state,
+                LeaseState::Revoked,
+                "lease state must be Revoked after explicit release — §12.1"
+            );
+        }
+
+        server.abort();
+    }
+
+    /// Task 12.2 — Disconnect during lifecycle triggers orphan badge then cleanup.
+    ///
+    /// Spec §Requirement: Full Lifecycle User-Test Scenario
+    /// Scenario: Disconnect during lifecycle triggers orphan path
+    /// tasks.md §12.2: after tile creation, simulate agent disconnect →
+    ///   tile enters orphan state with disconnection badge → grace period expires →
+    ///   tile is removed.
+    ///
+    /// This test is a complete lifecycle fork: it creates the tile (like §12.1),
+    /// then instead of dismissing cleanly it simulates a disconnect and verifies:
+    ///   1. Lease transitions to Orphaned immediately.
+    ///   2. Tile visual_hint is DisconnectionBadge within 1 frame (synchronous).
+    ///   3. After grace period (> 30 s), lease expires and tile is removed.
+    #[test]
+    fn test_disconnect_during_lifecycle_triggers_orphan_path() {
+        use std::sync::Arc;
+        use tze_hud_scene::clock::SimulatedClock;
+        use tze_hud_scene::graph::SceneGraph;
+        use tze_hud_scene::lease::TileVisualHint;
+        use tze_hud_scene::types::LeaseState;
+        use tze_hud_scene::{Capability, Rect};
+
+        // ── Step 1: Build a scene with the dashboard tile ─────────────────────
+        // Use a SimulatedClock so we can advance time precisely for the grace period.
+        let clock = SimulatedClock::new(0); // t=0 µs
+        let mut scene = SceneGraph::new_with_clock(1920.0, 1080.0, Arc::new(clock.clone()));
+
+        let tab_id = scene.create_tab("Main", 0).expect("create_tab — §12.2");
+        scene.active_tab = Some(tab_id);
+
+        // Grant lease with 60s TTL (longer than the 30s grace period).
+        let lease_id = scene.grant_lease(
+            "disconnect-lifecycle-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+
+        // Create the dashboard tile (400×300 at (50,50), z_order=100 per spec).
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "disconnect-lifecycle-agent",
+                lease_id,
+                Rect::new(
+                    crate::TILE_X,
+                    crate::TILE_Y,
+                    crate::TILE_W,
+                    crate::TILE_H,
+                ),
+                crate::TILE_Z_ORDER,
+            )
+            .expect("create_tile — §12.2");
+
+        // Tile must exist and lease must be Active before disconnect.
+        assert!(
+            scene.tiles.contains_key(&tile_id),
+            "tile must exist before disconnect — §12.2"
+        );
+        {
+            let lease = scene.leases.get(&lease_id).expect("lease must exist");
+            assert_eq!(
+                lease.state,
+                LeaseState::Active,
+                "lease must be Active before disconnect — §12.2"
+            );
+        }
+
+        // ── Step 2: Simulate agent disconnect ─────────────────────────────────
+        // §12.2: session disconnects unexpectedly after tile creation.
+        let disconnect_ms = 5_000u64; // disconnect at t=5 s
+        clock.set_us(disconnect_ms * 1_000);
+
+        scene
+            .disconnect_lease(&lease_id, disconnect_ms)
+            .expect("disconnect_lease — §12.2");
+
+        // ── Step 3: Verify orphan state and disconnection badge ───────────────
+        // §12.2: lease transitions to ORPHANED; disconnection badge within 1 frame.
+        {
+            let lease = scene.leases.get(&lease_id).expect("lease must exist");
+            assert_eq!(
+                lease.state,
+                LeaseState::Orphaned,
+                "lease must be Orphaned after disconnect — §12.2"
+            );
+        }
+        {
+            let tile = scene.tiles.get(&tile_id).expect("tile must exist during orphan phase");
+            assert_eq!(
+                tile.visual_hint,
+                TileVisualHint::DisconnectionBadge,
+                "tile visual_hint must be DisconnectionBadge after disconnect — §12.2"
+            );
+        }
+
+        // ── Step 4: Advance clock past the grace period → tile removed ────────
+        // §12.2: wait grace period → tile removal (same path as §10.4).
+        // Grace period = 30 s. We advance to disconnect_ms + 30_001 ms.
+        let grace_expiry_us = (disconnect_ms + 30_001) * 1_000;
+        clock.set_us(grace_expiry_us);
+
+        let expiries = scene.expire_leases();
+
+        // Lease must appear in expiry set.
+        assert!(
+            expiries.iter().any(|e| e.lease_id == lease_id),
+            "expired lease must appear in expire_leases result — §12.2"
+        );
+
+        // Lease state must be Expired.
+        {
+            let lease = scene.leases.get(&lease_id).expect("lease must remain in map");
+            assert_eq!(
+                lease.state,
+                LeaseState::Expired,
+                "lease must be Expired after grace period — §12.2"
+            );
+        }
+
+        // Tile must be removed (orphan cleanup after grace period).
+        assert!(
+            !scene.tiles.contains_key(&tile_id),
+            "tile must be removed after grace period expiry — §12.2"
+        );
+    }
+
     // ── Phase 11: Namespace Isolation ────────────────────────────────────────
 
     /// Task 11.1 — a second agent cannot mutate or delete the dashboard tile.
