@@ -255,7 +255,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     println!("    node_ids  = {} nodes created", tile_state.node_ids.len());
 
     println!("\n=== Exemplar Phases 1–4 complete ===");
-    println!("  lease_id    = {} bytes", lease_id.len());
+    println!("  lease_id    = {} bytes (Phase 4)", tile_state.lease_id.len());
     println!("  resource_id = {} bytes", resource_id.len());
     println!("  tile_id     = {} bytes", tile_state.tile_id.len());
     println!("Next: implement Phase 5 (periodic content updates) in tasks.md §6 [hud-zkwx].");
@@ -932,6 +932,7 @@ pub async fn create_tile_batch(
     .await?;
 
     // Drain any LeaseStateChange; expect MutationResult for Batch A.
+    // tasks.md §4.2: verify echoed batch_id and 16-byte tile_id before proceeding.
     let tile_id_bytes: Vec<u8> = loop {
         let msg = response_stream
             .next()
@@ -940,6 +941,13 @@ pub async fn create_tile_batch(
         match msg.payload {
             Some(session_proto::server_message::Payload::LeaseStateChange(_)) => continue,
             Some(session_proto::server_message::Payload::MutationResult(result)) => {
+                if result.batch_id != batch_a_id {
+                    return Err(format!(
+                        "MutationResult batch_id mismatch for Batch A: expected {:?}, got {:?}",
+                        batch_a_id, result.batch_id
+                    )
+                    .into());
+                }
                 if !result.accepted {
                     return Err(format!(
                         "CreateTile batch rejected: code={}, msg={}",
@@ -951,6 +959,13 @@ pub async fn create_tile_batch(
                     return Err("MutationResult for CreateTile must include created_ids".into());
                 }
                 let id = result.created_ids[0].clone();
+                if id.len() != 16 {
+                    return Err(format!(
+                        "tile_id must be 16 bytes (UUIDv7 SceneId), got {} bytes — tasks.md §4.2",
+                        id.len()
+                    )
+                    .into());
+                }
                 println!(
                     "  Batch A (CreateTile): accepted=true, tile_id={} bytes",
                     id.len()
@@ -1120,8 +1135,8 @@ pub async fn create_tile_batch(
         )),
     };
 
-    // Use the big-endian UUID bytes for tile_id in AddNodeMutation.parent_id
-    // (wire contract: big-endian RFC 4122, same as tile_id encoding).
+    // Use the big-endian UUID bytes for parent_id in AddNodeMutation
+    // (wire contract: big-endian RFC 4122, matching bytes_to_scene_id in session_server).
     let batch_b_id = uuid::Uuid::now_v7().as_bytes().to_vec();
     tx.send(session_proto::ClientMessage {
         sequence: 4,
@@ -1235,6 +1250,7 @@ pub async fn create_tile_batch(
     .await?;
 
     // Drain any interleaved state messages; expect MutationResult for Batch B.
+    // tasks.md §4.2: verify echoed batch_id and exactly 6 created_ids (1 bg + 5 children).
     let node_ids: Vec<Vec<u8>> = loop {
         let msg = response_stream
             .next()
@@ -1243,10 +1259,25 @@ pub async fn create_tile_batch(
         match msg.payload {
             Some(session_proto::server_message::Payload::LeaseStateChange(_)) => continue,
             Some(session_proto::server_message::Payload::MutationResult(result)) => {
+                if result.batch_id != batch_b_id {
+                    return Err(format!(
+                        "MutationResult batch_id mismatch for Batch B: expected {:?}, got {:?}",
+                        batch_b_id, result.batch_id
+                    )
+                    .into());
+                }
                 if !result.accepted {
                     return Err(format!(
                         "Node batch rejected: code={}, msg={}",
                         result.error_code, result.error_message
+                    )
+                    .into());
+                }
+                if result.created_ids.len() != 6 {
+                    return Err(format!(
+                        "Batch B must create exactly 6 nodes (bg + 5 children), \
+                         got {} created_ids — tasks.md §4.2",
+                        result.created_ids.len()
                     )
                     .into());
                 }
@@ -1665,10 +1696,13 @@ mod tests {
             tile_state.tile_id.len()
         );
 
-        // tasks.md §4.2: created_ids must be non-empty (6 nodes: bg + 5 children).
-        assert!(
-            !tile_state.node_ids.is_empty(),
-            "node_ids must be non-empty (6 nodes created) — tasks.md §4.2"
+        // tasks.md §4.2: created_ids must contain exactly 6 nodes (bg + 5 children).
+        assert_eq!(
+            tile_state.node_ids.len(),
+            6,
+            "node_ids must contain exactly 6 created IDs (bg + 5 children) — tasks.md §4.2, \
+             got {}",
+            tile_state.node_ids.len()
         );
 
         server.abort();
@@ -2033,6 +2067,290 @@ mod tests {
         );
 
         // The tile from Batch A must have no root node (Batch B was fully rolled back).
+        {
+            let tile_id_arr: [u8; 16] = tile_id_bytes
+                .as_slice()
+                .try_into()
+                .expect("tile_id must be 16 bytes");
+            let tile_uuid = uuid::Uuid::from_bytes(tile_id_arr);
+            let tile_scene_id = tze_hud_scene::SceneId::from_uuid(tile_uuid);
+            let st = state.lock().await;
+            let scene = st.scene.lock().await;
+            let tile = scene
+                .tiles
+                .get(&tile_scene_id)
+                .expect("tile must still exist (created in Batch A)");
+            assert!(
+                tile.root_node.is_none(),
+                "tile root must be None after rejected node batch (atomicity) — tasks.md §4.4"
+            );
+        }
+
+        server.abort();
+    }
+
+    /// Task 4.4 (node batch atomicity) — 6-node batch rejected when resource is unregistered.
+    ///
+    /// Spec §Requirement: Atomic Tile Creation Batch
+    /// Scenario: ResourceNotFound causes entire 6-node batch to be rejected
+    /// tasks.md §4.4: if any mutation in Batch B fails (e.g., StaticImageNode references an
+    ///   unregistered resource_id), the entire batch is rejected atomically — no nodes from
+    ///   that batch are committed.  The tile from Batch A persists but has no root node.
+    #[tokio::test]
+    async fn test_node_batch_rejected_atomically_on_unregistered_resource() {
+        use tze_hud_protocol::proto::session as sp;
+        use tokio_stream::StreamExt as _;
+
+        let port = ephemeral_port();
+        let (server, state) = start_test_runtime_with_state(port)
+            .await
+            .expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Create a tab but do NOT register any resource — StaticImageNode will fail.
+        {
+            let st = state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("Test Tab", 0).expect("create_tab");
+            scene.active_tab = Some(tab_id);
+        }
+
+        // Use a random (unregistered) 32-byte resource_id.
+        let unregistered_resource_id = vec![0xABu8; 32];
+
+        // Open session and acquire lease.
+        #[allow(deprecated)]
+        let mut session_client =
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+                .await
+                .expect("connect");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<sp::ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mut response_stream = session_client
+            .session(stream)
+            .await
+            .expect("session rpc")
+            .into_inner();
+
+        let now_us = crate::now_wall_us();
+        tx.send(sp::ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_us,
+            payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
+                agent_id: "node-atomicity-test-agent".to_string(),
+                agent_display_name: "Node Atomicity Test".to_string(),
+                pre_shared_key: TEST_PSK.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: vec![],
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            response_stream
+                .next()
+                .await
+                .expect("stream open")
+                .expect("no error");
+        }
+
+        tx.send(sp::ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: crate::now_wall_us(),
+            payload: Some(sp::client_message::Payload::LeaseRequest(sp::LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let lease_id_bytes: Vec<u8> = loop {
+            let msg = next_non_state_change(&mut response_stream).await;
+            if let Some(sp::server_message::Payload::LeaseResponse(resp)) = msg.payload {
+                assert!(resp.granted, "lease must be granted for node-atomicity test");
+                break resp.lease_id;
+            }
+        };
+
+        // Batch A: CreateTile (valid)
+        let batch_a_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(sp::ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: crate::now_wall_us(),
+            payload: Some(sp::client_message::Payload::MutationBatch(
+                sp::MutationBatch {
+                    batch_id: batch_a_id,
+                    lease_id: lease_id_bytes.clone(),
+                    mutations: vec![tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::CreateTile(
+                                tze_hud_protocol::proto::CreateTileMutation {
+                                    tab_id: vec![],
+                                    bounds: Some(tze_hud_protocol::proto::Rect {
+                                        x: 50.0,
+                                        y: 50.0,
+                                        width: 400.0,
+                                        height: 300.0,
+                                        ..Default::default()
+                                    }),
+                                    z_order: 100,
+                                },
+                            ),
+                        ),
+                    }],
+                    timing: None,
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let tile_id_bytes: Vec<u8> = loop {
+            let msg = next_non_state_change(&mut response_stream).await;
+            if let Some(sp::server_message::Payload::MutationResult(result)) = msg.payload {
+                assert!(result.accepted, "CreateTile must succeed");
+                break result.created_ids[0].clone();
+            }
+        };
+
+        // Record node count before the failing batch.
+        let node_count_before = {
+            let st = state.lock().await;
+            st.scene.lock().await.node_count()
+        };
+
+        // Batch B: SolidColorNode (valid) + StaticImageNode with unregistered resource_id.
+        // The StaticImageNode will fail ResourceNotFound; entire batch must be rejected.
+        let bg_uuid = uuid::Uuid::now_v7();
+        let bg_node_id_le = bg_uuid.to_bytes_le().to_vec();
+        let bg_parent_id_be = bg_uuid.as_bytes().to_vec();
+
+        let bg_node = tze_hud_protocol::proto::NodeProto {
+            id: bg_node_id_le,
+            data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
+                tze_hud_protocol::proto::SolidColorNodeProto {
+                    color: Some(tze_hud_protocol::proto::Rgba {
+                        r: 0.07,
+                        g: 0.07,
+                        b: 0.07,
+                        a: 0.90,
+                    }),
+                    bounds: Some(tze_hud_protocol::proto::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 400.0,
+                        height: 300.0,
+                        ..Default::default()
+                    }),
+                },
+            )),
+        };
+        let icon_node = tze_hud_protocol::proto::NodeProto {
+            id: vec![],
+            data: Some(
+                tze_hud_protocol::proto::node_proto::Data::StaticImage(
+                    tze_hud_protocol::proto::StaticImageNodeProto {
+                        resource_id: unregistered_resource_id, // triggers ResourceNotFound
+                        width: 48,
+                        height: 48,
+                        decoded_bytes: (48u64 * 48 * 4),
+                        fit_mode:
+                            tze_hud_protocol::proto::ImageFitModeProto::ImageFitModeContain as i32,
+                        bounds: Some(tze_hud_protocol::proto::Rect {
+                            x: 16.0,
+                            y: 16.0,
+                            width: 48.0,
+                            height: 48.0,
+                            ..Default::default()
+                        }),
+                    },
+                ),
+            ),
+        };
+
+        let batch_b_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(sp::ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: crate::now_wall_us(),
+            payload: Some(sp::client_message::Payload::MutationBatch(
+                sp::MutationBatch {
+                    batch_id: batch_b_id.clone(),
+                    lease_id: lease_id_bytes.clone(),
+                    mutations: vec![
+                        tze_hud_protocol::proto::MutationProto {
+                            mutation: Some(
+                                tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                    tze_hud_protocol::proto::AddNodeMutation {
+                                        tile_id: tile_id_bytes.clone(),
+                                        parent_id: vec![],
+                                        node: Some(bg_node),
+                                    },
+                                ),
+                            ),
+                        },
+                        tze_hud_protocol::proto::MutationProto {
+                            mutation: Some(
+                                tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                    tze_hud_protocol::proto::AddNodeMutation {
+                                        tile_id: tile_id_bytes.clone(),
+                                        parent_id: bg_parent_id_be,
+                                        node: Some(icon_node),
+                                    },
+                                ),
+                            ),
+                        },
+                    ],
+                    timing: None,
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        // Expect rejected batch (entire batch must be refused atomically).
+        let result_msg = next_non_state_change(&mut response_stream).await;
+        match result_msg.payload {
+            Some(sp::server_message::Payload::MutationResult(result)) => {
+                assert_eq!(
+                    result.batch_id, batch_b_id,
+                    "batch_id must be echoed back — tasks.md §4.2"
+                );
+                assert!(
+                    !result.accepted,
+                    "batch with unregistered StaticImageNode resource_id must be rejected \
+                     atomically — tasks.md §4.4; got: accepted={}, error_code={}, msg={}",
+                    result.accepted, result.error_code, result.error_message
+                );
+            }
+            other => panic!(
+                "Expected rejected MutationResult for unregistered-resource batch, got: {other:?}"
+            ),
+        }
+
+        // tasks.md §4.4: node count must not change — no nodes from Batch B were committed.
+        let node_count_after = {
+            let st = state.lock().await;
+            st.scene.lock().await.node_count()
+        };
+        assert_eq!(
+            node_count_after, node_count_before,
+            "node count must not change after rejected node batch — tasks.md §4.4"
+        );
+
+        // The tile from Batch A must still exist but have no root node.
         {
             let tile_id_arr: [u8; 16] = tile_id_bytes
                 .as_slice()
