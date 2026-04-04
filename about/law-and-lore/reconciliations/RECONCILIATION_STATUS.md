@@ -15,25 +15,25 @@ It documents the widget system, component shape language (RFC 0012), 10 exemplar
 runtime app binary, MCP stress testing, input capture, and resource ref-count tracking.
 
 **Key changes since Gen-4:**
-- Widget system implemented (5 delta specs) with 2 P1 gaps remaining (ClearWidget, TTL expiry)
+- Widget system implemented (5 delta specs); both P1 gaps confirmed closed (ClearWidget #249, TTL expiry #248)
 - Component shape language (RFC 0012) fully implemented
 - 10 exemplar components with integration tests and user-test scenarios
 - Session-protocol openspec refreshed to match actual 4-file proto layout
 - RFC count in law-and-lore corrected to 12
 
 **Open P1 gaps:**
-- ClearWidgetMutation not wired (hud-jliz)
 - Config contract app/spec alignment decision needed (hud-gxny)
 
-**Closed P1 gaps (post gen-5):**
-- Widget TTL expiry not enforced (hud-2c5g) — CLOSED: `drain_expired_widget_publications()` was already implemented in commit `9eeb28a` (2026-03-30); gen-5 incorrectly assessed as open
+**Closed P1 gaps (corrected post-authoring):**
+- ClearWidgetMutation not wired (hud-ziov) — CLOSED: fully implemented in commit `42e3b50` (2026-03-30, #249); gen-5 initial draft incorrectly assessed as open
+- Widget TTL expiry not enforced (hud-2c5g) — CLOSED: `drain_expired_widget_publications()` was already implemented in commit `9eeb28a` (2026-03-30, #248); gen-5 initial draft incorrectly assessed as open
 
 **Coverage (estimated):**
 
 | Status    | Percentage | Notes |
 |-----------|------------|-------|
-| FULL      | ~90%       | Gen-4 baseline + post-MVP features |
-| PARTIAL   | ~5%        | Widget system P1 gaps |
+| FULL      | ~95%       | Gen-4 baseline + post-MVP features; widget system P1 gaps resolved |
+| PARTIAL   | 0%         | No open P1 gaps |
 | RFC-ONLY  | ~5%        | I2, Pl1-Pl3 (unchanged from gen-4) |
 | ABSENT    | 0%         | — |
 
