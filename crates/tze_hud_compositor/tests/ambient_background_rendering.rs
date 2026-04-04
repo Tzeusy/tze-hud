@@ -34,7 +34,7 @@
 //!
 //! 6. `test_ambient_background_static_image_renders_placeholder` — Publish
 //!    `ZoneContent::StaticImage` to ambient-background → rendered pixels match
-//!    the warm-gray placeholder color (linear 0.3,0.3,0.3; sRGB ≈ 143).
+//!    the warm-gray placeholder color (linear 0.3,0.3,0.3; sRGB ≈ 149).
 //!
 //! 7. `test_ambient_background_layer_attachment_is_background` — `ZoneRegistry::with_defaults()`
 //!    MUST register ambient-background with `LayerAttachment::Background` (pure scene-state
@@ -626,7 +626,7 @@ async fn test_ambient_background_zorder_below_content_zones() {
 /// MUST render a warm-gray placeholder quad (linear 0.3,0.3,0.3) instead.
 ///
 /// After rendering, multiple sample points across the display MUST show the warm-gray
-/// sRGB approximation (≈ [143, 143, 143]) within ±8 per channel, confirming that:
+/// sRGB approximation (≈ [149, 149, 149]) within ±8 per channel, confirming that:
 ///   - The zone accepted the StaticImage publication (not rejected by validation).
 ///   - The placeholder quad was rendered full-screen (Background layer coverage).
 ///   - The `resource_id` was accepted (preserved in the publication record).
@@ -652,22 +652,28 @@ async fn test_ambient_background_static_image_renders_placeholder() {
         .expect("publish StaticImage to ambient-background must succeed");
 
     // Confirm the publication was recorded (resource_id preserved in active record).
-    let pub_count = scene
+    let publishes = scene
         .zone_registry
         .active_publishes
         .get("ambient-background")
-        .map(|v| v.len())
-        .unwrap_or(0);
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let pub_count = publishes.len();
     assert_eq!(
         pub_count, 1,
         "ambient-background must have exactly 1 active publication after StaticImage publish; got {pub_count}"
+    );
+    assert_eq!(
+        publishes[0].content,
+        ZoneContent::StaticImage(resource_id),
+        "active publication must preserve the published resource_id"
     );
 
     compositor.render_frame_headless(&scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // The placeholder color is STATIC_IMAGE_PLACEHOLDER_COLOR = linear(0.3, 0.3, 0.3).
-    // sRGB ≈ [143, 143, 143]; all channels equal (neutral gray, no blue or red tint).
+    // sRGB ≈ [149, 149, 149]; all channels equal (neutral gray, no blue or red tint).
     //
     // Sample multiple points to confirm full-screen coverage.
     let sample_points: &[(u32, u32)] = &[
