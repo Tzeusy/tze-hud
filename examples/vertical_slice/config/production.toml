@@ -29,6 +29,24 @@ capabilities = [
     "publish_zone:status-bar",
 ]
 
+# Component profile bundle directories scanned at startup.
+# Each path is resolved relative to this config file's parent directory
+# (examples/vertical_slice/config/). The runtime scans subdirectories of each
+# listed path for profile.toml files.
+#
+# profiles/ is the monorepo-root profiles directory:
+#   examples/vertical_slice/config/ → ../../../profiles/
+[component_profile_bundles]
+paths = ["../../../profiles"]
+
+# Active component profile selection.
+# Maps component type → profile name. Only profiles discovered via
+# [component_profile_bundles].paths can be referenced here.
+# Unknown profiles are logged and skipped (non-fatal).
+[component_profiles]
+subtitle      = "exemplar-subtitle"
+alert-banner  = "exemplar-alert-banner"
+
 # Widget bundle directories scanned at startup.
 # Paths are resolved relative to this config file's parent directory
 # (examples/vertical_slice/config/).
