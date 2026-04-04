@@ -20,7 +20,7 @@ exemplar components, runtime app binary, input capture, resource management, and
 
 | Area | Status | Evidence |
 |------|--------|----------|
-| **Widget system** (5 delta specs) | PARTIAL | Widget ontology, parameter schema, SVG rasterization, publishing, contention all implemented. **1 P1 gap remains**: ClearWidgetMutation unwired (GAP-1). GAP-2 (Widget TTL expiry) closed by hud-2c5g. 2 P2 gaps: type ID validation missing, occupancy per-policy resolution partial. |
+| **Widget system** (5 delta specs) | PARTIAL | Widget ontology, parameter schema, SVG rasterization, publishing, contention all implemented. **Both P1 gaps resolved**: ~~ClearWidgetMutation unwired (GAP-1)~~ RESOLVED in #249 (hud-ziov); ~~Widget TTL expiry not enforced (GAP-2)~~ CLOSED by hud-2c5g. 2 P2 gaps remain: type ID validation missing, occupancy per-policy resolution partial. |
 | **Component shape language** (RFC 0012, 3 delta specs) | FULL | Design tokens, component profiles, visual extensibility implemented. Exemplar profiles use the new token system. |
 | **Exemplar components** (10 exemplars) | FULL (functionally) | subtitle, alert-banner, notification, status-bar, status-indicator, progress-bar, dashboard-tile, gauge-widget, ambient-background, presence-card — all have component profiles, rendering, MCP fixtures, integration tests, user-test scenarios. **P3 gap**: subtitle and alert-banner profiles not wired into production config. |
 | **Runtime app binary** (3 specs) | FULL | Canonical `tze_hud_app` binary with windowed runtime, headless mode, fullscreen/overlay modes. Network services (gRPC, MCP) start with the runtime. |
@@ -34,17 +34,22 @@ exemplar components, runtime app binary, input capture, resource management, and
 | Status | Count | Percentage | Notes |
 |--------|-------|------------|-------|
 | FULL | 54 + new areas | ~90% | Gen-4 baseline + post-MVP features |
-| PARTIAL | Widget system | ~5% | 1 P1 gap remains (ClearWidgetMutation); GAP-2 closed |
+| PARTIAL | Widget system | ~5% | Both P1 gaps resolved (GAP-1, GAP-2); 2 P2 gaps remain |
 | RFC-ONLY | 4 | ~5% | I2, Pl1-Pl3 (unchanged from gen-4) |
 | ABSENT | 0 | 0% | No gaps without spec coverage |
 
 ## 3. Open P1 Gaps
 
-### GAP-1: ClearWidgetMutation not wired (P1)
-- **Spec**: Widget system delta spec requires ClearWidgetMutation
-- **Code**: Proto type exists in types.proto but is NOT in MutationProto.oneof; no session_server handler; no scene graph clear method
-- **Impact**: Agents cannot clear widget publications
-- **Bead**: hud-jliz
+### ~~GAP-1: ClearWidgetMutation not wired (P1)~~ — RESOLVED
+
+**Resolution (2026-04-05)**: This gap was already closed in PR #249 (hud-ziov, 2026-03-30)
+before this reconciliation was written.
+
+- `ClearWidgetMutation` is wired into `MutationProto.oneof` at field 5
+- `session_server.rs` handles `Mutation::ClearWidget` in both the live and queued mutation paths
+- `SceneMutation::ClearWidget` dispatches to `SceneGraph::clear_widget_for_publisher`
+- 6 unit tests pass: removes own pubs, isolates other namespaces, no-op on empty, error on unknown widget, full batch path, namespace-scoped clear
+- **Bead**: hud-jliz (closed)
 
 ### ~~GAP-2: Widget TTL expiry not enforced (P1)~~ — CLOSED (hud-2c5g)
 - **Resolution**: `drain_expired_widget_publications()` implemented in `crates/tze_hud_scene/src/graph.rs`
@@ -83,4 +88,4 @@ cargo check --workspace  # passes with zero errors
 cargo test --workspace   # all tests pass
 ```
 
-Gen-5 is a **progress snapshot**, not a closure point. The remaining widget system P1 gap (GAP-1: ClearWidgetMutation) must be closed before the widget-system epic can be archived. GAP-2 (Widget TTL expiry) was already implemented prior to gen-5 creation and is now correctly marked as closed.
+Gen-5 is a **progress snapshot**, not a closure point. Both widget system P1 gaps (GAP-1: ClearWidgetMutation, GAP-2: Widget TTL expiry) were already resolved prior to this report being written and are now correctly marked as closed. The remaining open items are P2 gaps (GAP-3, GAP-4).
