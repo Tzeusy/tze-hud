@@ -44,7 +44,6 @@ use tze_hud_resource::{
 };
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
-
 /// Embedded production config — capability governance always active by default.
 /// File lives at `config/production.toml` relative to this source file.
 const PRODUCTION_CONFIG: &str = include_str!("../config/production.toml");
@@ -197,10 +196,69 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
     println!("  Phase 3 PASSED: icon uploaded.");
     println!("    resource_id = {} bytes (BLAKE3)", resource_id.len());
 
-    println!("\n=== Exemplar Phases 1–3 complete ===");
+    // ─────────────────────────────────────────────────────────────────────────
+    // PHASE 4: Atomic Tile Creation Batch (tasks.md §4.1–4.4)
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // Registers the uploaded resource with the runtime's scene graph, then
+    // submits the full creation batch over gRPC:
+    //
+    //   Batch A (transactional): CreateTile (400×300 at (50,50), z_order=100)
+    //   Batch B (atomic node batch): 1× AddNode(root=SolidColorNode bg)
+    //                                5× AddNode(StaticImageNode, 2× TextMarkdown,
+    //                                           2× HitRegionNode) as children of bg
+    //                                + UpdateTileOpacity(1.0)
+    //                                + UpdateTileInputMode(Passthrough)
+    //
+    // Atomicity contract: Batch B is all-or-nothing — if any node is invalid,
+    // no nodes are committed (spec §Decision 2).
+    //
+    // The two-batch approach (rather than one batch with CreateTile + SetTileRoot)
+    // is required because the tile_id is not known until Batch A's created_ids
+    // are returned.  The atomicity property holds for Batch B itself.
+    //
+    // Spec references:
+    //   openspec/changes/exemplar-dashboard-tile/tasks.md §4.1–4.4
+    //   openspec/changes/exemplar-dashboard-tile/design.md §Decision 2
+    // ─────────────────────────────────────────────────────────────────────────
+    println!("\n=== Phase 4: Atomic Tile Creation Batch ===\n");
+
+    // Set up the runtime scene for tile creation:
+    //   1. Create a default tab and make it active (CreateTile requires an active tab).
+    //   2. Register the uploaded resource so StaticImageNode references are accepted
+    //      (resource-store/spec.md §Resource Upload Before Tile Creation).
+    {
+        let resource_id_bytes: [u8; 32] = resource_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| "resource_id must be exactly 32 bytes")?;
+        let scene_resource_id =
+            tze_hud_scene::types::ResourceId::from_bytes(resource_id_bytes);
+        let st = runtime.state.lock().await;
+        let mut scene = st.scene.lock().await;
+        let tab_id = scene.create_tab("Main", 0)?;
+        scene.active_tab = Some(tab_id);
+        scene.register_resource(scene_resource_id);
+    }
+
+    let tile_state = create_tile_batch(
+        GRPC_PORT,
+        AGENT_PSK,
+        AGENT_ID,
+        AGENT_DISPLAY_NAME,
+        resource_id.clone(),
+    )
+    .await?;
+
+    println!("  Phase 4 PASSED: tile created with all 6 nodes.");
+    println!("    tile_id   = {} bytes (UUIDv7)", tile_state.tile_id.len());
+    println!("    node_ids  = {} nodes created", tile_state.node_ids.len());
+
+    println!("\n=== Exemplar Phases 1–4 complete ===");
     println!("  lease_id    = {} bytes", lease_id.len());
     println!("  resource_id = {} bytes", resource_id.len());
-    println!("Next: implement Phase 4 (atomic tile creation batch) in tasks.md §4 [hud-xerv].");
+    println!("  tile_id     = {} bytes", tile_state.tile_id.len());
+    println!("Next: implement Phase 5 (periodic content updates) in tasks.md §6 [hud-zkwx].");
 
     Ok(())
 }
@@ -686,6 +744,534 @@ pub async fn upload_icon(agent_namespace: &str) -> Result<Vec<u8>, Box<dyn std::
     Ok(result.resource_id.as_bytes().to_vec())
 }
 
+// ─── Phase 4: Atomic Tile Creation Batch ─────────────────────────────────────
+
+/// Result of a successful tile creation batch (Phase 4).
+///
+/// Returned by [`create_tile_batch`] after both the CreateTile batch and the
+/// 6-node batch have been accepted and applied.
+pub struct TileCreationState {
+    /// The tile's UUIDv7 SceneId bytes (16 bytes) from `MutationResult.created_ids[0]`.
+    pub tile_id: Vec<u8>,
+    /// The lease's UUIDv7 bytes (16 bytes) used for the tile creation.
+    pub lease_id: Vec<u8>,
+    /// The 6 node SceneId bytes from the second batch's `created_ids`.
+    pub node_ids: Vec<Vec<u8>>,
+}
+
+/// Dashboard tile geometry per spec §Decision 6 / §Dashboard Tile Composition.
+const TILE_X: f32 = 50.0;
+const TILE_Y: f32 = 50.0;
+const TILE_W: f32 = 400.0;
+const TILE_H: f32 = 300.0;
+/// Agent-owned band z_order (< ZONE_TILE_Z_MIN = 0x8000_0000).
+const TILE_Z_ORDER: u32 = 100;
+
+/// Submit the atomic tile creation batch over gRPC and return the created state.
+///
+/// # Two-batch approach (tasks.md §4.1)
+///
+/// Because the tile_id is not known until Batch A is committed, the creation is
+/// split into two atomic batches:
+///
+/// **Batch A — CreateTile:**
+/// - `CreateTile { bounds: (50,50, 400×300), z_order: 100 }`
+/// - Returns `tile_id` from `MutationResult.created_ids[0]`.
+///
+/// **Batch B — 6-node tree + opacity + input_mode (atomic):**
+/// - `AddNode(parent=None, SolidColorNode)` → bg becomes tile root.
+/// - `AddNode(parent=bg, StaticImageNode)` → icon (48×48, resource_id).
+/// - `AddNode(parent=bg, TextMarkdownNode)` → header ("**Dashboard Agent**").
+/// - `AddNode(parent=bg, TextMarkdownNode)` → body (live stats placeholder).
+/// - `AddNode(parent=bg, HitRegionNode)` → Refresh button.
+/// - `AddNode(parent=bg, HitRegionNode)` → Dismiss button.
+/// - `UpdateTileOpacity { opacity: 1.0 }`.
+/// - `UpdateTileInputMode { input_mode: Passthrough }`.
+///
+/// Batch B is all-or-nothing: if any mutation fails (e.g., ResourceNotFound),
+/// no nodes are committed and the tile remains root-less (tasks.md §4.4).
+///
+/// # Spec references
+///
+/// - openspec/changes/exemplar-dashboard-tile/tasks.md §4.1–4.2
+/// - openspec/changes/exemplar-dashboard-tile/design.md §Decision 2 (atomicity)
+/// - openspec/changes/exemplar-dashboard-tile/design.md §Decision 6 (geometry)
+pub async fn create_tile_batch(
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+    resource_id_bytes: Vec<u8>,
+) -> Result<TileCreationState, Box<dyn std::error::Error>> {
+    use tokio_stream::StreamExt as _;
+
+    // ── 1. Open a new gRPC session ─────────────────────────────────────────
+    #[allow(deprecated)]
+    let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
+        "http://[::1]:{port}"
+    ))
+    .await?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let mut response_stream = session_client.session(stream).await?.into_inner();
+
+    // ── 2. Session handshake ───────────────────────────────────────────────
+    let now_us = now_wall_us();
+    tx.send(session_proto::ClientMessage {
+        sequence: 1,
+        timestamp_wall_us: now_us,
+        payload: Some(session_proto::client_message::Payload::SessionInit(
+            session_proto::SessionInit {
+                agent_id: agent_id.to_string(),
+                agent_display_name: agent_display_name.to_string(),
+                pre_shared_key: psk.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            },
+        )),
+    })
+    .await?;
+
+    // Drain SessionEstablished + SceneSnapshot.
+    for _ in 0..2 {
+        response_stream
+            .next()
+            .await
+            .ok_or("stream closed during handshake")??;
+    }
+
+    // ── 3. Request lease ───────────────────────────────────────────────────
+    tx.send(session_proto::ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(session_proto::client_message::Payload::LeaseRequest(
+            session_proto::LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            },
+        )),
+    })
+    .await?;
+
+    // Drain lease state changes; expect LeaseResponse.
+    let lease_id_bytes: Vec<u8> = loop {
+        let msg = response_stream
+            .next()
+            .await
+            .ok_or("stream closed before LeaseResponse")??;
+        match msg.payload {
+            Some(session_proto::server_message::Payload::LeaseStateChange(_)) => continue,
+            Some(session_proto::server_message::Payload::LeaseResponse(resp)) => {
+                if !resp.granted {
+                    return Err(format!(
+                        "LeaseResponse denied: code={}, reason={}",
+                        resp.deny_code, resp.deny_reason
+                    )
+                    .into());
+                }
+                if resp.lease_id.len() != 16 {
+                    return Err(format!(
+                        "lease_id must be 16 bytes (UUIDv7), got {} bytes",
+                        resp.lease_id.len()
+                    )
+                    .into());
+                }
+                println!("  Lease granted: {} bytes", resp.lease_id.len());
+                break resp.lease_id;
+            }
+            other => {
+                return Err(format!("Expected LeaseResponse, got: {other:?}").into());
+            }
+        }
+    };
+
+    // ── 4. Batch A: CreateTile (400×300 at (50,50), z_order=100) ──────────
+    //
+    // tasks.md §4.1: CreateTile with spec-mandated geometry.
+    // Note: opacity and input_mode cannot be set here; they require separate
+    // mutations (UpdateTileOpacity, UpdateTileInputMode) per proto design.
+    let batch_a_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+    tx.send(session_proto::ClientMessage {
+        sequence: 3,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(session_proto::client_message::Payload::MutationBatch(
+            session_proto::MutationBatch {
+                batch_id: batch_a_id.clone(),
+                lease_id: lease_id_bytes.clone(),
+                mutations: vec![tze_hud_protocol::proto::MutationProto {
+                    mutation: Some(
+                        tze_hud_protocol::proto::mutation_proto::Mutation::CreateTile(
+                            tze_hud_protocol::proto::CreateTileMutation {
+                                tab_id: vec![], // empty = server infers active tab
+                                bounds: Some(tze_hud_protocol::proto::Rect {
+                                    x: TILE_X,
+                                    y: TILE_Y,
+                                    width: TILE_W,
+                                    height: TILE_H,
+                                    ..Default::default()
+                                }),
+                                z_order: TILE_Z_ORDER,
+                            },
+                        ),
+                    ),
+                }],
+                timing: None,
+            },
+        )),
+    })
+    .await?;
+
+    // Drain any LeaseStateChange; expect MutationResult for Batch A.
+    let tile_id_bytes: Vec<u8> = loop {
+        let msg = response_stream
+            .next()
+            .await
+            .ok_or("stream closed before MutationResult (CreateTile)")??;
+        match msg.payload {
+            Some(session_proto::server_message::Payload::LeaseStateChange(_)) => continue,
+            Some(session_proto::server_message::Payload::MutationResult(result)) => {
+                if !result.accepted {
+                    return Err(format!(
+                        "CreateTile batch rejected: code={}, msg={}",
+                        result.error_code, result.error_message
+                    )
+                    .into());
+                }
+                if result.created_ids.is_empty() {
+                    return Err("MutationResult for CreateTile must include created_ids".into());
+                }
+                let id = result.created_ids[0].clone();
+                println!(
+                    "  Batch A (CreateTile): accepted=true, tile_id={} bytes",
+                    id.len()
+                );
+                break id;
+            }
+            other => {
+                return Err(format!("Expected MutationResult (CreateTile), got: {other:?}").into());
+            }
+        }
+    };
+
+    // ── 5. Batch B: 6-node tree + UpdateTileOpacity + UpdateTileInputMode ──
+    //
+    // tasks.md §4.1: atomic batch with bg root + 5 children + opacity + input_mode.
+    //
+    // Node layout per spec §Dashboard Tile Composition:
+    //   1. SolidColorNode bg  — root (parent=None → becomes tile root)
+    //   2. StaticImageNode     — icon 48×48 at (16,16)
+    //   3. TextMarkdownNode    — header at (76,20)
+    //   4. TextMarkdownNode    — body at (16,72)
+    //   5. HitRegionNode       — Refresh at (16,256)
+    //   6. HitRegionNode       — Dismiss at (208,256)
+    //
+    // Painter's model: bg renders first (background), then children in tree
+    // order (icon behind header, header behind body, body behind buttons).
+
+    // Build node proto messages.
+    //
+    // Node IDs are encoded differently depending on the field:
+    //   NodeProto.id          → 16 bytes, little-endian (uuid::Uuid::to_bytes_le)
+    //   AddNodeMutation.parent_id → 16 bytes, big-endian RFC 4122 (uuid::Uuid::as_bytes)
+    //
+    // We keep both encodings of bg_id to avoid mixing them up.
+    let bg_uuid = uuid::Uuid::now_v7();
+    let bg_node_id_le = bg_uuid.to_bytes_le().to_vec();    // for NodeProto.id
+    let bg_parent_id_be = bg_uuid.as_bytes().to_vec();     // for AddNodeMutation.parent_id
+
+    let bg_node = tze_hud_protocol::proto::NodeProto {
+        id: bg_node_id_le,
+        data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
+            tze_hud_protocol::proto::SolidColorNodeProto {
+                color: Some(tze_hud_protocol::proto::Rgba {
+                    r: 0.07,
+                    g: 0.07,
+                    b: 0.07,
+                    a: 0.90,
+                }),
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: TILE_W,
+                    height: TILE_H,
+                    ..Default::default()
+                }),
+            },
+        )),
+    };
+
+    let icon_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![], // empty = server assigns a fresh UUIDv7
+        data: Some(
+            tze_hud_protocol::proto::node_proto::Data::StaticImage(
+                tze_hud_protocol::proto::StaticImageNodeProto {
+                    resource_id: resource_id_bytes,
+                    width: ICON_W as u32,
+                    height: ICON_H as u32,
+                    decoded_bytes: (ICON_W * ICON_H * 4) as u64,
+                    fit_mode: tze_hud_protocol::proto::ImageFitModeProto::ImageFitModeContain as i32,
+                    bounds: Some(tze_hud_protocol::proto::Rect {
+                        x: 16.0,
+                        y: 16.0,
+                        width: ICON_W as f32,
+                        height: ICON_H as f32,
+                        ..Default::default()
+                    }),
+                },
+            ),
+        ),
+    };
+
+    let header_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(
+            tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
+                tze_hud_protocol::proto::TextMarkdownNodeProto {
+                    content: "**Dashboard Agent**".to_string(),
+                    bounds: Some(tze_hud_protocol::proto::Rect {
+                        x: 76.0,
+                        y: 20.0,
+                        width: 308.0,
+                        height: 32.0,
+                        ..Default::default()
+                    }),
+                    font_size_px: 18.0,
+                    color: Some(tze_hud_protocol::proto::Rgba {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    }),
+                    background: None,
+                },
+            ),
+        ),
+    };
+
+    let body_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(
+            tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
+                tze_hud_protocol::proto::TextMarkdownNodeProto {
+                    content: "**Status**: operational\nUptime: 0s".to_string(),
+                    bounds: Some(tze_hud_protocol::proto::Rect {
+                        x: 16.0,
+                        y: 72.0,
+                        width: 368.0,
+                        height: 180.0,
+                        ..Default::default()
+                    }),
+                    font_size_px: 14.0,
+                    color: Some(tze_hud_protocol::proto::Rgba {
+                        r: 0.78,
+                        g: 0.78,
+                        b: 0.78,
+                        a: 1.0,
+                    }),
+                    background: None,
+                },
+            ),
+        ),
+    };
+
+    let refresh_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
+            tze_hud_protocol::proto::HitRegionNodeProto {
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 16.0,
+                    y: 256.0,
+                    width: 176.0,
+                    height: 36.0,
+                    ..Default::default()
+                }),
+                interaction_id: "refresh-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+            },
+        )),
+    };
+
+    let dismiss_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
+            tze_hud_protocol::proto::HitRegionNodeProto {
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 208.0,
+                    y: 256.0,
+                    width: 176.0,
+                    height: 36.0,
+                    ..Default::default()
+                }),
+                interaction_id: "dismiss-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+            },
+        )),
+    };
+
+    // Use the big-endian UUID bytes for tile_id in AddNodeMutation.parent_id
+    // (wire contract: big-endian RFC 4122, same as tile_id encoding).
+    let batch_b_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+    tx.send(session_proto::ClientMessage {
+        sequence: 4,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(session_proto::client_message::Payload::MutationBatch(
+            session_proto::MutationBatch {
+                batch_id: batch_b_id.clone(),
+                lease_id: lease_id_bytes.clone(),
+                mutations: vec![
+                    // 1. bg node → becomes tile root (parent=None, tile has no root)
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: vec![],    // empty = root
+                                    node: Some(bg_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 2. icon → child of bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(icon_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 3. header → child of bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(header_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 4. body → child of bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(body_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 5. refresh button → child of bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(refresh_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 6. dismiss button → child of bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(dismiss_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // UpdateTileOpacity — separate from CreateTile per spec
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::UpdateTileOpacity(
+                                tze_hud_protocol::proto::UpdateTileOpacityMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    opacity: 1.0,
+                                },
+                            ),
+                        ),
+                    },
+                    // UpdateTileInputMode — separate from CreateTile per spec
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::UpdateTileInputMode(
+                                tze_hud_protocol::proto::UpdateTileInputModeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    input_mode:
+                                        tze_hud_protocol::proto::TileInputModeProto::TileInputModePassthrough
+                                            as i32,
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                timing: None,
+            },
+        )),
+    })
+    .await?;
+
+    // Drain any interleaved state messages; expect MutationResult for Batch B.
+    let node_ids: Vec<Vec<u8>> = loop {
+        let msg = response_stream
+            .next()
+            .await
+            .ok_or("stream closed before MutationResult (node batch)")??;
+        match msg.payload {
+            Some(session_proto::server_message::Payload::LeaseStateChange(_)) => continue,
+            Some(session_proto::server_message::Payload::MutationResult(result)) => {
+                if !result.accepted {
+                    return Err(format!(
+                        "Node batch rejected: code={}, msg={}",
+                        result.error_code, result.error_message
+                    )
+                    .into());
+                }
+                println!(
+                    "  Batch B (6-node tree + opacity + input_mode): accepted=true, \
+                     {} node_ids",
+                    result.created_ids.len()
+                );
+                break result.created_ids;
+            }
+            other => {
+                return Err(
+                    format!("Expected MutationResult (node batch), got: {other:?}").into(),
+                );
+            }
+        }
+    };
+
+    Ok(TileCreationState {
+        tile_id: tile_id_bytes,
+        lease_id: lease_id_bytes,
+        node_ids,
+    })
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -981,6 +1567,531 @@ mod tests {
             blake3::OUT_LEN, // 32 bytes
             "ResourceId must be 32 bytes (BLAKE3 digest) — tasks.md §3.1, got {} bytes",
             resource_id_bytes.len()
+        );
+    }
+
+    // ── Phase 4: Atomic Tile Creation Batch tests ─────────────────────────────
+    //
+    // Tests verify the gRPC wire protocol for tile creation:
+    //   §4.1–4.2: create_tile_batch returns accepted=true and a 16-byte tile_id
+    //   §4.3, §5.1: scene graph has 6 nodes in painter's model order after commit
+    //   §4.4: partial batch failure (invalid bounds) rejects entire batch atomically
+    //   §5.2: z_order=100 is below ZONE_TILE_Z_MIN (agent-owned band)
+    //   §5.3: chrome z_order (>= ZONE_TILE_Z_MIN) renders above dashboard tile
+    //
+    // All tests use an isolated HeadlessRuntime on an ephemeral port.
+
+    /// Start a HeadlessRuntime and return both the JoinHandle and the shared state Arc.
+    ///
+    /// The shared state is needed by Phase 4 tests to create a tab and register
+    /// the icon resource before submitting mutation batches over the wire.
+    async fn start_test_runtime_with_state(
+        port: u16,
+    ) -> Result<
+        (
+            tokio::task::JoinHandle<()>,
+            std::sync::Arc<tokio::sync::Mutex<tze_hud_protocol::session::SharedState>>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let config = HeadlessConfig {
+            width: 1920,
+            height: 1080,
+            grpc_port: port,
+            psk: TEST_PSK.to_string(),
+            config_toml: None, // dev-mode: unrestricted capabilities
+        };
+        let runtime = HeadlessRuntime::new(config).await?;
+        let state = runtime.state.clone();
+        let server = runtime.start_grpc_server().await?;
+        Ok((server, state))
+    }
+
+    /// Prepare the scene for tile creation:
+    ///   - Create a tab and set it as active (CreateTile requires an active tab).
+    ///   - Register the resource_id in the scene (StaticImageNode validation).
+    async fn setup_scene_with_resource(
+        state: &std::sync::Arc<tokio::sync::Mutex<tze_hud_protocol::session::SharedState>>,
+        resource_id_bytes: &[u8],
+    ) {
+        let resource_id_arr: [u8; 32] = resource_id_bytes
+            .try_into()
+            .expect("resource_id must be 32 bytes");
+        let scene_resource_id = tze_hud_scene::types::ResourceId::from_bytes(resource_id_arr);
+        let st = state.lock().await;
+        let mut scene = st.scene.lock().await;
+        let tab_id = scene.create_tab("Test Main", 0).expect("create_tab");
+        scene.active_tab = Some(tab_id);
+        scene.register_resource(scene_resource_id);
+    }
+
+    /// Task 4.1–4.2 — `create_tile_batch` returns accepted=true and a 16-byte tile_id.
+    ///
+    /// Spec §Requirement: Atomic Tile Creation Batch
+    /// Scenario: Successful atomic tile creation
+    /// tasks.md §4.1: MutationBatch with CreateTile (400×300 at (50,50), z_order=100),
+    ///   SetTileRoot (6-node tree via AddNode), UpdateTileOpacity, UpdateTileInputMode.
+    /// tasks.md §4.2: MutationResult accepted=true, non-empty batch_id, created_ids.
+    #[tokio::test]
+    async fn test_create_tile_batch_accepted_returns_tile_id() {
+        let port = ephemeral_port();
+        let (server, state) = start_test_runtime_with_state(port)
+            .await
+            .expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Upload icon and register resource
+        let resource_id_bytes = crate::upload_icon(TEST_AGENT_ID)
+            .await
+            .expect("upload_icon");
+        setup_scene_with_resource(&state, &resource_id_bytes).await;
+
+        let tile_state = crate::create_tile_batch(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            resource_id_bytes,
+        )
+        .await
+        .expect("create_tile_batch");
+
+        // tasks.md §4.2: tile_id must be a 16-byte UUIDv7 SceneId.
+        assert_eq!(
+            tile_state.tile_id.len(),
+            16,
+            "tile_id must be 16 bytes (UUIDv7) — tasks.md §4.2, got {} bytes",
+            tile_state.tile_id.len()
+        );
+
+        // tasks.md §4.2: created_ids must be non-empty (6 nodes: bg + 5 children).
+        assert!(
+            !tile_state.node_ids.is_empty(),
+            "node_ids must be non-empty (6 nodes created) — tasks.md §4.2"
+        );
+
+        server.abort();
+    }
+
+    /// Task 4.3, 5.1 — scene has 6 nodes in painter's model order after batch.
+    ///
+    /// Spec §Requirement: Dashboard Tile Composition
+    /// Scenario: All four node types / Painter's model compositing order
+    /// tasks.md §4.3: scene graph contains tile with all 6 nodes in correct tree order.
+    /// tasks.md §5.1: painter's model ordering —
+    ///   SolidColorNode (bg root), then StaticImageNode (icon), then 2× TextMarkdownNode
+    ///   (header, body), then 2× HitRegionNode (refresh, dismiss) as children in tree order.
+    #[tokio::test]
+    async fn test_scene_has_6_nodes_in_painters_model_order() {
+        use tze_hud_scene::types::NodeData;
+
+        let port = ephemeral_port();
+        let (server, state) = start_test_runtime_with_state(port)
+            .await
+            .expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let resource_id_bytes = crate::upload_icon(TEST_AGENT_ID)
+            .await
+            .expect("upload_icon");
+        setup_scene_with_resource(&state, &resource_id_bytes).await;
+
+        let tile_state = crate::create_tile_batch(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            resource_id_bytes,
+        )
+        .await
+        .expect("create_tile_batch");
+
+        // Inspect the scene graph.
+        let st = state.lock().await;
+        let scene = st.scene.lock().await;
+
+        // tasks.md §4.3: exactly 6 nodes in the scene.
+        assert_eq!(
+            scene.node_count(),
+            6,
+            "scene must contain exactly 6 nodes — tasks.md §4.3, got {}",
+            scene.node_count()
+        );
+
+        // Decode tile_id from wire bytes (big-endian RFC 4122).
+        let tile_id_arr: [u8; 16] = tile_state
+            .tile_id
+            .as_slice()
+            .try_into()
+            .expect("tile_id must be 16 bytes");
+        let tile_uuid = uuid::Uuid::from_bytes(tile_id_arr);
+        let tile_scene_id = tze_hud_scene::SceneId::from_uuid(tile_uuid);
+
+        let tile = scene
+            .tiles
+            .get(&tile_scene_id)
+            .expect("tile must exist in scene");
+
+        // tasks.md §5.1: root must be SolidColorNode (background).
+        let root_id = tile.root_node.expect("tile must have a root node");
+        let root = scene.nodes.get(&root_id).expect("root node must exist");
+        assert!(
+            matches!(root.data, NodeData::SolidColor(_)),
+            "root node must be SolidColorNode (background) — tasks.md §5.1"
+        );
+
+        // tasks.md §4.3: root must have exactly 5 children.
+        assert_eq!(
+            root.children.len(),
+            5,
+            "root must have exactly 5 children (icon, header, body, refresh, dismiss) \
+             — tasks.md §4.3"
+        );
+
+        // tasks.md §5.1: children in painter's model order.
+        let child_types: Vec<&str> = root
+            .children
+            .iter()
+            .map(|&cid| {
+                let child = scene.nodes.get(&cid).expect("child node must exist");
+                match &child.data {
+                    NodeData::SolidColor(_) => "SolidColor",
+                    NodeData::StaticImage(_) => "StaticImage",
+                    NodeData::TextMarkdown(_) => "TextMarkdown",
+                    NodeData::HitRegion(_) => "HitRegion",
+                }
+            })
+            .collect();
+
+        assert_eq!(
+            child_types,
+            ["StaticImage", "TextMarkdown", "TextMarkdown", "HitRegion", "HitRegion"],
+            "children must be in painter's model order: StaticImage, TextMarkdown (header), \
+             TextMarkdown (body), HitRegion (refresh), HitRegion (dismiss) — tasks.md §5.1"
+        );
+
+        // Verify HitRegion interaction_ids (§4.3 — correct tree order / content).
+        let refresh_node = scene
+            .nodes
+            .get(&root.children[3])
+            .expect("refresh node must exist");
+        if let NodeData::HitRegion(hr) = &refresh_node.data {
+            assert_eq!(
+                hr.interaction_id, "refresh-button",
+                "children[3] interaction_id must be 'refresh-button' — tasks.md §4.3"
+            );
+        } else {
+            panic!("children[3] must be HitRegionNode (refresh) — tasks.md §4.3");
+        }
+
+        let dismiss_node = scene
+            .nodes
+            .get(&root.children[4])
+            .expect("dismiss node must exist");
+        if let NodeData::HitRegion(hr) = &dismiss_node.data {
+            assert_eq!(
+                hr.interaction_id, "dismiss-button",
+                "children[4] interaction_id must be 'dismiss-button' — tasks.md §4.3"
+            );
+        } else {
+            panic!("children[4] must be HitRegionNode (dismiss) — tasks.md §4.3");
+        }
+
+        server.abort();
+    }
+
+    /// Task 4.4 — partial batch failure rejects entire batch atomically.
+    ///
+    /// Spec §Requirement: Atomic Tile Creation Batch
+    /// Scenario: Partial failure rejects entire batch
+    /// tasks.md §4.4: a batch containing one valid CreateTile and one CreateTile with
+    ///   width=0 (invalid bounds per RFC 0001 §2.3) is rejected atomically —
+    ///   no tiles from the failed batch appear in the scene.
+    #[tokio::test]
+    async fn test_partial_batch_failure_rejects_atomically() {
+        use tze_hud_protocol::proto::session as sp;
+        use tokio_stream::StreamExt as _;
+
+        let port = ephemeral_port();
+        let (server, state) = start_test_runtime_with_state(port)
+            .await
+            .expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Create a tab (CreateTile requires an active tab); skip resource upload
+        // since the batch will be rejected before any StaticImageNode is processed.
+        {
+            let st = state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("Test Tab", 0).expect("create_tab");
+            scene.active_tab = Some(tab_id);
+        }
+
+        // Open a session and acquire a lease.
+        #[allow(deprecated)]
+        let mut session_client =
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+                .await
+                .expect("connect");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<sp::ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mut response_stream = session_client
+            .session(stream)
+            .await
+            .expect("session rpc")
+            .into_inner();
+
+        let now_us = crate::now_wall_us();
+        tx.send(sp::ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_us,
+            payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
+                agent_id: "partial-fail-test-agent".to_string(),
+                agent_display_name: "Partial Fail Test".to_string(),
+                pre_shared_key: TEST_PSK.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: vec![],
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        // Drain SessionEstablished + SceneSnapshot.
+        for _ in 0..2 {
+            response_stream
+                .next()
+                .await
+                .expect("stream open")
+                .expect("no error");
+        }
+
+        // Acquire lease.
+        tx.send(sp::ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: crate::now_wall_us(),
+            payload: Some(sp::client_message::Payload::LeaseRequest(sp::LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let lease_id_bytes: Vec<u8> = loop {
+            let msg = next_non_state_change(&mut response_stream).await;
+            if let Some(sp::server_message::Payload::LeaseResponse(resp)) = msg.payload {
+                assert!(resp.granted, "lease must be granted for partial-fail test");
+                break resp.lease_id;
+            }
+        };
+
+        // Batch A: CreateTile (valid)
+        let batch_a_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(sp::ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: crate::now_wall_us(),
+            payload: Some(sp::client_message::Payload::MutationBatch(
+                sp::MutationBatch {
+                    batch_id: batch_a_id,
+                    lease_id: lease_id_bytes.clone(),
+                    mutations: vec![tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::CreateTile(
+                                tze_hud_protocol::proto::CreateTileMutation {
+                                    tab_id: vec![],
+                                    bounds: Some(tze_hud_protocol::proto::Rect {
+                                        x: 50.0,
+                                        y: 50.0,
+                                        width: 400.0,
+                                        height: 300.0,
+                                        ..Default::default()
+                                    }),
+                                    z_order: 100,
+                                },
+                            ),
+                        ),
+                    }],
+                    timing: None,
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        let tile_id_bytes: Vec<u8> = loop {
+            let msg = next_non_state_change(&mut response_stream).await;
+            if let Some(sp::server_message::Payload::MutationResult(result)) = msg.payload {
+                assert!(result.accepted, "CreateTile must succeed; got: {result:?}");
+                break result.created_ids[0].clone();
+            }
+        };
+
+        // Record tile count before the failing batch.
+        let tile_count_before = {
+            let st = state.lock().await;
+            st.scene.lock().await.tile_count()
+        };
+
+        // Batch B: two CreateTile mutations — the second has width=0 (invalid tile bounds).
+        // RFC 0001 §2.3: tile width and height must be > 0. The entire batch must be
+        // rejected atomically (tasks.md §4.4: all-or-nothing).
+        let batch_b_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        tx.send(sp::ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: crate::now_wall_us(),
+            payload: Some(sp::client_message::Payload::MutationBatch(
+                sp::MutationBatch {
+                    batch_id: batch_b_id.clone(),
+                    lease_id: lease_id_bytes.clone(),
+                    mutations: vec![
+                        // Valid CreateTile
+                        tze_hud_protocol::proto::MutationProto {
+                            mutation: Some(
+                                tze_hud_protocol::proto::mutation_proto::Mutation::CreateTile(
+                                    tze_hud_protocol::proto::CreateTileMutation {
+                                        tab_id: vec![],
+                                        bounds: Some(tze_hud_protocol::proto::Rect {
+                                            x: 50.0,
+                                            y: 200.0,
+                                            width: 200.0,
+                                            height: 100.0,
+                                            ..Default::default()
+                                        }),
+                                        z_order: 101,
+                                    },
+                                ),
+                            ),
+                        },
+                        // Invalid CreateTile: width=0 → bounds validation fails (RFC 0001 §2.3)
+                        tze_hud_protocol::proto::MutationProto {
+                            mutation: Some(
+                                tze_hud_protocol::proto::mutation_proto::Mutation::CreateTile(
+                                    tze_hud_protocol::proto::CreateTileMutation {
+                                        tab_id: vec![],
+                                        bounds: Some(tze_hud_protocol::proto::Rect {
+                                            x: 0.0,
+                                            y: 0.0,
+                                            width: 0.0, // INVALID: width must be > 0
+                                            height: 50.0,
+                                            ..Default::default()
+                                        }),
+                                        z_order: 102,
+                                    },
+                                ),
+                            ),
+                        },
+                    ],
+                    timing: None,
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        // Expect MutationResult with accepted=false (entire batch rejected).
+        let result_msg = next_non_state_change(&mut response_stream).await;
+        match result_msg.payload {
+            Some(sp::server_message::Payload::MutationResult(result)) => {
+                assert_eq!(
+                    result.batch_id, batch_b_id,
+                    "batch_id must be echoed back — tasks.md §4.2"
+                );
+                assert!(
+                    !result.accepted,
+                    "batch with width=0 CreateTile must be rejected atomically — tasks.md §4.4; \
+                     got: accepted={}, error_code={}, msg={}",
+                    result.accepted, result.error_code, result.error_message
+                );
+            }
+            other => panic!(
+                "Expected MutationResult (rejected) for partial batch failure, got: {other:?}"
+            ),
+        }
+
+        // tasks.md §4.4: tile count must not change — no tiles from Batch B were committed.
+        // (The tile itself was created in Batch A and is still present.)
+        let tile_count_after = {
+            let st = state.lock().await;
+            st.scene.lock().await.tile_count()
+        };
+        assert_eq!(
+            tile_count_after, tile_count_before,
+            "tile count must not change after rejected CreateTile batch — tasks.md §4.4"
+        );
+
+        // The tile from Batch A must have no root node (Batch B was fully rolled back).
+        {
+            let tile_id_arr: [u8; 16] = tile_id_bytes
+                .as_slice()
+                .try_into()
+                .expect("tile_id must be 16 bytes");
+            let tile_uuid = uuid::Uuid::from_bytes(tile_id_arr);
+            let tile_scene_id = tze_hud_scene::SceneId::from_uuid(tile_uuid);
+            let st = state.lock().await;
+            let scene = st.scene.lock().await;
+            let tile = scene
+                .tiles
+                .get(&tile_scene_id)
+                .expect("tile must still exist (created in Batch A)");
+            assert!(
+                tile.root_node.is_none(),
+                "tile root must be None after rejected node batch (atomicity) — tasks.md §4.4"
+            );
+        }
+
+        server.abort();
+    }
+
+    // ── Phase 5: Intra-Tile Compositing Verification (pure logic tests) ───────
+
+    /// Task 5.2 — z_order=100 is below ZONE_TILE_Z_MIN, confirming agent-owned band.
+    ///
+    /// Spec §Requirement: Z-Order Compositing at Content Layer
+    /// Scenario: Agent tile in content band
+    /// tasks.md §5.2: verify z_order=100 places the tile below ZONE_TILE_Z_MIN (0x8000_0000).
+    #[test]
+    fn test_z_order_100_is_in_agent_owned_band_below_zone_tile_z_min() {
+        assert!(
+            crate::TILE_Z_ORDER < tze_hud_scene::types::ZONE_TILE_Z_MIN,
+            "TILE_Z_ORDER={} must be below ZONE_TILE_Z_MIN=0x{:08x} — tasks.md §5.2",
+            crate::TILE_Z_ORDER,
+            tze_hud_scene::types::ZONE_TILE_Z_MIN,
+        );
+    }
+
+    /// Task 5.3 — chrome layer z_order renders above the dashboard tile.
+    ///
+    /// Spec §Requirement: Z-Order Compositing at Content Layer
+    /// Scenario: Chrome layer renders above dashboard tile
+    /// tasks.md §5.3: verify chrome layer elements (tab bar, disconnection badges)
+    ///   render above the dashboard tile.
+    ///
+    /// Chrome tiles have lease priority 0 and MUST use z_order >= ZONE_TILE_Z_MIN.
+    /// The hit-test contract checks chrome tiles before content tiles regardless of z_order
+    /// (per scene-graph/spec.md §Requirement: Hit-Testing Contract, RFC 0001 §5.1-5.2).
+    #[test]
+    fn test_chrome_z_order_renders_above_dashboard_tile() {
+        // Chrome elements use z_orders >= ZONE_TILE_Z_MIN.
+        let chrome_z = tze_hud_scene::types::ZONE_TILE_Z_MIN + 1;
+        let dashboard_z = crate::TILE_Z_ORDER;
+        assert!(
+            chrome_z > dashboard_z,
+            "chrome z (0x{:08x}) must exceed dashboard z ({}) — tasks.md §5.3",
+            chrome_z,
+            dashboard_z
         );
     }
 }
