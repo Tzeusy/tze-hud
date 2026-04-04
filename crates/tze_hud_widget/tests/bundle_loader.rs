@@ -1219,6 +1219,29 @@ description = "hyphen and digit are valid"
 }
 
 #[test]
+fn invalid_name_exclamation_mark_rejected() {
+    // Regression: 'My Gauge!' must be rejected — uppercase, space, and '!' are all
+    // non-conforming characters. Source: hud-qdmf (GAP-3).
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("widget.toml"),
+        br#"name = "My Gauge!"
+version = "1.0.0"
+description = "special chars not allowed"
+"#,
+    )
+    .unwrap();
+
+    let result = load_bundle_dir(dir.path());
+    match result {
+        BundleScanResult::Err(BundleError::InvalidName { name, .. }) => {
+            assert_eq!(name, "My Gauge!");
+        }
+        other => panic!("expected InvalidName, got {other:?}"),
+    }
+}
+
+#[test]
 fn invalid_name_wire_code() {
     let err = BundleError::InvalidName {
         path: "/tmp/test".to_string(),
