@@ -18,7 +18,7 @@
 //!
 //! **Budget enforcement is self-contained in `tze_hud_runtime::budget`. The
 //! `BudgetEnforcer` owns the per-agent enforcement state machine
-//! (Normal → Warning → Throttle → Revoke), the enforcement ladder tick, the
+//! (`Normal` → `Warning` → `Throttled` → `Revoked`), the enforcement ladder tick, the
 //! frame-time guardian, and the per-mutation admission gate. `tze_hud_policy`
 //! is a standalone reference design (pure evaluator, no side effects) and is
 //! NOT wired into the runtime for v1. No policy decisions flow through
