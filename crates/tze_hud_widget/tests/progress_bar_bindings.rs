@@ -51,10 +51,7 @@ use tze_hud_widget::loader::{BundleScanResult, load_bundle_dir_with_tokens};
 /// - `{{token.color.text.primary}}`     — label-text fill (fill.svg)
 fn progress_bar_tokens() -> HashMap<String, String> {
     HashMap::from([
-        (
-            "color.backdrop.default".to_string(),
-            "#1a1a2e".to_string(),
-        ),
+        ("color.backdrop.default".to_string(), "#1a1a2e".to_string()),
         ("color.text.accent".to_string(), "#4a9eff".to_string()),
         ("color.text.primary".to_string(), "#cccccc".to_string()),
     ])
@@ -151,19 +148,38 @@ fn progress_bar_bundle_loads_with_correct_structure() {
 
     // Widget type name must match the manifest.
     assert_eq!(def.id, "progress-bar", "widget id should be 'progress-bar'");
-    assert_eq!(def.name, "progress-bar", "widget name should be 'progress-bar'");
+    assert_eq!(
+        def.name, "progress-bar",
+        "widget name should be 'progress-bar'"
+    );
 
     // Parameter schema: 3 parameters (progress, label, fill_color).
     assert_eq!(
         def.parameter_schema.len(),
         3,
         "progress-bar must have exactly 3 parameters, got: {:?}",
-        def.parameter_schema.iter().map(|p| &p.name).collect::<Vec<_>>()
+        def.parameter_schema
+            .iter()
+            .map(|p| &p.name)
+            .collect::<Vec<_>>()
     );
-    let param_names: Vec<&str> = def.parameter_schema.iter().map(|p| p.name.as_str()).collect();
-    assert!(param_names.contains(&"progress"), "parameter schema must contain 'progress'");
-    assert!(param_names.contains(&"label"), "parameter schema must contain 'label'");
-    assert!(param_names.contains(&"fill_color"), "parameter schema must contain 'fill_color'");
+    let param_names: Vec<&str> = def
+        .parameter_schema
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        param_names.contains(&"progress"),
+        "parameter schema must contain 'progress'"
+    );
+    assert!(
+        param_names.contains(&"label"),
+        "parameter schema must contain 'label'"
+    );
+    assert!(
+        param_names.contains(&"fill_color"),
+        "parameter schema must contain 'fill_color'"
+    );
 
     // Layers: 2 total — track (index 0) and fill (index 1).
     assert_eq!(
@@ -194,7 +210,10 @@ fn progress_bar_bundle_loads_with_correct_structure() {
         fill_bindings.len(),
         3,
         "fill.svg layer must have exactly 3 bindings, got: {:?}",
-        fill_bindings.iter().map(|b| (&b.param, &b.target_attribute)).collect::<Vec<_>>()
+        fill_bindings
+            .iter()
+            .map(|b| (&b.param, &b.target_attribute))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -337,10 +356,7 @@ fn progress_bar_instance_has_correct_parameter_defaults() {
     // progress default = 0.0
     match instance.current_params.get("progress") {
         Some(WidgetParameterValue::F32(v)) => {
-            assert!(
-                v.abs() < 1e-6,
-                "default progress must be 0.0, got {v}"
-            );
+            assert!(v.abs() < 1e-6, "default progress must be 0.0, got {v}");
         }
         other => panic!("expected F32(0.0) for default progress, got {other:?}"),
     }
@@ -386,9 +402,7 @@ fn progress_bar_instance_has_correct_parameter_defaults() {
                 rgba.a
             );
         }
-        other => panic!(
-            "expected Color([74,158,255,255]) for default fill_color, got {other:?}"
-        ),
+        other => panic!("expected Color([74,158,255,255]) for default fill_color, got {other:?}"),
     }
 }
 
@@ -447,9 +461,7 @@ fn progress_bar_instance_appears_in_scene_with_correct_geometry() {
                 "geometry height_pct must be {expected_h:.6} (20/1080), got {height_pct:.6}"
             );
         }
-        other => panic!(
-            "expected GeometryPolicy::Relative for progress-bar, got {other:?}"
-        ),
+        other => panic!("expected GeometryPolicy::Relative for progress-bar, got {other:?}"),
     }
 
     // Verify the instance is also present in a full scene snapshot.
