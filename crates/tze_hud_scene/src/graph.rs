@@ -173,8 +173,7 @@ impl SceneGraph {
         } else {
             debug_assert!(
                 false,
-                "attempted to increment ref count for unregistered resource: {:?}",
-                id
+                "attempted to increment ref count for unregistered resource: {id:?}"
             );
         }
     }
@@ -5427,7 +5426,13 @@ mod tests {
             vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
         );
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(32, 32);
@@ -5488,10 +5493,22 @@ mod tests {
         );
 
         let tile_a = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
         let tile_b = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(200.0, 0.0, 200.0, 200.0), 2)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(200.0, 0.0, 200.0, 200.0),
+                2,
+            )
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(16, 16);
@@ -5555,7 +5572,13 @@ mod tests {
         // Grant a short lease (100 ms TTL).
         let lease_id = scene.grant_lease("agent", 100, vec![Capability::CreateTiles]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
         let (resource_id, decoded_bytes) = make_test_image_resource(8, 8);
@@ -5599,7 +5622,13 @@ mod tests {
         let tab_id = scene.create_tab("Main", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 300_000, vec![Capability::ModifyOwnTiles]);
         let tile_id = scene
-            .create_tile(tab_id, "agent", lease_id, Rect::new(0.0, 0.0, 200.0, 200.0), 1)
+            .create_tile(
+                tab_id,
+                "agent",
+                lease_id,
+                Rect::new(0.0, 0.0, 200.0, 200.0),
+                1,
+            )
             .unwrap();
 
         let (res_a, bytes_a) = make_test_image_resource(4, 4);
@@ -5722,7 +5751,7 @@ mod tests {
                     resource_id, // same
                     width: 32,
                     height: 32,
-                    decoded_bytes, // same
+                    decoded_bytes,                 // same
                     fit_mode: ImageFitMode::Cover, // changed
                     bounds: Rect::new(0.0, 0.0, 400.0, 300.0),
                 }),

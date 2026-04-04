@@ -457,7 +457,27 @@ impl SceneGraph {
         let snapshot = self.clone();
         let mut created_ids = Vec::new();
 
+        // Snapshot registered resource IDs before mutation application.
+        //
+        // Within a batch, `SetTileRoot` removes the old node tree (decrementing
+        // resource ref counts, potentially removing the resource from the map),
+        // while a subsequent `AddNode` may re-add a StaticImageNode referencing
+        // the same resource.  Without this guard the `AddNode` resource check
+        // would fail because the resource was transiently de-registered.
+        //
+        // After all mutations are applied, any resource that was in the snapshot
+        // but was removed during mutation application and still has no references
+        // is cleaned up below.
+        let pre_batch_resources: std::collections::HashSet<crate::types::ResourceId> =
+            self.registered_resources.keys().copied().collect();
+
         for (idx, mutation) in batch.mutations.iter().enumerate() {
+            // Before each mutation, ensure resources that were registered at
+            // batch start remain visible to the resource-registration gate.
+            for rid in &pre_batch_resources {
+                self.registered_resources.entry(*rid).or_insert(0);
+            }
+
             // Stage 3: Bounds check (in-line in apply_single_mutation via bounds validation)
             // Stage 4: Type check (in-line — references validated by apply_single_mutation)
             match self.apply_single_mutation(mutation, &batch.agent_namespace) {
@@ -468,6 +488,25 @@ impl SceneGraph {
                     let rejection =
                         BatchRejected::single(batch.batch_id, idx, mutation.type_name(), &e);
                     return MutationResult::rejected_with_error(batch.batch_id, rejection, e);
+                }
+            }
+        }
+
+        // Clean up: remove resources that were transiently kept alive by the
+        // pre-batch guard, ended the batch with ref count 0, AND were actually
+        // removed during this batch (i.e., had count > 0 at batch start).
+        // Resources that started at count 0 (registered but unused) must survive
+        // across batches — they may be referenced by a later batch.
+        for rid in &pre_batch_resources {
+            if let Some(&count) = self.registered_resources.get(rid) {
+                if count == 0 {
+                    // Only remove if this resource had refs at batch start (meaning
+                    // it was transiently freed during this batch, not pre-existing at 0).
+                    if let Some(&pre_count) = snapshot.registered_resources.get(rid) {
+                        if pre_count > 0 {
+                            self.registered_resources.remove(rid);
+                        }
+                    }
                 }
             }
         }
