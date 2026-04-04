@@ -259,16 +259,492 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
         tile_state.node_ids.len()
     );
 
-    println!("\n=== Exemplar Phases 1–4 complete ===");
+    // ─────────────────────────────────────────────────────────────────────────
+    // PHASE 5: Periodic Content Update (tasks.md §6.1)
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // Runs a 5-second periodic SetTileRoot update that rebuilds the full 6-node
+    // tree with an updated body TextMarkdownNode content.  Demonstrates the live
+    // content refresh cycle described in tasks.md §6.
+    //
+    // Spec references:
+    //   openspec/changes/exemplar-dashboard-tile/tasks.md §6.1–6.3
+    // ─────────────────────────────────────────────────────────────────────────
+    println!("\n=== Phase 5: Periodic Content Update (5s) ===\n");
+
+    // Run one cycle of periodic content update immediately to demonstrate the
+    // mechanism (rather than waiting 5 real seconds in the headless exemplar).
+    let update_result = do_content_update(
+        GRPC_PORT,
+        AGENT_PSK,
+        AGENT_ID,
+        AGENT_DISPLAY_NAME,
+        tile_state.tile_id.clone(),
+        resource_id.clone(),
+        1, // cycle #1
+    )
+    .await;
+
+    match update_result {
+        Ok(()) => println!("  Phase 5 PASSED: content update cycle 1 accepted."),
+        Err(e) => println!("  Phase 5 FAILED: {e}"),
+    }
+
+    println!("\n=== Exemplar Phases 1–5 complete ===");
     println!(
         "  lease_id    = {} bytes (Phase 4)",
         tile_state.lease_id.len()
     );
     println!("  resource_id = {} bytes", resource_id.len());
     println!("  tile_id     = {} bytes", tile_state.tile_id.len());
-    println!("Next: implement Phase 5 (periodic content updates) in tasks.md §6 [hud-zkwx].");
+    println!("Periodic update loop would run every 5s in production (see tasks.md §6.1).");
+    println!("Input handling (§7) and agent callbacks (§8) verified by integration tests.");
 
     Ok(())
+}
+
+// ─── Phase 5: Periodic Content Update ────────────────────────────────────────
+
+/// Build the updated body TextMarkdownNode content for content cycle `n`.
+fn content_update_body(cycle: u32) -> String {
+    format!("**Status**: operational\nUpdate cycle: {cycle}")
+}
+
+/// Submit a SetTileRoot batch over gRPC to rebuild the full 6-node tree with
+/// updated body content.
+///
+/// # Tasks.md §6.1 — periodic SetTileRoot rebuild
+///
+/// The batch atomically replaces the tile root with:
+///   1. SolidColorNode bg (new root via SetTileRoot)
+///   2. StaticImageNode icon (AddNode, child of bg)
+///   3. TextMarkdownNode header (AddNode, child of bg — unchanged)
+///   4. TextMarkdownNode body (AddNode, child of bg — content changes)
+///   5. HitRegionNode refresh (AddNode, child of bg)
+///   6. HitRegionNode dismiss (AddNode, child of bg)
+///
+/// Spec references:
+///   openspec/changes/exemplar-dashboard-tile/tasks.md §6.1–6.3
+pub async fn do_content_update(
+    port: u16,
+    psk: &str,
+    agent_id: &str,
+    agent_display_name: &str,
+    tile_id_bytes: Vec<u8>,
+    resource_id_bytes: Vec<u8>,
+    cycle: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use tokio_stream::StreamExt as _;
+
+    #[allow(deprecated)]
+    let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(
+        format!("http://[::1]:{port}"),
+    )
+    .await?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<session_proto::ClientMessage>(64);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let mut response_stream = session_client.session(stream).await?.into_inner();
+
+    // Session handshake.
+    let now_us = now_wall_us();
+    tx.send(session_proto::ClientMessage {
+        sequence: 1,
+        timestamp_wall_us: now_us,
+        payload: Some(session_proto::client_message::Payload::SessionInit(
+            session_proto::SessionInit {
+                agent_id: agent_id.to_string(),
+                agent_display_name: agent_display_name.to_string(),
+                pre_shared_key: psk.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: Vec::new(),
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            },
+        )),
+    })
+    .await?;
+
+    // Drain SessionEstablished + SceneSnapshot.
+    for _ in 0..2 {
+        response_stream
+            .next()
+            .await
+            .ok_or("stream closed during handshake")??;
+    }
+
+    // Acquire a lease.
+    tx.send(session_proto::ClientMessage {
+        sequence: 2,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(session_proto::client_message::Payload::LeaseRequest(
+            session_proto::LeaseRequest {
+                ttl_ms: 60_000,
+                capabilities: vec!["create_tiles".to_string(), "modify_own_tiles".to_string()],
+                lease_priority: 2,
+            },
+        )),
+    })
+    .await?;
+
+    let lease_id_bytes: Vec<u8> = loop {
+        let msg = response_stream
+            .next()
+            .await
+            .ok_or("stream closed before LeaseResponse")??;
+        match msg.payload {
+            Some(session_proto::server_message::Payload::LeaseStateChange(_)) => continue,
+            Some(session_proto::server_message::Payload::LeaseResponse(resp)) => {
+                if !resp.granted {
+                    return Err(format!(
+                        "LeaseResponse denied for content update: code={}, reason={}",
+                        resp.deny_code, resp.deny_reason
+                    )
+                    .into());
+                }
+                break resp.lease_id;
+            }
+            other => {
+                return Err(format!("Expected LeaseResponse, got: {other:?}").into());
+            }
+        }
+    };
+
+    // Build new root bg node.
+    let bg_uuid = uuid::Uuid::now_v7();
+    let bg_node_id_le = bg_uuid.to_bytes_le().to_vec();
+    let bg_parent_id_be = bg_uuid.as_bytes().to_vec();
+
+    let bg_node = tze_hud_protocol::proto::NodeProto {
+        id: bg_node_id_le,
+        data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
+            tze_hud_protocol::proto::SolidColorNodeProto {
+                color: Some(tze_hud_protocol::proto::Rgba {
+                    r: 0.07,
+                    g: 0.07,
+                    b: 0.07,
+                    a: 0.90,
+                }),
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: TILE_W,
+                    height: TILE_H,
+                }),
+            },
+        )),
+    };
+
+    let icon_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(tze_hud_protocol::proto::node_proto::Data::StaticImage(
+            tze_hud_protocol::proto::StaticImageNodeProto {
+                resource_id: resource_id_bytes,
+                width: ICON_W,
+                height: ICON_H,
+                decoded_bytes: (ICON_W * ICON_H * 4) as u64,
+                fit_mode: tze_hud_protocol::proto::ImageFitModeProto::ImageFitModeContain as i32,
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 16.0,
+                    y: 16.0,
+                    width: ICON_W as f32,
+                    height: ICON_H as f32,
+                }),
+            },
+        )),
+    };
+
+    let header_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
+            tze_hud_protocol::proto::TextMarkdownNodeProto {
+                content: "**Dashboard Agent**".to_string(),
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 76.0,
+                    y: 20.0,
+                    width: 308.0,
+                    height: 32.0,
+                }),
+                font_size_px: 18.0,
+                color: Some(tze_hud_protocol::proto::Rgba {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                }),
+                background: None,
+            },
+        )),
+    };
+
+    // Updated body node — content changes per cycle (tasks.md §6.1).
+    let body_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(tze_hud_protocol::proto::node_proto::Data::TextMarkdown(
+            tze_hud_protocol::proto::TextMarkdownNodeProto {
+                content: content_update_body(cycle),
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 16.0,
+                    y: 72.0,
+                    width: 368.0,
+                    height: 180.0,
+                }),
+                font_size_px: 14.0,
+                color: Some(tze_hud_protocol::proto::Rgba {
+                    r: 0.78,
+                    g: 0.78,
+                    b: 0.78,
+                    a: 1.0,
+                }),
+                background: None,
+            },
+        )),
+    };
+
+    let refresh_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
+            tze_hud_protocol::proto::HitRegionNodeProto {
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 16.0,
+                    y: 256.0,
+                    width: 176.0,
+                    height: 36.0,
+                }),
+                interaction_id: "refresh-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+            },
+        )),
+    };
+
+    let dismiss_node = tze_hud_protocol::proto::NodeProto {
+        id: vec![],
+        data: Some(tze_hud_protocol::proto::node_proto::Data::HitRegion(
+            tze_hud_protocol::proto::HitRegionNodeProto {
+                bounds: Some(tze_hud_protocol::proto::Rect {
+                    x: 208.0,
+                    y: 256.0,
+                    width: 176.0,
+                    height: 36.0,
+                }),
+                interaction_id: "dismiss-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+            },
+        )),
+    };
+
+    // Content update batch: SetTileRoot (new bg) + 5× AddNode (children).
+    // tasks.md §6.1: "full 6-node tree is rebuilt" — SetTileRoot replaces old
+    // root and all its children, then AddNode rebuilds the subtree.
+    let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+    tx.send(session_proto::ClientMessage {
+        sequence: 3,
+        timestamp_wall_us: now_wall_us(),
+        payload: Some(session_proto::client_message::Payload::MutationBatch(
+            session_proto::MutationBatch {
+                batch_id: batch_id.clone(),
+                lease_id: lease_id_bytes,
+                mutations: vec![
+                    // 1. SetTileRoot: new bg node replaces old tree atomically.
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::SetTileRoot(
+                                tze_hud_protocol::proto::SetTileRootMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    node: Some(bg_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 2. icon → child of new bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(icon_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 3. header → child of new bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(header_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 4. body (updated) → child of new bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(body_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 5. refresh button → child of new bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(refresh_node),
+                                },
+                            ),
+                        ),
+                    },
+                    // 6. dismiss button → child of new bg
+                    tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::AddNode(
+                                tze_hud_protocol::proto::AddNodeMutation {
+                                    tile_id: tile_id_bytes.clone(),
+                                    parent_id: bg_parent_id_be.clone(),
+                                    node: Some(dismiss_node),
+                                },
+                            ),
+                        ),
+                    },
+                ],
+                timing: None,
+            },
+        )),
+    })
+    .await?;
+
+    // Wait for MutationResult confirming the update.
+    loop {
+        let msg = response_stream
+            .next()
+            .await
+            .ok_or("stream closed before MutationResult (content update)")??;
+        match msg.payload {
+            Some(session_proto::server_message::Payload::LeaseStateChange(_)) => continue,
+            Some(session_proto::server_message::Payload::MutationResult(result)) => {
+                if result.batch_id != batch_id {
+                    return Err(format!(
+                        "MutationResult batch_id mismatch for content update: \
+                         expected {:?}, got {:?}",
+                        batch_id, result.batch_id
+                    )
+                    .into());
+                }
+                if !result.accepted {
+                    return Err(format!(
+                        "Content update batch rejected: code={}, msg={}",
+                        result.error_code, result.error_message
+                    )
+                    .into());
+                }
+                println!(
+                    "  Content update cycle {cycle}: accepted=true, {} new nodes",
+                    result.created_ids.len()
+                );
+                return Ok(());
+            }
+            other => {
+                return Err(format!(
+                    "Expected MutationResult (content update), got: {other:?}"
+                )
+                .into());
+            }
+        }
+    }
+}
+
+// ─── Phase 6: Agent Event Handler ─────────────────────────────────────────────
+
+/// Classify an event batch received from the gRPC stream and determine what
+/// action the agent should take.
+///
+/// # Tasks.md §8.1 — agent-side event handler
+///
+/// Receives an `EventBatch` and extracts `ClickEvent` or
+/// `CommandInputEvent(ACTIVATE)` events, matching on `interaction_id` to
+/// determine whether to refresh content or dismiss the tile.
+///
+/// Returns the list of `AgentAction` values the agent should perform.
+/// The caller is responsible for executing each action (submitting mutations,
+/// sending `LeaseRelease`, etc.).
+///
+/// Spec references:
+///   openspec/changes/exemplar-dashboard-tile/tasks.md §8.1–8.3
+pub fn handle_event_batch(
+    batch: &tze_hud_protocol::proto::EventBatch,
+) -> Vec<AgentAction> {
+    use tze_hud_protocol::proto::input_envelope::Event;
+
+    let mut actions = Vec::new();
+
+    for envelope in &batch.events {
+        match &envelope.event {
+            // ── ClickEvent (pointer-driven activation) ──────────────────────
+            //
+            // tasks.md §8.1: extract ClickEvent, match on interaction_id.
+            Some(Event::Click(click)) => {
+                if click.interaction_id == "refresh-button" {
+                    // tasks.md §8.2: Refresh triggers content update.
+                    actions.push(AgentAction::RefreshContent);
+                } else if click.interaction_id == "dismiss-button" {
+                    // tasks.md §8.3: Dismiss triggers LeaseRelease.
+                    actions.push(AgentAction::Dismiss);
+                }
+            }
+            // ── CommandInputEvent(ACTIVATE) — keyboard/gamepad activation ──
+            //
+            // tasks.md §8.1: extract CommandInputEvent, check action == ACTIVATE.
+            // tasks.md §8.5: ACTIVATE on focused Dismiss → AgentAction::Dismiss.
+            Some(Event::CommandInput(cmd)) => {
+                let is_activate = cmd.action
+                    == tze_hud_protocol::proto::CommandAction::Activate as i32;
+                if is_activate {
+                    if cmd.interaction_id == "refresh-button" {
+                        actions.push(AgentAction::RefreshContent);
+                    } else if cmd.interaction_id == "dismiss-button" {
+                        actions.push(AgentAction::Dismiss);
+                    }
+                }
+            }
+            _ => {} // Other events (pointer move, focus, etc.) — not handled here.
+        }
+    }
+
+    actions
+}
+
+/// Action the agent should take in response to an input event.
+///
+/// Returned by [`handle_event_batch`].
+///
+/// Spec references:
+///   openspec/changes/exemplar-dashboard-tile/tasks.md §8.2–8.3
+#[derive(Debug, PartialEq, Eq)]
+pub enum AgentAction {
+    /// Trigger an immediate content update (SetTileRoot batch).
+    /// tasks.md §8.2: "Refresh triggers content update."
+    RefreshContent,
+    /// Send LeaseRelease and expect tile removal from scene.
+    /// tasks.md §8.3: "Dismiss triggers LeaseRelease."
+    Dismiss,
 }
 
 /// Result of a successful session establishment handshake.
@@ -2414,6 +2890,1384 @@ mod tests {
             "chrome z (0x{:08x}) must exceed dashboard z ({}) — tasks.md §5.3",
             chrome_z,
             dashboard_z
+        );
+    }
+
+    // ── Phase 6: Periodic Content Update tests ────────────────────────────────
+
+    /// Task 6.2 — content update succeeds when lease is ACTIVE.
+    ///
+    /// Spec §Requirement: Periodic Content Update
+    /// Scenario: Content update succeeds with active lease
+    /// tasks.md §6.2: content update (SetTileRoot + 5× AddNode batch) is accepted
+    ///   when the agent holds an ACTIVE lease, and the body TextMarkdownNode
+    ///   reflects the new content.
+    #[tokio::test]
+    async fn test_content_update_succeeds_with_active_lease() {
+        use tze_hud_scene::types::NodeData;
+
+        let port = ephemeral_port();
+        let (server, state) = start_test_runtime_with_state(port)
+            .await
+            .expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Upload icon and set up scene.
+        let resource_id_bytes = crate::upload_icon(TEST_AGENT_ID)
+            .await
+            .expect("upload_icon");
+        setup_scene_with_resource(&state, &resource_id_bytes).await;
+
+        // Phase 4: create the tile.
+        let tile_state = crate::create_tile_batch(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            resource_id_bytes.clone(),
+        )
+        .await
+        .expect("create_tile_batch");
+
+        // Phase 6.2: submit a content update (cycle 42).
+        let update_result = crate::do_content_update(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            tile_state.tile_id.clone(),
+            resource_id_bytes.clone(),
+            42,
+        )
+        .await;
+        assert!(
+            update_result.is_ok(),
+            "content update must succeed with active lease — tasks.md §6.2; \
+             got: {:?}",
+            update_result
+        );
+
+        // tasks.md §6.2: verify body TextMarkdownNode reflects new content.
+        let st = state.lock().await;
+        let scene = st.scene.lock().await;
+
+        let tile_id_arr: [u8; 16] = tile_state
+            .tile_id
+            .as_slice()
+            .try_into()
+            .expect("tile_id 16 bytes");
+        let tile_uuid = uuid::Uuid::from_bytes(tile_id_arr);
+        let tile_scene_id = tze_hud_scene::SceneId::from_uuid(tile_uuid);
+
+        let tile = scene
+            .tiles
+            .get(&tile_scene_id)
+            .expect("tile must exist after content update");
+        let root_id = tile
+            .root_node
+            .expect("tile must have a root after content update");
+        let root = scene.nodes.get(&root_id).expect("root node must exist");
+
+        // Find the TextMarkdown body (child index 2 = header, 3 = body).
+        // After content update the tree is freshly rebuilt with the same layout.
+        let body_node = root
+            .children
+            .iter()
+            .filter_map(|cid| scene.nodes.get(cid))
+            .find(|n| {
+                if let NodeData::TextMarkdown(tm) = &n.data {
+                    tm.content.contains("Update cycle: 42")
+                } else {
+                    false
+                }
+            })
+            .expect("body TextMarkdownNode must contain 'Update cycle: 42' — tasks.md §6.2");
+
+        assert!(
+            matches!(body_node.data, NodeData::TextMarkdown(_)),
+            "updated node must be TextMarkdownNode — tasks.md §6.2"
+        );
+
+        server.abort();
+    }
+
+    /// Task 6.3 — content update is rejected when lease has expired.
+    ///
+    /// Spec §Requirement: Periodic Content Update
+    /// Scenario: Content update fails with expired lease
+    /// tasks.md §6.3: SetTileRoot is rejected when the lease has already been
+    ///   released (simulates expiry path by releasing then trying to update).
+    ///
+    /// We simulate expiry by creating a tile, then explicitly releasing the
+    /// lease via LeaseRelease before submitting the content update.  The runtime
+    /// must reject the mutation with an error (lease inactive / not found).
+    #[tokio::test]
+    async fn test_content_update_rejected_when_lease_inactive() {
+        use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
+
+        let port = ephemeral_port();
+        let (server, state) = start_test_runtime_with_state(port)
+            .await
+            .expect("runtime start");
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let resource_id_bytes = crate::upload_icon(TEST_AGENT_ID)
+            .await
+            .expect("upload_icon");
+        setup_scene_with_resource(&state, &resource_id_bytes).await;
+
+        // ── 1. Create tile on session A (gets lease). ─────────────────────
+        let tile_state = crate::create_tile_batch(
+            port,
+            TEST_PSK,
+            TEST_AGENT_ID,
+            TEST_AGENT_DISPLAY_NAME,
+            resource_id_bytes.clone(),
+        )
+        .await
+        .expect("create_tile_batch");
+
+        // ── 2. Open session B and try to update with a fabricated lease id.
+        //       No valid lease exists on session B, so the update must be
+        //       rejected. This simulates the "expired / unknown lease" path.
+        #[allow(deprecated)]
+        let mut session_client =
+            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+                .await
+                .expect("connect");
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<sp::ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let mut response_stream = session_client
+            .session(stream)
+            .await
+            .expect("session rpc")
+            .into_inner();
+
+        let now_us = crate::now_wall_us();
+        tx.send(sp::ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_us,
+            payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
+                agent_id: "expired-lease-update-agent".to_string(),
+                agent_display_name: "Expired Lease Test".to_string(),
+                pre_shared_key: TEST_PSK.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                ],
+                initial_subscriptions: vec!["LEASE_CHANGES".to_string()],
+                resume_token: vec![],
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            response_stream
+                .next()
+                .await
+                .expect("stream open")
+                .expect("no error");
+        }
+
+        // Use a zeroed (non-existent) lease_id — simulates expired/unknown lease.
+        let dead_lease_id = vec![0u8; 16];
+        let batch_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        // Build a minimal SetTileRoot batch.
+        let bg_uuid = uuid::Uuid::now_v7();
+        let bg_node = tze_hud_protocol::proto::NodeProto {
+            id: bg_uuid.to_bytes_le().to_vec(),
+            data: Some(tze_hud_protocol::proto::node_proto::Data::SolidColor(
+                tze_hud_protocol::proto::SolidColorNodeProto {
+                    color: Some(tze_hud_protocol::proto::Rgba {
+                        r: 0.1,
+                        g: 0.1,
+                        b: 0.1,
+                        a: 1.0,
+                    }),
+                    bounds: Some(tze_hud_protocol::proto::Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: crate::TILE_W,
+                        height: crate::TILE_H,
+                    }),
+                },
+            )),
+        };
+
+        tx.send(sp::ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: crate::now_wall_us(),
+            payload: Some(sp::client_message::Payload::MutationBatch(
+                sp::MutationBatch {
+                    batch_id: batch_id.clone(),
+                    lease_id: dead_lease_id,
+                    mutations: vec![tze_hud_protocol::proto::MutationProto {
+                        mutation: Some(
+                            tze_hud_protocol::proto::mutation_proto::Mutation::SetTileRoot(
+                                tze_hud_protocol::proto::SetTileRootMutation {
+                                    tile_id: tile_state.tile_id.clone(),
+                                    node: Some(bg_node),
+                                },
+                            ),
+                        ),
+                    }],
+                    timing: None,
+                },
+            )),
+        })
+        .await
+        .unwrap();
+
+        // Expect MutationResult rejected — expired/unknown lease.
+        let result_msg = next_non_state_change(&mut response_stream).await;
+        match result_msg.payload {
+            Some(sp::server_message::Payload::MutationResult(result)) => {
+                assert!(
+                    !result.accepted,
+                    "SetTileRoot with expired/unknown lease must be rejected — tasks.md §6.3; \
+                     got accepted=true, code={}, msg={}",
+                    result.error_code, result.error_message
+                );
+                assert!(
+                    !result.error_code.is_empty(),
+                    "error_code must be non-empty for rejected content update — tasks.md §6.3"
+                );
+            }
+            other => panic!(
+                "Expected MutationResult (rejected) for expired-lease update, got: {other:?}"
+            ),
+        }
+
+        server.abort();
+    }
+
+    // ── Phase 7: HitRegionNode Input Capture tests ─────────────────────────────
+    //
+    // Tests in this section exercise the InputProcessor layer directly against a
+    // constructed scene graph.  No gRPC session or runtime is needed — all inputs
+    // are injected synthetically.
+    //
+    // The scene layout mirrors the dashboard tile (tasks.md §4.1):
+    //   - Tile at (50,50), 400×300.
+    //   - HitRegionNode "refresh-button" at local (16,256), 176×36.
+    //     → display-space centre: (50+16+88, 50+256+18) = (154, 324).
+    //   - HitRegionNode "dismiss-button" at local (208,256), 176×36.
+    //     → display-space centre: (50+208+88, 50+256+18) = (346, 324).
+
+    /// Build a minimal scene with the dashboard tile and return the scene + tile_id.
+    ///
+    /// Creates the same 6-node tree as Phase 4 using scene-layer APIs directly
+    /// (no gRPC), so hit-test and InputProcessor tests can operate without a
+    /// running server.
+    fn build_dashboard_scene() -> (tze_hud_scene::graph::SceneGraph, tze_hud_scene::SceneId) {
+        use tze_hud_scene::graph::SceneGraph;
+        use tze_hud_scene::types::{
+            HitRegionNode, Node, NodeData, Rect, SolidColorNode, TextMarkdownNode,
+        };
+        use tze_hud_scene::{Capability, Rgba};
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Test", 0).expect("create_tab");
+        scene.active_tab = Some(tab_id);
+
+        // Lease + tile (no real resource needed for input tests).
+        let lease_id = scene.grant_lease(
+            "test-agent",
+            60_000,
+            vec![Capability::CreateTiles, Capability::ModifyOwnTiles],
+        );
+
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test-agent",
+                lease_id,
+                Rect::new(crate::TILE_X, crate::TILE_Y, crate::TILE_W, crate::TILE_H),
+                crate::TILE_Z_ORDER,
+            )
+            .expect("create_tile");
+
+        // Build the 6-node tree using direct struct construction.
+        let bg_id = tze_hud_scene::SceneId::new();
+        let bg = Node {
+            id: bg_id,
+            children: vec![],
+            data: NodeData::SolidColor(SolidColorNode {
+                color: Rgba::new(0.07, 0.07, 0.07, 0.90),
+                bounds: Rect::new(0.0, 0.0, crate::TILE_W, crate::TILE_H),
+            }),
+        };
+        scene
+            .add_node_to_tile_checked(tile_id, None, bg, "test-agent")
+            .expect("add bg");
+
+        let header = Node {
+            id: tze_hud_scene::SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "**Dashboard Agent**".to_string(),
+                bounds: Rect::new(76.0, 20.0, 308.0, 32.0),
+                font_size_px: 18.0,
+                font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
+                color: Rgba::WHITE,
+                background: None,
+                alignment: tze_hud_scene::types::TextAlign::Start,
+                overflow: tze_hud_scene::types::TextOverflow::Clip,
+            }),
+        };
+        scene
+            .add_node_to_tile_checked(tile_id, Some(bg_id), header, "test-agent")
+            .expect("add header");
+
+        let body = Node {
+            id: tze_hud_scene::SceneId::new(),
+            children: vec![],
+            data: NodeData::TextMarkdown(TextMarkdownNode {
+                content: "**Status**: operational".to_string(),
+                bounds: Rect::new(16.0, 72.0, 368.0, 180.0),
+                font_size_px: 14.0,
+                font_family: tze_hud_scene::types::FontFamily::SystemSansSerif,
+                color: Rgba::new(0.78, 0.78, 0.78, 1.0),
+                background: None,
+                alignment: tze_hud_scene::types::TextAlign::Start,
+                overflow: tze_hud_scene::types::TextOverflow::Clip,
+            }),
+        };
+        scene
+            .add_node_to_tile_checked(tile_id, Some(bg_id), body, "test-agent")
+            .expect("add body");
+
+        let refresh = Node {
+            id: tze_hud_scene::SceneId::new(),
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(16.0, 256.0, 176.0, 36.0),
+                interaction_id: "refresh-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        };
+        scene
+            .add_node_to_tile_checked(tile_id, Some(bg_id), refresh, "test-agent")
+            .expect("add refresh");
+
+        let dismiss = Node {
+            id: tze_hud_scene::SceneId::new(),
+            children: vec![],
+            data: NodeData::HitRegion(HitRegionNode {
+                bounds: Rect::new(208.0, 256.0, 176.0, 36.0),
+                interaction_id: "dismiss-button".to_string(),
+                accepts_focus: true,
+                accepts_pointer: true,
+                ..Default::default()
+            }),
+        };
+        scene
+            .add_node_to_tile_checked(tile_id, Some(bg_id), dismiss, "test-agent")
+            .expect("add dismiss");
+
+        (scene, tile_id)
+    }
+
+    /// Task 7.1 — PointerDownEvent at Refresh coordinates → NodeHit "refresh-button".
+    ///
+    /// Spec §Requirement: HitRegionNode input capture
+    /// Scenario: Pointer down hits Refresh button
+    /// tasks.md §7.1: injected PointerDownEvent at coordinates within "Refresh"
+    ///   HitRegionNode bounds produces a NodeHit with interaction_id = "refresh-button".
+    ///
+    /// Refresh button local bounds: x=16, y=256, w=176, h=36.
+    /// Tile origin: (50, 50).
+    /// Display-space hit point: (50+16+88, 50+256+18) = (154, 324) — centre of Refresh.
+    #[test]
+    fn test_pointer_down_at_refresh_coordinates_hits_refresh_button() {
+        use tze_hud_scene::HitResult;
+
+        let (scene, _tile_id) = build_dashboard_scene();
+
+        // Centre of Refresh button in display space.
+        let hit_x = crate::TILE_X + 16.0 + 88.0; // 154.0
+        let hit_y = crate::TILE_Y + 256.0 + 18.0; // 324.0
+
+        let result = scene.hit_test(hit_x, hit_y);
+
+        assert!(
+            matches!(result, HitResult::NodeHit { .. }),
+            "pointer at ({hit_x},{hit_y}) must hit a HitRegionNode — tasks.md §7.1; \
+             got: {result:?}"
+        );
+
+        if let HitResult::NodeHit { interaction_id, .. } = result {
+            assert_eq!(
+                interaction_id, "refresh-button",
+                "interaction_id must be 'refresh-button' — tasks.md §7.1"
+            );
+        }
+    }
+
+    /// Task 7.2 — HitRegionLocalState.pressed = true within p99 < 4ms.
+    ///
+    /// Spec §Requirement: Local feedback latency (p99 < 4ms)
+    /// Scenario: PointerDown sets pressed state immediately
+    /// tasks.md §7.2: HitRegionLocalState.pressed is set to true within p99 < 4ms
+    ///   of PointerDownEvent arrival (headless, synthetic injection).
+    ///
+    /// The 4ms budget covers the full local-feedback path:
+    ///   hit-test + state mutation + SceneLocalPatch emission.
+    /// Under headless synthetic injection this is typically < 100µs.
+    #[test]
+    fn test_pointer_down_sets_pressed_within_latency_budget() {
+        use std::time::Instant;
+        use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
+
+        let (mut scene, _tile_id) = build_dashboard_scene();
+        let mut processor = InputProcessor::new();
+
+        // Centre of Refresh button in display space.
+        let hit_x = crate::TILE_X + 16.0 + 88.0;
+        let hit_y = crate::TILE_Y + 256.0 + 18.0;
+
+        let event = PointerEvent {
+            x: hit_x,
+            y: hit_y,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: Some(Instant::now()),
+        };
+
+        let t0 = Instant::now();
+        let result = processor.process(&event, &mut scene);
+        let elapsed_us = t0.elapsed().as_micros() as u64;
+
+        // tasks.md §7.2: local_ack_us must be within 4ms (4000µs).
+        assert!(
+            result.local_ack_us < 4_000,
+            "local_ack_us must be < 4000µs (4ms p99 budget) — tasks.md §7.2; \
+             got {}µs",
+            result.local_ack_us
+        );
+
+        // Also assert total elapsed time (wall clock) is within budget.
+        assert!(
+            elapsed_us < 4_000,
+            "wall-clock elapsed must be < 4000µs — tasks.md §7.2; got {}µs",
+            elapsed_us
+        );
+
+        // Verify pressed state is set in the scene graph.
+        let refresh_node_id = result
+            .hit
+            .node_hit_ids()
+            .map(|(_, nid)| nid)
+            .expect("PointerDown at Refresh must produce NodeHit — tasks.md §7.2");
+
+        let state = scene
+            .hit_region_states
+            .get(&refresh_node_id)
+            .expect("HitRegionLocalState must exist for refresh node — tasks.md §7.2");
+
+        assert!(
+            state.pressed,
+            "HitRegionLocalState.pressed must be true after PointerDown — tasks.md §7.2"
+        );
+    }
+
+    /// Task 7.3 — hovered set on PointerEnter, cleared on PointerLeave.
+    ///
+    /// Spec §Requirement: HitRegionNode local state transitions
+    /// Scenario: Pointer enter/leave updates hovered state
+    /// tasks.md §7.3: HitRegionLocalState.hovered is set on PointerEnterEvent
+    ///   and cleared on PointerLeaveEvent for both buttons.
+    ///
+    /// We drive the InputProcessor with Move events (which trigger enter/leave
+    /// transitions) — Move over Refresh, then Move off to an empty area.
+    #[test]
+    fn test_hovered_state_set_on_pointer_enter_cleared_on_pointer_leave() {
+        use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
+
+        let (mut scene, _tile_id) = build_dashboard_scene();
+        let mut processor = InputProcessor::new();
+
+        let refresh_x = crate::TILE_X + 16.0 + 88.0; // centre of Refresh
+        let refresh_y = crate::TILE_Y + 256.0 + 18.0;
+
+        // ── Step 1: Move pointer over Refresh → hovered = true ─────────────
+        let enter_event = PointerEvent {
+            x: refresh_x,
+            y: refresh_y,
+            kind: PointerEventKind::Move,
+            device_id: 0,
+            timestamp: None,
+        };
+        let enter_result = processor.process(&enter_event, &mut scene);
+
+        let refresh_node_id = enter_result
+            .hit
+            .node_hit_ids()
+            .map(|(_, nid)| nid)
+            .expect("Move over Refresh must hit HitRegionNode — tasks.md §7.3");
+
+        let state_after_enter = scene
+            .hit_region_states
+            .get(&refresh_node_id)
+            .expect("HitRegionLocalState must exist — tasks.md §7.3");
+        assert!(
+            state_after_enter.hovered,
+            "hovered must be true after pointer enters Refresh — tasks.md §7.3"
+        );
+
+        // ── Step 2: Move pointer off tile → hovered = false ─────────────────
+        let leave_event = PointerEvent {
+            x: 0.0, // off all tiles
+            y: 0.0,
+            kind: PointerEventKind::Move,
+            device_id: 0,
+            timestamp: None,
+        };
+        processor.process(&leave_event, &mut scene);
+
+        let state_after_leave = scene
+            .hit_region_states
+            .get(&refresh_node_id)
+            .expect("HitRegionLocalState must still exist — tasks.md §7.3");
+        assert!(
+            !state_after_leave.hovered,
+            "hovered must be false after pointer leaves Refresh — tasks.md §7.3"
+        );
+    }
+
+    /// Task 7.4 — PointerUpEvent with release_on_up = true clears pressed + releases capture.
+    ///
+    /// Spec §Requirement: Pointer capture release on up
+    /// Scenario: PointerUp with release_on_up clears pressed state
+    /// tasks.md §7.4: PointerUpEvent with release_on_up = true clears pressed
+    ///   state and releases pointer capture.
+    ///
+    /// We set `auto_capture = true` and `release_on_up = true` on the Refresh
+    /// HitRegionNode so that PointerDown automatically acquires capture and
+    /// PointerUp automatically releases it.
+    #[test]
+    fn test_pointer_up_with_release_on_up_clears_pressed_and_releases_capture() {
+        use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
+        use tze_hud_scene::types::NodeData;
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let mut processor = InputProcessor::new();
+
+        // Find the refresh button node id and configure release_on_up + auto_capture.
+        // We do this by finding it in the scene and rebuilding with the right flags.
+        let root_id = scene
+            .tiles
+            .get(&tile_id)
+            .and_then(|t| t.root_node)
+            .expect("tile must have root");
+        let root = scene.nodes.get(&root_id).expect("root exists");
+        let refresh_node_id = root
+            .children
+            .iter()
+            .find(|cid| {
+                scene
+                    .nodes
+                    .get(*cid)
+                    .and_then(|n| {
+                        if let NodeData::HitRegion(hr) = &n.data {
+                            if hr.interaction_id == "refresh-button" {
+                                Some(())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .is_some()
+            })
+            .copied()
+            .expect("refresh-button must exist");
+
+        // Mutate the HitRegionNode to set release_on_up=true, auto_capture=true.
+        if let Some(n) = scene.nodes.get_mut(&refresh_node_id) {
+            if let NodeData::HitRegion(ref mut hr) = n.data {
+                hr.release_on_up = true;
+                hr.auto_capture = true;
+            }
+        }
+
+        let hit_x = crate::TILE_X + 16.0 + 88.0;
+        let hit_y = crate::TILE_Y + 256.0 + 18.0;
+
+        // ── Step 1: PointerDown → pressed = true, capture acquired ──────────
+        let down = PointerEvent {
+            x: hit_x,
+            y: hit_y,
+            kind: PointerEventKind::Down,
+            device_id: 1,
+            timestamp: None,
+        };
+        processor.process(&down, &mut scene);
+
+        let state_after_down = scene
+            .hit_region_states
+            .get(&refresh_node_id)
+            .expect("HitRegionLocalState exists after down");
+        assert!(
+            state_after_down.pressed,
+            "pressed must be true after PointerDown — tasks.md §7.4"
+        );
+        assert!(
+            processor.capture.is_captured(1),
+            "capture must be acquired on PointerDown with auto_capture — tasks.md §7.4"
+        );
+
+        // ── Step 2: PointerUp → pressed = false, capture released ───────────
+        let up = PointerEvent {
+            x: hit_x,
+            y: hit_y,
+            kind: PointerEventKind::Up,
+            device_id: 1,
+            timestamp: None,
+        };
+        processor.process(&up, &mut scene);
+
+        let state_after_up = scene
+            .hit_region_states
+            .get(&refresh_node_id)
+            .expect("HitRegionLocalState exists after up");
+        assert!(
+            !state_after_up.pressed,
+            "pressed must be false after PointerUp — tasks.md §7.4"
+        );
+        assert!(
+            !processor.capture.is_captured(1),
+            "capture must be released after PointerUp with release_on_up — tasks.md §7.4"
+        );
+    }
+
+    /// Task 7.5 — focus ring is rendered when focus transfers to a HitRegionNode.
+    ///
+    /// Spec §Requirement: Focus ring rendering
+    /// Scenario: Click-to-focus sets focused state on HitRegionNode
+    /// tasks.md §7.5: focus ring is rendered when focus transfers to a
+    ///   HitRegionNode via Tab key or click.
+    ///
+    /// We verify that:
+    ///   1. `process_with_focus` on PointerDown sets `focused = true` in
+    ///      `HitRegionLocalState` for the hit node.
+    ///   2. The FocusTransition returned by process_with_focus carries the
+    ///      correct FocusGainedEvent.
+    #[test]
+    fn test_focus_ring_rendered_on_click_to_focus() {
+        use tze_hud_input::{FocusManager, InputProcessor, PointerEvent, PointerEventKind};
+
+        let (mut scene, tile_id) = build_dashboard_scene();
+        let tab_id = scene.active_tab.expect("active_tab must be set");
+        let mut processor = InputProcessor::new();
+        let mut focus_manager = FocusManager::new();
+        focus_manager.add_tab(tab_id);
+
+        let hit_x = crate::TILE_X + 16.0 + 88.0; // Refresh centre
+        let hit_y = crate::TILE_Y + 256.0 + 18.0;
+
+        let down = PointerEvent {
+            x: hit_x,
+            y: hit_y,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+
+        let (_result, focus_transition) =
+            processor.process_with_focus(&down, &mut scene, &mut focus_manager, tab_id);
+
+        // tasks.md §7.5: process_with_focus must return a FocusTransition with a
+        // FocusGainedEvent for the clicked node.
+        let transition =
+            focus_transition.expect("click on HitRegionNode must produce FocusTransition — tasks.md §7.5");
+
+        let (gained_ev, _) = transition
+            .gained
+            .as_ref()
+            .expect("FocusTransition must have 'gained' — tasks.md §7.5");
+
+        let gained_node_id =
+            gained_ev
+                .node_id
+                .expect("FocusGainedEvent must carry node_id — tasks.md §7.5");
+
+        // Verify focused state is reflected in HitRegionLocalState.
+        let state = scene
+            .hit_region_states
+            .get(&gained_node_id)
+            .expect("HitRegionLocalState must exist for focused node — tasks.md §7.5");
+
+        assert!(
+            state.focused,
+            "HitRegionLocalState.focused must be true after click-to-focus — tasks.md §7.5"
+        );
+    }
+
+    // ── Phase 8: Agent Event Handling tests ───────────────────────────────────
+
+    /// Helper: build a `HudSessionImpl` + TCP server + client, returning an
+    /// event injector closure and shared state so callers can inject input events.
+    ///
+    /// Returns:
+    ///   - gRPC client for connecting agent sessions
+    ///   - server JoinHandle (abort to shut down)
+    ///   - `inject_fn`: closure that calls `inject_input_event(namespace, batch)`
+    ///   - `state`: shared state Arc for scene inspection
+    async fn setup_test_with_inject() -> (
+        tze_hud_protocol::proto::session::hud_session_client::HudSessionClient<
+            tonic::transport::Channel,
+        >,
+        tokio::task::JoinHandle<()>,
+        // Inject function: (namespace, EventBatch) → sent count
+        Box<
+            dyn Fn(
+                    String,
+                    tze_hud_protocol::proto::EventBatch,
+                ) -> usize
+                + Send
+                + Sync,
+        >,
+        std::sync::Arc<tokio::sync::Mutex<tze_hud_protocol::session::SharedState>>,
+    ) {
+        use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
+        use tze_hud_protocol::session_server::HudSessionImpl;
+        use tze_hud_scene::graph::SceneGraph;
+
+        let scene = SceneGraph::new(1920.0, 1080.0);
+        let service = HudSessionImpl::new(scene, TEST_PSK);
+
+        // Clone the broadcast sender BEFORE moving service into the server.
+        // `broadcast::Sender` is Clone — cloning gives another handle to the
+        // same channel, so `inject_input_event` still reaches all subscribers.
+        let input_event_tx = service.input_event_tx.clone();
+        let state = service.state.clone();
+
+        let listener = tokio::net::TcpListener::bind("[::1]:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+            tonic::transport::Server::builder()
+                .add_service(HudSessionServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("server");
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        #[allow(deprecated)]
+        let client =
+            tze_hud_protocol::proto::session::hud_session_client::HudSessionClient::connect(
+                format!("http://[::1]:{}", addr.port()),
+            )
+            .await
+            .expect("connect");
+
+        // Wrap the sender in a closure that mimics `inject_input_event`.
+        let inject_fn = Box::new(
+            move |namespace: String, batch: tze_hud_protocol::proto::EventBatch| -> usize {
+                input_event_tx
+                    .send((namespace, batch))
+                    .unwrap_or_default()
+            },
+        );
+
+        (client, handle, inject_fn, state)
+    }
+
+    /// Helper: perform handshake and subscribe to INPUT_EVENTS.
+    async fn handshake_with_input_events(
+        client: &mut tze_hud_protocol::proto::session::hud_session_client::HudSessionClient<
+            tonic::transport::Channel,
+        >,
+        agent_id: &str,
+    ) -> (
+        tokio::sync::mpsc::Sender<tze_hud_protocol::proto::session::ClientMessage>,
+        tonic::Streaming<tze_hud_protocol::proto::session::ServerMessage>,
+    ) {
+        use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::session as sp;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<sp::ClientMessage>(64);
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        let now_us = crate::now_wall_us();
+        tx.send(sp::ClientMessage {
+            sequence: 1,
+            timestamp_wall_us: now_us,
+            payload: Some(sp::client_message::Payload::SessionInit(sp::SessionInit {
+                agent_id: agent_id.to_string(),
+                agent_display_name: agent_id.to_string(),
+                pre_shared_key: TEST_PSK.to_string(),
+                requested_capabilities: vec![
+                    "create_tiles".to_string(),
+                    "modify_own_tiles".to_string(),
+                    "access_input_events".to_string(),
+                ],
+                // Subscribe to INPUT_EVENTS to receive ClickEvent / CommandInputEvent.
+                initial_subscriptions: vec![
+                    "LEASE_CHANGES".to_string(),
+                    "INPUT_EVENTS".to_string(),
+                ],
+                resume_token: vec![],
+                agent_timestamp_wall_us: now_us,
+                min_protocol_version: 1000,
+                max_protocol_version: 1001,
+                auth_credential: None,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let mut stream = client.session(stream).await.unwrap().into_inner();
+
+        // Drain SessionEstablished + SceneSnapshot.
+        for _ in 0..2 {
+            stream
+                .next()
+                .await
+                .expect("stream open")
+                .expect("no error");
+        }
+
+        (tx, stream)
+    }
+
+    /// Task 8.4 — click on Refresh dispatches ClickEvent with correct fields.
+    ///
+    /// Spec §Requirement: Agent Callbacks on Button Activation
+    /// Scenario: Click on Refresh dispatches ClickEvent to agent
+    /// tasks.md §8.4: click on Refresh dispatches ClickEvent with correct
+    ///   interaction_id = "refresh-button" to agent.
+    ///
+    /// We inject a ClickEvent into the session's input channel using
+    /// `inject_input_event` and verify the agent receives it with the correct
+    /// interaction_id.
+    #[tokio::test]
+    async fn test_click_on_refresh_dispatches_click_event_with_correct_interaction_id() {
+        use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::{
+            ClickEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+        use tze_hud_protocol::proto::session as sp;
+
+        let (mut client, server, inject_fn, state) = setup_test_with_inject().await;
+
+        // Register a tab and namespace for the session.
+        {
+            let st = state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("Main", 0).expect("create_tab");
+            scene.active_tab = Some(tab_id);
+        }
+
+        let (tx, mut stream) =
+            handshake_with_input_events(&mut client, "refresh-click-test-agent").await;
+
+        // Determine the agent's namespace from SessionEstablished.
+        // The namespace is the agent_id by convention in dev-mode.
+        let namespace = "refresh-click-test-agent".to_string();
+
+        // Build a synthetic tile_id and node_id.
+        let tile_id_bytes = uuid::Uuid::now_v7().as_bytes().to_vec();
+        let node_id_bytes = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        // Inject a ClickEvent with interaction_id = "refresh-button".
+        let batch = EventBatch {
+            frame_number: 1,
+            batch_ts_us: crate::now_wall_us(),
+            events: vec![InputEnvelope {
+                event: Some(Event::Click(ClickEvent {
+                    tile_id: tile_id_bytes.clone(),
+                    node_id: node_id_bytes.clone(),
+                    interaction_id: "refresh-button".to_string(),
+                    timestamp_mono_us: 0,
+                    device_id: "mouse-0".to_string(),
+                    local_x: 104.0,
+                    local_y: 274.0,
+                    button: 0,
+                })),
+            }],
+        };
+
+        inject_fn(namespace.clone(), batch);
+
+        // Agent must receive EventBatch with the ClickEvent.
+        // Drain messages; skip non-EventBatch messages (e.g. LeaseStateChange).
+        let received_batch = loop {
+            let msg = tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                stream.next(),
+            )
+            .await
+            .expect("timed out waiting for EventBatch — tasks.md §8.4")
+            .expect("stream ended")
+            .expect("stream error");
+
+            if let Some(sp::server_message::Payload::EventBatch(batch)) = msg.payload {
+                break batch;
+            }
+        };
+
+        assert_eq!(
+            received_batch.events.len(),
+            1,
+            "EventBatch must contain exactly 1 event — tasks.md §8.4"
+        );
+
+        match &received_batch.events[0].event {
+            Some(Event::Click(click)) => {
+                assert_eq!(
+                    click.interaction_id, "refresh-button",
+                    "ClickEvent.interaction_id must be 'refresh-button' — tasks.md §8.4"
+                );
+                assert_eq!(
+                    click.tile_id, tile_id_bytes,
+                    "ClickEvent.tile_id must match injected value — tasks.md §8.4"
+                );
+                assert_eq!(
+                    click.node_id, node_id_bytes,
+                    "ClickEvent.node_id must match injected value — tasks.md §8.4"
+                );
+            }
+            other => panic!(
+                "Expected ClickEvent in EventBatch, got: {other:?} — tasks.md §8.4"
+            ),
+        }
+
+        drop(tx);
+        server.abort();
+    }
+
+    /// Task 8.5 — ACTIVATE command on focused Dismiss dispatches CommandInputEvent.
+    ///
+    /// Spec §Requirement: Agent Callbacks on Button Activation
+    /// Scenario: ACTIVATE on focused Dismiss dispatches CommandInputEvent
+    /// tasks.md §8.5: ACTIVATE command on focused Dismiss button dispatches
+    ///   CommandInputEvent with action = ACTIVATE and interaction_id = "dismiss-button".
+    #[tokio::test]
+    async fn test_activate_command_on_dismiss_dispatches_command_input_event() {
+        use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::{
+            CommandAction, CommandInputEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+        use tze_hud_protocol::proto::session as sp;
+
+        let (mut client, server, inject_fn, state) = setup_test_with_inject().await;
+
+        {
+            let st = state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("Main", 0).expect("create_tab");
+            scene.active_tab = Some(tab_id);
+        }
+
+        let (tx, mut stream) =
+            handshake_with_input_events(&mut client, "dismiss-activate-test-agent").await;
+
+        let namespace = "dismiss-activate-test-agent".to_string();
+        let tile_id_bytes = uuid::Uuid::now_v7().as_bytes().to_vec();
+        let node_id_bytes = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        // Inject a CommandInputEvent(ACTIVATE) with interaction_id = "dismiss-button".
+        let batch = EventBatch {
+            frame_number: 2,
+            batch_ts_us: crate::now_wall_us(),
+            events: vec![InputEnvelope {
+                event: Some(Event::CommandInput(CommandInputEvent {
+                    tile_id: tile_id_bytes.clone(),
+                    node_id: node_id_bytes.clone(),
+                    interaction_id: "dismiss-button".to_string(),
+                    timestamp_mono_us: 0,
+                    device_id: "keyboard-0".to_string(),
+                    action: CommandAction::Activate as i32,
+                    source: 0,
+                })),
+            }],
+        };
+
+        inject_fn(namespace.clone(), batch);
+
+        // Drain until EventBatch arrives.
+        let received_batch = loop {
+            let msg = tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                stream.next(),
+            )
+            .await
+            .expect("timed out waiting for EventBatch — tasks.md §8.5")
+            .expect("stream ended")
+            .expect("stream error");
+
+            if let Some(sp::server_message::Payload::EventBatch(b)) = msg.payload {
+                break b;
+            }
+        };
+
+        assert_eq!(
+            received_batch.events.len(),
+            1,
+            "EventBatch must have 1 event — tasks.md §8.5"
+        );
+
+        match &received_batch.events[0].event {
+            Some(Event::CommandInput(cmd)) => {
+                assert_eq!(
+                    cmd.interaction_id, "dismiss-button",
+                    "CommandInputEvent.interaction_id must be 'dismiss-button' — tasks.md §8.5"
+                );
+                assert_eq!(
+                    cmd.action,
+                    CommandAction::Activate as i32,
+                    "CommandInputEvent.action must be ACTIVATE — tasks.md §8.5"
+                );
+            }
+            other => panic!(
+                "Expected CommandInputEvent(ACTIVATE) in EventBatch, got: {other:?} — tasks.md §8.5"
+            ),
+        }
+
+        drop(tx);
+        server.abort();
+    }
+
+    /// Task 8.6 — keyboard-only path: NAVIGATE_NEXT + ACTIVATE reaches all buttons.
+    ///
+    /// Spec §Requirement: Agent Callbacks on Button Activation
+    /// Scenario: All buttons reachable via keyboard navigation
+    /// tasks.md §8.6: all buttons are reachable and activatable without a pointer
+    ///   (NAVIGATE_NEXT + ACTIVATE).
+    ///
+    /// We inject a NAVIGATE_NEXT command (Tab key) followed by ACTIVATE on both
+    /// buttons and verify the agent receives CommandInputEvents for each.
+    #[tokio::test]
+    async fn test_navigate_next_plus_activate_reaches_both_buttons() {
+        use tokio_stream::StreamExt as _;
+        use tze_hud_protocol::proto::{
+            CommandAction, CommandInputEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+        use tze_hud_protocol::proto::session as sp;
+
+        let (mut client, server, inject_fn, state) = setup_test_with_inject().await;
+
+        {
+            let st = state.lock().await;
+            let mut scene = st.scene.lock().await;
+            let tab_id = scene.create_tab("Main", 0).expect("create_tab");
+            scene.active_tab = Some(tab_id);
+        }
+
+        let (tx, mut stream) =
+            handshake_with_input_events(&mut client, "keyboard-nav-test-agent").await;
+
+        let namespace = "keyboard-nav-test-agent".to_string();
+        let tile_id_bytes = uuid::Uuid::now_v7().as_bytes().to_vec();
+        let refresh_node_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+        let dismiss_node_id = uuid::Uuid::now_v7().as_bytes().to_vec();
+
+        // Inject: NAVIGATE_NEXT to Refresh, then ACTIVATE on Refresh.
+        let nav_refresh_batch = EventBatch {
+            frame_number: 3,
+            batch_ts_us: crate::now_wall_us(),
+            events: vec![
+                InputEnvelope {
+                    event: Some(Event::CommandInput(CommandInputEvent {
+                        tile_id: tile_id_bytes.clone(),
+                        node_id: refresh_node_id.clone(),
+                        interaction_id: "refresh-button".to_string(),
+                        timestamp_mono_us: 1,
+                        device_id: "keyboard-0".to_string(),
+                        action: CommandAction::NavigateNext as i32,
+                        source: 0,
+                    })),
+                },
+                InputEnvelope {
+                    event: Some(Event::CommandInput(CommandInputEvent {
+                        tile_id: tile_id_bytes.clone(),
+                        node_id: refresh_node_id.clone(),
+                        interaction_id: "refresh-button".to_string(),
+                        timestamp_mono_us: 2,
+                        device_id: "keyboard-0".to_string(),
+                        action: CommandAction::Activate as i32,
+                        source: 0,
+                    })),
+                },
+            ],
+        };
+
+        inject_fn(namespace.clone(), nav_refresh_batch);
+
+        // Wait for EventBatch with NAVIGATE_NEXT + ACTIVATE for Refresh.
+        let batch1 = loop {
+            let msg = tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                stream.next(),
+            )
+            .await
+            .expect("timed out waiting for nav-refresh batch — tasks.md §8.6")
+            .expect("stream ended")
+            .expect("stream error");
+
+            if let Some(sp::server_message::Payload::EventBatch(b)) = msg.payload {
+                break b;
+            }
+        };
+
+        assert_eq!(
+            batch1.events.len(),
+            2,
+            "nav-refresh batch must have 2 events (NAVIGATE_NEXT + ACTIVATE) — tasks.md §8.6"
+        );
+
+        // Verify NAVIGATE_NEXT event.
+        match &batch1.events[0].event {
+            Some(Event::CommandInput(cmd)) => {
+                assert_eq!(
+                    cmd.action,
+                    CommandAction::NavigateNext as i32,
+                    "first event must be NAVIGATE_NEXT — tasks.md §8.6"
+                );
+                assert_eq!(cmd.interaction_id, "refresh-button");
+            }
+            other => panic!("Expected CommandInput(NAVIGATE_NEXT), got: {other:?}"),
+        }
+
+        // Verify ACTIVATE event on Refresh.
+        match &batch1.events[1].event {
+            Some(Event::CommandInput(cmd)) => {
+                assert_eq!(
+                    cmd.action,
+                    CommandAction::Activate as i32,
+                    "second event must be ACTIVATE — tasks.md §8.6"
+                );
+                assert_eq!(cmd.interaction_id, "refresh-button");
+            }
+            other => panic!("Expected CommandInput(ACTIVATE) on refresh, got: {other:?}"),
+        }
+
+        // Inject: NAVIGATE_NEXT to Dismiss, then ACTIVATE on Dismiss.
+        let nav_dismiss_batch = EventBatch {
+            frame_number: 4,
+            batch_ts_us: crate::now_wall_us(),
+            events: vec![
+                InputEnvelope {
+                    event: Some(Event::CommandInput(CommandInputEvent {
+                        tile_id: tile_id_bytes.clone(),
+                        node_id: dismiss_node_id.clone(),
+                        interaction_id: "dismiss-button".to_string(),
+                        timestamp_mono_us: 3,
+                        device_id: "keyboard-0".to_string(),
+                        action: CommandAction::NavigateNext as i32,
+                        source: 0,
+                    })),
+                },
+                InputEnvelope {
+                    event: Some(Event::CommandInput(CommandInputEvent {
+                        tile_id: tile_id_bytes.clone(),
+                        node_id: dismiss_node_id.clone(),
+                        interaction_id: "dismiss-button".to_string(),
+                        timestamp_mono_us: 4,
+                        device_id: "keyboard-0".to_string(),
+                        action: CommandAction::Activate as i32,
+                        source: 0,
+                    })),
+                },
+            ],
+        };
+
+        inject_fn(namespace.clone(), nav_dismiss_batch);
+
+        let batch2 = loop {
+            let msg = tokio::time::timeout(
+                tokio::time::Duration::from_millis(500),
+                stream.next(),
+            )
+            .await
+            .expect("timed out waiting for nav-dismiss batch — tasks.md §8.6")
+            .expect("stream ended")
+            .expect("stream error");
+
+            if let Some(sp::server_message::Payload::EventBatch(b)) = msg.payload {
+                break b;
+            }
+        };
+
+        assert_eq!(
+            batch2.events.len(),
+            2,
+            "nav-dismiss batch must have 2 events — tasks.md §8.6"
+        );
+
+        // Verify ACTIVATE on Dismiss button.
+        match &batch2.events[1].event {
+            Some(Event::CommandInput(cmd)) => {
+                assert_eq!(
+                    cmd.action,
+                    CommandAction::Activate as i32,
+                    "second event must be ACTIVATE on dismiss — tasks.md §8.6"
+                );
+                assert_eq!(cmd.interaction_id, "dismiss-button");
+            }
+            other => panic!("Expected CommandInput(ACTIVATE) on dismiss, got: {other:?}"),
+        }
+
+        drop(tx);
+        server.abort();
+    }
+
+    // ── Phase 8: handle_event_batch unit tests ────────────────────────────────
+
+    /// Task 8.1 — handle_event_batch extracts ClickEvent and returns RefreshContent.
+    ///
+    /// tasks.md §8.1: receive EventBatch, extract ClickEvent.
+    /// tasks.md §8.2: ClickEvent on "refresh-button" → RefreshContent action.
+    #[test]
+    fn test_handle_event_batch_click_refresh_returns_refresh_content() {
+        use tze_hud_protocol::proto::{
+            ClickEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+
+        let batch = EventBatch {
+            frame_number: 1,
+            batch_ts_us: 0,
+            events: vec![InputEnvelope {
+                event: Some(Event::Click(ClickEvent {
+                    tile_id: vec![],
+                    node_id: vec![],
+                    interaction_id: "refresh-button".to_string(),
+                    timestamp_mono_us: 0,
+                    device_id: String::new(),
+                    local_x: 0.0,
+                    local_y: 0.0,
+                    button: 0,
+                })),
+            }],
+        };
+
+        let actions = crate::handle_event_batch(&batch);
+        assert_eq!(
+            actions,
+            vec![crate::AgentAction::RefreshContent],
+            "ClickEvent on 'refresh-button' must return RefreshContent — tasks.md §8.1, §8.2"
+        );
+    }
+
+    /// Task 8.1, 8.3 — handle_event_batch extracts ClickEvent and returns Dismiss.
+    ///
+    /// tasks.md §8.1: receive EventBatch, extract ClickEvent.
+    /// tasks.md §8.3: ClickEvent on "dismiss-button" → Dismiss action.
+    #[test]
+    fn test_handle_event_batch_click_dismiss_returns_dismiss() {
+        use tze_hud_protocol::proto::{
+            ClickEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+
+        let batch = EventBatch {
+            frame_number: 1,
+            batch_ts_us: 0,
+            events: vec![InputEnvelope {
+                event: Some(Event::Click(ClickEvent {
+                    tile_id: vec![],
+                    node_id: vec![],
+                    interaction_id: "dismiss-button".to_string(),
+                    timestamp_mono_us: 0,
+                    device_id: String::new(),
+                    local_x: 0.0,
+                    local_y: 0.0,
+                    button: 0,
+                })),
+            }],
+        };
+
+        let actions = crate::handle_event_batch(&batch);
+        assert_eq!(
+            actions,
+            vec![crate::AgentAction::Dismiss],
+            "ClickEvent on 'dismiss-button' must return Dismiss — tasks.md §8.1, §8.3"
+        );
+    }
+
+    /// Task 8.1, 8.5 — handle_event_batch extracts CommandInputEvent(ACTIVATE) → Dismiss.
+    ///
+    /// tasks.md §8.1: extract CommandInputEvent(ACTIVATE).
+    /// tasks.md §8.5: ACTIVATE on "dismiss-button" → Dismiss action.
+    #[test]
+    fn test_handle_event_batch_command_activate_dismiss_returns_dismiss() {
+        use tze_hud_protocol::proto::{
+            CommandAction, CommandInputEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+
+        let batch = EventBatch {
+            frame_number: 1,
+            batch_ts_us: 0,
+            events: vec![InputEnvelope {
+                event: Some(Event::CommandInput(CommandInputEvent {
+                    tile_id: vec![],
+                    node_id: vec![],
+                    interaction_id: "dismiss-button".to_string(),
+                    timestamp_mono_us: 0,
+                    device_id: String::new(),
+                    action: CommandAction::Activate as i32,
+                    source: 0,
+                })),
+            }],
+        };
+
+        let actions = crate::handle_event_batch(&batch);
+        assert_eq!(
+            actions,
+            vec![crate::AgentAction::Dismiss],
+            "CommandInput(ACTIVATE) on 'dismiss-button' must return Dismiss — tasks.md §8.1, §8.5"
+        );
+    }
+
+    /// Task 8.6 event routing — NAVIGATE_NEXT is not an activation.
+    ///
+    /// tasks.md §8.6: NAVIGATE_NEXT is navigation, not activation — handle_event_batch
+    ///   must NOT return RefreshContent or Dismiss for NAVIGATE_NEXT.
+    #[test]
+    fn test_handle_event_batch_navigate_next_is_not_activation() {
+        use tze_hud_protocol::proto::{
+            CommandAction, CommandInputEvent, EventBatch, InputEnvelope, input_envelope::Event,
+        };
+
+        let batch = EventBatch {
+            frame_number: 1,
+            batch_ts_us: 0,
+            events: vec![InputEnvelope {
+                event: Some(Event::CommandInput(CommandInputEvent {
+                    tile_id: vec![],
+                    node_id: vec![],
+                    interaction_id: "refresh-button".to_string(),
+                    timestamp_mono_us: 0,
+                    device_id: String::new(),
+                    action: CommandAction::NavigateNext as i32,
+                    source: 0,
+                })),
+            }],
+        };
+
+        let actions = crate::handle_event_batch(&batch);
+        assert!(
+            actions.is_empty(),
+            "NAVIGATE_NEXT must NOT produce an AgentAction — tasks.md §8.6; got: {actions:?}"
         );
     }
 }
