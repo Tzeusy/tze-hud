@@ -6,7 +6,7 @@ Authoritative design contracts for tze_hud: wire-level protobuf schemas, state m
 
 | Directory | Content |
 |-----------|---------|
-| `rfcs/` | 11 numbered design contract RFCs (0001–0011) |
+| `rfcs/` | 12 numbered design contract RFCs (0001–0012) |
 | `reviews/` | Review rounds per RFC |
 | `prompts/` | Epic development prompts |
 | `reconciliations/` | Spec-to-code reconciliation reports |

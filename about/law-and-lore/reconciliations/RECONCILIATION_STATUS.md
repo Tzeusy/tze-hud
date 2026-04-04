@@ -2,48 +2,61 @@
 
 This document is the entry point for understanding the current spec-to-code coverage baseline.
 
-## Current Baseline: Gen-4 (2026-03-27)
+## Current Baseline: Gen-5 (2026-04-04)
+
+**Document:** [reconciliation-gen5.md](reconciliation-gen5.md)
+**Issue:** hud-a1va
+**Date:** 2026-04-04
+
+### Summary
+
+Gen-5 is a **post-MVP feature expansion snapshot** covering 174 commits since gen-4.
+It documents the widget system, component shape language (RFC 0012), 10 exemplar components,
+runtime app binary, MCP stress testing, input capture, and resource ref-count tracking.
+
+**Key changes since Gen-4:**
+- Widget system implemented (5 delta specs) with 2 P1 gaps remaining (ClearWidget, TTL expiry)
+- Component shape language (RFC 0012) fully implemented
+- 10 exemplar components with integration tests and user-test scenarios
+- Session-protocol openspec refreshed to match actual 4-file proto layout
+- RFC count in law-and-lore corrected to 12
+
+**Open P1 gaps:**
+- ClearWidgetMutation not wired (hud-jliz)
+- Widget TTL expiry not enforced (hud-2c5g)
+- Config contract app/spec alignment decision needed (hud-gxny)
+
+**Coverage (estimated):**
+
+| Status    | Percentage | Notes |
+|-----------|------------|-------|
+| FULL      | ~90%       | Gen-4 baseline + post-MVP features |
+| PARTIAL   | ~5%        | Widget system P1 gaps |
+| RFC-ONLY  | ~5%        | I2, Pl1-Pl3 (unchanged from gen-4) |
+| ABSENT    | 0%         | — |
+
+`cargo check --workspace` passes with zero errors.
+
+---
+
+## Previous Baseline: Gen-4 (2026-03-27)
 
 **Document:** [reconciliation-gen4.md](reconciliation-gen4.md)
 **Issue:** hud-leji
 **Date:** 2026-03-27
 
-### Summary
-
-Gen-4 is the authoritative reconciliation snapshot as of 2026-03-27. It is the **v1-MVP
-final closure** snapshot, covering all 7 deliverables of the hud-kibj ship-readiness epic.
-
-**Coverage at Gen-4 close:**
-
-| Status    | Count | Percentage |
-|-----------|-------|------------|
-| FULL      | 54    | 93%        |
-| PARTIAL   | 0     | 0%         |
-| RFC-ONLY  | 4     | 7%         |
-| ABSENT    | 0     | 0%         |
-
-Key closures since Gen-3:
-- All 3 PARTIAL items resolved (Sec2 capability revocation, V1 Layer 1 colour assertions, T1 per-frame correctness fields)
-- Production config committed and exercised by CI
-- Closure-grade CI workflow (9 quality gates on push/PR to main)
-- Canonical vocabulary enforced with CI lint script
-- Governance authority boundaries documented
-- MCP zone conformance test coverage complete
-- Historical reconciliation docs labeled
-
-`cargo check --workspace` passes with zero errors.
-
-RFC-ONLY items (I2, Pl1, Pl2, Pl3) are explicitly deferred to v1.1 with justification
-in reconciliation-gen4.md §4. None block the v1 thesis.
+Gen-4 was the **v1-MVP final closure** snapshot covering all 7 deliverables of the
+hud-kibj ship-readiness epic. 54 FULL (93%), 0 PARTIAL, 4 RFC-ONLY (7%), 0 ABSENT.
 
 ---
 
 ## Historical Documents
 
-These snapshots are preserved for reference but have been superseded by Gen-4:
+These snapshots are preserved for reference:
 
 | Document | Date | Coverage |
 |----------|------|---------|
+| [reconciliation-gen4.md](reconciliation-gen4.md) | 2026-03-27 | 54 FULL (93%), 0 PARTIAL (0%), 4 RFC-ONLY (7%), 0 ABSENT (0%) — v1-MVP closure |
 | [reconciliation-gen3.md](reconciliation-gen3.md) | 2026-03-26 | 51 FULL (88%), 3 PARTIAL (5%), 4 RFC-ONLY (7%), 0 ABSENT (0%) |
 | [reconciliation-gen1.md](reconciliation-gen1.md) | 2026-03-22 | Gen-1 baseline |
 | [reconciliation-gen2.md](reconciliation-gen2.md) | 2026-03-22 | 32 FULL (57%), 13 PARTIAL (23%), 9 RFC-ONLY (16%), 1 ABSENT (2%) |

@@ -39,24 +39,39 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Proto File Layout
-The v1 protobuf definitions SHALL be organized into exactly three files under `crates/tze_hud_protocol/proto/`:
+The v1 protobuf definitions SHALL be organized into four files under `crates/tze_hud_protocol/proto/`:
 
-**`types.proto`** (`package tze_hud.protocol.v1`) — Geometry primitives, scene node types, mutation types, and zone types. SHALL contain:
+**`types.proto`** (`package tze_hud.protocol.v1`) — Geometry primitives, scene identity types, node types, mutation types, zone types, and widget types. SHALL contain:
+- Identity: `SceneIdProto` (16-byte little-endian UUIDv7), `ResourceIdProto` (32-byte BLAKE3 hash)
 - Geometry: `Rect`, `Rgba`
 - Node types: `NodeProto`, `SolidColorNodeProto`, `TextMarkdownNodeProto`, `HitRegionNodeProto`, `StaticImageNodeProto`, `ImageFitModeProto`
-- Mutation types: `MutationProto`, `CreateTileMutation`, `SetTileRootMutation`
+- Mutation types: `MutationProto` (oneof with 9 variants: `CreateTileMutation`, `SetTileRootMutation`, `UpdateNodeContentMutation`, `AddNodeMutation`, `UpdateTileOpacityMutation`, `UpdateTileInputModeMutation`, `PublishToZoneMutation`, `ClearZoneMutation`, `ClearWidgetMutation`)
 - Zone types: `ZoneContent`, `ZonePublishToken`, `ZoneDefinitionProto`, `ZoneRegistrySnapshotProto`, `ZonePublishRecordProto`, `NotificationPayload`, `StatusBarPayload`, `GeometryPolicyProto`, `RelativeGeometryPolicy`, `EdgeAnchoredGeometryPolicy`, `RenderingPolicyProto`, `DisplayEdge`, `TextAlignProto`, `ContentionPolicyProto`
-- Zone mutation types: `PublishToZoneMutation`, `ClearZoneMutation`
-- Zone query types: `ZoneRegistryRequest`, `ZoneRegistryResponse`
+- Widget types: `WidgetDefinitionProto`, `WidgetParameterValueProto`, `WidgetParameterConstraintsProto`, `WidgetInstanceProto`, `WidgetBindingProto`
 
-**`events.proto`** (`package tze_hud.protocol.v1`) — Event types dispatched from runtime to agents. SHALL import `types.proto`. SHALL contain:
-- Input events: `InputEvent`, `InputEventKind`
-- Scene lifecycle events: `TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`
-- Lease events: `LeaseEvent`, `LeaseEventKind`
-- Event envelope: `SceneEvent`
+**`events.proto`** (`package tze_hud.protocol.v1`) — RFC 0004-conformant input event types using bytes-encoded IDs and monotonic timestamps. SHALL import `types.proto`. SHALL contain a 19-variant `InputEnvelope` oneof with:
+- Pointer events: `PointerMoveEvent`, `PointerEnterEvent`, `PointerLeaveEvent`, `PointerDownEvent`, `PointerUpEvent`, `ClickEvent`, `PointerCancelEvent`
+- Keyboard events: `KeyDownEvent`, `KeyUpEvent`, `CharacterEvent`
+- Focus events: `FocusGainedEvent`, `FocusLostEvent`
+- Gesture events: `GestureEvent`
+- IME events: `ImeCompositionStartEvent`, `ImeCompositionUpdateEvent`, `ImeCompositionEndEvent`
+- Capture events: `CaptureReleasedEvent`
+- Scroll events: `ScrollOffsetChangedEvent`
+- Command events: `CommandInputEvent`
+- Event batch: `EventBatch` (frame_number, batch_ts_us wall-clock, ordered events)
 
-**`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, backpressure, input control, capability management, and runtime errors. SHALL import `types.proto` and `events.proto`. SHALL contain:
-- gRPC service: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`
+All tile_id/node_id fields in events.proto SHALL use raw 16-byte UUIDv7 (bytes), not strings. All timestamps SHALL use the `_mono_us` suffix (monotonic clock per RFC 0005 §2.4). Reserved fields SHALL include DoubleClickEvent (field 7), ContextMenuEvent (field 8), and ImeCompositionCancelledEvent (field 19) for future use.
+
+**`events_legacy.proto`** (`package tze_hud.protocol.v1`) — DEPRECATED backward-compatibility bridge containing the pre-RFC-0004 wire format. All types carry `option deprecated = true`. SHALL contain:
+- `InputEvent` (string tile_id/node_id, `InputEventKind` enum)
+- `TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent` (string tile_id, timestamp_wall_us)
+- `LeaseEvent` (string lease_id/namespace, `LeaseEventKind` enum, timestamp_wall_us)
+- `SceneEvent` (timestamp_wall_us, oneof of tile/input/lease events)
+
+This file exists solely because `session.proto` `SceneDelta` still references `LeaseEvent` from the legacy schema for backward compatibility. New agent code SHALL use the events.proto types exclusively. events_legacy.proto SHALL be removed when the SceneDelta migration is complete (post-v1).
+
+**`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, backpressure, input control, capability management, scene events, widget publishing, and runtime errors. SHALL import `types.proto`, `events.proto`, and `events_legacy.proto`. SHALL contain:
+- gRPC services: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`, and `RuntimeService` with `rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse)` for hot-reload (RFC 0006 §9)
 - Client/server envelopes: `ClientMessage`, `ServerMessage`
 - Session lifecycle: `SessionInit`, `SessionResume`, `SessionResumeResult`, `SessionClose`, `SessionEstablished`, `SessionError`, `SessionSuspended`, `SessionResumed`
 - Lease messages: `LeaseRequest`, `LeaseRenew`, `LeaseRelease`, `LeaseResponse`, `LeaseStateChange`
@@ -65,14 +80,17 @@ The v1 protobuf definitions SHALL be organized into exactly three files under `c
 - Scene state: `SceneSnapshot`, `SceneDelta`
 - Zone publishing: `ZonePublish`, `ZonePublishResult`
 - Keepalive: `Heartbeat`
-- Telemetry: `TelemetryFrame`
+- Telemetry: `TelemetryFrame` (client-to-server), `RuntimeTelemetryFrame` (server-to-client compositor metrics)
 - Backpressure: `BackpressureSignal`
 - Input control: `InputFocusRequest`, `InputFocusResponse`, `InputCaptureRequest`, `InputCaptureResponse`, `InputCaptureRelease`, `SetImePosition`
 - Capability management: `CapabilityRequest`, `CapabilityNotice`
+- Scene events: `EmitSceneEvent` (client-to-server), `EmitSceneEventResult` (server-to-client)
+- Widget publishing: `WidgetPublish` (client-to-server), `WidgetPublishResult` (server-to-client)
+- Degradation: `DegradationNotice`
 - Runtime errors: `RuntimeError`
-- Event delivery: `EventBatch` (carries `InputEvent` variants from `events.proto` on `ServerMessage` field 34)
+- Event delivery: `EventBatch` (carries RFC 0004 InputEnvelope variants from `events.proto` on `ServerMessage` field 34)
 
-**Deleted — no new home:** The following MUST be removed from the v1 protobuf definitions and SHALL NOT be assigned to any of the three target files:
+**Deleted — no new home:** The following MUST be removed from the v1 protobuf definitions and SHALL NOT be assigned to any of the four target files:
 - `SceneService` service definition (all unary RPCs: `Authenticate`, `AcquireLease`, `RenewLease`, `RevokeLease`, `ApplyMutations`, `QueryScene`, `QueryZoneRegistry`, `SubscribeEvents`)
 - Legacy request/response wrappers: `ConnectRequest`, `ConnectResponse`, `LeaseRequest` (unary form), `LeaseResponse` (unary form), `LeaseRenewRequest`, `LeaseRenewResponse`, `LeaseRevokeRequest`, `LeaseRevokeResponse`, `MutationBatchRequest`, `MutationBatchResponse` (unary form), `EventSubscribeRequest`, `SceneQueryRequest`, `SceneQueryResponse`
 
@@ -81,19 +99,23 @@ Scope: v1-mandatory
 
 #### Scenario: types.proto contains all shared primitives
 - **WHEN** building the v1 protobuf package
-- **THEN** geometry primitives (`Rect`, `Rgba`), node types, mutation types, and zone types SHALL all be defined in `types.proto`; no other v1 proto file SHALL re-define these types
+- **THEN** geometry primitives (`Rect`, `Rgba`), identity types (`SceneIdProto`, `ResourceIdProto`), node types, mutation types, zone types, and widget types SHALL all be defined in `types.proto`; no other v1 proto file SHALL re-define these types
 
-#### Scenario: events.proto imports types.proto and contains all event types
+#### Scenario: events.proto contains RFC 0004 input event types
 - **WHEN** building the v1 protobuf package
-- **THEN** `events.proto` SHALL import `types.proto` and SHALL define `InputEvent`, `InputEventKind`, `TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`, `LeaseEvent`, `LeaseEventKind`, and `SceneEvent`; no other proto file SHALL re-define these event types
+- **THEN** `events.proto` SHALL import `types.proto` and SHALL define the 19-variant `InputEnvelope` oneof with bytes-encoded IDs and `_mono_us` timestamps; the legacy string-based `InputEvent`/`InputEventKind` types SHALL NOT be in `events.proto`
 
-#### Scenario: session.proto imports events.proto and types.proto
+#### Scenario: events_legacy.proto is deprecated and backward-compat only
+- **WHEN** building the v1 protobuf package
+- **THEN** `events_legacy.proto` SHALL contain deprecated types (`InputEvent`, `InputEventKind`, `TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`, `LeaseEvent`, `LeaseEventKind`, `SceneEvent`) with `option deprecated = true`; these SHALL NOT be used by new agent code
+
+#### Scenario: session.proto imports all three dependency files
 - **WHEN** an agent SDK generates client code from the v1 proto package
-- **THEN** `session.proto` SHALL import both `types.proto` and `events.proto`; there SHALL be no circular imports among the three files
+- **THEN** `session.proto` SHALL import `types.proto`, `events.proto`, and `events_legacy.proto`; there SHALL be no circular imports among the four files
 
 #### Scenario: No scene_service.proto in v1 build
 - **WHEN** building the v1 protobuf definitions
-- **THEN** `scene_service.proto` SHALL NOT be present or compiled; all types it contained SHALL have migrated to `types.proto` or `events.proto`, and `SceneService` SHALL have been deleted entirely
+- **THEN** `scene_service.proto` SHALL NOT be present or compiled; all types it contained SHALL have migrated to the four target files, and `SceneService` SHALL have been deleted entirely
 
 #### Scenario: Legacy wrappers absent from v1 wire format
 - **WHEN** an agent SDK generates client code from the v1 proto package
@@ -101,7 +123,7 @@ Scope: v1-mandatory
 
 #### Scenario: Import paths are stable within v1
 - **WHEN** a worker writes a Rust or TypeScript agent that imports session protocol types
-- **THEN** all geometry types SHALL be imported from `tze_hud.protocol.v1` (defined in `types.proto`), all event types SHALL be imported from `tze_hud.protocol.v1` (defined in `events.proto`), and all session/service types SHALL be imported from `tze_hud.protocol.v1.session` (defined in `session.proto`)
+- **THEN** all geometry, identity, node, mutation, zone, and widget types SHALL be imported from `tze_hud.protocol.v1` (defined in `types.proto`); all input event types SHALL be imported from `tze_hud.protocol.v1` (defined in `events.proto`); legacy event types SHALL be imported from `tze_hud.protocol.v1` (defined in `events_legacy.proto`); and all session/service types SHALL be imported from `tze_hud.protocol.v1.session` (defined in `session.proto`)
 
 ---
 
@@ -195,7 +217,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: ClientMessage and ServerMessage Envelopes
-Every client-to-server message on the session stream SHALL be wrapped in a ClientMessage envelope, and every server-to-client message SHALL be wrapped in a ServerMessage envelope. Both envelopes SHALL contain: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. ClientMessage oneof payload fields SHALL be allocated at 10-29 (session lifecycle at 10-12, agent operations at 20-29). ServerMessage oneof payload fields SHALL be allocated at 10-35 (session lifecycle responses at 10-11, mutation/lease responses at 20-23, scene state and events at 30-35). Fields 36-49 in ServerMessage SHALL be reserved for future server-to-client messages. Fields 50-99 in both envelopes SHALL be reserved for post-v1 use.
+Every client-to-server message on the session stream SHALL be wrapped in a ClientMessage envelope, and every server-to-client message SHALL be wrapped in a ServerMessage envelope. Both envelopes SHALL contain: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. ClientMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-12 (SessionInit=10, SessionResume=11, SessionClose=12), agent operations at 20-35 (MutationBatch=20, LeaseRequest=21, LeaseRenew=22, LeaseRelease=23, SubscriptionChange=24, ZonePublish=25, TelemetryFrame=26, InputFocusRequest=27, InputCaptureRequest=28, InputCaptureRelease=29, SetImePosition=30, Heartbeat=31, CapabilityRequest=32, EmitSceneEvent=33, WidgetPublish=35). ServerMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-15 (SessionEstablished=10, SessionError=11, SessionResumeResult=12, SessionSuspended=13, SessionResumed=14, RuntimeError=15), mutation/lease responses at 20-25 (MutationResult=20, LeaseResponse=21, LeaseStateChange=23, CapabilityNotice=25), scene state at 30-36 (SceneSnapshot=30, SceneDelta=31, Heartbeat=33, EventBatch=34, BackpressureSignal=35, RuntimeTelemetryFrame=36), operational responses at 39-47 (SubscriptionChangeResult=39, ZonePublishResult=40, InputFocusResponse=43, InputCaptureResponse=44, EmitSceneEventResult=45, DegradationNotice=46, WidgetPublishResult=47). Fields 50-99 in both envelopes SHALL be reserved for post-v1 use.
 Source: RFC 0005 §2.2, §9.2
 Scope: v1-mandatory
 
@@ -230,7 +252,7 @@ Source: RFC 0005 §2.4
 Scope: v1-mandatory
 
 #### Scenario: RTT measurement uses monotonic clock
-- **WHEN** the agent sends a Heartbeat (ClientMessage.heartbeat=25) with timestamp_mono_us
+- **WHEN** the agent sends a Heartbeat (ClientMessage.heartbeat=31) with timestamp_mono_us
 - **THEN** the runtime SHALL respond with a Heartbeat (ServerMessage.heartbeat=33) echoing the same timestamp_mono_us value (monotonic), and the agent SHALL compute RTT as current_monotonic - echoed_value, not using wall-clock fields
 
 ---
@@ -348,7 +370,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: RuntimeError Structure
-All error responses SHALL follow the structured error model: error_code (string, canonical and stable), message (human-readable), context (invalid field/value), hint (machine-readable correction suggestion as JSON), and error_code_enum (typed enum for well-known codes). The well-known ErrorCode enum SHALL include: LEASE_EXPIRED, LEASE_NOT_FOUND, ZONE_TYPE_MISMATCH, ZONE_NOT_FOUND, BUDGET_EXCEEDED, MUTATION_REJECTED, PERMISSION_DENIED, RATE_LIMITED, INVALID_ARGUMENT, SESSION_EXPIRED, CLOCK_SKEW_HIGH, CLOCK_SKEW_EXCESSIVE, SAFE_MODE_ACTIVE, TIMESTAMP_TOO_OLD, TIMESTAMP_TOO_FUTURE, TIMESTAMP_EXPIRY_BEFORE_PRESENT.
+All error responses SHALL follow the structured error model: error_code (string, canonical and stable), message (human-readable), context (invalid field/value), hint (machine-readable correction suggestion as JSON), and error_code_enum (typed enum for well-known codes). The well-known ErrorCode enum SHALL include: LEASE_EXPIRED, LEASE_NOT_FOUND, ZONE_TYPE_MISMATCH, ZONE_NOT_FOUND, BUDGET_EXCEEDED, MUTATION_REJECTED, PERMISSION_DENIED, RATE_LIMITED, INVALID_ARGUMENT, SESSION_EXPIRED, CLOCK_SKEW_HIGH, CLOCK_SKEW_EXCESSIVE, SAFE_MODE_ACTIVE, TIMESTAMP_TOO_OLD, TIMESTAMP_TOO_FUTURE, TIMESTAMP_EXPIRY_BEFORE_PRESENT, WIDGET_NOT_FOUND, WIDGET_PARAMETER_INVALID, WIDGET_PARAMETER_TYPE_MISMATCH, AGENT_EVENT_RATE_EXCEEDED, AGENT_EVENT_PAYLOAD_TOO_LARGE, AGENT_EVENT_CAPABILITY_MISSING, AGENT_EVENT_INVALID_NAME, AGENT_EVENT_RESERVED_PREFIX.
 Source: RFC 0005 §3.5, DR-SP5
 Scope: v1-mandatory
 
@@ -650,7 +672,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Protobuf Schema in session.proto
-The session protocol SHALL be defined in session.proto (package tze_hud.protocol.v1.session). It SHALL import types.proto for MutationProto, zone types (ZoneContent, ZoneDefinitionProto, etc.), and SceneId. It SHALL import events.proto for SceneEvent, InputEvent, LeaseEvent, and related event types. RuntimeError SHALL be defined in session.proto itself. The gRPC service SHALL define: rpc Session(stream ClientMessage) returns (stream ServerMessage) for the primary bidirectional stream via the HudSession service, and rpc ClockSync(ClockSyncRequest) returns (ClockSyncResponse) for ongoing clock re-synchronization.
+The session protocol SHALL be defined in session.proto (package tze_hud.protocol.v1.session). It SHALL import types.proto for MutationProto, zone types (ZoneContent, ZoneDefinitionProto, etc.), widget types (WidgetParameterValueProto, etc.), and SceneIdProto. It SHALL import events.proto for EventBatch and the RFC 0004 input event types. It SHALL import events_legacy.proto for the deprecated LeaseEvent and SceneEvent types used by SceneDelta (backward compatibility only). RuntimeError SHALL be defined in session.proto itself. The gRPC services SHALL define: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)` for the primary bidirectional stream, and `RuntimeService` with `rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse)` for hot configuration reload (RFC 0006 §9).
 Source: RFC 0005 §9, §9.1
 Scope: v1-mandatory
 
@@ -690,6 +712,62 @@ Scope: post-v1
 #### Scenario: Deferred marker
 - **WHEN** v1 ships
 - **THEN** runtime restart SHALL invalidate all session tokens; no hot-reload session handoff SHALL be supported
+
+---
+
+### Requirement: Widget Publishing via Session Stream
+WidgetPublish (ClientMessage field 35) SHALL carry widget_name, instance_id, params (repeated WidgetParameterValueProto), transition_ms, ttl_us, and merge_key. Durable widget publishes SHALL be transactional and receive WidgetPublishResult (ServerMessage field 47) acknowledgement containing accepted flag, widget_name, error_code, and error_message. Ephemeral widget publishes SHALL be fire-and-forget (no WidgetPublishResult sent). Publishing to an unknown widget type SHALL be rejected with WIDGET_NOT_FOUND. Invalid parameter types SHALL be rejected with WIDGET_PARAMETER_TYPE_MISMATCH. Out-of-range parameter values SHALL be rejected with WIDGET_PARAMETER_INVALID.
+Source: Widget System delta spec §session-protocol
+Scope: v1-mandatory
+
+#### Scenario: Durable widget publish acknowledged
+- **WHEN** an agent sends WidgetPublish for a durable widget instance
+- **THEN** the runtime SHALL respond with WidgetPublishResult(accepted=true/false)
+
+#### Scenario: Unknown widget type rejected
+- **WHEN** an agent sends WidgetPublish with a widget_name not registered in the widget registry
+- **THEN** the runtime SHALL respond with WidgetPublishResult(accepted=false, error_code="WIDGET_NOT_FOUND")
+
+---
+
+### Requirement: Scene Event Emission via Session Stream
+EmitSceneEvent (ClientMessage field 33) SHALL carry bare_name (validated against `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`), payload (bytes, max 4096 bytes), and interruption_class_hint. EmitSceneEventResult (ServerMessage field 45) SHALL carry request_sequence, accepted flag, delivered_event_type, error_code, and error_message. Emission requires the `emit_scene_event:<event_name>` or `emit_scene_event:*` capability. Events with the `system.` or `scene.` prefix SHALL be rejected with AGENT_EVENT_RESERVED_PREFIX. Rate-limited agents SHALL receive AGENT_EVENT_RATE_EXCEEDED. Oversized payloads SHALL receive AGENT_EVENT_PAYLOAD_TOO_LARGE.
+Source: RFC 0010 §1.2, §7.2
+Scope: v1-mandatory
+
+#### Scenario: Scene event emitted successfully
+- **WHEN** an agent with `emit_scene_event:doorbell.ring` capability sends EmitSceneEvent(bare_name="doorbell.ring")
+- **THEN** the runtime SHALL deliver the event to subscribed agents and respond with EmitSceneEventResult(accepted=true)
+
+#### Scenario: Reserved prefix rejected
+- **WHEN** an agent sends EmitSceneEvent(bare_name="system.shutdown")
+- **THEN** the runtime SHALL reject with EmitSceneEventResult(error_code="AGENT_EVENT_RESERVED_PREFIX")
+
+---
+
+### Requirement: RuntimeTelemetryFrame Delivery
+The runtime SHALL send RuntimeTelemetryFrame (ServerMessage field 36) to sessions subscribed to TELEMETRY_FRAMES. RuntimeTelemetryFrame is a server-originated telemetry message distinct from the client-originated TelemetryFrame (ClientMessage field 26). RuntimeTelemetryFrame SHALL include: sample_timestamp_wall_us, compositor_frame_rate, compositor_frame_budget_us, compositor_frame_time_us, active_sessions, active_leases, heap_used_bytes, and gpu_utilization_pct. RuntimeTelemetryFrame SHALL be state-stream traffic class (coalesced under backpressure).
+Source: RFC 0005 §9, RFC 0002 §10
+Scope: v1-mandatory
+
+#### Scenario: Server telemetry includes compositor metrics
+- **WHEN** an agent is subscribed to TELEMETRY_FRAMES
+- **THEN** the runtime SHALL periodically deliver RuntimeTelemetryFrame with compositor_frame_time_us, active_leases, and gpu_utilization_pct
+
+---
+
+### Requirement: RuntimeService ReloadConfig RPC
+session.proto SHALL define a `RuntimeService` gRPC service with `rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse)`. ReloadConfigRequest SHALL carry config_toml (full TOML string). ReloadConfigResponse SHALL carry success flag, validation_errors (repeated), and reloaded_at_wall_us. This is a unary RPC separate from the HudSession bidirectional stream. Validation errors SHALL prevent the reload from being applied, preserving the running configuration. This RPC implements the gRPC path of the hot-reload requirement from RFC 0006 §9.
+Source: RFC 0006 §9
+Scope: v1-mandatory
+
+#### Scenario: Successful config reload
+- **WHEN** an operator sends ReloadConfig with valid TOML updating [privacy] settings
+- **THEN** the runtime SHALL validate and apply the hot-reloadable fields, returning success=true and reloaded_at_wall_us
+
+#### Scenario: Reload with validation errors
+- **WHEN** an operator sends ReloadConfig with TOML containing invalid values
+- **THEN** the runtime SHALL return success=false with validation_errors and SHALL NOT change the running configuration
 
 ---
 
