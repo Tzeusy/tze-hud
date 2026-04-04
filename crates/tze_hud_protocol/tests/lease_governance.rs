@@ -562,6 +562,7 @@ fn resource_ref_count_drops_after_lease_expiry() {
     // Set a tile root with a StaticImageNode referencing a resource.
     // The resource_id is a placeholder (48×48 PNG; 48×48×4 = 9216 bytes decoded).
     let resource_id = ResourceId::from_bytes([0xAB; 32]);
+    scene.register_resource(resource_id);
     let node = tze_hud_scene::types::Node {
         id: SceneId::new(),
         data: NodeData::StaticImage(StaticImageNode {

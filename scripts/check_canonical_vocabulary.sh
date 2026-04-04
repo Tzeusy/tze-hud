@@ -115,6 +115,7 @@ for i in "${!STALE_PATTERNS[@]}"; do
         fi
     done < <(
         grep -rn --include="*.rs" --include="*.md" --include="*.toml" --include="*.proto" \
+            --exclude-dir=".worktrees" --exclude-dir="target" \
             -E "${pattern}" . 2>/dev/null || true
     )
 
