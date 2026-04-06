@@ -4295,22 +4295,12 @@ impl Compositor {
         }
     }
 
-    /// Collect rounded-rectangle draw commands for zones whose `RenderingPolicy`
-    /// has `backdrop_radius` set.
-    ///
-    /// These zones are excluded from the flat-rect backdrop pass
-    /// (`render_zone_content`) and rendered instead by `encode_rounded_rect_pass`
-    /// using the SDF pipeline.
-    ///
-    /// Mirrors the backdrop-resolution logic in `render_zone_content` so color
-    /// derivation (severity tokens, urgency colors, opacity) is consistent.
-    ///
     /// Collect all rounded-rectangle draw commands in a single pass, partitioned by layer.
     ///
     /// Zones with `backdrop_radius` in their `RenderingPolicy` are collected and
     /// partitioned into separate vectors for Background, Content, and Chrome layers.
-    /// A single pass through the zone registry replaces the previous three-pass approach
-    /// (one per layer), reducing per-frame iteration cost by 3x.
+    /// This replaces three separate calls to `collect_rounded_rect_cmds` with one
+    /// efficient pass through the zone registry.
     ///
     /// These zones are excluded from the flat-rect backdrop pass
     /// (`render_zone_content`) and rendered instead by `encode_rounded_rect_pass`
@@ -4347,6 +4337,9 @@ impl Compositor {
 
             let policy = &zone_def.rendering_policy;
             let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+            // Clamp radius against the zone's full dimensions as a first-pass
+            // upper bound. For Stack zones, each slot height (effective_slot_h)
+            // may be smaller than h, so per-slot clamping is applied below.
             let max_r_zone = (w * 0.5).min(h * 0.5).max(0.0);
             let radius = radius.min(max_r_zone);
 
@@ -4356,6 +4349,7 @@ impl Compositor {
                 .map(|s| s.current_opacity())
                 .unwrap_or(1.0);
 
+            // Resolve backdrop color using the same logic as render_zone_content.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
                     let slot_h = Self::stack_slot_height(policy);
@@ -4414,6 +4408,9 @@ impl Compositor {
                                 }
                             }
                             rgba.a *= combined_opacity;
+                            // Re-clamp radius per slot: effective_slot_h may be
+                            // smaller than the zone height (e.g., last slot in a
+                            // stack), so the radius must not exceed half the slot.
                             let slot_radius =
                                 radius.min((w * 0.5).min(effective_slot_h * 0.5).max(0.0));
                             let cmd = RoundedRectDrawCmd {
@@ -4424,6 +4421,7 @@ impl Compositor {
                                 radius: slot_radius,
                                 color: self.gpu_color(rgba),
                             };
+                            // Partition by layer
                             match zone_def.layer_attachment {
                                 LayerAttachment::Background => result.background.push(cmd),
                                 LayerAttachment::Content => result.content.push(cmd),
@@ -4476,6 +4474,7 @@ impl Compositor {
                             radius,
                             color: self.gpu_color(rgba),
                         };
+                        // Partition by layer
                         match zone_def.layer_attachment {
                             LayerAttachment::Background => result.background.push(cmd),
                             LayerAttachment::Content => result.content.push(cmd),
