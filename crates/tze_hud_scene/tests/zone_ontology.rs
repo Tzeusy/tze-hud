@@ -349,6 +349,7 @@ fn contention_stack_evicts_oldest_at_max_depth() {
             urgency: 1,
             ttl_ms: None,
             title: String::new(),
+            actions: Vec::new(),
         })
     };
 

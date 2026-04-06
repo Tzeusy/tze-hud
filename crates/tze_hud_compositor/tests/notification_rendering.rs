@@ -264,6 +264,7 @@ async fn test_notification_urgency0_low_backdrop() {
                 urgency: 0,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "test-agent",
             None,
@@ -272,7 +273,7 @@ async fn test_notification_urgency0_low_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=0 Notification on notification-area");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     HeadlessSurface::assert_pixel_color(
@@ -309,6 +310,7 @@ async fn test_notification_urgency1_normal_backdrop() {
                 urgency: 1,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "test-agent",
             None,
@@ -317,7 +319,7 @@ async fn test_notification_urgency1_normal_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=1 Notification on notification-area");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     HeadlessSurface::assert_pixel_color(
@@ -354,6 +356,7 @@ async fn test_notification_urgency2_urgent_backdrop() {
                 urgency: 2,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "test-agent",
             None,
@@ -362,7 +365,7 @@ async fn test_notification_urgency2_urgent_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=2 Notification on notification-area");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     HeadlessSurface::assert_pixel_color(
@@ -399,6 +402,7 @@ async fn test_notification_urgency3_critical_backdrop() {
                 urgency: 3,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "test-agent",
             None,
@@ -407,7 +411,7 @@ async fn test_notification_urgency3_critical_backdrop() {
         )
         .expect("publish_to_zone must succeed for urgency=3 Notification on notification-area");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     HeadlessSurface::assert_pixel_color(
@@ -461,6 +465,7 @@ async fn test_notification_urgency_distinct_colors() {
                     urgency,
                     ttl_ms: None,
                     title: String::new(),
+                    actions: Vec::new(),
                 }),
                 "test-agent",
                 None,
@@ -468,7 +473,7 @@ async fn test_notification_urgency_distinct_colors() {
                 None,
             )
             .unwrap();
-        compositor.render_frame_headless(&scene, &surface);
+        compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         actuals.push(HeadlessSurface::pixel_at(
             &pixels, SURFACE_W, SAMPLE_X, SLOT0_Y,
@@ -562,6 +567,7 @@ async fn test_notification_icon_renders_texture_when_bytes_registered() {
                 urgency: 0,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "test-agent",
             None,
@@ -570,7 +576,7 @@ async fn test_notification_icon_renders_texture_when_bytes_registered() {
         )
         .expect("publish_to_zone must succeed for notification with icon");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Icon centre pixel: x=213, y=17.
@@ -606,6 +612,7 @@ async fn test_notification_without_icon_renders_backdrop_only() {
                 urgency: 0,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "test-agent",
             None,
@@ -614,7 +621,7 @@ async fn test_notification_without_icon_renders_backdrop_only() {
         )
         .expect("publish_to_zone must succeed for notification without icon");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Slot 0 centre at (222, 17) should show the urgency=0 (low) backdrop color,
@@ -653,6 +660,7 @@ async fn test_notification_icon_graceful_fallback_when_bytes_not_registered() {
                 urgency: 1,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "test-agent",
             None,
@@ -662,7 +670,7 @@ async fn test_notification_icon_graceful_fallback_when_bytes_not_registered() {
         .expect("publish_to_zone must succeed even when icon bytes are absent");
 
     // MUST NOT panic. Frame renders without the icon texture.
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Backdrop should still be the urgency=1 (normal) color.
@@ -747,6 +755,7 @@ async fn debug_probe_pixel_values() {
                     urgency,
                     ttl_ms: None,
                     title: String::new(),
+                    actions: Vec::new(),
                 }),
                 "probe",
                 None,
@@ -754,7 +763,7 @@ async fn debug_probe_pixel_values() {
                 None,
             )
             .unwrap();
-        compositor.render_frame_headless(&scene, &surface);
+        compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         let p = HeadlessSurface::pixel_at(&pixels, SURFACE_W, SAMPLE_X, SLOT0_Y);
         println!(

@@ -75,6 +75,21 @@ pub struct SceneGraph {
     /// per RFC 0001 §2.4 and resource-store/spec.md §Requirement: V1 ephemerality).
     #[serde(skip, default)]
     pub registered_resources: HashMap<ResourceId, u32>,
+
+    /// Runtime-managed zone interaction hit regions.
+    ///
+    /// Populated by the compositor each frame during `render_zone_content`.
+    /// Contains the display-space bounds of dismiss (×) buttons and action
+    /// buttons for visible notification slots.
+    ///
+    /// The hit-test pipeline checks this list after tile testing when the
+    /// result would otherwise be `Passthrough`, producing a
+    /// [`HitResult::ZoneInteraction`] result for zone-owned affordances.
+    ///
+    /// Ephemeral: skipped during serialization.  Cleared by the compositor
+    /// at the start of each frame before zone geometry is recomputed.
+    #[serde(skip, default)]
+    pub zone_hit_regions: Vec<ZoneHitRegion>,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -131,6 +146,7 @@ impl SceneGraph {
             version: 0,
             sequence_number: 0,
             registered_resources: HashMap::new(),
+            zone_hit_regions: Vec::new(),
         }
     }
 
@@ -2391,6 +2407,21 @@ impl SceneGraph {
         }
 
         // Only passthrough tiles covered the point, or no tiles at all.
+        // Fall through to runtime-managed zone hit regions (dismiss/action
+        // buttons on notification slots). These are populated by the compositor
+        // each frame and do not require agent-owned tiles.
+        for region in &self.zone_hit_regions {
+            if region.bounds.contains_point(x, y) {
+                return HitResult::ZoneInteraction {
+                    zone_name: region.zone_name.clone(),
+                    published_at_wall_us: region.published_at_wall_us,
+                    publisher_namespace: region.publisher_namespace.clone(),
+                    interaction_id: region.interaction_id.clone(),
+                    kind: region.kind.clone(),
+                };
+            }
+        }
+
         HitResult::Passthrough
     }
 
@@ -3362,6 +3393,56 @@ impl SceneGraph {
         Ok(())
     }
 
+    /// Dismiss a single notification by its publication key.
+    ///
+    /// Removes the publication identified by `(zone_name, published_at_wall_us,
+    /// publisher_namespace)` from `zone_registry.active_publishes`.  This is the
+    /// primitive used by the zone interaction layer when the user clicks or
+    /// activates a notification's dismiss (×) button.
+    ///
+    /// Returns `true` if a matching publication was found and removed, `false` if
+    /// the zone does not exist or no matching publication was found.
+    ///
+    /// # Local feedback
+    ///
+    /// Per doctrine ("local feedback first"), this method immediately removes
+    /// matching hit regions from `zone_hit_regions` so that the stale dismiss
+    /// affordance is gone before the next rendered frame.  Empty zone entries
+    /// are pruned from `active_publishes` for consistency with other cleanup
+    /// helpers.
+    pub fn dismiss_notification(
+        &mut self,
+        zone_name: &str,
+        published_at_wall_us: u64,
+        publisher_namespace: &str,
+    ) -> bool {
+        let publishes = match self.zone_registry.active_publishes.get_mut(zone_name) {
+            Some(v) => v,
+            None => return false,
+        };
+        let before = publishes.len();
+        publishes.retain(|r| {
+            !(r.published_at_wall_us == published_at_wall_us
+                && r.publisher_namespace == publisher_namespace)
+        });
+        let removed = publishes.len() < before;
+        if removed {
+            // Prune empty zone entry (consistent with other cleanup helpers).
+            if publishes.is_empty() {
+                self.zone_registry.active_publishes.remove(zone_name);
+            }
+            // Remove stale hit regions for this publication immediately so
+            // pointer/keyboard events can no longer land on them this frame.
+            self.zone_hit_regions.retain(|r| {
+                !(r.zone_name == zone_name
+                    && r.published_at_wall_us == published_at_wall_us
+                    && r.publisher_namespace == publisher_namespace)
+            });
+            self.version += 1;
+        }
+        removed
+    }
+
     /// Clear all widget publications from a given agent namespace across all widgets.
     ///
     /// Called on lease expiry/revocation to satisfy spec §Requirement: Lease
@@ -4125,6 +4206,7 @@ mod tests {
                 urgency: 1,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             }),
             "agent",
             None,
@@ -4184,6 +4266,7 @@ mod tests {
                 urgency: 1,
                 ttl_ms: None,
                 title: String::new(),
+                actions: Vec::new(),
             })
         };
 
@@ -4283,6 +4366,7 @@ mod tests {
                     urgency,
                     ttl_ms: None,
                     title: String::new(),
+                    actions: Vec::new(),
                 }),
                 "test-agent",
                 None,

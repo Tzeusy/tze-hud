@@ -283,6 +283,10 @@ pub fn proto_zone_content_to_scene(c: &proto::ZoneContent) -> Option<ZoneContent
             // round-trip it in both directions here.
             ttl_ms: None,
             title: n.title.clone(),
+            // actions are not yet carried over the gRPC wire (proto field
+            // not defined). Wire support can be added by extending
+            // types.proto and converting here. Default to empty.
+            actions: Vec::new(),
         })),
         Payload::StatusBar(sb) => Some(ZoneContent::StatusBar(StatusBarPayload {
             entries: sb.entries.clone(),

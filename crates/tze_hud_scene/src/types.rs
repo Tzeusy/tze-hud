@@ -609,6 +609,24 @@ pub enum HitResult {
         /// The scene ID of the chrome tile (or node, for chrome HitRegionNodes).
         element_id: SceneId,
     },
+    /// The point hit a runtime-managed zone interaction region (dismiss button
+    /// or action button on a notification slot).
+    ///
+    /// These regions are managed by the compositor and do not require
+    /// agent-owned tiles.  The `interaction_id` follows the scheme documented
+    /// on [`ZoneHitRegion::interaction_id`].
+    ZoneInteraction {
+        /// Zone that owns the interactive element.
+        zone_name: String,
+        /// `published_at_wall_us` of the notification publication.
+        published_at_wall_us: u64,
+        /// Publisher namespace of the notification.
+        publisher_namespace: String,
+        /// Interaction identifier (dismiss or action callback id).
+        interaction_id: String,
+        /// What kind of interaction was hit.
+        kind: ZoneInteractionKind,
+    },
 }
 
 /// HitRegionNode is the sole interactive primitive in v1.
@@ -715,11 +733,27 @@ impl HitResult {
 
     /// Extract the tile_id for `NodeHit` or `TileHit` results.
     ///
-    /// Returns `None` for `Chrome` and `Passthrough`.
+    /// Returns `None` for `Chrome`, `ZoneInteraction`, and `Passthrough`.
     pub fn tile_id(&self) -> Option<SceneId> {
         match self {
             HitResult::NodeHit { tile_id, .. } | HitResult::TileHit { tile_id } => Some(*tile_id),
             _ => None,
+        }
+    }
+
+    /// Returns `true` if this is a [`HitResult::ZoneInteraction`] hit.
+    pub fn is_zone_interaction(&self) -> bool {
+        matches!(self, HitResult::ZoneInteraction { .. })
+    }
+
+    /// Extract the `interaction_id` for [`HitResult::ZoneInteraction`] results.
+    ///
+    /// Returns `None` for all other variants.
+    pub fn zone_interaction_id(&self) -> Option<&str> {
+        if let HitResult::ZoneInteraction { interaction_id, .. } = self {
+            Some(interaction_id.as_str())
+        } else {
+            None
         }
     }
 }
@@ -1507,7 +1541,42 @@ pub struct ZonePublishToken {
 
 // ─── Zone content ────────────────────────────────────────────────────────────
 
-/// Notification payload: text + optional icon + urgency + optional two-line layout.
+/// A single actionable button on a notification.
+///
+/// When the user clicks or activates an action button, the runtime routes the
+/// callback to the publishing agent by emitting an interaction event.  The
+/// emitted event's `interaction_id` follows the scheme
+/// `"zone:{zone_name}:action:{published_at_wall_us}:{publisher_namespace}:{callback_id}"`
+/// (see [`ZoneInteractionKind::Action`] and [`ZoneHitRegion::interaction_id`]).
+///
+/// Rendering: buttons appear in a horizontal row at the bottom of the
+/// notification slot.  Labels exceeding `MAX_ACTION_LABEL_LEN` characters are
+/// not currently truncated by the runtime — callers should enforce this limit
+/// before publishing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAction {
+    /// Human-readable label shown on the button (e.g. "Open", "Snooze").
+    ///
+    /// Maximum `MAX_ACTION_LABEL_LEN` characters.  The runtime does not
+    /// currently enforce truncation; callers are responsible.
+    pub label: String,
+    /// Opaque callback identifier forwarded to the publishing agent when the
+    /// button is activated (click or keyboard Enter/Space).
+    ///
+    /// Must be non-empty.  The runtime treats an empty `callback_id` as
+    /// "unnamed" and will still route the event, but agents should use
+    /// meaningful identifiers for routing clarity.
+    pub callback_id: String,
+}
+
+/// Maximum UTF-8 character length for a `NotificationAction` label.
+///
+/// Labels exceeding this limit may overflow the rendered slot.  The runtime
+/// does not currently enforce truncation at publish time; callers should
+/// respect this limit before constructing a [`NotificationAction`].
+pub const MAX_ACTION_LABEL_LEN: usize = 32;
+
+/// Notification payload: text + optional icon + urgency + optional two-line layout + optional action buttons.
 ///
 /// ## Single-line vs. two-line rendering
 ///
@@ -1543,6 +1612,87 @@ pub struct NotificationPayload {
     /// When empty or absent: single-line rendering using `text` only.
     #[serde(default)]
     pub title: String,
+    /// Optional action buttons shown at the bottom of the notification slot.
+    ///
+    /// At most `MAX_NOTIFICATION_ACTIONS` actions are rendered; excess entries
+    /// are silently ignored by the compositor.  Each action's label is
+    /// truncated to `MAX_ACTION_LABEL_LEN` characters.
+    ///
+    /// When empty (the default), no action buttons are rendered.
+    #[serde(default)]
+    pub actions: Vec<NotificationAction>,
+}
+
+/// Maximum number of action buttons rendered per notification slot.
+pub const MAX_NOTIFICATION_ACTIONS: usize = 3;
+
+// ─── Zone hit regions ────────────────────────────────────────────────────────
+
+/// Element kind within a notification slot's interactive region.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ZoneInteractionKind {
+    /// The dismiss (×) button in the top-right corner of a notification slot.
+    ///
+    /// Activating this removes the notification from the zone.  The
+    /// `interaction_id` for dismiss elements follows the pattern
+    /// `"zone:{zone_name}:dismiss:{published_at_wall_us}:{publisher_namespace}"`.
+    Dismiss,
+    /// An action button.  `callback_id` is the agent-defined identifier from
+    /// [`NotificationAction::callback_id`].  The `interaction_id` follows the
+    /// pattern
+    /// `"zone:{zone_name}:action:{published_at_wall_us}:{publisher_namespace}:{callback_id}"`.
+    Action { callback_id: String },
+}
+
+/// A runtime-managed interactive region derived from zone content layout.
+///
+/// Zone content (e.g. notification slots) is rendered by the compositor, which
+/// also computes the pixel-space bounds of interactive affordances such as
+/// dismiss buttons and action buttons.  These bounds are written back into
+/// `SceneGraph::zone_hit_regions` each frame so that the hit-test pipeline can
+/// route pointer and keyboard events to zone interactions without requiring
+/// agent-owned tiles.
+///
+/// `ZoneHitRegion`s are ephemeral: they are recomputed every frame by the
+/// compositor and discarded when the zone has no active content.  They MUST NOT
+/// be serialised alongside the scene graph — use `#[serde(skip)]` on the
+/// owning field.
+///
+/// # Input routing contract
+///
+/// When [`SceneGraph::hit_test`] finds no tile hit at a point, it falls through
+/// to the zone hit region list.  The first region whose `bounds` contain the
+/// display-space point produces a [`HitResult::ZoneInteraction`] result.
+///
+/// Per RFC 0004 §7.1 doctrine: HitRegionNode is the sole interactive
+/// primitive; zone hit regions are a thin adapter that maps zone geometry
+/// to the same `interaction_id`-based routing model without requiring
+/// agent-managed tiles for each notification slot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ZoneHitRegion {
+    /// Zone that owns this interactive element.
+    pub zone_name: String,
+    /// `published_at_wall_us` of the publication this region belongs to.
+    pub published_at_wall_us: u64,
+    /// Publisher namespace of the publication.
+    pub publisher_namespace: String,
+    /// Display-space bounding rectangle (absolute pixel coordinates).
+    pub bounds: Rect,
+    /// What kind of interaction this region represents.
+    pub kind: ZoneInteractionKind,
+    /// Interaction identifier forwarded in all events from this region.
+    ///
+    /// Scheme:
+    /// - Dismiss: `"zone:{zone_name}:dismiss:{published_at_wall_us}:{publisher_namespace}"`
+    /// - Action:  `"zone:{zone_name}:action:{published_at_wall_us}:{publisher_namespace}:{callback_id}"`
+    pub interaction_id: String,
+    /// Tab-order index within the zone's interactive elements.
+    ///
+    /// Zone hit regions participate in keyboard focus cycling alongside
+    /// tile-owned HitRegionNodes.  The compositor assigns tab-order indices
+    /// in top-to-bottom, left-to-right reading order (dismiss first, then
+    /// actions in order of their `Vec` position).
+    pub tab_order: u32,
 }
 
 /// Status-bar payload: key → display string map.

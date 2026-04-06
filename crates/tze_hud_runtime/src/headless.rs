@@ -359,8 +359,6 @@ impl HeadlessRuntime {
         self.compositor.update_publication_animations(&scene_guard);
         self.compositor.prune_faded_publications(&mut scene_guard);
 
-        let scene = &*scene_guard;
-
         // ── Capture compositor render work upfront ────────────────────────────
         // The headless pipeline runs all stages in-process. The compositor's
         // render_frame() handles stages 6 (encode) and 7 (submit) internally.
@@ -383,7 +381,7 @@ impl HeadlessRuntime {
 
         // Stage 4: Scene Commit (headless — scene already committed)
         let s4_start = Instant::now();
-        let new_snap = HitTestSnapshot::from_scene(scene);
+        let new_snap = HitTestSnapshot::from_scene(&scene_guard);
         self.pipeline.hit_test_snapshot.store(Arc::new(new_snap));
         let stage4_us = s4_start.elapsed().as_micros() as u64;
         // input_to_scene_commit: wall time from frame_start to end of Stage 4.
@@ -393,13 +391,18 @@ impl HeadlessRuntime {
 
         // Stage 5: Layout Resolve
         let s5_start = Instant::now();
-        let tiles_visible = scene.visible_tiles().len() as u32;
+        let tiles_visible = scene_guard.visible_tiles().len() as u32;
         let stage5_us = s5_start.elapsed().as_micros() as u64;
 
         // Stages 6 + 7: Render Encode + GPU Submit (handled by Compositor::render_frame_headless)
         // Must use render_frame_headless (not render_frame) so copy_to_buffer is called
         // before queue.submit(), making read_pixels() return actual rendered pixel data.
-        let compositor_telemetry = self.compositor.render_frame_headless(scene, &self.surface);
+        // render_frame_headless takes &mut SceneGraph to populate zone_hit_regions after
+        // rendering so that interactive zone affordances are ready for the next frame's
+        // hit-testing.
+        let compositor_telemetry = self
+            .compositor
+            .render_frame_headless(&mut scene_guard, &self.surface);
         // Total frame time from Compositor covers encode + submit
         let stage6_us = compositor_telemetry.render_encode_us;
         let stage7_us = compositor_telemetry.gpu_submit_us;

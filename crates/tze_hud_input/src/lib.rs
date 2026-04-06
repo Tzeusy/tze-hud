@@ -579,6 +579,15 @@ impl InputProcessor {
             }
             HitResult::TileHit { tile_id } => (Some(*tile_id), None),
             HitResult::Chrome { .. } | HitResult::Passthrough => (None, None),
+            // ZoneInteraction hits are handled by the zone interaction layer,
+            // not by the tile/node dispatch path.  No tile or node ID is associated.
+            HitResult::ZoneInteraction {
+                interaction_id: iid,
+                ..
+            } => {
+                interaction_id = Some(iid.clone());
+                (None, None)
+            }
         };
 
         // ── Stage 2: Update hover state ───────────────────────────────────
