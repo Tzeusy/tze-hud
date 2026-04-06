@@ -500,7 +500,7 @@ impl HeadlessRuntime {
         // (net.ipv6.bindv6only=0 default), accepting both [::1] and 127.0.0.1 clients.
         // Binding here rather than inside the spawned task also eliminates the race
         // condition that required the previous 50ms sleep.
-        let bind_addr = format!("[::]:{}",  self.config.grpc_port);
+        let bind_addr = format!("[::]:{}", self.config.grpc_port);
         let listener = tokio::net::TcpListener::bind(&bind_addr)
             .await
             .map_err(|e| format!("gRPC server: failed to bind {bind_addr}: {e}"))?;
