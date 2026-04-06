@@ -3198,13 +3198,16 @@ impl Compositor {
     /// `(encoder, encode_us)` — the ready-to-submit encoder and the wall-clock
     /// microseconds spent encoding (for `FrameTelemetry::render_encode_us`).
     /// `bg_vertex_count`: number of vertices at the start of `vertices` that
-    /// belong to the Background layer (including any overlay-mode clear quad
-    /// prepended before them).  The Background SDF rounded-rect pass is
-    /// inserted between this initial slice and the remaining
-    /// tile/content/chrome vertices so that Background backdrops are
-    /// correctly drawn BELOW agent tiles.  Pass `0` when there are no
-    /// Background flat-rect vertices (all Background zones use SDF); the
-    /// Background SDF pass still runs before the tile/content/chrome pass.
+    /// make up the initial Background slice.  This includes any overlay-mode
+    /// clear quad prepended before Background zone vertices, so in overlay
+    /// mode callers must include those 6 clear-quad vertices in the count
+    /// even when Background zones emit no flat-rect vertices.  The
+    /// Background SDF rounded-rect pass is inserted between this initial
+    /// slice and the remaining tile/content/chrome vertices so that
+    /// Background backdrops are correctly drawn BELOW agent tiles.  Pass `0`
+    /// only when the initial Background slice is empty (i.e. no Background
+    /// flat-rect vertices and no overlay-mode clear quad); the Background
+    /// SDF pass still runs before the tile/content/chrome pass.
     #[allow(clippy::too_many_arguments)]
     fn encode_frame(
         &mut self,
@@ -3218,8 +3221,8 @@ impl Compositor {
     ) -> (wgpu::CommandEncoder, u64) {
         let encode_start = std::time::Instant::now();
 
-        // Upload the full vertex buffer once — individual passes reference
-        // sub-ranges via byte offsets.
+        // Upload the full vertex buffer once — individual passes render
+        // different vertex sub-ranges from it using draw ranges.
         let vertex_buffer = if vertices.is_empty() {
             None
         } else {
@@ -3242,8 +3245,8 @@ impl Compositor {
         let sw = surf_w as f32;
         let sh = surf_h as f32;
 
-        // Choose pipeline once — used for every flat-rect sub-pass.
-        // In overlay mode, the clear_pipeline (no blending) is used for ALL
+        // Both flat-rect geometry sub-passes use the same pipeline selector:
+        // in overlay mode, the clear_pipeline (no blending) is used for ALL
         // flat-rect rendering. The first 6 vertices are a full-screen
         // transparent quad that zeros out every pixel's alpha. Subsequent
         // content overwrites specific regions with their own alpha.
