@@ -157,7 +157,7 @@ async fn test_rounded_rect_backdrop_interior_pixel() {
     let name = register_rounded_zone(&mut scene, Some(16.0));
     publish_text(&mut scene, name);
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Linear green (0.0, 0.5, 0.0) → sRGB ≈ (0, 188, 0).
@@ -201,7 +201,7 @@ async fn test_rounded_rect_corners_are_transparent() {
     let name = register_rounded_zone(&mut scene, Some(40.0));
     publish_text(&mut scene, name);
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Sample the very top-left corner of the bounding box (pixel 64, 102).
@@ -234,7 +234,7 @@ async fn test_flat_rect_unaffected_by_rounded_rect_pipeline() {
     let name = register_rounded_zone(&mut scene, None);
     publish_text(&mut scene, name);
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     let expected_green: [u8; 4] = [0, 188, 0, 255];
@@ -300,7 +300,7 @@ async fn test_no_backdrop_no_rounded_rect() {
         )
         .expect("publish_to_zone must succeed");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // No backdrop was registered, so the pixel must show the clear color.

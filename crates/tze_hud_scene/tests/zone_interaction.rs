@@ -67,6 +67,7 @@ fn setup_single_notification_scene() -> (SceneGraph, u64, &'static str) {
                 icon: String::new(),
                 urgency: 1,
                 ttl_ms: None,
+                title: String::new(),
                 actions: Vec::new(),
             }),
             "agent-a",
@@ -215,6 +216,7 @@ fn dismiss_notification_leaves_other_publications_untouched() {
                 icon: String::new(),
                 urgency: 1,
                 ttl_ms: None,
+                title: String::new(),
                 actions: Vec::new(),
             }),
             "agent-a",
@@ -232,6 +234,7 @@ fn dismiss_notification_leaves_other_publications_untouched() {
                 icon: String::new(),
                 urgency: 2,
                 ttl_ms: None,
+                title: String::new(),
                 actions: Vec::new(),
             }),
             "agent-b",
@@ -447,6 +450,7 @@ fn notification_payload_with_actions_serializes() {
         icon: String::new(),
         urgency: 1,
         ttl_ms: None,
+        title: String::new(),
         actions: vec![
             NotificationAction {
                 label: "Yes".to_string(),

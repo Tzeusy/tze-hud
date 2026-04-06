@@ -8918,6 +8918,7 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(), // empty: must use single-line path
+                    actions: vec![],
                 }),
                 "test-agent",
                 None,
@@ -8989,6 +8990,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 2,
                     ttl_ms: None,
+                    actions: vec![],
                 }),
                 "test-agent",
                 None,
@@ -9145,6 +9147,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    actions: vec![],
                 }),
                 "agent-a",
                 None,
@@ -9161,6 +9164,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    actions: vec![],
                 }),
                 "agent-b",
                 None,
@@ -10772,6 +10776,8 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+
+                    title: String::new(),
                     actions: Vec::new(),
                 }),
                 "agent-a",
@@ -10841,6 +10847,8 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+
+                    title: String::new(),
                     actions: Vec::new(),
                 }),
                 "agent-a",
@@ -10912,6 +10920,8 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+
+                    title: String::new(),
                     actions: vec![
                         NotificationAction {
                             label: "Yes".to_string(),
@@ -10998,6 +11008,8 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+
+                    title: String::new(),
                     actions: vec![
                         NotificationAction {
                             label: "A".to_string(),
@@ -11067,6 +11079,8 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+
+                    title: String::new(),
                     actions: Vec::new(),
                 }),
                 "agent-a",
