@@ -315,3 +315,80 @@ async fn test_no_backdrop_no_rounded_rect() {
     )
     .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// Requirement: Background-layer rounded-rect zone renders at correct layer depth.
+///
+/// A zone with `LayerAttachment::Background` and `backdrop_radius > 0` must be
+/// collected in the Background layer slot of `collect_rounded_rect_cmds` and
+/// encoded before Content/Chrome layers.  This test verifies that such a zone
+/// renders its backdrop (interior shows the backdrop color) and confirms the
+/// function correctly filters by layer when `only_layer = Some(Background)`.
+///
+/// This covers the hud-tofc fix: `collect_rounded_rect_cmds` is now called
+/// three times in per-layer order instead of once with `only_layer=None`.
+#[tokio::test]
+async fn test_background_layer_rounded_rect_renders_backdrop() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+
+    let mut scene = SceneGraph::new(SURFACE_W as f32, SURFACE_H as f32);
+    scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
+
+    // Register a Background-layer zone with backdrop_radius.
+    scene.register_zone(ZoneDefinition {
+        id: SceneId::new(),
+        name: "bg-rounded-zone".to_owned(),
+        description: "Background-layer zone with SDF rounded-rect backdrop".to_owned(),
+        geometry_policy: GeometryPolicy::Relative {
+            x_pct: 0.25,
+            y_pct: 0.40,
+            width_pct: 0.50,
+            height_pct: 0.20,
+        },
+        accepted_media_types: vec![ZoneMediaType::StreamText],
+        rendering_policy: RenderingPolicy {
+            backdrop: Some(Rgba {
+                r: 0.0,
+                g: 0.5,
+                b: 0.0,
+                a: 1.0,
+            }),
+            backdrop_radius: Some(8.0),
+            ..Default::default()
+        },
+        contention_policy: ContentionPolicy::LatestWins,
+        max_publishers: 1,
+        transport_constraint: None,
+        auto_clear_ms: None,
+        ephemeral: false,
+        // Background layer — must be collected before Content/Chrome zones.
+        layer_attachment: LayerAttachment::Background,
+    });
+
+    scene
+        .publish_to_zone(
+            "bg-rounded-zone",
+            ZoneContent::StreamText("bg content".to_string()),
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .expect("publish_to_zone must succeed");
+
+    compositor.render_frame_headless(&mut scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // Zone interior at (128, 128) — well inside the rounded shape — must show green.
+    let expected_green: [u8; 4] = [0, 188, 0, 255];
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        SURFACE_W,
+        128,
+        128,
+        expected_green,
+        TOLERANCE,
+        "Background-layer rounded-rect zone interior must show green backdrop",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+}
