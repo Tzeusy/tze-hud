@@ -1560,6 +1560,11 @@ impl Compositor {
     /// when a key is absent or unparseable.
     pub fn set_token_map(&mut self, map: HashMap<String, String>) {
         self.token_map = map;
+        // Token-substitution failures in ensure_icon_texture are tied to the
+        // token map state, not to the SVG file on disk.  Clearing the negative
+        // cache here lets icons that previously failed due to a missing token
+        // be retried with the updated map (e.g. on hot-reload or late init).
+        self.failed_icon_paths.clear();
     }
 
     /// Initialize (or re-initialize) the text rasterizer for a given surface format.
@@ -1820,9 +1825,10 @@ impl Compositor {
         };
 
         // Apply design token substitution before parsing.
-        // For SVGs with no `{{...}}` placeholders this is a zero-cost no-op.
-        // For SVGs with placeholders that cannot be resolved (token missing),
-        // log a warning and degrade gracefully (skip icon).
+        // `resolve_token_placeholders` has an internal fast path for SVGs that
+        // contain neither `{{` nor escape sequences — only a `contains` scan,
+        // no allocation.  For SVGs with placeholders that cannot be resolved
+        // (token missing), log a warning and degrade gracefully (skip icon).
         let resolved_svg;
         let svg_str = match resolve_token_placeholders(svg_str, &self.token_map) {
             Ok(s) => {
@@ -12006,5 +12012,101 @@ mod tests {
             1,
             "second call must still produce 1 (not accumulate to 2)"
         );
+    }
+
+    // ─── ensure_icon_texture: token substitution unit tests ──────────────────
+
+    /// SVG icon with a `{{token.color.primary}}` placeholder loads successfully
+    /// when the token is present in the compositor's token map.
+    ///
+    /// Acceptance criterion: compositor-level token substitution is applied
+    /// before SVG parsing so that token-driven icons render correctly.
+    #[tokio::test]
+    async fn test_ensure_icon_texture_resolves_token_placeholder() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
+
+        // Write a minimal SVG with a token placeholder to a temp file.
+        let svg_path = std::env::temp_dir().join("tze_hud_test_icon_token_ok.svg");
+        std::fs::write(
+            &svg_path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">
+<rect width="32" height="32" fill="{{token.color.primary}}"/>
+</svg>"#,
+        )
+        .expect("write test SVG");
+        let path = svg_path.to_string_lossy().into_owned();
+
+        // Token map with the required key — icon must load.
+        compositor.set_token_map(
+            [("color.primary".to_string(), "#ff0000".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let loaded = compositor.ensure_icon_texture(&path);
+        assert!(
+            loaded,
+            "ensure_icon_texture must succeed when token is resolved"
+        );
+
+        // Texture should be in the cache.
+        let resource_id = tze_hud_scene::ResourceId::of(path.as_bytes());
+        assert!(
+            compositor.image_texture_cache.contains_key(&resource_id),
+            "resolved icon must be in image_texture_cache"
+        );
+
+        let _ = std::fs::remove_file(&svg_path);
+    }
+
+    /// SVG icon with an unresolved token placeholder causes `ensure_icon_texture`
+    /// to return `false` and negative-cache the failure.  After `set_token_map`
+    /// is called with the missing token, the negative cache is cleared and the
+    /// icon can be loaded on the next call.
+    #[tokio::test]
+    async fn test_ensure_icon_texture_unresolved_token_cleared_after_set_token_map() {
+        let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
+
+        let svg_path = std::env::temp_dir().join("tze_hud_test_icon_token_missing.svg");
+        std::fs::write(
+            &svg_path,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32">
+<rect width="32" height="32" fill="{{token.color.primary}}"/>
+</svg>"#,
+        )
+        .expect("write test SVG");
+        let path = svg_path.to_string_lossy().into_owned();
+
+        // Empty token map — token is missing, load must fail.
+        compositor.set_token_map(std::collections::HashMap::new());
+        let first = compositor.ensure_icon_texture(&path);
+        assert!(
+            !first,
+            "ensure_icon_texture must return false on unresolved token"
+        );
+
+        let resource_id = tze_hud_scene::ResourceId::of(path.as_bytes());
+        assert!(
+            compositor.failed_icon_paths.contains(&resource_id),
+            "failed path must be in negative cache after unresolved token"
+        );
+
+        // Now provide the missing token.  set_token_map must clear the negative
+        // cache so the icon can be retried.
+        compositor.set_token_map(
+            [("color.primary".to_string(), "#00ff00".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            !compositor.failed_icon_paths.contains(&resource_id),
+            "negative cache must be cleared after set_token_map"
+        );
+        let second = compositor.ensure_icon_texture(&path);
+        assert!(
+            second,
+            "ensure_icon_texture must succeed after token map is updated"
+        );
+
+        let _ = std::fs::remove_file(&svg_path);
     }
 }

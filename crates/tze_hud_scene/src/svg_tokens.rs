@@ -43,6 +43,12 @@ pub fn resolve_token_placeholders(
     svg_text: &str,
     tokens: &HashMap<String, String>,
 ) -> Result<String, String> {
+    // Fast path: most SVGs have no placeholders or escape sequences.
+    // Skipping both checks avoids any allocation for the common case.
+    if !svg_text.contains("{{") && !svg_text.contains("\\{\\{") {
+        return Ok(svg_text.to_string());
+    }
+
     // Sentinel strings that cannot appear in valid SVG/XML.
     const ESC_OPEN: &str = "\x00LBRACE\x00";
     const ESC_CLOSE: &str = "\x00RBRACE\x00";
@@ -182,22 +188,16 @@ pub fn is_valid_token_key(key: &str) -> bool {
     if key.is_empty() {
         return false;
     }
-    for (segment_index, segment) in key.split('.').enumerate() {
+    for (i, segment) in key.split('.').enumerate() {
         let mut chars = segment.chars();
-        match chars.next() {
-            Some(first) if first.is_ascii_lowercase() => {}
-            _ => return false,
+        // Each segment must start with a lowercase ASCII letter.
+        if !matches!(chars.next(), Some(c) if c.is_ascii_lowercase()) {
+            return false;
         }
-        if segment_index == 0 {
-            // First segment: only lowercase letters and digits (no underscores).
-            if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
-                return false;
-            }
-        } else {
-            // Subsequent segments: lowercase letters, digits, and underscores.
-            if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-                return false;
-            }
+        // Remaining chars: letters or digits for all segments;
+        // underscores additionally allowed in non-first segments.
+        if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || (i > 0 && c == '_')) {
+            return false;
         }
     }
     true
