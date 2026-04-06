@@ -158,6 +158,15 @@ const BORDER_DEFAULT_FALLBACK: Rgba = Rgba {
     a: 1.0,
 };
 
+/// Icon size in pixels for status-bar entry icons.
+///
+/// Icons from `RenderingPolicy::key_icon_map` are rasterized at this size
+/// (square) and rendered to the left of each mapped entry's text value.
+const ICON_SIZE_PX: f32 = 24.0;
+
+/// Gap in pixels between the icon and the text value for status-bar entries.
+const ICON_TEXT_GAP_PX: f32 = 6.0;
+
 /// sRGB transfer: linear → sRGB (matches GPU hardware encoding on `*Srgb` surfaces).
 #[inline]
 fn linear_to_srgb(c: f32) -> f32 {
@@ -186,128 +195,6 @@ fn srgb_to_linear(c: f32) -> f32 {
 #[inline]
 fn is_alert_banner_zone(zone_name: &str) -> bool {
     zone_name == "alert-banner"
-}
-
-/// Detect status-bar zones by canonical name.
-///
-/// The status-bar zone uses vertical right-edge layout: one row per entry,
-/// right-aligned, stacked top-to-bottom within the zone geometry.
-#[inline]
-fn is_status_bar_zone(zone_name: &str) -> bool {
-    zone_name == "status-bar"
-}
-
-/// Per-row height for status-bar vertical stack layout (pixels).
-const STATUS_BAR_ENTRY_H: f32 = 28.0;
-
-/// Gap between consecutive status-bar rows (pixels).
-const STATUS_BAR_ENTRY_GAP: f32 = 4.0;
-
-/// Maximum number of visible rows in the status-bar vertical stack.
-const STATUS_BAR_MAX_ENTRIES: usize = 8;
-
-/// Return a short unicode icon prefix for well-known status-bar keys.
-///
-/// Used to prepend a symbolic indicator to the displayed value in the
-/// vertical right-edge layout. Falls back to an empty string for unknown keys.
-/// Icon rendering via a texture pipeline is post-v1; this unicode fallback
-/// is the v1 approximation.
-fn status_bar_icon_prefix(key: &str) -> &'static str {
-    match key {
-        "battery" | "bat" => "🔋 ",
-        "wifi" | "network" | "net" => "📶 ",
-        "cpu" => "🖥 ",
-        "mem" | "memory" | "ram" => "💾 ",
-        "time" | "clock" => "🕐 ",
-        "temp" | "temperature" => "🌡 ",
-        "vol" | "volume" | "audio" => "🔊 ",
-        "bright" | "brightness" => "☀ ",
-        _ => "",
-    }
-}
-
-/// Emit one `TextItem` per status-bar entry into a right-edge vertical stack.
-///
-/// Each entry occupies a row of `STATUS_BAR_ENTRY_H` pixels, separated by
-/// `STATUS_BAR_ENTRY_GAP` pixels.  Entries are sorted by key for deterministic
-/// ordering and capped at `STATUS_BAR_MAX_ENTRIES` rows.  Text is right-aligned
-/// within the zone bounds.
-///
-/// Parameters:
-///   - `sorted_entries`: entries already sorted by key, ready for display
-///   - `zx`, `zy`, `zw`, `zh`: zone geometry (physical pixels)
-///   - `policy`: zone rendering policy (font, color, margins)
-///   - `opacity`: current animation opacity
-///   - `items`: output buffer
-#[allow(clippy::too_many_arguments)]
-fn emit_status_bar_entries(
-    sorted_entries: &[(&String, &String)],
-    zx: f32,
-    zy: f32,
-    zw: f32,
-    zh: f32,
-    policy: &tze_hud_scene::types::RenderingPolicy,
-    opacity: f32,
-    items: &mut Vec<crate::text::TextItem>,
-) {
-    use crate::text::TextItem;
-    use tze_hud_scene::types::{FontFamily, TextAlign, TextOverflow};
-
-    let margin_h = policy.margin_horizontal.or(policy.margin_px).unwrap_or(4.0);
-    let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(4.0);
-    let font_size_px = policy.font_size_px.unwrap_or(13.0).clamp(6.0, 200.0);
-    let font_family = policy.font_family.unwrap_or(FontFamily::SystemSansSerif);
-    let font_weight = policy.font_weight.unwrap_or(400).clamp(100, 900);
-
-    let base_color = policy
-        .text_color
-        .map(crate::text::rgba_to_srgb_u8)
-        .unwrap_or([255, 255, 255, 220]);
-    let color = crate::text::apply_opacity_to_color(base_color, opacity);
-
-    let (outline_color, outline_width) = match (policy.outline_color, policy.outline_width) {
-        (Some(oc), Some(ow)) if ow > 0.0 => {
-            let oc_srgb =
-                crate::text::apply_opacity_to_color(crate::text::rgba_to_srgb_u8(oc), opacity);
-            (Some(oc_srgb), Some(ow))
-        }
-        _ => (None, None),
-    };
-
-    let entry_stride = STATUS_BAR_ENTRY_H + STATUS_BAR_ENTRY_GAP;
-    let visible_entries = sorted_entries.len().min(STATUS_BAR_MAX_ENTRIES);
-    // Inset the stack from the zone edges by the vertical margin.
-    let stack_top = zy + margin_v;
-    let zone_bottom = (zy + zh - margin_v).max(stack_top);
-
-    for (idx, (key, value)) in sorted_entries.iter().take(visible_entries).enumerate() {
-        let row_y = stack_top + idx as f32 * entry_stride;
-        // Skip rows that start at or below the zone bottom edge.
-        if row_y >= zone_bottom {
-            break;
-        }
-        // Clamp the row height so the last row does not overflow the zone.
-        let row_h = STATUS_BAR_ENTRY_H.min(zone_bottom - row_y).max(1.0);
-        let icon = status_bar_icon_prefix(key);
-        let text = format!("{icon}{value}");
-
-        items.push(TextItem {
-            text,
-            pixel_x: zx + margin_h,
-            pixel_y: row_y,
-            bounds_width: (zw - margin_h * 2.0).max(1.0),
-            bounds_height: row_h,
-            font_size_px,
-            font_family,
-            font_weight,
-            color,
-            alignment: TextAlign::End,
-            overflow: TextOverflow::Clip,
-            outline_color,
-            outline_width,
-            opacity,
-        });
-    }
 }
 
 /// Extract the urgency from a `ZonePublishRecord` if it carries `Notification` content.
@@ -1015,7 +902,20 @@ pub struct Compositor {
     ///
     /// Entries are created on-demand by `ensure_image_texture` and evicted
     /// when the resource is no longer referenced in the scene.
+    ///
+    /// Also stores status-bar icon textures via `ensure_icon_texture`, which
+    /// uses `ResourceId::of(svg_path.as_bytes())` as the key.  Icon entries
+    /// are kept alive by including their ResourceIds in the eviction-guard set
+    /// (see `ensure_scene_icon_textures`).
     image_texture_cache: HashMap<ResourceId, ImageTextureEntry>,
+    /// Negative cache for SVG paths that failed to load/parse.
+    ///
+    /// Paths are inserted on the first failed `ensure_icon_texture` call.
+    /// Subsequent calls skip the filesystem read entirely, avoiding per-frame
+    /// I/O and log spam for invalid icon paths. Entries persist for the
+    /// lifetime of the compositor (SVG paths are static config; runtime reload
+    /// of icon paths is not currently supported).
+    failed_icon_paths: HashSet<ResourceId>,
 }
 
 impl Compositor {
@@ -1108,6 +1008,7 @@ impl Compositor {
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
+            failed_icon_paths: HashSet::new(),
         })
     }
 
@@ -1375,6 +1276,7 @@ impl Compositor {
             image_bytes: HashMap::new(),
             image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
+            failed_icon_paths: HashSet::new(),
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -1790,6 +1692,147 @@ impl Compositor {
         true
     }
 
+    /// Ensure a GPU texture exists for a status-bar icon SVG file path.
+    ///
+    /// Uses `ResourceId::of(path.as_bytes())` as the cache key so the texture
+    /// is stored in `image_texture_cache` and drawn by the standard image pass.
+    ///
+    /// On cache hit, returns `true` immediately (no I/O).  On miss:
+    /// 1. Reads the SVG bytes from `path` (filesystem).
+    ///    NOTE: This is a blocking filesystem read on the compositor thread.
+    ///    It only occurs once per unique SVG path (cache miss); subsequent
+    ///    calls for the same path return immediately from cache or the
+    ///    negative-cache set (`failed_icon_paths`).
+    /// 2. Rasterizes at [`ICON_SIZE_PX`] × [`ICON_SIZE_PX`] via resvg/tiny-skia.
+    /// 3. Uploads the RGBA pixmap to a `wgpu::Texture`.
+    /// 4. Inserts into `image_texture_cache` under the path-derived `ResourceId`.
+    ///
+    /// Returns `false` if the file cannot be read or parsed.  In that case the
+    /// `ResourceId` is added to `failed_icon_paths` so no further I/O is
+    /// attempted for this path (graceful degradation — text-only fallback).
+    fn ensure_icon_texture(&mut self, path: &str) -> bool {
+        let resource_id = ResourceId::of(path.as_bytes());
+        if self.image_texture_cache.contains_key(&resource_id) {
+            return true;
+        }
+        // Negative cache: skip repeated I/O for known-bad paths.
+        if self.failed_icon_paths.contains(&resource_id) {
+            return false;
+        }
+
+        let size = ICON_SIZE_PX as u32;
+
+        // Read SVG bytes from disk (blocking; occurs at most once per path).
+        let svg_bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(path, error = %e, "icon: failed to read SVG file");
+                self.failed_icon_paths.insert(resource_id);
+                return false;
+            }
+        };
+        let svg_str = match std::str::from_utf8(&svg_bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(path, error = %e, "icon: SVG file is not valid UTF-8");
+                self.failed_icon_paths.insert(resource_id);
+                return false;
+            }
+        };
+
+        // Rasterize via resvg (same pipeline as WidgetRenderer).
+        let opts = resvg::usvg::Options::default();
+        let tree = match resvg::usvg::Tree::from_str(svg_str, &opts) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(path, error = %e, "icon: failed to parse SVG");
+                self.failed_icon_paths.insert(resource_id);
+                return false;
+            }
+        };
+        let mut pixmap = match tiny_skia::Pixmap::new(size, size) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(path, size, "icon: failed to allocate pixmap");
+                self.failed_icon_paths.insert(resource_id);
+                return false;
+            }
+        };
+        // Scale uniformly with centering (same transform logic as widget rasterization).
+        let svg_size = tree.size();
+        let sx = size as f32 / svg_size.width();
+        let sy = size as f32 / svg_size.height();
+        let uniform_scale = sx.min(sy);
+        let rendered_w = svg_size.width() * uniform_scale;
+        let rendered_h = svg_size.height() * uniform_scale;
+        let offset_x = (size as f32 - rendered_w) * 0.5;
+        let offset_y = (size as f32 - rendered_h) * 0.5;
+        let transform = tiny_skia::Transform::from_translate(offset_x, offset_y)
+            .post_scale(uniform_scale, uniform_scale);
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+        // Upload to GPU.
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("icon_tex_{path}")),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pixmap.data(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * 4),
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("icon_bg_{path}")),
+            layout: &self.texture_rect_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                },
+            ],
+        });
+        self.image_texture_cache.insert(
+            resource_id,
+            ImageTextureEntry {
+                _texture: texture,
+                bind_group,
+                width: size,
+                height: size,
+            },
+        );
+        tracing::debug!(path, size, "icon texture rasterized and uploaded to GPU");
+        true
+    }
+
     /// Evict cached GPU textures for resources no longer referenced in the scene.
     ///
     /// Call once per frame after rendering. `referenced_ids` is the set of
@@ -1864,6 +1907,37 @@ impl Compositor {
         }
 
         referenced
+    }
+
+    /// Scan the scene's zone registry for all `key_icon_map` SVG paths,
+    /// ensure their GPU textures are cached, and return the set of their
+    /// path-derived `ResourceId`s.
+    ///
+    /// The returned set must be merged into the `referenced_ids` passed to
+    /// `evict_unused_image_textures` so that icon textures are not evicted
+    /// on frames where no matching StaticImage publication is active.
+    ///
+    /// Called once per frame before `render_zone_content` so that the
+    /// immutable render path can look up `image_texture_cache` by ResourceId.
+    ///
+    /// SVG rasterization only occurs on cache miss (init-time / first-seen
+    /// path).  Subsequent calls are O(1) per path due to the cache hit-check
+    /// guard in `ensure_icon_texture`.
+    fn ensure_scene_icon_textures(&mut self, scene: &SceneGraph) -> HashSet<ResourceId> {
+        let mut icon_ids: HashSet<ResourceId> = HashSet::new();
+        for zone_def in scene.zone_registry.zones.values() {
+            let icon_map = &zone_def.rendering_policy.key_icon_map;
+            if icon_map.is_empty() {
+                continue;
+            }
+            for svg_path in icon_map.values() {
+                let id = ResourceId::of(svg_path.as_bytes());
+                icon_ids.insert(id);
+                // ensure_icon_texture is a no-op on cache hit.
+                self.ensure_icon_texture(svg_path);
+            }
+        }
+        icon_ids
     }
 
     // ─── Widget renderer ──────────────────────────────────────────────────────
@@ -1974,6 +2048,64 @@ impl Compositor {
                 }
             }
         }
+    }
+
+    /// Build per-entry `TextItem`s for a StatusBar zone with icon mappings.
+    ///
+    /// Called when `RenderingPolicy::key_icon_map` is non-empty.  Each entry
+    /// occupies one slot (height = `stack_slot_height(policy)`).  Entries whose
+    /// key is mapped to an SVG icon have their text x-origin shifted right by
+    /// `ICON_SIZE_PX + ICON_TEXT_GAP_PX` so the icon quad can be rendered to
+    /// the left without overlap.  Entries without an icon mapping are rendered
+    /// at the unshifted position.
+    ///
+    /// Each entry is a single `TextItem` rendered by delegating to
+    /// `TextItem::from_zone_policy` with adjusted `(x, y, w, h)` that place
+    /// the text in its row and account for icon inset.
+    ///
+    /// # Parameters
+    /// - `sorted` — entries sorted by key (deterministic row order).
+    /// - `key_icon_map` — key → SVG path mapping from `RenderingPolicy`.
+    /// - `zx`, `zy`, `zw` — zone pixel bounds (x, y, width).
+    /// - `policy` — the zone's `RenderingPolicy`.
+    /// - `opacity` — current animation opacity.
+    fn status_bar_icon_text_items(
+        sorted: &[(&String, &String)],
+        key_icon_map: &HashMap<String, String>,
+        zx: f32,
+        zy: f32,
+        zw: f32,
+        policy: &RenderingPolicy,
+        opacity: f32,
+    ) -> Vec<TextItem> {
+        let slot_h = Self::stack_slot_height(policy);
+
+        sorted
+            .iter()
+            .enumerate()
+            .map(|(i, (k, v))| {
+                let entry_y = zy + i as f32 * slot_h;
+                let has_icon = key_icon_map.contains_key(k.as_str());
+                let icon_inset = if has_icon {
+                    ICON_SIZE_PX + ICON_TEXT_GAP_PX
+                } else {
+                    0.0
+                };
+                // Pass adjusted bounds to from_zone_policy so it applies margins
+                // on top of the per-entry position and icon inset.
+                // Effective pixel_x = (zx + icon_inset) + margin_h
+                // Effective bounds_width = (zw - icon_inset) - 2*margin_h
+                TextItem::from_zone_policy(
+                    &format!("{k}: {v}"),
+                    zx + icon_inset,
+                    entry_y,
+                    zw - icon_inset,
+                    slot_h,
+                    policy,
+                    opacity,
+                )
+            })
+            .collect()
     }
 
     /// Collect `TextItem`s for all TextMarkdownNode tiles and zone StreamText
@@ -2272,21 +2404,17 @@ impl Compositor {
                     if !merged.is_empty() {
                         let mut sorted: Vec<(&String, &String)> = merged.iter().collect();
                         sorted.sort_by_key(|(k, _)| k.as_str());
-                        if is_status_bar_zone(zone_name) {
-                            // Status-bar: vertical right-edge layout — one TextItem per entry,
-                            // right-aligned, stacked top-to-bottom within the zone geometry.
-                            emit_status_bar_entries(
-                                &sorted,
-                                zx,
-                                zy,
-                                zw,
-                                zh,
-                                policy,
-                                anim_opacity,
-                                &mut items,
-                            );
-                        } else {
-                            // Non-status-bar MergeByKey zones: legacy joined-text layout.
+                        // Use per-entry layout only when key_icon_map is non-empty AND
+                        // at least one current entry key has an icon mapping.  This
+                        // avoids switching layout when the map is configured but none
+                        // of the currently displayed entries are mapped.
+                        let use_icon_layout = !policy.key_icon_map.is_empty()
+                            && sorted
+                                .iter()
+                                .any(|(k, _)| policy.key_icon_map.contains_key(k.as_str()));
+                        if !use_icon_layout {
+                            // No icons for current entries: render all as a single
+                            // newline-joined TextItem (existing behavior).
                             let text = sorted
                                 .iter()
                                 .map(|(k, v)| format!("{k}: {v}"))
@@ -2298,6 +2426,18 @@ impl Compositor {
                                 zy,
                                 zw,
                                 zh,
+                                policy,
+                                anim_opacity,
+                            ));
+                        } else {
+                            // Icons configured for current entries: render each as an
+                            // individual TextItem, with text x-inset when an icon is mapped.
+                            items.extend(Self::status_bar_icon_text_items(
+                                &sorted,
+                                &policy.key_icon_map,
+                                zx,
+                                zy,
+                                zw,
                                 policy,
                                 anim_opacity,
                             ));
@@ -2539,25 +2679,19 @@ impl Compositor {
                                 break;
                             }
                             ZoneContent::StatusBar(payload) => {
-                                // Sort key-value pairs by key for deterministic output.
+                                // Format key-value pairs as "key: value" lines, sorted by key
+                                // for deterministic output.
                                 let mut sorted: Vec<(&String, &String)> =
                                     payload.entries.iter().collect();
                                 sorted.sort_by_key(|(k, _)| k.as_str());
-                                if is_status_bar_zone(zone_name) {
-                                    // Status-bar: vertical right-edge layout — one TextItem
-                                    // per entry, right-aligned, stacked top-to-bottom.
-                                    emit_status_bar_entries(
-                                        &sorted,
-                                        zx,
-                                        zy,
-                                        zw,
-                                        zh,
-                                        policy,
-                                        anim_opacity,
-                                        &mut items,
-                                    );
-                                } else {
-                                    // Non-status-bar zones: legacy joined-text layout.
+                                // Use per-entry layout only when key_icon_map is non-empty AND
+                                // at least one current entry key has an icon mapping.
+                                let use_icon_layout = !policy.key_icon_map.is_empty()
+                                    && sorted
+                                        .iter()
+                                        .any(|(k, _)| policy.key_icon_map.contains_key(k.as_str()));
+                                if !use_icon_layout {
+                                    // No icons for current entries: single newline-joined TextItem.
                                     let text = sorted
                                         .iter()
                                         .map(|(k, v)| format!("{k}: {v}"))
@@ -2569,6 +2703,17 @@ impl Compositor {
                                         zy,
                                         zw,
                                         zh,
+                                        policy,
+                                        anim_opacity,
+                                    ));
+                                } else {
+                                    // Icons configured for current entries: per-entry TextItems.
+                                    items.extend(Self::status_bar_icon_text_items(
+                                        &sorted,
+                                        &policy.key_icon_map,
+                                        zx,
+                                        zy,
+                                        zw,
                                         policy,
                                         anim_opacity,
                                     ));
@@ -3156,7 +3301,11 @@ impl Compositor {
         }
 
         // ── Ensure image textures are uploaded before rendering ──────────────
-        let image_refs = self.ensure_scene_image_textures(scene);
+        let mut image_refs = self.ensure_scene_image_textures(scene);
+        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
+        // Merge their ResourceIds into the eviction-guard set so they survive.
+        let icon_refs = self.ensure_scene_icon_textures(scene);
+        image_refs.extend(icon_refs);
         self.evict_unused_image_textures(&image_refs);
 
         // Update zone animation states (fade-in/fade-out) before rendering.
@@ -3304,7 +3453,10 @@ impl Compositor {
         let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
 
         // ── Ensure image textures are uploaded before rendering ──────────────
-        let image_refs = self.ensure_scene_image_textures(scene);
+        let mut image_refs = self.ensure_scene_image_textures(scene);
+        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
+        let icon_refs = self.ensure_scene_icon_textures(scene);
+        image_refs.extend(icon_refs);
         self.evict_unused_image_textures(&image_refs);
 
         // Update zone animation states before rendering zone content.
@@ -3452,7 +3604,10 @@ impl Compositor {
         self.sync_widget_textures(scene, self.degradation_level);
 
         // ── Ensure image textures are uploaded before rendering ──────────────
-        let image_refs = self.ensure_scene_image_textures(scene);
+        let mut image_refs = self.ensure_scene_image_textures(scene);
+        // Ensure icon textures (key_icon_map SVGs) are rasterized and cached.
+        let icon_refs = self.ensure_scene_icon_textures(scene);
+        image_refs.extend(icon_refs);
         self.evict_unused_image_textures(&image_refs);
 
         // ── Pass 1: Content (background + agent tiles) ──────────────────────
@@ -3808,28 +3963,8 @@ impl Compositor {
     /// Encode a render pass for textured image quads.
     ///
     /// Uses `LoadOp::Load` to composite textured images on top of the color
-    /// geometry already written to the frame.
-    ///
-    /// ## Batching strategy
-    ///
-    /// To minimise GPU buffer allocations (formerly one per draw command), this
-    /// method:
-    ///
-    /// 1. Filters `cmds` to those whose texture is cached, **preserving the
-    ///    original draw order** so that alpha-blended quads composite correctly.
-    /// 2. Builds a single flat `Vec<TexturedRectVertex>` containing all quad
-    ///    vertices (6 vertices per quad, in original scene order).
-    /// 3. Uploads that data as **one** `wgpu::Buffer` for the entire pass.
-    /// 4. Emits one `draw` call per *consecutive* run of quads that share the
-    ///    same bind group, switching the bind group only when the `resource_id`
-    ///    changes in the traversal order.
-    ///
-    /// This reduces N buffer allocations → 1 per frame.  Bind-group switches
-    /// are minimised for consecutive runs of the same texture (the common case
-    /// for zone backdrops followed by their icon).  A full sort by `resource_id`
-    /// is intentionally avoided: it would change the compositing order of quads
-    /// that belong to different textures and could alter the visual result when
-    /// quads overlap with partial alpha.
+    /// geometry already written to the frame. Each unique `ResourceId` in
+    /// `cmds` switches the bind group to the corresponding cached texture.
     fn encode_image_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3842,36 +3977,8 @@ impl Compositor {
             return;
         }
 
-        use crate::pipeline::TexturedRectVertex;
         use wgpu::util::DeviceExt;
 
-        // ── Step 1: filter to cached commands, preserving original order ──────
-        let cached: Vec<&TexturedDrawCmd> = cmds
-            .iter()
-            .filter(|c| self.image_texture_cache.contains_key(&c.resource_id))
-            .collect();
-        if cached.is_empty() {
-            return;
-        }
-
-        // ── Step 2: build a single flat vertex buffer ─────────────────────────
-        let total_verts = cached.len() * 6;
-        let mut all_verts: Vec<TexturedRectVertex> = Vec::with_capacity(total_verts);
-        for cmd in &cached {
-            let verts =
-                textured_rect_vertices(cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint);
-            all_verts.extend_from_slice(&verts);
-        }
-
-        let vertex_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("image_pass_batch_buf"),
-                contents: bytemuck::cast_slice(&all_verts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-
-        // ── Step 3: encode the render pass with one draw call per consecutive run
         let mut image_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("image_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3888,34 +3995,27 @@ impl Compositor {
         });
 
         image_pass.set_pipeline(&self.texture_rect_pipeline);
-        image_pass.set_vertex_buffer(0, vertex_buf.slice(..));
 
-        // Walk the list in original order and emit one draw call per contiguous
-        // run that shares the same resource_id (and therefore the same bind group).
-        let mut run_start: u32 = 0;
-        let mut current_id = cached[0].resource_id;
+        for cmd in cmds {
+            let entry = match self.image_texture_cache.get(&cmd.resource_id) {
+                Some(e) => e,
+                None => continue, // shouldn't happen if ensure was called
+            };
 
-        for (i, cmd) in cached.iter().enumerate() {
-            let vert_idx = i as u32 * 6;
-            if cmd.resource_id != current_id {
-                // Flush the previous run.
-                let entry = self
-                    .image_texture_cache
-                    .get(&current_id)
-                    .expect("filtered to cached entries above");
-                image_pass.set_bind_group(0, &entry.bind_group, &[]);
-                image_pass.draw(run_start..vert_idx, 0..1);
-                current_id = cmd.resource_id;
-                run_start = vert_idx;
-            }
+            let verts =
+                textured_rect_vertices(cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint);
+            let vertex_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("image_quad_buf"),
+                    contents: bytemuck::cast_slice(&verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+            image_pass.set_bind_group(0, &entry.bind_group, &[]);
+            image_pass.set_vertex_buffer(0, vertex_buf.slice(..));
+            image_pass.draw(0..6, 0..1);
         }
-        // Flush the final run.
-        let entry = self
-            .image_texture_cache
-            .get(&current_id)
-            .expect("filtered to cached entries above");
-        image_pass.set_bind_group(0, &entry.bind_group, &[]);
-        image_pass.draw(run_start..cached.len() as u32 * 6, 0..1);
     }
 
     /// Collect rounded-rectangle draw commands for zones whose `RenderingPolicy`
@@ -4567,6 +4667,58 @@ impl Compositor {
                             }
                         }
                     }
+
+                    // ── StatusBar icon rendering ──────────────────────────────
+                    // Emit TexturedDrawCmd for each status-bar entry whose key
+                    // is mapped to a cached icon texture.  Only runs when the
+                    // zone has key_icon_map entries AND at least one current
+                    // entry key has an icon mapping (avoids spurious layout
+                    // changes when key_icon_map is non-empty but no displayed
+                    // keys are mapped).
+                    if !policy.key_icon_map.is_empty() {
+                        // Reuse shared helper for consistent merge/sort behavior.
+                        let sorted = Self::collect_sorted_status_bar_entries(
+                            publishes,
+                            zone_def.contention_policy,
+                        );
+
+                        // Only proceed when at least one displayed key has an icon.
+                        let has_any_icon = sorted
+                            .iter()
+                            .any(|(k, _)| policy.key_icon_map.contains_key(k.as_str()));
+                        if has_any_icon {
+                            let slot_h = Self::stack_slot_height(policy);
+                            let margin_h =
+                                policy.margin_horizontal.or(policy.margin_px).unwrap_or(8.0);
+
+                            for (row, (k, _v)) in sorted.iter().enumerate() {
+                                let svg_path = match policy.key_icon_map.get(k.as_str()) {
+                                    Some(p) => p,
+                                    None => continue, // no icon for this key
+                                };
+                                // Icons are stored in image_texture_cache under the path-derived
+                                // ResourceId by ensure_icon_texture (called via
+                                // ensure_scene_icon_textures before this render pass).
+                                let resource_id = ResourceId::of(svg_path.as_bytes());
+                                if !self.image_texture_cache.contains_key(&resource_id) {
+                                    continue; // texture not cached — rasterization failed, skip
+                                }
+                                // Position: vertically centered within the entry's slot.
+                                let icon_x = x + margin_h;
+                                let icon_y =
+                                    y + row as f32 * slot_h + (slot_h - ICON_SIZE_PX) * 0.5;
+                                textured_cmds.push(TexturedDrawCmd {
+                                    resource_id,
+                                    x: icon_x,
+                                    y: icon_y,
+                                    w: ICON_SIZE_PX,
+                                    h: ICON_SIZE_PX,
+                                    uv_rect: [0.0, 0.0, 1.0, 1.0],
+                                    tint: [1.0, 1.0, 1.0, anim_opacity.clamp(0.0, 1.0)],
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -4616,6 +4768,55 @@ impl Compositor {
                 vertices.extend_from_slice(&rect_vertices(x, y, w, h, sw, sh, color));
             }
         }
+    }
+
+    /// Collect and sort the active StatusBar entries for a zone.
+    ///
+    /// Shared by `collect_text_items` (text layout) and `render_zone_content`
+    /// (icon rendering) so both paths use the same source of truth for entry
+    /// ordering, merge semantics, and max_keys behavior.
+    ///
+    /// - `MergeByKey`: merges entries from all active publications, respecting
+    ///   `max_keys` as the initial capacity hint.
+    /// - All other policies (LatestWins, Replace): uses the most-recent
+    ///   StatusBar publication only.
+    ///
+    /// Returns entries sorted by key (deterministic row ordering).
+    fn collect_sorted_status_bar_entries(
+        publishes: &[ZonePublishRecord],
+        contention_policy: ContentionPolicy,
+    ) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = match contention_policy {
+            ContentionPolicy::MergeByKey { max_keys } => {
+                let mut merged: HashMap<String, String> = HashMap::with_capacity(max_keys as usize);
+                for record in publishes.iter() {
+                    if let ZoneContent::StatusBar(payload) = &record.content {
+                        for (k, v) in &payload.entries {
+                            merged.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                merged.into_iter().collect()
+            }
+            _ => publishes
+                .iter()
+                .rev()
+                .find_map(|r| {
+                    if let ZoneContent::StatusBar(p) = &r.content {
+                        Some(
+                            p.entries
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default(),
+        };
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries
     }
 
     /// Compute the per-slot height for a Stack zone (single-line content).
@@ -5949,11 +6150,10 @@ mod tests {
 
     /// Zone StatusBar (KeyValuePairs) publish renders visible text at zone geometry.
     ///
-    /// Acceptance criteria for hud-x2v1 (vertical right-edge layout):
-    ///   1. `publish_to_zone` with `ZoneContent::StatusBar` to the canonical
-    ///      "status-bar" zone produces one `TextItem` per entry in `collect_text_items`.
-    ///   2. Items are sorted by key, right-aligned, stacked vertically.
-    ///   3. Pixel render shows bright text in the zone area.
+    /// Acceptance criteria for hud-6at1:
+    ///   1. `publish_to_zone` with `ZoneContent::StatusBar` produces a `TextItem` in
+    ///      `collect_text_items`.
+    ///   2. The key-value pairs are rendered as text at the zone geometry position.
     #[tokio::test]
     async fn test_zone_status_bar_renders_visible_text() {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
@@ -5961,23 +6161,21 @@ mod tests {
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
-        // Register the canonical "status-bar" zone on the right edge (5% width, 40% height).
-        // x_pct=0.95 puts it in the rightmost 5% of the screen.
+        // Register a status-bar zone (top edge, 5% height).
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
-            name: "status-bar".to_owned(),
-            description: "status bar zone — right-edge vertical stack".to_owned(),
-            geometry_policy: GeometryPolicy::Relative {
-                x_pct: 0.95,
-                y_pct: 0.10,
-                width_pct: 0.05,
-                height_pct: 0.40,
+            name: "statusbar".to_owned(),
+            description: "status bar zone".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Top,
+                height_pct: 0.05,
+                width_pct: 0.80,
+                margin_px: 8.0,
             },
             accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
             rendering_policy: RenderingPolicy {
-                font_size_px: Some(13.0),
-                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.85)),
-                text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
+                font_size_px: Some(16.0),
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
                 text_align: None,
                 margin_px: None,
                 ..Default::default()
@@ -5987,16 +6185,16 @@ mod tests {
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
-            layer_attachment: LayerAttachment::Chrome,
+            layer_attachment: LayerAttachment::Content,
         });
 
-        // Publish StatusBar content with two key-value pairs.
+        // Publish StatusBar content with key-value pairs.
         let mut entries = std::collections::HashMap::new();
         entries.insert("battery".to_owned(), "95%".to_owned());
         entries.insert("time".to_owned(), "12:34".to_owned());
         scene
             .publish_to_zone(
-                "status-bar",
+                "statusbar",
                 ZoneContent::StatusBar(StatusBarPayload { entries }),
                 "test",
                 None,
@@ -6005,77 +6203,54 @@ mod tests {
             )
             .unwrap();
 
-        // Vertical right-edge layout: one TextItem per entry (2 entries → 2 items).
+        // Verify collect_text_items produces a TextItem with the formatted pairs.
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
         assert_eq!(
             items.len(),
-            2,
-            "expected one TextItem per status-bar entry (2 entries)"
+            1,
+            "expected exactly one TextItem for StatusBar"
         );
-
-        // Items are sorted by key: "battery" (idx 0) < "time" (idx 1).
-        // "battery" entry gets an icon prefix "🔋 ".
-        assert!(
-            items[0].text.contains("95%"),
-            "first item (battery) should contain '95%'; got: {}",
-            items[0].text
-        );
-        assert!(
-            items[1].text.contains("12:34"),
-            "second item (time) should contain '12:34'; got: {}",
-            items[1].text
-        );
-
-        // Items should be right-aligned.
+        let item = &items[0];
+        // Entries are sorted by key ("battery" < "time") and separated by newlines.
         assert_eq!(
-            items[0].alignment,
-            tze_hud_scene::types::TextAlign::End,
-            "status-bar items must be right-aligned"
+            item.text, "battery: 95%\ntime: 12:34",
+            "Entries should be sorted by key and formatted correctly"
         );
-
-        // Vertical stacking: second item must be below the first.
+        // The TextItem position should be within the zone geometry.
+        // Zone top-edge: y = 8.0 (margin_px), height = 720*0.05 = 36, width = 1280*0.8 = 1024.
         assert!(
-            items[1].pixel_y > items[0].pixel_y,
-            "second entry must be below first entry; got pixel_y[0]={} pixel_y[1]={}",
-            items[0].pixel_y,
-            items[1].pixel_y
+            item.pixel_y >= 8.0,
+            "text y should be at or below zone top margin"
+        );
+        assert!(
+            item.pixel_y < 720.0 * 0.10,
+            "text y should be within top zone area"
         );
 
-        // Both items must be within the zone's y range (0.10–0.50 of 720px = 72..360).
-        for item in &items {
-            assert!(
-                item.pixel_y >= 72.0,
-                "item pixel_y {} should be at or below zone top (72px)",
-                item.pixel_y
-            );
-            assert!(
-                item.pixel_y + item.bounds_height <= 360.0,
-                "item bottom edge {} should be at or above zone bottom (360px)",
-                item.pixel_y + item.bounds_height
-            );
-        }
-
-        // Render to pixels and verify bright text appears in the right edge zone area.
+        // Render to pixels and verify bright text appears in the top zone area.
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
 
-        // Zone is at x = 0.95*1280 = 1216 to 1280, y = 72..360.
-        // Look for bright (text) pixels in that region.
+        // The zone is at the top ~8..44px, centered horizontally.
+        // White text glyphs should show as bright pixels.
         let mut found_bright = false;
-        'outer: for row in 75usize..200 {
-            for col in 1216usize..1278 {
+        for row in 10usize..42 {
+            for col in 150usize..1130 {
                 let offset = (row * 1280 + col) * 4;
                 let p = &pixels[offset..offset + 4];
                 if p[0] > 180 && p[1] > 180 && p[2] > 180 {
                     found_bright = true;
-                    break 'outer;
+                    break;
                 }
+            }
+            if found_bright {
+                break;
             }
         }
         assert!(
             found_bright,
-            "expected bright (text) pixels in status-bar zone area (right edge, rows 75..200, cols 1216..1278)"
+            "expected bright (text) pixels in status bar zone area (rows 10..42)"
         );
     }
 
@@ -8020,10 +8195,7 @@ mod tests {
     }
 
     /// MergeByKey zone: collect_text_items must merge ALL StatusBar publications'
-    /// entries and produce one TextItem per unique key (vertical right-edge layout).
-    ///
-    /// Three unique keys (cpu, mem, net) → three TextItems, sorted by key,
-    /// each right-aligned, stacked vertically.
+    /// entries and produce a single TextItem containing all unique keys.
     #[tokio::test]
     async fn test_merge_by_key_zone_merges_all_status_bar_entries() {
         let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
@@ -8033,11 +8205,11 @@ mod tests {
             id: SceneId::new(),
             name: "status-bar".to_owned(),
             description: "merge-by-key zone test".to_owned(),
-            geometry_policy: GeometryPolicy::Relative {
-                x_pct: 0.92,
-                y_pct: 0.10,
-                width_pct: 0.07,
-                height_pct: 0.40,
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.04,
+                width_pct: 1.0,
+                margin_px: 0.0,
             },
             accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
             rendering_policy: RenderingPolicy {
@@ -8084,61 +8256,39 @@ mod tests {
 
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
 
-        // Vertical layout: one TextItem per unique key (cpu, mem, net = 3 items).
+        // MergeByKey must produce exactly ONE TextItem containing all merged entries.
         assert_eq!(
             items.len(),
-            3,
-            "status-bar MergeByKey must produce one TextItem per unique key (3 keys), got {}",
+            1,
+            "MergeByKey zone must produce a single merged TextItem, got {}",
             items.len()
         );
 
-        // Items are sorted by key: cpu < mem < net.
-        // cpu icon prefix is "🖥 ", mem icon prefix is "💾 ", net icon prefix is "📶 ".
-        let all_text: String = items
-            .iter()
-            .map(|i| i.text.as_str())
-            .collect::<Vec<_>>()
-            .join("|");
+        let text = &items[0].text;
         assert!(
-            all_text.contains("45%"),
-            "merged items must include cpu value '45%'; got: {all_text}"
+            text.contains("cpu"),
+            "merged text must include 'cpu' key; got: {text}"
         );
         assert!(
-            all_text.contains("8.2 GB"),
-            "merged items must include mem value '8.2 GB'; got: {all_text}"
+            text.contains("mem"),
+            "merged text must include 'mem' key; got: {text}"
         );
         assert!(
-            all_text.contains("1.2 MB/s"),
-            "merged items must include net value '1.2 MB/s'; got: {all_text}"
-        );
-
-        // All items must be right-aligned.
-        for item in &items {
-            assert_eq!(
-                item.alignment,
-                tze_hud_scene::types::TextAlign::End,
-                "status-bar items must be right-aligned"
-            );
-        }
-
-        // Items must be stacked vertically (ascending pixel_y).
-        assert!(
-            items[1].pixel_y > items[0].pixel_y,
-            "item[1] must be below item[0]; got pixel_y[0]={} pixel_y[1]={}",
-            items[0].pixel_y,
-            items[1].pixel_y
+            text.contains("net"),
+            "merged text must include 'net' key; got: {text}"
         );
         assert!(
-            items[2].pixel_y > items[1].pixel_y,
-            "item[2] must be below item[1]; got pixel_y[1]={} pixel_y[2]={}",
-            items[1].pixel_y,
-            items[2].pixel_y
+            text.contains("45%"),
+            "merged text must include cpu value '45%'; got: {text}"
+        );
+        assert!(
+            text.contains("1.2 MB/s"),
+            "merged text must include net value '1.2 MB/s'; got: {text}"
         );
     }
 
     /// MergeByKey zone: when a key appears in multiple publications, the latest
-    /// value wins (last-write-wins per key semantics). With vertical layout,
-    /// one unique key "cpu" → one TextItem showing the latest value.
+    /// value wins (last-write-wins per key semantics).
     #[tokio::test]
     async fn test_merge_by_key_latest_value_wins_for_duplicate_keys() {
         let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
@@ -8148,11 +8298,11 @@ mod tests {
             id: SceneId::new(),
             name: "status-bar".to_owned(),
             description: "merge-by-key duplicate key test".to_owned(),
-            geometry_policy: GeometryPolicy::Relative {
-                x_pct: 0.92,
-                y_pct: 0.10,
-                width_pct: 0.07,
-                height_pct: 0.40,
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.04,
+                width_pct: 1.0,
+                margin_px: 0.0,
             },
             accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
             rendering_policy: RenderingPolicy {
@@ -8202,18 +8352,183 @@ mod tests {
 
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
 
-        // One unique key "cpu" → one TextItem in vertical layout.
-        assert_eq!(items.len(), 1, "one unique key must produce one TextItem");
+        assert_eq!(items.len(), 1, "must produce one merged TextItem");
         let text = &items[0].text;
 
         // The latest value "90%" must appear; "10%" must not.
         assert!(
             text.contains("90%"),
-            "item text must show latest cpu value '90%'; got: {text}"
+            "merged text must show latest cpu value '90%'; got: {text}"
         );
         assert!(
             !text.contains("10%"),
-            "item text must not show stale cpu value '10%'; got: {text}"
+            "merged text must not show stale cpu value '10%'; got: {text}"
+        );
+    }
+
+    // ── StatusBar icon layout tests [hud-x2v1.2] ─────────────────────────────
+
+    /// `key_icon_map` empty → single merged TextItem (backward-compatible).
+    ///
+    /// When `key_icon_map` is empty, the existing single-TextItem newline-joined
+    /// behavior must be preserved unchanged.
+    #[tokio::test]
+    async fn test_status_bar_empty_key_icon_map_produces_single_text_item() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "status-bar".to_owned(),
+            description: "icon layout: empty map regression".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.04,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)),
+                text_color: Some(Rgba::WHITE),
+                // key_icon_map defaults to empty HashMap via serde(default).
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::MergeByKey { max_keys: 16 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("cpu".to_owned(), "45%".to_owned());
+        entries.insert("mem".to_owned(), "8 GB".to_owned());
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload { entries }),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // Must still produce exactly ONE TextItem (no icon layout).
+        assert_eq!(
+            items.len(),
+            1,
+            "empty key_icon_map must produce one merged TextItem; got {}",
+            items.len()
+        );
+        let text = &items[0].text;
+        assert!(text.contains("cpu"), "text must contain 'cpu'");
+        assert!(text.contains("mem"), "text must contain 'mem'");
+        // Entries joined with newline (alphabetically sorted).
+        assert!(
+            text.contains('\n'),
+            "multiple entries must be newline-separated; got: {text}"
+        );
+    }
+
+    /// `key_icon_map` non-empty → per-entry TextItems; icon-mapped entries have
+    /// text `pixel_x` inset by `ICON_SIZE_PX + ICON_TEXT_GAP_PX`.
+    ///
+    /// We don't use real SVG files here since tests can't rely on specific
+    /// filesystem paths.  Instead we verify the TextItem layout (pixel_x
+    /// position) produced by `status_bar_icon_text_items` directly — the icon
+    /// draw command path is exercised separately.
+    #[tokio::test]
+    async fn test_status_bar_key_icon_map_produces_per_entry_text_items() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut key_icon_map = std::collections::HashMap::new();
+        // Map only "cpu" to an icon path; "mem" has no mapping.
+        key_icon_map.insert("cpu".to_owned(), "/nonexistent/cpu.svg".to_owned());
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "status-bar".to_owned(),
+            description: "icon layout: per-entry TextItems".to_owned(),
+            geometry_policy: GeometryPolicy::EdgeAnchored {
+                edge: DisplayEdge::Bottom,
+                height_pct: 0.10,
+                width_pct: 1.0,
+                margin_px: 0.0,
+            },
+            accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.08, 0.08, 0.08, 1.0)),
+                text_color: Some(Rgba::WHITE),
+                font_size_px: Some(16.0),
+                key_icon_map,
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::MergeByKey { max_keys: 16 },
+            max_publishers: 4,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("cpu".to_owned(), "45%".to_owned());
+        entries.insert("mem".to_owned(), "8 GB".to_owned());
+        scene
+            .publish_to_zone(
+                "status-bar",
+                ZoneContent::StatusBar(StatusBarPayload { entries }),
+                "agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // Must produce one TextItem per entry (2 entries → 2 TextItems).
+        assert_eq!(
+            items.len(),
+            2,
+            "non-empty key_icon_map must produce per-entry TextItems; got {}",
+            items.len()
+        );
+
+        // Entries are sorted by key: "cpu" (row 0) then "mem" (row 1).
+        let cpu_item = items.iter().find(|i| i.text.starts_with("cpu:"));
+        let mem_item = items.iter().find(|i| i.text.starts_with("mem:"));
+
+        assert!(cpu_item.is_some(), "expected a TextItem for 'cpu'");
+        assert!(mem_item.is_some(), "expected a TextItem for 'mem'");
+
+        let cpu_item = cpu_item.unwrap();
+        let mem_item = mem_item.unwrap();
+
+        // "cpu" is icon-mapped: pixel_x must be inset by ICON_SIZE_PX + ICON_TEXT_GAP_PX
+        // relative to "mem" (which has no icon).
+        // Both items use from_zone_policy with x = zx + icon_inset, so:
+        //   cpu.pixel_x = zx + ICON_SIZE_PX + ICON_TEXT_GAP_PX + margin_h
+        //   mem.pixel_x = zx + 0 + margin_h
+        // Difference should be exactly ICON_SIZE_PX + ICON_TEXT_GAP_PX (30.0).
+        let icon_inset = ICON_SIZE_PX + ICON_TEXT_GAP_PX; // 24.0 + 6.0 = 30.0
+        let diff = cpu_item.pixel_x - mem_item.pixel_x;
+        assert!(
+            (diff - icon_inset).abs() < 0.5,
+            "cpu pixel_x must be inset by {icon_inset} px relative to mem; diff={diff}"
+        );
+
+        // "mem" has no icon: bounds_width must be wider than "cpu" by icon_inset.
+        let width_diff = mem_item.bounds_width - cpu_item.bounds_width;
+        assert!(
+            (width_diff - icon_inset).abs() < 0.5,
+            "mem bounds_width must be {icon_inset} px wider than cpu; diff={width_diff}"
         );
     }
 
