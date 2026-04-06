@@ -1438,7 +1438,7 @@ impl Compositor {
 
         // Create GPU texture.
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(&format!("img_tex_{}", resource_id)),
+            label: Some(&format!("img_tex_{resource_id}")),
             size: wgpu::Extent3d {
                 width: img_width,
                 height: img_height,
@@ -1476,7 +1476,7 @@ impl Compositor {
         // Create bind group.
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(&format!("img_bg_{}", resource_id)),
+            label: Some(&format!("img_bg_{resource_id}")),
             layout: &self.texture_rect_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -3674,7 +3674,7 @@ impl Compositor {
     }
 
     /// Render a node and its children within a tile.
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
     fn render_node(
         &self,
         node_id: SceneId,

@@ -144,6 +144,7 @@ impl TexturedRectVertex {
 /// Coordinates are in pixels; they are converted to NDC internally.
 /// `uv_rect` is `(u_min, v_min, u_max, v_max)` — use `(0,0,1,1)` for the
 /// full texture, or custom values for fit-mode cropping / letterboxing.
+#[allow(clippy::too_many_arguments)]
 pub fn textured_rect_vertices(
     x: f32,
     y: f32,
