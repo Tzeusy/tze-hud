@@ -79,7 +79,8 @@ async fn render_scene(scene: SceneGraph, w: u32, h: u32) -> Vec<u8> {
         .await
         .expect("headless compositor");
     let surface = HeadlessSurface::new(&compositor.device, w, h);
-    compositor.render_frame_headless(&scene, &surface);
+    let mut scene = scene;
+    compositor.render_frame_headless(&mut scene, &surface);
     surface.read_pixels(&compositor.device)
 }
 

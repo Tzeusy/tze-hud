@@ -1544,18 +1544,21 @@ pub struct ZonePublishToken {
 /// A single actionable button on a notification.
 ///
 /// When the user clicks or activates an action button, the runtime routes the
-/// callback to the publishing agent by emitting an interaction event whose
-/// `interaction_id` equals `callback_id`.
+/// callback to the publishing agent by emitting an interaction event.  The
+/// emitted event's `interaction_id` follows the scheme
+/// `"zone:{zone_name}:action:{published_at_wall_us}:{publisher_namespace}:{callback_id}"`
+/// (see [`ZoneInteractionKind::Action`] and [`ZoneHitRegion::interaction_id`]).
 ///
 /// Rendering: buttons appear in a horizontal row at the bottom of the
-/// notification slot.  Labels are truncated with ellipsis if they exceed
-/// `MAX_ACTION_LABEL_LEN` characters.
+/// notification slot.  Labels exceeding `MAX_ACTION_LABEL_LEN` characters are
+/// not currently truncated by the runtime — callers should enforce this limit
+/// before publishing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationAction {
     /// Human-readable label shown on the button (e.g. "Open", "Snooze").
     ///
-    /// Maximum `MAX_ACTION_LABEL_LEN` characters; excess is silently truncated
-    /// at publish time.
+    /// Maximum `MAX_ACTION_LABEL_LEN` characters.  The runtime does not
+    /// currently enforce truncation; callers are responsible.
     pub label: String,
     /// Opaque callback identifier forwarded to the publishing agent when the
     /// button is activated (click or keyboard Enter/Space).
@@ -1568,8 +1571,9 @@ pub struct NotificationAction {
 
 /// Maximum UTF-8 character length for a `NotificationAction` label.
 ///
-/// Labels exceeding this limit are truncated (by the scene graph at publish
-/// time) to prevent overflow in the rendered slot.
+/// Labels exceeding this limit may overflow the rendered slot.  The runtime
+/// does not currently enforce truncation at publish time; callers should
+/// respect this limit before constructing a [`NotificationAction`].
 pub const MAX_ACTION_LABEL_LEN: usize = 32;
 
 /// Notification payload: text + optional icon + urgency + optional two-line layout + optional action buttons.

@@ -400,9 +400,9 @@ impl HeadlessRuntime {
         // render_frame_headless takes &mut SceneGraph to populate zone_hit_regions after
         // rendering so that interactive zone affordances are ready for the next frame's
         // hit-testing.
-        let compositor_telemetry =
-            self.compositor
-                .render_frame_headless(&mut scene_guard, &self.surface);
+        let compositor_telemetry = self
+            .compositor
+            .render_frame_headless(&mut scene_guard, &self.surface);
         // Total frame time from Compositor covers encode + submit
         let stage6_us = compositor_telemetry.render_encode_us;
         let stage7_us = compositor_telemetry.gpu_submit_us;

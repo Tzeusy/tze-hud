@@ -3405,9 +3405,11 @@ impl SceneGraph {
     ///
     /// # Local feedback
     ///
-    /// Per doctrine ("local feedback first"), the caller (compositor/input pipeline)
-    /// MUST remove the dismiss hit region from `zone_hit_regions` in the same pass
-    /// to avoid a stale affordance on the next rendered frame.
+    /// Per doctrine ("local feedback first"), this method immediately removes
+    /// matching hit regions from `zone_hit_regions` so that the stale dismiss
+    /// affordance is gone before the next rendered frame.  Empty zone entries
+    /// are pruned from `active_publishes` for consistency with other cleanup
+    /// helpers.
     pub fn dismiss_notification(
         &mut self,
         zone_name: &str,
@@ -3425,6 +3427,17 @@ impl SceneGraph {
         });
         let removed = publishes.len() < before;
         if removed {
+            // Prune empty zone entry (consistent with other cleanup helpers).
+            if publishes.is_empty() {
+                self.zone_registry.active_publishes.remove(zone_name);
+            }
+            // Remove stale hit regions for this publication immediately so
+            // pointer/keyboard events can no longer land on them this frame.
+            self.zone_hit_regions.retain(|r| {
+                !(r.zone_name == zone_name
+                    && r.published_at_wall_us == published_at_wall_us
+                    && r.publisher_namespace == publisher_namespace)
+            });
             self.version += 1;
         }
         removed

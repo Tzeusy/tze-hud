@@ -767,7 +767,7 @@ async fn test_ambient_background_static_image_renders_texture_when_bytes_registe
         )
         .expect("publish StaticImage must succeed");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // The image is solid red. When rendered as a texture, centre pixels should be
@@ -808,7 +808,7 @@ async fn test_ambient_background_static_image_falls_back_to_placeholder_without_
         )
         .expect("publish StaticImage must succeed");
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Should render the warm-gray placeholder.
@@ -889,7 +889,7 @@ async fn test_tile_static_image_fill_mode_renders_texture() {
 
     compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
 
-    let scene = scene_with_static_image_tile(
+    let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
         SURFACE_H as f32,
         resource_id,
@@ -898,7 +898,7 @@ async fn test_tile_static_image_fill_mode_renders_texture() {
         ImageFitMode::Fill,
     );
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Centre pixel should be green.
@@ -925,7 +925,7 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
 
     compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
 
-    let scene = scene_with_static_image_tile(
+    let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
         SURFACE_H as f32,
         resource_id,
@@ -934,7 +934,7 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
         ImageFitMode::Contain,
     );
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // For a 16:8 (2:1) image in a 256x256 square:
@@ -973,7 +973,7 @@ async fn test_tile_static_image_cover_mode_fills_completely() {
 
     compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
 
-    let scene = scene_with_static_image_tile(
+    let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
         SURFACE_H as f32,
         resource_id,
@@ -982,7 +982,7 @@ async fn test_tile_static_image_cover_mode_fills_completely() {
         ImageFitMode::Cover,
     );
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // Cover fills the entire destination. Since the image is solid magenta,
@@ -1018,7 +1018,7 @@ async fn test_tile_static_image_scale_down_mode_native_size() {
 
     compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
 
-    let scene = scene_with_static_image_tile(
+    let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
         SURFACE_H as f32,
         resource_id,
@@ -1027,7 +1027,7 @@ async fn test_tile_static_image_scale_down_mode_native_size() {
         ImageFitMode::ScaleDown,
     );
 
-    compositor.render_frame_headless(&scene, &surface);
+    compositor.render_frame_headless(&mut scene, &surface);
     let pixels = surface.read_pixels(&compositor.device);
 
     // ScaleDown with 4x4 image in 256x256 dest: renders at native 4x4 size, centred.

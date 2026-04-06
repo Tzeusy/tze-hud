@@ -4198,9 +4198,10 @@ impl Compositor {
     ///
     /// # Called by
     ///
-    /// Called at the beginning of each frame render before hit-testing, so that
-    /// `SceneGraph::hit_test` returns `ZoneInteraction` for affordances rendered
-    /// in the current frame.
+    /// Called after a frame render completes to refresh `scene.zone_hit_regions`
+    /// for the next frame's hit-testing.  This prepares `SceneGraph::hit_test` to
+    /// return `ZoneInteraction` for zone affordances based on the most recently
+    /// rendered layout.
     pub fn populate_zone_hit_regions(&self, scene: &mut SceneGraph, sw: f32, sh: f32) {
         /// Side length of the dismiss (×) button in pixels.
         const DISMISS_BUTTON_SIZE: f32 = 20.0;
@@ -4212,7 +4213,17 @@ impl Compositor {
         scene.zone_hit_regions.clear();
         let mut tab_order: u32 = 0;
 
-        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+        // Sort zone names for deterministic tab-order assignment across frames.
+        // HashMap iteration order is nondeterministic; sorting ensures keyboard
+        // focus cycling is stable when multiple interactive zones are present.
+        let mut zone_names: Vec<_> = scene.zone_registry.active_publishes.keys().collect();
+        zone_names.sort_unstable();
+
+        for zone_name in zone_names {
+            let publishes = match scene.zone_registry.active_publishes.get(zone_name) {
+                Some(p) => p,
+                None => continue,
+            };
             if publishes.is_empty() {
                 continue;
             }
@@ -5299,7 +5310,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -5769,7 +5781,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -5840,7 +5853,8 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -5943,7 +5957,8 @@ mod tests {
                     urgency: 3, // Critical — must use color.notification.urgency.critical, NOT color.severity.critical
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -6203,7 +6218,8 @@ mod tests {
                     urgency: 1, // normal
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -6266,7 +6282,8 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -6333,7 +6350,8 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -6396,7 +6414,8 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -6590,7 +6609,8 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -6818,7 +6838,8 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -6910,7 +6931,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-a",
                 None,
                 None,
@@ -6926,7 +6948,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-b",
                 None,
                 None,
@@ -7012,7 +7035,8 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-a",
                 None,
                 None,
@@ -7028,7 +7052,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-b",
                 None,
                 None,
@@ -7044,7 +7069,8 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-c",
                 None,
                 None,
@@ -7143,7 +7169,8 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                        actions: Vec::new(),                    }),
+                        actions: Vec::new(),
+                    }),
                     &format!("agent-{i}"),
                     None,
                     None,
@@ -7225,7 +7252,8 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-0",
                 None,
                 None,
@@ -7242,7 +7270,8 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                        actions: Vec::new(),                    }),
+                        actions: Vec::new(),
+                    }),
                     &format!("agent-{i}"),
                     None,
                     None,
@@ -7323,7 +7352,8 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                        actions: Vec::new(),                    }),
+                        actions: Vec::new(),
+                    }),
                     &format!("agent-{i}"),
                     None,
                     None,
@@ -7668,7 +7698,8 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "test",
                 None,
                 None,
@@ -7964,7 +7995,8 @@ mod tests {
                     urgency,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 publisher,
                 None,
                 None,
@@ -8311,7 +8343,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-a",
                 None,
                 None,
@@ -8434,7 +8467,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-a",
                 None,
                 None,
@@ -8928,7 +8962,8 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-a",
                 None,
                 None,
@@ -8944,7 +8979,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-b",
                 None,
                 None,
@@ -9106,7 +9142,8 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                        actions: Vec::new(),                    }),
+                        actions: Vec::new(),
+                    }),
                     agent,
                     None,
                     None,
@@ -9224,7 +9261,8 @@ mod tests {
                     urgency: 1,
                     ttl_ms: Some(3_000),
                     title: String::new(),
-                    actions: Vec::new(),                }),
+                    actions: Vec::new(),
+                }),
                 "agent-a",
                 None,
                 None,
@@ -9266,7 +9304,8 @@ mod tests {
                 urgency: 0,
                 ttl_ms: None,
                 title: String::new(),
-                actions: Vec::new(),            }),
+                actions: Vec::new(),
+            }),
             published_at_wall_us: 2_000_000,
             merge_key: None,
             expires_at_wall_us: None,
@@ -9829,7 +9868,8 @@ mod tests {
                 urgency: 2,
                 ttl_ms: None, // No per-notification TTL — urgency path sets expires_at
                 title: String::new(),
-                actions: Vec::new(),            }),
+                actions: Vec::new(),
+            }),
             published_at_wall_us: 0,
             merge_key: None,
             expires_at_wall_us: Some(15_000_000), // 15 s in µs
@@ -9853,7 +9893,8 @@ mod tests {
                 urgency: 3,
                 ttl_ms: None,
                 title: String::new(),
-                actions: Vec::new(),            }),
+                actions: Vec::new(),
+            }),
             published_at_wall_us: 0,
             merge_key: None,
             expires_at_wall_us: Some(30_000_000), // 30 s in µs
@@ -9877,7 +9918,8 @@ mod tests {
                 urgency: 2,
                 ttl_ms: Some(5_000), // explicit 5 s TTL on the notification itself
                 title: String::new(),
-                actions: Vec::new(),            }),
+                actions: Vec::new(),
+            }),
             published_at_wall_us: 1_000_000, // published at t=1s
             merge_key: None,
             expires_at_wall_us: Some(16_000_000), // expires at t=16s → 15 s duration
@@ -9900,7 +9942,8 @@ mod tests {
                 urgency: 1,
                 ttl_ms: Some(8_000),
                 title: String::new(),
-                actions: Vec::new(),            }),
+                actions: Vec::new(),
+            }),
             published_at_wall_us: 0,
             merge_key: None,
             expires_at_wall_us: None,
@@ -10333,8 +10376,7 @@ mod tests {
     /// single notification with no actions in a Stack zone.
     #[tokio::test]
     async fn zone_hit_single_notification_produces_dismiss_region() {
-        let (compositor, _surface) =
-            require_gpu!(make_compositor_and_surface(256, 256).await);
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let _tab = scene.create_tab("Main", 0).unwrap();
@@ -10401,8 +10443,7 @@ mod tests {
     /// Expected: dismiss.x ≈ 1920*0.75 + 1920*0.24 - 20 = 1440 + 460.8 - 20 = 1880.8.
     #[tokio::test]
     async fn zone_hit_dismiss_region_at_top_right_of_slot() {
-        let (compositor, _surface) =
-            require_gpu!(make_compositor_and_surface(256, 256).await);
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         let sw = 1920.0f32;
         let sh = 1080.0f32;
@@ -10449,7 +10490,11 @@ mod tests {
 
         compositor.populate_zone_hit_regions(&mut scene, sw, sh);
 
-        assert_eq!(scene.zone_hit_regions.len(), 1, "must have exactly 1 region");
+        assert_eq!(
+            scene.zone_hit_regions.len(),
+            1,
+            "must have exactly 1 region"
+        );
         let region = &scene.zone_hit_regions[0];
 
         // Dismiss should be at the top-right of the slot.
@@ -10471,8 +10516,7 @@ mod tests {
     /// A notification with 2 actions MUST produce 3 regions: 1 dismiss + 2 actions.
     #[tokio::test]
     async fn zone_hit_notification_with_two_actions_produces_three_regions() {
-        let (compositor, _surface) =
-            require_gpu!(make_compositor_and_surface(256, 256).await);
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let _tab = scene.create_tab("Main", 0).unwrap();
@@ -10558,8 +10602,7 @@ mod tests {
     /// Tab order MUST be sequential: dismiss=0, action[0]=1, action[1]=2.
     #[tokio::test]
     async fn zone_hit_tab_order_is_sequential() {
-        let (compositor, _surface) =
-            require_gpu!(make_compositor_and_surface(256, 256).await);
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let _tab = scene.create_tab("Main", 0).unwrap();
@@ -10614,16 +10657,24 @@ mod tests {
         compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
 
         assert_eq!(scene.zone_hit_regions.len(), 3, "must produce 3 regions");
-        assert_eq!(scene.zone_hit_regions[0].tab_order, 0, "dismiss tab_order must be 0");
-        assert_eq!(scene.zone_hit_regions[1].tab_order, 1, "action[0] tab_order must be 1");
-        assert_eq!(scene.zone_hit_regions[2].tab_order, 2, "action[1] tab_order must be 2");
+        assert_eq!(
+            scene.zone_hit_regions[0].tab_order, 0,
+            "dismiss tab_order must be 0"
+        );
+        assert_eq!(
+            scene.zone_hit_regions[1].tab_order, 1,
+            "action[0] tab_order must be 1"
+        );
+        assert_eq!(
+            scene.zone_hit_regions[2].tab_order, 2,
+            "action[1] tab_order must be 2"
+        );
     }
 
     /// Calling `populate_zone_hit_regions` twice MUST clear stale regions (no accumulation).
     #[tokio::test]
     async fn zone_hit_populate_clears_on_repeated_calls() {
-        let (compositor, _surface) =
-            require_gpu!(make_compositor_and_surface(256, 256).await);
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(256, 256).await);
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         let _tab = scene.create_tab("Main", 0).unwrap();

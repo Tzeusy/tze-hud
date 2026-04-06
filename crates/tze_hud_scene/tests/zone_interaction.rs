@@ -91,9 +91,8 @@ fn insert_dismiss_region(
     bounds: Rect,
     tab_order: u32,
 ) {
-    let interaction_id = format!(
-        "zone:{zone_name}:dismiss:{published_at_wall_us}:{publisher_namespace}"
-    );
+    let interaction_id =
+        format!("zone:{zone_name}:dismiss:{published_at_wall_us}:{publisher_namespace}");
     scene.zone_hit_regions.push(ZoneHitRegion {
         zone_name: zone_name.to_string(),
         published_at_wall_us,
@@ -120,7 +119,10 @@ fn dismiss_notification_removes_matching_publication() {
 
     let removed = scene.dismiss_notification("notif", published_at, ns);
 
-    assert!(removed, "dismiss_notification must return true for a matching publication");
+    assert!(
+        removed,
+        "dismiss_notification must return true for a matching publication"
+    );
     assert_eq!(
         scene.zone_registry.active_for_zone("notif").len(),
         0,
@@ -153,7 +155,10 @@ fn dismiss_notification_returns_false_for_unknown_zone() {
     let result = scene.dismiss_notification("nonexistent-zone", published_at, ns);
 
     assert!(!result, "must return false for unknown zone");
-    assert_eq!(scene.version, version_before, "version must not change for unknown zone");
+    assert_eq!(
+        scene.version, version_before,
+        "version must not change for unknown zone"
+    );
 }
 
 /// `dismiss_notification()` MUST return `false` when the publication key does
@@ -164,7 +169,10 @@ fn dismiss_notification_returns_false_for_wrong_pub_key() {
 
     let result = scene.dismiss_notification("notif", 99999, ns);
 
-    assert!(!result, "must return false when published_at does not match");
+    assert!(
+        !result,
+        "must return false when published_at does not match"
+    );
     assert_eq!(
         scene.zone_registry.active_for_zone("notif").len(),
         1,
@@ -245,9 +253,16 @@ fn dismiss_notification_leaves_other_publications_untouched() {
 
     let removed = scene.dismiss_notification("notif", agent_a_pub_at, "agent-a");
 
-    assert!(removed, "dismiss must return true for agent-a's publication");
+    assert!(
+        removed,
+        "dismiss must return true for agent-a's publication"
+    );
     let remaining = scene.zone_registry.active_for_zone("notif");
-    assert_eq!(remaining.len(), 1, "one publication must remain after dismiss");
+    assert_eq!(
+        remaining.len(),
+        1,
+        "one publication must remain after dismiss"
+    );
     assert_eq!(
         remaining[0].publisher_namespace, "agent-b",
         "agent-b's publication must survive"
@@ -485,11 +500,14 @@ fn zone_hit_regions_are_skipped_in_serialization() {
         0,
     );
 
-    assert_eq!(scene.zone_hit_regions.len(), 1, "precondition: region present");
+    assert_eq!(
+        scene.zone_hit_regions.len(),
+        1,
+        "precondition: region present"
+    );
 
     let json = serde_json::to_string(&scene).expect("serialization must succeed");
-    let restored: SceneGraph =
-        serde_json::from_str(&json).expect("deserialization must succeed");
+    let restored: SceneGraph = serde_json::from_str(&json).expect("deserialization must succeed");
 
     assert!(
         restored.zone_hit_regions.is_empty(),
