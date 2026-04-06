@@ -3355,15 +3355,15 @@ impl Compositor {
             }
         }
 
+        // ── Single-pass partition of all rounded-rect commands ────────────────
+        // Collect once; reuse the partitioned results in both SDF passes below.
+        let rr_all = self.collect_all_rounded_rect_cmds(scene, sw, sh);
+
         // ── Background SDF rounded-rect pass ──────────────────────────────────
         // Runs after the Clear pass (so it composites over the cleared surface)
         // but BEFORE tile/content/chrome geometry — this is what ensures
         // Background backdrops are correctly occluded by agent tiles.
-        {
-            let rr_bg =
-                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
-            self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_bg, sw, sh);
-        }
+        self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_all.background, sw, sh);
 
         // ── Geometry pass 2: Tiles + Content + Chrome flat-rect zones ─────────
         // Uses LoadOp::Load to preserve the Background geometry drawn above.
@@ -3403,18 +3403,8 @@ impl Compositor {
         // Runs after tiles so Content/Chrome backdrops composite above tiles.
         {
             let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
-            rr_post.extend(self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Content),
-            ));
-            rr_post.extend(self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Chrome),
-            ));
+            rr_post.extend(rr_all.content);
+            rr_post.extend(rr_all.chrome);
             self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_post, sw, sh);
         }
 
@@ -4000,13 +3990,13 @@ impl Compositor {
             }
         }
 
+        // ── Single-pass partition of all rounded-rect commands ────────────────
+        // Collect once; reuse the partitioned results in both SDF passes below.
+        let rr_all = self.collect_all_rounded_rect_cmds(scene, sw, sh);
+
         // ── Background SDF rounded-rect pass ─────────────────────────────────
         // Runs after the Clear pass so Background backdrops are below tiles.
-        {
-            let rr_bg =
-                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
-            self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_bg, sw, sh);
-        }
+        self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_all.background, sw, sh);
 
         // ── Content pass 2: Tiles + Content + Chrome flat-rect zones ──────────
         // Uses LoadOp::Load to preserve Background geometry drawn above.
@@ -4040,18 +4030,8 @@ impl Compositor {
         // Runs after tiles so Content/Chrome backdrops composite above tiles.
         {
             let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
-            rr_post.extend(self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Content),
-            ));
-            rr_post.extend(self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Chrome),
-            ));
+            rr_post.extend(rr_all.content);
+            rr_post.extend(rr_all.chrome);
             self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_post, sw, sh);
         }
 
@@ -4325,14 +4305,12 @@ impl Compositor {
     /// Mirrors the backdrop-resolution logic in `render_zone_content` so color
     /// derivation (severity tokens, urgency colors, opacity) is consistent.
     ///
-    /// # Layer filtering
-    ///
     /// Collect all rounded-rectangle draw commands in a single pass, partitioned by layer.
     ///
     /// Zones with `backdrop_radius` in their `RenderingPolicy` are collected and
     /// partitioned into separate vectors for Background, Content, and Chrome layers.
-    /// This replaces three separate calls to `collect_rounded_rect_cmds` with one
-    /// efficient pass through the zone registry.
+    /// A single pass through the zone registry replaces the previous three-pass approach
+    /// (one per layer), reducing per-frame iteration cost by 3x.
     ///
     /// These zones are excluded from the flat-rect backdrop pass
     /// (`render_zone_content`) and rendered instead by `encode_rounded_rect_pass`
@@ -4511,181 +4489,6 @@ impl Compositor {
         result
     }
 
-    /// When `only_layer` is `Some(layer)`, only zones matching that layer are
-    /// included.  Pass `None` to collect all layers.
-    fn collect_rounded_rect_cmds(
-        &self,
-        scene: &SceneGraph,
-        sw: f32,
-        sh: f32,
-        only_layer: Option<LayerAttachment>,
-    ) -> Vec<RoundedRectDrawCmd> {
-        let mut cmds = Vec::new();
-
-        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
-            if publishes.is_empty() {
-                continue;
-            }
-            let zone_def = match scene.zone_registry.zones.get(zone_name) {
-                Some(z) => z,
-                None => continue,
-            };
-
-            // Layer filter.
-            if let Some(required_layer) = only_layer {
-                if zone_def.layer_attachment != required_layer {
-                    continue;
-                }
-            }
-
-            let policy = &zone_def.rendering_policy;
-
-            // Only collect zones with a backdrop_radius — others use the flat rect path.
-            let radius = match policy.backdrop_radius {
-                Some(r) if r > 0.0 => r,
-                _ => continue,
-            };
-
-            let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
-            // Clamp radius against the zone's full dimensions as a first-pass
-            // upper bound. For Stack zones, each slot height (effective_slot_h)
-            // may be smaller than h, so per-slot clamping is applied below.
-            let max_r_zone = (w * 0.5).min(h * 0.5).max(0.0);
-            let radius = radius.min(max_r_zone);
-
-            let anim_opacity = self
-                .zone_animation_states
-                .get(zone_name)
-                .map(|s| s.current_opacity())
-                .unwrap_or(1.0);
-
-            // Resolve backdrop color using the same logic as render_zone_content.
-            match zone_def.contention_policy {
-                ContentionPolicy::Stack { .. } => {
-                    let slot_h = Self::stack_slot_height(policy);
-                    let effective_h = if is_alert_banner_zone(zone_name) {
-                        publishes.len() as f32 * slot_h
-                    } else {
-                        h
-                    };
-
-                    let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
-                        sort_alert_banner_indices(publishes)
-                    } else {
-                        (0..publishes.len()).rev().collect()
-                    };
-
-                    for (slot_idx, &pub_idx) in ordered_indices.iter().enumerate() {
-                        let record = &publishes[pub_idx];
-                        let slot_y = y + slot_idx as f32 * slot_h;
-                        if slot_y >= y + effective_h {
-                            break;
-                        }
-                        let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
-
-                        let pub_opacity = self.pub_opacity(zone_name, record);
-                        let combined_opacity = (anim_opacity * pub_opacity).clamp(0.0, 1.0);
-
-                        let is_notification_content =
-                            matches!(&record.content, ZoneContent::Notification(_));
-                        let backdrop_rgba: Option<Rgba> = match &record.content {
-                            ZoneContent::SolidColor(rgba) => Some(*rgba),
-                            ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
-                            ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
-                                if policy.backdrop.is_some() {
-                                    Some(urgency_to_severity_color(n.urgency, &self.token_map))
-                                } else {
-                                    None
-                                }
-                            }
-                            ZoneContent::Notification(n) => {
-                                if policy.backdrop.is_some() {
-                                    let mut color =
-                                        urgency_to_notification_color(n.urgency, &self.token_map);
-                                    color.a = NOTIFICATION_BACKDROP_OPACITY;
-                                    Some(color)
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => policy.backdrop,
-                        };
-
-                        if let Some(mut rgba) = backdrop_rgba {
-                            if !is_notification_content || is_alert_banner_zone(zone_name) {
-                                if let Some(opacity) = policy.backdrop_opacity {
-                                    rgba.a = opacity.clamp(0.0, 1.0);
-                                }
-                            }
-                            rgba.a *= combined_opacity;
-                            // Re-clamp radius per slot: effective_slot_h may be
-                            // smaller than the zone height (e.g., last slot in a
-                            // stack), so the radius must not exceed half the slot.
-                            let slot_radius =
-                                radius.min((w * 0.5).min(effective_slot_h * 0.5).max(0.0));
-                            cmds.push(RoundedRectDrawCmd {
-                                x,
-                                y: slot_y,
-                                width: w,
-                                height: effective_slot_h,
-                                radius: slot_radius,
-                                color: self.gpu_color(rgba),
-                            });
-                        }
-                    }
-                }
-                ContentionPolicy::MergeByKey { .. }
-                | ContentionPolicy::LatestWins
-                | ContentionPolicy::Replace => {
-                    let latest = &publishes[publishes.len() - 1];
-                    let is_notification_content =
-                        matches!(&latest.content, ZoneContent::Notification(_));
-                    let backdrop_rgba: Option<Rgba> = match &latest.content {
-                        ZoneContent::SolidColor(rgba) => Some(*rgba),
-                        ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
-                        ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
-                            if policy.backdrop.is_some() {
-                                Some(urgency_to_severity_color(n.urgency, &self.token_map))
-                            } else {
-                                None
-                            }
-                        }
-                        ZoneContent::Notification(n) => {
-                            if policy.backdrop.is_some() {
-                                let mut color =
-                                    urgency_to_notification_color(n.urgency, &self.token_map);
-                                color.a = NOTIFICATION_BACKDROP_OPACITY;
-                                Some(color)
-                            } else {
-                                None
-                            }
-                        }
-                        _ => policy.backdrop,
-                    };
-
-                    if let Some(mut rgba) = backdrop_rgba {
-                        if !is_notification_content || is_alert_banner_zone(zone_name) {
-                            if let Some(opacity) = policy.backdrop_opacity {
-                                rgba.a = opacity.clamp(0.0, 1.0);
-                            }
-                        }
-                        rgba.a *= anim_opacity.clamp(0.0, 1.0);
-                        cmds.push(RoundedRectDrawCmd {
-                            x,
-                            y,
-                            width: w,
-                            height: h,
-                            radius,
-                            color: self.gpu_color(rgba),
-                        });
-                    }
-                }
-            }
-        }
-
-        cmds
-    }
-
     /// Encode a GPU pass that renders the given rounded-rectangle commands
     /// using the SDF pipeline.
     ///
@@ -4799,7 +4602,7 @@ impl Compositor {
             let policy = &zone_def.rendering_policy;
 
             // Zones with backdrop_radius use the SDF rounded-rect pipeline instead.
-            // Skip flat-rect backdrop emission for those zones; collect_rounded_rect_cmds
+            // Skip flat-rect backdrop emission for those zones; collect_all_rounded_rect_cmds
             // handles their backdrops separately in encode_rounded_rect_pass.
             let use_rounded_rect = policy.backdrop_radius.is_some_and(|r| r > 0.0);
 
