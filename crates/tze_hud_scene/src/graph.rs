@@ -2324,6 +2324,23 @@ impl SceneGraph {
     /// Pure geometry — no GPU involvement.  Target: < 100 µs for 50 tiles
     /// (scene-graph/spec.md line 267, RFC 0001 §10).
     pub fn hit_test(&self, x: f32, y: f32) -> HitResult {
+        // ── Zone hit regions check (global, not tab-specific) ────────────────
+        // These are runtime-managed zone hit regions (dismiss/action buttons on
+        // notification slots). They are populated by the compositor each frame and
+        // do not require agent-owned tiles or an active tab. Check them first so
+        // they are always available regardless of active_tab state.
+        for region in &self.zone_hit_regions {
+            if region.bounds.contains_point(x, y) {
+                return HitResult::ZoneInteraction {
+                    zone_name: region.zone_name.clone(),
+                    published_at_wall_us: region.published_at_wall_us,
+                    publisher_namespace: region.publisher_namespace.clone(),
+                    interaction_id: region.interaction_id.clone(),
+                    kind: region.kind.clone(),
+                };
+            }
+        }
+
         let Some(active) = self.active_tab else {
             return HitResult::Passthrough;
         };
@@ -2407,21 +2424,6 @@ impl SceneGraph {
         }
 
         // Only passthrough tiles covered the point, or no tiles at all.
-        // Fall through to runtime-managed zone hit regions (dismiss/action
-        // buttons on notification slots). These are populated by the compositor
-        // each frame and do not require agent-owned tiles.
-        for region in &self.zone_hit_regions {
-            if region.bounds.contains_point(x, y) {
-                return HitResult::ZoneInteraction {
-                    zone_name: region.zone_name.clone(),
-                    published_at_wall_us: region.published_at_wall_us,
-                    publisher_namespace: region.publisher_namespace.clone(),
-                    interaction_id: region.interaction_id.clone(),
-                    kind: region.kind.clone(),
-                };
-            }
-        }
-
         HitResult::Passthrough
     }
 
@@ -3897,6 +3899,45 @@ mod tests {
 
         // Miss everything
         let result = scene.hit_test(10.0, 10.0);
+        assert_eq!(result, HitResult::Passthrough);
+    }
+
+    #[test]
+    fn test_hit_test_zone_regions_without_active_tab() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        // Intentionally do not create/activate a tab
+
+        // Add a zone hit region (as the compositor would do each frame)
+        scene.zone_hit_regions.push(ZoneHitRegion {
+            zone_name: "notifications".to_string(),
+            published_at_wall_us: 123456,
+            publisher_namespace: "test".to_string(),
+            bounds: Rect::new(100.0, 100.0, 200.0, 150.0),
+            kind: ZoneInteractionKind::Dismiss,
+            interaction_id: "zone:notifications:dismiss:123456:test".to_string(),
+            tab_order: 0,
+        });
+
+        // Hit the zone region even though active_tab is None
+        let result = scene.hit_test(150.0, 125.0);
+        match result {
+            HitResult::ZoneInteraction {
+                zone_name,
+                published_at_wall_us,
+                publisher_namespace,
+                interaction_id,
+                kind: ZoneInteractionKind::Dismiss,
+            } => {
+                assert_eq!(zone_name, "notifications");
+                assert_eq!(published_at_wall_us, 123456);
+                assert_eq!(publisher_namespace, "test");
+                assert_eq!(interaction_id, "zone:notifications:dismiss:123456:test");
+            }
+            _ => panic!("Expected ZoneInteraction, got {result:?}"),
+        }
+
+        // Miss the zone region
+        let result = scene.hit_test(50.0, 50.0);
         assert_eq!(result, HitResult::Passthrough);
     }
 
