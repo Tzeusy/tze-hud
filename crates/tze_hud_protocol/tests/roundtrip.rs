@@ -1772,13 +1772,10 @@ fn roundtrip_rendering_policy_convert_backdrop_radius() {
         ..RenderingPolicy::default()
     };
     let proto_zero = rendering_policy_to_proto(&original_zero);
-    // 0.0 is encoded as -1.0 sentinel for None, so Some(0.0) should roundtrip correctly
-    // Note: since 0.0 rounds to None via -1.0 sentinel, Some(0.0) ≡ None on roundtrip
-    // (corner radius 0 is effectively flat rect — same as None)
+    // Some(0.0) encodes as 0.0 on the wire (not the -1.0 sentinel — that is only used
+    // for None). The decode check is `>= 0.0`, and 0.0 >= 0.0 is true, so Some(0.0)
+    // survives the roundtrip correctly.
     let recovered_zero = proto_to_rendering_policy(&proto_zero);
-    // backdrop_radius = Some(0.0) → sentinel -1.0 on wire? No — 0.0 is a valid value.
-    // Our sentinel is -1.0 for None; 0.0 is encoded as 0.0 which decodes as None because
-    // our decode check is `>= 0.0`. Actually 0.0 >= 0.0 is true, so Some(0.0) round-trips.
     assert_eq!(
         recovered_zero.backdrop_radius,
         Some(0.0),
