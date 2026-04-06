@@ -3724,9 +3724,11 @@ impl Compositor {
             };
 
             let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
-            // Clamp radius so it never exceeds half the shortest side.
-            let max_r = (w * 0.5).min(h * 0.5).max(0.0);
-            let radius = radius.min(max_r);
+            // Clamp radius against the zone's full dimensions as a first-pass
+            // upper bound. For Stack zones, each slot height (effective_slot_h)
+            // may be smaller than h, so per-slot clamping is applied below.
+            let max_r_zone = (w * 0.5).min(h * 0.5).max(0.0);
+            let radius = radius.min(max_r_zone);
 
             let anim_opacity = self
                 .zone_animation_states
@@ -3793,12 +3795,17 @@ impl Compositor {
                                 }
                             }
                             rgba.a *= combined_opacity;
+                            // Re-clamp radius per slot: effective_slot_h may be
+                            // smaller than the zone height (e.g., last slot in a
+                            // stack), so the radius must not exceed half the slot.
+                            let slot_radius =
+                                radius.min((w * 0.5).min(effective_slot_h * 0.5).max(0.0));
                             cmds.push(RoundedRectDrawCmd {
                                 x,
                                 y: slot_y,
                                 width: w,
                                 height: effective_slot_h,
-                                radius,
+                                radius: slot_radius,
                                 color: self.gpu_color(rgba),
                             });
                         }

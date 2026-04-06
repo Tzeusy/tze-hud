@@ -351,7 +351,8 @@ pub struct RoundedRectVertex {
     pub rect_half_size: [f32; 2],
     /// Corner radius in pixels.
     pub radius: f32,
-    /// Premultiplied RGBA color.
+    /// RGBA color as returned by `gpu_color` (non-premultiplied in fullscreen
+    /// mode; premultiplied in overlay mode).
     pub color: [f32; 4],
 }
 
@@ -462,10 +463,15 @@ pub fn rounded_rect_vertices(
 /// - Computes the signed distance from `frag_pos` to the nearest point on the
 ///   rounded rectangle (standard box SDF with per-corner radius).
 /// - Converts distance to an alpha via `smoothstep` for sub-pixel anti-aliasing.
-/// - Multiplies the input premultiplied color by the computed alpha.
+/// - Applies coverage to the alpha channel only (RGB passes through unchanged).
 ///
-/// Works correctly in both overlay mode (premultiplied alpha) and fullscreen
-/// mode (standard alpha blending is enabled on the pipeline).
+/// The pipeline uses `BlendState::ALPHA_BLENDING` (straight-alpha), so the
+/// fragment output must be non-premultiplied: keeping RGB unmodified and only
+/// scaling alpha ensures the GPU blend equation applies coverage exactly once.
+///
+/// Note: overlay mode passes premultiplied colors via `gpu_color`. The
+/// rounded-rect pass currently runs with blending enabled and may not produce
+/// pixel-perfect results in overlay mode (tracked as a follow-up).
 pub const ROUNDED_RECT_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position:       vec2<f32>,
@@ -518,8 +524,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // smoothstep(0.5, -0.5, d) transitions from 0→1 as d goes from +0.5→-0.5.
     let alpha = smoothstep(0.5, -0.5, d);
 
-    // Input color is premultiplied; scale all channels by alpha.
-    return in.color * alpha;
+    // Apply coverage to alpha only.  The pipeline uses ALPHA_BLENDING, which
+    // performs: result = src.rgb * src.a + dst.rgb * (1 - src.a).
+    // The vertex color (in.color) arrives as non-premultiplied RGBA, so we
+    // must keep RGB unmodified and only scale the alpha channel by coverage.
+    // Scaling all four channels by alpha (as in premultiplied blending) would
+    // cause the GPU to apply coverage again during blending, darkening edges.
+    return vec4<f32>(in.color.rgb, in.color.a * alpha);
 }
 "#;
 
