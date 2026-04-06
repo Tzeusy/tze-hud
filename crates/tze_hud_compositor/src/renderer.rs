@@ -5012,7 +5012,21 @@ mod tests {
             }),
         };
 
-        let mut scene = scene_with_node(node);
+        // Resource must be registered before set_tile_root inserts the StaticImageNode tree.
+        let mut scene = SceneGraph::new(256.0, 256.0);
+        scene.register_resource(resource_id);
+        let tab_id = scene.create_tab("test", 0).unwrap();
+        let lease_id = scene.grant_lease("test", 60_000, vec![]);
+        let tile_id = scene
+            .create_tile(
+                tab_id,
+                "test",
+                lease_id,
+                Rect::new(0.0, 0.0, 256.0, 256.0),
+                1,
+            )
+            .unwrap();
+        scene.set_tile_root(tile_id, node).unwrap();
         compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
@@ -5035,6 +5049,9 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(512, 256).await);
 
         let mut scene = SceneGraph::new(512.0, 256.0);
+        // Resource must be registered before set_tile_root inserts a StaticImageNode tree.
+        let static_image_resource_id = ResourceId::of(b"8x8 green placeholder");
+        scene.register_resource(static_image_resource_id);
         let tab_id = scene.create_tab("test", 0).unwrap();
         let lease_id = scene.grant_lease("agent", 60_000, vec![]);
 
@@ -5080,7 +5097,7 @@ mod tests {
                     id: SceneId::new(),
                     children: vec![],
                     data: NodeData::StaticImage(StaticImageNode {
-                        resource_id: ResourceId::of(b"8x8 green placeholder"),
+                        resource_id: static_image_resource_id,
                         width: 8,
                         height: 8,
                         decoded_bytes: 8 * 8 * 4,
@@ -7656,8 +7673,12 @@ mod tests {
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
         // Zone height: 72px at 720 tall → height_pct = 72/720 = 0.1.
-        // font_size_px=16, default margin_v=8 → slot_h = 16+2*8+2 = 34px.
-        // 2 full slots fit (slots 0,1: 2*34=68 < 72); slot 2 partial (y=68 < 72); slot 3 clipped.
+        // font_size_px=16, line_height = 16*1.4 = 22.4, margin_v=8, SLOT_BASELINE_GAP=4
+        // → slot_h = 22.4 + 2*8 + 4 = 42.4px.
+        // slot 0 at y=0  (fits: 0+42.4=42.4 ≤ 72 → emitted).
+        // slot 1 at y=42.4 (fits: 42.4+42.4=84.8 > 72 but y < 72 → emitted).
+        // slot 2 at y=84.8 → y ≥ zone_bottom(72) → loop breaks.
+        // Exactly 2 items (slots 0, 1) are emitted.
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
             name: "notification-area".to_owned(),
@@ -7706,17 +7727,15 @@ mod tests {
 
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
 
-        // Zone height = 72px, slot_h = 34px.
-        // slot 0 at y=0  (fits: 0+34=34 ≤ 72 → emitted).
-        // slot 1 at y=34 (fits: 34+34=68 ≤ 72 → emitted).
-        // slot 2 at y=68 (partial: y=68 < 72, effective_slot_h = 4 → still emitted,
-        //   clamped; text may not visually render but the TextItem is produced).
-        // slot 3 at y=102 → y ≥ zone_bottom(72) → loop breaks, no item.
-        // Exactly 3 items (slots 0, 1, 2) are emitted.
+        // slot_h = line_height(16*1.4) + 2*margin_v(8) + SLOT_BASELINE_GAP(4) = 42.4px.
+        // slot 0 at y=0:    0 < 72 → emitted.
+        // slot 1 at y=42.4: 42.4 < 72 → emitted.
+        // slot 2 at y=84.8: 84.8 ≥ 72 → loop breaks.
+        // Exactly 2 items (slots 0, 1) are emitted.
         assert_eq!(
             items.len(),
-            3,
-            "with 72px zone and 34px slots, exactly 3 items should be emitted; got {}",
+            2,
+            "with 72px zone and 42.4px slots, exactly 2 items should be emitted; got {}",
             items.len()
         );
 
@@ -9445,7 +9464,7 @@ mod tests {
         let (mut compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
-        // Zone at x=0, y=0 with font_size 16px default → slot_h = 16 + 2*8 + 2 = 34px.
+        // Zone at x=0, y=0 with font_size 16px default → slot_h = line_height(22.4) + 2*8 + 4 = 42.4px.
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
             name: "notification-area".to_owned(),
@@ -9542,7 +9561,8 @@ mod tests {
 
         // Newest (Gamma = agent-c) is at slot 0 (top, pixel_y = 9.0).
         // Oldest remaining (Beta = agent-b) is at slot 1.
-        // slot_h = 16 + 2*8 + 2 = 34. Slot 1 starts at y=34, text at y=34+9=43.
+        // slot_h = line_height(16*1.4) + 2*margin_v(8) + SLOT_BASELINE_GAP(4) = 42.4px.
+        // Slot 1 starts at y=42.4, text at y=42.4+9=51.4.
         let gamma_item = items_after.iter().find(|i| i.text == "Gamma");
         let beta_item = items_after.iter().find(|i| i.text == "Beta");
 
@@ -9555,11 +9575,11 @@ mod tests {
             9.0,
             "Gamma (newest) must be at slot 0, pixel_y=9.0"
         );
-        // Beta is oldest remaining → slot 1 → pixel_y = 34 + 9 = 43.
+        // Beta is oldest remaining → slot 1 → pixel_y = 42.4 + 9 = 51.4.
         assert_eq!(
             beta_item.unwrap().pixel_y,
-            43.0,
-            "Beta (oldest remaining) must be at slot 1, pixel_y=43.0"
+            51.4,
+            "Beta (oldest remaining) must be at slot 1, pixel_y=51.4"
         );
     }
 
