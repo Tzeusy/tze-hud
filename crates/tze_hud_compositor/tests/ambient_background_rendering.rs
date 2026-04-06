@@ -753,7 +753,7 @@ async fn test_ambient_background_static_image_renders_texture_when_bytes_registe
     let resource_id = ResourceId::of(&rgba_data);
 
     // Register the decoded RGBA bytes with the compositor.
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
 
     // Publish the StaticImage to ambient-background.
     scene
@@ -781,6 +781,61 @@ async fn test_ambient_background_static_image_renders_texture_when_bytes_registe
     assert!(
         centre_pixel[0] > 200 && centre_pixel[1] < 30 && centre_pixel[2] < 30,
         "centre pixel should be red (from texture) not warm-gray placeholder; got {:?}",
+        centre_pixel
+    );
+}
+
+/// Regression test: non-square zone images must render as textures, not the
+/// warm-gray placeholder.
+///
+/// The old code used a square-root heuristic (`(bytes.len() / 4).sqrt()`) to
+/// determine image dimensions for `ZoneContent::StaticImage` zone publications.
+/// This heuristic silently produces wrong dimensions for non-square images
+/// (e.g. 16×8 = 128 pixels → sqrt(128) ≈ 11.3 → truncated to 11, which is
+/// neither 16 nor 8), causing the byte-count validation inside
+/// `ensure_image_texture` to fail and fall back to the placeholder.
+///
+/// The fix stores explicit `(width, height)` in `Compositor::image_dims` via
+/// the updated `register_image_bytes(id, bytes, width, height)` API and uses
+/// those dimensions in `ensure_scene_image_textures`.
+#[tokio::test]
+async fn test_ambient_background_static_image_non_square_renders_texture() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    let mut scene = scene_with_defaults(SURFACE_W as f32, SURFACE_H as f32);
+
+    // Non-square image: 16 wide × 8 tall (aspect ratio 2:1).
+    // The old sqrt heuristic would compute sqrt(16*8) = sqrt(128) ≈ 11, which is
+    // wrong for both dimensions, causing ensure_image_texture to reject it.
+    let img_w: u32 = 16;
+    let img_h: u32 = 8;
+    let blue_pixel: [u8; 4] = [0, 0, 255, 255]; // sRGB blue
+    let rgba_data: Vec<u8> = blue_pixel.repeat((img_w * img_h) as usize);
+    let resource_id = ResourceId::of(&rgba_data);
+
+    // Register with explicit dimensions — the fix under test.
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
+
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            ZoneContent::StaticImage(resource_id),
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .expect("publish non-square StaticImage must succeed");
+
+    compositor.render_frame_headless(&mut scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // The image is solid blue. Centre pixels should be blue, NOT the warm-gray
+    // placeholder (~149, 149, 149).
+    let centre_pixel = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
+    assert!(
+        centre_pixel[2] > 200 && centre_pixel[0] < 30 && centre_pixel[1] < 30,
+        "non-square zone image: centre pixel should be blue (texture), not warm-gray; got {:?}",
         centre_pixel
     );
 }
@@ -887,7 +942,7 @@ async fn test_tile_static_image_fill_mode_renders_texture() {
     let rgba_data = make_solid_rgba(img_w, img_h, 0, 255, 0, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
@@ -923,7 +978,7 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
     let rgba_data = make_solid_rgba(img_w, img_h, 0, 0, 255, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
@@ -971,7 +1026,7 @@ async fn test_tile_static_image_cover_mode_fills_completely() {
     let rgba_data = make_solid_rgba(img_w, img_h, 255, 0, 255, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
@@ -1016,7 +1071,7 @@ async fn test_tile_static_image_scale_down_mode_native_size() {
     let rgba_data = make_solid_rgba(img_w, img_h, 255, 255, 0, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
