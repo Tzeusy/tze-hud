@@ -89,6 +89,7 @@ use tze_hud_protocol::proto::{
     LeaseEventKind,
     MutationProto,
     NodeProto,
+    NotificationActionProto,
     NotificationPayload,
     PointerDownEvent,
     PointerMoveEvent,
@@ -394,18 +395,27 @@ fn roundtrip_zone_content_all_variants() {
     let d1 = round_trip(&z1);
     assert!(matches!(d1.payload, Some(ZonePayload::StreamText(_))));
 
-    // Notification
+    // Notification — with actions to catch proto↔scene wiring regressions
     let z2 = ZoneContent {
         payload: Some(ZonePayload::Notification(NotificationPayload {
             text: "Alert!".to_string(),
             icon: "warning.png".to_string(),
             urgency: 2,
             title: String::new(),
+            actions: vec![NotificationActionProto {
+                label: "Dismiss".to_string(),
+                callback_id: "dismiss-1".to_string(),
+            }],
         })),
     };
     let d2 = round_trip(&z2);
-    match d2.payload {
-        Some(ZonePayload::Notification(n)) => assert_eq!(n.urgency, 2),
+    match &d2.payload {
+        Some(ZonePayload::Notification(n)) => {
+            assert_eq!(n.urgency, 2);
+            assert_eq!(n.actions.len(), 1);
+            assert_eq!(n.actions[0].label, "Dismiss");
+            assert_eq!(n.actions[0].callback_id, "dismiss-1");
+        }
         _ => panic!("wrong variant"),
     }
 

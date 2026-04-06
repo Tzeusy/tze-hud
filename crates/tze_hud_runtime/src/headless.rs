@@ -54,10 +54,10 @@ use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
+use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::ZoneInteractionKind;
-use tze_hud_scene::HitResult;
 use tze_hud_telemetry::{FrameTelemetry, TelemetryCollector};
 use wgpu::TextureFormat;
 
@@ -1038,7 +1038,9 @@ default_tab = true
     fn process_pointer_event_dismiss_removes_notification() {
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         // hit_test requires an active tab; create one to mimic production state.
-        scene.create_tab("Main", 0).expect("tab creation must succeed");
+        scene
+            .create_tab("Main", 0)
+            .expect("tab creation must succeed");
         scene.register_zone(make_test_zone("alert-banner"));
 
         scene
@@ -1059,10 +1061,8 @@ default_tab = true
             )
             .expect("publish should succeed");
 
-        let record_published_at = scene
-            .zone_registry
-            .active_for_zone("alert-banner")[0]
-            .published_at_wall_us;
+        let record_published_at =
+            scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
         scene.zone_hit_regions.push(ZoneHitRegion {
             zone_name: "alert-banner".to_string(),
@@ -1070,9 +1070,7 @@ default_tab = true
             publisher_namespace: "test-agent".to_string(),
             bounds: Rect::new(100.0, 10.0, 20.0, 20.0),
             kind: ZoneInteractionKind::Dismiss,
-            interaction_id: format!(
-                "zone:alert-banner:dismiss:{record_published_at}:test-agent"
-            ),
+            interaction_id: format!("zone:alert-banner:dismiss:{record_published_at}:test-agent"),
             tab_order: 0,
         });
 
@@ -1125,7 +1123,11 @@ default_tab = true
             } = result.hit
             {
                 if let ZoneInteractionKind::Dismiss = kind {
-                    scene.dismiss_notification(zone_name, published_at_wall_us, publisher_namespace);
+                    scene.dismiss_notification(
+                        zone_name,
+                        published_at_wall_us,
+                        publisher_namespace,
+                    );
                 }
             }
         }

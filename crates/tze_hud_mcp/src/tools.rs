@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use tze_hud_scene::{
     graph::SceneGraph,
     types::{
-        Capability, FontFamily, Node, NodeData, NotificationPayload, Rect, Rgba, SceneId,
-        StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow, WidgetParameterValue,
-        ZoneContent,
+        Capability, FontFamily, Node, NodeData, NotificationAction, NotificationPayload, Rect,
+        Rgba, SceneId, StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow,
+        WidgetParameterValue, ZoneContent,
     },
 };
 
@@ -453,13 +453,53 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
+                    let actions: Vec<NotificationAction> = match obj.get("actions") {
+                        None => Vec::new(),
+                        Some(Value::Array(arr)) => arr
+                            .iter()
+                            .enumerate()
+                            .map(|(index, item)| {
+                                let o = item.as_object().ok_or_else(|| {
+                                    McpError::InvalidParams(format!(
+                                        "notification.actions[{index}] must be an object"
+                                    ))
+                                })?;
+                                let label = o
+                                    .get("label")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|v| !v.is_empty())
+                                    .ok_or_else(|| {
+                                        McpError::InvalidParams(format!(
+                                            "notification.actions[{index}].label must be a non-empty string"
+                                        ))
+                                    })?
+                                    .to_string();
+                                let callback_id = o
+                                    .get("callback_id")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|v| !v.is_empty())
+                                    .ok_or_else(|| {
+                                        McpError::InvalidParams(format!(
+                                            "notification.actions[{index}].callback_id must be a non-empty string"
+                                        ))
+                                    })?
+                                    .to_string();
+                                Ok(NotificationAction { label, callback_id })
+                            })
+                            .collect::<Result<Vec<_>, McpError>>()?,
+                        Some(_) => {
+                            return Err(McpError::InvalidParams(
+                                "notification.actions must be an array".to_string(),
+                            ))
+                        }
+                    };
                     Ok(ZoneContent::Notification(NotificationPayload {
                         text,
                         icon,
                         urgency,
                         ttl_ms,
                         title,
-                        actions: Vec::new(),
+                        actions,
                     }))
                 }
                 "status_bar" => {

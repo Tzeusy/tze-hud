@@ -96,10 +96,10 @@ use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServ
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
+use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{ZoneContent, ZoneInteractionKind};
-use tze_hud_scene::HitResult;
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -2513,8 +2513,8 @@ redaction_style = "blank"
     // ── Zone interaction: dismiss hit wiring (hud-ltgk.6) ────────────────────
 
     use tze_hud_scene::types::{
-        ContentionPolicy, GeometryPolicy, LayerAttachment, NotificationPayload, RenderingPolicy,
-        Rect, SceneId, ZoneDefinition, ZoneHitRegion, ZoneMediaType,
+        ContentionPolicy, GeometryPolicy, LayerAttachment, NotificationPayload, Rect,
+        RenderingPolicy, SceneId, ZoneDefinition, ZoneHitRegion, ZoneMediaType,
     };
 
     fn make_test_zone(name: &str) -> ZoneDefinition {
@@ -2552,7 +2552,9 @@ redaction_style = "blank"
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
         // hit_test requires an active tab; create one to mimic production state.
-        scene.create_tab("Main", 0).expect("tab creation must succeed");
+        scene
+            .create_tab("Main", 0)
+            .expect("tab creation must succeed");
         scene.register_zone(make_test_zone("alert-banner"));
 
         // Publish a notification so there is something to dismiss.
@@ -2582,10 +2584,8 @@ redaction_style = "blank"
             "notification must be present before dismiss"
         );
         // Use the actual published_at from the record (assigned by publish_to_zone).
-        let record_published_at = scene
-            .zone_registry
-            .active_for_zone("alert-banner")[0]
-            .published_at_wall_us;
+        let record_published_at =
+            scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
         // Simulate the compositor injecting a dismiss ZoneHitRegion for this publication.
         scene.zone_hit_regions.push(ZoneHitRegion {
@@ -2594,9 +2594,7 @@ redaction_style = "blank"
             publisher_namespace: publisher.to_string(),
             bounds: Rect::new(100.0, 10.0, 20.0, 20.0), // dismiss button at (100,10)
             kind: ZoneInteractionKind::Dismiss,
-            interaction_id: format!(
-                "zone:alert-banner:dismiss:{record_published_at}:{publisher}"
-            ),
+            interaction_id: format!("zone:alert-banner:dismiss:{record_published_at}:{publisher}"),
             tab_order: 0,
         });
 
@@ -2672,7 +2670,9 @@ redaction_style = "blank"
         use tze_hud_input::PointerEvent;
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
-        scene.create_tab("Main", 0).expect("tab creation must succeed");
+        scene
+            .create_tab("Main", 0)
+            .expect("tab creation must succeed");
         scene.register_zone(make_test_zone("alert-banner"));
 
         scene
@@ -2693,10 +2693,8 @@ redaction_style = "blank"
             )
             .expect("publish should succeed");
 
-        let record_published_at = scene
-            .zone_registry
-            .active_for_zone("alert-banner")[0]
-            .published_at_wall_us;
+        let record_published_at =
+            scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
         scene.zone_hit_regions.push(ZoneHitRegion {
             zone_name: "alert-banner".to_string(),
@@ -2704,9 +2702,7 @@ redaction_style = "blank"
             publisher_namespace: "test-agent".to_string(),
             bounds: Rect::new(100.0, 10.0, 20.0, 20.0),
             kind: ZoneInteractionKind::Dismiss,
-            interaction_id: format!(
-                "zone:alert-banner:dismiss:{record_published_at}:test-agent"
-            ),
+            interaction_id: format!("zone:alert-banner:dismiss:{record_published_at}:test-agent"),
             tab_order: 0,
         });
 
@@ -2726,8 +2722,7 @@ redaction_style = "blank"
         // even if we ran the zone dispatch logic.
         let would_dismiss = match &result.hit {
             HitResult::ZoneInteraction { kind, .. } => {
-                matches!(kind, ZoneInteractionKind::Dismiss)
-                    && down.kind == PointerEventKind::Up // false for Down
+                matches!(kind, ZoneInteractionKind::Dismiss) && down.kind == PointerEventKind::Up // false for Down
             }
             _ => false,
         };
@@ -2747,7 +2742,9 @@ redaction_style = "blank"
         use tze_hud_input::PointerEvent;
 
         let mut scene = SceneGraph::new(1920.0, 1080.0);
-        scene.create_tab("Main", 0).expect("tab creation must succeed");
+        scene
+            .create_tab("Main", 0)
+            .expect("tab creation must succeed");
         scene.register_zone(make_test_zone("alert-banner"));
 
         scene
@@ -2768,10 +2765,8 @@ redaction_style = "blank"
             )
             .expect("publish should succeed");
 
-        let record_published_at = scene
-            .zone_registry
-            .active_for_zone("alert-banner")[0]
-            .published_at_wall_us;
+        let record_published_at =
+            scene.zone_registry.active_for_zone("alert-banner")[0].published_at_wall_us;
 
         // Place an Action hit region (not Dismiss).
         scene.zone_hit_regions.push(ZoneHitRegion {
@@ -2811,7 +2806,11 @@ redaction_style = "blank"
             match kind {
                 ZoneInteractionKind::Dismiss => {
                     // Should not happen for an Action hit region.
-                    scene.dismiss_notification(zone_name, published_at_wall_us, publisher_namespace);
+                    scene.dismiss_notification(
+                        zone_name,
+                        published_at_wall_us,
+                        publisher_namespace,
+                    );
                 }
                 ZoneInteractionKind::Action { .. } => {
                     // Action: just log (no dismiss).
