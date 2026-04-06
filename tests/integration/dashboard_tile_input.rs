@@ -28,7 +28,7 @@ use tze_hud_input::{
     RawCommandEvent,
 };
 use tze_hud_scene::{
-    Capability, HitRegionNode, InputMode, Node, NodeData, Rect, SceneGraph, SceneId, SolidColorNode,
+    Capability, HitRegionNode, Node, NodeData, Rect, SceneGraph, SceneId, SolidColorNode,
 };
 
 // ── Dashboard tile geometry (from spec.md lines 5-11) ──────────────────────────
@@ -612,7 +612,7 @@ fn pointer_up_clears_pressed_and_releases_capture_on_dismiss() {
 /// FocusLostEvent to Refresh and FocusGainedEvent(source=TabKey) to the agent for Dismiss.
 #[test]
 fn tab_advances_focus_from_refresh_to_dismiss() {
-    let (mut scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
+    let (scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
 
@@ -693,7 +693,7 @@ fn tab_advances_focus_from_refresh_to_dismiss() {
 /// (in a single-tile scene with no other tiles).
 #[test]
 fn tab_wraps_focus_from_dismiss_back_to_refresh() {
-    let (mut scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
+    let (scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
 
@@ -745,7 +745,7 @@ fn tab_wraps_focus_from_dismiss_back_to_refresh() {
 /// Shift+Tab cycles Dismiss → Refresh (NAVIGATE_PREV).
 #[test]
 fn shift_tab_cycles_focus_dismiss_to_refresh() {
-    let (mut scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
+    let (scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
 
@@ -793,7 +793,7 @@ fn shift_tab_cycles_focus_dismiss_to_refresh() {
 /// Spec §Requirement: Focus Cycling Between Buttons, Scenario: Shift+Tab wraps Refresh → Dismiss
 #[test]
 fn shift_tab_wraps_refresh_to_dismiss() {
-    let (mut scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
+    let (scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
 
@@ -825,7 +825,7 @@ fn shift_tab_wraps_refresh_to_dismiss() {
 /// display-space position (tile origin + node local bounds).
 #[test]
 fn focus_ring_bounds_computed_in_display_space_for_refresh() {
-    let (mut scene, tab_id, tile_id, refresh_id, _dismiss_id) = setup_dashboard_tile_scene();
+    let (scene, tab_id, tile_id, refresh_id, _dismiss_id) = setup_dashboard_tile_scene();
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
 
@@ -865,7 +865,7 @@ fn focus_ring_bounds_computed_in_display_space_for_refresh() {
 /// Spec §Requirement: Focus Ring Visual Indication — Tab also produces ring update
 #[test]
 fn focus_ring_produced_on_tab_navigation_to_dismiss() {
-    let (mut scene, tab_id, tile_id, refresh_id, _dismiss_id) = setup_dashboard_tile_scene();
+    let (scene, tab_id, tile_id, refresh_id, _dismiss_id) = setup_dashboard_tile_scene();
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
 
@@ -1002,7 +1002,7 @@ fn both_buttons_reachable_and_activatable_via_navigate_next_and_activate() {
 /// including click-to-focus.
 #[test]
 fn focus_gained_and_lost_events_dispatched_on_click_to_focus() {
-    let (mut scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
+    let (scene, tab_id, tile_id, refresh_id, dismiss_id) = setup_dashboard_tile_scene();
     let mut fm = FocusManager::new();
     fm.add_tab(tab_id);
 

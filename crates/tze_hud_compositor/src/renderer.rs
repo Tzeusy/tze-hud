@@ -3012,7 +3012,7 @@ impl Compositor {
     /// Returns telemetry for this frame.
     pub fn render_frame_headless(
         &mut self,
-        scene: &SceneGraph,
+        scene: &mut SceneGraph,
         surface: &HeadlessSurface,
     ) -> FrameTelemetry {
         let frame_start = std::time::Instant::now();
@@ -3135,6 +3135,14 @@ impl Compositor {
         telemetry.gpu_submit_us = submit_start.elapsed().as_micros() as u64;
 
         telemetry.frame_time_us = frame_start.elapsed().as_micros() as u64;
+
+        // Populate zone interaction hit regions for the next frame's hit-testing.
+        // Must run after rendering so the region geometry is consistent with what
+        // was just displayed.  This follows the snapshot-based design: regions
+        // computed from the rendered geometry are used for hit-testing on the
+        // next input event.
+        self.populate_zone_hit_regions(scene, sw, sh);
+
         telemetry
     }
 
@@ -4166,6 +4174,154 @@ impl Compositor {
         }
     }
 
+    /// Recompute the zone interaction hit regions for the current frame.
+    ///
+    /// Clears `scene.zone_hit_regions` then repopulates it with dismiss (×)
+    /// buttons and action buttons for every visible notification slot in every
+    /// Stack zone that contains `ZoneContent::Notification` publications.
+    ///
+    /// # Layout
+    ///
+    /// For each notification slot (height = `stack_slot_height(policy)`):
+    ///
+    /// - **Dismiss button**: a square in the top-right corner of the slot.
+    ///   Size: `DISMISS_BUTTON_SIZE × DISMISS_BUTTON_SIZE` px.
+    ///   Position: `(slot_right - DISMISS_BUTTON_SIZE, slot_y)`.
+    ///
+    /// - **Action buttons**: a horizontal row at the bottom of the slot.
+    ///   Each button is `ACTION_BUTTON_H` px tall and
+    ///   `(slot_w - inset * 2) / n_actions` px wide (where `n_actions` is
+    ///   capped at `MAX_NOTIFICATION_ACTIONS`).
+    ///
+    /// Tab order within a slot: dismiss button first, then actions left-to-right.
+    /// Slots are ordered top-to-bottom (slot 0 = newest, matching rendering order).
+    ///
+    /// # Called by
+    ///
+    /// Called at the beginning of each frame render before hit-testing, so that
+    /// `SceneGraph::hit_test` returns `ZoneInteraction` for affordances rendered
+    /// in the current frame.
+    pub fn populate_zone_hit_regions(&self, scene: &mut SceneGraph, sw: f32, sh: f32) {
+        /// Side length of the dismiss (×) button in pixels.
+        const DISMISS_BUTTON_SIZE: f32 = 20.0;
+        /// Height of each action button row in pixels.
+        const ACTION_BUTTON_H: f32 = 22.0;
+        /// Horizontal inset used to position action buttons (matches notification inset).
+        const ACTION_INSET: f32 = 9.0;
+
+        scene.zone_hit_regions.clear();
+        let mut tab_order: u32 = 0;
+
+        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            if publishes.is_empty() {
+                continue;
+            }
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+            // Only Stack zones with Notification content get interactive regions.
+            if !matches!(zone_def.contention_policy, ContentionPolicy::Stack { .. }) {
+                continue;
+            }
+
+            let policy = &zone_def.rendering_policy;
+            let (zx, zy, zw, zh) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+            let slot_h = Self::stack_slot_height(policy);
+
+            // alert-banner uses dynamic height; other Stack zones use configured zh.
+            let effective_zh = if is_alert_banner_zone(zone_name) {
+                publishes.len() as f32 * slot_h
+            } else {
+                zh
+            };
+
+            // Ordered as in render_zone_content: newest-first for regular zones,
+            // severity-descending for alert-banner.
+            let ordered: Vec<&ZonePublishRecord> = if is_alert_banner_zone(zone_name) {
+                sort_alert_banner_indices(publishes)
+                    .into_iter()
+                    .map(|idx| &publishes[idx])
+                    .collect()
+            } else {
+                publishes.iter().rev().collect()
+            };
+
+            for (slot_idx, record) in ordered.iter().enumerate() {
+                let slot_y = zy + slot_idx as f32 * slot_h;
+                if slot_y >= zy + effective_zh {
+                    break;
+                }
+                let effective_slot_h = slot_h.min((zy + effective_zh) - slot_y);
+
+                let n_payload = match &record.content {
+                    ZoneContent::Notification(n) => n,
+                    _ => continue, // Only notifications get interactive affordances.
+                };
+
+                // ── Dismiss (×) button ────────────────────────────────────────
+                // Top-right corner of the slot, DISMISS_BUTTON_SIZE square.
+                let dismiss_bounds = Rect::new(
+                    zx + zw - DISMISS_BUTTON_SIZE,
+                    slot_y,
+                    DISMISS_BUTTON_SIZE,
+                    DISMISS_BUTTON_SIZE.min(effective_slot_h),
+                );
+                let dismiss_id = format!(
+                    "zone:{}:dismiss:{}:{}",
+                    zone_name, record.published_at_wall_us, record.publisher_namespace,
+                );
+                scene.zone_hit_regions.push(ZoneHitRegion {
+                    zone_name: zone_name.clone(),
+                    published_at_wall_us: record.published_at_wall_us,
+                    publisher_namespace: record.publisher_namespace.clone(),
+                    bounds: dismiss_bounds,
+                    kind: ZoneInteractionKind::Dismiss,
+                    interaction_id: dismiss_id,
+                    tab_order,
+                });
+                tab_order += 1;
+
+                // ── Action buttons ────────────────────────────────────────────
+                let n_actions = n_payload.actions.len().min(MAX_NOTIFICATION_ACTIONS);
+                if n_actions > 0 {
+                    let avail_w = (zw - ACTION_INSET * 2.0).max(1.0);
+                    let btn_w = avail_w / n_actions as f32;
+                    let action_y = slot_y + effective_slot_h - ACTION_BUTTON_H;
+
+                    for (btn_idx, action) in n_payload.actions.iter().take(n_actions).enumerate() {
+                        let btn_x = zx + ACTION_INSET + btn_idx as f32 * btn_w;
+                        let action_bounds = Rect::new(
+                            btn_x,
+                            action_y.max(slot_y),
+                            btn_w,
+                            ACTION_BUTTON_H.min(effective_slot_h),
+                        );
+                        let action_id = format!(
+                            "zone:{}:action:{}:{}:{}",
+                            zone_name,
+                            record.published_at_wall_us,
+                            record.publisher_namespace,
+                            action.callback_id,
+                        );
+                        scene.zone_hit_regions.push(ZoneHitRegion {
+                            zone_name: zone_name.clone(),
+                            published_at_wall_us: record.published_at_wall_us,
+                            publisher_namespace: record.publisher_namespace.clone(),
+                            bounds: action_bounds,
+                            kind: ZoneInteractionKind::Action {
+                                callback_id: action.callback_id.clone(),
+                            },
+                            interaction_id: action_id,
+                            tab_order,
+                        });
+                        tab_order += 1;
+                    }
+                }
+            }
+        }
+    }
+
     /// Determine the background color for a tile based on its content.
     fn tile_background_color(&self, tile: &Tile, scene: &SceneGraph) -> [f32; 4] {
         if let Some(root_id) = tile.root_node
@@ -4504,8 +4660,8 @@ mod tests {
             }),
         };
 
-        let scene = scene_with_node(node);
-        compositor.render_frame_headless(&scene, &surface);
+        let mut scene = scene_with_node(node);
+        compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
         // The background clear color is ~[0.05, 0.05, 0.1] in linear; tile bg is [0.05,0.05,0.05].
@@ -4583,7 +4739,7 @@ mod tests {
             )
             .unwrap();
 
-        compositor.render_frame_headless(&scene, &surface);
+        compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 512 * 256 * 4, "pixel buffer size mismatch");
@@ -4903,8 +5059,8 @@ mod tests {
                 overflow: TextOverflow::Clip,
             }),
         };
-        let scene = scene_with_node(node);
-        compositor.render_frame_headless(&scene, &surface);
+        let mut scene = scene_with_node(node);
+        compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 256 * 256 * 4, "pixel buffer size");
@@ -4947,8 +5103,8 @@ mod tests {
                 overflow: TextOverflow::Clip,
             }),
         };
-        let scene = scene_with_node(node);
-        compositor.render_frame_headless(&scene, &surface);
+        let mut scene = scene_with_node(node);
+        compositor.render_frame_headless(&mut scene, &surface);
 
         let pixels = surface.read_pixels(&compositor.device);
 
@@ -5002,9 +5158,9 @@ mod tests {
                 overflow: TextOverflow::Ellipsis,
             }),
         };
-        let scene = scene_with_node(node);
+        let mut scene = scene_with_node(node);
         // Must not panic.
-        compositor.render_frame_headless(&scene, &surface);
+        compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(
             pixels.len(),
@@ -5063,7 +5219,7 @@ mod tests {
             )
             .unwrap();
 
-        compositor.render_frame_headless(&scene, &surface);
+        compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
 
@@ -5143,7 +5299,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -5151,7 +5307,7 @@ mod tests {
             )
             .unwrap();
 
-        compositor.render_frame_headless(&scene, &surface);
+        compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
 
@@ -5258,7 +5414,7 @@ mod tests {
         );
 
         // Render to pixels and verify bright text appears in the top zone area.
-        compositor.render_frame_headless(&scene, &surface);
+        compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
 
@@ -5290,8 +5446,8 @@ mod tests {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
-        let scene = SceneGraph::new(64.0, 64.0);
-        compositor.render_frame_headless(&scene, &surface);
+        let mut scene = SceneGraph::new(64.0, 64.0);
+        compositor.render_frame_headless(&mut scene, &surface);
         // No panic = pass.
     }
 
@@ -5300,8 +5456,8 @@ mod tests {
     async fn test_text_renderer_empty_scene_no_panic() {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(64, 64).await);
         compositor.init_text_renderer(wgpu::TextureFormat::Rgba8UnormSrgb);
-        let scene = SceneGraph::new(64.0, 64.0);
-        compositor.render_frame_headless(&scene, &surface);
+        let mut scene = SceneGraph::new(64.0, 64.0);
+        compositor.render_frame_headless(&mut scene, &surface);
     }
 
     /// Stage 6 frame-budget benchmark — text rendering active.
@@ -5416,13 +5572,13 @@ mod tests {
         // that does not reflect steady-state Stage 6 performance; excluding it
         // mirrors production behaviour where shaders are pre-compiled.
         for _ in 0..5 {
-            compositor.render_frame_headless(&scene, &surface);
+            compositor.render_frame_headless(&mut scene, &surface);
         }
 
         // ── Render loop ─────────────────────────────────────────────────────────
         let mut timings: Vec<u64> = Vec::with_capacity(FRAME_COUNT);
         for _ in 0..FRAME_COUNT {
-            let telem = compositor.render_frame_headless(&scene, &surface);
+            let telem = compositor.render_frame_headless(&mut scene, &surface);
             // render_encode_us is the Stage 6 wall-clock encode duration.
             timings.push(telem.render_encode_us);
         }
@@ -5613,7 +5769,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -5684,7 +5840,7 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -5787,7 +5943,7 @@ mod tests {
                     urgency: 3, // Critical — must use color.notification.urgency.critical, NOT color.severity.critical
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -6047,7 +6203,7 @@ mod tests {
                     urgency: 1, // normal
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -6110,7 +6266,7 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -6177,7 +6333,7 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -6240,7 +6396,7 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -6434,7 +6590,7 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -6662,7 +6818,7 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -6754,7 +6910,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-a",
                 None,
                 None,
@@ -6770,7 +6926,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-b",
                 None,
                 None,
@@ -6856,7 +7012,7 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-a",
                 None,
                 None,
@@ -6872,7 +7028,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-b",
                 None,
                 None,
@@ -6888,7 +7044,7 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-c",
                 None,
                 None,
@@ -6987,7 +7143,7 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                    }),
+                        actions: Vec::new(),                    }),
                     &format!("agent-{i}"),
                     None,
                     None,
@@ -7069,7 +7225,7 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-0",
                 None,
                 None,
@@ -7086,7 +7242,7 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                    }),
+                        actions: Vec::new(),                    }),
                     &format!("agent-{i}"),
                     None,
                     None,
@@ -7167,7 +7323,7 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                    }),
+                        actions: Vec::new(),                    }),
                     &format!("agent-{i}"),
                     None,
                     None,
@@ -7512,7 +7668,7 @@ mod tests {
                     urgency: 2,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "test",
                 None,
                 None,
@@ -7808,7 +7964,7 @@ mod tests {
                     urgency,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 publisher,
                 None,
                 None,
@@ -8155,7 +8311,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-a",
                 None,
                 None,
@@ -8278,7 +8434,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-a",
                 None,
                 None,
@@ -8772,7 +8928,7 @@ mod tests {
                     urgency: 0,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-a",
                 None,
                 None,
@@ -8788,7 +8944,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-b",
                 None,
                 None,
@@ -8950,7 +9106,7 @@ mod tests {
                         urgency: 1,
                         ttl_ms: None,
                         title: String::new(),
-                    }),
+                        actions: Vec::new(),                    }),
                     agent,
                     None,
                     None,
@@ -9068,7 +9224,7 @@ mod tests {
                     urgency: 1,
                     ttl_ms: Some(3_000),
                     title: String::new(),
-                }),
+                    actions: Vec::new(),                }),
                 "agent-a",
                 None,
                 None,
@@ -9110,7 +9266,7 @@ mod tests {
                 urgency: 0,
                 ttl_ms: None,
                 title: String::new(),
-            }),
+                actions: Vec::new(),            }),
             published_at_wall_us: 2_000_000,
             merge_key: None,
             expires_at_wall_us: None,
@@ -9673,7 +9829,7 @@ mod tests {
                 urgency: 2,
                 ttl_ms: None, // No per-notification TTL — urgency path sets expires_at
                 title: String::new(),
-            }),
+                actions: Vec::new(),            }),
             published_at_wall_us: 0,
             merge_key: None,
             expires_at_wall_us: Some(15_000_000), // 15 s in µs
@@ -9697,7 +9853,7 @@ mod tests {
                 urgency: 3,
                 ttl_ms: None,
                 title: String::new(),
-            }),
+                actions: Vec::new(),            }),
             published_at_wall_us: 0,
             merge_key: None,
             expires_at_wall_us: Some(30_000_000), // 30 s in µs
@@ -9721,7 +9877,7 @@ mod tests {
                 urgency: 2,
                 ttl_ms: Some(5_000), // explicit 5 s TTL on the notification itself
                 title: String::new(),
-            }),
+                actions: Vec::new(),            }),
             published_at_wall_us: 1_000_000, // published at t=1s
             merge_key: None,
             expires_at_wall_us: Some(16_000_000), // expires at t=16s → 15 s duration
@@ -9744,7 +9900,7 @@ mod tests {
                 urgency: 1,
                 ttl_ms: Some(8_000),
                 title: String::new(),
-            }),
+                actions: Vec::new(),            }),
             published_at_wall_us: 0,
             merge_key: None,
             expires_at_wall_us: None,
@@ -10160,6 +10316,362 @@ mod tests {
         assert_eq!(
             visible_text, "The",
             "initial reveal must show only text up to first breakpoint (\"The\")"
+        );
+    }
+
+    // ── Zone interaction hit region tests (hud-ltgk.4) ────────────────────────
+    //
+    // These tests verify `populate_zone_hit_regions`: the pure-geometry path that
+    // computes dismiss (×) and action button pixel bounds for Stack zone
+    // notification publications.
+    //
+    // All tests are GPU-gated (require_gpu!) because populate_zone_hit_regions
+    // is a method on Compositor, which requires a GPU device at construction.
+    // The method itself is pure geometry — it does not issue GPU commands.
+
+    /// `populate_zone_hit_regions()` MUST produce exactly one dismiss region for a
+    /// single notification with no actions in a Stack zone.
+    #[tokio::test]
+    async fn zone_hit_single_notification_produces_dismiss_region() {
+        let (compositor, _surface) =
+            require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let _tab = scene.create_tab("Main", 0).unwrap();
+        scene.register_zone(tze_hud_scene::types::ZoneDefinition {
+            id: SceneId::new(),
+            name: "notif".to_string(),
+            description: "Stack zone".to_string(),
+            geometry_policy: tze_hud_scene::types::GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![tze_hud_scene::types::ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: tze_hud_scene::types::RenderingPolicy {
+                font_size_px: Some(16.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: tze_hud_scene::types::LayerAttachment::Chrome,
+            ephemeral: false,
+        });
+        scene
+            .publish_to_zone(
+                "notif",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Hello".to_string(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    actions: Vec::new(),
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
+
+        assert_eq!(
+            scene.zone_hit_regions.len(),
+            1,
+            "single notification with no actions must produce exactly 1 hit region"
+        );
+        assert_eq!(
+            scene.zone_hit_regions[0].kind,
+            tze_hud_scene::types::ZoneInteractionKind::Dismiss,
+            "single region must be a Dismiss button"
+        );
+        assert!(
+            scene.zone_hit_regions[0].interaction_id.contains("dismiss"),
+            "interaction_id must contain 'dismiss': {}",
+            scene.zone_hit_regions[0].interaction_id
+        );
+    }
+
+    /// The dismiss region MUST be positioned at the top-right of the notification slot.
+    /// Zone: x_pct=0.75, width_pct=0.24 on a 1920×1080 screen.
+    /// Expected: dismiss.x ≈ 1920*0.75 + 1920*0.24 - 20 = 1440 + 460.8 - 20 = 1880.8.
+    #[tokio::test]
+    async fn zone_hit_dismiss_region_at_top_right_of_slot() {
+        let (compositor, _surface) =
+            require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let sw = 1920.0f32;
+        let sh = 1080.0f32;
+        let mut scene = SceneGraph::new(sw, sh);
+        let _tab = scene.create_tab("Main", 0).unwrap();
+        scene.register_zone(tze_hud_scene::types::ZoneDefinition {
+            id: SceneId::new(),
+            name: "notif".to_string(),
+            description: "Stack zone".to_string(),
+            geometry_policy: tze_hud_scene::types::GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![tze_hud_scene::types::ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: tze_hud_scene::types::RenderingPolicy {
+                font_size_px: Some(16.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: tze_hud_scene::types::LayerAttachment::Chrome,
+            ephemeral: false,
+        });
+        scene
+            .publish_to_zone(
+                "notif",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Test".to_string(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    actions: Vec::new(),
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        compositor.populate_zone_hit_regions(&mut scene, sw, sh);
+
+        assert_eq!(scene.zone_hit_regions.len(), 1, "must have exactly 1 region");
+        let region = &scene.zone_hit_regions[0];
+
+        // Dismiss should be at the top-right of the slot.
+        // Zone geometry: zx = 1920*0.75 = 1440, zw = 1920*0.24 = 460.8.
+        // Dismiss x = zx + zw - 20 = 1880.8.
+        let expected_x = sw * 0.75 + sw * 0.24 - 20.0;
+        assert!(
+            (region.bounds.x - expected_x).abs() < 1.0,
+            "dismiss x must be at top-right (expected≈{expected_x:.1}, got {:.1})",
+            region.bounds.x
+        );
+        assert!(
+            region.bounds.y < 1.0,
+            "dismiss y must be near top of slot (expected≈0, got {:.1})",
+            region.bounds.y
+        );
+    }
+
+    /// A notification with 2 actions MUST produce 3 regions: 1 dismiss + 2 actions.
+    #[tokio::test]
+    async fn zone_hit_notification_with_two_actions_produces_three_regions() {
+        let (compositor, _surface) =
+            require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let _tab = scene.create_tab("Main", 0).unwrap();
+        scene.register_zone(tze_hud_scene::types::ZoneDefinition {
+            id: SceneId::new(),
+            name: "notif".to_string(),
+            description: "Stack zone".to_string(),
+            geometry_policy: tze_hud_scene::types::GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![tze_hud_scene::types::ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: tze_hud_scene::types::RenderingPolicy {
+                font_size_px: Some(16.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: tze_hud_scene::types::LayerAttachment::Chrome,
+            ephemeral: false,
+        });
+        scene
+            .publish_to_zone(
+                "notif",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Confirm?".to_string(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    actions: vec![
+                        NotificationAction {
+                            label: "Yes".to_string(),
+                            callback_id: "yes".to_string(),
+                        },
+                        NotificationAction {
+                            label: "No".to_string(),
+                            callback_id: "no".to_string(),
+                        },
+                    ],
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
+
+        assert_eq!(
+            scene.zone_hit_regions.len(),
+            3,
+            "1 dismiss + 2 action buttons = 3 regions"
+        );
+
+        assert_eq!(
+            scene.zone_hit_regions[0].kind,
+            tze_hud_scene::types::ZoneInteractionKind::Dismiss,
+            "first region must be Dismiss"
+        );
+        assert!(
+            matches!(
+                &scene.zone_hit_regions[1].kind,
+                tze_hud_scene::types::ZoneInteractionKind::Action { callback_id }
+                    if callback_id == "yes"
+            ),
+            "second region must be Action(yes)"
+        );
+        assert!(
+            matches!(
+                &scene.zone_hit_regions[2].kind,
+                tze_hud_scene::types::ZoneInteractionKind::Action { callback_id }
+                    if callback_id == "no"
+            ),
+            "third region must be Action(no)"
+        );
+    }
+
+    /// Tab order MUST be sequential: dismiss=0, action[0]=1, action[1]=2.
+    #[tokio::test]
+    async fn zone_hit_tab_order_is_sequential() {
+        let (compositor, _surface) =
+            require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let _tab = scene.create_tab("Main", 0).unwrap();
+        scene.register_zone(tze_hud_scene::types::ZoneDefinition {
+            id: SceneId::new(),
+            name: "notif".to_string(),
+            description: "Stack zone".to_string(),
+            geometry_policy: tze_hud_scene::types::GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![tze_hud_scene::types::ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: tze_hud_scene::types::RenderingPolicy {
+                font_size_px: Some(16.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: tze_hud_scene::types::LayerAttachment::Chrome,
+            ephemeral: false,
+        });
+        scene
+            .publish_to_zone(
+                "notif",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Tab order test".to_string(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    actions: vec![
+                        NotificationAction {
+                            label: "A".to_string(),
+                            callback_id: "a".to_string(),
+                        },
+                        NotificationAction {
+                            label: "B".to_string(),
+                            callback_id: "b".to_string(),
+                        },
+                    ],
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
+
+        assert_eq!(scene.zone_hit_regions.len(), 3, "must produce 3 regions");
+        assert_eq!(scene.zone_hit_regions[0].tab_order, 0, "dismiss tab_order must be 0");
+        assert_eq!(scene.zone_hit_regions[1].tab_order, 1, "action[0] tab_order must be 1");
+        assert_eq!(scene.zone_hit_regions[2].tab_order, 2, "action[1] tab_order must be 2");
+    }
+
+    /// Calling `populate_zone_hit_regions` twice MUST clear stale regions (no accumulation).
+    #[tokio::test]
+    async fn zone_hit_populate_clears_on_repeated_calls() {
+        let (compositor, _surface) =
+            require_gpu!(make_compositor_and_surface(256, 256).await);
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let _tab = scene.create_tab("Main", 0).unwrap();
+        scene.register_zone(tze_hud_scene::types::ZoneDefinition {
+            id: SceneId::new(),
+            name: "notif".to_string(),
+            description: "Stack zone".to_string(),
+            geometry_policy: tze_hud_scene::types::GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.24,
+                height_pct: 0.30,
+            },
+            accepted_media_types: vec![tze_hud_scene::types::ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: tze_hud_scene::types::RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            layer_attachment: tze_hud_scene::types::LayerAttachment::Chrome,
+            ephemeral: false,
+        });
+        scene
+            .publish_to_zone(
+                "notif",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Once".to_string(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                    actions: Vec::new(),
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
+        let first_count = scene.zone_hit_regions.len();
+        assert_eq!(first_count, 1, "first call must produce 1 region");
+
+        compositor.populate_zone_hit_regions(&mut scene, 1920.0, 1080.0);
+        assert_eq!(
+            scene.zone_hit_regions.len(),
+            1,
+            "second call must still produce 1 (not accumulate to 2)"
         );
     }
 }

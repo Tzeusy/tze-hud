@@ -782,6 +782,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                     urgency: 1,
                     ttl_ms: None,
                     title: String::new(),
+                    actions: Vec::new(),
                 }),
                 &namespace,
                 None, // no merge key — stacks alongside other notifications

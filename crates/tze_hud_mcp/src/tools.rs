@@ -459,6 +459,7 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                         urgency,
                         ttl_ms,
                         title,
+                        actions: Vec::new(),
                     }))
                 }
                 "status_bar" => {
