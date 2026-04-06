@@ -1504,14 +1504,12 @@ impl Compositor {
                     if !merged.is_empty() {
                         let mut sorted: Vec<(&String, &String)> = merged.iter().collect();
                         sorted.sort_by_key(|(k, _)| k.as_str());
-                        // Compact format: value-only, newline-separated for
-                        // vertical right-edge layout. Keys are suppressed —
-                        // agents should publish display-ready values (e.g.
-                        // "30°C" not "temperature: 30°C"). Icons are a
-                        // post-v1 feature (texture pipeline).
+                        // Format as "key: value" lines, sorted by key for
+                        // deterministic output. Consistent with the LatestWins
+                        // StatusBar rendering path.
                         let text = sorted
                             .iter()
-                            .map(|(_, v)| v.as_str())
+                            .map(|(k, v)| format!("{k}: {v}"))
                             .collect::<Vec<_>>()
                             .join("\n");
                         items.push(TextItem::from_zone_policy(
