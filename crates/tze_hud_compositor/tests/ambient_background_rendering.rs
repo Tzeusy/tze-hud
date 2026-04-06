@@ -80,8 +80,9 @@
 use tze_hud_compositor::{Compositor, CompositorError, surface::HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{
-    ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, ResourceId, Rgba, SceneId,
-    ZoneContent, ZoneDefinition, ZoneMediaType, ZoneRegistry,
+    ContentionPolicy, GeometryPolicy, ImageFitMode, LayerAttachment, Node, NodeData, Rect,
+    RenderingPolicy, ResourceId, Rgba, SceneId, StaticImageNode, ZoneContent, ZoneDefinition,
+    ZoneMediaType, ZoneRegistry,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -724,5 +725,328 @@ fn test_ambient_background_layer_attachment_is_background() {
         "ambient-background zone MUST use LayerAttachment::Background so it renders \
          behind all content and chrome zones; got {:?}",
         zone.layer_attachment
+    );
+}
+
+// ─── GPU texture rendering tests ────────────────────────────────────────────
+
+/// When decoded RGBA bytes are registered for a StaticImage resource, the
+/// compositor renders the actual image texture instead of the warm-gray
+/// placeholder.
+///
+/// This test:
+/// 1. Creates a solid-red 8x8 RGBA image programmatically
+/// 2. Registers it via `compositor.register_image_bytes()`
+/// 3. Publishes `ZoneContent::StaticImage(resource_id)` to ambient-background
+/// 4. Asserts that rendered pixels are red, not warm-gray
+#[tokio::test]
+async fn test_ambient_background_static_image_renders_texture_when_bytes_registered() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    let mut scene = scene_with_defaults(SURFACE_W as f32, SURFACE_H as f32);
+
+    // Create a solid-red 8x8 RGBA image.
+    let img_w: u32 = 8;
+    let img_h: u32 = 8;
+    let red_pixel: [u8; 4] = [255, 0, 0, 255]; // sRGB red
+    let rgba_data: Vec<u8> = red_pixel.repeat((img_w * img_h) as usize);
+    let resource_id = ResourceId::of(&rgba_data);
+
+    // Register the decoded RGBA bytes with the compositor.
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+
+    // Publish the StaticImage to ambient-background.
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            ZoneContent::StaticImage(resource_id),
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .expect("publish StaticImage must succeed");
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // The image is solid red. When rendered as a texture, centre pixels should be
+    // red-dominant, NOT the warm-gray placeholder (~149,149,149).
+    //
+    // Note: The 8x8 image is upscaled to fill the 256x256 zone via bilinear filtering.
+    // sRGB red [255,0,0] stored in Rgba8UnormSrgb is decoded to linear (1.0,0,0) by the
+    // GPU, then the fragment shader outputs it, and the surface re-encodes to sRGB.
+    // Expected ≈ [255, 0, 0, 255] ± tolerance.
+    let centre_pixel = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
+    assert!(
+        centre_pixel[0] > 200 && centre_pixel[1] < 30 && centre_pixel[2] < 30,
+        "centre pixel should be red (from texture) not warm-gray placeholder; got {:?}",
+        centre_pixel
+    );
+}
+
+/// When no bytes are registered, the compositor falls back to the warm-gray
+/// placeholder — even though `ZoneContent::StaticImage` is published.
+/// This ensures backward compatibility with the pre-texture-rendering behavior.
+#[tokio::test]
+async fn test_ambient_background_static_image_falls_back_to_placeholder_without_bytes() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    let mut scene = scene_with_defaults(SURFACE_W as f32, SURFACE_H as f32);
+
+    // Use a ResourceId for which no bytes are registered.
+    let resource_id = ResourceId::of(b"unregistered-image-data");
+
+    scene
+        .publish_to_zone(
+            "ambient-background",
+            ZoneContent::StaticImage(resource_id),
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .expect("publish StaticImage must succeed");
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // Should render the warm-gray placeholder.
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        SURFACE_W,
+        128,
+        128,
+        STATIC_IMAGE_PLACEHOLDER_EXPECTED,
+        TOLERANCE,
+        "StaticImage without registered bytes should render warm-gray placeholder",
+    )
+    .unwrap_or_else(|e| {
+        panic!("placeholder fallback pixel assertion failed: {e}")
+    });
+}
+
+// ─── Tile-node StaticImage rendering tests with fit modes ───────────────────
+
+/// Helper: create a solid-color RGBA8 image of the given dimensions.
+fn make_solid_rgba(width: u32, height: u32, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
+    let pixel = [r, g, b, a];
+    pixel.repeat((width * height) as usize)
+}
+
+/// Helper: create a scene with a single tile containing a StaticImage node.
+fn scene_with_static_image_tile(
+    surface_w: f32,
+    surface_h: f32,
+    resource_id: ResourceId,
+    img_w: u32,
+    img_h: u32,
+    fit_mode: ImageFitMode,
+) -> SceneGraph {
+    let mut scene = SceneGraph::new(surface_w, surface_h);
+    // Register the resource ID so the scene graph allows refcounting.
+    scene.register_resource(resource_id);
+    let tab_id = scene.create_tab("test", 0).unwrap();
+    let lease_id = scene.grant_lease("test-agent", 60_000, vec![]);
+    let tile_id = scene
+        .create_tile(
+            tab_id,
+            "test-agent",
+            lease_id,
+            Rect::new(0.0, 0.0, surface_w, surface_h),
+            1,
+        )
+        .unwrap();
+    scene
+        .set_tile_root(
+            tile_id,
+            Node {
+                id: SceneId::new(),
+                children: vec![],
+                data: NodeData::StaticImage(StaticImageNode {
+                    resource_id,
+                    width: img_w,
+                    height: img_h,
+                    decoded_bytes: (img_w as u64) * (img_h as u64) * 4,
+                    fit_mode,
+                    bounds: Rect::new(0.0, 0.0, surface_w, surface_h),
+                }),
+            },
+        )
+        .unwrap();
+    scene
+}
+
+/// ImageFitMode::Fill — renders a solid-green 8x8 image stretched to fill
+/// the entire 256x256 tile. All pixels should be green.
+#[tokio::test]
+async fn test_tile_static_image_fill_mode_renders_texture() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+
+    let img_w = 8u32;
+    let img_h = 8u32;
+    let rgba_data = make_solid_rgba(img_w, img_h, 0, 255, 0, 255);
+    let resource_id = ResourceId::of(&rgba_data);
+
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+
+    let scene = scene_with_static_image_tile(
+        SURFACE_W as f32,
+        SURFACE_H as f32,
+        resource_id,
+        img_w,
+        img_h,
+        ImageFitMode::Fill,
+    );
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // Centre pixel should be green.
+    let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
+    assert!(
+        centre[0] < 30 && centre[1] > 200 && centre[2] < 30,
+        "Fill mode: centre pixel should be green; got {:?}",
+        centre
+    );
+}
+
+/// ImageFitMode::Contain — renders a wide 16x8 solid-blue image into a square
+/// 256x256 tile. The image should be letterboxed (bars at top/bottom).
+/// Centre should be blue; top-edge should be the tile background (not blue).
+#[tokio::test]
+async fn test_tile_static_image_contain_mode_letterboxes() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+
+    let img_w = 16u32;
+    let img_h = 8u32;
+    let rgba_data = make_solid_rgba(img_w, img_h, 0, 0, 255, 255);
+    let resource_id = ResourceId::of(&rgba_data);
+
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+
+    let scene = scene_with_static_image_tile(
+        SURFACE_W as f32,
+        SURFACE_H as f32,
+        resource_id,
+        img_w,
+        img_h,
+        ImageFitMode::Contain,
+    );
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // For a 16:8 (2:1) image in a 256x256 square:
+    // Contain: width fills 256, height = 256/2 = 128, centered vertically.
+    // Letterbox bars: y=0..64 and y=192..256 should be tile background.
+    // Image region: y=64..192, all blue.
+
+    let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
+    assert!(
+        centre[2] > 200 && centre[0] < 30 && centre[1] < 30,
+        "Contain mode: centre pixel (in image region) should be blue; got {:?}",
+        centre
+    );
+
+    // Top edge (y=2) should be tile background (dark), not blue.
+    let top = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 2);
+    assert!(
+        top[2] < 100,
+        "Contain mode: top letterbox pixel should not be blue; got {:?}",
+        top
+    );
+}
+
+/// ImageFitMode::Cover — renders a tall 8x16 solid-magenta image into a square
+/// 256x256 tile. The image should be cropped (sides cut off) to fill.
+/// All visible pixels should be magenta.
+#[tokio::test]
+async fn test_tile_static_image_cover_mode_fills_completely() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+
+    let img_w = 8u32;
+    let img_h = 16u32;
+    let rgba_data = make_solid_rgba(img_w, img_h, 255, 0, 255, 255);
+    let resource_id = ResourceId::of(&rgba_data);
+
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+
+    let scene = scene_with_static_image_tile(
+        SURFACE_W as f32,
+        SURFACE_H as f32,
+        resource_id,
+        img_w,
+        img_h,
+        ImageFitMode::Cover,
+    );
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // Cover fills the entire destination. Since the image is solid magenta,
+    // all pixels should be magenta regardless of cropping.
+    let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
+    assert!(
+        centre[0] > 200 && centre[1] < 30 && centre[2] > 200,
+        "Cover mode: centre pixel should be magenta; got {:?}",
+        centre
+    );
+
+    // Corner should also be magenta (Cover fills everything).
+    let corner = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 2, 2);
+    assert!(
+        corner[0] > 200 && corner[1] < 30 && corner[2] > 200,
+        "Cover mode: corner pixel should also be magenta; got {:?}",
+        corner
+    );
+}
+
+/// ImageFitMode::ScaleDown — renders a small 4x4 solid-yellow image into a
+/// 256x256 tile. Since 4 < 256, the image should be rendered at native 4x4
+/// size centered in the tile, with the tile background visible around it.
+#[tokio::test]
+async fn test_tile_static_image_scale_down_mode_native_size() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+
+    let img_w = 4u32;
+    let img_h = 4u32;
+    let rgba_data = make_solid_rgba(img_w, img_h, 255, 255, 0, 255);
+    let resource_id = ResourceId::of(&rgba_data);
+
+    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()));
+
+    let scene = scene_with_static_image_tile(
+        SURFACE_W as f32,
+        SURFACE_H as f32,
+        resource_id,
+        img_w,
+        img_h,
+        ImageFitMode::ScaleDown,
+    );
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // ScaleDown with 4x4 image in 256x256 dest: renders at native 4x4 size, centred.
+    // Centre of image: pixel (128,128) should be yellow.
+    // (The 4x4 image spans x=126..130, y=126..130)
+    let centre = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 128, 128);
+    assert!(
+        centre[0] > 200 && centre[1] > 200 && centre[2] < 30,
+        "ScaleDown mode: centre pixel should be yellow (image at native size); got {:?}",
+        centre
+    );
+
+    // Far corner (0,0) should be tile background (dark), not yellow.
+    let corner = HeadlessSurface::pixel_at(&pixels, SURFACE_W, 0, 0);
+    assert!(
+        corner[0] < 100 && corner[1] < 100,
+        "ScaleDown mode: far corner should be tile background, not yellow; got {:?}",
+        corner
     );
 }

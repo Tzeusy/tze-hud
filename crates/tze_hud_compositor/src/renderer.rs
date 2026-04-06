@@ -22,9 +22,13 @@
 //! This separation is the architectural foundation for future render-skip redaction
 //! (capture-safe architecture): the content and chrome passes are structurally independent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use crate::pipeline::{ChromeDrawCmd, RectVertex, rect_vertices};
+use crate::pipeline::{
+    ChromeDrawCmd, RectVertex, create_texture_rect_bind_group_layout,
+    create_texture_rect_pipeline, rect_vertices, textured_rect_vertices,
+};
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
 use crate::widget::WidgetRenderer;
@@ -375,6 +379,112 @@ fn emit_border_quads(
     }
 }
 
+// ─── Image fit mode UV calculations ─────────────────────────────────────────
+
+/// A textured draw command collected during scene traversal.
+///
+/// These are collected separately from color quads because they use a
+/// different vertex layout and render pipeline.
+struct TexturedDrawCmd {
+    resource_id: ResourceId,
+    /// Pixel-space position and size of the destination rectangle.
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    /// UV sub-rectangle within the texture: `[u_min, v_min, u_max, v_max]`.
+    uv_rect: [f32; 4],
+    /// Per-vertex tint (opacity, fade, etc.).
+    tint: [f32; 4],
+}
+
+/// Compute the UV rectangle and destination rectangle for a given fit mode.
+///
+/// Returns `(dest_x, dest_y, dest_w, dest_h, uv_rect)` where:
+/// - `(dest_x, dest_y, dest_w, dest_h)` is the pixel-space quad to render
+/// - `uv_rect` is `[u_min, v_min, u_max, v_max]` within the texture
+///
+/// All fit modes assume the texture contains the full image at `(img_w, img_h)`.
+fn compute_fit_mode(
+    fit_mode: ImageFitMode,
+    // Destination bounds in pixel space
+    dest_x: f32,
+    dest_y: f32,
+    dest_w: f32,
+    dest_h: f32,
+    // Source image dimensions
+    img_w: u32,
+    img_h: u32,
+) -> (f32, f32, f32, f32, [f32; 4]) {
+    let iw = img_w as f32;
+    let ih = img_h as f32;
+
+    if iw <= 0.0 || ih <= 0.0 || dest_w <= 0.0 || dest_h <= 0.0 {
+        return (dest_x, dest_y, dest_w, dest_h, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    let src_aspect = iw / ih;
+    let dst_aspect = dest_w / dest_h;
+
+    match fit_mode {
+        ImageFitMode::Fill => {
+            // Stretch to fill — full UV, full dest
+            (dest_x, dest_y, dest_w, dest_h, [0.0, 0.0, 1.0, 1.0])
+        }
+        ImageFitMode::Contain => {
+            // Scale uniformly so the entire image is visible; letterbox bars.
+            let (rw, rh) = if src_aspect > dst_aspect {
+                // Image is wider: fit width, letterbox top/bottom
+                let rw = dest_w;
+                let rh = dest_w / src_aspect;
+                (rw, rh)
+            } else {
+                // Image is taller: fit height, letterbox left/right
+                let rh = dest_h;
+                let rw = dest_h * src_aspect;
+                (rw, rh)
+            };
+            let rx = dest_x + (dest_w - rw) * 0.5;
+            let ry = dest_y + (dest_h - rh) * 0.5;
+            (rx, ry, rw, rh, [0.0, 0.0, 1.0, 1.0])
+        }
+        ImageFitMode::Cover => {
+            // Scale uniformly to cover the entire dest; crop the excess via UV.
+            let (u_min, v_min, u_max, v_max) = if src_aspect > dst_aspect {
+                // Image is wider than dest: crop horizontal
+                let visible_fraction = dst_aspect / src_aspect;
+                let u_offset = (1.0 - visible_fraction) * 0.5;
+                (u_offset, 0.0, u_offset + visible_fraction, 1.0)
+            } else {
+                // Image is taller than dest: crop vertical
+                let visible_fraction = src_aspect / dst_aspect;
+                let v_offset = (1.0 - visible_fraction) * 0.5;
+                (0.0, v_offset, 1.0, v_offset + visible_fraction)
+            };
+            (dest_x, dest_y, dest_w, dest_h, [u_min, v_min, u_max, v_max])
+        }
+        ImageFitMode::ScaleDown => {
+            // Like Contain but never scale up.
+            if iw <= dest_w && ih <= dest_h {
+                // Image fits at native size — center it.
+                let rx = dest_x + (dest_w - iw) * 0.5;
+                let ry = dest_y + (dest_h - ih) * 0.5;
+                (rx, ry, iw, ih, [0.0, 0.0, 1.0, 1.0])
+            } else {
+                // Image is larger — use Contain logic.
+                let (rw, rh) = if src_aspect > dst_aspect {
+                    (dest_w, dest_w / src_aspect)
+                } else {
+                    (dest_h * src_aspect, dest_h)
+                };
+                let rx = dest_x + (dest_w - rw) * 0.5;
+                let ry = dest_y + (dest_h - rh) * 0.5;
+                (rx, ry, rw, rh, [0.0, 0.0, 1.0, 1.0])
+            }
+        }
+    }
+}
+
 /// Per-zone opacity animation state.
 ///
 /// Tracks a fade-in or fade-out transition for a single zone.
@@ -619,6 +729,26 @@ impl StreamRevealState {
     }
 }
 
+// ─── Image texture cache ────────────────────────────────────────────────────
+
+/// A cached GPU texture for a static image resource.
+///
+/// Created by [`Compositor::ensure_image_texture`] on first reference and
+/// reused across frames until eviction.
+pub struct ImageTextureEntry {
+    /// The GPU texture holding RGBA pixel data, kept alive for `bind_group`.
+    /// Prefixed with `_` to make intent explicit: this field exists solely to
+    /// retain ownership and keep the wgpu texture alive as long as the bind
+    /// group references it.
+    pub _texture: wgpu::Texture,
+    /// Pre-built bind group (texture view + sampler) ready for draw calls.
+    pub bind_group: wgpu::BindGroup,
+    /// Image width in pixels (needed for fit-mode UV calculations).
+    pub width: u32,
+    /// Image height in pixels (needed for fit-mode UV calculations).
+    pub height: u32,
+}
+
 /// GPU state and render pipeline.
 pub struct Compositor {
     pub device: wgpu::Device,
@@ -628,6 +758,12 @@ pub struct Compositor {
     /// the framebuffer to transparent in overlay mode (LoadOp::Clear
     /// doesn't write alpha correctly on some GPUs).
     clear_pipeline: wgpu::RenderPipeline,
+    /// Render pipeline for textured rectangles (static image rendering).
+    texture_rect_pipeline: wgpu::RenderPipeline,
+    /// Bind group layout for the texture rect pipeline (shared by all images).
+    texture_rect_bind_group_layout: wgpu::BindGroupLayout,
+    /// Shared linear-filtering sampler for all image textures (created once).
+    image_sampler: wgpu::Sampler,
     pub width: u32,
     pub height: u32,
     frame_number: u64,
@@ -684,6 +820,20 @@ pub struct Compositor {
     /// Populated by calling `set_token_map` after `run_component_startup`
     /// produces a `ComponentStartupResult::global_tokens`.
     pub token_map: HashMap<String, String>,
+    /// Decoded RGBA image bytes indexed by `ResourceId`.
+    ///
+    /// Populated by calling [`Compositor::register_image_bytes`] after an image
+    /// resource is uploaded. The compositor decodes/uploads to GPU texture on
+    /// first reference via [`Compositor::ensure_image_texture`].
+    ///
+    /// The raw bytes are kept until the ResourceId is no longer referenced by
+    /// any scene node or zone publication (evicted by `evict_unused_image_textures`).
+    image_bytes: HashMap<ResourceId, Arc<[u8]>>,
+    /// GPU texture cache for static images, keyed by `ResourceId`.
+    ///
+    /// Entries are created on-demand by `ensure_image_texture` and evicted
+    /// when the resource is no longer referenced in the scene.
+    image_texture_cache: HashMap<ResourceId, ImageTextureEntry>,
 }
 
 impl Compositor {
@@ -734,11 +884,30 @@ impl Compositor {
         let clear_pipeline =
             Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
 
+        let texture_rect_bind_group_layout =
+            create_texture_rect_bind_group_layout(&device);
+        let texture_rect_pipeline = create_texture_rect_pipeline(
+            &device,
+            &texture_rect_bind_group_layout,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image_linear_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         Ok(Self {
             device,
             queue,
             pipeline,
             clear_pipeline,
+            texture_rect_pipeline,
+            texture_rect_bind_group_layout,
+            image_sampler,
             width,
             height,
             frame_number: 0,
@@ -752,6 +921,8 @@ impl Compositor {
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
+            image_bytes: HashMap::new(),
+            image_texture_cache: HashMap::new(),
         })
     }
 
@@ -981,11 +1152,30 @@ impl Compositor {
         let pipeline = Self::create_pipeline_with_format(&device, surface_format);
         let clear_pipeline = Self::create_clear_pipeline(&device, surface_format);
 
+        let texture_rect_bind_group_layout =
+            create_texture_rect_bind_group_layout(&device);
+        let texture_rect_pipeline = create_texture_rect_pipeline(
+            &device,
+            &texture_rect_bind_group_layout,
+            surface_format,
+        );
+        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image_linear_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let compositor = Self {
             device,
             queue,
             pipeline,
             clear_pipeline,
+            texture_rect_pipeline,
+            texture_rect_bind_group_layout,
+            image_sampler,
             width: clamped_width,
             height: clamped_height,
             frame_number: 0,
@@ -999,6 +1189,8 @@ impl Compositor {
             pub_animation_states: HashMap::new(),
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
+            image_bytes: HashMap::new(),
+            image_texture_cache: HashMap::new(),
         };
 
         let window_surface = WindowSurface::new(surface, config);
@@ -1190,7 +1382,200 @@ impl Compositor {
             .unwrap_or(false)
     }
 
-    // ─── Widget renderer ─────────────────────────────────────────────────────
+    // ─── Image texture cache ─────────────────────────────────────────────────
+
+    /// Register decoded RGBA image bytes for a resource.
+    ///
+    /// The runtime should call this after each successful image upload so the
+    /// compositor can create GPU textures on demand. `rgba_data` must be
+    /// width × height × 4 bytes of RGBA8 pixel data.
+    ///
+    /// Duplicate calls with the same `resource_id` are ignored (content-addressed
+    /// identity guarantees the bytes are identical).
+    pub fn register_image_bytes(&mut self, resource_id: ResourceId, rgba_data: Arc<[u8]>) {
+        self.image_bytes.entry(resource_id).or_insert(rgba_data);
+    }
+
+    /// Ensure a GPU texture exists for the given `ResourceId`.
+    ///
+    /// Returns `true` if a texture is ready (either already cached or just
+    /// created). Returns `false` if the image bytes are not registered.
+    ///
+    /// The flow: check `image_texture_cache` → miss → look up `image_bytes` →
+    /// create `wgpu::Texture` → write data → create `BindGroup` → cache.
+    fn ensure_image_texture(
+        &mut self,
+        resource_id: ResourceId,
+        img_width: u32,
+        img_height: u32,
+    ) -> bool {
+        // Already cached?
+        if self.image_texture_cache.contains_key(&resource_id) {
+            return true;
+        }
+
+        // Retrieve raw RGBA bytes.
+        let rgba_data = match self.image_bytes.get(&resource_id) {
+            Some(data) => Arc::clone(data),
+            None => {
+                tracing::debug!(
+                    resource_id = %resource_id,
+                    "image bytes not registered — falling back to placeholder"
+                );
+                return false;
+            }
+        };
+
+        // Validate byte count.
+        let expected_bytes = (img_width as usize) * (img_height as usize) * 4;
+        if rgba_data.len() != expected_bytes {
+            tracing::warn!(
+                resource_id = %resource_id,
+                expected = expected_bytes,
+                actual = rgba_data.len(),
+                "image bytes length mismatch — falling back to placeholder"
+            );
+            return false;
+        }
+
+        // Create GPU texture.
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("img_tex_{resource_id}")),
+            size: wgpu::Extent3d {
+                width: img_width,
+                height: img_height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Upload pixel data.
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(img_width * 4),
+                rows_per_image: Some(img_height),
+            },
+            wgpu::Extent3d {
+                width: img_width,
+                height: img_height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Create bind group.
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("img_bg_{resource_id}")),
+            layout: &self.texture_rect_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                },
+            ],
+        });
+
+        self.image_texture_cache.insert(
+            resource_id,
+            ImageTextureEntry {
+                _texture: texture,
+                bind_group,
+                width: img_width,
+                height: img_height,
+            },
+        );
+
+        tracing::debug!(
+            resource_id = %resource_id,
+            width = img_width,
+            height = img_height,
+            "image texture uploaded to GPU"
+        );
+
+        true
+    }
+
+    /// Evict cached GPU textures for resources no longer referenced in the scene.
+    ///
+    /// Call once per frame after rendering. `referenced_ids` is the set of
+    /// `ResourceId`s that appeared in zone publications or tile nodes during
+    /// this frame. Any cache entry not in this set is dropped.
+    pub fn evict_unused_image_textures(&mut self, referenced_ids: &HashSet<ResourceId>) {
+        self.image_texture_cache
+            .retain(|id, _| referenced_ids.contains(id));
+        // Also evict bytes for resources no longer referenced.
+        self.image_bytes
+            .retain(|id, _| referenced_ids.contains(id));
+    }
+
+    /// Scan the scene graph for all StaticImage resources, ensure their GPU
+    /// textures are uploaded, and return the set of referenced `ResourceId`s.
+    ///
+    /// This method uploads textures for tile-backed static images directly,
+    /// and for zone-publication images when dimensions can be inferred from
+    /// registered RGBA bytes.
+    ///
+    /// The returned `HashSet<ResourceId>` should be passed to
+    /// [`Compositor::evict_unused_image_textures`] once per frame so that
+    /// stale cache entries are reclaimed and the cache does not grow without
+    /// bound across frames.
+    fn ensure_scene_image_textures(&mut self, scene: &SceneGraph) -> HashSet<ResourceId> {
+        let mut referenced: HashSet<ResourceId> = HashSet::new();
+
+        // Collect all referenced StaticImage resource IDs from tiles.
+        for node in scene.nodes.values() {
+            if let NodeData::StaticImage(img) = &node.data {
+                self.ensure_image_texture(img.resource_id, img.width, img.height);
+                referenced.insert(img.resource_id);
+            }
+        }
+
+        // Collect from zone publications.
+        for publishes in scene.zone_registry.active_publishes.values() {
+            for record in publishes {
+                if let ZoneContent::StaticImage(resource_id) = &record.content {
+                    referenced.insert(*resource_id);
+                    // For zone images, we don't have explicit dimensions — if
+                    // the image_bytes are registered, check the cache entry or
+                    // use a default. The actual dimensions are determined from
+                    // the registered bytes.
+                    if !self.image_texture_cache.contains_key(resource_id) {
+                        if let Some(data) = self.image_bytes.get(resource_id) {
+                            // Try to determine dimensions from the RGBA data size.
+                            // This is a heuristic: assume square if we can't determine.
+                            // In production, the runtime should provide dimensions.
+                            let pixel_count = data.len() / 4;
+                            let side = (pixel_count as f64).sqrt() as u32;
+                            if side > 0 && (side * side) as usize == pixel_count {
+                                self.ensure_image_texture(*resource_id, side, side);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        referenced
+    }
+
+    // ─── Widget renderer ──────────────────────────────────────────────────────
 
     /// Initialize (or re-initialize) the widget renderer for the given surface format.
     ///
@@ -2185,6 +2570,7 @@ impl Compositor {
         let sw = surf_w as f32;
         let sh = surf_h as f32;
         let mut vertices: Vec<RectVertex> = Vec::new();
+        let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
 
         // In overlay mode, prepend a full-screen quad to zero out alpha.
         if self.overlay_mode {
@@ -2207,6 +2593,10 @@ impl Compositor {
             ));
         }
 
+        // ── Ensure image textures are uploaded before rendering ──────────────
+        let image_refs = self.ensure_scene_image_textures(scene);
+        self.evict_unused_image_textures(&image_refs);
+
         // Update zone animation states (fade-in/fade-out) before rendering.
         // Must run before any render_zone_content call below.
         self.update_zone_animations(scene);
@@ -2216,6 +2606,7 @@ impl Compositor {
         self.render_zone_content(
             scene,
             &mut vertices,
+            &mut textured_cmds,
             sw,
             sh,
             Some(LayerAttachment::Background),
@@ -2237,7 +2628,7 @@ impl Compositor {
 
             // Render nodes within the tile
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut vertices, sw, sh);
+                self.render_node(root_id, tile, scene, &mut vertices, &mut textured_cmds, sw, sh);
             }
         }
 
@@ -2248,9 +2639,9 @@ impl Compositor {
         self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
+        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Content));
         // Chrome zones render last, above everything.
-        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Chrome));
+        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Chrome));
 
         // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
         // SVG rasterization can be slow; if a resize event arrives while we hold
@@ -2270,6 +2661,9 @@ impl Compositor {
             self.overlay_mode,
         );
         telemetry.render_encode_us = encode_us;
+
+        // ── Image pass: draw textured quads on top of color geometry ─────────
+        self.encode_image_pass(&mut encoder, &frame.view, &textured_cmds, sw, sh);
 
         // ── Widget pass: composite pre-synced textures above zone content ────
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
@@ -2323,6 +2717,11 @@ impl Compositor {
         let sw = surf_w as f32;
         let sh = surf_h as f32;
         let mut vertices: Vec<RectVertex> = Vec::new();
+        let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
+
+        // ── Ensure image textures are uploaded before rendering ──────────────
+        let image_refs = self.ensure_scene_image_textures(scene);
+        self.evict_unused_image_textures(&image_refs);
 
         // Update zone animation states before rendering zone content.
         // Must run before any render_zone_content call below.
@@ -2333,6 +2732,7 @@ impl Compositor {
         self.render_zone_content(
             scene,
             &mut vertices,
+            &mut textured_cmds,
             sw,
             sh,
             Some(LayerAttachment::Background),
@@ -2352,7 +2752,7 @@ impl Compositor {
             vertices.extend_from_slice(&verts);
 
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut vertices, sw, sh);
+                self.render_node(root_id, tile, scene, &mut vertices, &mut textured_cmds, sw, sh);
             }
         }
 
@@ -2363,9 +2763,9 @@ impl Compositor {
         self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Content));
+        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Content));
         // Chrome zones render last, above everything.
-        self.render_zone_content(scene, &mut vertices, sw, sh, Some(LayerAttachment::Chrome));
+        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Chrome));
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -2377,6 +2777,9 @@ impl Compositor {
         let (mut encoder, encode_us) =
             self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false);
         telemetry.render_encode_us = encode_us;
+
+        // ── Image pass: draw textured quads on top of color geometry ─────────
+        self.encode_image_pass(&mut encoder, &frame.view, &textured_cmds, sw, sh);
 
         // ── Widget pass: composite pre-synced textures above zone content ────
         self.encode_widget_pass(&mut encoder, &frame.view, &scene.widget_registry, sw, sh);
@@ -2434,6 +2837,10 @@ impl Compositor {
         // ── Widget texture sync before encoding (avoids surface-texture race).
         self.sync_widget_textures(scene, self.degradation_level);
 
+        // ── Ensure image textures are uploaded before rendering ──────────────
+        let image_refs = self.ensure_scene_image_textures(scene);
+        self.evict_unused_image_textures(&image_refs);
+
         // ── Pass 1: Content (background + agent tiles) ──────────────────────
         let tiles = scene.visible_tiles();
         telemetry.tile_count = tiles.len() as u32;
@@ -2441,6 +2848,7 @@ impl Compositor {
         telemetry.active_leases = scene.leases.len() as u32;
 
         let mut content_vertices: Vec<RectVertex> = Vec::new();
+        let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
         let (surf_w, surf_h) = surface.size();
         let sw = surf_w as f32;
         let sh = surf_h as f32;
@@ -2454,6 +2862,7 @@ impl Compositor {
         self.render_zone_content(
             scene,
             &mut content_vertices,
+            &mut textured_cmds,
             sw,
             sh,
             Some(LayerAttachment::Background),
@@ -2472,7 +2881,7 @@ impl Compositor {
             );
             content_vertices.extend_from_slice(&verts);
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut content_vertices, sw, sh);
+                self.render_node(root_id, tile, scene, &mut content_vertices, &mut textured_cmds, sw, sh);
             }
         }
 
@@ -2484,6 +2893,7 @@ impl Compositor {
         self.render_zone_content(
             scene,
             &mut content_vertices,
+            &mut textured_cmds,
             sw,
             sh,
             Some(LayerAttachment::Content),
@@ -2492,6 +2902,7 @@ impl Compositor {
         self.render_zone_content(
             scene,
             &mut content_vertices,
+            &mut textured_cmds,
             sw,
             sh,
             Some(LayerAttachment::Chrome),
@@ -2599,6 +3010,9 @@ impl Compositor {
             // must be evicted even when the current frame has no text.
             tr.trim_atlas();
         }
+
+        // ── Image pass: draw textured quads on top of color geometry ─────────
+        self.encode_image_pass(&mut encoder, &surface.view, &textured_cmds, sw, sh);
 
         // ── Widget pass: composite pre-synced textures above content + text ──
         // sync_widget_textures is called earlier, before frame encoding begins.
@@ -2760,6 +3174,65 @@ impl Compositor {
         wr.composite_widgets(&mut widget_pass, registry, surf_w, surf_h, &self.device);
     }
 
+    /// Encode a render pass for textured image quads.
+    ///
+    /// Uses `LoadOp::Load` to composite textured images on top of the color
+    /// geometry already written to the frame. Each unique `ResourceId` in
+    /// `cmds` switches the bind group to the corresponding cached texture.
+    fn encode_image_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_view: &wgpu::TextureView,
+        cmds: &[TexturedDrawCmd],
+        sw: f32,
+        sh: f32,
+    ) {
+        if cmds.is_empty() {
+            return;
+        }
+
+        use wgpu::util::DeviceExt;
+
+        let mut image_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("image_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: frame_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        image_pass.set_pipeline(&self.texture_rect_pipeline);
+
+        for cmd in cmds {
+            let entry = match self.image_texture_cache.get(&cmd.resource_id) {
+                Some(e) => e,
+                None => continue, // shouldn't happen if ensure was called
+            };
+
+            let verts = textured_rect_vertices(
+                cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint,
+            );
+            let vertex_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("image_quad_buf"),
+                    contents: bytemuck::cast_slice(&verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+            image_pass.set_bind_group(0, &entry.bind_group, &[]);
+            image_pass.set_vertex_buffer(0, vertex_buf.slice(..));
+            image_pass.draw(0..6, 0..1);
+        }
+    }
+
     /// Render zone content backdrop quads driven by `RenderingPolicy`.
     ///
     /// For each zone with at least one active publish:
@@ -2788,6 +3261,7 @@ impl Compositor {
         &self,
         scene: &SceneGraph,
         vertices: &mut Vec<RectVertex>,
+        textured_cmds: &mut Vec<TexturedDrawCmd>,
         sw: f32,
         sh: f32,
         only_layer: Option<LayerAttachment>,
@@ -2876,10 +3350,27 @@ impl Compositor {
                             matches!(&record.content, ZoneContent::Notification(_));
                         let backdrop_rgba: Option<Rgba> = match &record.content {
                             ZoneContent::SolidColor(rgba) => Some(*rgba),
-                            ZoneContent::StaticImage(_) => {
-                                // Placeholder warm-gray backdrop — full GPU texture upload
-                                // (wgpu sampler pipeline) is deferred to a follow-up iteration.
-                                Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
+                            ZoneContent::StaticImage(resource_id) => {
+                                // If a GPU texture is cached, emit a textured draw command
+                                // filling this publication's slot.
+                                if self.image_texture_cache.contains_key(resource_id) {
+                                    let combined_opacity =
+                                        (anim_opacity * self.pub_opacity(zone_name, record))
+                                            .clamp(0.0, 1.0);
+                                    textured_cmds.push(TexturedDrawCmd {
+                                        resource_id: *resource_id,
+                                        x,
+                                        y: slot_y,
+                                        w,
+                                        h: effective_slot_h,
+                                        uv_rect: [0.0, 0.0, 1.0, 1.0],
+                                        tint: [1.0, 1.0, 1.0, combined_opacity],
+                                    });
+                                    None // skip the color quad
+                                } else {
+                                    // Placeholder warm-gray backdrop.
+                                    Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
+                                }
                             }
                             ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                                 // alert-banner: severity tokens (color.severity.*).
@@ -2963,10 +3454,24 @@ impl Compositor {
                             // SolidColor always renders its own color (no policy override).
                             Some(*rgba)
                         }
-                        ZoneContent::StaticImage(_) => {
-                            // Placeholder warm-gray backdrop — full GPU texture upload
-                            // (wgpu sampler pipeline) is deferred to a follow-up iteration.
-                            Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
+                        ZoneContent::StaticImage(resource_id) => {
+                            // If a GPU texture is cached, emit a textured draw command
+                            // filling the zone.
+                            if self.image_texture_cache.contains_key(resource_id) {
+                                textured_cmds.push(TexturedDrawCmd {
+                                    resource_id: *resource_id,
+                                    x,
+                                    y,
+                                    w,
+                                    h,
+                                    uv_rect: [0.0, 0.0, 1.0, 1.0],
+                                    tint: [1.0, 1.0, 1.0, anim_opacity.clamp(0.0, 1.0)],
+                                });
+                                None // skip the color quad
+                            } else {
+                                // Placeholder warm-gray backdrop.
+                                Some(STATIC_IMAGE_PLACEHOLDER_COLOR)
+                            }
                         }
                         ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
                             // alert-banner: map urgency to severity token color.
@@ -3188,13 +3693,14 @@ impl Compositor {
     }
 
     /// Render a node and its children within a tile.
-    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::only_used_in_recursion, clippy::too_many_arguments)]
     fn render_node(
         &self,
         node_id: SceneId,
         tile: &Tile,
         scene: &SceneGraph,
         vertices: &mut Vec<RectVertex>,
+        textured_cmds: &mut Vec<TexturedDrawCmd>,
         sw: f32,
         sh: f32,
     ) {
@@ -3273,46 +3779,62 @@ impl Compositor {
                 vertices.extend_from_slice(&verts);
             }
             NodeData::StaticImage(img) => {
-                // Render a representative colored quad for the image bounds.
-                //
-                // Full GPU texture upload (wgpu::Texture from RGBA data) is deferred to a
-                // follow-up iteration that adds a sampler pipeline. For the vertical slice this
-                // placeholder renders a warm-gray background quad with a smaller accent strip
-                // (mimicking the visual weight of an image) so that pixel-readback tests can
-                // verify the node is composited into the frame at the correct position.
-                let outer_color = [0.55_f32, 0.50, 0.45, 1.0]; // warm gray — "image placeholder"
-                let verts = rect_vertices(
-                    tile.bounds.x + img.bounds.x,
-                    tile.bounds.y + img.bounds.y,
-                    img.bounds.width,
-                    img.bounds.height,
-                    sw,
-                    sh,
-                    self.gpu_color_raw(outer_color),
-                );
-                vertices.extend_from_slice(&verts);
-
-                // Inner accent strip — a slightly brighter inset rectangle.
-                let margin = 4.0_f32;
-                if img.bounds.width > margin * 2.0 && img.bounds.height > margin * 2.0 {
-                    let accent_color = [0.75_f32, 0.70, 0.65, 1.0];
+                // If a GPU texture is cached for this resource, emit a textured
+                // draw command with fit-mode UV calculations.
+                if let Some(entry) = self.image_texture_cache.get(&img.resource_id) {
+                    let (dx, dy, dw, dh, uv_rect) = compute_fit_mode(
+                        img.fit_mode,
+                        tile.bounds.x + img.bounds.x,
+                        tile.bounds.y + img.bounds.y,
+                        img.bounds.width,
+                        img.bounds.height,
+                        entry.width,
+                        entry.height,
+                    );
+                    textured_cmds.push(TexturedDrawCmd {
+                        resource_id: img.resource_id,
+                        x: dx,
+                        y: dy,
+                        w: dw,
+                        h: dh,
+                        uv_rect,
+                        tint: [1.0, 1.0, 1.0, tile.opacity],
+                    });
+                } else {
+                    // Fallback: warm-gray placeholder when bytes not registered.
+                    let outer_color = [0.55_f32, 0.50, 0.45, 1.0];
                     let verts = rect_vertices(
-                        tile.bounds.x + img.bounds.x + margin,
-                        tile.bounds.y + img.bounds.y + margin,
-                        img.bounds.width - margin * 2.0,
-                        img.bounds.height - margin * 2.0,
+                        tile.bounds.x + img.bounds.x,
+                        tile.bounds.y + img.bounds.y,
+                        img.bounds.width,
+                        img.bounds.height,
                         sw,
                         sh,
-                        self.gpu_color_raw(accent_color),
+                        self.gpu_color_raw(outer_color),
                     );
                     vertices.extend_from_slice(&verts);
+
+                    let margin = 4.0_f32;
+                    if img.bounds.width > margin * 2.0 && img.bounds.height > margin * 2.0 {
+                        let accent_color = [0.75_f32, 0.70, 0.65, 1.0];
+                        let verts = rect_vertices(
+                            tile.bounds.x + img.bounds.x + margin,
+                            tile.bounds.y + img.bounds.y + margin,
+                            img.bounds.width - margin * 2.0,
+                            img.bounds.height - margin * 2.0,
+                            sw,
+                            sh,
+                            self.gpu_color_raw(accent_color),
+                        );
+                        vertices.extend_from_slice(&verts);
+                    }
                 }
             }
         }
 
         // Render children
         for child_id in &node.children {
-            self.render_node(*child_id, tile, scene, vertices, sw, sh);
+            self.render_node(*child_id, tile, scene, vertices, textured_cmds, sw, sh);
         }
     }
 }
@@ -4592,7 +5114,7 @@ mod tests {
 
         // render_zone_content should produce backdrop rect vertices.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
         // We check that vertices were emitted (backdrop rendered).
         assert!(
             !vertices.is_empty(),
@@ -4662,7 +5184,7 @@ mod tests {
 
         // Collect vertices from render_zone_content.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // The backdrop should be severity warning color (~amber: R=1.0, G~0.72, B=0.0).
         // rect_vertices emits 6 vertices; each has color at the end.
@@ -4771,7 +5293,7 @@ mod tests {
         // Render and check: the backdrop must NOT be severity critical (pure red R~1.0, G~0.0, B~0.0).
         // It should be notification urgency critical fallback: #8B1A1A (R~0.545, G~0.102, B~0.102).
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         assert!(
             !vertices.is_empty(),
@@ -5022,7 +5544,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         assert!(!vertices.is_empty(), "expected vertices");
         // The first quad's alpha (index 3 of color) should be 0.9.
@@ -5084,7 +5606,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // One backdrop (6 vertices) + up to 4 border quads (6 each) = 6 + 24 = 30 max.
         // Minimum: 6 (backdrop) + 6 (at least top edge border) = 12.
@@ -5150,7 +5672,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // alert-banner: only 6 vertices (one backdrop quad, no border).
         assert_eq!(
@@ -5212,7 +5734,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // vertices[0..6] = backdrop quad (urgency low color)
         // vertices[6..] = border quads (should be cyan: R≈0, G≈1, B≈1)
@@ -5406,7 +5928,7 @@ mod tests {
 
         // Collect vertices from render_zone_content.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // rect_vertices emits 6 vertices per quad; each vertex has a `color: [f32; 4]` field.
         // The backdrop should be green (R~0.0, G~1.0, B~0.0), not amber.
@@ -5523,7 +6045,7 @@ mod tests {
         // We verify this by checking the vertex colors produced — the alpha channel
         // of the first rect vertex should reflect 0.6.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
         assert!(!vertices.is_empty(), "expected backdrop vertices");
         // The RectVertex has color field [f32; 4]; alpha should be ~0.6.
         let alpha = vertices[0].color[3];
@@ -5575,7 +6097,7 @@ mod tests {
 
         // With backdrop=None, no rect vertices should be emitted.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
         assert!(
             vertices.is_empty(),
             "no backdrop quad should be rendered when policy.backdrop is None"
@@ -5632,7 +6154,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
         assert!(
             vertices.is_empty(),
             "no backdrop or border quads should be rendered when policy.backdrop is None, got {} vertices",
@@ -5738,7 +6260,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // Two publications → two backdrop quads (6 verts each) + border quads.
         // Each Notification slot emits: 1 backdrop quad (6) + 4 border quads (24) = 30.
@@ -6641,7 +7163,7 @@ mod tests {
 
         // No publications — zone is inactive.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // Zero vertices emitted → zone occupies zero visible space.
         assert!(
@@ -6927,7 +7449,7 @@ mod tests {
         {
             let scene = make_alert_banner_scene();
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
             assert!(
                 vertices.is_empty(),
                 "0 banners → 0 vertices (zero height); got {} vertices",
@@ -6940,7 +7462,7 @@ mod tests {
             let mut scene = make_alert_banner_scene();
             publish_alert(&mut scene, "Single banner", 2, "agent-a");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
             assert_eq!(
                 vertices.len(),
                 6,
@@ -6961,7 +7483,7 @@ mod tests {
             publish_alert(&mut scene, "Banner B", 2, "agent-b");
             publish_alert(&mut scene, "Banner C", 3, "agent-c");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
             assert_eq!(
                 vertices.len(),
                 18,
@@ -6997,7 +7519,7 @@ mod tests {
         publish_alert(&mut scene, "Critical", 3, "agent-b");
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // 2 backdrop quads → 12 vertices.
         assert_eq!(vertices.len(), 12, "2 banners → 12 vertices");
@@ -7767,7 +8289,7 @@ mod tests {
             .unwrap();
 
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-        compositor.render_zone_content(&scene, &mut vertices, 1280.0, 720.0, None);
+        compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
 
         // At least one backdrop quad must be emitted.
         assert!(
@@ -7885,6 +8407,7 @@ mod tests {
         compositor.render_zone_content(
             &scene,
             &mut bg_only,
+            &mut Vec::new(),
             1280.0,
             720.0,
             Some(LayerAttachment::Background),
@@ -7913,6 +8436,7 @@ mod tests {
         compositor.render_zone_content(
             &scene,
             &mut content_only,
+            &mut Vec::new(),
             1280.0,
             720.0,
             Some(LayerAttachment::Content),
@@ -8011,6 +8535,7 @@ mod tests {
         compositor.render_zone_content(
             &scene,
             &mut chrome_only,
+            &mut Vec::new(),
             1280.0,
             720.0,
             Some(LayerAttachment::Chrome),
@@ -8043,6 +8568,7 @@ mod tests {
         compositor.render_zone_content(
             &scene,
             &mut content_only,
+            &mut Vec::new(),
             1280.0,
             720.0,
             Some(LayerAttachment::Content),
@@ -8164,9 +8690,11 @@ mod tests {
         // Perform three-pass rendering into a single vertex buffer.
         // Pass 1: Background.
         let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
+        let mut tex_cmds: Vec<TexturedDrawCmd> = Vec::new();
         compositor.render_zone_content(
             &scene,
             &mut vertices,
+            &mut tex_cmds,
             1280.0,
             720.0,
             Some(LayerAttachment::Background),
@@ -8177,6 +8705,7 @@ mod tests {
         compositor.render_zone_content(
             &scene,
             &mut vertices,
+            &mut tex_cmds,
             1280.0,
             720.0,
             Some(LayerAttachment::Content),
@@ -8187,6 +8716,7 @@ mod tests {
         compositor.render_zone_content(
             &scene,
             &mut vertices,
+            &mut tex_cmds,
             1280.0,
             720.0,
             Some(LayerAttachment::Chrome),
