@@ -343,9 +343,12 @@ pub fn merge_zone_override(
     // retain their existing value in the policy. This allows additive composition
     // when multiple overrides are applied sequentially (profile → tab → instance).
     if !override_.key_icon_map.is_empty() {
-        for (key, svg_path) in &override_.key_icon_map {
-            policy.key_icon_map.insert(key.clone(), svg_path.clone());
-        }
+        policy.key_icon_map.extend(
+            override_
+                .key_icon_map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
     }
 }
 
@@ -813,7 +816,10 @@ mod tests {
         use std::collections::HashMap;
 
         let mut policy = RenderingPolicy::default();
-        assert!(policy.key_icon_map.is_empty(), "default policy has empty key_icon_map");
+        assert!(
+            policy.key_icon_map.is_empty(),
+            "default policy has empty key_icon_map"
+        );
 
         let mut icon_map = HashMap::new();
         icon_map.insert("weather".to_string(), "icons/weather.svg".to_string());
@@ -844,7 +850,9 @@ mod tests {
         use crate::component_profiles::ZoneRenderingOverride;
 
         let mut policy = RenderingPolicy::default();
-        policy.key_icon_map.insert("time".to_string(), "icons/clock.svg".to_string());
+        policy
+            .key_icon_map
+            .insert("time".to_string(), "icons/clock.svg".to_string());
 
         let override_ = ZoneRenderingOverride::default(); // key_icon_map is empty
         merge_zone_override(&mut policy, &override_);
@@ -864,7 +872,9 @@ mod tests {
         use std::collections::HashMap;
 
         let mut policy = RenderingPolicy::default();
-        policy.key_icon_map.insert("weather".to_string(), "icons/old-weather.svg".to_string());
+        policy
+            .key_icon_map
+            .insert("weather".to_string(), "icons/old-weather.svg".to_string());
 
         let mut icon_map = HashMap::new();
         icon_map.insert("weather".to_string(), "icons/new-weather.svg".to_string());

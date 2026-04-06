@@ -115,8 +115,9 @@ pub struct ZoneRenderingOverride {
     /// Status-bar key-to-icon SVG mapping.
     ///
     /// Maps merge keys (e.g., `"weather"`, `"battery"`) to SVG file paths or
-    /// resource IDs. Values may contain `{{token.key}}` references, which are
-    /// resolved against the profile-scoped token map at load time.
+    /// resource IDs. Values may contain `{{key}}` token references (e.g.,
+    /// `{{icon.battery}}`), which are resolved against the profile-scoped token
+    /// map at load time.
     ///
     /// Keys absent from this map are rendered as text-only. This field is
     /// meaningful only for `status-bar` zone overrides; it is ignored for other
@@ -213,10 +214,10 @@ struct RawZoneOverride {
     /// ```toml
     /// [key_icon_map]
     /// weather = "icons/weather.svg"
-    /// battery = "{{token.icon.battery}}"
+    /// battery = "{{icon.battery}}"
     /// ```
     ///
-    /// All values are strings; `{{token.key}}` references are resolved at load time.
+    /// All values are strings; `{{key}}` token references are resolved at load time.
     #[serde(default)]
     key_icon_map: HashMap<String, toml::Value>,
 }
@@ -969,10 +970,10 @@ fn validate_zone_override(
     }
 
     // ── key_icon_map ─────────────────────────────────────────────────────────
-    // Each entry in the map must be a TOML string (literal path or {{token.key}}).
-    // Values with {{token.key}} references are resolved against scoped_tokens.
+    // Each entry in the map must be a TOML string (literal path or {{key}} ref).
+    // Values with {{key}} token references are resolved against scoped_tokens.
     if !raw.key_icon_map.is_empty() {
-        let mut resolved_map: HashMap<String, String> = HashMap::new();
+        out.key_icon_map.reserve(raw.key_icon_map.len());
         for (key, val) in &raw.key_icon_map {
             let field_path_key = format!("key_icon_map.{key}");
             let s = extract_string_value(val, &field_path_key, profile_name, zone_type_name)?;
@@ -983,9 +984,8 @@ fn validate_zone_override(
                 zone_type_name,
                 &field_path_key,
             )?;
-            resolved_map.insert(key.clone(), resolved);
+            out.key_icon_map.insert(key.clone(), resolved);
         }
-        out.key_icon_map = resolved_map;
     }
 
     Ok(out)
@@ -2234,19 +2234,25 @@ battery = "icons/battery.svg"
             .expect("status-bar zone override must be present");
 
         assert_eq!(
-            zone_override.key_icon_map.get("weather").map(String::as_str),
+            zone_override
+                .key_icon_map
+                .get("weather")
+                .map(String::as_str),
             Some("icons/weather.svg"),
             "weather icon path must be preserved as-is"
         );
         assert_eq!(
-            zone_override.key_icon_map.get("battery").map(String::as_str),
+            zone_override
+                .key_icon_map
+                .get("battery")
+                .map(String::as_str),
             Some("icons/battery.svg"),
             "battery icon path must be preserved as-is"
         );
     }
 
-    /// WHEN a status-bar zone override has key_icon_map values with {{token.key}}
-    /// references THEN those references are resolved against the scoped token map.
+    /// WHEN a status-bar zone override has key_icon_map values with `{{key}}`
+    /// token references THEN those references are resolved against the scoped token map.
     #[test]
     fn key_icon_map_token_references_resolved() {
         let mut config_tokens = DesignTokenMap::new();
@@ -2277,7 +2283,10 @@ weather = "{{icon.weather.svg}}"
             .expect("status-bar zone override must be present");
 
         assert_eq!(
-            zone_override.key_icon_map.get("weather").map(String::as_str),
+            zone_override
+                .key_icon_map
+                .get("weather")
+                .map(String::as_str),
             Some("assets/weather-v2.svg"),
             "weather icon path must be resolved from token reference"
         );
@@ -2330,8 +2339,7 @@ weather = "{{icon.nonexistent.svg}}"
         );
 
         let result = load_profile_dir(&path, &empty_tokens());
-        let errors =
-            result.expect_err("unresolved token in key_icon_map should produce error");
+        let errors = result.expect_err("unresolved token in key_icon_map should produce error");
         assert!(
             errors
                 .iter()

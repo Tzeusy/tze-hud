@@ -1416,8 +1416,9 @@ pub struct RenderingPolicy {
     ///
     /// Keys absent from this map are rendered as text-only (backward compatible).
     /// SVG path values are opaque strings resolved by the compositor's resource
-    /// loader; they MUST NOT contain `{{token.key}}` references (those are
-    /// resolved at profile load time before being stored here).
+    /// loader; they MUST NOT contain unresolved config-layer token placeholders
+    /// such as `{{icon.battery}}` — those are resolved at profile load time
+    /// before being stored here.
     ///
     /// Only meaningful for zones with `accepted_media_types: [KeyValuePairs]`
     /// (i.e., the `status-bar` zone). Ignored for all other zone types.
