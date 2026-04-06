@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use tze_hud_scene::{
     graph::SceneGraph,
     types::{
-        Capability, FontFamily, Node, NodeData, NotificationPayload, Rect, Rgba, SceneId,
-        StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow, WidgetParameterValue,
-        ZoneContent,
+        Capability, FontFamily, Node, NodeData, NotificationAction, NotificationPayload, Rect,
+        Rgba, SceneId, StatusBarPayload, TextAlign, TextMarkdownNode, TextOverflow,
+        WidgetParameterValue, ZoneContent,
     },
 };
 
@@ -453,13 +453,35 @@ fn parse_zone_content(content: &Value) -> Result<ZoneContent, McpError> {
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
+                    let actions: Vec<NotificationAction> = obj
+                        .get("actions")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|item| {
+                                    let o = item.as_object()?;
+                                    let label = o
+                                        .get("label")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    let callback_id = o
+                                        .get("callback_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    Some(NotificationAction { label, callback_id })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
                     Ok(ZoneContent::Notification(NotificationPayload {
                         text,
                         icon,
                         urgency,
                         ttl_ms,
                         title,
-                        actions: Vec::new(),
+                        actions,
                     }))
                 }
                 "status_bar" => {

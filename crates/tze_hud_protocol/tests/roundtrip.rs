@@ -401,6 +401,7 @@ fn roundtrip_zone_content_all_variants() {
             icon: "warning.png".to_string(),
             urgency: 2,
             title: String::new(),
+            actions: vec![],
         })),
     };
     let d2 = round_trip(&z2);

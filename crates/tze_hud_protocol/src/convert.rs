@@ -283,10 +283,14 @@ pub fn proto_zone_content_to_scene(c: &proto::ZoneContent) -> Option<ZoneContent
             // round-trip it in both directions here.
             ttl_ms: None,
             title: n.title.clone(),
-            // actions are not yet carried over the gRPC wire (proto field
-            // not defined). Wire support can be added by extending
-            // types.proto and converting here. Default to empty.
-            actions: Vec::new(),
+            actions: n
+                .actions
+                .iter()
+                .map(|a| NotificationAction {
+                    label: a.label.clone(),
+                    callback_id: a.callback_id.clone(),
+                })
+                .collect(),
         })),
         Payload::StatusBar(sb) => Some(ZoneContent::StatusBar(StatusBarPayload {
             entries: sb.entries.clone(),
@@ -305,6 +309,14 @@ pub fn scene_zone_content_to_proto(c: &ZoneContent) -> proto::ZoneContent {
             icon: n.icon.clone(),
             urgency: n.urgency,
             title: n.title.clone(),
+            actions: n
+                .actions
+                .iter()
+                .map(|a| proto::NotificationActionProto {
+                    label: a.label.clone(),
+                    callback_id: a.callback_id.clone(),
+                })
+                .collect(),
         }),
         ZoneContent::StatusBar(sb) => Payload::StatusBar(proto::StatusBarPayload {
             entries: sb.entries.clone(),
