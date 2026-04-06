@@ -26,8 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::pipeline::{
-    ChromeDrawCmd, RectVertex, create_texture_rect_bind_group_layout, create_texture_rect_pipeline,
-    rect_vertices, textured_rect_vertices,
+    ChromeDrawCmd, ROUNDED_RECT_SHADER, RectVertex, RoundedRectDrawCmd, RoundedRectVertex,
+    create_texture_rect_bind_group_layout, create_texture_rect_pipeline, rect_vertices,
+    rounded_rect_vertices, textured_rect_vertices,
 };
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
@@ -810,6 +811,12 @@ pub struct Compositor {
     texture_rect_bind_group_layout: wgpu::BindGroupLayout,
     /// Shared linear-filtering sampler for all image textures (created once).
     image_sampler: wgpu::Sampler,
+    /// SDF rounded-rectangle pipeline.
+    ///
+    /// Used to render zone backdrops whose `RenderingPolicy` has
+    /// `backdrop_radius` set.  Encoded in a separate pass after the main
+    /// rect pass so rounded corners composite cleanly over the background.
+    rounded_rect_pipeline: wgpu::RenderPipeline,
     pub width: u32,
     pub height: u32,
     frame_number: u64,
@@ -929,6 +936,8 @@ impl Compositor {
         let pipeline = Self::create_pipeline(&device);
         let clear_pipeline =
             Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let rounded_rect_pipeline =
+            Self::create_rounded_rect_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
 
         let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
         let texture_rect_pipeline = create_texture_rect_pipeline(
@@ -953,6 +962,7 @@ impl Compositor {
             texture_rect_pipeline,
             texture_rect_bind_group_layout,
             image_sampler,
+            rounded_rect_pipeline,
             width,
             height,
             frame_number: 0,
@@ -1196,6 +1206,7 @@ impl Compositor {
         // ── Step 6: Create render pipelines (format-aware) ────────────────────
         let pipeline = Self::create_pipeline_with_format(&device, surface_format);
         let clear_pipeline = Self::create_clear_pipeline(&device, surface_format);
+        let rounded_rect_pipeline = Self::create_rounded_rect_pipeline(&device, surface_format);
 
         let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
         let texture_rect_pipeline =
@@ -1217,6 +1228,7 @@ impl Compositor {
             texture_rect_pipeline,
             texture_rect_bind_group_layout,
             image_sampler,
+            rounded_rect_pipeline,
             width: clamped_width,
             height: clamped_height,
             frame_number: 0,
@@ -1364,6 +1376,64 @@ impl Compositor {
     /// Create a render pipeline for headless mode (`Rgba8UnormSrgb`).
     fn create_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
         Self::create_pipeline_inner(device, wgpu::TextureFormat::Rgba8UnormSrgb, "")
+    }
+
+    /// Create the SDF rounded-rectangle pipeline for the given output format.
+    ///
+    /// Uses `ROUNDED_RECT_SHADER` and `RoundedRectVertex::desc()`.
+    /// Alpha blending is enabled (standard source-over) so rounded corners
+    /// composite correctly over any background.
+    ///
+    /// This pipeline is used in `encode_rounded_rect_pass` for zones whose
+    /// `RenderingPolicy` has `backdrop_radius` set.
+    fn create_rounded_rect_pipeline(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rounded_rect_shader"),
+            source: wgpu::ShaderSource::Wgsl(ROUNDED_RECT_SHADER.into()),
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rounded_rect_pipeline_layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rounded_rect_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[RoundedRectVertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
     }
 
     /// Replace the compositor's resolved design token map.
@@ -2780,11 +2850,21 @@ impl Compositor {
             }
         }
 
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
+
+        // ── Rounded-rect pass ─────────────────────────────────────────────────
+        // Collect SDF rounded-rect commands for zones with backdrop_radius set.
+        // Rendered after the flat-rect pass (using LoadOp::Load) so rounded
+        // corners composite cleanly over the scene background.
+        {
+            let rr_cmds = self.collect_rounded_rect_cmds(scene, sw, sh, None);
+            self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_cmds, sw, sh);
+        }
+
         // ── Text pass (Stage 6) ───────────────────────────────────────────────
         // Collect text items before borrowing the rasterizer mutably, to avoid
         // simultaneous mutable + immutable borrow of `self`.
-        let sw = surf_w as f32;
-        let sh = surf_h as f32;
         let text_items: Vec<TextItem> = if self.text_rasterizer.is_some() {
             self.collect_text_items(scene, sw, sh)
         } else {
@@ -3327,6 +3407,15 @@ impl Compositor {
             }
         }
 
+        // ── Rounded-rect pass (content layer) ────────────────────────────────
+        // Collect and encode SDF rounded-rect commands for zones with
+        // backdrop_radius set.  Runs after the content geometry pass (LoadOp::Load)
+        // so rounded corners composite cleanly over the background.
+        {
+            let rr_cmds = self.collect_rounded_rect_cmds(scene, sw, sh, None);
+            self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_cmds, sw, sh);
+        }
+
         // ── Stage 6: Text pass (between content and chrome) ──────────────────
         // Text is content — rendered above geometry rectangles but below chrome.
         let text_items_chrome: Vec<TextItem> = if self.text_rasterizer.is_some() {
@@ -3587,6 +3676,239 @@ impl Compositor {
         }
     }
 
+    /// Collect rounded-rectangle draw commands for zones whose `RenderingPolicy`
+    /// has `backdrop_radius` set.
+    ///
+    /// These zones are excluded from the flat-rect backdrop pass
+    /// (`render_zone_content`) and rendered instead by `encode_rounded_rect_pass`
+    /// using the SDF pipeline.
+    ///
+    /// Mirrors the backdrop-resolution logic in `render_zone_content` so color
+    /// derivation (severity tokens, urgency colors, opacity) is consistent.
+    ///
+    /// # Layer filtering
+    ///
+    /// When `only_layer` is `Some(layer)`, only zones matching that layer are
+    /// included.  Pass `None` to collect all layers.
+    fn collect_rounded_rect_cmds(
+        &self,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+        only_layer: Option<LayerAttachment>,
+    ) -> Vec<RoundedRectDrawCmd> {
+        let mut cmds = Vec::new();
+
+        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            if publishes.is_empty() {
+                continue;
+            }
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+
+            // Layer filter.
+            if let Some(required_layer) = only_layer {
+                if zone_def.layer_attachment != required_layer {
+                    continue;
+                }
+            }
+
+            let policy = &zone_def.rendering_policy;
+
+            // Only collect zones with a backdrop_radius — others use the flat rect path.
+            let radius = match policy.backdrop_radius {
+                Some(r) if r > 0.0 => r,
+                _ => continue,
+            };
+
+            let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+            // Clamp radius so it never exceeds half the shortest side.
+            let max_r = (w * 0.5).min(h * 0.5).max(0.0);
+            let radius = radius.min(max_r);
+
+            let anim_opacity = self
+                .zone_animation_states
+                .get(zone_name)
+                .map(|s| s.current_opacity())
+                .unwrap_or(1.0);
+
+            // Resolve backdrop color using the same logic as render_zone_content.
+            match zone_def.contention_policy {
+                ContentionPolicy::Stack { .. } => {
+                    let slot_h = Self::stack_slot_height(policy);
+                    let effective_h = if is_alert_banner_zone(zone_name) {
+                        publishes.len() as f32 * slot_h
+                    } else {
+                        h
+                    };
+
+                    let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
+                        sort_alert_banner_indices(publishes)
+                    } else {
+                        (0..publishes.len()).rev().collect()
+                    };
+
+                    for (slot_idx, &pub_idx) in ordered_indices.iter().enumerate() {
+                        let record = &publishes[pub_idx];
+                        let slot_y = y + slot_idx as f32 * slot_h;
+                        if slot_y >= y + effective_h {
+                            break;
+                        }
+                        let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
+
+                        let pub_opacity = self.pub_opacity(zone_name, record);
+                        let combined_opacity = (anim_opacity * pub_opacity).clamp(0.0, 1.0);
+
+                        let is_notification_content =
+                            matches!(&record.content, ZoneContent::Notification(_));
+                        let backdrop_rgba: Option<Rgba> = match &record.content {
+                            ZoneContent::SolidColor(rgba) => Some(*rgba),
+                            ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
+                            ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                                if policy.backdrop.is_some() {
+                                    Some(urgency_to_severity_color(n.urgency, &self.token_map))
+                                } else {
+                                    None
+                                }
+                            }
+                            ZoneContent::Notification(n) => {
+                                if policy.backdrop.is_some() {
+                                    let mut color =
+                                        urgency_to_notification_color(n.urgency, &self.token_map);
+                                    color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                    Some(color)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => policy.backdrop,
+                        };
+
+                        if let Some(mut rgba) = backdrop_rgba {
+                            if !is_notification_content || is_alert_banner_zone(zone_name) {
+                                if let Some(opacity) = policy.backdrop_opacity {
+                                    rgba.a = opacity.clamp(0.0, 1.0);
+                                }
+                            }
+                            rgba.a *= combined_opacity;
+                            cmds.push(RoundedRectDrawCmd {
+                                x,
+                                y: slot_y,
+                                width: w,
+                                height: effective_slot_h,
+                                radius,
+                                color: self.gpu_color(rgba),
+                            });
+                        }
+                    }
+                }
+                ContentionPolicy::MergeByKey { .. }
+                | ContentionPolicy::LatestWins
+                | ContentionPolicy::Replace => {
+                    let latest = &publishes[publishes.len() - 1];
+                    let is_notification_content =
+                        matches!(&latest.content, ZoneContent::Notification(_));
+                    let backdrop_rgba: Option<Rgba> = match &latest.content {
+                        ZoneContent::SolidColor(rgba) => Some(*rgba),
+                        ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
+                        ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                            if policy.backdrop.is_some() {
+                                Some(urgency_to_severity_color(n.urgency, &self.token_map))
+                            } else {
+                                None
+                            }
+                        }
+                        ZoneContent::Notification(n) => {
+                            if policy.backdrop.is_some() {
+                                let mut color =
+                                    urgency_to_notification_color(n.urgency, &self.token_map);
+                                color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                Some(color)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => policy.backdrop,
+                    };
+
+                    if let Some(mut rgba) = backdrop_rgba {
+                        if !is_notification_content || is_alert_banner_zone(zone_name) {
+                            if let Some(opacity) = policy.backdrop_opacity {
+                                rgba.a = opacity.clamp(0.0, 1.0);
+                            }
+                        }
+                        rgba.a *= anim_opacity.clamp(0.0, 1.0);
+                        cmds.push(RoundedRectDrawCmd {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                            radius,
+                            color: self.gpu_color(rgba),
+                        });
+                    }
+                }
+            }
+        }
+
+        cmds
+    }
+
+    /// Encode a GPU pass that renders the given rounded-rectangle commands
+    /// using the SDF pipeline.
+    ///
+    /// Uses `LoadOp::Load` so existing scene pixels are preserved beneath
+    /// the rounded corners.  Skips the pass entirely when `cmds` is empty.
+    fn encode_rounded_rect_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame_view: &wgpu::TextureView,
+        cmds: &[crate::pipeline::RoundedRectDrawCmd],
+        sw: f32,
+        sh: f32,
+    ) {
+        if cmds.is_empty() {
+            return;
+        }
+
+        // Build vertex buffer from all commands.
+        let mut vertices: Vec<RoundedRectVertex> = Vec::with_capacity(cmds.len() * 6);
+        for cmd in cmds {
+            vertices.extend_from_slice(&rounded_rect_vertices(
+                cmd.x, cmd.y, cmd.width, cmd.height, sw, sh, cmd.radius, cmd.color,
+            ));
+        }
+
+        let vertex_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("rounded_rect_vertex_buffer"),
+                    contents: bytemuck::cast_slice(&vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("rounded_rect_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: frame_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // preserve background pixels
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        pass.set_pipeline(&self.rounded_rect_pipeline);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.draw(0..vertices.len() as u32, 0..1);
+    }
+
     /// Render zone content backdrop quads driven by `RenderingPolicy`.
     ///
     /// For each zone with at least one active publish:
@@ -3637,6 +3959,11 @@ impl Compositor {
             let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
 
             let policy = &zone_def.rendering_policy;
+
+            // Zones with backdrop_radius use the SDF rounded-rect pipeline instead.
+            // Skip flat-rect backdrop emission for those zones; collect_rounded_rect_cmds
+            // handles their backdrops separately in encode_rounded_rect_pass.
+            let use_rounded_rect = policy.backdrop_radius.is_some_and(|r| r > 0.0);
 
             // Determine current animation opacity for this zone.
             let anim_opacity = self
@@ -3791,31 +4118,34 @@ impl Compositor {
                                 }
                             }
                             rgba.a *= combined_opacity;
-                            vertices.extend_from_slice(&rect_vertices(
-                                x,
-                                slot_y,
-                                w,
-                                effective_slot_h,
-                                sw,
-                                sh,
-                                self.gpu_color(rgba),
-                            ));
-
-                            // For non-alert-banner Notification content: emit 1px 4-quad border.
-                            if is_notification_content && !is_alert_banner_zone(zone_name) {
-                                let mut border_color =
-                                    resolve_border_default_color(&self.token_map);
-                                border_color.a *= combined_opacity;
-                                emit_border_quads(
-                                    vertices,
+                            // Skip flat-rect emission for rounded zones — handled by the SDF pass.
+                            if !use_rounded_rect {
+                                vertices.extend_from_slice(&rect_vertices(
                                     x,
                                     slot_y,
                                     w,
                                     effective_slot_h,
                                     sw,
                                     sh,
-                                    self.gpu_color(border_color),
-                                );
+                                    self.gpu_color(rgba),
+                                ));
+
+                                // For non-alert-banner Notification content: emit 1px 4-quad border.
+                                if is_notification_content && !is_alert_banner_zone(zone_name) {
+                                    let mut border_color =
+                                        resolve_border_default_color(&self.token_map);
+                                    border_color.a *= combined_opacity;
+                                    emit_border_quads(
+                                        vertices,
+                                        x,
+                                        slot_y,
+                                        w,
+                                        effective_slot_h,
+                                        sw,
+                                        sh,
+                                        self.gpu_color(border_color),
+                                    );
+                                }
                             }
                         }
 
@@ -3933,30 +4263,34 @@ impl Compositor {
                         // Apply zone animation opacity.
                         rgba.a *= anim_opacity.clamp(0.0, 1.0);
 
-                        vertices.extend_from_slice(&rect_vertices(
-                            x,
-                            y,
-                            w,
-                            h,
-                            sw,
-                            sh,
-                            self.gpu_color(rgba),
-                        ));
-
-                        // For non-alert-banner Notification content: emit 1px 4-quad border.
-                        if is_notification_content && !is_alert_banner_zone(zone_name) {
-                            let mut border_color = resolve_border_default_color(&self.token_map);
-                            border_color.a *= anim_opacity.clamp(0.0, 1.0);
-                            emit_border_quads(
-                                vertices,
+                        // Skip flat-rect emission for rounded zones — handled by the SDF pass.
+                        if !use_rounded_rect {
+                            vertices.extend_from_slice(&rect_vertices(
                                 x,
                                 y,
                                 w,
                                 h,
                                 sw,
                                 sh,
-                                self.gpu_color(border_color),
-                            );
+                                self.gpu_color(rgba),
+                            ));
+
+                            // For non-alert-banner Notification content: emit 1px 4-quad border.
+                            if is_notification_content && !is_alert_banner_zone(zone_name) {
+                                let mut border_color =
+                                    resolve_border_default_color(&self.token_map);
+                                border_color.a *= anim_opacity.clamp(0.0, 1.0);
+                                emit_border_quads(
+                                    vertices,
+                                    x,
+                                    y,
+                                    w,
+                                    h,
+                                    sw,
+                                    sh,
+                                    self.gpu_color(border_color),
+                                );
+                            }
                         }
                     }
 

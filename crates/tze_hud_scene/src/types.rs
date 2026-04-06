@@ -1479,6 +1479,16 @@ pub struct RenderingPolicy {
     /// (i.e., the `status-bar` zone). Ignored for all other zone types.
     #[serde(default)]
     pub key_icon_map: HashMap<String, String>,
+    /// Corner radius for the zone backdrop in pixels.
+    ///
+    /// When set, the compositor uses the SDF rounded-rectangle pipeline instead
+    /// of the axis-aligned quad pipeline to render this zone's backdrop.
+    /// The value is clamped to `[0, min(half_width, half_height)]` at render
+    /// time so it never exceeds the geometry.
+    ///
+    /// `None` (the default) means axis-aligned flat rect (existing behaviour).
+    #[serde(default)]
+    pub backdrop_radius: Option<f32>,
 }
 
 /// Contention policy — what happens when multiple agents publish to the same zone.

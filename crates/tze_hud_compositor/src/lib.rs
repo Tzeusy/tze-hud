@@ -28,7 +28,7 @@ pub mod text;
 pub mod widget;
 
 pub use adapter::{AdapterSelectionError, PlatformBackends, select_gpu_adapter};
-pub use pipeline::{ChromeDrawCmd, TexturedRectVertex};
+pub use pipeline::{ChromeDrawCmd, RoundedRectDrawCmd, TexturedRectVertex};
 pub use renderer::{Compositor, CompositorError, ImageTextureEntry};
 pub use surface::{CompositorFrame, CompositorSurface, HeadlessSurface, WindowSurface};
 pub use text::{TextItem, TextRasterizer};
