@@ -58,9 +58,9 @@
 //! For a 256×256 surface:
 //!   - EdgeAnchored { Top, height_pct=0.06, width_pct=1.0, margin_px=0.0 }
 //!   - Nominal zone height = 256 × 0.06 = 15.36px (unused for alert-banner)
-//!   - Dynamic slot height = font_size_px(24) + 2*margin_vertical(0) + 2 = 26px
-//!   - Single banner: y ∈ [0, 26), full width x ∈ [0, 256)
-//!   - Sample centre: x=128, y=13 (mid-slot)
+//!   - Dynamic slot height = line_height(24*1.4=33.6) + 2*margin_vertical(0) + SLOT_BASELINE_GAP(4) = 37.6px
+//!   - Single banner: y ∈ [0, 37.6), full width x ∈ [0, 256)
+//!   - Sample centre: x=128, y=18 (mid-slot)
 //!
 //! ## References
 //!
@@ -169,12 +169,14 @@ const CRITICAL_EXPECTED: [u8; 4] = [244, 15, 26, 255];
 // ─── Alert-banner geometry constants ─────────────────────────────────────────
 //
 // For a 256×256 surface with the default alert-banner rendering policy:
-//   slot_h = font_size_px(24) + 2*margin_vertical(0.0) + SLOT_BASELINE_GAP(2) = 26px
+//   font_size_px = 24, line_height = 24 * 1.4 = 33.6
+//   margin_vertical = 0.0, SLOT_BASELINE_GAP = 4
+//   slot_h = 33.6 + 2*0 + 4 = 37.6px ≈ 38px
 //
 // Slot centres (one publication per slot):
-//   slot 0 (top)    → y = 0 + 26/2 = 13
-//   slot 1 (middle) → y = 26 + 26/2 = 39
-//   slot 2 (bottom) → y = 52 + 26/2 = 65
+//   slot 0 (top)    → y = 0    + 37.6/2 ≈ 18
+//   slot 1 (middle) → y = 37.6 + 37.6/2 ≈ 56
+//   slot 2 (bottom) → y = 75.2 + 37.6/2 ≈ 94
 
 const SURFACE_W: u32 = 256;
 const SURFACE_H: u32 = 256;
@@ -183,11 +185,11 @@ const SURFACE_H: u32 = 256;
 const SAMPLE_X: u32 = SURFACE_W / 2;
 
 /// Centre y-coordinate of slot 0 (topmost slot, highest-severity).
-const SLOT0_Y: u32 = 13;
+const SLOT0_Y: u32 = 18;
 /// Centre y-coordinate of slot 1.
-const SLOT1_Y: u32 = 39;
+const SLOT1_Y: u32 = 56;
 /// Centre y-coordinate of slot 2 (bottommost slot, lowest-severity).
-const SLOT2_Y: u32 = 65;
+const SLOT2_Y: u32 = 94;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -377,11 +379,11 @@ async fn test_alert_banner_urgency3_critical_backdrop() {
 /// When info (urgency=1), warning (urgency=2), and critical (urgency=3) alerts are
 /// published simultaneously to the alert-banner zone from three different agent
 /// namespaces, the compositor MUST render them in severity-descending order:
-///   slot 0 (top)    → critical (red,   sampled at y=13)
-///   slot 1 (middle) → warning  (amber, sampled at y=39)
-///   slot 2 (bottom) → info     (blue,  sampled at y=65)
+///   slot 0 (top)    → critical (red,   sampled at y=18)
+///   slot 1 (middle) → warning  (amber, sampled at y=56)
+///   slot 2 (bottom) → info     (blue,  sampled at y=94)
 ///
-/// Each slot has height 26px (font_size=24 + 2×margin_vertical=0 + baseline_gap=2).
+/// Each slot has height 37.6px (line_height=24*1.4=33.6 + 2×margin_vertical=0 + baseline_gap=4).
 /// The alert-banner zone uses `ContentionPolicy::Stack { max_depth: 8 }` with
 /// `max_publishers: 1` (one banner per agent namespace), so three different
 /// namespaces ("agent-critical", "agent-warning", "agent-info") are used.
