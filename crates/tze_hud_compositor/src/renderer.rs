@@ -4317,6 +4317,7 @@ mod tests {
     /// Dimension clamping must apply both the device max and a minimum of 1.
     /// wgpu panics on `surface.configure()` with zero-width or zero-height.
     #[test]
+    #[allow(clippy::min_max)]
     fn surface_dim_clamp_zero_becomes_one() {
         let max_dim = 16384u32;
         assert_eq!(0u32.min(max_dim).max(1), 1);
