@@ -146,12 +146,14 @@ impl ResourceId {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Parse a 64-character lowercase hex string back into a `ResourceId`.
+    /// Parse a 64-character hex string (case-insensitive) back into a `ResourceId`.
     ///
     /// Returns `None` if the string is not exactly 64 hex characters.
     ///
-    /// Used to resolve `NotificationPayload.icon` (stored as a hex string)
+    /// Used when a non-wire, non-storage hex representation (for example,
+    /// `NotificationPayload.icon` in local/UI-facing data) must be resolved
     /// back into a content-addressed `ResourceId` for GPU texture lookup.
+    /// Hex MUST NOT be used as a wire or storage format for `ResourceId`.
     pub fn from_hex(s: &str) -> Option<Self> {
         if s.len() != 64 {
             return None;

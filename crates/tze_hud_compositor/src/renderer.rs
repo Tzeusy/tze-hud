@@ -1599,11 +1599,10 @@ impl Compositor {
                         }
                     }
                     ZoneContent::Notification(payload) if !payload.icon.is_empty() => {
-                        // Parse the icon field as a hex-encoded ResourceId and ensure
-                        // the GPU texture is uploaded if bytes are registered.
-                        // Non-empty but un-parseable strings are silently skipped (graceful
-                        // fallback: render notification text-only).
-                        if let Some(resource_id) = ResourceId::from_hex(&payload.icon) {
+                        // Parse the icon field via the shared helper (handles empty string
+                        // and invalid hex with graceful None). Non-parseable icons are
+                        // silently skipped (render notification text-only).
+                        if let Some(resource_id) = parse_notification_icon(&payload.icon) {
                             referenced.insert(resource_id);
                             if !self.image_texture_cache.contains_key(&resource_id) {
                                 if let Some(data) = self.image_bytes.get(&resource_id) {
@@ -2001,14 +2000,18 @@ impl Compositor {
                                             })
                                             .unwrap_or(0.0);
                                     if icon_width_reserved > 0.0 {
+                                        // Use the same default inset as the icon draw path
+                                        // (NOTIFICATION_INSET = 9px) so text and icon stay
+                                        // aligned when policy margins are not explicitly set.
+                                        const NOTIFICATION_INSET: f32 = 9.0;
                                         let margin_h = policy
                                             .margin_horizontal
                                             .or(policy.margin_px)
-                                            .unwrap_or(8.0);
+                                            .unwrap_or(NOTIFICATION_INSET);
                                         let margin_v = policy
                                             .margin_vertical
                                             .or(policy.margin_px)
-                                            .unwrap_or(8.0);
+                                            .unwrap_or(NOTIFICATION_INSET);
                                         let font_size_px = policy
                                             .font_size_px
                                             .unwrap_or(16.0)
@@ -2139,14 +2142,18 @@ impl Compositor {
                                         .unwrap_or(0.0);
                                 if icon_width_reserved > 0.0 {
                                     // Build TextItem manually to apply icon offset.
+                                    // Use the same default inset as the icon draw path
+                                    // (NOTIFICATION_INSET = 9px) so text and icon stay
+                                    // aligned when policy margins are not explicitly set.
+                                    const NOTIFICATION_INSET: f32 = 9.0;
                                     let margin_h = policy
                                         .margin_horizontal
                                         .or(policy.margin_px)
-                                        .unwrap_or(8.0);
+                                        .unwrap_or(NOTIFICATION_INSET);
                                     let margin_v = policy
                                         .margin_vertical
                                         .or(policy.margin_px)
-                                        .unwrap_or(8.0);
+                                        .unwrap_or(NOTIFICATION_INSET);
                                     let font_size_px =
                                         policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
                                     let font_family = policy.font_family.unwrap_or(
