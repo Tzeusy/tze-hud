@@ -103,12 +103,10 @@ pub fn apply_subtitle_token_defaults(policy: &mut RenderingPolicy, tokens: &Desi
     if policy.font_weight.is_none() {
         policy.font_weight = token_u16(tokens, "typography.subtitle.weight");
     }
-    if policy.backdrop.is_none() {
-        policy.backdrop = token_color(tokens, "color.backdrop.default");
-    }
-    if policy.backdrop_opacity.is_none() {
-        policy.backdrop_opacity = token_f32(tokens, "opacity.backdrop.default");
-    }
+    // Subtitle uses outline-only readability (no backdrop). The DualLayer
+    // technique achieves legibility via text outline alone on a transparent
+    // background, letting the underlying content show through.
+    // backdrop and backdrop_opacity are intentionally NOT populated from tokens.
     if policy.outline_color.is_none() {
         policy.outline_color = token_color(tokens, "color.outline.default");
     }
@@ -125,6 +123,13 @@ pub fn apply_subtitle_token_defaults(policy: &mut RenderingPolicy, tokens: &Desi
     // overflow: Ellipsis per subtitle exemplar spec (hardcoded, not token-driven)
     if policy.overflow.is_none() {
         policy.overflow = Some(TextOverflow::Ellipsis);
+    }
+    // Fade transitions for subtitle publish/clear.
+    if policy.transition_in_ms.is_none() {
+        policy.transition_in_ms = Some(200);
+    }
+    if policy.transition_out_ms.is_none() {
+        policy.transition_out_ms = Some(150);
     }
 }
 
@@ -189,11 +194,17 @@ pub fn apply_status_bar_token_defaults(policy: &mut RenderingPolicy, tokens: &De
     if policy.font_size_px.is_none() {
         policy.font_size_px = token_f32(tokens, "typography.body.size");
     }
+    // OpaqueBackdrop readability required per component type contract
+    // (heart-and-soul/presence.md line 281: opacity >= 0.8).
     if policy.backdrop.is_none() {
         policy.backdrop = token_color(tokens, "color.backdrop.default");
     }
     if policy.backdrop_opacity.is_none() {
         policy.backdrop_opacity = token_f32(tokens, "opacity.backdrop.opaque");
+    }
+    // Right-aligned, compact vertical layout.
+    if policy.text_align.is_none() {
+        policy.text_align = Some(TextAlign::End);
     }
 }
 
@@ -224,6 +235,20 @@ pub fn apply_alert_banner_token_defaults(policy: &mut RenderingPolicy, tokens: &
     }
     if policy.backdrop_opacity.is_none() {
         policy.backdrop_opacity = token_f32(tokens, "opacity.backdrop.opaque");
+    }
+    // Black text outline for legibility on light backdrops (e.g. warning/amber).
+    if policy.outline_color.is_none() {
+        policy.outline_color = token_color(tokens, "color.outline.default");
+    }
+    if policy.outline_width.is_none() {
+        policy.outline_width = Some(1.0);
+    }
+    // Generous vertical padding for banner readability.
+    if policy.margin_vertical.is_none() {
+        policy.margin_vertical = Some(12.0);
+    }
+    if policy.margin_horizontal.is_none() {
+        policy.margin_horizontal = Some(12.0);
     }
 }
 
@@ -510,8 +535,15 @@ mod tests {
         // text_align should be Center (hardcoded)
         assert_eq!(policy.text_align, Some(TextAlign::Center));
 
-        // backdrop should be set
-        assert!(policy.backdrop.is_some());
+        // backdrop should be None — subtitle uses outline-only readability (no backdrop)
+        assert!(
+            policy.backdrop.is_none(),
+            "subtitle zone must not set backdrop (outline-only readability)"
+        );
+
+        // transition_in_ms and transition_out_ms should be set
+        assert_eq!(policy.transition_in_ms, Some(200));
+        assert_eq!(policy.transition_out_ms, Some(150));
 
         // outline_color should be set
         assert!(policy.outline_color.is_some());

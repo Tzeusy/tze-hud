@@ -549,8 +549,9 @@ impl PublicationAnimationState {
 
 /// How many frames to display each breakpoint segment before advancing.
 ///
-/// At 60fps, 1 frame ≈ 16ms between words — perceptible as word-by-word reveal.
-const STREAM_REVEAL_FRAMES_PER_SEGMENT: u32 = 1;
+/// At 60fps, 10 frames ≈ 167ms dwell per word — comfortably perceptible as
+/// word-by-word reveal without feeling sluggish.
+const STREAM_REVEAL_FRAMES_PER_SEGMENT: u32 = 10;
 
 /// Per-zone streaming reveal state.
 ///
@@ -1454,6 +1455,19 @@ impl Compositor {
                                     base_color,
                                     effective_opacity,
                                 );
+                                // Outline: use policy outline if set, otherwise
+                                // derive from policy (ensures legibility on
+                                // light-colored backdrops like warning/amber).
+                                let (oc, ow) = match (policy.outline_color, policy.outline_width) {
+                                    (Some(oc), Some(ow)) if ow > 0.0 => {
+                                        let oc_srgb = crate::text::apply_opacity_to_color(
+                                            crate::text::rgba_to_srgb_u8(oc),
+                                            effective_opacity,
+                                        );
+                                        (Some(oc_srgb), Some(ow))
+                                    }
+                                    _ => (None, None),
+                                };
                                 items.push(TextItem {
                                     text: payload.text.clone(),
                                     pixel_x: zx + inset_h,
@@ -1466,8 +1480,8 @@ impl Compositor {
                                     color,
                                     alignment: tze_hud_scene::types::TextAlign::Start,
                                     overflow: tze_hud_scene::types::TextOverflow::Clip,
-                                    outline_color: None,
-                                    outline_width: None,
+                                    outline_color: oc,
+                                    outline_width: ow,
                                     opacity: effective_opacity,
                                 });
                             }
@@ -1490,11 +1504,16 @@ impl Compositor {
                     if !merged.is_empty() {
                         let mut sorted: Vec<(&String, &String)> = merged.iter().collect();
                         sorted.sort_by_key(|(k, _)| k.as_str());
+                        // Compact format: value-only, newline-separated for
+                        // vertical right-edge layout. Keys are suppressed —
+                        // agents should publish display-ready values (e.g.
+                        // "30°C" not "temperature: 30°C"). Icons are a
+                        // post-v1 feature (texture pipeline).
                         let text = sorted
                             .iter()
-                            .map(|(k, v)| format!("{k}: {v}"))
+                            .map(|(_, v)| v.as_str())
                             .collect::<Vec<_>>()
-                            .join("  ");
+                            .join("\n");
                         items.push(TextItem::from_zone_policy(
                             &text,
                             zx,
@@ -3091,10 +3110,14 @@ impl Compositor {
     /// Used by both `collect_text_items` and `render_zone_content` so both code
     /// paths stay consistent.
     fn stack_slot_height(policy: &RenderingPolicy) -> f32 {
-        const SLOT_BASELINE_GAP: f32 = 2.0;
+        const SLOT_BASELINE_GAP: f32 = 4.0;
         let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
+        // Use line_height (font_size × 1.4) to match cosmic-text layout in
+        // prepare_text_items. Previously this used font_size_px directly, which
+        // produced bounds too small for one line of text to render.
+        let line_height = font_size_px * 1.4;
         let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
-        (font_size_px + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
+        (line_height + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
     }
 
     /// Resolve a zone's geometry policy to pixel bounds (x, y, w, h).

@@ -205,6 +205,15 @@ impl TextRasterizer {
                 let weight = Weight(item.font_weight.clamp(100, 900));
                 let attrs = Attrs::new().family(family).weight(weight);
                 buf.set_text(&mut self.font_system, &item.text, attrs, Shaping::Basic);
+                // Apply text alignment to all lines in the buffer.
+                let ct_align = match item.alignment {
+                    TextAlign::Start => glyphon::cosmic_text::Align::Left,
+                    TextAlign::Center => glyphon::cosmic_text::Align::Center,
+                    TextAlign::End => glyphon::cosmic_text::Align::End,
+                };
+                for line in buf.lines.iter_mut() {
+                    line.set_align(Some(ct_align));
+                }
                 buf.shape_until_scroll(&mut self.font_system, false);
                 buf
             })

@@ -2121,12 +2121,12 @@ impl ZoneRegistry {
         registry.register(ZoneDefinition {
             id: SceneId::new(),
             name: "status-bar".to_string(),
-            description: "Status bar at the bottom of the display".to_string(),
-            geometry_policy: GeometryPolicy::EdgeAnchored {
-                edge: DisplayEdge::Bottom,
-                height_pct: 0.04,
-                width_pct: 1.0,
-                margin_px: 0.0,
+            description: "Status bar — right edge, vertical layout, chrome layer".to_string(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.92,
+                y_pct: 0.10,
+                width_pct: 0.07,
+                height_pct: 0.40,
             },
             accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
             rendering_policy: RenderingPolicy::default(),
