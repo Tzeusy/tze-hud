@@ -22,6 +22,7 @@ tze_hud_widget = { path = "../tze_hud_widget" }
 tze_hud_mcp = { path = "../tze_hud_mcp", features = ["http"] }
 tze_hud_resource = { path = "../tze_hud_resource" }
 tokio = { workspace = true }
+tokio-stream = "0.1"
 tonic = { workspace = true }
 wgpu = { workspace = true }
 winit = { workspace = true }

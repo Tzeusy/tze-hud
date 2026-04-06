@@ -494,7 +494,17 @@ impl HeadlessRuntime {
         if self.config.grpc_port == 0 {
             return Err("start_grpc_server: grpc_port = 0 (gRPC server disabled)".into());
         }
-        let addr = format!("0.0.0.0:{}", self.config.grpc_port).parse()?;
+
+        // Bind to [::]:port before spawning so the port is ready before we return.
+        // Using an IPv6 wildcard address ([::]) creates a dual-stack socket on Linux
+        // (net.ipv6.bindv6only=0 default), accepting both [::1] and 127.0.0.1 clients.
+        // Binding here rather than inside the spawned task also eliminates the race
+        // condition that required the previous 50ms sleep.
+        let bind_addr = format!("[::]:{}",  self.config.grpc_port);
+        let listener = tokio::net::TcpListener::bind(&bind_addr)
+            .await
+            .map_err(|e| format!("gRPC server: failed to bind {bind_addr}: {e}"))?;
+        tracing::info!(addr = %bind_addr, "gRPC server listener bound");
 
         // Wire config-driven capability registry into the session service.
         // Snapshot the agent capability map from RuntimeContext (one-time clone at startup).
@@ -511,15 +521,13 @@ impl HeadlessRuntime {
         );
 
         let handle = tokio::spawn(async move {
+            let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
             tonic::transport::Server::builder()
                 .add_service(HudSessionServer::new(service))
-                .serve(addr)
+                .serve_with_incoming(incoming)
                 .await
                 .expect("gRPC server failed");
         });
-
-        // Give the server a moment to bind
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
         Ok(handle)
     }
