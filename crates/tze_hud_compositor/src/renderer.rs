@@ -253,18 +253,10 @@ fn emit_status_bar_entries(
     use crate::text::TextItem;
     use tze_hud_scene::types::{FontFamily, TextAlign, TextOverflow};
 
-    let margin_h = policy
-        .margin_horizontal
-        .or(policy.margin_px)
-        .unwrap_or(4.0);
-    let margin_v = policy
-        .margin_vertical
-        .or(policy.margin_px)
-        .unwrap_or(4.0);
+    let margin_h = policy.margin_horizontal.or(policy.margin_px).unwrap_or(4.0);
+    let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(4.0);
     let font_size_px = policy.font_size_px.unwrap_or(13.0).clamp(6.0, 200.0);
-    let font_family = policy
-        .font_family
-        .unwrap_or(FontFamily::SystemSansSerif);
+    let font_family = policy.font_family.unwrap_or(FontFamily::SystemSansSerif);
     let font_weight = policy.font_weight.unwrap_or(400).clamp(100, 900);
 
     let base_color = policy
@@ -275,7 +267,8 @@ fn emit_status_bar_entries(
 
     let (outline_color, outline_width) = match (policy.outline_color, policy.outline_width) {
         (Some(oc), Some(ow)) if ow > 0.0 => {
-            let oc_srgb = crate::text::apply_opacity_to_color(crate::text::rgba_to_srgb_u8(oc), opacity);
+            let oc_srgb =
+                crate::text::apply_opacity_to_color(crate::text::rgba_to_srgb_u8(oc), opacity);
             (Some(oc_srgb), Some(ow))
         }
         _ => (None, None),
@@ -8009,7 +8002,11 @@ mod tests {
 
         // Items are sorted by key: cpu < mem < net.
         // cpu icon prefix is "🖥 ", mem icon prefix is "💾 ", net icon prefix is "📶 ".
-        let all_text: String = items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>().join("|");
+        let all_text: String = items
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
         assert!(
             all_text.contains("45%"),
             "merged items must include cpu value '45%'; got: {all_text}"
@@ -8036,12 +8033,14 @@ mod tests {
         assert!(
             items[1].pixel_y > items[0].pixel_y,
             "item[1] must be below item[0]; got pixel_y[0]={} pixel_y[1]={}",
-            items[0].pixel_y, items[1].pixel_y
+            items[0].pixel_y,
+            items[1].pixel_y
         );
         assert!(
             items[2].pixel_y > items[1].pixel_y,
             "item[2] must be below item[1]; got pixel_y[1]={} pixel_y[2]={}",
-            items[1].pixel_y, items[2].pixel_y
+            items[1].pixel_y,
+            items[2].pixel_y
         );
     }
 
