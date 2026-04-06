@@ -33,3 +33,15 @@ backdrop_opacity = 0.9                            # satisfies OpaqueBackdrop >= 
 # no vertical margin so the strip is flush to its edge anchor
 margin_horizontal = "{{spacing.padding.medium}}"  # resolved: 8px
 margin_vertical   = 0.0                           # flush edge — no top/bottom margin
+
+# Key-to-icon SVG mapping — optional per key.
+# Keys absent from this map are rendered as text-only (backward compatible).
+# Values are SVG file paths (relative to profile directory) or resource IDs.
+# Values may reference design tokens: "{{token.key}}".
+#
+# This field is specific to zones with accepted_media_types = [KeyValuePairs]
+# (i.e. the status-bar zone); it is ignored for other zone types.
+[key_icon_map]
+weather = "icons/weather.svg"
+battery = "icons/battery.svg"
+time    = "icons/clock.svg"

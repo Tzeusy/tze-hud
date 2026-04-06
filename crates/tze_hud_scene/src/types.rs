@@ -1409,6 +1409,20 @@ pub struct RenderingPolicy {
     /// Text overflow mode; None = falls back to Clip.
     #[serde(default)]
     pub overflow: Option<TextOverflow>,
+    /// Status-bar key-to-icon SVG mapping.
+    ///
+    /// Maps merge keys (e.g., `"weather"`, `"battery"`) to SVG file paths or
+    /// resource IDs used to render an icon alongside the text value.
+    ///
+    /// Keys absent from this map are rendered as text-only (backward compatible).
+    /// SVG path values are opaque strings resolved by the compositor's resource
+    /// loader; they MUST NOT contain `{{token.key}}` references (those are
+    /// resolved at profile load time before being stored here).
+    ///
+    /// Only meaningful for zones with `accepted_media_types: [KeyValuePairs]`
+    /// (i.e., the `status-bar` zone). Ignored for all other zone types.
+    #[serde(default)]
+    pub key_icon_map: HashMap<String, String>,
 }
 
 /// Contention policy — what happens when multiple agents publish to the same zone.

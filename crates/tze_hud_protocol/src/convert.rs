@@ -718,6 +718,9 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
         transition_in_ms,
         transition_out_ms,
         overflow,
+        // key_icon_map is a config-layer concept; proto deserialization does not
+        // carry it (protocol messages carry payloads, not zone configuration).
+        key_icon_map: Default::default(),
     }
 }
 
