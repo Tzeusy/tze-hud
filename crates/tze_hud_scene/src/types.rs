@@ -145,6 +145,25 @@ impl ResourceId {
     pub fn to_hex(&self) -> String {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
+
+    /// Parse a 64-character lowercase hex string back into a `ResourceId`.
+    ///
+    /// Returns `None` if the string is not exactly 64 hex characters.
+    ///
+    /// Used to resolve `NotificationPayload.icon` (stored as a hex string)
+    /// back into a content-addressed `ResourceId` for GPU texture lookup.
+    pub fn from_hex(s: &str) -> Option<Self> {
+        if s.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+            let hi = (chunk[0] as char).to_digit(16)? as u8;
+            let lo = (chunk[1] as char).to_digit(16)? as u8;
+            bytes[i] = (hi << 4) | lo;
+        }
+        Some(ResourceId(bytes))
+    }
 }
 
 impl std::fmt::Display for ResourceId {
@@ -2571,6 +2590,42 @@ mod tests {
             hex.chars().all(|c| c.is_ascii_hexdigit()),
             "must be valid hex"
         );
+    }
+
+    // ── ResourceId::from_hex round-trip ──────────────────────────────────────
+
+    /// `from_hex(to_hex(id)) == id` for any ResourceId.
+    #[test]
+    fn resource_id_from_hex_round_trip() {
+        let id = ResourceId::of(b"from_hex round-trip test");
+        let hex = id.to_hex();
+        let restored = ResourceId::from_hex(&hex).expect("from_hex must succeed on valid hex");
+        assert_eq!(id, restored, "from_hex(to_hex(id)) must equal id");
+    }
+
+    /// `from_hex` rejects a non-64-character string.
+    #[test]
+    fn resource_id_from_hex_rejects_short_string() {
+        assert!(ResourceId::from_hex("abc").is_none());
+        assert!(ResourceId::from_hex("").is_none());
+    }
+
+    /// `from_hex` rejects a 64-character string with non-hex characters
+    /// (e.g. a human-readable name like `"shield"`).
+    #[test]
+    fn resource_id_from_hex_rejects_non_hex_string() {
+        // 64 chars but not valid hex (contains 'g' and 'z').
+        let bad = "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg";
+        assert_eq!(bad.len(), 64);
+        assert!(ResourceId::from_hex(bad).is_none());
+    }
+
+    /// `from_hex` rejects a human-readable icon name like `"shield"`.
+    #[test]
+    fn resource_id_from_hex_rejects_human_readable_name() {
+        assert!(ResourceId::from_hex("shield").is_none());
+        assert!(ResourceId::from_hex("update").is_none());
+        assert!(ResourceId::from_hex("").is_none());
     }
 
     // ── Layer 0 identity invariant check helper ───────────────────────────────

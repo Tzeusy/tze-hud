@@ -76,11 +76,12 @@
 //! - hud-s5dr (parent epic: Fix compositor and API gaps for exemplar readiness)
 //! - spec §Notification Exemplar MCP Integration Test (urgency styling requirement)
 
+use std::sync::Arc;
 use tze_hud_compositor::{Compositor, CompositorError, surface::HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, LayerAttachment, NotificationPayload, RenderingPolicy, Rgba,
-    SceneId, ZoneContent, ZoneDefinition, ZoneMediaType,
+    ResourceId, SceneId, ZoneContent, ZoneDefinition, ZoneMediaType,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -511,6 +512,162 @@ async fn test_notification_urgency_distinct_colors() {
             );
         }
     }
+}
+
+// ─── Notification icon tests ─────────────────────────────────────────────────
+
+/// The icon region of a notification slot (left-aligned, 24×24px at the same
+/// horizontal inset as the text) renders the icon texture when bytes are registered
+/// and the icon field holds a valid hex ResourceId.
+///
+/// Layout for a 256×256 surface with the notification-area zone at x_pct=0.75:
+///   zone_x  = 256 * 0.75 = 192
+///   inset_h = 9px  (1px border + 8px padding)
+///   icon_x  = 192 + 9 = 201
+///   icon_w  = 24px
+///   slot_h  = 34px  (font_size 16 + 2*margin_v 8 + gap 2)
+///   icon_y  = slot_y + (slot_h - 24) / 2 = 0 + 5 = 5
+///   icon centre: x = 201 + 12 = 213, y = 5 + 12 = 17
+///
+/// The icon is a solid-green 24×24 RGBA image (to distinguish from backdrop color).
+#[tokio::test]
+async fn test_notification_icon_renders_texture_when_bytes_registered() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    let mut scene = SceneGraph::new(SURFACE_W as f32, SURFACE_H as f32);
+    register_notification_zone(&mut scene);
+
+    // Create a solid-green 24×24 RGBA image to use as the icon.
+    let icon_w: u32 = 24;
+    let icon_h: u32 = 24;
+    let green_pixel: [u8; 4] = [0, 200, 0, 255]; // sRGB green
+    let rgba_data: Vec<u8> = green_pixel.repeat((icon_w * icon_h) as usize);
+    let resource_id = ResourceId::of(&rgba_data);
+
+    // Register the icon bytes with the compositor.
+    compositor.register_image_bytes(resource_id, Arc::from(rgba_data.as_slice()));
+
+    // Publish a notification with the icon field set to the hex ResourceId.
+    scene
+        .publish_to_zone(
+            "notification-area",
+            ZoneContent::Notification(NotificationPayload {
+                text: "Icon test".to_string(),
+                icon: resource_id.to_hex(),
+                urgency: 0,
+                ttl_ms: None,
+            }),
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .expect("publish_to_zone must succeed for notification with icon");
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // Icon centre pixel: x=213, y=17.
+    // The icon is solid green — rendered pixels should be green-dominant.
+    // sRGB green [0,200,0] stored as Rgba8UnormSrgb → GPU decodes to linear,
+    // fragment outputs, surface re-encodes to sRGB. Expected ≈ [0, 200, 0, 255].
+    const ICON_SAMPLE_X: u32 = 213;
+    const ICON_SAMPLE_Y: u32 = 17;
+    const ICON_TOLERANCE: u8 = 20;
+    let pixel = HeadlessSurface::pixel_at(&pixels, SURFACE_W, ICON_SAMPLE_X, ICON_SAMPLE_Y);
+    assert!(
+        pixel[1] > pixel[0] + 100 && pixel[1] > pixel[2] + 100,
+        "icon pixel at ({ICON_SAMPLE_X},{ICON_SAMPLE_Y}) should be green (from texture); got {pixel:?}",
+    );
+    let _ = ICON_TOLERANCE; // used for documentation purposes
+}
+
+/// When the icon field is an empty string, the notification renders text-only —
+/// no icon texture is emitted and the backdrop pixels remain the urgency color.
+#[tokio::test]
+async fn test_notification_without_icon_renders_backdrop_only() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    let mut scene = SceneGraph::new(SURFACE_W as f32, SURFACE_H as f32);
+    register_notification_zone(&mut scene);
+
+    scene
+        .publish_to_zone(
+            "notification-area",
+            ZoneContent::Notification(NotificationPayload {
+                text: "No icon".to_string(),
+                icon: String::new(),
+                urgency: 0,
+                ttl_ms: None,
+            }),
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .expect("publish_to_zone must succeed for notification without icon");
+
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // Slot 0 centre at (222, 17) should show the urgency=0 (low) backdrop color,
+    // not green. Reuse LOW_EXPECTED from the urgency tests.
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        SURFACE_W,
+        SAMPLE_X,
+        SLOT0_Y,
+        LOW_EXPECTED,
+        TOLERANCE,
+        "urgency=0 notification without icon must render urgency-low backdrop",
+    )
+    .unwrap_or_else(|e| panic!("backdrop color assertion failed: {e}"));
+}
+
+/// When the icon field is non-empty but the bytes are NOT registered with the
+/// compositor, rendering falls back to text-only (no texture command is emitted,
+/// no GPU crash occurs). The backdrop should still render its urgency color.
+#[tokio::test]
+async fn test_notification_icon_graceful_fallback_when_bytes_not_registered() {
+    let (mut compositor, surface) =
+        gpu_or_skip!(make_compositor_and_surface(SURFACE_W, SURFACE_H).await);
+    let mut scene = SceneGraph::new(SURFACE_W as f32, SURFACE_H as f32);
+    register_notification_zone(&mut scene);
+
+    // Use a ResourceId for which NO bytes are registered.
+    let resource_id = ResourceId::of(b"unregistered-icon-data");
+
+    scene
+        .publish_to_zone(
+            "notification-area",
+            ZoneContent::Notification(NotificationPayload {
+                text: "Missing icon".to_string(),
+                icon: resource_id.to_hex(),
+                urgency: 1,
+                ttl_ms: None,
+            }),
+            "test-agent",
+            None,
+            None,
+            None,
+        )
+        .expect("publish_to_zone must succeed even when icon bytes are absent");
+
+    // MUST NOT panic. Frame renders without the icon texture.
+    compositor.render_frame_headless(&scene, &surface);
+    let pixels = surface.read_pixels(&compositor.device);
+
+    // Backdrop should still be the urgency=1 (normal) color.
+    HeadlessSurface::assert_pixel_color(
+        &pixels,
+        SURFACE_W,
+        SAMPLE_X,
+        SLOT0_Y,
+        NORMAL_EXPECTED,
+        TOLERANCE,
+        "urgency=1 notification with unregistered icon must render urgency-normal backdrop",
+    )
+    .unwrap_or_else(|e| panic!("graceful fallback backdrop assertion failed: {e}"));
 }
 
 // ─── Debug probe (ignored, for calibration only) ─────────────────────────────

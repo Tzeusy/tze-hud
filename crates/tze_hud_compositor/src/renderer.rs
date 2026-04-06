@@ -120,6 +120,15 @@ const STATIC_IMAGE_PLACEHOLDER_COLOR: Rgba = Rgba {
     a: 1.0,
 };
 
+/// Size of a notification icon in pixels (square, 24×24).
+///
+/// Icons are rendered left-aligned within the notification backdrop, at the
+/// same horizontal inset as the text, and vertically centred in the slot.
+const NOTIFICATION_ICON_SIZE_PX: f32 = 24.0;
+
+/// Horizontal gap between the icon and the notification text (pixels).
+const NOTIFICATION_ICON_GAP_PX: f32 = 6.0;
+
 /// Fallback color for `color.border.default` when the token is absent.
 ///
 /// Matches the default value in built-in component startup tokens (#444466).
@@ -377,6 +386,25 @@ fn emit_border_quads(
             border_color,
         ));
     }
+}
+
+// ─── Notification icon helpers ───────────────────────────────────────────────
+
+/// Parse a `NotificationPayload.icon` string as a hex-encoded `ResourceId`.
+///
+/// Returns `Some(resource_id)` only when:
+/// - The icon string is non-empty.
+/// - It is exactly 64 hex characters (the `ResourceId::to_hex()` format).
+///
+/// Returns `None` for empty strings, human-readable names (e.g. `"shield"`),
+/// or malformed hex. Callers MUST check the image_texture_cache before emitting
+/// a draw command — this function does not verify that the texture is loaded.
+#[inline]
+fn parse_notification_icon(icon: &str) -> Option<ResourceId> {
+    if icon.is_empty() {
+        return None;
+    }
+    ResourceId::from_hex(icon)
 }
 
 // ─── Image fit mode UV calculations ─────────────────────────────────────────
@@ -1550,24 +1578,47 @@ impl Compositor {
         // Collect from zone publications.
         for publishes in scene.zone_registry.active_publishes.values() {
             for record in publishes {
-                if let ZoneContent::StaticImage(resource_id) = &record.content {
-                    referenced.insert(*resource_id);
-                    // For zone images, we don't have explicit dimensions — if
-                    // the image_bytes are registered, check the cache entry or
-                    // use a default. The actual dimensions are determined from
-                    // the registered bytes.
-                    if !self.image_texture_cache.contains_key(resource_id) {
-                        if let Some(data) = self.image_bytes.get(resource_id) {
-                            // Try to determine dimensions from the RGBA data size.
-                            // This is a heuristic: assume square if we can't determine.
-                            // In production, the runtime should provide dimensions.
-                            let pixel_count = data.len() / 4;
-                            let side = (pixel_count as f64).sqrt() as u32;
-                            if side > 0 && (side * side) as usize == pixel_count {
-                                self.ensure_image_texture(*resource_id, side, side);
+                match &record.content {
+                    ZoneContent::StaticImage(resource_id) => {
+                        referenced.insert(*resource_id);
+                        // For zone images, we don't have explicit dimensions — if
+                        // the image_bytes are registered, check the cache entry or
+                        // use a default. The actual dimensions are determined from
+                        // the registered bytes.
+                        if !self.image_texture_cache.contains_key(resource_id) {
+                            if let Some(data) = self.image_bytes.get(resource_id) {
+                                // Try to determine dimensions from the RGBA data size.
+                                // This is a heuristic: assume square if we can't determine.
+                                // In production, the runtime should provide dimensions.
+                                let pixel_count = data.len() / 4;
+                                let side = (pixel_count as f64).sqrt() as u32;
+                                if side > 0 && (side * side) as usize == pixel_count {
+                                    self.ensure_image_texture(*resource_id, side, side);
+                                }
                             }
                         }
                     }
+                    ZoneContent::Notification(payload) if !payload.icon.is_empty() => {
+                        // Parse the icon field as a hex-encoded ResourceId and ensure
+                        // the GPU texture is uploaded if bytes are registered.
+                        // Non-empty but un-parseable strings are silently skipped (graceful
+                        // fallback: render notification text-only).
+                        if let Some(resource_id) = ResourceId::from_hex(&payload.icon) {
+                            referenced.insert(resource_id);
+                            if !self.image_texture_cache.contains_key(&resource_id) {
+                                if let Some(data) = self.image_bytes.get(&resource_id) {
+                                    // Use square-root heuristic for dimension inference,
+                                    // same as StaticImage zone images above.
+                                    let pixel_count = data.len() / 4;
+                                    let side = (pixel_count as f64).sqrt() as u32;
+                                    if side > 0 && (side * side) as usize == pixel_count {
+                                        self.ensure_image_texture(resource_id, side, side);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1799,7 +1850,8 @@ impl Compositor {
                                 //
                                 // Layout: left-aligned with 9px inset (8px padding + 1px border),
                                 // clips at content area boundary (no wrapping in v1).
-                                // Icon rendering is stubbed (no texture pipeline in v1).
+                                // When a valid icon texture is cached, the text is additionally
+                                // inset to the right of the icon (icon_size + gap).
                                 // Spec-defined inset for notification-area zones:
                                 // 1px border + 8px padding = 9px from backdrop edges.
                                 // When the zone's RenderingPolicy explicitly sets
@@ -1819,6 +1871,16 @@ impl Compositor {
                                     .margin_vertical
                                     .or(policy.margin_px)
                                     .unwrap_or(NOTIFICATION_INSET);
+                                // If a cached icon texture exists, inset text to the right of it.
+                                let icon_width_reserved =
+                                    parse_notification_icon(&payload.icon)
+                                        .filter(|id| {
+                                            self.image_texture_cache.contains_key(id)
+                                        })
+                                        .map(|_| {
+                                            NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
+                                        })
+                                        .unwrap_or(0.0);
                                 // Font size: policy explicit > typography.body.size token > 16px
                                 let font_size_px = policy.font_size_px.unwrap_or_else(|| {
                                     Self::resolve_body_font_size(&self.token_map)
@@ -1853,11 +1915,14 @@ impl Compositor {
                                     }
                                     _ => (None, None),
                                 };
+                                let text_x = zx + inset_h + icon_width_reserved;
+                                let text_w =
+                                    (zw - inset_h - icon_width_reserved - inset_h).max(1.0);
                                 items.push(TextItem {
                                     text: payload.text.clone(),
-                                    pixel_x: zx + inset_h,
+                                    pixel_x: text_x,
                                     pixel_y: slot_y + inset_v,
-                                    bounds_width: (zw - inset_h * 2.0).max(1.0),
+                                    bounds_width: text_w,
                                     bounds_height: (effective_slot_h - inset_v * 2.0).max(1.0),
                                     font_size_px,
                                     font_family,
@@ -1923,15 +1988,93 @@ impl Compositor {
                                     break;
                                 }
                                 ZoneContent::Notification(payload) => {
-                                    items.push(TextItem::from_zone_policy(
-                                        &payload.text,
-                                        zx,
-                                        zy,
-                                        zw,
-                                        zh,
-                                        policy,
-                                        anim_opacity,
-                                    ));
+                                    // MergeByKey fallback: icon-aware inset, same logic
+                                    // as the LatestWins/Replace path.
+                                    let icon_width_reserved =
+                                        parse_notification_icon(&payload.icon)
+                                            .filter(|id| {
+                                                self.image_texture_cache.contains_key(id)
+                                            })
+                                            .map(|_| {
+                                                NOTIFICATION_ICON_SIZE_PX
+                                                    + NOTIFICATION_ICON_GAP_PX
+                                            })
+                                            .unwrap_or(0.0);
+                                    if icon_width_reserved > 0.0 {
+                                        let margin_h = policy
+                                            .margin_horizontal
+                                            .or(policy.margin_px)
+                                            .unwrap_or(8.0);
+                                        let margin_v = policy
+                                            .margin_vertical
+                                            .or(policy.margin_px)
+                                            .unwrap_or(8.0);
+                                        let font_size_px = policy
+                                            .font_size_px
+                                            .unwrap_or(16.0)
+                                            .clamp(6.0, 200.0);
+                                        let font_family = policy.font_family.unwrap_or(
+                                            tze_hud_scene::types::FontFamily::SystemSansSerif,
+                                        );
+                                        let font_weight =
+                                            policy.font_weight.unwrap_or(400).clamp(100, 900);
+                                        let base_color = policy
+                                            .text_color
+                                            .map(crate::text::rgba_to_srgb_u8)
+                                            .unwrap_or([255, 255, 255, 220]);
+                                        let color = crate::text::apply_opacity_to_color(
+                                            base_color,
+                                            anim_opacity,
+                                        );
+                                        let (oc, ow) = match (
+                                            policy.outline_color,
+                                            policy.outline_width,
+                                        ) {
+                                            (Some(oc), Some(ow)) if ow > 0.0 => {
+                                                let oc_srgb =
+                                                    crate::text::apply_opacity_to_color(
+                                                        crate::text::rgba_to_srgb_u8(oc),
+                                                        anim_opacity,
+                                                    );
+                                                (Some(oc_srgb), Some(ow))
+                                            }
+                                            _ => (None, None),
+                                        };
+                                        items.push(TextItem {
+                                            text: payload.text.clone(),
+                                            pixel_x: zx + margin_h + icon_width_reserved,
+                                            pixel_y: zy + margin_v,
+                                            bounds_width: (zw
+                                                - margin_h
+                                                - icon_width_reserved
+                                                - margin_h)
+                                                .max(1.0),
+                                            bounds_height: (zh - margin_v * 2.0).max(1.0),
+                                            font_size_px,
+                                            font_family,
+                                            font_weight,
+                                            color,
+                                            alignment: policy.text_align.unwrap_or(
+                                                tze_hud_scene::types::TextAlign::Start,
+                                            ),
+                                            overflow: policy.overflow.unwrap_or(
+                                                tze_hud_scene::types::TextOverflow::Clip,
+                                            ),
+                                            outline_color: oc,
+                                            outline_width: ow,
+                                            opacity: anim_opacity,
+                                        });
+                                    } else {
+                                        items.push(TextItem::from_zone_policy(
+                                            &payload.text,
+                                            zx,
+                                            zy,
+                                            zw,
+                                            zh,
+                                            policy,
+                                            anim_opacity,
+                                        ));
+                                    }
                                     break;
                                 }
                                 _ => {}
@@ -1983,19 +2126,88 @@ impl Compositor {
                             }
                             ZoneContent::Notification(payload) => {
                                 // Render the notification text.
-                                // For alert-banner, text color is always policy.text_color
-                                // for contrast against the severity-colored backdrop.
-                                // For notification-area, policy.text_color is also used.
-                                // Icon rendering is stubbed (no texture pipeline in v1).
-                                items.push(TextItem::from_zone_policy(
-                                    &payload.text,
-                                    zx,
-                                    zy,
-                                    zw,
-                                    zh,
-                                    policy,
-                                    anim_opacity,
-                                ));
+                                // When a valid icon texture is cached, inset the text
+                                // to the right of the icon (icon_size + gap px).
+                                let icon_width_reserved =
+                                    parse_notification_icon(&payload.icon)
+                                        .filter(|id| {
+                                            self.image_texture_cache.contains_key(id)
+                                        })
+                                        .map(|_| {
+                                            NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
+                                        })
+                                        .unwrap_or(0.0);
+                                if icon_width_reserved > 0.0 {
+                                    // Build TextItem manually to apply icon offset.
+                                    let margin_h = policy
+                                        .margin_horizontal
+                                        .or(policy.margin_px)
+                                        .unwrap_or(8.0);
+                                    let margin_v = policy
+                                        .margin_vertical
+                                        .or(policy.margin_px)
+                                        .unwrap_or(8.0);
+                                    let font_size_px =
+                                        policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
+                                    let font_family = policy.font_family.unwrap_or(
+                                        tze_hud_scene::types::FontFamily::SystemSansSerif,
+                                    );
+                                    let font_weight =
+                                        policy.font_weight.unwrap_or(400).clamp(100, 900);
+                                    let base_color = policy
+                                        .text_color
+                                        .map(crate::text::rgba_to_srgb_u8)
+                                        .unwrap_or([255, 255, 255, 220]);
+                                    let color = crate::text::apply_opacity_to_color(
+                                        base_color,
+                                        anim_opacity,
+                                    );
+                                    let (oc, ow) =
+                                        match (policy.outline_color, policy.outline_width) {
+                                            (Some(oc), Some(ow)) if ow > 0.0 => {
+                                                let oc_srgb = crate::text::apply_opacity_to_color(
+                                                    crate::text::rgba_to_srgb_u8(oc),
+                                                    anim_opacity,
+                                                );
+                                                (Some(oc_srgb), Some(ow))
+                                            }
+                                            _ => (None, None),
+                                        };
+                                    items.push(TextItem {
+                                        text: payload.text.clone(),
+                                        pixel_x: zx + margin_h + icon_width_reserved,
+                                        pixel_y: zy + margin_v,
+                                        bounds_width: (zw
+                                            - margin_h
+                                            - icon_width_reserved
+                                            - margin_h)
+                                            .max(1.0),
+                                        bounds_height: (zh - margin_v * 2.0).max(1.0),
+                                        font_size_px,
+                                        font_family,
+                                        font_weight,
+                                        color,
+                                        alignment: policy.text_align.unwrap_or(
+                                            tze_hud_scene::types::TextAlign::Start,
+                                        ),
+                                        overflow: policy
+                                            .overflow
+                                            .unwrap_or(tze_hud_scene::types::TextOverflow::Clip),
+                                        outline_color: oc,
+                                        outline_width: ow,
+                                        opacity: anim_opacity,
+                                    });
+                                } else {
+                                    items.push(TextItem::from_zone_policy(
+                                        &payload.text,
+                                        zx,
+                                        zy,
+                                        zw,
+                                        zh,
+                                        policy,
+                                        anim_opacity,
+                                    ));
+                                }
                                 // Only render the most-recent publish.
                                 break;
                             }
@@ -3437,6 +3649,35 @@ impl Compositor {
                                 );
                             }
                         }
+
+                        // Notification icon: emit a textured draw command for the icon
+                        // left-aligned inside the slot, vertically centred.
+                        // Renders only when: icon is a valid hex ResourceId AND the
+                        // texture is cached.  Falls back to text-only (no icon) otherwise.
+                        if let ZoneContent::Notification(payload) = &record.content {
+                            if let Some(icon_id) = parse_notification_icon(&payload.icon) {
+                                if self.image_texture_cache.contains_key(&icon_id) {
+                                    // Inset from backdrop edge, same as text (border+padding).
+                                    const NOTIFICATION_INSET: f32 = 9.0;
+                                    let inset_h = policy
+                                        .margin_horizontal
+                                        .or(policy.margin_px)
+                                        .unwrap_or(NOTIFICATION_INSET);
+                                    let icon_x = x + inset_h;
+                                    let icon_y = slot_y
+                                        + (effective_slot_h - NOTIFICATION_ICON_SIZE_PX) * 0.5;
+                                    textured_cmds.push(TexturedDrawCmd {
+                                        resource_id: icon_id,
+                                        x: icon_x,
+                                        y: icon_y,
+                                        w: NOTIFICATION_ICON_SIZE_PX,
+                                        h: NOTIFICATION_ICON_SIZE_PX,
+                                        uv_rect: [0.0, 0.0, 1.0, 1.0],
+                                        tint: [1.0, 1.0, 1.0, combined_opacity],
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 ContentionPolicy::MergeByKey { .. }
@@ -3547,6 +3788,31 @@ impl Compositor {
                                 sh,
                                 self.gpu_color(border_color),
                             );
+                        }
+                    }
+
+                    // Notification icon for LatestWins/MergeByKey/Replace zones.
+                    if let ZoneContent::Notification(payload) = &latest.content {
+                        if let Some(icon_id) = parse_notification_icon(&payload.icon) {
+                            if self.image_texture_cache.contains_key(&icon_id) {
+                                const NOTIFICATION_INSET: f32 = 9.0;
+                                let inset_h = policy
+                                    .margin_horizontal
+                                    .or(policy.margin_px)
+                                    .unwrap_or(NOTIFICATION_INSET);
+                                let icon_x = x + inset_h;
+                                let icon_y = y + (h - NOTIFICATION_ICON_SIZE_PX) * 0.5;
+                                let eff_opacity = anim_opacity.clamp(0.0, 1.0);
+                                textured_cmds.push(TexturedDrawCmd {
+                                    resource_id: icon_id,
+                                    x: icon_x,
+                                    y: icon_y,
+                                    w: NOTIFICATION_ICON_SIZE_PX,
+                                    h: NOTIFICATION_ICON_SIZE_PX,
+                                    uv_rect: [0.0, 0.0, 1.0, 1.0],
+                                    tint: [1.0, 1.0, 1.0, eff_opacity],
+                                });
+                            }
                         }
                     }
                 }
