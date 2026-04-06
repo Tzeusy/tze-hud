@@ -241,9 +241,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 ///
 /// Binding 0: 2D float texture (filterable)
 /// Binding 1: Filtering sampler
-pub fn create_texture_rect_bind_group_layout(
-    device: &wgpu::Device,
-) -> wgpu::BindGroupLayout {
+pub fn create_texture_rect_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("image_texture_bgl"),
         entries: &[

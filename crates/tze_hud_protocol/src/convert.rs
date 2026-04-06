@@ -282,6 +282,7 @@ pub fn proto_zone_content_to_scene(c: &proto::ZoneContent) -> Option<ZoneContent
             // To support it over gRPC, add the field to types.proto and
             // round-trip it in both directions here.
             ttl_ms: None,
+            title: n.title.clone(),
         })),
         Payload::StatusBar(sb) => Some(ZoneContent::StatusBar(StatusBarPayload {
             entries: sb.entries.clone(),
@@ -299,6 +300,7 @@ pub fn scene_zone_content_to_proto(c: &ZoneContent) -> proto::ZoneContent {
             text: n.text.clone(),
             icon: n.icon.clone(),
             urgency: n.urgency,
+            title: n.title.clone(),
         }),
         ZoneContent::StatusBar(sb) => Payload::StatusBar(proto::StatusBarPayload {
             entries: sb.entries.clone(),

@@ -26,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::pipeline::{
-    ChromeDrawCmd, RectVertex, create_texture_rect_bind_group_layout,
-    create_texture_rect_pipeline, rect_vertices, textured_rect_vertices,
+    ChromeDrawCmd, RectVertex, create_texture_rect_bind_group_layout, create_texture_rect_pipeline,
+    rect_vertices, textured_rect_vertices,
 };
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
@@ -107,6 +107,24 @@ const NOTIFICATION_URGENCY_CRITICAL: Rgba = Rgba {
 /// This is the fixed 0.9 opacity specified for notification zone backdrop rendering.
 /// It overrides the token color's alpha channel.
 const NOTIFICATION_BACKDROP_OPACITY: f32 = 0.9;
+
+/// Scale factor for the body line font size in two-line notification layout.
+///
+/// When a `NotificationPayload.title` is non-empty, the body text (`text` field)
+/// is rendered at `title_font_size * NOTIFICATION_BODY_SCALE`.
+///
+/// Token override path: `typography.notification.body.scale` (parsed as f32).
+/// Fallback: 0.85.
+const NOTIFICATION_BODY_SCALE: f32 = 0.85;
+
+/// Bold font weight used for the title line in two-line notification layout.
+///
+/// Token override: `typography.notification.title.weight` (parsed as u16).
+/// Fallback: 700 (bold).
+const NOTIFICATION_TITLE_WEIGHT: u16 = 700;
+
+/// Vertical gap (px) between the title line and the body line in two-line layout.
+const NOTIFICATION_INTER_LINE_GAP: f32 = 2.0;
 
 /// Warm-gray placeholder color rendered for `ZoneContent::StaticImage` zones.
 ///
@@ -912,8 +930,7 @@ impl Compositor {
         let clear_pipeline =
             Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
 
-        let texture_rect_bind_group_layout =
-            create_texture_rect_bind_group_layout(&device);
+        let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
         let texture_rect_pipeline = create_texture_rect_pipeline(
             &device,
             &texture_rect_bind_group_layout,
@@ -1180,13 +1197,9 @@ impl Compositor {
         let pipeline = Self::create_pipeline_with_format(&device, surface_format);
         let clear_pipeline = Self::create_clear_pipeline(&device, surface_format);
 
-        let texture_rect_bind_group_layout =
-            create_texture_rect_bind_group_layout(&device);
-        let texture_rect_pipeline = create_texture_rect_pipeline(
-            &device,
-            &texture_rect_bind_group_layout,
-            surface_format,
-        );
+        let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
+        let texture_rect_pipeline =
+            create_texture_rect_pipeline(&device, &texture_rect_bind_group_layout, surface_format);
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("image_linear_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -1549,8 +1562,7 @@ impl Compositor {
         self.image_texture_cache
             .retain(|id, _| referenced_ids.contains(id));
         // Also evict bytes for resources no longer referenced.
-        self.image_bytes
-            .retain(|id, _| referenced_ids.contains(id));
+        self.image_bytes.retain(|id, _| referenced_ids.contains(id));
     }
 
     /// Scan the scene graph for all StaticImage resources, ensure their GPU
@@ -1781,8 +1793,9 @@ impl Compositor {
             //   For generic Stack zones: newest at top (slot 0 = newest).
             //   For alert-banner zones: severity-descending (critical first),
             //   then recency-descending (newer first) within the same severity.
-            //   slot_h via Self::stack_slot_height().
-            //   Dynamic height: alert-banner zone height = active_count × slot_h.
+            //   Per-slot heights are computed via Self::per_slot_heights() and may
+            //   vary by item (two-line notifications occupy a taller slot).
+            //   Dynamic height: alert-banner zone height = sum(slot_heights).
             //
             // MergeByKey: collect ALL StatusBar publications, merge their entries
             //   (last write wins per key), render the merged set as one text item.
@@ -1790,18 +1803,6 @@ impl Compositor {
             // LatestWins / Replace: render only the most-recent publication.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    let slot_h = Self::stack_slot_height(policy);
-
-                    // For alert-banner: dynamic zone height = active_count × slot_h.
-                    // Height grows with each active banner; no cap at the configured
-                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
-                    // For other Stack zones: use the configured zone height (zh).
-                    let effective_zh = if is_alert_banner_zone(zone_name) {
-                        publishes.len() as f32 * slot_h
-                    } else {
-                        zh
-                    };
-
                     // Build an ordered reference slice: alert-banner uses severity sort
                     // (critical first, then recency); other Stack zones use newest-first.
                     let ordered: Vec<&ZonePublishRecord> = if is_alert_banner_zone(zone_name) {
@@ -1813,8 +1814,47 @@ impl Compositor {
                         publishes.iter().rev().collect()
                     };
 
-                    for (slot_idx, record) in ordered.into_iter().enumerate() {
-                        let slot_y = zy + slot_idx as f32 * slot_h;
+                    // Resolve notification typography tokens once per zone so that both
+                    // slot-height calculation and per-item rendering use the same values.
+                    // (Token lookups are cheap, but resolving outside the per-item loop
+                    // also avoids redundant HashMap lookups on zones with many items.)
+                    let notif_body_scale = self
+                        .token_map
+                        .get("typography.notification.body.scale")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(NOTIFICATION_BODY_SCALE)
+                        .clamp(0.5, 1.0);
+                    let notif_title_weight = self
+                        .token_map
+                        .get("typography.notification.title.weight")
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .unwrap_or(NOTIFICATION_TITLE_WEIGHT);
+
+                    // Compute per-slot heights (variable for two-line notifications).
+                    let slot_heights = Self::per_slot_heights(
+                        &ordered,
+                        policy,
+                        notif_body_scale,
+                        NOTIFICATION_INTER_LINE_GAP,
+                    );
+                    let slot_offsets = Self::slot_offsets(&slot_heights);
+                    let total_slots_h: f32 = slot_heights.iter().sum();
+
+                    // For alert-banner: dynamic zone height = sum of per-slot heights.
+                    // Height grows with each active banner; no cap at the configured
+                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
+                    // For other Stack zones: use the configured zone height (zh).
+                    let effective_zh = if is_alert_banner_zone(zone_name) {
+                        total_slots_h
+                    } else {
+                        zh
+                    };
+
+                    for (record, (slot_offset, slot_h)) in ordered
+                        .into_iter()
+                        .zip(slot_offsets.iter().zip(slot_heights.iter()))
+                    {
+                        let slot_y = zy + slot_offset;
                         if slot_y >= zy + effective_zh {
                             break;
                         }
@@ -1871,15 +1911,10 @@ impl Compositor {
                                     .or(policy.margin_px)
                                     .unwrap_or(NOTIFICATION_INSET);
                                 // If a cached icon texture exists, inset text to the right of it.
-                                let icon_width_reserved =
-                                    parse_notification_icon(&payload.icon)
-                                        .filter(|id| {
-                                            self.image_texture_cache.contains_key(id)
-                                        })
-                                        .map(|_| {
-                                            NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
-                                        })
-                                        .unwrap_or(0.0);
+                                let icon_width_reserved = parse_notification_icon(&payload.icon)
+                                    .filter(|id| self.image_texture_cache.contains_key(id))
+                                    .map(|_| NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX)
+                                    .unwrap_or(0.0);
                                 // Font size: policy explicit > typography.body.size token > 16px
                                 let font_size_px = policy.font_size_px.unwrap_or_else(|| {
                                     Self::resolve_body_font_size(&self.token_map)
@@ -1888,8 +1923,6 @@ impl Compositor {
                                 let font_family = policy
                                     .font_family
                                     .unwrap_or(tze_hud_scene::types::FontFamily::SystemSansSerif);
-                                // Font weight: policy explicit > 400 default
-                                let font_weight = policy.font_weight.unwrap_or(400);
                                 // Text color: policy explicit > color.text.primary token > near-white
                                 let base_color = policy
                                     .text_color
@@ -1914,25 +1947,82 @@ impl Compositor {
                                     }
                                     _ => (None, None),
                                 };
+
+                                // Text x-offset respects icon reservation (from icon texture pipeline).
                                 let text_x = zx + inset_h + icon_width_reserved;
                                 let text_w =
                                     (zw - inset_h - icon_width_reserved - inset_h).max(1.0);
-                                items.push(TextItem {
-                                    text: payload.text.clone(),
-                                    pixel_x: text_x,
-                                    pixel_y: slot_y + inset_v,
-                                    bounds_width: text_w,
-                                    bounds_height: (effective_slot_h - inset_v * 2.0).max(1.0),
-                                    font_size_px,
-                                    font_family,
-                                    font_weight,
-                                    color,
-                                    alignment: tze_hud_scene::types::TextAlign::Start,
-                                    overflow: tze_hud_scene::types::TextOverflow::Clip,
-                                    outline_color: oc,
-                                    outline_width: ow,
-                                    opacity: effective_opacity,
-                                });
+
+                                if payload.title.is_empty() {
+                                    // ── Single-line rendering (backward-compatible) ──
+                                    // Font weight: policy explicit > 400 default
+                                    let font_weight = policy.font_weight.unwrap_or(400);
+                                    items.push(TextItem {
+                                        text: payload.text.clone(),
+                                        pixel_x: text_x,
+                                        pixel_y: slot_y + inset_v,
+                                        bounds_width: text_w,
+                                        bounds_height: (effective_slot_h - inset_v * 2.0).max(1.0),
+                                        font_size_px,
+                                        font_family,
+                                        font_weight,
+                                        color,
+                                        alignment: tze_hud_scene::types::TextAlign::Start,
+                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
+                                        outline_color: oc,
+                                        outline_width: ow,
+                                        opacity: effective_opacity,
+                                    });
+                                } else {
+                                    // ── Two-line rendering: bold title + regular body ──
+                                    //
+                                    // Use pre-resolved token values (notif_title_weight,
+                                    // notif_body_scale) to keep rendering consistent with
+                                    // the slot-height calculation above.
+                                    let body_font_size = font_size_px * notif_body_scale;
+                                    let title_line_h = font_size_px * 1.4;
+                                    let content_top = slot_y + inset_v;
+
+                                    // Title line (bold)
+                                    items.push(TextItem {
+                                        text: payload.title.clone(),
+                                        pixel_x: text_x,
+                                        pixel_y: content_top,
+                                        bounds_width: text_w,
+                                        bounds_height: title_line_h.max(1.0),
+                                        font_size_px,
+                                        font_family,
+                                        font_weight: notif_title_weight,
+                                        color,
+                                        alignment: tze_hud_scene::types::TextAlign::Start,
+                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
+                                        outline_color: oc,
+                                        outline_width: ow,
+                                        opacity: effective_opacity,
+                                    });
+                                    // Body line (regular weight, 0.85× size)
+                                    let body_top =
+                                        content_top + title_line_h + NOTIFICATION_INTER_LINE_GAP;
+                                    // Remaining slot height available for body (down to inset bottom)
+                                    let body_bounds_h =
+                                        ((slot_y + effective_slot_h - inset_v) - body_top).max(1.0);
+                                    items.push(TextItem {
+                                        text: payload.text.clone(),
+                                        pixel_x: text_x,
+                                        pixel_y: body_top,
+                                        bounds_width: text_w,
+                                        bounds_height: body_bounds_h,
+                                        font_size_px: body_font_size,
+                                        font_family,
+                                        font_weight: 400,
+                                        color,
+                                        alignment: tze_hud_scene::types::TextAlign::Start,
+                                        overflow: tze_hud_scene::types::TextOverflow::Clip,
+                                        outline_color: oc,
+                                        outline_width: ow,
+                                        opacity: effective_opacity,
+                                    });
+                                }
                             }
                             _ => {}
                         }
@@ -1991,12 +2081,9 @@ impl Compositor {
                                     // as the LatestWins/Replace path.
                                     let icon_width_reserved =
                                         parse_notification_icon(&payload.icon)
-                                            .filter(|id| {
-                                                self.image_texture_cache.contains_key(id)
-                                            })
+                                            .filter(|id| self.image_texture_cache.contains_key(id))
                                             .map(|_| {
-                                                NOTIFICATION_ICON_SIZE_PX
-                                                    + NOTIFICATION_ICON_GAP_PX
+                                                NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
                                             })
                                             .unwrap_or(0.0);
                                     if icon_width_reserved > 0.0 {
@@ -2012,10 +2099,8 @@ impl Compositor {
                                             .margin_vertical
                                             .or(policy.margin_px)
                                             .unwrap_or(NOTIFICATION_INSET);
-                                        let font_size_px = policy
-                                            .font_size_px
-                                            .unwrap_or(16.0)
-                                            .clamp(6.0, 200.0);
+                                        let font_size_px =
+                                            policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
                                         let font_family = policy.font_family.unwrap_or(
                                             tze_hud_scene::types::FontFamily::SystemSansSerif,
                                         );
@@ -2029,20 +2114,18 @@ impl Compositor {
                                             base_color,
                                             anim_opacity,
                                         );
-                                        let (oc, ow) = match (
-                                            policy.outline_color,
-                                            policy.outline_width,
-                                        ) {
-                                            (Some(oc), Some(ow)) if ow > 0.0 => {
-                                                let oc_srgb =
-                                                    crate::text::apply_opacity_to_color(
-                                                        crate::text::rgba_to_srgb_u8(oc),
-                                                        anim_opacity,
-                                                    );
-                                                (Some(oc_srgb), Some(ow))
-                                            }
-                                            _ => (None, None),
-                                        };
+                                        let (oc, ow) =
+                                            match (policy.outline_color, policy.outline_width) {
+                                                (Some(oc), Some(ow)) if ow > 0.0 => {
+                                                    let oc_srgb =
+                                                        crate::text::apply_opacity_to_color(
+                                                            crate::text::rgba_to_srgb_u8(oc),
+                                                            anim_opacity,
+                                                        );
+                                                    (Some(oc_srgb), Some(ow))
+                                                }
+                                                _ => (None, None),
+                                            };
                                         items.push(TextItem {
                                             text: payload.text.clone(),
                                             pixel_x: zx + margin_h + icon_width_reserved,
@@ -2057,9 +2140,9 @@ impl Compositor {
                                             font_family,
                                             font_weight,
                                             color,
-                                            alignment: policy.text_align.unwrap_or(
-                                                tze_hud_scene::types::TextAlign::Start,
-                                            ),
+                                            alignment: policy
+                                                .text_align
+                                                .unwrap_or(tze_hud_scene::types::TextAlign::Start),
                                             overflow: policy.overflow.unwrap_or(
                                                 tze_hud_scene::types::TextOverflow::Clip,
                                             ),
@@ -2131,15 +2214,10 @@ impl Compositor {
                                 // Render the notification text.
                                 // When a valid icon texture is cached, inset the text
                                 // to the right of the icon (icon_size + gap px).
-                                let icon_width_reserved =
-                                    parse_notification_icon(&payload.icon)
-                                        .filter(|id| {
-                                            self.image_texture_cache.contains_key(id)
-                                        })
-                                        .map(|_| {
-                                            NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
-                                        })
-                                        .unwrap_or(0.0);
+                                let icon_width_reserved = parse_notification_icon(&payload.icon)
+                                    .filter(|id| self.image_texture_cache.contains_key(id))
+                                    .map(|_| NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX)
+                                    .unwrap_or(0.0);
                                 if icon_width_reserved > 0.0 {
                                     // Build TextItem manually to apply icon offset.
                                     // Use the same default inset as the icon draw path
@@ -2194,9 +2272,9 @@ impl Compositor {
                                         font_family,
                                         font_weight,
                                         color,
-                                        alignment: policy.text_align.unwrap_or(
-                                            tze_hud_scene::types::TextAlign::Start,
-                                        ),
+                                        alignment: policy
+                                            .text_align
+                                            .unwrap_or(tze_hud_scene::types::TextAlign::Start),
                                         overflow: policy
                                             .overflow
                                             .unwrap_or(tze_hud_scene::types::TextOverflow::Clip),
@@ -2845,7 +2923,15 @@ impl Compositor {
 
             // Render nodes within the tile
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut vertices, &mut textured_cmds, sw, sh);
+                self.render_node(
+                    root_id,
+                    tile,
+                    scene,
+                    &mut vertices,
+                    &mut textured_cmds,
+                    sw,
+                    sh,
+                );
             }
         }
 
@@ -2856,9 +2942,23 @@ impl Compositor {
         self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Content));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Content),
+        );
         // Chrome zones render last, above everything.
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Chrome));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Chrome),
+        );
 
         // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
         // SVG rasterization can be slow; if a resize event arrives while we hold
@@ -2969,7 +3069,15 @@ impl Compositor {
             vertices.extend_from_slice(&verts);
 
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut vertices, &mut textured_cmds, sw, sh);
+                self.render_node(
+                    root_id,
+                    tile,
+                    scene,
+                    &mut vertices,
+                    &mut textured_cmds,
+                    sw,
+                    sh,
+                );
             }
         }
 
@@ -2980,9 +3088,23 @@ impl Compositor {
         self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Content));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Content),
+        );
         // Chrome zones render last, above everything.
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Chrome));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Chrome),
+        );
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -3098,7 +3220,15 @@ impl Compositor {
             );
             content_vertices.extend_from_slice(&verts);
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut content_vertices, &mut textured_cmds, sw, sh);
+                self.render_node(
+                    root_id,
+                    tile,
+                    scene,
+                    &mut content_vertices,
+                    &mut textured_cmds,
+                    sw,
+                    sh,
+                );
             }
         }
 
@@ -3433,9 +3563,8 @@ impl Compositor {
                 None => continue, // shouldn't happen if ensure was called
             };
 
-            let verts = textured_rect_vertices(
-                cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint,
-            );
+            let verts =
+                textured_rect_vertices(cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint);
             let vertex_buf = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3512,10 +3641,11 @@ impl Compositor {
             //
             // Stack zones: each publication gets its own vertically-stacked slot.
             //   For alert-banner: severity-descending (critical first), then
-            //   recency-descending within the same severity.  Dynamic zone height:
-            //   active_count × slot_h (zero when empty, capped at configured max).
+            //   recency-descending within the same severity.
             //   For other Stack zones: newest-first (slot 0 = newest, at top of zone).
-            //   slot_h via Self::stack_slot_height() — content-sized, policy-driven.
+            //   Per-slot heights are computed via Self::per_slot_heights() and may vary
+            //   by item (two-line notifications occupy a taller slot).  Dynamic zone
+            //   height for alert-banner: sum(slot_heights) — zero when empty.
             //
             // MergeByKey zones: single backdrop for the full zone (entries are merged
             //   at the data level; visually one unified strip).
@@ -3523,18 +3653,6 @@ impl Compositor {
             // LatestWins / Replace: single backdrop from the most-recent publish only.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    let slot_h = Self::stack_slot_height(policy);
-
-                    // alert-banner: dynamic height = active_count × slot_h.
-                    // Height grows with each active banner; no cap at the configured
-                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
-                    // For other Stack zones: use the configured zone height (h).
-                    let effective_h = if is_alert_banner_zone(zone_name) {
-                        publishes.len() as f32 * slot_h
-                    } else {
-                        h
-                    };
-
                     // Build an ordered reference slice: alert-banner uses severity sort
                     // (critical first, then recency); other Stack zones use newest-first.
                     let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
@@ -3543,9 +3661,45 @@ impl Compositor {
                         (0..publishes.len()).rev().collect()
                     };
 
-                    for (slot_idx, &pub_idx) in ordered_indices.iter().enumerate() {
+                    // Ordered references for per_slot_heights.
+                    let ordered_refs: Vec<&ZonePublishRecord> =
+                        ordered_indices.iter().map(|&i| &publishes[i]).collect();
+
+                    // Resolve notification typography tokens once per zone so that
+                    // slot-height calculation matches what collect_text_items renders.
+                    let notif_body_scale = self
+                        .token_map
+                        .get("typography.notification.body.scale")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(NOTIFICATION_BODY_SCALE)
+                        .clamp(0.5, 1.0);
+
+                    // Compute per-slot heights (variable for two-line notifications).
+                    let slot_heights = Self::per_slot_heights(
+                        &ordered_refs,
+                        policy,
+                        notif_body_scale,
+                        NOTIFICATION_INTER_LINE_GAP,
+                    );
+                    let slot_offsets = Self::slot_offsets(&slot_heights);
+                    let total_slots_h: f32 = slot_heights.iter().sum();
+
+                    // alert-banner: dynamic height = sum of per-slot heights.
+                    // Height grows with each active banner; no cap at the configured
+                    // height_pct.  (Zero banners → zero height via the is_empty guard.)
+                    // For other Stack zones: use the configured zone height (h).
+                    let effective_h = if is_alert_banner_zone(zone_name) {
+                        total_slots_h
+                    } else {
+                        h
+                    };
+
+                    for (&pub_idx, (slot_offset, slot_h)) in ordered_indices
+                        .iter()
+                        .zip(slot_offsets.iter().zip(slot_heights.iter()))
+                    {
                         let record = &publishes[pub_idx];
-                        let slot_y = y + slot_idx as f32 * slot_h;
+                        let slot_y = y + slot_offset;
                         if slot_y >= y + effective_h {
                             break;
                         }
@@ -3571,9 +3725,9 @@ impl Compositor {
                                 // If a GPU texture is cached, emit a textured draw command
                                 // filling this publication's slot.
                                 if self.image_texture_cache.contains_key(resource_id) {
-                                    let combined_opacity =
-                                        (anim_opacity * self.pub_opacity(zone_name, record))
-                                            .clamp(0.0, 1.0);
+                                    let combined_opacity = (anim_opacity
+                                        * self.pub_opacity(zone_name, record))
+                                    .clamp(0.0, 1.0);
                                     textured_cmds.push(TexturedDrawCmd {
                                         resource_id: *resource_id,
                                         x,
@@ -3873,19 +4027,20 @@ impl Compositor {
         }
     }
 
-    /// Compute the per-slot height for a Stack zone.
+    /// Compute the per-slot height for a Stack zone (single-line content).
     ///
-    /// `slot_h = font_size_px + 2 * margin_v + SLOT_BASELINE_GAP`
+    /// `slot_h = line_height + 2 * margin_v + SLOT_BASELINE_GAP`
+    /// where `line_height = font_size_px * 1.4`
     ///
     /// - `font_size_px` — from `RenderingPolicy`; defaults to 16.
     /// - `margin_v` — from `margin_vertical` → `margin_px` → 8 px fallback chain.
-    /// - `SLOT_BASELINE_GAP` — a small constant gap (2 px) between successive slot
+    /// - `SLOT_BASELINE_GAP` — a small constant gap (4 px) between successive slot
     ///   backdrops so they don't bleed into each other visually. This is not a
     ///   configurable policy field; it is a structural layout constant.
     ///
     /// Used by both `collect_text_items` and `render_zone_content` so both code
     /// paths stay consistent.
-    fn stack_slot_height(policy: &RenderingPolicy) -> f32 {
+    pub(crate) fn stack_slot_height(policy: &RenderingPolicy) -> f32 {
         const SLOT_BASELINE_GAP: f32 = 4.0;
         let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
         // Use line_height (font_size × 1.4) to match cosmic-text layout in
@@ -3894,6 +4049,87 @@ impl Compositor {
         let line_height = font_size_px * 1.4;
         let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
         (line_height + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
+    }
+
+    /// Compute the per-slot height for a single notification publication.
+    ///
+    /// When `payload.title` is non-empty, the slot must accommodate two text lines:
+    ///   - Title line: `font_size_px * 1.4` (line height, same as single-line slot)
+    ///   - Body line: `title_line_h * notification_body_scale`
+    ///   - Inter-line gap: `notification_inter_line_gap` px between the two lines
+    ///
+    /// Two-line height formula:
+    ///   `slot_h = title_line_h + inter_line_gap + body_line_h + 2*margin_v + SLOT_BASELINE_GAP`
+    ///   where `title_line_h = font_size_px * 1.4`, `body_line_h = title_line_h * notification_body_scale`
+    ///
+    /// The caller is responsible for resolving `notification_body_scale` and
+    /// `notification_inter_line_gap` from the token map (with appropriate fallbacks) so
+    /// that height calculation and rendering use the exact same values.
+    ///
+    /// When `payload.title` is empty, falls back to [`Self::stack_slot_height`] (single line).
+    pub(crate) fn notification_slot_height(
+        payload: &NotificationPayload,
+        policy: &RenderingPolicy,
+        notification_body_scale: f32,
+        notification_inter_line_gap: f32,
+    ) -> f32 {
+        if payload.title.is_empty() {
+            return Self::stack_slot_height(policy);
+        }
+        const SLOT_BASELINE_GAP: f32 = 4.0;
+        let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
+        let title_line_h = font_size_px * 1.4;
+        let body_line_h = title_line_h * notification_body_scale;
+        let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
+        (title_line_h
+            + notification_inter_line_gap
+            + body_line_h
+            + 2.0 * margin_v
+            + SLOT_BASELINE_GAP)
+            .max(1.0)
+    }
+
+    /// Compute per-slot heights for an ordered slice of publications in a Stack zone.
+    ///
+    /// For non-`Notification` content and single-line notifications, returns
+    /// `Self::stack_slot_height(policy)` for every slot.  For two-line
+    /// notifications (`payload.title` non-empty), returns the taller two-line height
+    /// computed from the same resolved notification typography values used by rendering.
+    ///
+    /// Returns a `Vec<f32>` of length `ordered.len()`, one height per slot.
+    fn per_slot_heights(
+        ordered: &[&ZonePublishRecord],
+        policy: &RenderingPolicy,
+        notification_body_scale: f32,
+        notification_inter_line_gap: f32,
+    ) -> Vec<f32> {
+        ordered
+            .iter()
+            .map(|rec| match &rec.content {
+                ZoneContent::Notification(n) => Self::notification_slot_height(
+                    n,
+                    policy,
+                    notification_body_scale,
+                    notification_inter_line_gap,
+                ),
+                _ => Self::stack_slot_height(policy),
+            })
+            .collect()
+    }
+
+    /// Compute the cumulative slot y-offsets from a list of per-slot heights.
+    ///
+    /// Returns a `Vec<f32>` of length `heights.len()`, where `offsets[i]` is the
+    /// sum of all `heights[0..i]` (i.e. the y-start of slot `i` relative to the
+    /// zone origin).
+    fn slot_offsets(heights: &[f32]) -> Vec<f32> {
+        let mut offsets = Vec::with_capacity(heights.len());
+        let mut acc = 0.0_f32;
+        for &h in heights {
+            offsets.push(acc);
+            acc += h;
+        }
+        offsets
     }
 
     /// Resolve a zone's geometry policy to pixel bounds (x, y, w, h).
@@ -4906,6 +5142,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -5375,6 +5612,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -5445,6 +5683,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 2,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -5547,6 +5786,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 3, // Critical — must use color.notification.urgency.critical, NOT color.severity.critical
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -5806,6 +6046,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1, // normal
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -5868,6 +6109,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 0,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -5934,6 +6176,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 2,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -5996,6 +6239,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 0,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -6189,6 +6433,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 2,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -6416,6 +6661,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 2,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -6507,6 +6753,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-a",
                 None,
@@ -6522,6 +6769,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-b",
                 None,
@@ -6607,6 +6855,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 0,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-a",
                 None,
@@ -6622,6 +6871,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-b",
                 None,
@@ -6637,6 +6887,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 2,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-c",
                 None,
@@ -6735,6 +6986,7 @@ mod tests {
                         icon: String::new(),
                         urgency: 1,
                         ttl_ms: None,
+                        title: String::new(),
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -6816,6 +7068,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 0,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-0",
                 None,
@@ -6832,6 +7085,7 @@ mod tests {
                         icon: String::new(),
                         urgency: 1,
                         ttl_ms: None,
+                        title: String::new(),
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -6912,6 +7166,7 @@ mod tests {
                         icon: String::new(),
                         urgency: 1,
                         ttl_ms: None,
+                        title: String::new(),
                     }),
                     &format!("agent-{i}"),
                     None,
@@ -7256,6 +7511,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 2,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test",
                 None,
@@ -7551,6 +7807,7 @@ mod tests {
                     icon: String::new(),
                     urgency,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 publisher,
                 None,
@@ -7720,7 +7977,14 @@ mod tests {
         {
             let scene = make_alert_banner_scene();
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+            compositor.render_zone_content(
+                &scene,
+                &mut vertices,
+                &mut Vec::new(),
+                1280.0,
+                720.0,
+                None,
+            );
             assert!(
                 vertices.is_empty(),
                 "0 banners → 0 vertices (zero height); got {} vertices",
@@ -7733,7 +7997,14 @@ mod tests {
             let mut scene = make_alert_banner_scene();
             publish_alert(&mut scene, "Single banner", 2, "agent-a");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+            compositor.render_zone_content(
+                &scene,
+                &mut vertices,
+                &mut Vec::new(),
+                1280.0,
+                720.0,
+                None,
+            );
             assert_eq!(
                 vertices.len(),
                 6,
@@ -7754,7 +8025,14 @@ mod tests {
             publish_alert(&mut scene, "Banner B", 2, "agent-b");
             publish_alert(&mut scene, "Banner C", 3, "agent-c");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+            compositor.render_zone_content(
+                &scene,
+                &mut vertices,
+                &mut Vec::new(),
+                1280.0,
+                720.0,
+                None,
+            );
             assert_eq!(
                 vertices.len(),
                 18,
@@ -7876,6 +8154,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-a",
                 None,
@@ -7998,6 +8277,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-a",
                 None,
@@ -8032,6 +8312,331 @@ mod tests {
             item.overflow,
             TextOverflow::Clip,
             "notification text must clip at content area (no wrapping)"
+        );
+    }
+
+    // ── Two-line notification rendering [hud-ltgk.3] ──────────────────────────
+    //
+    // Spec §Two-line notification layout:
+    //   - Empty title → single-line backward-compatible path (1 TextItem)
+    //   - Non-empty title → two-line path (2 TextItems: title bold, body regular)
+    //   - Title font_weight = NOTIFICATION_TITLE_WEIGHT (700)
+    //   - Body font_size = font_size_px * NOTIFICATION_BODY_SCALE (0.85×)
+    //   - Body font_weight = 400 (regular)
+    //   - Body positioned below title line + inter-line gap
+
+    /// Two-line notification: empty `title` produces exactly 1 TextItem (backward compat).
+    ///
+    /// AC: `collect_text_items` with `NotificationPayload { title: "" }` MUST produce
+    /// the same output as before this feature was added.
+    #[tokio::test]
+    async fn test_two_line_notification_empty_title_produces_one_text_item() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "two-line backward-compat test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.75,
+                y_pct: 0.0,
+                width_pct: 0.25,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                font_size_px: Some(16.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "Body only notification".to_owned(),
+                    icon: String::new(),
+                    urgency: 0,
+                    ttl_ms: None,
+                    title: String::new(), // empty: must use single-line path
+                }),
+                "test-agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        assert_eq!(
+            items.len(),
+            1,
+            "single-line notification (empty title) must produce exactly 1 TextItem"
+        );
+        assert_eq!(
+            items[0].text, "Body only notification",
+            "single-line TextItem must contain body text"
+        );
+        assert_eq!(
+            items[0].font_weight, 400,
+            "single-line notification must use regular weight (400)"
+        );
+    }
+
+    /// Two-line notification: non-empty `title` produces 2 TextItems with correct properties.
+    ///
+    /// AC:
+    ///   1. `collect_text_items` produces exactly 2 TextItems for the slot.
+    ///   2. First item (lower pixel_y): title text, weight=700, font_size_px=16.
+    ///   3. Second item (higher pixel_y): body text, weight=400, font_size=16*0.85=13.6.
+    ///   4. Body item pixel_y > title item pixel_y.
+    #[tokio::test]
+    async fn test_two_line_notification_title_produces_two_text_items() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        // Zone at x=0 (x_pct=0) so items are easy to find (pixel_x near 0).
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "two-line title test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.5,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                font_size_px: Some(16.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    title: "System Alert".to_owned(),
+                    text: "Disk space low on /dev/sda1".to_owned(),
+                    icon: String::new(),
+                    urgency: 2,
+                    ttl_ms: None,
+                }),
+                "test-agent",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        assert_eq!(
+            items.len(),
+            2,
+            "two-line notification (non-empty title) must produce exactly 2 TextItems, got {} items: {:?}",
+            items.len(),
+            items.iter().map(|i| &i.text).collect::<Vec<_>>()
+        );
+
+        // Sort by pixel_y to get title (top) and body (bottom).
+        let mut sorted = items.clone();
+        sorted.sort_by(|a, b| a.pixel_y.partial_cmp(&b.pixel_y).unwrap());
+        let title_item = &sorted[0];
+        let body_item = &sorted[1];
+
+        // Title item checks.
+        assert_eq!(
+            title_item.text, "System Alert",
+            "first item must be the title text"
+        );
+        assert_eq!(
+            title_item.font_weight, NOTIFICATION_TITLE_WEIGHT,
+            "title must use bold weight ({}), got {}",
+            NOTIFICATION_TITLE_WEIGHT, title_item.font_weight
+        );
+        assert!(
+            (title_item.font_size_px - 16.0).abs() < 0.01,
+            "title must use policy font_size_px (16.0), got {}",
+            title_item.font_size_px
+        );
+
+        // Body item checks.
+        assert_eq!(
+            body_item.text, "Disk space low on /dev/sda1",
+            "second item must be the body text"
+        );
+        assert_eq!(
+            body_item.font_weight, 400,
+            "body must use regular weight (400), got {}",
+            body_item.font_weight
+        );
+        let expected_body_size = 16.0 * NOTIFICATION_BODY_SCALE;
+        assert!(
+            (body_item.font_size_px - expected_body_size).abs() < 0.1,
+            "body font size must be 0.85× title size ({expected_body_size:.2}), got {}",
+            body_item.font_size_px
+        );
+
+        // Body must be below title.
+        assert!(
+            body_item.pixel_y > title_item.pixel_y,
+            "body item must be below title: title_y={}, body_y={}",
+            title_item.pixel_y,
+            body_item.pixel_y
+        );
+    }
+
+    /// Two-line slot height: `notification_slot_height` returns a larger height for
+    /// two-line notifications than for single-line notifications.
+    ///
+    /// AC: two_line_slot_h > single_line_slot_h for the same RenderingPolicy.
+    #[test]
+    fn test_notification_slot_height_two_line_exceeds_single_line() {
+        let policy = RenderingPolicy {
+            font_size_px: Some(16.0),
+            ..Default::default()
+        };
+
+        let single_line = NotificationPayload {
+            text: "body".to_owned(),
+            title: String::new(),
+            ..Default::default()
+        };
+
+        let two_line = NotificationPayload {
+            title: "Title".to_owned(),
+            text: "body".to_owned(),
+            ..Default::default()
+        };
+
+        let h_single = Compositor::notification_slot_height(
+            &single_line,
+            &policy,
+            NOTIFICATION_BODY_SCALE,
+            NOTIFICATION_INTER_LINE_GAP,
+        );
+        let h_two_line = Compositor::notification_slot_height(
+            &two_line,
+            &policy,
+            NOTIFICATION_BODY_SCALE,
+            NOTIFICATION_INTER_LINE_GAP,
+        );
+
+        assert!(
+            h_two_line > h_single,
+            "two-line slot height ({h_two_line:.2}) must exceed single-line ({h_single:.2})"
+        );
+
+        // Single-line == stack_slot_height
+        let h_stack = Compositor::stack_slot_height(&policy);
+        assert!(
+            (h_single - h_stack).abs() < 0.01,
+            "single-line notification_slot_height ({h_single:.2}) must equal stack_slot_height ({h_stack:.2})"
+        );
+    }
+
+    /// Two-line notification stacking: two two-line notifications stack correctly,
+    /// with the second slot starting after the first two-line slot height.
+    #[tokio::test]
+    async fn test_two_line_notifications_stack_correctly() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "two-line stacking test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.5,
+                height_pct: 0.9,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy {
+                backdrop: Some(Rgba::new(0.1, 0.1, 0.1, 0.9)),
+                font_size_px: Some(16.0),
+                ..Default::default()
+            },
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        // Publish two two-line notifications.
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    title: "First Alert".to_owned(),
+                    text: "First body text".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                }),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(NotificationPayload {
+                    title: "Second Alert".to_owned(),
+                    text: "Second body text".to_owned(),
+                    icon: String::new(),
+                    urgency: 1,
+                    ttl_ms: None,
+                }),
+                "agent-b",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
+
+        // Two two-line notifications = 4 TextItems.
+        assert_eq!(
+            items.len(),
+            4,
+            "two two-line notifications must produce 4 TextItems (2 per notification), got {} items",
+            items.len()
+        );
+
+        // All 4 items must have distinct pixel_y values (no overlap).
+        let mut ys: Vec<f32> = items.iter().map(|i| i.pixel_y).collect();
+        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        assert_eq!(
+            ys.len(),
+            4,
+            "all 4 TextItems must have distinct pixel_y values, got: {:?}",
+            ys
         );
     }
 
@@ -8166,6 +8771,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 0,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-a",
                 None,
@@ -8181,6 +8787,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "agent-b",
                 None,
@@ -8342,6 +8949,7 @@ mod tests {
                         icon: String::new(),
                         urgency: 1,
                         ttl_ms: None,
+                        title: String::new(),
                     }),
                     agent,
                     None,
@@ -8459,6 +9067,7 @@ mod tests {
                     icon: String::new(),
                     urgency: 1,
                     ttl_ms: Some(3_000),
+                    title: String::new(),
                 }),
                 "agent-a",
                 None,
@@ -8500,6 +9109,7 @@ mod tests {
                 icon: String::new(),
                 urgency: 0,
                 ttl_ms: None,
+                title: String::new(),
             }),
             published_at_wall_us: 2_000_000,
             merge_key: None,
@@ -9062,6 +9672,7 @@ mod tests {
                 icon: String::new(),
                 urgency: 2,
                 ttl_ms: None, // No per-notification TTL — urgency path sets expires_at
+                title: String::new(),
             }),
             published_at_wall_us: 0,
             merge_key: None,
@@ -9085,6 +9696,7 @@ mod tests {
                 icon: String::new(),
                 urgency: 3,
                 ttl_ms: None,
+                title: String::new(),
             }),
             published_at_wall_us: 0,
             merge_key: None,
@@ -9108,6 +9720,7 @@ mod tests {
                 icon: String::new(),
                 urgency: 2,
                 ttl_ms: Some(5_000), // explicit 5 s TTL on the notification itself
+                title: String::new(),
             }),
             published_at_wall_us: 1_000_000, // published at t=1s
             merge_key: None,
@@ -9130,6 +9743,7 @@ mod tests {
                 icon: String::new(),
                 urgency: 1,
                 ttl_ms: Some(8_000),
+                title: String::new(),
             }),
             published_at_wall_us: 0,
             merge_key: None,

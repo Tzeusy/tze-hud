@@ -381,6 +381,7 @@ async fn publish_notification_to_zone_via_grpc(
                     text: text.to_string(),
                     icon: String::new(),
                     urgency,
+                    title: String::new(),
                 },
             )),
         },

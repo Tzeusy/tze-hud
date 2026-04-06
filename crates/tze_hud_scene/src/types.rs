@@ -1507,9 +1507,22 @@ pub struct ZonePublishToken {
 
 // ─── Zone content ────────────────────────────────────────────────────────────
 
-/// Notification payload: text + optional icon + urgency.
+/// Notification payload: text + optional icon + urgency + optional two-line layout.
+///
+/// ## Single-line vs. two-line rendering
+///
+/// - When `title` is empty (or absent), the notification renders as a single
+///   line using the `text` field (existing behavior, fully backward compatible).
+/// - When `title` is non-empty, the notification renders as two lines:
+///   - Line 1: `title` — bold weight (`typography.notification.title.weight`,
+///     default 700), `font_size_px` from `RenderingPolicy` / design tokens.
+///   - Line 2: `text` — regular weight (400), 0.85× the title font size.
+///
+///   The slot height is expanded to fit both lines plus inter-line spacing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct NotificationPayload {
+    /// Body text.  For single-line notifications this is the only displayed
+    /// text.  For two-line notifications this is the second (body) line.
     pub text: String,
     /// Resource name or empty string.
     pub icon: String,
@@ -1523,6 +1536,13 @@ pub struct NotificationPayload {
     /// `notification-area` zone).
     #[serde(default)]
     pub ttl_ms: Option<u64>,
+    /// Optional bold title for two-line notification layout.
+    ///
+    /// When non-empty: renders as the first (title) line in bold, with `text`
+    /// rendered as the second (body) line in regular weight.
+    /// When empty or absent: single-line rendering using `text` only.
+    #[serde(default)]
+    pub title: String,
 }
 
 /// Status-bar payload: key → display string map.
