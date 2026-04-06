@@ -3,6 +3,7 @@
 .dolt/
 *.db
 
+.env
 # Rust build artifacts
 /target/
 
@@ -22,3 +23,6 @@ hud-eqjn/
 hud-zeiq/
 hud-au1w/
 hud-h9ix/
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key

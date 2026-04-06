@@ -2,5 +2,6 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "server",
-  "dolt_database": "hud"
+  "dolt_database": "hud",
+  "project_id": "fb32d9ee-2041-4b66-a252-9418206fb9ef"
 }
