@@ -3665,19 +3665,21 @@ impl Compositor {
     /// To minimise GPU buffer allocations (formerly one per draw command), this
     /// method:
     ///
-    /// 1. Sorts a local copy of `cmds` by `resource_id` so that quads sharing
-    ///    the same texture are contiguous.  The sort is **stable** so that the
-    ///    relative draw order of quads with the same texture is preserved.
+    /// 1. Filters `cmds` to those whose texture is cached, **preserving the
+    ///    original draw order** so that alpha-blended quads composite correctly.
     /// 2. Builds a single flat `Vec<TexturedRectVertex>` containing all quad
-    ///    vertices (6 vertices per quad, in sorted order).
+    ///    vertices (6 vertices per quad, in original scene order).
     /// 3. Uploads that data as **one** `wgpu::Buffer` for the entire pass.
-    /// 4. For each contiguous run of quads that share a bind group, issues a
-    ///    single `draw` call covering the corresponding vertex range.
+    /// 4. Emits one `draw` call per *consecutive* run of quads that share the
+    ///    same bind group, switching the bind group only when the `resource_id`
+    ///    changes in the traversal order.
     ///
-    /// This reduces N buffer allocations → 1 per frame and cuts bind-group
-    /// switches to the number of unique textures rather than the number of
-    /// quads.  Visual output is identical to the previous per-quad approach
-    /// because draw order within each texture group is unchanged.
+    /// This reduces N buffer allocations → 1 per frame.  Bind-group switches
+    /// are minimised for consecutive runs of the same texture (the common case
+    /// for zone backdrops followed by their icon).  A full sort by `resource_id`
+    /// is intentionally avoided: it would change the compositing order of quads
+    /// that belong to different textures and could alter the visual result when
+    /// quads overlap with partial alpha.
     fn encode_image_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3693,22 +3695,19 @@ impl Compositor {
         use crate::pipeline::TexturedRectVertex;
         use wgpu::util::DeviceExt;
 
-        // ── Step 1: sort by resource_id to group quads by texture ────────────
-        // Only retain commands whose texture is actually cached; skip the rest.
-        let mut sorted: Vec<&TexturedDrawCmd> = cmds
+        // ── Step 1: filter to cached commands, preserving original order ──────
+        let cached: Vec<&TexturedDrawCmd> = cmds
             .iter()
             .filter(|c| self.image_texture_cache.contains_key(&c.resource_id))
             .collect();
-        if sorted.is_empty() {
+        if cached.is_empty() {
             return;
         }
-        // Stable sort: preserves relative order of quads with the same texture.
-        sorted.sort_by(|a, b| a.resource_id.cmp(&b.resource_id));
 
         // ── Step 2: build a single flat vertex buffer ─────────────────────────
-        let total_verts = sorted.len() * 6;
+        let total_verts = cached.len() * 6;
         let mut all_verts: Vec<TexturedRectVertex> = Vec::with_capacity(total_verts);
-        for cmd in &sorted {
+        for cmd in &cached {
             let verts =
                 textured_rect_vertices(cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint);
             all_verts.extend_from_slice(&verts);
@@ -3722,7 +3721,7 @@ impl Compositor {
                 usage: wgpu::BufferUsages::VERTEX,
             });
 
-        // ── Step 3: encode the render pass with one draw call per texture ─────
+        // ── Step 3: encode the render pass with one draw call per consecutive run
         let mut image_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("image_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3741,28 +3740,32 @@ impl Compositor {
         image_pass.set_pipeline(&self.texture_rect_pipeline);
         image_pass.set_vertex_buffer(0, vertex_buf.slice(..));
 
-        // Walk the sorted list and emit one draw call per contiguous run that
-        // shares the same resource_id (and therefore the same bind group).
+        // Walk the list in original order and emit one draw call per contiguous
+        // run that shares the same resource_id (and therefore the same bind group).
         let mut run_start: u32 = 0;
-        let mut current_id = sorted[0].resource_id;
+        let mut current_id = cached[0].resource_id;
 
-        for (i, cmd) in sorted.iter().enumerate() {
+        for (i, cmd) in cached.iter().enumerate() {
             let vert_idx = i as u32 * 6;
             if cmd.resource_id != current_id {
                 // Flush the previous run.
-                if let Some(entry) = self.image_texture_cache.get(&current_id) {
-                    image_pass.set_bind_group(0, &entry.bind_group, &[]);
-                    image_pass.draw(run_start..vert_idx, 0..1);
-                }
+                let entry = self
+                    .image_texture_cache
+                    .get(&current_id)
+                    .expect("filtered to cached entries above");
+                image_pass.set_bind_group(0, &entry.bind_group, &[]);
+                image_pass.draw(run_start..vert_idx, 0..1);
                 current_id = cmd.resource_id;
                 run_start = vert_idx;
             }
         }
         // Flush the final run.
-        if let Some(entry) = self.image_texture_cache.get(&current_id) {
-            image_pass.set_bind_group(0, &entry.bind_group, &[]);
-            image_pass.draw(run_start..sorted.len() as u32 * 6, 0..1);
-        }
+        let entry = self
+            .image_texture_cache
+            .get(&current_id)
+            .expect("filtered to cached entries above");
+        image_pass.set_bind_group(0, &entry.bind_group, &[]);
+        image_pass.draw(run_start..cached.len() as u32 * 6, 0..1);
     }
 
     /// Collect rounded-rectangle draw commands for zones whose `RenderingPolicy`
