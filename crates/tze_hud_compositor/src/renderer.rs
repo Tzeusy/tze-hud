@@ -882,6 +882,13 @@ pub struct Compositor {
     /// The raw bytes are kept until the ResourceId is no longer referenced by
     /// any scene node or zone publication (evicted by `evict_unused_image_textures`).
     image_bytes: HashMap<ResourceId, Arc<[u8]>>,
+    /// Explicit pixel dimensions for registered image resources, keyed by `ResourceId`.
+    ///
+    /// Populated alongside `image_bytes` by [`Compositor::register_image_bytes`].
+    /// Stores `(width, height)` so that `ensure_scene_image_textures` can pass
+    /// exact dimensions to [`Compositor::ensure_image_texture`] without resorting
+    /// to the square-root heuristic that fails for non-square images.
+    image_dims: HashMap<ResourceId, (u32, u32)>,
     /// GPU texture cache for static images, keyed by `ResourceId`.
     ///
     /// Entries are created on-demand by `ensure_image_texture` and evicted
@@ -977,6 +984,7 @@ impl Compositor {
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
             image_bytes: HashMap::new(),
+            image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
         })
     }
@@ -1243,6 +1251,7 @@ impl Compositor {
             stream_reveal_states: HashMap::new(),
             token_map: HashMap::new(),
             image_bytes: HashMap::new(),
+            image_dims: HashMap::new(),
             image_texture_cache: HashMap::new(),
         };
 
@@ -1499,12 +1508,48 @@ impl Compositor {
     ///
     /// The runtime should call this after each successful image upload so the
     /// compositor can create GPU textures on demand. `rgba_data` must be
-    /// width × height × 4 bytes of RGBA8 pixel data.
+    /// `width × height × 4` bytes of RGBA8 pixel data. The explicit `width` and
+    /// `height` are stored alongside the bytes so that
+    /// [`Compositor::ensure_scene_image_textures`] can create GPU textures for
+    /// zone images (which do not carry dimensions in `ZoneContent::StaticImage`)
+    /// without resorting to the square-root heuristic that fails for non-square
+    /// images (e.g. 640×360).
     ///
     /// Duplicate calls with the same `resource_id` are ignored (content-addressed
     /// identity guarantees the bytes are identical).
-    pub fn register_image_bytes(&mut self, resource_id: ResourceId, rgba_data: Arc<[u8]>) {
-        self.image_bytes.entry(resource_id).or_insert(rgba_data);
+    ///
+    /// Returns without registering if `width` or `height` is zero, or if the
+    /// product `width × height × 4` overflows `usize`.
+    pub fn register_image_bytes(
+        &mut self,
+        resource_id: ResourceId,
+        rgba_data: Arc<[u8]>,
+        width: u32,
+        height: u32,
+    ) {
+        // Guard: reject zero-dimension images; content-addressed uploads should
+        // never arrive with degenerate dimensions, so treat this as a caller bug.
+        if width == 0 || height == 0 {
+            return;
+        }
+        // Guard: overflow — reject if the byte count would overflow usize.
+        if width
+            .checked_mul(height)
+            .and_then(|px| px.checked_mul(4))
+            .is_none()
+        {
+            return;
+        }
+
+        // Insert both maps atomically via the Entry API.  Using separate
+        // `or_insert` calls would allow one map to contain the key without the
+        // other if a previous partially-failed insertion left them out of sync.
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.image_bytes.entry(resource_id)
+        {
+            entry.insert(rgba_data);
+            self.image_dims.insert(resource_id, (width, height));
+        }
     }
 
     /// Ensure a GPU texture exists for the given `ResourceId`.
@@ -1631,8 +1676,9 @@ impl Compositor {
     pub fn evict_unused_image_textures(&mut self, referenced_ids: &HashSet<ResourceId>) {
         self.image_texture_cache
             .retain(|id, _| referenced_ids.contains(id));
-        // Also evict bytes for resources no longer referenced.
+        // Also evict bytes and dims for resources no longer referenced.
         self.image_bytes.retain(|id, _| referenced_ids.contains(id));
+        self.image_dims.retain(|id, _| referenced_ids.contains(id));
     }
 
     /// Scan the scene graph for all StaticImage resources, ensure their GPU
@@ -1663,19 +1709,13 @@ impl Compositor {
                 match &record.content {
                     ZoneContent::StaticImage(resource_id) => {
                         referenced.insert(*resource_id);
-                        // For zone images, we don't have explicit dimensions — if
-                        // the image_bytes are registered, check the cache entry or
-                        // use a default. The actual dimensions are determined from
-                        // the registered bytes.
+                        // Use the explicit dimensions stored by `register_image_bytes`.
+                        // This correctly handles non-square images (e.g. 640×360) that
+                        // the old square-root heuristic would mis-detect.
                         if !self.image_texture_cache.contains_key(resource_id) {
-                            if let Some(data) = self.image_bytes.get(resource_id) {
-                                // Try to determine dimensions from the RGBA data size.
-                                // This is a heuristic: assume square if we can't determine.
-                                // In production, the runtime should provide dimensions.
-                                let pixel_count = data.len() / 4;
-                                let side = (pixel_count as f64).sqrt() as u32;
-                                if side > 0 && (side * side) as usize == pixel_count {
-                                    self.ensure_image_texture(*resource_id, side, side);
+                            if let Some(&(w, h)) = self.image_dims.get(resource_id) {
+                                if w > 0 && h > 0 {
+                                    self.ensure_image_texture(*resource_id, w, h);
                                 }
                             }
                         }
@@ -1686,14 +1726,11 @@ impl Compositor {
                         // silently skipped (render notification text-only).
                         if let Some(resource_id) = parse_notification_icon(&payload.icon) {
                             referenced.insert(resource_id);
+                            // Use the explicit dimensions stored by `register_image_bytes`.
                             if !self.image_texture_cache.contains_key(&resource_id) {
-                                if let Some(data) = self.image_bytes.get(&resource_id) {
-                                    // Use square-root heuristic for dimension inference,
-                                    // same as StaticImage zone images above.
-                                    let pixel_count = data.len() / 4;
-                                    let side = (pixel_count as f64).sqrt() as u32;
-                                    if side > 0 && (side * side) as usize == pixel_count {
-                                        self.ensure_image_texture(resource_id, side, side);
+                                if let Some(&(w, h)) = self.image_dims.get(&resource_id) {
+                                    if w > 0 && h > 0 {
+                                        self.ensure_image_texture(resource_id, w, h);
                                     }
                                 }
                             }

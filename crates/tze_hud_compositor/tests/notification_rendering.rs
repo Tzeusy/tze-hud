@@ -555,7 +555,7 @@ async fn test_notification_icon_renders_texture_when_bytes_registered() {
     let resource_id = ResourceId::of(&rgba_data);
 
     // Register the icon bytes with the compositor.
-    compositor.register_image_bytes(resource_id, Arc::from(rgba_data.as_slice()));
+    compositor.register_image_bytes(resource_id, Arc::from(rgba_data.as_slice()), icon_w, icon_h);
 
     // Publish a notification with the icon field set to the hex ResourceId.
     scene
