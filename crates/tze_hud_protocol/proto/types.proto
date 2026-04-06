@@ -272,6 +272,7 @@ message RenderingPolicyProto {
   uint32            transition_in_ms   = 13;  // 0 = not set
   uint32            transition_out_ms  = 14;  // 0 = not set
   TextOverflowProto overflow           = 15;  // UNSPECIFIED = compositor default (Clip)
+  float             backdrop_radius    = 16;  // -1.0 = not set sentinel; valid >= 0.0
 }
 
 // Contention policy values (used as enum int in ZoneDefinitionProto).

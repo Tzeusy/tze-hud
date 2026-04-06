@@ -489,6 +489,8 @@ pub fn rendering_policy_to_proto(rp: &RenderingPolicy) -> proto::RenderingPolicy
                 TextOverflow::Ellipsis => proto::TextOverflowProto::Ellipsis as i32,
             })
             .unwrap_or(proto::TextOverflowProto::Unspecified as i32),
+        // Sentinel: -1.0 = not set (0.0 is a valid radius)
+        backdrop_radius: rp.backdrop_radius.unwrap_or(-1.0),
     }
 }
 
@@ -730,7 +732,12 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
         // RenderingPolicy reconstructed from proto will have an empty map; the
         // compositor must re-apply zone config after proto-roundtrip if needed.
         key_icon_map: Default::default(),
-        backdrop_radius: None,
+        // backdrop_radius: sentinel -1.0 = not set (0.0 is a valid radius)
+        backdrop_radius: if p.backdrop_radius >= 0.0 {
+            Some(p.backdrop_radius)
+        } else {
+            None
+        },
     }
 }
 
