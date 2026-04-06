@@ -1,0 +1,87 @@
+# tze_hud Production Configuration
+#
+# This is the canonical production config for the tze_hud_app windowed binary.
+# Deploy alongside the compiled binary as tze_hud.toml in the same directory
+# (the runtime's CWD auto-resolution picks up ./tze_hud.toml first).
+#
+# On Windows, copy both tze_hud.exe and this file as tze_hud.toml to C:\tze_hud\.
+# The asset directories (widget_bundles/) must also be deployed there:
+#
+#   C:\tze_hud\
+#     tze_hud.exe
+#     tze_hud.toml          (this file, renamed)
+#     widget_bundles\
+#       gauge\
+#       progress-bar\
+#       status-indicator\
+#
+# Usage:
+#   tze_hud --window-mode overlay
+#   tze_hud --config /path/to/tze_hud.toml --window-mode overlay
+#
+# Widget instance names (for MCP publish_to_widget):
+#   widget_name: "main-gauge"      → gauge widget (level, label, fill_color, severity)
+#   widget_name: "main-progress"   → progress-bar widget (progress, label, fill_color)
+#   widget_name: "main-status"     → status-indicator widget (status, label)
+#
+# See publish_to_widget semantics in .claude/skills/user-test/SKILL.md:
+# widget_name addresses a widget *instance* (not a type). The instance name is
+# the instance_id declared below — not the widget_type name.
+
+# Widget bundle directories scanned at startup.
+# Paths are resolved relative to this config file's parent directory.
+# Each path is a root whose immediate subdirectories are scanned for widget.toml.
+#
+# When deploying to Windows, copy all three bundle directories alongside the exe:
+#   widget_bundles/gauge/
+#   widget_bundles/progress-bar/
+#   widget_bundles/status-indicator/
+[widget_bundles]
+paths = ["widget_bundles"]
+
+# Main display tab — hosts all widget instances.
+[[tabs]]
+name        = "Main"
+default_tab = true
+
+# ── Gauge widget instance ─────────────────────────────────────────────────────
+# MCP widget_name: "main-gauge"
+# Parameters: level (f32 0–1), label (string), fill_color (color), severity (enum)
+# Position: right side of display at x=1740, centered vertically.
+[[tabs.widgets]]
+widget_type = "gauge"
+instance_id  = "main-gauge"
+
+[tabs.widgets.geometry]
+x      = 1740
+y      = 420
+width  = 100
+height = 240
+
+# ── Progress-bar widget instance ──────────────────────────────────────────────
+# MCP widget_name: "main-progress"
+# Parameters: progress (f32 0–1), label (string), fill_color (color)
+# Position: bottom of display, inset from left edge.
+[[tabs.widgets]]
+widget_type = "progress-bar"
+instance_id  = "main-progress"
+
+[tabs.widgets.geometry]
+x      = 10
+y      = 1040
+width  = 300
+height = 20
+
+# ── Status-indicator widget instance ─────────────────────────────────────────
+# MCP widget_name: "main-status"
+# Parameters: status (enum: online/away/busy/offline), label (string)
+# Position: top-right corner.
+[[tabs.widgets]]
+widget_type = "status-indicator"
+instance_id  = "main-status"
+
+[tabs.widgets.geometry]
+x      = 1860
+y      = 10
+width  = 48
+height = 56

@@ -8778,7 +8778,10 @@ mod tests {
         let mem_item = items.iter().find(|i| i.text.starts_with("💾 mem:"));
 
         assert!(cpu_item.is_some(), "expected a TextItem for 'cpu'");
-        assert!(mem_item.is_some(), "expected a TextItem for 'mem' with emoji prefix");
+        assert!(
+            mem_item.is_some(),
+            "expected a TextItem for 'mem' with emoji prefix"
+        );
 
         let cpu_item = cpu_item.unwrap();
         let mem_item = mem_item.unwrap();

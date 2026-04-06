@@ -50,19 +50,57 @@ alert-banner  = "exemplar-alert-banner"
 # Widget bundle directories scanned at startup.
 # Paths are resolved relative to this config file's parent directory
 # (examples/vertical_slice/config/).
+#
+# Two roots cover all production widget bundles:
+#   assets/widget_bundles/ — progress-bar, status-indicator
+#   assets/widgets/        — gauge
 [widget_bundles]
-paths = ["../../../assets/widget_bundles"]
+paths = [
+    "../../../assets/widget_bundles",
+    "../../../assets/widgets",
+]
 
 # Widget instances declared on the Main tab.
-# progress-bar: horizontal progress bar at x=10, y=400, 300x20 pixels.
-# Driven by three bindings: progress→fill-bar.width (linear), fill_color→fill-bar.fill
-# (direct), label→label-text.text-content (direct).
+#
+# Instance names used by user-test fixtures (see .claude/skills/user-test/):
+#   main-gauge     → gauge widget
+#   main-progress  → progress-bar widget
+#   main-status    → status-indicator widget
+#
+# IMPORTANT: widget_name in publish_to_widget refers to instance_id (not widget_type).
+
+# Gauge: vertical fill gauge at right edge of display.
+# MCP widget_name: "main-gauge"
+[[tabs.widgets]]
+widget_type = "gauge"
+instance_id  = "main-gauge"
+
+[tabs.widgets.geometry]
+x      = 1740
+y      = 420
+width  = 100
+height = 240
+
+# Progress bar: horizontal progress bar near bottom of display.
+# MCP widget_name: "main-progress"
 [[tabs.widgets]]
 widget_type = "progress-bar"
-instance_id  = "progress-bar"
+instance_id  = "main-progress"
 
 [tabs.widgets.geometry]
 x      = 10
-y      = 400
+y      = 1040
 width  = 300
 height = 20
+
+# Status indicator: small status circle at top-right corner.
+# MCP widget_name: "main-status"
+[[tabs.widgets]]
+widget_type = "status-indicator"
+instance_id  = "main-status"
+
+[tabs.widgets.geometry]
+x      = 1860
+y      = 10
+width  = 48
+height = 56

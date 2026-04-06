@@ -1913,3 +1913,182 @@ fn exemplar_gauge_fails_without_token_map() {
         ),
     }
 }
+
+// ─── Production status-indicator bundle (assets/widget_bundles/status-indicator/) ──
+
+/// Returns the path to the production status-indicator bundle.
+/// Located at <workspace>/assets/widget_bundles/status-indicator/ relative to
+/// CARGO_MANIFEST_DIR.
+fn production_status_indicator_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..") // crates/
+        .join("..") // workspace root
+        .join("assets")
+        .join("widget_bundles")
+        .join("status-indicator")
+}
+
+/// Returns a minimal token map covering every {{token.key}} placeholder in
+/// the production status-indicator SVG.
+fn production_status_indicator_tokens() -> HashMap<String, String> {
+    let mut tokens = HashMap::new();
+    tokens.insert("color.border.default".to_string(), "#333333".to_string());
+    tokens.insert("color.text.secondary".to_string(), "#B0B0B0".to_string());
+    tokens.insert("color.outline.default".to_string(), "#000000".to_string());
+    tokens
+}
+
+/// The production status-indicator bundle loads without errors using the
+/// canonical token map.  Validates structural integrity and token resolution.
+#[test]
+fn production_status_indicator_loads_without_errors() {
+    let dir = production_status_indicator_path();
+    let tokens = production_status_indicator_tokens();
+    let result = load_bundle_dir_with_tokens(&dir, &tokens);
+    match &result {
+        BundleScanResult::Ok(_) => {}
+        BundleScanResult::Err(e) => {
+            panic!("production status-indicator bundle failed to load: {e}");
+        }
+    }
+}
+
+/// After loading with the canonical token map, all {{token.*}} placeholders
+/// must be replaced and the expected resolved values must appear in the SVG.
+#[test]
+fn production_status_indicator_token_resolution_correct() {
+    let dir = production_status_indicator_path();
+    let tokens = production_status_indicator_tokens();
+    let bundle = match load_bundle_dir_with_tokens(&dir, &tokens) {
+        BundleScanResult::Ok(b) => b,
+        BundleScanResult::Err(e) => panic!("production status-indicator failed to load: {e}"),
+    };
+
+    let svg_bytes = bundle
+        .svg_contents
+        .get("indicator.svg")
+        .expect("indicator.svg must be in svg_contents");
+    let svg_text = std::str::from_utf8(svg_bytes).expect("SVG must be valid UTF-8");
+
+    // No unresolved placeholders in non-comment SVG content.
+    // Strip XML comments first: <!-- ... --> before checking for {{token.
+    let svg_no_comments = {
+        let mut out = String::new();
+        let mut rest = svg_text;
+        while let Some(start) = rest.find("<!--") {
+            out.push_str(&rest[..start]);
+            if let Some(end) = rest[start..].find("-->") {
+                rest = &rest[start + end + 3..];
+            } else {
+                break;
+            }
+        }
+        out.push_str(rest);
+        out
+    };
+    assert!(
+        !svg_no_comments.contains("{{token."),
+        "indicator.svg must not contain unresolved token placeholders outside comments: {svg_text}"
+    );
+
+    // Resolved border color must appear (stroke attribute on the circle).
+    assert!(
+        svg_text.contains("#333333"),
+        "indicator.svg must contain resolved border color #333333: {svg_text}"
+    );
+}
+
+/// The production status-indicator bundle registers as "status-indicator" with
+/// 2 parameters (status, label), 1 layer (indicator.svg), and 2 bindings.
+#[test]
+fn production_status_indicator_registration_structure() {
+    let dir = production_status_indicator_path();
+    let tokens = production_status_indicator_tokens();
+    let bundle = match load_bundle_dir_with_tokens(&dir, &tokens) {
+        BundleScanResult::Ok(b) => b,
+        BundleScanResult::Err(e) => panic!("production status-indicator failed to load: {e}"),
+    };
+
+    let def = &bundle.definition;
+
+    assert_eq!(
+        def.name, "status-indicator",
+        "widget name must be 'status-indicator'"
+    );
+
+    // 2 parameters: status (enum) and label (string).
+    assert_eq!(
+        def.parameter_schema.len(),
+        2,
+        "must have exactly 2 parameters"
+    );
+    let param_names: Vec<&str> = def
+        .parameter_schema
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect();
+    assert!(
+        param_names.contains(&"status"),
+        "must declare 'status' param"
+    );
+    assert!(param_names.contains(&"label"), "must declare 'label' param");
+
+    // 1 layer: indicator.svg with 2 bindings.
+    assert_eq!(def.layers.len(), 1, "must have exactly 1 layer");
+    assert_eq!(
+        def.layers[0].svg_file, "indicator.svg",
+        "layer must be indicator.svg"
+    );
+    assert_eq!(
+        def.layers[0].bindings.len(),
+        2,
+        "indicator.svg must have exactly 2 bindings (status discrete + label direct)"
+    );
+}
+
+/// The discrete value_map for the "status" binding must contain all four
+/// canonical state colors (online, away, busy, offline).
+#[test]
+fn production_status_indicator_discrete_value_map_complete() {
+    use tze_hud_scene::types::WidgetBindingMapping;
+
+    let dir = production_status_indicator_path();
+    let tokens = production_status_indicator_tokens();
+    let bundle = match load_bundle_dir_with_tokens(&dir, &tokens) {
+        BundleScanResult::Ok(b) => b,
+        BundleScanResult::Err(e) => panic!("production status-indicator failed to load: {e}"),
+    };
+
+    let layer = &bundle.definition.layers[0];
+    let status_binding = layer
+        .bindings
+        .iter()
+        .find(|b| b.param == "status")
+        .expect("status binding must exist in indicator.svg layer");
+
+    let value_map = match &status_binding.mapping {
+        WidgetBindingMapping::Discrete { value_map } => value_map,
+        other => panic!("status binding must be Discrete, got {other:?}"),
+    };
+
+    assert_eq!(
+        value_map.get("online").map(|s| s.as_str()),
+        Some("#4FB543"),
+        "online → #4FB543"
+    );
+    assert_eq!(
+        value_map.get("away").map(|s| s.as_str()),
+        Some("#D97706"),
+        "away → #D97706"
+    );
+    assert_eq!(
+        value_map.get("busy").map(|s| s.as_str()),
+        Some("#DC2626"),
+        "busy → #DC2626"
+    );
+    assert_eq!(
+        value_map.get("offline").map(|s| s.as_str()),
+        Some("#6B7280"),
+        "offline → #6B7280"
+    );
+}

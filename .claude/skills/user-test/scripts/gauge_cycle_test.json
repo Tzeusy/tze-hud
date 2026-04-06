@@ -1,43 +1,63 @@
 [
   {
-    "widget_name": "hello-gauge",
+    "widget_name": "main-gauge",
     "params": {
       "level": 0.25,
       "label": "Low",
-      "fill_color": {"r": 0.2, "g": 0.6, "b": 1.0, "a": 1.0},
+      "fill_color": {
+        "r": 0.2,
+        "g": 0.6,
+        "b": 1.0,
+        "a": 1.0
+      },
       "severity": "info"
     },
     "ttl_us": 10000000,
     "namespace": "user-test"
   },
   {
-    "widget_name": "hello-gauge",
+    "widget_name": "main-gauge",
     "params": {
       "level": 0.5,
       "label": "Medium",
-      "fill_color": {"r": 1.0, "g": 0.8, "b": 0.0, "a": 1.0},
+      "fill_color": {
+        "r": 1.0,
+        "g": 0.8,
+        "b": 0.0,
+        "a": 1.0
+      },
       "severity": "warning"
     },
     "ttl_us": 10000000,
     "namespace": "user-test"
   },
   {
-    "widget_name": "hello-gauge",
+    "widget_name": "main-gauge",
     "params": {
       "level": 0.95,
       "label": "Critical!",
-      "fill_color": {"r": 1.0, "g": 0.15, "b": 0.1, "a": 1.0},
+      "fill_color": {
+        "r": 1.0,
+        "g": 0.15,
+        "b": 0.1,
+        "a": 1.0
+      },
       "severity": "error"
     },
     "ttl_us": 10000000,
     "namespace": "user-test"
   },
   {
-    "widget_name": "hello-gauge",
+    "widget_name": "main-gauge",
     "params": {
       "level": 0.42,
       "label": "Normal",
-      "fill_color": {"r": 0.1, "g": 0.85, "b": 0.3, "a": 1.0},
+      "fill_color": {
+        "r": 0.1,
+        "g": 0.85,
+        "b": 0.3,
+        "a": 1.0
+      },
       "severity": "info"
     },
     "ttl_us": 60000000,
