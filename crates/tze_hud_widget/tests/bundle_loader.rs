@@ -261,12 +261,12 @@ fn status_indicator_fixture_loads_successfully() {
             if let tze_hud_scene::types::WidgetBindingMapping::Discrete { value_map } =
                 &status_binding.mapping
             {
-                assert_eq!(value_map.get("online").map(String::as_str), Some("#00CC66"));
-                assert_eq!(value_map.get("away").map(String::as_str), Some("#FFB800"));
-                assert_eq!(value_map.get("busy").map(String::as_str), Some("#FF4444"));
+                assert_eq!(value_map.get("online").map(String::as_str), Some("#4FB543"));
+                assert_eq!(value_map.get("away").map(String::as_str), Some("#D97706"));
+                assert_eq!(value_map.get("busy").map(String::as_str), Some("#DC2626"));
                 assert_eq!(
                     value_map.get("offline").map(String::as_str),
-                    Some("#666666")
+                    Some("#6B7280")
                 );
             } else {
                 panic!("expected discrete mapping for status binding");

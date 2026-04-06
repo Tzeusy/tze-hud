@@ -730,6 +730,7 @@ pub fn proto_to_rendering_policy(p: &proto::RenderingPolicyProto) -> RenderingPo
         // RenderingPolicy reconstructed from proto will have an empty map; the
         // compositor must re-apply zone config after proto-roundtrip if needed.
         key_icon_map: Default::default(),
+        backdrop_radius: None,
     }
 }
 
