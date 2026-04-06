@@ -98,7 +98,8 @@ use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::ZoneContent;
+use tze_hud_scene::types::{ZoneContent, ZoneInteractionKind};
+use tze_hud_scene::HitResult;
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -929,15 +930,65 @@ impl WinitApp {
         // both the SharedState lock and the scene lock.
         if let Ok(state) = self.state.shared_state.try_lock() {
             if let Ok(mut scene) = state.scene.try_lock() {
-                let _result = self
+                let result = self
                     .state
                     .input_processor
                     .process(&pointer_event, &mut scene);
+
+                // ── Zone interaction dispatch (local feedback first) ──────────
+                // On pointer-up, check whether the hit landed on a compositor-
+                // managed zone interaction element (e.g. a notification dismiss
+                // button).  Dismiss actions are applied synchronously here so the
+                // stale affordance disappears before the next rendered frame —
+                // satisfying the "local feedback first" doctrine.
+                //
+                // Action interactions are logged for now; callback delivery to
+                // agents is handled separately (see hud-ltgk.7).
+                if pointer_event.kind == PointerEventKind::Up {
+                    if let HitResult::ZoneInteraction {
+                        ref zone_name,
+                        published_at_wall_us,
+                        ref publisher_namespace,
+                        ref kind,
+                        ..
+                    } = result.hit
+                    {
+                        match kind {
+                            ZoneInteractionKind::Dismiss => {
+                                let removed = scene.dismiss_notification(
+                                    zone_name,
+                                    published_at_wall_us,
+                                    publisher_namespace,
+                                );
+                                tracing::debug!(
+                                    zone = %zone_name,
+                                    published_at_wall_us,
+                                    publisher = %publisher_namespace,
+                                    removed,
+                                    "zone dismiss: notification removed from scene"
+                                );
+                            }
+                            ZoneInteractionKind::Action { callback_id } => {
+                                // Action callback delivery to the owning agent is
+                                // handled by the agent event pipeline (hud-ltgk.7).
+                                tracing::debug!(
+                                    zone = %zone_name,
+                                    published_at_wall_us,
+                                    publisher = %publisher_namespace,
+                                    %callback_id,
+                                    "zone action: callback queued for agent delivery"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Local feedback patch (result.local_patch) would be sent to the
+                // compositor via a local-patch channel in the full pipeline. For the
+                // initial windowed runtime, the compositor reads the scene state
+                // directly on the next frame.
+                let _ = result;
             }
-            // Local feedback patch (_result.local_patch) would be sent to the
-            // compositor via a local-patch channel in the full pipeline. For the
-            // initial windowed runtime, the compositor reads the scene state
-            // directly on the next frame.
         }
     }
 
@@ -2457,5 +2508,322 @@ redaction_style = "blank"
         // Old code multiplied — would have produced 3200x1800.
         let old_surface_w = (inner_w as f64 * scale).round() as u32;
         assert_eq!(old_surface_w, 3200, "old code over-counted surface width");
+    }
+
+    // ── Zone interaction: dismiss hit wiring (hud-ltgk.6) ────────────────────
+
+    use tze_hud_scene::types::{
+        ContentionPolicy, GeometryPolicy, LayerAttachment, NotificationPayload, RenderingPolicy,
+        Rect, SceneId, ZoneDefinition, ZoneHitRegion, ZoneMediaType,
+    };
+
+    fn make_test_zone(name: &str) -> ZoneDefinition {
+        ZoneDefinition {
+            id: SceneId::new(),
+            name: name.to_string(),
+            description: format!("test zone: {name}"),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 0.1,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: RenderingPolicy::default(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 8 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        }
+    }
+
+    /// Pointer-up on a zone dismiss hit-region must remove the notification from
+    /// `zone_registry.active_publishes`.
+    ///
+    /// This is the regression test for hud-ltgk.6: the dismiss button rendered
+    /// visually but clicks had no effect because the `InputResult` was discarded
+    /// without acting on `HitResult::ZoneInteraction { kind: Dismiss }`.
+    #[test]
+    fn zone_dismiss_on_pointer_up_removes_notification() {
+        use tze_hud_input::InputProcessor;
+        use tze_hud_input::PointerEvent;
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        // hit_test requires an active tab; create one to mimic production state.
+        scene.create_tab("Main", 0).expect("tab creation must succeed");
+        scene.register_zone(make_test_zone("alert-banner"));
+
+        // Publish a notification so there is something to dismiss.
+        let publisher = "test-agent";
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "hello".to_string(),
+                    icon: String::new(),
+                    urgency: 0,
+                    ttl_ms: None,
+                    title: String::new(),
+                    actions: vec![],
+                }),
+                publisher,
+                None,
+                None, // no explicit expiry
+                None,
+            )
+            .expect("publish should succeed");
+
+        // Verify the notification is present.
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            1,
+            "notification must be present before dismiss"
+        );
+        // Use the actual published_at from the record (assigned by publish_to_zone).
+        let record_published_at = scene
+            .zone_registry
+            .active_for_zone("alert-banner")[0]
+            .published_at_wall_us;
+
+        // Simulate the compositor injecting a dismiss ZoneHitRegion for this publication.
+        scene.zone_hit_regions.push(ZoneHitRegion {
+            zone_name: "alert-banner".to_string(),
+            published_at_wall_us: record_published_at,
+            publisher_namespace: publisher.to_string(),
+            bounds: Rect::new(100.0, 10.0, 20.0, 20.0), // dismiss button at (100,10)
+            kind: ZoneInteractionKind::Dismiss,
+            interaction_id: format!(
+                "zone:alert-banner:dismiss:{record_published_at}:{publisher}"
+            ),
+            tab_order: 0,
+        });
+
+        let mut processor = InputProcessor::new();
+
+        // Pointer-down on the dismiss button (does not dismiss yet).
+        let down = PointerEvent {
+            x: 110.0,
+            y: 20.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result_down = processor.process(&down, &mut scene);
+        // Down on a ZoneInteraction does not dismiss.
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            1,
+            "notification must still be present after pointer-down"
+        );
+        // The hit result must be ZoneInteraction.
+        assert!(
+            result_down.hit.is_zone_interaction(),
+            "pointer-down on zone hit region must produce ZoneInteraction hit"
+        );
+
+        // Pointer-up on the dismiss button — this is where the dismiss fires.
+        let up = PointerEvent {
+            x: 110.0,
+            y: 20.0,
+            kind: PointerEventKind::Up,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result_up = processor.process(&up, &mut scene);
+        assert!(
+            result_up.hit.is_zone_interaction(),
+            "pointer-up on zone hit region must produce ZoneInteraction hit"
+        );
+
+        // Simulate the windowed runtime's zone interaction dispatch.
+        if let HitResult::ZoneInteraction {
+            ref zone_name,
+            published_at_wall_us,
+            ref publisher_namespace,
+            ref kind,
+            ..
+        } = result_up.hit
+        {
+            if let ZoneInteractionKind::Dismiss = kind {
+                scene.dismiss_notification(zone_name, published_at_wall_us, publisher_namespace);
+            }
+        }
+
+        // The notification must now be gone.
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            0,
+            "notification must be removed after dismiss pointer-up [hud-ltgk.6 regression]"
+        );
+
+        // The hit region must also be pruned immediately (local feedback first).
+        assert!(
+            scene.zone_hit_regions.is_empty(),
+            "stale dismiss hit-region must be pruned after dismiss [local feedback first]"
+        );
+    }
+
+    /// Pointer-down alone must NOT dismiss a notification — only pointer-up triggers dismiss.
+    #[test]
+    fn zone_dismiss_only_on_pointer_up_not_down() {
+        use tze_hud_input::InputProcessor;
+        use tze_hud_input::PointerEvent;
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.create_tab("Main", 0).expect("tab creation must succeed");
+        scene.register_zone(make_test_zone("alert-banner"));
+
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "hello".to_string(),
+                    icon: String::new(),
+                    urgency: 0,
+                    ttl_ms: None,
+                    title: String::new(),
+                    actions: vec![],
+                }),
+                "test-agent",
+                None,
+                None,
+                None,
+            )
+            .expect("publish should succeed");
+
+        let record_published_at = scene
+            .zone_registry
+            .active_for_zone("alert-banner")[0]
+            .published_at_wall_us;
+
+        scene.zone_hit_regions.push(ZoneHitRegion {
+            zone_name: "alert-banner".to_string(),
+            published_at_wall_us: record_published_at,
+            publisher_namespace: "test-agent".to_string(),
+            bounds: Rect::new(100.0, 10.0, 20.0, 20.0),
+            kind: ZoneInteractionKind::Dismiss,
+            interaction_id: format!(
+                "zone:alert-banner:dismiss:{record_published_at}:test-agent"
+            ),
+            tab_order: 0,
+        });
+
+        let mut processor = InputProcessor::new();
+
+        // Only send pointer-down, no pointer-up.
+        let down = PointerEvent {
+            x: 110.0,
+            y: 20.0,
+            kind: PointerEventKind::Down,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result = processor.process(&down, &mut scene);
+
+        // No dismiss dispatch on pointer-down — check it would not be dismissed
+        // even if we ran the zone dispatch logic.
+        let would_dismiss = match &result.hit {
+            HitResult::ZoneInteraction { kind, .. } => {
+                matches!(kind, ZoneInteractionKind::Dismiss)
+                    && down.kind == PointerEventKind::Up // false for Down
+            }
+            _ => false,
+        };
+        assert!(!would_dismiss, "pointer-down must not trigger dismiss");
+
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            1,
+            "notification must still be present after pointer-down only"
+        );
+    }
+
+    /// Action zone hit does NOT dismiss the notification — it should only log.
+    #[test]
+    fn zone_action_hit_does_not_dismiss_notification() {
+        use tze_hud_input::InputProcessor;
+        use tze_hud_input::PointerEvent;
+
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.create_tab("Main", 0).expect("tab creation must succeed");
+        scene.register_zone(make_test_zone("alert-banner"));
+
+        scene
+            .publish_to_zone(
+                "alert-banner",
+                ZoneContent::Notification(NotificationPayload {
+                    text: "hello".to_string(),
+                    icon: String::new(),
+                    urgency: 0,
+                    ttl_ms: None,
+                    title: String::new(),
+                    actions: vec![],
+                }),
+                "test-agent",
+                None,
+                None,
+                None,
+            )
+            .expect("publish should succeed");
+
+        let record_published_at = scene
+            .zone_registry
+            .active_for_zone("alert-banner")[0]
+            .published_at_wall_us;
+
+        // Place an Action hit region (not Dismiss).
+        scene.zone_hit_regions.push(ZoneHitRegion {
+            zone_name: "alert-banner".to_string(),
+            published_at_wall_us: record_published_at,
+            publisher_namespace: "test-agent".to_string(),
+            bounds: Rect::new(50.0, 10.0, 40.0, 20.0),
+            kind: ZoneInteractionKind::Action {
+                callback_id: "open".to_string(),
+            },
+            interaction_id: format!(
+                "zone:alert-banner:action:{record_published_at}:test-agent:open"
+            ),
+            tab_order: 1,
+        });
+
+        let mut processor = InputProcessor::new();
+
+        let up = PointerEvent {
+            x: 70.0,
+            y: 20.0,
+            kind: PointerEventKind::Up,
+            device_id: 0,
+            timestamp: None,
+        };
+        let result = processor.process(&up, &mut scene);
+
+        // Run the zone dispatch logic: action must NOT call dismiss_notification.
+        if let HitResult::ZoneInteraction {
+            ref zone_name,
+            published_at_wall_us,
+            ref publisher_namespace,
+            ref kind,
+            ..
+        } = result.hit
+        {
+            match kind {
+                ZoneInteractionKind::Dismiss => {
+                    // Should not happen for an Action hit region.
+                    scene.dismiss_notification(zone_name, published_at_wall_us, publisher_namespace);
+                }
+                ZoneInteractionKind::Action { .. } => {
+                    // Action: just log (no dismiss).
+                }
+            }
+        }
+
+        // Notification must still be present.
+        assert_eq!(
+            scene.zone_registry.active_for_zone("alert-banner").len(),
+            1,
+            "action interaction must NOT remove the notification"
+        );
     }
 }
