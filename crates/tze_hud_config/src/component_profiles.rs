@@ -112,6 +112,15 @@ pub struct ZoneRenderingOverride {
     /// Exit transition duration in milliseconds.
     pub transition_out_ms: Option<u32>,
 
+    /// Corner radius for the zone backdrop in pixels.
+    ///
+    /// When set, the compositor uses the SDF rounded-rectangle pipeline instead
+    /// of the axis-aligned quad pipeline to render this zone's backdrop.
+    /// Values are clamped to `[0, min(half_width, half_height)]` at render time.
+    ///
+    /// Maps to `RenderingPolicy::backdrop_radius`.
+    pub backdrop_radius: Option<f32>,
+
     /// Status-bar key-to-icon SVG mapping.
     ///
     /// Maps merge keys (e.g., `"weather"`, `"battery"`) to SVG file paths or
@@ -208,6 +217,7 @@ struct RawZoneOverride {
     margin_vertical: Option<toml::Value>,
     transition_in_ms: Option<toml::Value>,
     transition_out_ms: Option<toml::Value>,
+    backdrop_radius: Option<toml::Value>,
     /// Optional TOML table mapping merge keys to SVG file paths or resource IDs.
     ///
     /// In the TOML file this is written as:
@@ -968,6 +978,9 @@ fn validate_zone_override(
             "transition_out_ms",
         )?);
     }
+
+    // ── backdrop_radius ──────────────────────────────────────────────────────
+    out.backdrop_radius = resolve_numeric_field!(raw.backdrop_radius, "backdrop_radius");
 
     // ── key_icon_map ─────────────────────────────────────────────────────────
     // Each entry in the map must be a TOML string (literal path or {{key}} ref).

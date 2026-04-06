@@ -145,6 +145,7 @@ pub fn apply_subtitle_token_defaults(policy: &mut RenderingPolicy, tokens: &Desi
 /// - `outline_color` ← `None` (no outline for notifications; spec says explicitly None)
 /// - `margin_horizontal` ← `spacing.padding.medium`
 /// - `margin_vertical` ← `spacing.padding.medium`
+/// - `backdrop_radius` ← `border.radius.medium`
 pub fn apply_notification_area_token_defaults(
     policy: &mut RenderingPolicy,
     tokens: &DesignTokenMap,
@@ -173,6 +174,9 @@ pub fn apply_notification_area_token_defaults(
     }
     if policy.margin_vertical.is_none() {
         policy.margin_vertical = token_f32(tokens, "spacing.padding.medium");
+    }
+    if policy.backdrop_radius.is_none() {
+        policy.backdrop_radius = token_f32(tokens, "border.radius.medium");
     }
 }
 
@@ -337,6 +341,9 @@ pub fn merge_zone_override(
     }
     if let Some(t) = override_.transition_out_ms {
         policy.transition_out_ms = Some(t);
+    }
+    if let Some(r) = override_.backdrop_radius {
+        policy.backdrop_radius = Some(r);
     }
     // ── key_icon_map (status-bar icons) ──────────────────────────────────────
     // Merge: entries in the override are inserted; keys absent from the override
@@ -507,7 +514,7 @@ pub fn build_all_effective_policies(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokens::{CANONICAL_TOKENS, resolve_tokens};
+    use crate::tokens::resolve_tokens;
 
     fn default_tokens() -> DesignTokenMap {
         resolve_tokens(&DesignTokenMap::new(), &DesignTokenMap::new())
@@ -647,6 +654,31 @@ mod tests {
         );
         assert!(policy.margin_horizontal.is_some());
         assert!(policy.margin_vertical.is_some());
+        // backdrop_radius should be set from border.radius.medium (canonical default: 8.0)
+        assert!(
+            policy.backdrop_radius.is_some(),
+            "notification-area must have backdrop_radius set from border.radius.medium token"
+        );
+        let radius = policy.backdrop_radius.unwrap();
+        assert!(
+            (radius - 8.0).abs() < 1e-4,
+            "border.radius.medium canonical default is 8.0, got {radius}"
+        );
+    }
+
+    #[test]
+    fn test_notification_area_backdrop_radius_not_overwritten_when_explicit() {
+        let tokens = default_tokens();
+        let mut policy = RenderingPolicy::default();
+        // Pre-set backdrop_radius to 4.0 (explicit override)
+        policy.backdrop_radius = Some(4.0);
+        apply_token_defaults_for_zone("notification-area", &mut policy, &tokens);
+        // Must remain 4.0 — token default must not overwrite explicit values
+        assert_eq!(
+            policy.backdrop_radius,
+            Some(4.0),
+            "explicit backdrop_radius must not be overwritten by token default"
+        );
     }
 
     #[test]

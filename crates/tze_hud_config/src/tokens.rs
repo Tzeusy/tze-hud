@@ -222,6 +222,9 @@ pub struct CanonicalToken {
 /// does not specify them. The schema is defined by the component-shape-language
 /// specification (`openspec/changes/component-shape-language/specs/
 /// component-shape-language/spec.md`, §Requirement: Canonical Token Schema).
+///
+/// Current count: 31 tokens (25 original + 3 border.radius variants + 3 spacing additions).
+/// Token groups: color (10), opacity (2), typography (9), spacing (4), stroke (2), border.radius (3).
 pub static CANONICAL_TOKENS: &[CanonicalToken] = &[
     // Color — text
     CanonicalToken {
@@ -368,6 +371,22 @@ pub static CANONICAL_TOKENS: &[CanonicalToken] = &[
         key: "stroke.border.width",
         description: "Border/frame stroke width in pixels",
         default_value: "1",
+    },
+    // Border radius
+    CanonicalToken {
+        key: "border.radius.small",
+        description: "Small corner radius in pixels",
+        default_value: "4",
+    },
+    CanonicalToken {
+        key: "border.radius.medium",
+        description: "Medium corner radius in pixels",
+        default_value: "8",
+    },
+    CanonicalToken {
+        key: "border.radius.large",
+        description: "Large corner radius in pixels",
+        default_value: "16",
     },
 ];
 

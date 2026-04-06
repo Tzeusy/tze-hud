@@ -475,6 +475,7 @@ fn roundtrip_zone_definition_proto() {
             transition_in_ms: 0,
             transition_out_ms: 0,
             overflow: 0, // TextOverflowProto::Unspecified = not set
+            backdrop_radius: -1.0, // -1.0 = not set sentinel
         }),
         contention_policy: ContentionPolicyProto::ContentionPolicyLatestWins as i32,
         max_publishers: 4,
@@ -1472,6 +1473,7 @@ fn roundtrip_rendering_policy_proto_all_fields_populated() {
         transition_in_ms: 250,
         transition_out_ms: 150,
         overflow: TextOverflowProto::Ellipsis as i32,
+        backdrop_radius: 12.0,
     };
     let decoded = round_trip(&orig);
     // original fields
@@ -1500,6 +1502,7 @@ fn roundtrip_rendering_policy_proto_all_fields_populated() {
     assert_eq!(orig.transition_in_ms, decoded.transition_in_ms);
     assert_eq!(orig.transition_out_ms, decoded.transition_out_ms);
     assert_eq!(orig.overflow, decoded.overflow);
+    assert_eq!(orig.backdrop_radius, decoded.backdrop_radius);
 }
 
 /// Round-trip with all extended fields absent (all-None / zero-value proto defaults).
@@ -1523,6 +1526,8 @@ fn roundtrip_rendering_policy_proto_all_fields_none() {
         transition_in_ms: 0,
         transition_out_ms: 0,
         overflow: TextOverflowProto::Unspecified as i32,
+        // -1.0 sentinel = not set for backdrop_radius
+        backdrop_radius: -1.0,
     };
     let decoded = round_trip(&orig);
     assert_eq!(decoded.font_size_px, 0.0);
@@ -1567,6 +1572,7 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
         transition_in_ms: 0,
         transition_out_ms: 0,
         overflow: 0, // TextOverflowProto::Unspecified = proto3 default
+        backdrop_radius: 0.0, // proto3 default for float
     };
 
     // Encode only the fields that would be present in a v0 wire message.
@@ -1738,6 +1744,58 @@ fn roundtrip_rendering_policy_convert_all_new_fields_none() {
     assert!(recovered.transition_in_ms.is_none());
     assert!(recovered.transition_out_ms.is_none());
     assert!(recovered.overflow.is_none());
+    assert!(recovered.backdrop_radius.is_none());
+}
+
+/// Round-trip: backdrop_radius is preserved across proto conversion [hud-ltgk.8].
+#[test]
+fn roundtrip_rendering_policy_convert_backdrop_radius() {
+    use tze_hud_protocol::convert::{proto_to_rendering_policy, rendering_policy_to_proto};
+    use tze_hud_scene::types::RenderingPolicy;
+
+    // Some(value) round-trips correctly
+    let original = RenderingPolicy {
+        backdrop_radius: Some(12.0),
+        ..RenderingPolicy::default()
+    };
+    let proto = rendering_policy_to_proto(&original);
+    let recovered = proto_to_rendering_policy(&proto);
+    assert_eq!(
+        recovered.backdrop_radius,
+        Some(12.0),
+        "backdrop_radius Some(12.0) must survive proto roundtrip"
+    );
+
+    // Zero radius is a valid value and must not be treated as sentinel
+    let original_zero = RenderingPolicy {
+        backdrop_radius: Some(0.0),
+        ..RenderingPolicy::default()
+    };
+    let proto_zero = rendering_policy_to_proto(&original_zero);
+    // 0.0 is encoded as -1.0 sentinel for None, so Some(0.0) should roundtrip correctly
+    // Note: since 0.0 rounds to None via -1.0 sentinel, Some(0.0) ≡ None on roundtrip
+    // (corner radius 0 is effectively flat rect — same as None)
+    let recovered_zero = proto_to_rendering_policy(&proto_zero);
+    // backdrop_radius = Some(0.0) → sentinel -1.0 on wire? No — 0.0 is a valid value.
+    // Our sentinel is -1.0 for None; 0.0 is encoded as 0.0 which decodes as None because
+    // our decode check is `>= 0.0`. Actually 0.0 >= 0.0 is true, so Some(0.0) round-trips.
+    assert_eq!(
+        recovered_zero.backdrop_radius,
+        Some(0.0),
+        "backdrop_radius Some(0.0) must survive proto roundtrip (0.0 >= 0.0 → Some)"
+    );
+
+    // None round-trips as None
+    let original_none = RenderingPolicy {
+        backdrop_radius: None,
+        ..RenderingPolicy::default()
+    };
+    let proto_none = rendering_policy_to_proto(&original_none);
+    let recovered_none = proto_to_rendering_policy(&proto_none);
+    assert_eq!(
+        recovered_none.backdrop_radius, None,
+        "backdrop_radius None must survive proto roundtrip"
+    );
 }
 
 /// Backward-compat: deserialize a pre-extension JSON RenderingPolicy
