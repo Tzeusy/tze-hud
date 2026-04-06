@@ -402,11 +402,19 @@ pub fn rasterize_svg_layers(
             }
         };
 
-        // Scale the SVG to fill the target pixel size.
+        // Scale the SVG uniformly (preserving aspect ratio) and center it
+        // within the target pixel rectangle.  This prevents circles from
+        // becoming ovals on non-square screen geometries.
         let svg_size = tree.size();
         let sx = pixel_width as f32 / svg_size.width();
         let sy = pixel_height as f32 / svg_size.height();
-        let transform = tiny_skia::Transform::from_scale(sx, sy);
+        let uniform_scale = sx.min(sy);
+        let rendered_w = svg_size.width() * uniform_scale;
+        let rendered_h = svg_size.height() * uniform_scale;
+        let offset_x = (pixel_width as f32 - rendered_w) * 0.5;
+        let offset_y = (pixel_height as f32 - rendered_h) * 0.5;
+        let transform = tiny_skia::Transform::from_translate(offset_x, offset_y)
+            .post_scale(uniform_scale, uniform_scale);
         resvg::render(&tree, transform, &mut pixmap.as_mut());
 
         // Composite this layer onto the accumulation pixmap (source-over).
@@ -765,8 +773,10 @@ impl WidgetRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // Use Rgba8Unorm (not sRGB) because tiny-skia outputs premultiplied linear alpha.
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            // Use Rgba8UnormSrgb: tiny-skia rasterises SVGs in sRGB color space.
+            // The GPU must sRGB-decode on sample so colours match the hex values
+            // in the SVG source (e.g. #4FB543 looks the same as in a browser).
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });

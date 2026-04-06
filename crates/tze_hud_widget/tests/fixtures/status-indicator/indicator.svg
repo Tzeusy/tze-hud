@@ -9,7 +9,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
   <!-- Status indicator circle: fill driven by "status" discrete mapping -->
   <circle id="indicator-fill" cx="24" cy="20" r="14"
-          fill="#666666"
+          fill="#666666" 
           stroke="{{token.color.border.default}}" stroke-width="1.5"/>
   <!-- Label text: text content driven by "label" -->
   <text id="label-text" x="24" y="44" text-anchor="middle"

@@ -1,6 +1,6 @@
 [
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "online",
       "label": "Butler"
@@ -9,7 +9,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "online",
       "label": "Codex"
@@ -18,7 +18,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "online",
       "label": ""

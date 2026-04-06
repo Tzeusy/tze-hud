@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 //! # tze_hud — canonical runtime application binary
 //!
 //! This is the **production entrypoint** for the tze_hud windowed display runtime.

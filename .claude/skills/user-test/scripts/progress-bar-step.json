@@ -1,6 +1,6 @@
 [
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.0,
       "label": ""
@@ -10,7 +10,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.25,
       "label": "25%"
@@ -20,7 +20,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.5,
       "label": "50%"
@@ -30,7 +30,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.75,
       "label": "75%"
@@ -40,7 +40,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 1.0,
       "label": "100%"
@@ -50,7 +50,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "fill_color": {"r": 0.0, "g": 0.784, "b": 0.325, "a": 1.0}
     },
@@ -59,7 +59,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.0,
       "label": ""

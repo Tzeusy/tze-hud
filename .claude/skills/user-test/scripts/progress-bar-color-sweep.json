@@ -1,6 +1,6 @@
 [
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.75,
       "label": "75%",
@@ -11,7 +11,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.75,
       "label": "75%",
@@ -22,7 +22,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.75,
       "label": "75%",
@@ -33,7 +33,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "progress-bar",
+    "widget_name": "main-progress",
     "params": {
       "progress": 0.75,
       "label": "75%",

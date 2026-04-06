@@ -43,10 +43,10 @@ target_attribute = "fill"
 mapping = "discrete"
 
 [layers.bindings.value_map]
-online  = "#00CC66"
-away    = "#FFB800"
-busy    = "#FF4444"
-offline = "#666666"
+online  = "#4FB543"
+away    = "#D97706"
+busy    = "#DC2626"
+offline = "#6B7280"
 
 [[layers.bindings]]
 param = "label"

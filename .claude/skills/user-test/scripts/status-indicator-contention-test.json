@@ -1,6 +1,6 @@
 [
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "online",
       "label": "AgentA"
@@ -9,7 +9,7 @@
     "namespace": "agent-a"
   },
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "busy",
       "label": "AgentB"

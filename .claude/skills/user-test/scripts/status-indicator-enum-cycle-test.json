@@ -1,6 +1,6 @@
 [
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "online"
     },
@@ -8,7 +8,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "away"
     },
@@ -16,7 +16,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "busy"
     },
@@ -24,7 +24,7 @@
     "namespace": "user-test"
   },
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "offline"
     },

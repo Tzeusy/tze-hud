@@ -1,6 +1,6 @@
 [
   {
-    "widget_name": "status-indicator",
+    "widget_name": "main-status",
     "params": {
       "status": "do-not-disturb"
     },
