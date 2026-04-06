@@ -8,18 +8,18 @@ A polished zone exemplar defining the visual, behavioral, and test contract for 
 ## ADDED Requirements
 
 ### Requirement: Status Bar Visual Specification
-The status-bar zone exemplar SHALL render as a full-width thin strip at the bottom edge of the display, attached to the chrome layer (above all content tiles). The visual treatment SHALL be defined by a component profile with the following effective rendering policy:
+The status-bar zone exemplar SHALL render as a vertical stack positioned at the right edge of the display, attached to the chrome layer (above all content tiles). The visual treatment SHALL be defined by a component profile with the following effective rendering policy:
 
-- **Geometry:** `EdgeAnchored { edge: Bottom, height_pct: 0.04, width_pct: 1.0, margin_px: 0.0 }` (full-width, 4% screen height, bottom edge)
+- **Geometry:** `Relative { x_pct: 0.92, y_pct: 0.10, width_pct: 0.07, height_pct: 0.40 }` (7% screen width, 40% screen height, positioned at right edge with 8% margin from right and 10% from top)
 - **Backdrop:** opaque dark background using `color.backdrop.default` token at 90% opacity (`backdrop_opacity = 0.9`). This satisfies the `OpaqueBackdrop` readability requirement (opacity >= 0.8).
 - **Text:** secondary text color using `color.text.secondary` token (#B0B0B0 canonical fallback) for readability without being visually distracting
 - **Typography:** monospace font family (`font_family = "monospace"`), body size via token (`font_size_px = "{{typography.body.size}}"`)
-- **Layout:** key-value pairs rendered as a horizontal row with `spacing.padding.medium` between pairs
+- **Layout:** key-value pairs rendered as a vertical stack with `spacing.padding.medium` between entries
 - **Layer:** chrome layer — always visible, never occluded by agent content tiles
 
-#### Scenario: Status bar renders at bottom edge with opaque backdrop
+#### Scenario: Status bar renders at right edge with opaque backdrop
 - **WHEN** the status-bar zone has one or more active publications
-- **THEN** the compositor SHALL render a full-width strip at the display's bottom edge with a dark backdrop at 90% opacity, and all active key-value pairs SHALL be visible in secondary text color using monospace font at the resolved body size
+- **THEN** the compositor SHALL render a vertical stack at the right edge (92% x-position) with a dark backdrop at 90% opacity, and all active key-value pairs SHALL be visible in secondary text color using monospace font at the resolved body size, stacked vertically
 
 #### Scenario: Status bar readability passes OpaqueBackdrop check
 - **WHEN** the exemplar component profile is loaded and its effective RenderingPolicy is validated
