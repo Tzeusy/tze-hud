@@ -245,7 +245,7 @@ fn emit_status_bar_entries(
     zx: f32,
     zy: f32,
     zw: f32,
-    _zh: f32,
+    zh: f32,
     policy: &tze_hud_scene::types::RenderingPolicy,
     opacity: f32,
     items: &mut Vec<crate::text::TextItem>,
@@ -255,6 +255,10 @@ fn emit_status_bar_entries(
 
     let margin_h = policy
         .margin_horizontal
+        .or(policy.margin_px)
+        .unwrap_or(4.0);
+    let margin_v = policy
+        .margin_vertical
         .or(policy.margin_px)
         .unwrap_or(4.0);
     let font_size_px = policy.font_size_px.unwrap_or(13.0).clamp(6.0, 200.0);
@@ -279,9 +283,18 @@ fn emit_status_bar_entries(
 
     let entry_stride = STATUS_BAR_ENTRY_H + STATUS_BAR_ENTRY_GAP;
     let visible_entries = sorted_entries.len().min(STATUS_BAR_MAX_ENTRIES);
+    // Inset the stack from the zone edges by the vertical margin.
+    let stack_top = zy + margin_v;
+    let zone_bottom = (zy + zh - margin_v).max(stack_top);
 
     for (idx, (key, value)) in sorted_entries.iter().take(visible_entries).enumerate() {
-        let row_y = zy + idx as f32 * entry_stride;
+        let row_y = stack_top + idx as f32 * entry_stride;
+        // Skip rows that start at or below the zone bottom edge.
+        if row_y >= zone_bottom {
+            break;
+        }
+        // Clamp the row height so the last row does not overflow the zone.
+        let row_h = STATUS_BAR_ENTRY_H.min(zone_bottom - row_y).max(1.0);
         let icon = status_bar_icon_prefix(key);
         let text = format!("{icon}{value}");
 
@@ -290,7 +303,7 @@ fn emit_status_bar_entries(
             pixel_x: zx + margin_h,
             pixel_y: row_y,
             bounds_width: (zw - margin_h * 2.0).max(1.0),
-            bounds_height: STATUS_BAR_ENTRY_H,
+            bounds_height: row_h,
             font_size_px,
             font_family,
             font_weight,
@@ -5949,6 +5962,11 @@ mod tests {
                 item.pixel_y >= 72.0,
                 "item pixel_y {} should be at or below zone top (72px)",
                 item.pixel_y
+            );
+            assert!(
+                item.pixel_y + item.bounds_height <= 360.0,
+                "item bottom edge {} should be at or above zone bottom (360px)",
+                item.pixel_y + item.bounds_height
             );
         }
 
