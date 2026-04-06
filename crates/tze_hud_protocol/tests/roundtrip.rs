@@ -484,7 +484,7 @@ fn roundtrip_zone_definition_proto() {
             margin_vertical: -1.0,
             transition_in_ms: 0,
             transition_out_ms: 0,
-            overflow: 0, // TextOverflowProto::Unspecified = not set
+            overflow: 0,           // TextOverflowProto::Unspecified = not set
             backdrop_radius: -1.0, // -1.0 = not set sentinel
         }),
         contention_policy: ContentionPolicyProto::ContentionPolicyLatestWins as i32,
@@ -1552,7 +1552,10 @@ fn roundtrip_rendering_policy_proto_all_fields_none() {
     assert_eq!(decoded.margin_vertical, -1.0);
     assert_eq!(decoded.transition_in_ms, 0);
     assert_eq!(decoded.transition_out_ms, 0);
-    assert_eq!(decoded.backdrop_radius, -1.0, "backdrop_radius absent = -1.0 sentinel");
+    assert_eq!(
+        decoded.backdrop_radius, -1.0,
+        "backdrop_radius absent = -1.0 sentinel"
+    );
 }
 
 /// Backward-compatibility: a pre-extension serialized RenderingPolicyProto
@@ -1582,7 +1585,7 @@ fn roundtrip_rendering_policy_proto_backward_compat_pre_extension_format() {
         margin_vertical: 0.0,
         transition_in_ms: 0,
         transition_out_ms: 0,
-        overflow: 0, // TextOverflowProto::Unspecified = proto3 default
+        overflow: 0,          // TextOverflowProto::Unspecified = proto3 default
         backdrop_radius: 0.0, // proto3 default for float
     };
 
