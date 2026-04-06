@@ -3808,8 +3808,28 @@ impl Compositor {
     /// Encode a render pass for textured image quads.
     ///
     /// Uses `LoadOp::Load` to composite textured images on top of the color
-    /// geometry already written to the frame. Each unique `ResourceId` in
-    /// `cmds` switches the bind group to the corresponding cached texture.
+    /// geometry already written to the frame.
+    ///
+    /// ## Batching strategy
+    ///
+    /// To minimise GPU buffer allocations (formerly one per draw command), this
+    /// method:
+    ///
+    /// 1. Filters `cmds` to those whose texture is cached, **preserving the
+    ///    original draw order** so that alpha-blended quads composite correctly.
+    /// 2. Builds a single flat `Vec<TexturedRectVertex>` containing all quad
+    ///    vertices (6 vertices per quad, in original scene order).
+    /// 3. Uploads that data as **one** `wgpu::Buffer` for the entire pass.
+    /// 4. Emits one `draw` call per *consecutive* run of quads that share the
+    ///    same bind group, switching the bind group only when the `resource_id`
+    ///    changes in the traversal order.
+    ///
+    /// This reduces N buffer allocations → 1 per frame.  Bind-group switches
+    /// are minimised for consecutive runs of the same texture (the common case
+    /// for zone backdrops followed by their icon).  A full sort by `resource_id`
+    /// is intentionally avoided: it would change the compositing order of quads
+    /// that belong to different textures and could alter the visual result when
+    /// quads overlap with partial alpha.
     fn encode_image_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3822,8 +3842,36 @@ impl Compositor {
             return;
         }
 
+        use crate::pipeline::TexturedRectVertex;
         use wgpu::util::DeviceExt;
 
+        // ── Step 1: filter to cached commands, preserving original order ──────
+        let cached: Vec<&TexturedDrawCmd> = cmds
+            .iter()
+            .filter(|c| self.image_texture_cache.contains_key(&c.resource_id))
+            .collect();
+        if cached.is_empty() {
+            return;
+        }
+
+        // ── Step 2: build a single flat vertex buffer ─────────────────────────
+        let total_verts = cached.len() * 6;
+        let mut all_verts: Vec<TexturedRectVertex> = Vec::with_capacity(total_verts);
+        for cmd in &cached {
+            let verts =
+                textured_rect_vertices(cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint);
+            all_verts.extend_from_slice(&verts);
+        }
+
+        let vertex_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("image_pass_batch_buf"),
+                contents: bytemuck::cast_slice(&all_verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+
+        // ── Step 3: encode the render pass with one draw call per consecutive run
         let mut image_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("image_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3840,27 +3888,34 @@ impl Compositor {
         });
 
         image_pass.set_pipeline(&self.texture_rect_pipeline);
+        image_pass.set_vertex_buffer(0, vertex_buf.slice(..));
 
-        for cmd in cmds {
-            let entry = match self.image_texture_cache.get(&cmd.resource_id) {
-                Some(e) => e,
-                None => continue, // shouldn't happen if ensure was called
-            };
+        // Walk the list in original order and emit one draw call per contiguous
+        // run that shares the same resource_id (and therefore the same bind group).
+        let mut run_start: u32 = 0;
+        let mut current_id = cached[0].resource_id;
 
-            let verts =
-                textured_rect_vertices(cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint);
-            let vertex_buf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("image_quad_buf"),
-                    contents: bytemuck::cast_slice(&verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-
-            image_pass.set_bind_group(0, &entry.bind_group, &[]);
-            image_pass.set_vertex_buffer(0, vertex_buf.slice(..));
-            image_pass.draw(0..6, 0..1);
+        for (i, cmd) in cached.iter().enumerate() {
+            let vert_idx = i as u32 * 6;
+            if cmd.resource_id != current_id {
+                // Flush the previous run.
+                let entry = self
+                    .image_texture_cache
+                    .get(&current_id)
+                    .expect("filtered to cached entries above");
+                image_pass.set_bind_group(0, &entry.bind_group, &[]);
+                image_pass.draw(run_start..vert_idx, 0..1);
+                current_id = cmd.resource_id;
+                run_start = vert_idx;
+            }
         }
+        // Flush the final run.
+        let entry = self
+            .image_texture_cache
+            .get(&current_id)
+            .expect("filtered to cached entries above");
+        image_pass.set_bind_group(0, &entry.bind_group, &[]);
+        image_pass.draw(run_start..cached.len() as u32 * 6, 0..1);
     }
 
     /// Collect rounded-rectangle draw commands for zones whose `RenderingPolicy`
