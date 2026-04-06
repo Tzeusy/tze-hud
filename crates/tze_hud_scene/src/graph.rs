@@ -4124,6 +4124,7 @@ mod tests {
                 icon: "".to_string(),
                 urgency: 1,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "agent",
             None,
@@ -4182,6 +4183,7 @@ mod tests {
                 icon: "".to_string(),
                 urgency: 1,
                 ttl_ms: None,
+                title: String::new(),
             })
         };
 
@@ -4280,6 +4282,7 @@ mod tests {
                     icon: "".to_string(),
                     urgency,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test-agent",
                 None,

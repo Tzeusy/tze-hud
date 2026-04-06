@@ -1799,8 +1799,9 @@ impl Compositor {
             //   For generic Stack zones: newest at top (slot 0 = newest).
             //   For alert-banner zones: severity-descending (critical first),
             //   then recency-descending (newer first) within the same severity.
-            //   slot_h via Self::stack_slot_height().
-            //   Dynamic height: alert-banner zone height = active_count × slot_h.
+            //   Per-slot heights are computed via Self::per_slot_heights() and may
+            //   vary by item (two-line notifications occupy a taller slot).
+            //   Dynamic height: alert-banner zone height = sum(slot_heights).
             //
             // MergeByKey: collect ALL StatusBar publications, merge their entries
             //   (last write wins per key), render the merged set as one text item.
@@ -1819,8 +1820,29 @@ impl Compositor {
                         publishes.iter().rev().collect()
                     };
 
+                    // Resolve notification typography tokens once per zone so that both
+                    // slot-height calculation and per-item rendering use the same values.
+                    // (Token lookups are cheap, but resolving outside the per-item loop
+                    // also avoids redundant HashMap lookups on zones with many items.)
+                    let notif_body_scale = self
+                        .token_map
+                        .get("typography.notification.body.scale")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(NOTIFICATION_BODY_SCALE)
+                        .clamp(0.5, 1.0);
+                    let notif_title_weight = self
+                        .token_map
+                        .get("typography.notification.title.weight")
+                        .and_then(|v| v.parse::<u16>().ok())
+                        .unwrap_or(NOTIFICATION_TITLE_WEIGHT);
+
                     // Compute per-slot heights (variable for two-line notifications).
-                    let slot_heights = Self::per_slot_heights(&ordered, policy);
+                    let slot_heights = Self::per_slot_heights(
+                        &ordered,
+                        policy,
+                        notif_body_scale,
+                        NOTIFICATION_INTER_LINE_GAP,
+                    );
                     let slot_offsets = Self::slot_offsets(&slot_heights);
                     let total_slots_h: f32 = slot_heights.iter().sum();
 
@@ -3592,10 +3614,11 @@ impl Compositor {
             //
             // Stack zones: each publication gets its own vertically-stacked slot.
             //   For alert-banner: severity-descending (critical first), then
-            //   recency-descending within the same severity.  Dynamic zone height:
-            //   active_count × slot_h (zero when empty, capped at configured max).
+            //   recency-descending within the same severity.
             //   For other Stack zones: newest-first (slot 0 = newest, at top of zone).
-            //   slot_h via Self::stack_slot_height() — content-sized, policy-driven.
+            //   Per-slot heights are computed via Self::per_slot_heights() and may vary
+            //   by item (two-line notifications occupy a taller slot).  Dynamic zone
+            //   height for alert-banner: sum(slot_heights) — zero when empty.
             //
             // MergeByKey zones: single backdrop for the full zone (entries are merged
             //   at the data level; visually one unified strip).
@@ -3615,8 +3638,22 @@ impl Compositor {
                     let ordered_refs: Vec<&ZonePublishRecord> =
                         ordered_indices.iter().map(|&i| &publishes[i]).collect();
 
+                    // Resolve notification typography tokens once per zone so that
+                    // slot-height calculation matches what collect_text_items renders.
+                    let notif_body_scale = self
+                        .token_map
+                        .get("typography.notification.body.scale")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(NOTIFICATION_BODY_SCALE)
+                        .clamp(0.5, 1.0);
+
                     // Compute per-slot heights (variable for two-line notifications).
-                    let slot_heights = Self::per_slot_heights(&ordered_refs, policy);
+                    let slot_heights = Self::per_slot_heights(
+                        &ordered_refs,
+                        policy,
+                        notif_body_scale,
+                        NOTIFICATION_INTER_LINE_GAP,
+                    );
                     let slot_offsets = Self::slot_offsets(&slot_heights);
                     let total_slots_h: f32 = slot_heights.iter().sum();
 
@@ -3963,13 +4000,14 @@ impl Compositor {
         }
     }
 
-    /// Compute the per-slot height for a Stack zone.
+    /// Compute the per-slot height for a Stack zone (single-line content).
     ///
-    /// `slot_h = font_size_px + 2 * margin_v + SLOT_BASELINE_GAP`
+    /// `slot_h = line_height + 2 * margin_v + SLOT_BASELINE_GAP`
+    /// where `line_height = font_size_px * 1.4`
     ///
     /// - `font_size_px` — from `RenderingPolicy`; defaults to 16.
     /// - `margin_v` — from `margin_vertical` → `margin_px` → 8 px fallback chain.
-    /// - `SLOT_BASELINE_GAP` — a small constant gap (2 px) between successive slot
+    /// - `SLOT_BASELINE_GAP` — a small constant gap (4 px) between successive slot
     ///   backdrops so they don't bleed into each other visually. This is not a
     ///   configurable policy field; it is a structural layout constant.
     ///
@@ -3989,43 +4027,59 @@ impl Compositor {
     /// Compute the per-slot height for a single notification publication.
     ///
     /// When `payload.title` is non-empty, the slot must accommodate two text lines:
-    ///   - Title line: `font_size_px` (same as the policy body size)
-    ///   - Body line: `font_size_px * NOTIFICATION_BODY_SCALE` (0.85× title)
-    ///   - Inter-line gap: `NOTIFICATION_INTER_LINE_GAP` px between the two lines
+    ///   - Title line: `font_size_px * 1.4` (line height, same as single-line slot)
+    ///   - Body line: `title_line_h * notification_body_scale`
+    ///   - Inter-line gap: `notification_inter_line_gap` px between the two lines
     ///
     /// Two-line height formula:
     ///   `slot_h = title_line_h + inter_line_gap + body_line_h + 2*margin_v + SLOT_BASELINE_GAP`
-    ///   where `title_line_h = font_size_px * 1.4`, `body_line_h = title_line_h * BODY_SCALE`
+    ///   where `title_line_h = font_size_px * 1.4`, `body_line_h = title_line_h * notification_body_scale`
+    ///
+    /// The caller is responsible for resolving `notification_body_scale` and
+    /// `notification_inter_line_gap` from the token map (with appropriate fallbacks) so
+    /// that height calculation and rendering use the exact same values.
     ///
     /// When `payload.title` is empty, falls back to [`Self::stack_slot_height`] (single line).
-    pub(crate) fn notification_slot_height(payload: &NotificationPayload, policy: &RenderingPolicy) -> f32 {
+    pub(crate) fn notification_slot_height(
+        payload: &NotificationPayload,
+        policy: &RenderingPolicy,
+        notification_body_scale: f32,
+        notification_inter_line_gap: f32,
+    ) -> f32 {
         if payload.title.is_empty() {
             return Self::stack_slot_height(policy);
         }
         const SLOT_BASELINE_GAP: f32 = 4.0;
-        const INTER_LINE_GAP: f32 = 2.0;
         let font_size_px = policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
         let title_line_h = font_size_px * 1.4;
-        let body_line_h = title_line_h * NOTIFICATION_BODY_SCALE;
+        let body_line_h = title_line_h * notification_body_scale;
         let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
-        (title_line_h + INTER_LINE_GAP + body_line_h + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
+        (title_line_h + notification_inter_line_gap + body_line_h + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
     }
 
     /// Compute per-slot heights for an ordered slice of publications in a Stack zone.
     ///
     /// For non-`Notification` content and single-line notifications, returns
     /// `Self::stack_slot_height(policy)` for every slot.  For two-line
-    /// notifications (`payload.title` non-empty), returns the taller two-line height.
+    /// notifications (`payload.title` non-empty), returns the taller two-line height
+    /// computed from the same resolved notification typography values used by rendering.
     ///
     /// Returns a `Vec<f32>` of length `ordered.len()`, one height per slot.
     fn per_slot_heights(
         ordered: &[&ZonePublishRecord],
         policy: &RenderingPolicy,
+        notification_body_scale: f32,
+        notification_inter_line_gap: f32,
     ) -> Vec<f32> {
         ordered
             .iter()
             .map(|rec| match &rec.content {
-                ZoneContent::Notification(n) => Self::notification_slot_height(n, policy),
+                ZoneContent::Notification(n) => Self::notification_slot_height(
+                    n,
+                    policy,
+                    notification_body_scale,
+                    notification_inter_line_gap,
+                ),
                 _ => Self::stack_slot_height(policy),
             })
             .collect()
@@ -8419,8 +8473,18 @@ mod tests {
             ..Default::default()
         };
 
-        let h_single = Compositor::notification_slot_height(&single_line, &policy);
-        let h_two_line = Compositor::notification_slot_height(&two_line, &policy);
+        let h_single = Compositor::notification_slot_height(
+            &single_line,
+            &policy,
+            NOTIFICATION_BODY_SCALE,
+            NOTIFICATION_INTER_LINE_GAP,
+        );
+        let h_two_line = Compositor::notification_slot_height(
+            &two_line,
+            &policy,
+            NOTIFICATION_BODY_SCALE,
+            NOTIFICATION_INTER_LINE_GAP,
+        );
 
         assert!(
             h_two_line > h_single,
