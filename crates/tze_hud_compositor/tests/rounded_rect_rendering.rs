@@ -31,8 +31,8 @@
 use tze_hud_compositor::{Compositor, CompositorError, surface::HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{
-    ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, Rgba, SceneId,
-    ZoneContent, ZoneDefinition, ZoneMediaType, ZoneRegistry,
+    ContentionPolicy, GeometryPolicy, LayerAttachment, RenderingPolicy, Rgba, SceneId, ZoneContent,
+    ZoneDefinition, ZoneMediaType, ZoneRegistry,
 };
 
 // ─── Constants ────────────────────────────────────────────────────────────────
