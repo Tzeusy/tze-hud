@@ -188,6 +188,122 @@ fn is_alert_banner_zone(zone_name: &str) -> bool {
     zone_name == "alert-banner"
 }
 
+/// Detect status-bar zones by canonical name.
+///
+/// The status-bar zone uses vertical right-edge layout: one row per entry,
+/// right-aligned, stacked top-to-bottom within the zone geometry.
+#[inline]
+fn is_status_bar_zone(zone_name: &str) -> bool {
+    zone_name == "status-bar"
+}
+
+/// Per-row height for status-bar vertical stack layout (pixels).
+const STATUS_BAR_ENTRY_H: f32 = 28.0;
+
+/// Gap between consecutive status-bar rows (pixels).
+const STATUS_BAR_ENTRY_GAP: f32 = 4.0;
+
+/// Maximum number of visible rows in the status-bar vertical stack.
+const STATUS_BAR_MAX_ENTRIES: usize = 8;
+
+/// Return a short unicode icon prefix for well-known status-bar keys.
+///
+/// Used to prepend a symbolic indicator to the displayed value in the
+/// vertical right-edge layout. Falls back to an empty string for unknown keys.
+/// Icon rendering via a texture pipeline is post-v1; this unicode fallback
+/// is the v1 approximation.
+fn status_bar_icon_prefix(key: &str) -> &'static str {
+    match key {
+        "battery" | "bat" => "🔋 ",
+        "wifi" | "network" | "net" => "📶 ",
+        "cpu" => "🖥 ",
+        "mem" | "memory" | "ram" => "💾 ",
+        "time" | "clock" => "🕐 ",
+        "temp" | "temperature" => "🌡 ",
+        "vol" | "volume" | "audio" => "🔊 ",
+        "bright" | "brightness" => "☀ ",
+        _ => "",
+    }
+}
+
+/// Emit one `TextItem` per status-bar entry into a right-edge vertical stack.
+///
+/// Each entry occupies a row of `STATUS_BAR_ENTRY_H` pixels, separated by
+/// `STATUS_BAR_ENTRY_GAP` pixels.  Entries are sorted by key for deterministic
+/// ordering and capped at `STATUS_BAR_MAX_ENTRIES` rows.  Text is right-aligned
+/// within the zone bounds.
+///
+/// Parameters:
+///   - `sorted_entries`: entries already sorted by key, ready for display
+///   - `zx`, `zy`, `zw`, `zh`: zone geometry (physical pixels)
+///   - `policy`: zone rendering policy (font, color, margins)
+///   - `opacity`: current animation opacity
+///   - `items`: output buffer
+#[allow(clippy::too_many_arguments)]
+fn emit_status_bar_entries(
+    sorted_entries: &[(&String, &String)],
+    zx: f32,
+    zy: f32,
+    zw: f32,
+    _zh: f32,
+    policy: &tze_hud_scene::types::RenderingPolicy,
+    opacity: f32,
+    items: &mut Vec<crate::text::TextItem>,
+) {
+    use crate::text::TextItem;
+    use tze_hud_scene::types::{FontFamily, TextAlign, TextOverflow};
+
+    let margin_h = policy
+        .margin_horizontal
+        .or(policy.margin_px)
+        .unwrap_or(4.0);
+    let font_size_px = policy.font_size_px.unwrap_or(13.0).clamp(6.0, 200.0);
+    let font_family = policy
+        .font_family
+        .unwrap_or(FontFamily::SystemSansSerif);
+    let font_weight = policy.font_weight.unwrap_or(400).clamp(100, 900);
+
+    let base_color = policy
+        .text_color
+        .map(crate::text::rgba_to_srgb_u8)
+        .unwrap_or([255, 255, 255, 220]);
+    let color = crate::text::apply_opacity_to_color(base_color, opacity);
+
+    let (outline_color, outline_width) = match (policy.outline_color, policy.outline_width) {
+        (Some(oc), Some(ow)) if ow > 0.0 => {
+            let oc_srgb = crate::text::apply_opacity_to_color(crate::text::rgba_to_srgb_u8(oc), opacity);
+            (Some(oc_srgb), Some(ow))
+        }
+        _ => (None, None),
+    };
+
+    let entry_stride = STATUS_BAR_ENTRY_H + STATUS_BAR_ENTRY_GAP;
+    let visible_entries = sorted_entries.len().min(STATUS_BAR_MAX_ENTRIES);
+
+    for (idx, (key, value)) in sorted_entries.iter().take(visible_entries).enumerate() {
+        let row_y = zy + idx as f32 * entry_stride;
+        let icon = status_bar_icon_prefix(key);
+        let text = format!("{icon}{value}");
+
+        items.push(TextItem {
+            text,
+            pixel_x: zx + margin_h,
+            pixel_y: row_y,
+            bounds_width: (zw - margin_h * 2.0).max(1.0),
+            bounds_height: STATUS_BAR_ENTRY_H,
+            font_size_px,
+            font_family,
+            font_weight,
+            color,
+            alignment: TextAlign::End,
+            overflow: TextOverflow::Clip,
+            outline_color,
+            outline_width,
+            opacity,
+        });
+    }
+}
+
 /// Extract the urgency from a `ZonePublishRecord` if it carries `Notification` content.
 ///
 /// Returns `0` for non-Notification content (treated as lowest severity for sort).
@@ -2113,23 +2229,36 @@ impl Compositor {
                     if !merged.is_empty() {
                         let mut sorted: Vec<(&String, &String)> = merged.iter().collect();
                         sorted.sort_by_key(|(k, _)| k.as_str());
-                        // Format as "key: value" lines, sorted by key for
-                        // deterministic output. Consistent with the LatestWins
-                        // StatusBar rendering path.
-                        let text = sorted
-                            .iter()
-                            .map(|(k, v)| format!("{k}: {v}"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        items.push(TextItem::from_zone_policy(
-                            &text,
-                            zx,
-                            zy,
-                            zw,
-                            zh,
-                            policy,
-                            anim_opacity,
-                        ));
+                        if is_status_bar_zone(zone_name) {
+                            // Status-bar: vertical right-edge layout — one TextItem per entry,
+                            // right-aligned, stacked top-to-bottom within the zone geometry.
+                            emit_status_bar_entries(
+                                &sorted,
+                                zx,
+                                zy,
+                                zw,
+                                zh,
+                                policy,
+                                anim_opacity,
+                                &mut items,
+                            );
+                        } else {
+                            // Non-status-bar MergeByKey zones: legacy joined-text layout.
+                            let text = sorted
+                                .iter()
+                                .map(|(k, v)| format!("{k}: {v}"))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            items.push(TextItem::from_zone_policy(
+                                &text,
+                                zx,
+                                zy,
+                                zw,
+                                zh,
+                                policy,
+                                anim_opacity,
+                            ));
+                        }
                     } else {
                         // Fallback: render whatever the latest publication contains.
                         for record in publishes.iter().rev() {
@@ -2367,25 +2496,40 @@ impl Compositor {
                                 break;
                             }
                             ZoneContent::StatusBar(payload) => {
-                                // Format key-value pairs as "key: value" lines, sorted by key
-                                // for deterministic output.
+                                // Sort key-value pairs by key for deterministic output.
                                 let mut sorted: Vec<(&String, &String)> =
                                     payload.entries.iter().collect();
                                 sorted.sort_by_key(|(k, _)| k.as_str());
-                                let text = sorted
-                                    .iter()
-                                    .map(|(k, v)| format!("{k}: {v}"))
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                items.push(TextItem::from_zone_policy(
-                                    &text,
-                                    zx,
-                                    zy,
-                                    zw,
-                                    zh,
-                                    policy,
-                                    anim_opacity,
-                                ));
+                                if is_status_bar_zone(zone_name) {
+                                    // Status-bar: vertical right-edge layout — one TextItem
+                                    // per entry, right-aligned, stacked top-to-bottom.
+                                    emit_status_bar_entries(
+                                        &sorted,
+                                        zx,
+                                        zy,
+                                        zw,
+                                        zh,
+                                        policy,
+                                        anim_opacity,
+                                        &mut items,
+                                    );
+                                } else {
+                                    // Non-status-bar zones: legacy joined-text layout.
+                                    let text = sorted
+                                        .iter()
+                                        .map(|(k, v)| format!("{k}: {v}"))
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    items.push(TextItem::from_zone_policy(
+                                        &text,
+                                        zx,
+                                        zy,
+                                        zw,
+                                        zh,
+                                        policy,
+                                        anim_opacity,
+                                    ));
+                                }
                                 // Only render the most-recent StatusBar publish.
                                 break;
                             }
@@ -5707,10 +5851,11 @@ mod tests {
 
     /// Zone StatusBar (KeyValuePairs) publish renders visible text at zone geometry.
     ///
-    /// Acceptance criteria for hud-6at1:
-    ///   1. `publish_to_zone` with `ZoneContent::StatusBar` produces a `TextItem` in
-    ///      `collect_text_items`.
-    ///   2. The key-value pairs are rendered as text at the zone geometry position.
+    /// Acceptance criteria for hud-x2v1 (vertical right-edge layout):
+    ///   1. `publish_to_zone` with `ZoneContent::StatusBar` to the canonical
+    ///      "status-bar" zone produces one `TextItem` per entry in `collect_text_items`.
+    ///   2. Items are sorted by key, right-aligned, stacked vertically.
+    ///   3. Pixel render shows bright text in the zone area.
     #[tokio::test]
     async fn test_zone_status_bar_renders_visible_text() {
         let (mut compositor, surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
@@ -5718,21 +5863,23 @@ mod tests {
 
         let mut scene = SceneGraph::new(1280.0, 720.0);
 
-        // Register a status-bar zone (top edge, 5% height).
+        // Register the canonical "status-bar" zone on the right edge (5% width, 40% height).
+        // x_pct=0.95 puts it in the rightmost 5% of the screen.
         scene.register_zone(ZoneDefinition {
             id: SceneId::new(),
-            name: "statusbar".to_owned(),
-            description: "status bar zone".to_owned(),
-            geometry_policy: GeometryPolicy::EdgeAnchored {
-                edge: DisplayEdge::Top,
-                height_pct: 0.05,
-                width_pct: 0.80,
-                margin_px: 8.0,
+            name: "status-bar".to_owned(),
+            description: "status bar zone — right-edge vertical stack".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.95,
+                y_pct: 0.10,
+                width_pct: 0.05,
+                height_pct: 0.40,
             },
             accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
             rendering_policy: RenderingPolicy {
-                font_size_px: Some(16.0),
-                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.7)),
+                font_size_px: Some(13.0),
+                backdrop: Some(Rgba::new(0.0, 0.0, 0.0, 0.85)),
+                text_color: Some(Rgba::new(1.0, 1.0, 1.0, 1.0)),
                 text_align: None,
                 margin_px: None,
                 ..Default::default()
@@ -5742,16 +5889,16 @@ mod tests {
             transport_constraint: None,
             auto_clear_ms: None,
             ephemeral: false,
-            layer_attachment: LayerAttachment::Content,
+            layer_attachment: LayerAttachment::Chrome,
         });
 
-        // Publish StatusBar content with key-value pairs.
+        // Publish StatusBar content with two key-value pairs.
         let mut entries = std::collections::HashMap::new();
         entries.insert("battery".to_owned(), "95%".to_owned());
         entries.insert("time".to_owned(), "12:34".to_owned());
         scene
             .publish_to_zone(
-                "statusbar",
+                "status-bar",
                 ZoneContent::StatusBar(StatusBarPayload { entries }),
                 "test",
                 None,
@@ -5760,54 +5907,72 @@ mod tests {
             )
             .unwrap();
 
-        // Verify collect_text_items produces a TextItem with the formatted pairs.
+        // Vertical right-edge layout: one TextItem per entry (2 entries → 2 items).
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
         assert_eq!(
             items.len(),
-            1,
-            "expected exactly one TextItem for StatusBar"
-        );
-        let item = &items[0];
-        // Entries are sorted by key ("battery" < "time") and separated by newlines.
-        assert_eq!(
-            item.text, "battery: 95%\ntime: 12:34",
-            "Entries should be sorted by key and formatted correctly"
-        );
-        // The TextItem position should be within the zone geometry.
-        // Zone top-edge: y = 8.0 (margin_px), height = 720*0.05 = 36, width = 1280*0.8 = 1024.
-        assert!(
-            item.pixel_y >= 8.0,
-            "text y should be at or below zone top margin"
-        );
-        assert!(
-            item.pixel_y < 720.0 * 0.10,
-            "text y should be within top zone area"
+            2,
+            "expected one TextItem per status-bar entry (2 entries)"
         );
 
-        // Render to pixels and verify bright text appears in the top zone area.
+        // Items are sorted by key: "battery" (idx 0) < "time" (idx 1).
+        // "battery" entry gets an icon prefix "🔋 ".
+        assert!(
+            items[0].text.contains("95%"),
+            "first item (battery) should contain '95%'; got: {}",
+            items[0].text
+        );
+        assert!(
+            items[1].text.contains("12:34"),
+            "second item (time) should contain '12:34'; got: {}",
+            items[1].text
+        );
+
+        // Items should be right-aligned.
+        assert_eq!(
+            items[0].alignment,
+            tze_hud_scene::types::TextAlign::End,
+            "status-bar items must be right-aligned"
+        );
+
+        // Vertical stacking: second item must be below the first.
+        assert!(
+            items[1].pixel_y > items[0].pixel_y,
+            "second entry must be below first entry; got pixel_y[0]={} pixel_y[1]={}",
+            items[0].pixel_y,
+            items[1].pixel_y
+        );
+
+        // Both items must be within the zone's y range (0.10–0.50 of 720px = 72..360).
+        for item in &items {
+            assert!(
+                item.pixel_y >= 72.0,
+                "item pixel_y {} should be at or below zone top (72px)",
+                item.pixel_y
+            );
+        }
+
+        // Render to pixels and verify bright text appears in the right edge zone area.
         compositor.render_frame_headless(&mut scene, &surface);
         let pixels = surface.read_pixels(&compositor.device);
         assert_eq!(pixels.len(), 1280 * 720 * 4, "pixel buffer size");
 
-        // The zone is at the top ~8..44px, centered horizontally.
-        // White text glyphs should show as bright pixels.
+        // Zone is at x = 0.95*1280 = 1216 to 1280, y = 72..360.
+        // Look for bright (text) pixels in that region.
         let mut found_bright = false;
-        for row in 10usize..42 {
-            for col in 150usize..1130 {
+        'outer: for row in 75usize..200 {
+            for col in 1216usize..1278 {
                 let offset = (row * 1280 + col) * 4;
                 let p = &pixels[offset..offset + 4];
                 if p[0] > 180 && p[1] > 180 && p[2] > 180 {
                     found_bright = true;
-                    break;
+                    break 'outer;
                 }
-            }
-            if found_bright {
-                break;
             }
         }
         assert!(
             found_bright,
-            "expected bright (text) pixels in status bar zone area (rows 10..42)"
+            "expected bright (text) pixels in status-bar zone area (right edge, rows 75..200, cols 1216..1278)"
         );
     }
 
@@ -7752,7 +7917,10 @@ mod tests {
     }
 
     /// MergeByKey zone: collect_text_items must merge ALL StatusBar publications'
-    /// entries and produce a single TextItem containing all unique keys.
+    /// entries and produce one TextItem per unique key (vertical right-edge layout).
+    ///
+    /// Three unique keys (cpu, mem, net) → three TextItems, sorted by key,
+    /// each right-aligned, stacked vertically.
     #[tokio::test]
     async fn test_merge_by_key_zone_merges_all_status_bar_entries() {
         let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
@@ -7762,11 +7930,11 @@ mod tests {
             id: SceneId::new(),
             name: "status-bar".to_owned(),
             description: "merge-by-key zone test".to_owned(),
-            geometry_policy: GeometryPolicy::EdgeAnchored {
-                edge: DisplayEdge::Bottom,
-                height_pct: 0.04,
-                width_pct: 1.0,
-                margin_px: 0.0,
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.92,
+                y_pct: 0.10,
+                width_pct: 0.07,
+                height_pct: 0.40,
             },
             accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
             rendering_policy: RenderingPolicy {
@@ -7813,39 +7981,55 @@ mod tests {
 
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
 
-        // MergeByKey must produce exactly ONE TextItem containing all merged entries.
+        // Vertical layout: one TextItem per unique key (cpu, mem, net = 3 items).
         assert_eq!(
             items.len(),
-            1,
-            "MergeByKey zone must produce a single merged TextItem, got {}",
+            3,
+            "status-bar MergeByKey must produce one TextItem per unique key (3 keys), got {}",
             items.len()
         );
 
-        let text = &items[0].text;
+        // Items are sorted by key: cpu < mem < net.
+        // cpu icon prefix is "🖥 ", mem icon prefix is "💾 ", net icon prefix is "📶 ".
+        let all_text: String = items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>().join("|");
         assert!(
-            text.contains("cpu"),
-            "merged text must include 'cpu' key; got: {text}"
+            all_text.contains("45%"),
+            "merged items must include cpu value '45%'; got: {all_text}"
         );
         assert!(
-            text.contains("mem"),
-            "merged text must include 'mem' key; got: {text}"
+            all_text.contains("8.2 GB"),
+            "merged items must include mem value '8.2 GB'; got: {all_text}"
         );
         assert!(
-            text.contains("net"),
-            "merged text must include 'net' key; got: {text}"
+            all_text.contains("1.2 MB/s"),
+            "merged items must include net value '1.2 MB/s'; got: {all_text}"
+        );
+
+        // All items must be right-aligned.
+        for item in &items {
+            assert_eq!(
+                item.alignment,
+                tze_hud_scene::types::TextAlign::End,
+                "status-bar items must be right-aligned"
+            );
+        }
+
+        // Items must be stacked vertically (ascending pixel_y).
+        assert!(
+            items[1].pixel_y > items[0].pixel_y,
+            "item[1] must be below item[0]; got pixel_y[0]={} pixel_y[1]={}",
+            items[0].pixel_y, items[1].pixel_y
         );
         assert!(
-            text.contains("45%"),
-            "merged text must include cpu value '45%'; got: {text}"
-        );
-        assert!(
-            text.contains("1.2 MB/s"),
-            "merged text must include net value '1.2 MB/s'; got: {text}"
+            items[2].pixel_y > items[1].pixel_y,
+            "item[2] must be below item[1]; got pixel_y[1]={} pixel_y[2]={}",
+            items[1].pixel_y, items[2].pixel_y
         );
     }
 
     /// MergeByKey zone: when a key appears in multiple publications, the latest
-    /// value wins (last-write-wins per key semantics).
+    /// value wins (last-write-wins per key semantics). With vertical layout,
+    /// one unique key "cpu" → one TextItem showing the latest value.
     #[tokio::test]
     async fn test_merge_by_key_latest_value_wins_for_duplicate_keys() {
         let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
@@ -7855,11 +8039,11 @@ mod tests {
             id: SceneId::new(),
             name: "status-bar".to_owned(),
             description: "merge-by-key duplicate key test".to_owned(),
-            geometry_policy: GeometryPolicy::EdgeAnchored {
-                edge: DisplayEdge::Bottom,
-                height_pct: 0.04,
-                width_pct: 1.0,
-                margin_px: 0.0,
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.92,
+                y_pct: 0.10,
+                width_pct: 0.07,
+                height_pct: 0.40,
             },
             accepted_media_types: vec![ZoneMediaType::KeyValuePairs],
             rendering_policy: RenderingPolicy {
@@ -7909,17 +8093,18 @@ mod tests {
 
         let items = compositor.collect_text_items(&scene, 1280.0, 720.0);
 
-        assert_eq!(items.len(), 1, "must produce one merged TextItem");
+        // One unique key "cpu" → one TextItem in vertical layout.
+        assert_eq!(items.len(), 1, "one unique key must produce one TextItem");
         let text = &items[0].text;
 
         // The latest value "90%" must appear; "10%" must not.
         assert!(
             text.contains("90%"),
-            "merged text must show latest cpu value '90%'; got: {text}"
+            "item text must show latest cpu value '90%'; got: {text}"
         );
         assert!(
             !text.contains("10%"),
-            "merged text must not show stale cpu value '10%'; got: {text}"
+            "item text must not show stale cpu value '10%'; got: {text}"
         );
     }
 
