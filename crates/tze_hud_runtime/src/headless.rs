@@ -494,7 +494,7 @@ impl HeadlessRuntime {
         if self.config.grpc_port == 0 {
             return Err("start_grpc_server: grpc_port = 0 (gRPC server disabled)".into());
         }
-        let addr = format!("[::1]:{}", self.config.grpc_port).parse()?;
+        let addr = format!("0.0.0.0:{}", self.config.grpc_port).parse()?;
 
         // Wire config-driven capability registry into the session service.
         // Snapshot the agent capability map from RuntimeContext (one-time clone at startup).
@@ -531,7 +531,7 @@ impl HeadlessRuntime {
     /// The `RuntimeService.ReloadConfig` RPC accepts a TOML string, validates it,
     /// and atomically applies the hot-reloadable sections via `RuntimeContext`.
     ///
-    /// The server binds to `addr` (e.g. `"[::1]:50052"`). It is independent of
+    /// The server binds to `addr` (e.g. `"0.0.0.0:50052"`). It is independent of
     /// the `HudSession` gRPC server — you may co-host them on the same port via
     /// `tonic::transport::Server::builder().add_service(...).add_service(...)`.
     ///

@@ -1553,7 +1553,7 @@ fn build_runtime_context(cfg: &WindowedConfig) -> (SharedRuntimeContext, bool) {
 ///
 /// ## gRPC server
 ///
-/// When `grpc_port != 0`, starts the `HudSession` gRPC server on `[::1]:grpc_port`.
+/// When `grpc_port != 0`, starts the `HudSession` gRPC server on `0.0.0.0:grpc_port`.
 /// Setting `grpc_port = 0` skips server creation (compositor-only mode).
 ///
 /// ## Errors
@@ -1580,7 +1580,7 @@ fn start_network_services(
     let network_rt = NetworkRuntime::new()
         .map_err(|e| format!("windowed runtime: failed to build network Tokio runtime: {e}"))?;
 
-    let addr: std::net::SocketAddr = format!("[::1]:{grpc_port}")
+    let addr: std::net::SocketAddr = format!("0.0.0.0:{grpc_port}")
         .parse()
         .map_err(|e| format!("windowed runtime: invalid gRPC address (port {grpc_port}): {e}"))?;
 

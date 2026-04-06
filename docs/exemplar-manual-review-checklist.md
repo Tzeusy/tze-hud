@@ -11,8 +11,8 @@ Reviewed: 2026-04-06
 | 2 | [Alert Banner](#2-alert-banner) | **done** | Fixed missing text, added 1px outline, taller banners |
 | 3 | [Notification](#3-notification) | **deferred** | Basic rendering works; needs modern redesign (rounded corners, icons, dismiss, action buttons) |
 | 4 | [Status Bar](#4-status-bar) | **deferred** | Repositioned to right edge, compact value-only format. Needs SVG widget redesign (hud-x2v1) |
-| 5 | [Ambient Background](#5-ambient-background) | pending | |
-| 6 | [Dashboard Tile](#6-dashboard-tile) | pending | |
+| 5 | [Ambient Background](#5-ambient-background) | **deferred** | Fixed exemplar alpha 1.0→0.15; StaticImage rendering blocked on hud-4sk5 |
+| 6 | [Dashboard Tile](#6-dashboard-tile) | pending | gRPC test client built; ready for visual review |
 | 7 | [Presence Card](#7-presence-card) | pending | |
 | 8 | [Gauge Widget](#8-gauge-widget) | pending | |
 | 9 | [Progress Bar](#9-progress-bar) | pending | |
@@ -141,15 +141,26 @@ _(to be filled during review)_
 
 ### Design Review
 
-- [ ] Solid color rendering
+- [x] Solid color rendering
 - [ ] Static image scaling/positioning
-- [ ] Transition between backgrounds
-- [ ] Impact on foreground element readability
-- [ ] Default/fallback appearance
+- [x] Transition between backgrounds
+- [x] Impact on foreground element readability
+- [x] Default/fallback appearance
 
 ### UX Tweaks
 
-_(to be filled during review)_
+1. **Fixed exemplar script alpha** — all colors changed from `a: 1.0` (fully opaque, obscures desktop) to `a: 0.15` (subtle tint). Added `DEFAULT_ALPHA` constant. Fixed log format to show actual alpha instead of hardcoded `1.0`. User confirmed 0.15 looks right for overlay mode.
+2. **Increased phase 3 pause** — static image placeholder pause increased from 2s to 5s so the warm-gray is visible before phase 4 overwrites it.
+3. **StaticImage renders placeholder (not acceptable for v1)** — warm-gray `(0.3, 0.3, 0.3, 1.0)` placeholder is not a real image. User requested actual GPU texture rendering. Created epic **hud-4sk5** (P1, 5 children) to implement the full wgpu texture pipeline. Spec confirms StaticImage is v1-mandatory — the placeholder was an implementation gap, not a spec gap.
+4. **Instant transitions acceptable** — background swap at low alpha is not jarring. Crossfade deferred.
+
+**Files changed:**
+- `.claude/skills/user-test/scripts/ambient_background_exemplar.py` — DEFAULT_ALPHA=0.15, fixed log format, phase 3 pause 2s→5s
+
+**Infrastructure built during this review:**
+- gRPC server bind changed from `[::1]` to `0.0.0.0` (windowed.rs + headless.rs) — enables remote gRPC testing over Tailnet
+- Python gRPC test client (`hud_grpc_client.py`) — session, lease, tile, node support via proto stubs
+- Proto stubs generated in `proto_gen/` from `crates/tze_hud_protocol/proto/`
 
 ---
 
