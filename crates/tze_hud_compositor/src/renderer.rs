@@ -1447,6 +1447,9 @@ impl Compositor {
     ///
     /// Duplicate calls with the same `resource_id` are ignored (content-addressed
     /// identity guarantees the bytes are identical).
+    ///
+    /// Returns without registering if `width` or `height` is zero, or if the
+    /// product `width × height × 4` overflows `usize`.
     pub fn register_image_bytes(
         &mut self,
         resource_id: ResourceId,
@@ -1454,8 +1457,29 @@ impl Compositor {
         width: u32,
         height: u32,
     ) {
-        self.image_bytes.entry(resource_id).or_insert(rgba_data);
-        self.image_dims.entry(resource_id).or_insert((width, height));
+        // Guard: reject zero-dimension images; content-addressed uploads should
+        // never arrive with degenerate dimensions, so treat this as a caller bug.
+        if width == 0 || height == 0 {
+            return;
+        }
+        // Guard: overflow — reject if the byte count would overflow usize.
+        if width
+            .checked_mul(height)
+            .and_then(|px| px.checked_mul(4))
+            .is_none()
+        {
+            return;
+        }
+
+        // Insert both maps atomically via the Entry API.  Using separate
+        // `or_insert` calls would allow one map to contain the key without the
+        // other if a previous partially-failed insertion left them out of sync.
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            self.image_bytes.entry(resource_id)
+        {
+            entry.insert(rgba_data);
+            self.image_dims.insert(resource_id, (width, height));
+        }
     }
 
     /// Ensure a GPU texture exists for the given `ResourceId`.
