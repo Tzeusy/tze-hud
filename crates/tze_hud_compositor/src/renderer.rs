@@ -3197,6 +3197,15 @@ impl Compositor {
     ///
     /// `(encoder, encode_us)` — the ready-to-submit encoder and the wall-clock
     /// microseconds spent encoding (for `FrameTelemetry::render_encode_us`).
+    /// `bg_vertex_count`: number of vertices at the start of `vertices` that
+    /// belong to the Background layer (including any overlay-mode clear quad
+    /// prepended before them).  The Background SDF rounded-rect pass is
+    /// inserted between this initial slice and the remaining
+    /// tile/content/chrome vertices so that Background backdrops are
+    /// correctly drawn BELOW agent tiles.  Pass `0` when there are no
+    /// Background flat-rect vertices (all Background zones use SDF); the
+    /// Background SDF pass still runs before the tile/content/chrome pass.
+    #[allow(clippy::too_many_arguments)]
     fn encode_frame(
         &mut self,
         vertices: &[RectVertex],
@@ -3205,10 +3214,12 @@ impl Compositor {
         surf_w: u32,
         surf_h: u32,
         use_overlay_pipeline: bool,
+        bg_vertex_count: usize,
     ) -> (wgpu::CommandEncoder, u64) {
         let encode_start = std::time::Instant::now();
 
-        // ── Geometry pass ─────────────────────────────────────────────────────
+        // Upload the full vertex buffer once — individual passes reference
+        // sub-ranges via byte offsets.
         let vertex_buffer = if vertices.is_empty() {
             None
         } else {
@@ -3228,9 +3239,23 @@ impl Compositor {
                 label: Some("frame_encoder"),
             });
 
+        let sw = surf_w as f32;
+        let sh = surf_h as f32;
+
+        // Choose pipeline once — used for every flat-rect sub-pass.
+        // In overlay mode, the clear_pipeline (no blending) is used for ALL
+        // flat-rect rendering. The first 6 vertices are a full-screen
+        // transparent quad that zeros out every pixel's alpha. Subsequent
+        // content overwrites specific regions with their own alpha.
+
+        // ── Geometry pass 1: Background flat-rect zones ───────────────────────
+        // Clears the surface and draws Background-layer zone backdrops (those
+        // without backdrop_radius; zones with backdrop_radius emit no vertices
+        // here).  Tile/content/chrome vertices are deferred to pass 2 so that
+        // the Background SDF pass can be interleaved between the two.
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frame_pass"),
+                label: Some("frame_pass_bg"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: frame_view,
                     resolve_target: None,
@@ -3244,10 +3269,6 @@ impl Compositor {
                 occlusion_query_set: None,
             });
 
-            // In overlay mode, use the clear_pipeline (no blending) for ALL
-            // rendering. The first 6 vertices are a full-screen transparent
-            // quad that zeros out every pixel's alpha. Subsequent content
-            // (zone bars) overwrites specific regions with their own alpha.
             if use_overlay_pipeline {
                 render_pass.set_pipeline(&self.clear_pipeline);
             } else {
@@ -3255,36 +3276,79 @@ impl Compositor {
             }
 
             if let Some(ref buffer) = vertex_buffer {
-                render_pass.set_vertex_buffer(0, buffer.slice(..));
-                render_pass.draw(0..vertices.len() as u32, 0..1);
+                let bg_end = bg_vertex_count.min(vertices.len());
+                if bg_end > 0 {
+                    render_pass.set_vertex_buffer(0, buffer.slice(..));
+                    render_pass.draw(0..bg_end as u32, 0..1);
+                }
             }
         }
 
-        let sw = surf_w as f32;
-        let sh = surf_h as f32;
-
-        // ── Rounded-rect pass ─────────────────────────────────────────────────
-        // Collect SDF rounded-rect commands for zones with backdrop_radius set,
-        // in canonical layer order (Background → Content → Chrome) to match the
-        // flat-rect vertex ordering above.  Each layer is collected separately
-        // so Background-layer zones with backdrop_radius composite before tiles,
-        // and Chrome-layer zones composite above content.
+        // ── Background SDF rounded-rect pass ──────────────────────────────────
+        // Runs after the Clear pass (so it composites over the cleared surface)
+        // but BEFORE tile/content/chrome geometry — this is what ensures
+        // Background backdrops are correctly occluded by agent tiles.
         {
-            let mut rr_cmds =
-                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
-            rr_cmds.extend(self.collect_rounded_rect_cmds(
+            let rr_bg = self.collect_rounded_rect_cmds(
+                scene,
+                sw,
+                sh,
+                Some(LayerAttachment::Background),
+            );
+            self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_bg, sw, sh);
+        }
+
+        // ── Geometry pass 2: Tiles + Content + Chrome flat-rect zones ─────────
+        // Uses LoadOp::Load to preserve the Background geometry drawn above.
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame_pass_tiles_content_chrome"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: frame_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            if use_overlay_pipeline {
+                render_pass.set_pipeline(&self.clear_pipeline);
+            } else {
+                render_pass.set_pipeline(&self.pipeline);
+            }
+
+            if let Some(ref buffer) = vertex_buffer {
+                let bg_end = bg_vertex_count.min(vertices.len());
+                let rest_count = vertices.len().saturating_sub(bg_end);
+                if rest_count > 0 {
+                    render_pass.set_vertex_buffer(0, buffer.slice(..));
+                    render_pass.draw(bg_end as u32..vertices.len() as u32, 0..1);
+                }
+            }
+        }
+
+        // ── Content + Chrome SDF rounded-rect pass ────────────────────────────
+        // Runs after tiles so Content/Chrome backdrops composite above tiles.
+        {
+            let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
+            rr_post.extend(self.collect_rounded_rect_cmds(
                 scene,
                 sw,
                 sh,
                 Some(LayerAttachment::Content),
             ));
-            rr_cmds.extend(self.collect_rounded_rect_cmds(
+            rr_post.extend(self.collect_rounded_rect_cmds(
                 scene,
                 sw,
                 sh,
                 Some(LayerAttachment::Chrome),
             ));
-            self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_cmds, sw, sh);
+            self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_post, sw, sh);
         }
 
         // ── Text pass (Stage 6) ───────────────────────────────────────────────
@@ -3416,6 +3480,10 @@ impl Compositor {
             Some(LayerAttachment::Background),
         );
 
+        // Capture the vertex count after Background zones so encode_frame can
+        // split the flat-rect pass and interleave the Background SDF pass.
+        let bg_vertex_count = vertices.len();
+
         for tile in &tiles {
             // Render tile background
             let bg_color = self.tile_background_color(tile, scene);
@@ -3485,6 +3553,7 @@ impl Compositor {
             surf_w,
             surf_h,
             self.overlay_mode,
+            bg_vertex_count,
         );
         telemetry.render_encode_us = encode_us;
 
@@ -3567,6 +3636,10 @@ impl Compositor {
             Some(LayerAttachment::Background),
         );
 
+        // Capture the vertex count after Background zones so encode_frame can
+        // split the flat-rect pass and interleave the Background SDF pass.
+        let bg_vertex_count = vertices.len();
+
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
             let verts = rect_vertices(
@@ -3626,7 +3699,7 @@ impl Compositor {
 
         // Headless never uses overlay mode — pass false for the pipeline selector.
         let (mut encoder, encode_us) =
-            self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false);
+            self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false, bg_vertex_count);
         telemetry.render_encode_us = encode_us;
 
         // ── Image pass: draw textured quads on top of color geometry ─────────
@@ -3730,6 +3803,11 @@ impl Compositor {
             Some(LayerAttachment::Background),
         );
 
+        // Capture the vertex count after Background zones so that the Background
+        // SDF pass can be interleaved between the Background flat-rect pass and
+        // the tile/content/chrome pass below.
+        let bg_vertex_count = content_vertices.len();
+
         for tile in &tiles {
             let bg_color = self.tile_background_color(tile, scene);
             let verts = rect_vertices(
@@ -3819,10 +3897,13 @@ impl Compositor {
                 label: Some("frame_encoder_with_chrome"),
             });
 
-        // Content render pass — clears the surface and draws agent tiles.
+        // ── Content pass 1: Background flat-rect zones ────────────────────────
+        // Clears the surface and draws Background-layer zone backdrops (those
+        // without backdrop_radius).  Tile/content/chrome vertices are deferred
+        // to pass 2 so that the Background SDF pass can be interleaved.
         {
             let mut content_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("content_pass"),
+                label: Some("content_pass_bg"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &surface.view,
                     resolve_target: None,
@@ -3837,32 +3918,71 @@ impl Compositor {
             });
             content_pass.set_pipeline(&self.pipeline);
             if let Some(ref buf) = content_buffer {
-                content_pass.set_vertex_buffer(0, buf.slice(..));
-                content_pass.draw(0..content_vertices.len() as u32, 0..1);
+                let bg_end = bg_vertex_count.min(content_vertices.len());
+                if bg_end > 0 {
+                    content_pass.set_vertex_buffer(0, buf.slice(..));
+                    content_pass.draw(0..bg_end as u32, 0..1);
+                }
             }
         }
 
-        // ── Rounded-rect pass ────────────────────────────────────────────────
-        // Collect SDF rounded-rect commands in canonical layer order
-        // (Background → Content → Chrome) to match the flat-rect vertex
-        // ordering above.  Background-layer zones with backdrop_radius are
-        // rendered before tiles; Chrome-layer zones render above content.
+        // ── Background SDF rounded-rect pass ─────────────────────────────────
+        // Runs after the Clear pass so Background backdrops are below tiles.
         {
-            let mut rr_cmds =
-                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
-            rr_cmds.extend(self.collect_rounded_rect_cmds(
+            let rr_bg = self.collect_rounded_rect_cmds(
+                scene,
+                sw,
+                sh,
+                Some(LayerAttachment::Background),
+            );
+            self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_bg, sw, sh);
+        }
+
+        // ── Content pass 2: Tiles + Content + Chrome flat-rect zones ──────────
+        // Uses LoadOp::Load to preserve Background geometry drawn above.
+        {
+            let mut content_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("content_pass_tiles_content_chrome"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            content_pass.set_pipeline(&self.pipeline);
+            if let Some(ref buf) = content_buffer {
+                let bg_end = bg_vertex_count.min(content_vertices.len());
+                let rest_count = content_vertices.len().saturating_sub(bg_end);
+                if rest_count > 0 {
+                    content_pass.set_vertex_buffer(0, buf.slice(..));
+                    content_pass.draw(bg_end as u32..content_vertices.len() as u32, 0..1);
+                }
+            }
+        }
+
+        // ── Content + Chrome SDF rounded-rect pass ────────────────────────────
+        // Runs after tiles so Content/Chrome backdrops composite above tiles.
+        {
+            let mut rr_post: Vec<crate::pipeline::RoundedRectDrawCmd> = Vec::new();
+            rr_post.extend(self.collect_rounded_rect_cmds(
                 scene,
                 sw,
                 sh,
                 Some(LayerAttachment::Content),
             ));
-            rr_cmds.extend(self.collect_rounded_rect_cmds(
+            rr_post.extend(self.collect_rounded_rect_cmds(
                 scene,
                 sw,
                 sh,
                 Some(LayerAttachment::Chrome),
             ));
-            self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_cmds, sw, sh);
+            self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_post, sw, sh);
         }
 
         // ── Stage 6: Text pass (between content and chrome) ──────────────────
