@@ -1078,8 +1078,10 @@ impl Compositor {
             Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
         let rounded_rect_pipeline =
             Self::create_rounded_rect_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let rounded_rect_overlay_pipeline =
-            Self::create_rounded_rect_overlay_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let rounded_rect_overlay_pipeline = Self::create_rounded_rect_overlay_pipeline(
+            &device,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
 
         let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
         let texture_rect_pipeline = create_texture_rect_pipeline(
@@ -3123,12 +3125,8 @@ impl Compositor {
         // so Background-layer zones with backdrop_radius composite before tiles,
         // and Chrome-layer zones composite above content.
         {
-            let mut rr_cmds = self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Background),
-            );
+            let mut rr_cmds =
+                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
             rr_cmds.extend(self.collect_rounded_rect_cmds(
                 scene,
                 sw,
@@ -3695,12 +3693,8 @@ impl Compositor {
         // ordering above.  Background-layer zones with backdrop_radius are
         // rendered before tiles; Chrome-layer zones render above content.
         {
-            let mut rr_cmds = self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Background),
-            );
+            let mut rr_cmds =
+                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
             rr_cmds.extend(self.collect_rounded_rect_cmds(
                 scene,
                 sw,
