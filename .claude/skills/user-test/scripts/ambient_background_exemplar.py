@@ -42,22 +42,26 @@ ZONE_NAME = "ambient-background"
 # the runtime renders a warm-gray placeholder quad).
 PLACEHOLDER_RESOURCE_ID = "4878ca0425c739fa427f7eda20fe845f6b2f46ba5fe5ac7d6b85add8db6bb08f"
 
+# Default alpha for overlay-appropriate tints (fully opaque backgrounds
+# obscure the desktop; 0.15 gives a subtle color wash).
+DEFAULT_ALPHA = 0.15
+
 # Phase 1 / 2 colors
-COLOR_DARK_BLUE = {"r": 0.05, "g": 0.05, "b": 0.2, "a": 1.0}
-COLOR_WARM_AMBER = {"r": 0.9, "g": 0.6, "b": 0.2, "a": 1.0}
+COLOR_DARK_BLUE = {"r": 0.05, "g": 0.05, "b": 0.2, "a": DEFAULT_ALPHA}
+COLOR_WARM_AMBER = {"r": 0.9, "g": 0.6, "b": 0.2, "a": DEFAULT_ALPHA}
 
 # Phase 4 rapid-replacement palette (10 colors; last one is bright green)
 RAPID_COLORS: list[tuple[str, dict[str, float]]] = [
-    ("red",         {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}),
-    ("blue",        {"r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0}),
-    ("yellow",      {"r": 1.0, "g": 1.0, "b": 0.0, "a": 1.0}),
-    ("magenta",     {"r": 1.0, "g": 0.0, "b": 1.0, "a": 1.0}),
-    ("cyan",        {"r": 0.0, "g": 1.0, "b": 1.0, "a": 1.0}),
-    ("gray",        {"r": 0.5, "g": 0.5, "b": 0.5, "a": 1.0}),
-    ("orange",      {"r": 1.0, "g": 0.5, "b": 0.0, "a": 1.0}),
-    ("purple",      {"r": 0.5, "g": 0.0, "b": 0.5, "a": 1.0}),
-    ("dark-green",  {"r": 0.0, "g": 0.5, "b": 0.0, "a": 1.0}),
-    ("bright-green",{"r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0}),  # last
+    ("red",         {"r": 1.0, "g": 0.0, "b": 0.0, "a": DEFAULT_ALPHA}),
+    ("blue",        {"r": 0.0, "g": 0.0, "b": 1.0, "a": DEFAULT_ALPHA}),
+    ("yellow",      {"r": 1.0, "g": 1.0, "b": 0.0, "a": DEFAULT_ALPHA}),
+    ("magenta",     {"r": 1.0, "g": 0.0, "b": 1.0, "a": DEFAULT_ALPHA}),
+    ("cyan",        {"r": 0.0, "g": 1.0, "b": 1.0, "a": DEFAULT_ALPHA}),
+    ("gray",        {"r": 0.5, "g": 0.5, "b": 0.5, "a": DEFAULT_ALPHA}),
+    ("orange",      {"r": 1.0, "g": 0.5, "b": 0.0, "a": DEFAULT_ALPHA}),
+    ("purple",      {"r": 0.5, "g": 0.0, "b": 0.5, "a": DEFAULT_ALPHA}),
+    ("dark-green",  {"r": 0.0, "g": 0.5, "b": 0.0, "a": DEFAULT_ALPHA}),
+    ("bright-green",{"r": 0.0, "g": 1.0, "b": 0.0, "a": DEFAULT_ALPHA}),  # last
 ]
 
 # ---------------------------------------------------------------------------
@@ -115,9 +119,9 @@ def publish_solid_color(
     response = rpc_call(url, token, "publish_to_zone", params, req_id)
     ok = "error" not in response
     status = "ok" if ok else f"ERR: {response.get('error')}"
-    r, g, b = color["r"], color["g"], color["b"]
+    r, g, b, a = color["r"], color["g"], color["b"], color["a"]
     print(
-        f"  [solid_color] {label:12s} rgba({r:.2f},{g:.2f},{b:.2f},1.0) | {status}",
+        f"  [solid_color] {label:12s} rgba({r:.2f},{g:.2f},{b:.2f},{a:.2f}) | {status}",
         flush=True,
     )
     return response
@@ -224,8 +228,8 @@ def phase3_static_image(url: str, token: str, req_id: int) -> tuple[int, bool]:
         "\n  Full texture rendering is deferred to post-v1.",
         flush=True,
     )
-    print("  Pausing 2s for visual inspection...", flush=True)
-    time.sleep(2)
+    print("  Pausing 5s for visual inspection...", flush=True)
+    time.sleep(5)
     return req_id + 1, ok
 
 
