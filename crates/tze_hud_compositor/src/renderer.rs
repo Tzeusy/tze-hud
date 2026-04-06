@@ -931,10 +931,10 @@ pub struct Compositor {
 }
 
 /// Partitioned rounded-rectangle draw commands organized by layer.
-pub struct LayerPartitionedRoundedRectCmds {
-    pub background: Vec<RoundedRectDrawCmd>,
-    pub content: Vec<RoundedRectDrawCmd>,
-    pub chrome: Vec<RoundedRectDrawCmd>,
+pub(crate) struct LayerPartitionedRoundedRectCmds {
+    pub(crate) background: Vec<RoundedRectDrawCmd>,
+    pub(crate) content: Vec<RoundedRectDrawCmd>,
+    pub(crate) chrome: Vec<RoundedRectDrawCmd>,
 }
 
 impl Compositor {
