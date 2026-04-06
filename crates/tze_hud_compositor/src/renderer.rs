@@ -3292,12 +3292,8 @@ impl Compositor {
         // but BEFORE tile/content/chrome geometry — this is what ensures
         // Background backdrops are correctly occluded by agent tiles.
         {
-            let rr_bg = self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Background),
-            );
+            let rr_bg =
+                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
             self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_bg, sw, sh);
         }
 
@@ -3701,8 +3697,15 @@ impl Compositor {
         let frame = surface.acquire_frame();
 
         // Headless never uses overlay mode — pass false for the pipeline selector.
-        let (mut encoder, encode_us) =
-            self.encode_frame(&vertices, &frame.view, scene, surf_w, surf_h, false, bg_vertex_count);
+        let (mut encoder, encode_us) = self.encode_frame(
+            &vertices,
+            &frame.view,
+            scene,
+            surf_w,
+            surf_h,
+            false,
+            bg_vertex_count,
+        );
         telemetry.render_encode_us = encode_us;
 
         // ── Image pass: draw textured quads on top of color geometry ─────────
@@ -3932,12 +3935,8 @@ impl Compositor {
         // ── Background SDF rounded-rect pass ─────────────────────────────────
         // Runs after the Clear pass so Background backdrops are below tiles.
         {
-            let rr_bg = self.collect_rounded_rect_cmds(
-                scene,
-                sw,
-                sh,
-                Some(LayerAttachment::Background),
-            );
+            let rr_bg =
+                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
             self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_bg, sw, sh);
         }
 
