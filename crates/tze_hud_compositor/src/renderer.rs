@@ -2137,6 +2137,27 @@ impl Compositor {
     /// the left without overlap.  Entries without an icon mapping are rendered
     /// at the unshifted position.
     ///
+    /// Returns a unicode emoji prefix for well-known status-bar keys.
+    /// Used as a v1 fallback when no SVG icon mapping exists.
+    ///
+    /// # Parameters
+    /// - `key` — the status-bar entry key.
+    ///
+    /// # Returns
+    /// A unicode emoji string, or empty string if key is not recognized.
+    fn status_bar_icon_prefix(key: &str) -> &str {
+        match key {
+            "battery" => "🔋",
+            "wifi" | "network" => "📶",
+            "cpu" => "🖥",
+            "memory" | "mem" => "💾",
+            "time" | "clock" => "🕐",
+            "weather" => "☀",
+            "temperature" | "temp" => "🌡",
+            _ => "",
+        }
+    }
+
     /// Each entry is a single `TextItem` rendered by delegating to
     /// `TextItem::from_zone_policy` with adjusted `(x, y, w, h)` that place
     /// the text in its row and account for icon inset.
@@ -2173,8 +2194,18 @@ impl Compositor {
                 // on top of the per-entry position and icon inset.
                 // Effective pixel_x = (zx + icon_inset) + margin_h
                 // Effective bounds_width = (zw - icon_inset) - 2*margin_h
+                let text = if has_icon {
+                    format!("{k}: {v}")
+                } else {
+                    let prefix = Self::status_bar_icon_prefix(k.as_str());
+                    if prefix.is_empty() {
+                        format!("{k}: {v}")
+                    } else {
+                        format!("{prefix} {k}: {v}")
+                    }
+                };
                 TextItem::from_zone_policy(
-                    &format!("{k}: {v}"),
+                    &text,
                     zx + icon_inset,
                     entry_y,
                     zw - icon_inset,
@@ -8739,11 +8770,13 @@ mod tests {
         );
 
         // Entries are sorted by key: "cpu" (row 0) then "mem" (row 1).
+        // "cpu" has an SVG icon mapping, so no prefix.
+        // "mem" has no SVG icon mapping, so gets emoji prefix "💾".
         let cpu_item = items.iter().find(|i| i.text.starts_with("cpu:"));
-        let mem_item = items.iter().find(|i| i.text.starts_with("mem:"));
+        let mem_item = items.iter().find(|i| i.text.starts_with("💾 mem:"));
 
         assert!(cpu_item.is_some(), "expected a TextItem for 'cpu'");
-        assert!(mem_item.is_some(), "expected a TextItem for 'mem'");
+        assert!(mem_item.is_some(), "expected a TextItem for 'mem' with emoji prefix");
 
         let cpu_item = cpu_item.unwrap();
         let mem_item = mem_item.unwrap();
