@@ -753,7 +753,12 @@ async fn test_ambient_background_static_image_renders_texture_when_bytes_registe
     let resource_id = ResourceId::of(&rgba_data);
 
     // Register the decoded RGBA bytes with the compositor.
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
+    compositor.register_image_bytes(
+        resource_id,
+        std::sync::Arc::from(rgba_data.as_slice()),
+        img_w,
+        img_h,
+    );
 
     // Publish the StaticImage to ambient-background.
     scene
@@ -814,7 +819,12 @@ async fn test_ambient_background_static_image_non_square_renders_texture() {
     let resource_id = ResourceId::of(&rgba_data);
 
     // Register with explicit dimensions — the fix under test.
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
+    compositor.register_image_bytes(
+        resource_id,
+        std::sync::Arc::from(rgba_data.as_slice()),
+        img_w,
+        img_h,
+    );
 
     scene
         .publish_to_zone(
@@ -942,7 +952,12 @@ async fn test_tile_static_image_fill_mode_renders_texture() {
     let rgba_data = make_solid_rgba(img_w, img_h, 0, 255, 0, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
+    compositor.register_image_bytes(
+        resource_id,
+        std::sync::Arc::from(rgba_data.as_slice()),
+        img_w,
+        img_h,
+    );
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
@@ -978,7 +993,12 @@ async fn test_tile_static_image_contain_mode_letterboxes() {
     let rgba_data = make_solid_rgba(img_w, img_h, 0, 0, 255, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
+    compositor.register_image_bytes(
+        resource_id,
+        std::sync::Arc::from(rgba_data.as_slice()),
+        img_w,
+        img_h,
+    );
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
@@ -1026,7 +1046,12 @@ async fn test_tile_static_image_cover_mode_fills_completely() {
     let rgba_data = make_solid_rgba(img_w, img_h, 255, 0, 255, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
+    compositor.register_image_bytes(
+        resource_id,
+        std::sync::Arc::from(rgba_data.as_slice()),
+        img_w,
+        img_h,
+    );
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
@@ -1071,7 +1096,12 @@ async fn test_tile_static_image_scale_down_mode_native_size() {
     let rgba_data = make_solid_rgba(img_w, img_h, 255, 255, 0, 255);
     let resource_id = ResourceId::of(&rgba_data);
 
-    compositor.register_image_bytes(resource_id, std::sync::Arc::from(rgba_data.as_slice()), img_w, img_h);
+    compositor.register_image_bytes(
+        resource_id,
+        std::sync::Arc::from(rgba_data.as_slice()),
+        img_w,
+        img_h,
+    );
 
     let mut scene = scene_with_static_image_tile(
         SURFACE_W as f32,
