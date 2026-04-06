@@ -457,7 +457,7 @@ pub fn rounded_rect_vertices(
     ]
 }
 
-/// WGSL shader for SDF rounded rectangle rendering.
+/// WGSL shader for SDF rounded rectangle rendering (fullscreen / straight-alpha mode).
 ///
 /// Fragment stage:
 /// - Computes the signed distance from `frag_pos` to the nearest point on the
@@ -469,9 +469,8 @@ pub fn rounded_rect_vertices(
 /// fragment output must be non-premultiplied: keeping RGB unmodified and only
 /// scaling alpha ensures the GPU blend equation applies coverage exactly once.
 ///
-/// Note: overlay mode passes premultiplied colors via `gpu_color`. The
-/// rounded-rect pass currently runs with blending enabled and may not produce
-/// pixel-perfect results in overlay mode (tracked as a follow-up).
+/// In overlay mode use `ROUNDED_RECT_OVERLAY_SHADER` + `PREMULTIPLIED_ALPHA_BLENDING`
+/// instead — see `create_rounded_rect_overlay_pipeline`.
 pub const ROUNDED_RECT_SHADER: &str = r#"
 struct VertexInput {
     @location(0) position:       vec2<f32>,
@@ -531,6 +530,81 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Scaling all four channels by alpha (as in premultiplied blending) would
     // cause the GPU to apply coverage again during blending, darkening edges.
     return vec4<f32>(in.color.rgb, in.color.a * alpha);
+}
+"#;
+
+/// WGSL shader for SDF rounded rectangle rendering in overlay / premultiplied-alpha mode.
+///
+/// Identical SDF geometry to `ROUNDED_RECT_SHADER`, but the fragment output
+/// scales **all four channels** by the coverage alpha.  This is required when
+/// the pipeline uses `BlendState::PREMULTIPLIED_ALPHA_BLENDING`, whose blend
+/// equation is:
+///
+/// ```text
+/// result.rgb = src.rgb           + dst.rgb * (1 - src.a)
+/// result.a   = src.a * 1         + dst.a   * (1 - src.a)
+/// ```
+///
+/// In overlay mode the vertex colors are premultiplied by `gpu_color`
+/// (`src.rgb = actual.rgb * actual.a`).  Scaling everything by coverage gives:
+///
+/// ```text
+/// out = vec4(premul_rgb * cov, premul_a * cov)
+/// ```
+///
+/// which the premultiplied blend equation composites correctly:
+///
+/// ```text
+/// result.rgb = premul_rgb * cov + dst.rgb * (1 - premul_a * cov)
+/// ```
+///
+/// DWM then composites the framebuffer (already premultiplied) with the desktop.
+pub const ROUNDED_RECT_OVERLAY_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position:       vec2<f32>,
+    @location(1) frag_pos:       vec2<f32>,
+    @location(2) rect_center:    vec2<f32>,
+    @location(3) rect_half_size: vec2<f32>,
+    @location(4) radius:         f32,
+    @location(5) color:          vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) frag_pos:       vec2<f32>,
+    @location(1) rect_center:    vec2<f32>,
+    @location(2) rect_half_size: vec2<f32>,
+    @location(3) radius:         f32,
+    @location(4) color:          vec4<f32>,
+};
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
+    out.frag_pos       = in.frag_pos;
+    out.rect_center    = in.rect_center;
+    out.rect_half_size = in.rect_half_size;
+    out.radius         = in.radius;
+    out.color          = in.color;
+    return out;
+}
+
+fn sdf_rounded_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - b + vec2<f32>(r, r);
+    return length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let p = in.frag_pos - in.rect_center;
+    let d = sdf_rounded_box(p, in.rect_half_size, in.radius);
+    let alpha = smoothstep(0.5, -0.5, d);
+
+    // Overlay mode: vertex color is already premultiplied (rgb = actual.rgb * actual.a).
+    // Scale all four channels by coverage so the premultiplied blend equation
+    // composites the anti-aliased edge correctly.
+    return vec4<f32>(in.color.rgb * alpha, in.color.a * alpha);
 }
 "#;
 

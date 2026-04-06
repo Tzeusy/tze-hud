@@ -26,9 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::pipeline::{
-    ChromeDrawCmd, ROUNDED_RECT_SHADER, RectVertex, RoundedRectDrawCmd, RoundedRectVertex,
-    create_texture_rect_bind_group_layout, create_texture_rect_pipeline, rect_vertices,
-    rounded_rect_vertices, textured_rect_vertices,
+    ChromeDrawCmd, ROUNDED_RECT_OVERLAY_SHADER, ROUNDED_RECT_SHADER, RectVertex,
+    RoundedRectDrawCmd, RoundedRectVertex, create_texture_rect_bind_group_layout,
+    create_texture_rect_pipeline, rect_vertices, rounded_rect_vertices, textured_rect_vertices,
 };
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
@@ -820,12 +820,23 @@ pub struct Compositor {
     texture_rect_bind_group_layout: wgpu::BindGroupLayout,
     /// Shared linear-filtering sampler for all image textures (created once).
     image_sampler: wgpu::Sampler,
-    /// SDF rounded-rectangle pipeline.
+    /// SDF rounded-rectangle pipeline (fullscreen / straight-alpha mode).
     ///
     /// Used to render zone backdrops whose `RenderingPolicy` has
     /// `backdrop_radius` set.  Encoded in a separate pass after the main
     /// rect pass so rounded corners composite cleanly over the background.
+    ///
+    /// Uses `BlendState::ALPHA_BLENDING`; vertex colors are non-premultiplied.
+    /// In overlay mode `rounded_rect_overlay_pipeline` is selected instead.
     rounded_rect_pipeline: wgpu::RenderPipeline,
+    /// SDF rounded-rectangle pipeline for overlay / premultiplied-alpha mode.
+    ///
+    /// Identical geometry to `rounded_rect_pipeline` but uses
+    /// `BlendState::PREMULTIPLIED_ALPHA_BLENDING` and
+    /// `ROUNDED_RECT_OVERLAY_SHADER` (which scales all four channels by
+    /// coverage).  Selected by `encode_rounded_rect_pass` when
+    /// `self.overlay_mode` is true.
+    rounded_rect_overlay_pipeline: wgpu::RenderPipeline,
     pub width: u32,
     pub height: u32,
     frame_number: u64,
@@ -967,6 +978,10 @@ impl Compositor {
             Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
         let rounded_rect_pipeline =
             Self::create_rounded_rect_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let rounded_rect_overlay_pipeline = Self::create_rounded_rect_overlay_pipeline(
+            &device,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
 
         let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
         let texture_rect_pipeline = create_texture_rect_pipeline(
@@ -992,6 +1007,7 @@ impl Compositor {
             texture_rect_bind_group_layout,
             image_sampler,
             rounded_rect_pipeline,
+            rounded_rect_overlay_pipeline,
             width,
             height,
             frame_number: 0,
@@ -1238,6 +1254,8 @@ impl Compositor {
         let pipeline = Self::create_pipeline_with_format(&device, surface_format);
         let clear_pipeline = Self::create_clear_pipeline(&device, surface_format);
         let rounded_rect_pipeline = Self::create_rounded_rect_pipeline(&device, surface_format);
+        let rounded_rect_overlay_pipeline =
+            Self::create_rounded_rect_overlay_pipeline(&device, surface_format);
 
         let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
         let texture_rect_pipeline =
@@ -1260,6 +1278,7 @@ impl Compositor {
             texture_rect_bind_group_layout,
             image_sampler,
             rounded_rect_pipeline,
+            rounded_rect_overlay_pipeline,
             width: clamped_width,
             height: clamped_height,
             frame_number: 0,
@@ -1449,6 +1468,65 @@ impl Compositor {
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        })
+    }
+
+    /// Create the SDF rounded-rectangle pipeline for overlay / premultiplied-alpha mode.
+    ///
+    /// Uses `ROUNDED_RECT_OVERLAY_SHADER` (which scales all four RGBA channels by
+    /// SDF coverage) and `BlendState::PREMULTIPLIED_ALPHA_BLENDING`.  Selected by
+    /// `encode_rounded_rect_pass` when `self.overlay_mode` is true.
+    ///
+    /// In overlay mode vertex colors are premultiplied by `gpu_color`; the shader
+    /// must therefore output `(rgb * cov, a * cov)` so the premultiplied blend
+    /// equation applies coverage exactly once without double-multiplying alpha.
+    fn create_rounded_rect_overlay_pipeline(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rounded_rect_overlay_shader"),
+            source: wgpu::ShaderSource::Wgsl(ROUNDED_RECT_OVERLAY_SHADER.into()),
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rounded_rect_overlay_pipeline_layout"),
+            bind_group_layouts: &[],
+            push_constant_ranges: &[],
+        });
+
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rounded_rect_overlay_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[RoundedRectVertex::desc()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -3186,11 +3264,26 @@ impl Compositor {
         let sh = surf_h as f32;
 
         // ── Rounded-rect pass ─────────────────────────────────────────────────
-        // Collect SDF rounded-rect commands for zones with backdrop_radius set.
-        // Rendered after the flat-rect pass (using LoadOp::Load) so rounded
-        // corners composite cleanly over the scene background.
+        // Collect SDF rounded-rect commands for zones with backdrop_radius set,
+        // in canonical layer order (Background → Content → Chrome) to match the
+        // flat-rect vertex ordering above.  Each layer is collected separately
+        // so Background-layer zones with backdrop_radius composite before tiles,
+        // and Chrome-layer zones composite above content.
         {
-            let rr_cmds = self.collect_rounded_rect_cmds(scene, sw, sh, None);
+            let mut rr_cmds =
+                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
+            rr_cmds.extend(self.collect_rounded_rect_cmds(
+                scene,
+                sw,
+                sh,
+                Some(LayerAttachment::Content),
+            ));
+            rr_cmds.extend(self.collect_rounded_rect_cmds(
+                scene,
+                sw,
+                sh,
+                Some(LayerAttachment::Chrome),
+            ));
             self.encode_rounded_rect_pass(&mut encoder, frame_view, &rr_cmds, sw, sh);
         }
 
@@ -3749,12 +3842,26 @@ impl Compositor {
             }
         }
 
-        // ── Rounded-rect pass (content layer) ────────────────────────────────
-        // Collect and encode SDF rounded-rect commands for zones with
-        // backdrop_radius set.  Runs after the content geometry pass (LoadOp::Load)
-        // so rounded corners composite cleanly over the background.
+        // ── Rounded-rect pass ────────────────────────────────────────────────
+        // Collect SDF rounded-rect commands in canonical layer order
+        // (Background → Content → Chrome) to match the flat-rect vertex
+        // ordering above.  Background-layer zones with backdrop_radius are
+        // rendered before tiles; Chrome-layer zones render above content.
         {
-            let rr_cmds = self.collect_rounded_rect_cmds(scene, sw, sh, None);
+            let mut rr_cmds =
+                self.collect_rounded_rect_cmds(scene, sw, sh, Some(LayerAttachment::Background));
+            rr_cmds.extend(self.collect_rounded_rect_cmds(
+                scene,
+                sw,
+                sh,
+                Some(LayerAttachment::Content),
+            ));
+            rr_cmds.extend(self.collect_rounded_rect_cmds(
+                scene,
+                sw,
+                sh,
+                Some(LayerAttachment::Chrome),
+            ));
             self.encode_rounded_rect_pass(&mut encoder, &surface.view, &rr_cmds, sw, sh);
         }
 
@@ -4253,7 +4360,15 @@ impl Compositor {
             occlusion_query_set: None,
         });
 
-        pass.set_pipeline(&self.rounded_rect_pipeline);
+        // In overlay mode select the premultiplied pipeline; otherwise use the
+        // straight-alpha pipeline.  Vertex colors are premultiplied by gpu_color
+        // in overlay mode, so the blend equation and shader must match.
+        let pipeline = if self.overlay_mode {
+            &self.rounded_rect_overlay_pipeline
+        } else {
+            &self.rounded_rect_pipeline
+        };
+        pass.set_pipeline(pipeline);
         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         pass.draw(0..vertices.len() as u32, 0..1);
     }
