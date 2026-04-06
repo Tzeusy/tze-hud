@@ -338,6 +338,18 @@ pub fn merge_zone_override(
     if let Some(t) = override_.transition_out_ms {
         policy.transition_out_ms = Some(t);
     }
+    // ── key_icon_map (status-bar icons) ──────────────────────────────────────
+    // Merge: entries in the override are inserted; keys absent from the override
+    // retain their existing value in the policy. This allows additive composition
+    // when multiple overrides are applied sequentially (profile → tab → instance).
+    if !override_.key_icon_map.is_empty() {
+        policy.key_icon_map.extend(
+            override_
+                .key_icon_map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone())),
+        );
+    }
 }
 
 // ─── Profile selection resolver ───────────────────────────────────────────────
@@ -791,6 +803,92 @@ mod tests {
             policy.font_weight,
             Some(400_u16),
             "None font_weight override must leave existing policy.font_weight intact"
+        );
+    }
+
+    // ── key_icon_map merge ────────────────────────────────────────────────────
+
+    /// WHEN merge_zone_override is called with a non-empty key_icon_map
+    /// THEN the entries are inserted into the policy's key_icon_map.
+    #[test]
+    fn merge_zone_override_key_icon_map_inserted() {
+        use crate::component_profiles::ZoneRenderingOverride;
+        use std::collections::HashMap;
+
+        let mut policy = RenderingPolicy::default();
+        assert!(
+            policy.key_icon_map.is_empty(),
+            "default policy has empty key_icon_map"
+        );
+
+        let mut icon_map = HashMap::new();
+        icon_map.insert("weather".to_string(), "icons/weather.svg".to_string());
+        icon_map.insert("battery".to_string(), "icons/battery.svg".to_string());
+
+        let override_ = ZoneRenderingOverride {
+            key_icon_map: icon_map,
+            ..ZoneRenderingOverride::default()
+        };
+        merge_zone_override(&mut policy, &override_);
+
+        assert_eq!(
+            policy.key_icon_map.get("weather").map(String::as_str),
+            Some("icons/weather.svg"),
+            "weather icon must be in policy.key_icon_map after merge"
+        );
+        assert_eq!(
+            policy.key_icon_map.get("battery").map(String::as_str),
+            Some("icons/battery.svg"),
+            "battery icon must be in policy.key_icon_map after merge"
+        );
+    }
+
+    /// WHEN merge_zone_override is called with an empty key_icon_map
+    /// THEN existing entries in policy.key_icon_map are preserved (no-op).
+    #[test]
+    fn merge_zone_override_empty_key_icon_map_is_noop() {
+        use crate::component_profiles::ZoneRenderingOverride;
+
+        let mut policy = RenderingPolicy::default();
+        policy
+            .key_icon_map
+            .insert("time".to_string(), "icons/clock.svg".to_string());
+
+        let override_ = ZoneRenderingOverride::default(); // key_icon_map is empty
+        merge_zone_override(&mut policy, &override_);
+
+        assert_eq!(
+            policy.key_icon_map.get("time").map(String::as_str),
+            Some("icons/clock.svg"),
+            "existing key_icon_map entry must be preserved when override is empty"
+        );
+    }
+
+    /// WHEN merge_zone_override overlaps an existing key in key_icon_map
+    /// THEN the override value wins (replaces the existing entry).
+    #[test]
+    fn merge_zone_override_key_icon_map_override_wins() {
+        use crate::component_profiles::ZoneRenderingOverride;
+        use std::collections::HashMap;
+
+        let mut policy = RenderingPolicy::default();
+        policy
+            .key_icon_map
+            .insert("weather".to_string(), "icons/old-weather.svg".to_string());
+
+        let mut icon_map = HashMap::new();
+        icon_map.insert("weather".to_string(), "icons/new-weather.svg".to_string());
+
+        let override_ = ZoneRenderingOverride {
+            key_icon_map: icon_map,
+            ..ZoneRenderingOverride::default()
+        };
+        merge_zone_override(&mut policy, &override_);
+
+        assert_eq!(
+            policy.key_icon_map.get("weather").map(String::as_str),
+            Some("icons/new-weather.svg"),
+            "override value must replace the existing key_icon_map entry"
         );
     }
 }
