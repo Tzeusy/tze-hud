@@ -53,6 +53,7 @@ pub use mutation::BatchTimingHints as MutationTimingHints;
 pub use mutation::{
     BatchTimingHints, MAX_BATCH_SIZE, MutationBatch, MutationResult, SceneMutation,
 };
+pub use svg_tokens::{is_valid_token_key, resolve_token_placeholders};
 pub use test_scenes::{
     ClockMs, InvariantViolation, SceneGraphTestExt, SceneSpec, TestSceneRegistry,
     assert_layer0_invariants,
@@ -116,7 +117,6 @@ pub use timing::{
     validate_timing_hints,
 };
 pub use types::*;
-pub use svg_tokens::{is_valid_token_key, resolve_token_placeholders};
 pub use validation::{BatchRejected, BatchValidationError, ValidationError, ValidationErrorCode};
 
 // ── Lease governance public API ───────────────────────────────────────────────
