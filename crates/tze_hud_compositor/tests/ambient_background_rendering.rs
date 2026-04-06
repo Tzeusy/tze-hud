@@ -821,9 +821,7 @@ async fn test_ambient_background_static_image_falls_back_to_placeholder_without_
         TOLERANCE,
         "StaticImage without registered bytes should render warm-gray placeholder",
     )
-    .unwrap_or_else(|e| {
-        panic!("placeholder fallback pixel assertion failed: {e}")
-    });
+    .unwrap_or_else(|e| panic!("placeholder fallback pixel assertion failed: {e}"));
 }
 
 // ─── Tile-node StaticImage rendering tests with fit modes ───────────────────

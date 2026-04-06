@@ -26,8 +26,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::pipeline::{
-    ChromeDrawCmd, RectVertex, create_texture_rect_bind_group_layout,
-    create_texture_rect_pipeline, rect_vertices, textured_rect_vertices,
+    ChromeDrawCmd, RectVertex, create_texture_rect_bind_group_layout, create_texture_rect_pipeline,
+    rect_vertices, textured_rect_vertices,
 };
 use crate::surface::{CompositorSurface, HeadlessSurface};
 use crate::text::{TextItem, TextRasterizer};
@@ -930,8 +930,7 @@ impl Compositor {
         let clear_pipeline =
             Self::create_clear_pipeline(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
 
-        let texture_rect_bind_group_layout =
-            create_texture_rect_bind_group_layout(&device);
+        let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
         let texture_rect_pipeline = create_texture_rect_pipeline(
             &device,
             &texture_rect_bind_group_layout,
@@ -1198,13 +1197,9 @@ impl Compositor {
         let pipeline = Self::create_pipeline_with_format(&device, surface_format);
         let clear_pipeline = Self::create_clear_pipeline(&device, surface_format);
 
-        let texture_rect_bind_group_layout =
-            create_texture_rect_bind_group_layout(&device);
-        let texture_rect_pipeline = create_texture_rect_pipeline(
-            &device,
-            &texture_rect_bind_group_layout,
-            surface_format,
-        );
+        let texture_rect_bind_group_layout = create_texture_rect_bind_group_layout(&device);
+        let texture_rect_pipeline =
+            create_texture_rect_pipeline(&device, &texture_rect_bind_group_layout, surface_format);
         let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("image_linear_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -1567,8 +1562,7 @@ impl Compositor {
         self.image_texture_cache
             .retain(|id, _| referenced_ids.contains(id));
         // Also evict bytes for resources no longer referenced.
-        self.image_bytes
-            .retain(|id, _| referenced_ids.contains(id));
+        self.image_bytes.retain(|id, _| referenced_ids.contains(id));
     }
 
     /// Scan the scene graph for all StaticImage resources, ensure their GPU
@@ -1917,15 +1911,10 @@ impl Compositor {
                                     .or(policy.margin_px)
                                     .unwrap_or(NOTIFICATION_INSET);
                                 // If a cached icon texture exists, inset text to the right of it.
-                                let icon_width_reserved =
-                                    parse_notification_icon(&payload.icon)
-                                        .filter(|id| {
-                                            self.image_texture_cache.contains_key(id)
-                                        })
-                                        .map(|_| {
-                                            NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
-                                        })
-                                        .unwrap_or(0.0);
+                                let icon_width_reserved = parse_notification_icon(&payload.icon)
+                                    .filter(|id| self.image_texture_cache.contains_key(id))
+                                    .map(|_| NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX)
+                                    .unwrap_or(0.0);
                                 // Font size: policy explicit > typography.body.size token > 16px
                                 let font_size_px = policy.font_size_px.unwrap_or_else(|| {
                                     Self::resolve_body_font_size(&self.token_map)
@@ -2016,8 +2005,7 @@ impl Compositor {
                                         content_top + title_line_h + NOTIFICATION_INTER_LINE_GAP;
                                     // Remaining slot height available for body (down to inset bottom)
                                     let body_bounds_h =
-                                        ((slot_y + effective_slot_h - inset_v) - body_top)
-                                            .max(1.0);
+                                        ((slot_y + effective_slot_h - inset_v) - body_top).max(1.0);
                                     items.push(TextItem {
                                         text: payload.text.clone(),
                                         pixel_x: text_x,
@@ -2093,12 +2081,9 @@ impl Compositor {
                                     // as the LatestWins/Replace path.
                                     let icon_width_reserved =
                                         parse_notification_icon(&payload.icon)
-                                            .filter(|id| {
-                                                self.image_texture_cache.contains_key(id)
-                                            })
+                                            .filter(|id| self.image_texture_cache.contains_key(id))
                                             .map(|_| {
-                                                NOTIFICATION_ICON_SIZE_PX
-                                                    + NOTIFICATION_ICON_GAP_PX
+                                                NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
                                             })
                                             .unwrap_or(0.0);
                                     if icon_width_reserved > 0.0 {
@@ -2114,10 +2099,8 @@ impl Compositor {
                                             .margin_vertical
                                             .or(policy.margin_px)
                                             .unwrap_or(NOTIFICATION_INSET);
-                                        let font_size_px = policy
-                                            .font_size_px
-                                            .unwrap_or(16.0)
-                                            .clamp(6.0, 200.0);
+                                        let font_size_px =
+                                            policy.font_size_px.unwrap_or(16.0).clamp(6.0, 200.0);
                                         let font_family = policy.font_family.unwrap_or(
                                             tze_hud_scene::types::FontFamily::SystemSansSerif,
                                         );
@@ -2131,20 +2114,18 @@ impl Compositor {
                                             base_color,
                                             anim_opacity,
                                         );
-                                        let (oc, ow) = match (
-                                            policy.outline_color,
-                                            policy.outline_width,
-                                        ) {
-                                            (Some(oc), Some(ow)) if ow > 0.0 => {
-                                                let oc_srgb =
-                                                    crate::text::apply_opacity_to_color(
-                                                        crate::text::rgba_to_srgb_u8(oc),
-                                                        anim_opacity,
-                                                    );
-                                                (Some(oc_srgb), Some(ow))
-                                            }
-                                            _ => (None, None),
-                                        };
+                                        let (oc, ow) =
+                                            match (policy.outline_color, policy.outline_width) {
+                                                (Some(oc), Some(ow)) if ow > 0.0 => {
+                                                    let oc_srgb =
+                                                        crate::text::apply_opacity_to_color(
+                                                            crate::text::rgba_to_srgb_u8(oc),
+                                                            anim_opacity,
+                                                        );
+                                                    (Some(oc_srgb), Some(ow))
+                                                }
+                                                _ => (None, None),
+                                            };
                                         items.push(TextItem {
                                             text: payload.text.clone(),
                                             pixel_x: zx + margin_h + icon_width_reserved,
@@ -2159,9 +2140,9 @@ impl Compositor {
                                             font_family,
                                             font_weight,
                                             color,
-                                            alignment: policy.text_align.unwrap_or(
-                                                tze_hud_scene::types::TextAlign::Start,
-                                            ),
+                                            alignment: policy
+                                                .text_align
+                                                .unwrap_or(tze_hud_scene::types::TextAlign::Start),
                                             overflow: policy.overflow.unwrap_or(
                                                 tze_hud_scene::types::TextOverflow::Clip,
                                             ),
@@ -2233,15 +2214,10 @@ impl Compositor {
                                 // Render the notification text.
                                 // When a valid icon texture is cached, inset the text
                                 // to the right of the icon (icon_size + gap px).
-                                let icon_width_reserved =
-                                    parse_notification_icon(&payload.icon)
-                                        .filter(|id| {
-                                            self.image_texture_cache.contains_key(id)
-                                        })
-                                        .map(|_| {
-                                            NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX
-                                        })
-                                        .unwrap_or(0.0);
+                                let icon_width_reserved = parse_notification_icon(&payload.icon)
+                                    .filter(|id| self.image_texture_cache.contains_key(id))
+                                    .map(|_| NOTIFICATION_ICON_SIZE_PX + NOTIFICATION_ICON_GAP_PX)
+                                    .unwrap_or(0.0);
                                 if icon_width_reserved > 0.0 {
                                     // Build TextItem manually to apply icon offset.
                                     // Use the same default inset as the icon draw path
@@ -2296,9 +2272,9 @@ impl Compositor {
                                         font_family,
                                         font_weight,
                                         color,
-                                        alignment: policy.text_align.unwrap_or(
-                                            tze_hud_scene::types::TextAlign::Start,
-                                        ),
+                                        alignment: policy
+                                            .text_align
+                                            .unwrap_or(tze_hud_scene::types::TextAlign::Start),
                                         overflow: policy
                                             .overflow
                                             .unwrap_or(tze_hud_scene::types::TextOverflow::Clip),
@@ -2947,7 +2923,15 @@ impl Compositor {
 
             // Render nodes within the tile
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut vertices, &mut textured_cmds, sw, sh);
+                self.render_node(
+                    root_id,
+                    tile,
+                    scene,
+                    &mut vertices,
+                    &mut textured_cmds,
+                    sw,
+                    sh,
+                );
             }
         }
 
@@ -2958,9 +2942,23 @@ impl Compositor {
         self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Content));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Content),
+        );
         // Chrome zones render last, above everything.
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Chrome));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Chrome),
+        );
 
         // ── Widget texture sync: rasterize dirty SVGs BEFORE frame acquisition.
         // SVG rasterization can be slow; if a resize event arrives while we hold
@@ -3071,7 +3069,15 @@ impl Compositor {
             vertices.extend_from_slice(&verts);
 
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut vertices, &mut textured_cmds, sw, sh);
+                self.render_node(
+                    root_id,
+                    tile,
+                    scene,
+                    &mut vertices,
+                    &mut textured_cmds,
+                    sw,
+                    sh,
+                );
             }
         }
 
@@ -3082,9 +3088,23 @@ impl Compositor {
         self.update_stream_reveals(scene);
 
         // Content zones render as a batch after all tiles (above background, below chrome).
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Content));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Content),
+        );
         // Chrome zones render last, above everything.
-        self.render_zone_content(scene, &mut vertices, &mut textured_cmds, sw, sh, Some(LayerAttachment::Chrome));
+        self.render_zone_content(
+            scene,
+            &mut vertices,
+            &mut textured_cmds,
+            sw,
+            sh,
+            Some(LayerAttachment::Chrome),
+        );
 
         // ── Widget texture sync before frame acquisition (same as windowed path).
         self.sync_widget_textures(scene, self.degradation_level);
@@ -3200,7 +3220,15 @@ impl Compositor {
             );
             content_vertices.extend_from_slice(&verts);
             if let Some(root_id) = tile.root_node {
-                self.render_node(root_id, tile, scene, &mut content_vertices, &mut textured_cmds, sw, sh);
+                self.render_node(
+                    root_id,
+                    tile,
+                    scene,
+                    &mut content_vertices,
+                    &mut textured_cmds,
+                    sw,
+                    sh,
+                );
             }
         }
 
@@ -3535,9 +3563,8 @@ impl Compositor {
                 None => continue, // shouldn't happen if ensure was called
             };
 
-            let verts = textured_rect_vertices(
-                cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint,
-            );
+            let verts =
+                textured_rect_vertices(cmd.x, cmd.y, cmd.w, cmd.h, sw, sh, cmd.uv_rect, cmd.tint);
             let vertex_buf = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -3698,9 +3725,9 @@ impl Compositor {
                                 // If a GPU texture is cached, emit a textured draw command
                                 // filling this publication's slot.
                                 if self.image_texture_cache.contains_key(resource_id) {
-                                    let combined_opacity =
-                                        (anim_opacity * self.pub_opacity(zone_name, record))
-                                            .clamp(0.0, 1.0);
+                                    let combined_opacity = (anim_opacity
+                                        * self.pub_opacity(zone_name, record))
+                                    .clamp(0.0, 1.0);
                                     textured_cmds.push(TexturedDrawCmd {
                                         resource_id: *resource_id,
                                         x,
@@ -4054,7 +4081,12 @@ impl Compositor {
         let title_line_h = font_size_px * 1.4;
         let body_line_h = title_line_h * notification_body_scale;
         let margin_v = policy.margin_vertical.or(policy.margin_px).unwrap_or(8.0);
-        (title_line_h + notification_inter_line_gap + body_line_h + 2.0 * margin_v + SLOT_BASELINE_GAP).max(1.0)
+        (title_line_h
+            + notification_inter_line_gap
+            + body_line_h
+            + 2.0 * margin_v
+            + SLOT_BASELINE_GAP)
+            .max(1.0)
     }
 
     /// Compute per-slot heights for an ordered slice of publications in a Stack zone.
@@ -7945,7 +7977,14 @@ mod tests {
         {
             let scene = make_alert_banner_scene();
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+            compositor.render_zone_content(
+                &scene,
+                &mut vertices,
+                &mut Vec::new(),
+                1280.0,
+                720.0,
+                None,
+            );
             assert!(
                 vertices.is_empty(),
                 "0 banners → 0 vertices (zero height); got {} vertices",
@@ -7958,7 +7997,14 @@ mod tests {
             let mut scene = make_alert_banner_scene();
             publish_alert(&mut scene, "Single banner", 2, "agent-a");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+            compositor.render_zone_content(
+                &scene,
+                &mut vertices,
+                &mut Vec::new(),
+                1280.0,
+                720.0,
+                None,
+            );
             assert_eq!(
                 vertices.len(),
                 6,
@@ -7979,7 +8025,14 @@ mod tests {
             publish_alert(&mut scene, "Banner B", 2, "agent-b");
             publish_alert(&mut scene, "Banner C", 3, "agent-c");
             let mut vertices: Vec<crate::pipeline::RectVertex> = Vec::new();
-            compositor.render_zone_content(&scene, &mut vertices, &mut Vec::new(), 1280.0, 720.0, None);
+            compositor.render_zone_content(
+                &scene,
+                &mut vertices,
+                &mut Vec::new(),
+                1280.0,
+                720.0,
+                None,
+            );
             assert_eq!(
                 vertices.len(),
                 18,
@@ -8410,13 +8463,14 @@ mod tests {
         let body_item = &sorted[1];
 
         // Title item checks.
-        assert_eq!(title_item.text, "System Alert", "first item must be the title text");
         assert_eq!(
-            title_item.font_weight,
-            NOTIFICATION_TITLE_WEIGHT,
+            title_item.text, "System Alert",
+            "first item must be the title text"
+        );
+        assert_eq!(
+            title_item.font_weight, NOTIFICATION_TITLE_WEIGHT,
             "title must use bold weight ({}), got {}",
-            NOTIFICATION_TITLE_WEIGHT,
-            title_item.font_weight
+            NOTIFICATION_TITLE_WEIGHT, title_item.font_weight
         );
         assert!(
             (title_item.font_size_px - 16.0).abs() < 0.01,

@@ -80,8 +80,8 @@ use std::sync::Arc;
 use tze_hud_compositor::{Compositor, CompositorError, surface::HeadlessSurface};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::types::{
-    ContentionPolicy, GeometryPolicy, LayerAttachment, NotificationPayload, RenderingPolicy, Rgba,
-    ResourceId, SceneId, ZoneContent, ZoneDefinition, ZoneMediaType,
+    ContentionPolicy, GeometryPolicy, LayerAttachment, NotificationPayload, RenderingPolicy,
+    ResourceId, Rgba, SceneId, ZoneContent, ZoneDefinition, ZoneMediaType,
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
