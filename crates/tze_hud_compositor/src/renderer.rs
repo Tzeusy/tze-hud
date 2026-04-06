@@ -736,9 +736,11 @@ impl StreamRevealState {
 /// Created by [`Compositor::ensure_image_texture`] on first reference and
 /// reused across frames until eviction.
 pub struct ImageTextureEntry {
-    /// The GPU texture holding RGBA pixel data.
-    #[allow(dead_code)]
-    pub texture: wgpu::Texture,
+    /// The GPU texture holding RGBA pixel data, kept alive for `bind_group`.
+    /// Prefixed with `_` to make intent explicit: this field exists solely to
+    /// retain ownership and keep the wgpu texture alive as long as the bind
+    /// group references it.
+    pub _texture: wgpu::Texture,
     /// Pre-built bind group (texture view + sampler) ready for draw calls.
     pub bind_group: wgpu::BindGroup,
     /// Image width in pixels (needed for fit-mode UV calculations).
@@ -1493,7 +1495,7 @@ impl Compositor {
         self.image_texture_cache.insert(
             resource_id,
             ImageTextureEntry {
-                texture,
+                _texture: texture,
                 bind_group,
                 width: img_width,
                 height: img_height,
@@ -1523,14 +1525,25 @@ impl Compositor {
             .retain(|id, _| referenced_ids.contains(id));
     }
 
-    /// Scan the scene graph for all StaticImage resources and ensure their
-    /// GPU textures are uploaded. Also collects the set of referenced resource
-    /// IDs for cache eviction.
-    fn ensure_scene_image_textures(&mut self, scene: &SceneGraph) {
+    /// Scan the scene graph for all StaticImage resources, ensure their GPU
+    /// textures are uploaded, and return the set of referenced `ResourceId`s.
+    ///
+    /// This method uploads textures for tile-backed static images directly,
+    /// and for zone-publication images when dimensions can be inferred from
+    /// registered RGBA bytes.
+    ///
+    /// The returned `HashSet<ResourceId>` should be passed to
+    /// [`Compositor::evict_unused_image_textures`] once per frame so that
+    /// stale cache entries are reclaimed and the cache does not grow without
+    /// bound across frames.
+    fn ensure_scene_image_textures(&mut self, scene: &SceneGraph) -> HashSet<ResourceId> {
+        let mut referenced: HashSet<ResourceId> = HashSet::new();
+
         // Collect all referenced StaticImage resource IDs from tiles.
         for node in scene.nodes.values() {
             if let NodeData::StaticImage(img) = &node.data {
                 self.ensure_image_texture(img.resource_id, img.width, img.height);
+                referenced.insert(img.resource_id);
             }
         }
 
@@ -1538,6 +1551,7 @@ impl Compositor {
         for publishes in scene.zone_registry.active_publishes.values() {
             for record in publishes {
                 if let ZoneContent::StaticImage(resource_id) = &record.content {
+                    referenced.insert(*resource_id);
                     // For zone images, we don't have explicit dimensions — if
                     // the image_bytes are registered, check the cache entry or
                     // use a default. The actual dimensions are determined from
@@ -1557,9 +1571,11 @@ impl Compositor {
                 }
             }
         }
+
+        referenced
     }
 
-    // ─── Widget renderer ──────────────────────────────────────────────────��──
+    // ─── Widget renderer ──────────────────────────────────────────────────────
 
     /// Initialize (or re-initialize) the widget renderer for the given surface format.
     ///
@@ -2578,7 +2594,8 @@ impl Compositor {
         }
 
         // ── Ensure image textures are uploaded before rendering ──────────────
-        self.ensure_scene_image_textures(scene);
+        let image_refs = self.ensure_scene_image_textures(scene);
+        self.evict_unused_image_textures(&image_refs);
 
         // Update zone animation states (fade-in/fade-out) before rendering.
         // Must run before any render_zone_content call below.
@@ -2703,7 +2720,8 @@ impl Compositor {
         let mut textured_cmds: Vec<TexturedDrawCmd> = Vec::new();
 
         // ── Ensure image textures are uploaded before rendering ──────────────
-        self.ensure_scene_image_textures(scene);
+        let image_refs = self.ensure_scene_image_textures(scene);
+        self.evict_unused_image_textures(&image_refs);
 
         // Update zone animation states before rendering zone content.
         // Must run before any render_zone_content call below.
@@ -2820,7 +2838,8 @@ impl Compositor {
         self.sync_widget_textures(scene, self.degradation_level);
 
         // ── Ensure image textures are uploaded before rendering ──────────────
-        self.ensure_scene_image_textures(scene);
+        let image_refs = self.ensure_scene_image_textures(scene);
+        self.evict_unused_image_textures(&image_refs);
 
         // ── Pass 1: Content (background + agent tiles) ──────────────────────
         let tiles = scene.visible_tiles();
