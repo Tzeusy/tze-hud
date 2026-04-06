@@ -263,6 +263,7 @@ async fn test_notification_urgency0_low_backdrop() {
                 icon: String::new(),
                 urgency: 0,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "test-agent",
             None,
@@ -307,6 +308,7 @@ async fn test_notification_urgency1_normal_backdrop() {
                 icon: String::new(),
                 urgency: 1,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "test-agent",
             None,
@@ -351,6 +353,7 @@ async fn test_notification_urgency2_urgent_backdrop() {
                 icon: String::new(),
                 urgency: 2,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "test-agent",
             None,
@@ -395,6 +398,7 @@ async fn test_notification_urgency3_critical_backdrop() {
                 icon: String::new(),
                 urgency: 3,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "test-agent",
             None,
@@ -456,6 +460,7 @@ async fn test_notification_urgency_distinct_colors() {
                     icon: String::new(),
                     urgency,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "test-agent",
                 None,
@@ -556,6 +561,7 @@ async fn test_notification_icon_renders_texture_when_bytes_registered() {
                 icon: resource_id.to_hex(),
                 urgency: 0,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "test-agent",
             None,
@@ -599,6 +605,7 @@ async fn test_notification_without_icon_renders_backdrop_only() {
                 icon: String::new(),
                 urgency: 0,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "test-agent",
             None,
@@ -645,6 +652,7 @@ async fn test_notification_icon_graceful_fallback_when_bytes_not_registered() {
                 icon: resource_id.to_hex(),
                 urgency: 1,
                 ttl_ms: None,
+                title: String::new(),
             }),
             "test-agent",
             None,
@@ -668,6 +676,49 @@ async fn test_notification_icon_graceful_fallback_when_bytes_not_registered() {
         "urgency=1 notification with unregistered icon must render urgency-normal backdrop",
     )
     .unwrap_or_else(|e| panic!("graceful fallback backdrop assertion failed: {e}"));
+}
+
+// ─── Two-line notification tests [hud-ltgk.3] ────────────────────────────────
+
+/// Requirement: Two-line notification layout — slot height formula.
+///
+/// Verifies the pure math of the slot-height formulas:
+///   - Single-line: `font_size_px * 1.4 + 2 * margin_v + SLOT_BASELINE_GAP`
+///     = 16.0 * 1.4 + 2 * 8.0 + 4.0 = 42.4 px
+///   - Two-line: `title_line_h + INTER_LINE_GAP + body_line_h + 2 * margin_v + SLOT_BASELINE_GAP`
+///     = 22.4 + 2.0 + 19.04 + 16.0 + 4.0 ≈ 63.44 px
+///
+/// The two-line height MUST exceed the single-line height.
+#[test]
+fn test_two_line_notification_slot_height_formula() {
+    // Constants from renderer.rs (duplicated here for white-box verification).
+    let font_size_px = 16.0_f32;
+    let margin_v = 8.0_f32;
+    let slot_baseline_gap = 4.0_f32;
+    let body_scale = 0.85_f32;
+    let inter_line_gap = 2.0_f32;
+
+    let single_line_h = font_size_px * 1.4 + 2.0 * margin_v + slot_baseline_gap;
+    let title_line_h = font_size_px * 1.4;
+    let body_line_h = title_line_h * body_scale;
+    let two_line_h =
+        title_line_h + inter_line_gap + body_line_h + 2.0 * margin_v + slot_baseline_gap;
+
+    assert!(
+        two_line_h > single_line_h,
+        "two-line slot height ({two_line_h:.2} px) must exceed single-line ({single_line_h:.2} px)"
+    );
+
+    // 16.0 * 1.4 + 2 * 8 + 4 = 42.4 px
+    assert!(
+        (single_line_h - 42.4).abs() < 0.1,
+        "single-line slot height with font=16/margin=8 should be 42.4 px, got {single_line_h:.2}"
+    );
+    // 22.4 (title) + 2.0 (gap) + 19.04 (body) + 16.0 (2×margin) + 4.0 (gap_end) ≈ 63.44 px
+    assert!(
+        two_line_h > 55.0,
+        "two-line slot height must be substantially larger than single-line, got {two_line_h:.2}"
+    );
 }
 
 // ─── Debug probe (ignored, for calibration only) ─────────────────────────────
@@ -695,6 +746,7 @@ async fn debug_probe_pixel_values() {
                     icon: String::new(),
                     urgency,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 "probe",
                 None,

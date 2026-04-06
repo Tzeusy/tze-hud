@@ -180,6 +180,7 @@ message NotificationPayload {
   string text    = 1;
   string icon    = 2;   // Resource name or empty
   uint32 urgency = 3;   // 0=low, 1=normal, 2=urgent, 3=critical
+  string title   = 4;   // Optional: bold title for two-line layout; empty = single-line
 }
 
 message StatusBarPayload {

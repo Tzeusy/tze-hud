@@ -781,6 +781,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
                     icon: "info".to_string(),
                     urgency: 1,
                     ttl_ms: None,
+                    title: String::new(),
                 }),
                 &namespace,
                 None, // no merge key — stacks alongside other notifications
