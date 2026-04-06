@@ -14,6 +14,7 @@ pub mod graph;
 pub mod invariants;
 pub mod mutation;
 pub mod replay;
+pub mod svg_tokens;
 pub mod test_scenes;
 pub mod timing;
 pub mod trace;
@@ -52,6 +53,7 @@ pub use mutation::BatchTimingHints as MutationTimingHints;
 pub use mutation::{
     BatchTimingHints, MAX_BATCH_SIZE, MutationBatch, MutationResult, SceneMutation,
 };
+pub use svg_tokens::{is_valid_token_key, resolve_token_placeholders};
 pub use test_scenes::{
     ClockMs, InvariantViolation, SceneGraphTestExt, SceneSpec, TestSceneRegistry,
     assert_layer0_invariants,
