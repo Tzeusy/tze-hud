@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Indicator layer for the production status-indicator widget.
+     Contains a colored status circle (bound to "status" via discrete mapping)
+     and a label text element (bound to "label" via text-content binding).
+
+     Token placeholders ({{token.key}}) are resolved at bundle load time against
+     the global token map — never at render time. Zero hardcoded hex colors in
+     the circle stroke and label fill; discrete value_map provides the status
+     colors in widget.toml.
+
+     Element IDs referenced in widget.toml bindings:
+       "indicator-fill" — circle; fill color driven by "status" discrete mapping
+       "label-text"     — text element; text content driven by "label" -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 56" width="48" height="56">
+  <!-- Status indicator circle: fill driven by "status" discrete mapping.
+       Default fill (offline gray) is overridden by the binding at render time. -->
+  <circle id="indicator-fill" cx="24" cy="20" r="14"
+          fill="#6B7280"
+          stroke="{{token.color.border.default}}" stroke-width="1.5"/>
+  <!-- Label text: centered below the circle.
+       data-role="text" marks this element for DualLayer readability validation.
+       stroke + fill present for legibility on varied backgrounds. -->
+  <text id="label-text" x="24" y="46" text-anchor="middle"
+        data-role="text"
+        font-family="sans-serif" font-size="10"
+        fill="{{token.color.text.secondary}}"
+        stroke="{{token.color.outline.default}}"
+        stroke-width="1"
+        paint-order="stroke fill"></text>
+</svg>

@@ -106,6 +106,29 @@ Widget message shape:
 
 `transition_ms`, `ttl_us`, `namespace`, and `instance_id` are optional per message.
 
+**`widget_name` semantics: instance name, not type name**
+
+`widget_name` in `publish_to_widget` identifies a *widget instance*, not a widget type.
+When the HUD starts, instances are created from `[[tabs.widgets]]` entries in the config,
+each with an `instance_id`. That `instance_id` is the string you pass as `widget_name`.
+
+For the production `tze_hud_app` deployment (see `app/tze_hud_app/config/production.toml`):
+
+| `widget_name` | Widget type | What it shows |
+|---|---|---|
+| `main-gauge` | `gauge` | Vertical fill gauge (level, label, severity) |
+| `main-progress` | `progress-bar` | Horizontal progress bar (progress, label) |
+| `main-status` | `status-indicator` | Status circle with label (online/away/busy/offline) |
+
+Use `list_widgets` to discover available instances:
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" --psk-env MCP_TEST_PSK \
+  --messages-file /dev/null --list-widgets
+```
+`list_widgets` returns `widget_instances` (with `instance_name`) — use those names as `widget_name`.
+If `list_widgets` returns no instances, the HUD binary is running without a config that declares instances.
+
 ## Workflow
 
 ### Step 0: SSH Connectivity Gate

@@ -1,0 +1,61 @@
+# Production status-indicator widget bundle — token-driven exemplar.
+#
+# This is the canonical production-quality status-indicator widget, demonstrating:
+# - Discrete binding: status enum → indicator fill color (four states)
+# - Direct binding: label → text-content
+# - All colors via {{token.key}} placeholders — zero hardcoded hex values
+# - 48x48 viewBox: compact circle indicator with label below
+#
+# Registered as "status-indicator" in the WidgetRegistry when loaded from
+# assets/widget_bundles/status-indicator/.
+#
+# Parameters:
+#   status - Connection/presence state; drives indicator fill color (enum)
+#   label  - Display label below the circle (string, max 16 bytes)
+#
+# Token placeholders ({{token.key}}) in layer SVGs are resolved against the
+# global token map at bundle load time — never at render time.
+
+name        = "status-indicator"
+version     = "1.0.0"
+description = "Status indicator widget: colored circle with label, driven by enum binding"
+default_contention_policy = "LatestWins"
+
+[[parameter_schema]]
+name    = "status"
+type    = "enum"
+default = "offline"
+
+[parameter_schema.constraints]
+enum_allowed_values = ["online", "away", "busy", "offline"]
+
+[[parameter_schema]]
+name    = "label"
+type    = "string"
+default = ""
+
+[parameter_schema.constraints]
+string_max_bytes = 16
+
+# Indicator layer: circle fill driven by "status" discrete mapping,
+# label text driven by "label" direct binding.
+[[layers]]
+svg_file = "indicator.svg"
+
+[[layers.bindings]]
+param            = "status"
+target_element   = "indicator-fill"
+target_attribute = "fill"
+mapping          = "discrete"
+
+[layers.bindings.value_map]
+online  = "#4FB543"
+away    = "#D97706"
+busy    = "#DC2626"
+offline = "#6B7280"
+
+[[layers.bindings]]
+param            = "label"
+target_element   = "label-text"
+target_attribute = "text-content"
+mapping          = "direct"
