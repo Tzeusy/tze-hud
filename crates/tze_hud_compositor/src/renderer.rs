@@ -35,6 +35,7 @@ use crate::text::{TextItem, TextRasterizer};
 use crate::widget::WidgetRenderer;
 use tze_hud_scene::DegradationLevel;
 use tze_hud_scene::graph::SceneGraph;
+use tze_hud_scene::resolve_token_placeholders;
 use tze_hud_scene::types::*;
 use tze_hud_telemetry::FrameTelemetry;
 
@@ -1813,6 +1814,27 @@ impl Compositor {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(path, error = %e, "icon: SVG file is not valid UTF-8");
+                self.failed_icon_paths.insert(resource_id);
+                return false;
+            }
+        };
+
+        // Apply design token substitution before parsing.
+        // For SVGs with no `{{...}}` placeholders this is a zero-cost no-op.
+        // For SVGs with placeholders that cannot be resolved (token missing),
+        // log a warning and degrade gracefully (skip icon).
+        let resolved_svg;
+        let svg_str = match resolve_token_placeholders(svg_str, &self.token_map) {
+            Ok(s) => {
+                resolved_svg = s;
+                resolved_svg.as_str()
+            }
+            Err(missing_key) => {
+                tracing::warn!(
+                    path,
+                    token_key = %missing_key,
+                    "icon: unresolved design token in SVG; skipping icon"
+                );
                 self.failed_icon_paths.insert(resource_id);
                 return false;
             }

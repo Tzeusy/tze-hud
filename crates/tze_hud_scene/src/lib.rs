@@ -14,6 +14,7 @@ pub mod graph;
 pub mod invariants;
 pub mod mutation;
 pub mod replay;
+pub mod svg_tokens;
 pub mod test_scenes;
 pub mod timing;
 pub mod trace;
@@ -115,6 +116,7 @@ pub use timing::{
     validate_timing_hints,
 };
 pub use types::*;
+pub use svg_tokens::{is_valid_token_key, resolve_token_placeholders};
 pub use validation::{BatchRejected, BatchValidationError, ValidationError, ValidationErrorCode};
 
 // ── Lease governance public API ───────────────────────────────────────────────
