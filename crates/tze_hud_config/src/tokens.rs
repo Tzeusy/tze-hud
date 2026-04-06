@@ -223,7 +223,7 @@ pub struct CanonicalToken {
 /// specification (`openspec/changes/component-shape-language/specs/
 /// component-shape-language/spec.md`, §Requirement: Canonical Token Schema).
 ///
-/// Current count: 31 tokens (25 original + 3 border.radius variants + 3 spacing additions).
+/// Current count: 30 tokens (24 original + 3 border.radius variants + 3 spacing additions).
 /// Token groups: color (10), opacity (2), typography (9), spacing (4), stroke (2), border.radius (3).
 pub static CANONICAL_TOKENS: &[CanonicalToken] = &[
     // Color — text

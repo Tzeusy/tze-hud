@@ -114,8 +114,9 @@ pub struct ZoneRenderingOverride {
 
     /// Corner radius for the zone backdrop in pixels.
     ///
-    /// When set, the compositor uses the SDF rounded-rectangle pipeline instead
-    /// of the axis-aligned quad pipeline to render this zone's backdrop.
+    /// When set to a value greater than `0.0`, the compositor uses the SDF
+    /// rounded-rectangle pipeline instead of the axis-aligned quad pipeline to
+    /// render this zone's backdrop. `Some(0.0)` leaves the flat-rect path in use.
     /// Values are clamped to `[0, min(half_width, half_height)]` at render time.
     ///
     /// Maps to `RenderingPolicy::backdrop_radius`.

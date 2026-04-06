@@ -1542,6 +1542,7 @@ fn roundtrip_rendering_policy_proto_all_fields_none() {
     assert_eq!(decoded.margin_vertical, -1.0);
     assert_eq!(decoded.transition_in_ms, 0);
     assert_eq!(decoded.transition_out_ms, 0);
+    assert_eq!(decoded.backdrop_radius, -1.0, "backdrop_radius absent = -1.0 sentinel");
 }
 
 /// Backward-compatibility: a pre-extension serialized RenderingPolicyProto
