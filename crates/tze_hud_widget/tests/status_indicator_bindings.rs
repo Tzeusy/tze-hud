@@ -147,10 +147,10 @@ fn discrete_color_for_status(tokens: &HashMap<String, String>, status_value: &st
 // DISCRETE BINDING TESTS (1–6)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Test 1: status=online → fill #00CC66 ────────────────────────────────────
+// ─── Test 1: status=online → fill #4FB543 ────────────────────────────────────
 
 /// WHEN status=online is published THEN the discrete binding resolves the fill
-/// attribute to #00CC66, and publishing succeeds.
+/// attribute to #4FB543, and publishing succeeds.
 ///
 /// Source: spec.md §Scenario: Online status renders green
 /// [hud-tjq8.2]
@@ -179,18 +179,18 @@ fn status_online_maps_to_green() {
         other => panic!("expected Enum(\"online\") for status, got {other:?}"),
     }
 
-    // Verify the binding value_map maps "online" to #00CC66.
+    // Verify the binding value_map maps "online" to #4FB543.
     let fill_color = discrete_color_for_status(&tokens, "online");
     assert_eq!(
-        fill_color, "#00CC66",
-        "discrete mapping for online should resolve to #00CC66, got {fill_color:?}"
+        fill_color, "#4FB543",
+        "discrete mapping for online should resolve to #4FB543, got {fill_color:?}"
     );
 }
 
-// ─── Test 2: status=away → fill #FFB800 ──────────────────────────────────────
+// ─── Test 2: status=away → fill #D97706 ──────────────────────────────────────
 
 /// WHEN status=away is published THEN the discrete binding resolves the fill
-/// attribute to #FFB800, and publishing succeeds.
+/// attribute to #D97706, and publishing succeeds.
 ///
 /// Source: spec.md §Scenario: Away status renders yellow
 /// [hud-tjq8.2]
@@ -220,15 +220,15 @@ fn status_away_maps_to_yellow() {
 
     let fill_color = discrete_color_for_status(&tokens, "away");
     assert_eq!(
-        fill_color, "#FFB800",
-        "discrete mapping for away should resolve to #FFB800, got {fill_color:?}"
+        fill_color, "#D97706",
+        "discrete mapping for away should resolve to #D97706, got {fill_color:?}"
     );
 }
 
-// ─── Test 3: status=busy → fill #FF4444 ──────────────────────────────────────
+// ─── Test 3: status=busy → fill #DC2626 ──────────────────────────────────────
 
 /// WHEN status=busy is published THEN the discrete binding resolves the fill
-/// attribute to #FF4444, and publishing succeeds.
+/// attribute to #DC2626, and publishing succeeds.
 ///
 /// Source: spec.md §Scenario: Busy status renders red
 /// [hud-tjq8.2]
@@ -258,15 +258,15 @@ fn status_busy_maps_to_red() {
 
     let fill_color = discrete_color_for_status(&tokens, "busy");
     assert_eq!(
-        fill_color, "#FF4444",
-        "discrete mapping for busy should resolve to #FF4444, got {fill_color:?}"
+        fill_color, "#DC2626",
+        "discrete mapping for busy should resolve to #DC2626, got {fill_color:?}"
     );
 }
 
-// ─── Test 4: status=offline → fill #666666 ───────────────────────────────────
+// ─── Test 4: status=offline → fill #6B7280 ───────────────────────────────────
 
 /// WHEN status=offline is published THEN the discrete binding resolves the fill
-/// attribute to #666666, and publishing succeeds.
+/// attribute to #6B7280, and publishing succeeds.
 ///
 /// Source: spec.md §Scenario: Offline status renders gray
 /// [hud-tjq8.2]
@@ -296,8 +296,8 @@ fn status_offline_maps_to_gray() {
 
     let fill_color = discrete_color_for_status(&tokens, "offline");
     assert_eq!(
-        fill_color, "#666666",
-        "discrete mapping for offline should resolve to #666666, got {fill_color:?}"
+        fill_color, "#6B7280",
+        "discrete mapping for offline should resolve to #6B7280, got {fill_color:?}"
     );
 }
 
@@ -338,7 +338,7 @@ fn status_invalid_enum_value_rejected() {
 // ─── Test 6: Discrete binding snaps — transition_ms ignored for enums ─────────
 
 /// WHEN status=online is published with transition_ms=500, then status=busy is
-/// published, THEN the fill snaps immediately to #FF4444 with no interpolation.
+/// published, THEN the fill snaps immediately to #DC2626 with no interpolation.
 ///
 /// Enum parameters always snap to new values (spec §Widget Parameter
 /// Interpolation: "string / enum: snap to new value at t=0").  transition_ms
@@ -395,7 +395,7 @@ fn status_discrete_snap_ignores_transition_ms() {
         other => panic!("expected Enum(\"busy\") for status after snap, got {other:?}"),
     }
 
-    // Binding resolves to #FF4444 — no interpolation between online and busy.
+    // Binding resolves to #DC2626 — no interpolation between online and busy.
     let bundle = load_fixture(&tokens);
     let layer = &bundle.definition.layers[0];
     let status_binding = layer
@@ -414,8 +414,8 @@ fn status_discrete_snap_ignores_transition_ms() {
     .expect("discrete binding should resolve");
 
     assert_eq!(
-        resolved, "#FF4444",
-        "discrete binding for busy should resolve to #FF4444 (no interpolation), got {resolved:?}"
+        resolved, "#DC2626",
+        "discrete binding for busy should resolve to #DC2626 (no interpolation), got {resolved:?}"
     );
 }
 
