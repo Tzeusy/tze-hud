@@ -2156,10 +2156,12 @@ impl Compositor {
         policy: &RenderingPolicy,
         opacity: f32,
     ) -> Vec<TextItem> {
+        const STATUS_BAR_MAX_ENTRIES: usize = 8;
         let slot_h = Self::stack_slot_height(policy);
 
         sorted
             .iter()
+            .take(STATUS_BAR_MAX_ENTRIES)
             .enumerate()
             .map(|(i, (k, v))| {
                 let entry_y = zy + i as f32 * slot_h;
