@@ -930,6 +930,13 @@ pub struct Compositor {
     failed_icon_paths: HashSet<ResourceId>,
 }
 
+/// Partitioned rounded-rectangle draw commands organized by layer.
+pub struct LayerPartitionedRoundedRectCmds {
+    pub background: Vec<RoundedRectDrawCmd>,
+    pub content: Vec<RoundedRectDrawCmd>,
+    pub chrome: Vec<RoundedRectDrawCmd>,
+}
+
 impl Compositor {
     /// Create a new headless compositor.
     ///
@@ -4320,6 +4327,190 @@ impl Compositor {
     ///
     /// # Layer filtering
     ///
+    /// Collect all rounded-rectangle draw commands in a single pass, partitioned by layer.
+    ///
+    /// Zones with `backdrop_radius` in their `RenderingPolicy` are collected and
+    /// partitioned into separate vectors for Background, Content, and Chrome layers.
+    /// This replaces three separate calls to `collect_rounded_rect_cmds` with one
+    /// efficient pass through the zone registry.
+    ///
+    /// These zones are excluded from the flat-rect backdrop pass
+    /// (`render_zone_content`) and rendered instead by `encode_rounded_rect_pass`
+    /// using the SDF pipeline.
+    ///
+    /// Mirrors the backdrop-resolution logic in `render_zone_content` so color
+    /// derivation (severity tokens, urgency colors, opacity) is consistent.
+    fn collect_all_rounded_rect_cmds(
+        &self,
+        scene: &SceneGraph,
+        sw: f32,
+        sh: f32,
+    ) -> LayerPartitionedRoundedRectCmds {
+        let mut result = LayerPartitionedRoundedRectCmds {
+            background: Vec::new(),
+            content: Vec::new(),
+            chrome: Vec::new(),
+        };
+
+        for (zone_name, publishes) in &scene.zone_registry.active_publishes {
+            if publishes.is_empty() {
+                continue;
+            }
+            let zone_def = match scene.zone_registry.zones.get(zone_name) {
+                Some(z) => z,
+                None => continue,
+            };
+
+            // Only collect zones with a backdrop_radius — others use the flat rect path.
+            let radius = match zone_def.rendering_policy.backdrop_radius {
+                Some(r) if r > 0.0 => r,
+                _ => continue,
+            };
+
+            let policy = &zone_def.rendering_policy;
+            let (x, y, w, h) = Self::resolve_zone_geometry(&zone_def.geometry_policy, sw, sh);
+            let max_r_zone = (w * 0.5).min(h * 0.5).max(0.0);
+            let radius = radius.min(max_r_zone);
+
+            let anim_opacity = self
+                .zone_animation_states
+                .get(zone_name)
+                .map(|s| s.current_opacity())
+                .unwrap_or(1.0);
+
+            match zone_def.contention_policy {
+                ContentionPolicy::Stack { .. } => {
+                    let slot_h = Self::stack_slot_height(policy);
+                    let effective_h = if is_alert_banner_zone(zone_name) {
+                        publishes.len() as f32 * slot_h
+                    } else {
+                        h
+                    };
+
+                    let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
+                        sort_alert_banner_indices(publishes)
+                    } else {
+                        (0..publishes.len()).rev().collect()
+                    };
+
+                    for (slot_idx, &pub_idx) in ordered_indices.iter().enumerate() {
+                        let record = &publishes[pub_idx];
+                        let slot_y = y + slot_idx as f32 * slot_h;
+                        if slot_y >= y + effective_h {
+                            break;
+                        }
+                        let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
+
+                        let pub_opacity = self.pub_opacity(zone_name, record);
+                        let combined_opacity = (anim_opacity * pub_opacity).clamp(0.0, 1.0);
+
+                        let is_notification_content =
+                            matches!(&record.content, ZoneContent::Notification(_));
+                        let backdrop_rgba: Option<Rgba> = match &record.content {
+                            ZoneContent::SolidColor(rgba) => Some(*rgba),
+                            ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
+                            ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                                if policy.backdrop.is_some() {
+                                    Some(urgency_to_severity_color(n.urgency, &self.token_map))
+                                } else {
+                                    None
+                                }
+                            }
+                            ZoneContent::Notification(n) => {
+                                if policy.backdrop.is_some() {
+                                    let mut color =
+                                        urgency_to_notification_color(n.urgency, &self.token_map);
+                                    color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                    Some(color)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => policy.backdrop,
+                        };
+
+                        if let Some(mut rgba) = backdrop_rgba {
+                            if !is_notification_content || is_alert_banner_zone(zone_name) {
+                                if let Some(opacity) = policy.backdrop_opacity {
+                                    rgba.a = opacity.clamp(0.0, 1.0);
+                                }
+                            }
+                            rgba.a *= combined_opacity;
+                            let slot_radius =
+                                radius.min((w * 0.5).min(effective_slot_h * 0.5).max(0.0));
+                            let cmd = RoundedRectDrawCmd {
+                                x,
+                                y: slot_y,
+                                width: w,
+                                height: effective_slot_h,
+                                radius: slot_radius,
+                                color: self.gpu_color(rgba),
+                            };
+                            match zone_def.layer_attachment {
+                                LayerAttachment::Background => result.background.push(cmd),
+                                LayerAttachment::Content => result.content.push(cmd),
+                                LayerAttachment::Chrome => result.chrome.push(cmd),
+                            }
+                        }
+                    }
+                }
+                ContentionPolicy::MergeByKey { .. }
+                | ContentionPolicy::LatestWins
+                | ContentionPolicy::Replace => {
+                    let latest = &publishes[publishes.len() - 1];
+                    let is_notification_content =
+                        matches!(&latest.content, ZoneContent::Notification(_));
+                    let backdrop_rgba: Option<Rgba> = match &latest.content {
+                        ZoneContent::SolidColor(rgba) => Some(*rgba),
+                        ZoneContent::StaticImage(_) => Some(STATIC_IMAGE_PLACEHOLDER_COLOR),
+                        ZoneContent::Notification(n) if is_alert_banner_zone(zone_name) => {
+                            if policy.backdrop.is_some() {
+                                Some(urgency_to_severity_color(n.urgency, &self.token_map))
+                            } else {
+                                None
+                            }
+                        }
+                        ZoneContent::Notification(n) => {
+                            if policy.backdrop.is_some() {
+                                let mut color =
+                                    urgency_to_notification_color(n.urgency, &self.token_map);
+                                color.a = NOTIFICATION_BACKDROP_OPACITY;
+                                Some(color)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => policy.backdrop,
+                    };
+
+                    if let Some(mut rgba) = backdrop_rgba {
+                        if !is_notification_content || is_alert_banner_zone(zone_name) {
+                            if let Some(opacity) = policy.backdrop_opacity {
+                                rgba.a = opacity.clamp(0.0, 1.0);
+                            }
+                        }
+                        rgba.a *= anim_opacity.clamp(0.0, 1.0);
+                        let cmd = RoundedRectDrawCmd {
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                            radius,
+                            color: self.gpu_color(rgba),
+                        };
+                        match zone_def.layer_attachment {
+                            LayerAttachment::Background => result.background.push(cmd),
+                            LayerAttachment::Content => result.content.push(cmd),
+                            LayerAttachment::Chrome => result.chrome.push(cmd),
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
     /// When `only_layer` is `Some(layer)`, only zones matching that layer are
     /// included.  Pass `None` to collect all layers.
     fn collect_rounded_rect_cmds(
