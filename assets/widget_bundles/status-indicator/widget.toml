@@ -3,8 +3,9 @@
 # This is the canonical production-quality status-indicator widget, demonstrating:
 # - Discrete binding: status enum → indicator fill color (four states)
 # - Direct binding: label → text-content
-# - All colors via {{token.key}} placeholders — zero hardcoded hex values
-# - 48x48 viewBox: compact circle indicator with label below
+# - SVG template colors via {{token.key}} placeholders; enum state colors
+#   are literal hex values in the discrete value_map (intentional)
+# - 48x56 viewBox: compact circle indicator with label below
 #
 # Registered as "status-indicator" in the WidgetRegistry when loaded from
 # assets/widget_bundles/status-indicator/.

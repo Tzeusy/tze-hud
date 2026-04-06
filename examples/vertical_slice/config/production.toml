@@ -89,7 +89,7 @@ instance_id  = "main-progress"
 
 [tabs.widgets.geometry]
 x      = 10
-y      = 400
+y      = 1040
 width  = 300
 height = 20
 
