@@ -121,7 +121,7 @@ async fn run_headless(dev_mode: bool) -> Result<(), Box<dyn std::error::Error>> 
 
     let runtime = HeadlessRuntime::new(config).await?;
     let _server = runtime.start_grpc_server().await?;
-    println!("Runtime initialized: 1920x1080, gRPC on [::1]:{GRPC_PORT}\n");
+    println!("Runtime initialized: 1920x1080, gRPC on 127.0.0.1:{GRPC_PORT}\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // PHASE 1: Session Establishment (tasks.md §1.1–1.2)
@@ -338,7 +338,7 @@ pub async fn do_content_update(
 
     #[allow(deprecated)]
     let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
-        "http://[::1]:{port}"
+        "http://127.0.0.1:{port}"
     ))
     .await?;
 
@@ -813,7 +813,7 @@ async fn establish_session_with(
     // All session traffic — handshake, mutations, events, heartbeats,
     // lease management — flows over this one stream per agent.
     #[allow(deprecated)]
-    let mut session_client = HudSessionClient::connect(format!("http://[::1]:{port}")).await?;
+    let mut session_client = HudSessionClient::connect(format!("http://127.0.0.1:{port}")).await?;
 
     // Channel for client → server messages.  Buffer = 64 gives the agent
     // headroom during bursts (e.g., mutation batches) without unbounded growth.
@@ -1005,7 +1005,7 @@ pub async fn request_lease(
     // each phase is independently testable in unit tests without coupling.
     #[allow(deprecated)]
     let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
-        "http://[::1]:{port}"
+        "http://127.0.0.1:{port}"
     ))
     .await?;
 
@@ -1279,7 +1279,7 @@ pub async fn create_tile_batch(
     // ── 1. Open a new gRPC session ─────────────────────────────────────────
     #[allow(deprecated)]
     let mut session_client = session_proto::hud_session_client::HudSessionClient::connect(format!(
-        "http://[::1]:{port}"
+        "http://127.0.0.1:{port}"
     ))
     .await?;
 
@@ -1796,7 +1796,7 @@ mod tests {
     /// the gRPC server starts; there is a brief TOCTOU window, but this is the
     /// same pattern used across the integration test suite.
     fn ephemeral_port() -> u16 {
-        let listener = std::net::TcpListener::bind("[::1]:0").expect("bind ephemeral port");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let port = listener.local_addr().expect("get local addr").port();
         drop(listener);
         port
@@ -1941,7 +1941,7 @@ mod tests {
         // ── 1. Open a session ─────────────────────────────────────────────────
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
                 .await
                 .expect("connect");
 
@@ -2329,7 +2329,7 @@ mod tests {
         // Open a session and acquire a lease.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
                 .await
                 .expect("connect");
 
@@ -2586,7 +2586,7 @@ mod tests {
         // Open session and acquire lease.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
                 .await
                 .expect("connect");
 
@@ -3027,7 +3027,7 @@ mod tests {
         //       rejected. This simulates the "expired / unknown lease" path.
         #[allow(deprecated)]
         let mut session_client =
-            sp::hud_session_client::HudSessionClient::connect(format!("http://[::1]:{port}"))
+            sp::hud_session_client::HudSessionClient::connect(format!("http://127.0.0.1:{port}"))
                 .await
                 .expect("connect");
 

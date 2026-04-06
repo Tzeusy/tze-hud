@@ -722,7 +722,7 @@ mod tests {
     async fn test_headless_grpc_server_starts() {
         // Bind to port 0 to get an ephemeral port, then release the listener
         // before tonic binds. This avoids hardcoded ports that may conflict in CI.
-        let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let free_port = listener.local_addr().unwrap().port();
         drop(listener);
 
