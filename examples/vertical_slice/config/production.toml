@@ -46,6 +46,7 @@ paths = ["../../../profiles"]
 [component_profiles]
 subtitle      = "exemplar-subtitle"
 alert-banner  = "exemplar-alert-banner"
+notification  = "notification-stack-exemplar"
 
 # Widget bundle directories scanned at startup.
 # Paths are resolved relative to this config file's parent directory

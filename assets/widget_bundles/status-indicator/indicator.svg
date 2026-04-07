@@ -1,30 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Indicator layer for the production status-indicator widget.
-     Contains a colored status circle (bound to "status" via discrete mapping)
-     and a label text element (bound to "label" via text-content binding).
+<!-- Compact top-right status indicator with delayed-hover tooltip.
 
-     Token placeholders ({{token.key}}) are resolved at bundle load time against
-     the global token map — never at render time. Zero hardcoded hex colors in
-     the circle stroke and label fill; discrete value_map provides the status
-     colors in widget.toml.
+     Bound element IDs:
+       indicator-fill  <- status (discrete fill color)
+       status-glyph    <- status (discrete text-content icon glyph)
+       label-text      <- label (legacy direct text-content compatibility)
+       tooltip-group   <- tooltip_visible (linear opacity 0..1)
+       tooltip-label   <- label (direct text-content)
+       tooltip-reason  <- reason (direct text-content)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 252 96" width="252" height="96">
+  <!-- Small icon badge; slightly translucent to avoid fully blocking content. -->
+  <g id="icon-group" opacity="0.8">
+    <rect id="icon-shadow" x="224" y="4" width="20" height="20" rx="10"
+          fill="#000000" fill-opacity="0.25"/>
+    <rect id="indicator-fill" x="223" y="3" width="20" height="20" rx="10"
+          fill="#6B7280" stroke="{{token.color.border.default}}" stroke-width="1.2"/>
+    <text id="status-glyph" x="233" y="17"
+          text-anchor="middle"
+          font-family="sans-serif" font-size="12" font-weight="700"
+          fill="#FFFFFF">×</text>
+  </g>
 
-     Element IDs referenced in widget.toml bindings:
-       "indicator-fill" — circle; fill color driven by "status" discrete mapping
-       "label-text"     — text element; text content driven by "label" -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 56" width="48" height="56">
-  <!-- Status indicator circle: fill driven by "status" discrete mapping.
-       Default fill (offline gray) is overridden by the binding at render time. -->
-  <circle id="indicator-fill" cx="24" cy="20" r="14"
-          fill="#6B7280"
-          stroke="{{token.color.border.default}}" stroke-width="1.5"/>
-  <!-- Label text: centered below the circle.
-       data-role="text" marks this element for DualLayer readability validation.
-       stroke + fill present for legibility on varied backgrounds. -->
-  <text id="label-text" x="24" y="46" text-anchor="middle"
-        data-role="text"
+  <!-- Hidden compatibility text node retained for legacy label-text binding tests. -->
+  <text id="label-text" x="0" y="0"
         font-family="sans-serif" font-size="10"
-        fill="{{token.color.text.secondary}}"
-        stroke="{{token.color.outline.default}}"
-        stroke-width="1"
-        paint-order="stroke fill"></text>
+        fill="{{token.color.text.secondary}}" opacity="0"></text>
+
+  <!-- Tooltip panel; hidden by default and revealed by tooltip_visible binding. -->
+  <g id="tooltip-group" opacity="0">
+    <rect x="12" y="30" width="228" height="56" rx="8"
+          fill="#111827" fill-opacity="0.92"
+          stroke="{{token.color.border.default}}" stroke-width="1"/>
+    <text x="18" y="46"
+          font-family="sans-serif" font-size="10" font-weight="700"
+          fill="{{token.color.text.secondary}}">Status</text>
+    <text id="tooltip-label" x="58" y="46"
+          font-family="sans-serif" font-size="10" font-weight="700"
+          fill="#F9FAFB"></text>
+    <text id="tooltip-reason" x="18" y="64"
+          data-role="text"
+          font-family="sans-serif" font-size="9"
+          fill="#E5E7EB"></text>
+    <text x="18" y="78"
+          font-family="sans-serif" font-size="8"
+          fill="#9CA3AF">Hover 3s for status reason</text>
+  </g>
 </svg>

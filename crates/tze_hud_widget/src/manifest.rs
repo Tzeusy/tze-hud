@@ -68,6 +68,9 @@ pub struct RawManifest {
     pub default_contention_policy: Option<String>,
     /// Optional default rendering policy name.
     pub default_rendering_policy: Option<String>,
+    /// Optional runtime-managed hover behavior.
+    #[serde(default)]
+    pub hover_behavior: Option<RawHoverBehavior>,
 }
 
 /// A single parameter declaration in `[[parameter_schema]]`.
@@ -130,4 +133,28 @@ pub struct RawBinding {
     /// For "discrete" mapping: enum_value → attribute_value lookup table.
     #[serde(default)]
     pub value_map: BTreeMap<String, String>,
+}
+
+/// Runtime-managed hover behavior declaration.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawHoverBehavior {
+    /// Widget-local trigger rectangle in normalized coordinates.
+    pub trigger_rect: Option<RawNormalizedRect>,
+    /// Delay before visibility param is switched to `visible_value`.
+    pub delay_ms: Option<u32>,
+    /// Parameter name to drive on hover transitions.
+    pub visibility_param: Option<String>,
+    /// Value written when hover is inactive.
+    pub hidden_value: Option<f32>,
+    /// Value written when hover dwell is satisfied.
+    pub visible_value: Option<f32>,
+}
+
+/// Normalized rectangle in widget-local coordinates.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RawNormalizedRect {
+    pub x_pct: Option<f32>,
+    pub y_pct: Option<f32>,
+    pub width_pct: Option<f32>,
+    pub height_pct: Option<f32>,
 }

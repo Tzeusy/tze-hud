@@ -1,18 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Indicator layer for the reference status-indicator widget fixture.
-     Contains the status circle (bound to "status" via discrete mapping)
-     and the label text element (bound to "label" via text-content synthetic target).
+<!-- Reference compact status indicator fixture.
+     Bound IDs:
+       indicator-fill, status-glyph, label-text, tooltip-group, tooltip-label, tooltip-reason -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 252 96" width="252" height="96">
+  <g id="icon-group" opacity="0.8">
+    <rect id="icon-shadow" x="224" y="4" width="20" height="20" rx="10"
+          fill="#000000" fill-opacity="0.25"/>
+    <rect id="indicator-fill" x="223" y="3" width="20" height="20" rx="10"
+          fill="#6B7280" stroke="{{token.color.border.default}}" stroke-width="1.2"/>
+    <text id="status-glyph" x="233" y="17"
+          text-anchor="middle"
+          font-family="sans-serif" font-size="12" font-weight="700"
+          fill="#FFFFFF">×</text>
+  </g>
 
-     Element IDs referenced in widget.toml bindings:
-       - "indicator-fill"  — circle, fill color driven by "status" discrete mapping
-       - "label-text"      — SVG text element, text content driven by "label" -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
-  <!-- Status indicator circle: fill driven by "status" discrete mapping -->
-  <circle id="indicator-fill" cx="24" cy="20" r="14"
-          fill="#666666" 
-          stroke="{{token.color.border.default}}" stroke-width="1.5"/>
-  <!-- Label text: text content driven by "label" -->
-  <text id="label-text" x="24" y="44" text-anchor="middle"
+  <text id="label-text" x="0" y="0"
         font-family="sans-serif" font-size="10"
-        fill="{{token.color.text.secondary}}"></text>
+        fill="{{token.color.text.secondary}}" opacity="0"></text>
+
+  <g id="tooltip-group" opacity="0">
+    <rect x="12" y="30" width="228" height="56" rx="8"
+          fill="#111827" fill-opacity="0.92"
+          stroke="{{token.color.border.default}}" stroke-width="1"/>
+    <text x="18" y="46"
+          font-family="sans-serif" font-size="10" font-weight="700"
+          fill="{{token.color.text.secondary}}">Status</text>
+    <text id="tooltip-label" x="58" y="46"
+          font-family="sans-serif" font-size="10" font-weight="700"
+          fill="#F9FAFB"></text>
+    <text id="tooltip-reason" x="18" y="64"
+          font-family="sans-serif" font-size="9"
+          fill="#E5E7EB"></text>
+  </g>
 </svg>

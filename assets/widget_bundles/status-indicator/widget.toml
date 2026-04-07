@@ -1,25 +1,16 @@
-# Production status-indicator widget bundle — token-driven exemplar.
+# Production status-indicator widget bundle.
 #
-# This is the canonical production-quality status-indicator widget, demonstrating:
-# - Discrete binding: status enum → indicator fill color (four states)
-# - Direct binding: label → text-content
-# - SVG template colors via {{token.key}} placeholders; enum state colors
-#   are literal hex values in the discrete value_map (intentional)
-# - 48x56 viewBox: compact circle indicator with label below
+# Visual contract:
+# - Compact top-right badge (icon-first; no always-visible label text)
+# - Tooltip panel appears only when runtime drives `tooltip_visible` to 1.0
+# - Tooltip content binds to `label` and `reason`
 #
-# Registered as "status-indicator" in the WidgetRegistry when loaded from
+# Registered as "status-indicator" in the WidgetRegistry when loaded from:
 # assets/widget_bundles/status-indicator/.
-#
-# Parameters:
-#   status - Connection/presence state; drives indicator fill color (enum)
-#   label  - Display label below the circle (string, max 16 bytes)
-#
-# Token placeholders ({{token.key}}) in layer SVGs are resolved against the
-# global token map at bundle load time — never at render time.
 
 name        = "status-indicator"
 version     = "1.0.0"
-description = "Status indicator widget: colored circle with label, driven by enum binding"
+description = "Compact icon status indicator with delayed-hover tooltip"
 default_contention_policy = "LatestWins"
 
 [[parameter_schema]]
@@ -38,8 +29,35 @@ default = ""
 [parameter_schema.constraints]
 string_max_bytes = 16
 
-# Indicator layer: circle fill driven by "status" discrete mapping,
-# label text driven by "label" direct binding.
+[[parameter_schema]]
+name    = "reason"
+type    = "string"
+default = ""
+
+[parameter_schema.constraints]
+string_max_bytes = 160
+
+[[parameter_schema]]
+name    = "tooltip_visible"
+type    = "f32"
+default = 0.0
+
+[parameter_schema.constraints]
+f32_min = 0.0
+f32_max = 1.0
+
+[hover_behavior]
+delay_ms = 1500
+visibility_param = "tooltip_visible"
+hidden_value = 0.0
+visible_value = 1.0
+
+[hover_behavior.trigger_rect]
+x_pct = 0.88
+y_pct = 0.06
+width_pct = 0.08
+height_pct = 0.22
+
 [[layers]]
 svg_file = "indicator.svg"
 
@@ -56,7 +74,39 @@ busy    = "#DC2626"
 offline = "#6B7280"
 
 [[layers.bindings]]
+param            = "status"
+target_element   = "status-glyph"
+target_attribute = "text-content"
+mapping          = "discrete"
+
+[layers.bindings.value_map]
+online  = "✓"
+away    = "…"
+busy    = "!"
+offline = "×"
+
+[[layers.bindings]]
+param            = "tooltip_visible"
+target_element   = "tooltip-group"
+target_attribute = "opacity"
+mapping          = "linear"
+attr_min         = 0.0
+attr_max         = 1.0
+
+[[layers.bindings]]
 param            = "label"
 target_element   = "label-text"
+target_attribute = "text-content"
+mapping          = "direct"
+
+[[layers.bindings]]
+param            = "label"
+target_element   = "tooltip-label"
+target_attribute = "text-content"
+mapping          = "direct"
+
+[[layers.bindings]]
+param            = "reason"
+target_element   = "tooltip-reason"
 target_attribute = "text-content"
 mapping          = "direct"

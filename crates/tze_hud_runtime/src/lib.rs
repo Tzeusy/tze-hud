@@ -101,6 +101,7 @@ pub mod subscriptions;
 pub mod tab_switch_trigger;
 pub mod threads;
 pub mod trace_capture;
+mod widget_hover;
 pub mod widget_startup;
 pub mod window;
 pub mod windowed;

@@ -29,6 +29,7 @@
 //! above zone tiles.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use tze_hud_scene::DegradationLevel;
@@ -332,6 +333,23 @@ pub struct WidgetAnimationState {
 
 // ─── Standalone SVG rasterization (CPU-only, no GPU) ─────────────────────────
 
+fn widget_usvg_options() -> resvg::usvg::Options<'static> {
+    let mut opts = resvg::usvg::Options::default();
+    opts.fontdb = shared_widget_fontdb();
+    opts
+}
+
+fn shared_widget_fontdb() -> Arc<resvg::usvg::fontdb::Database> {
+    static FONTDB: OnceLock<Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
+    FONTDB
+        .get_or_init(|| {
+            let mut db = resvg::usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            Arc::new(db)
+        })
+        .clone()
+}
+
 /// Rasterize all SVG layers for a widget definition with parameter bindings applied.
 ///
 /// This is the **CPU-only** portion of the widget rendering pipeline — SVG string
@@ -380,7 +398,7 @@ pub fn rasterize_svg_layers(
         }
 
         // Parse modified SVG into usvg::Tree.
-        let opts = resvg::usvg::Options::default();
+        let opts = widget_usvg_options();
         let tree = match resvg::usvg::Tree::from_str(&modified_svg, &opts) {
             Ok(t) => t,
             Err(e) => {
@@ -877,7 +895,7 @@ impl WidgetRenderer {
             };
 
             // Resolve pixel geometry from the instance's geometry policy.
-            let (px, py, pw, ph) =
+            let (raw_x, raw_y, _pw, _ph) =
                 resolve_pixel_geometry(&instance.geometry_override, surf_w, surf_h).unwrap_or_else(
                     || {
                         // Fall back to full-screen if geometry not set
@@ -893,6 +911,15 @@ impl WidgetRenderer {
                         }
                     },
                 );
+            // Pixel-snap widget quads so text-heavy SVGs remain crisp on screen.
+            let (px, py, pw, ph) = snap_composite_rect(
+                raw_x,
+                raw_y,
+                entry.width as f32,
+                entry.height as f32,
+                surf_w,
+                surf_h,
+            );
 
             // Build NDC quad vertices with UV coordinates.
             let vertices = widget_quad_vertices(px, py, pw, ph, surf_w, surf_h);
@@ -967,6 +994,42 @@ fn resolve_pixel_geometry(
         }
         None => None,
     }
+}
+
+/// Snap a composite rectangle to integer pixels and clamp it to the surface.
+fn snap_composite_rect(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    surf_w: f32,
+    surf_h: f32,
+) -> (f32, f32, f32, f32) {
+    let mut pw = w.max(1.0).round();
+    let mut ph = h.max(1.0).round();
+    if surf_w.is_finite() && surf_w > 0.0 {
+        pw = pw.min(surf_w.round().max(1.0));
+    }
+    if surf_h.is_finite() && surf_h > 0.0 {
+        ph = ph.min(surf_h.round().max(1.0));
+    }
+
+    let mut px = x.round();
+    let mut py = y.round();
+    if surf_w.is_finite() && surf_w > 0.0 {
+        let max_x = (surf_w - pw).max(0.0);
+        px = px.clamp(0.0, max_x);
+    } else {
+        px = px.max(0.0);
+    }
+    if surf_h.is_finite() && surf_h > 0.0 {
+        let max_y = (surf_h - ph).max(0.0);
+        py = py.clamp(0.0, max_y);
+    } else {
+        py = py.max(0.0);
+    }
+
+    (px, py, pw, ph)
 }
 
 // ─── Vertex types ─────────────────────────────────────────────────────────────
@@ -1461,6 +1524,24 @@ mod tests {
         }
         // Verify non-trivial output
         assert_eq!(pixmap.data().len(), 512 * 512 * 4);
+    }
+
+    #[test]
+    fn snap_composite_rect_rounds_fractional_origin() {
+        let (x, y, w, h) = snap_composite_rect(2213.3333, 10.6667, 336.0, 128.0, 2560.0, 1440.0);
+        assert_eq!(x, 2213.0);
+        assert_eq!(y, 11.0);
+        assert_eq!(w, 336.0);
+        assert_eq!(h, 128.0);
+    }
+
+    #[test]
+    fn snap_composite_rect_clamps_to_surface_bounds() {
+        let (x, y, w, h) = snap_composite_rect(2500.9, 1430.2, 120.0, 40.0, 2560.0, 1440.0);
+        assert_eq!(x, 2440.0);
+        assert_eq!(y, 1400.0);
+        assert_eq!(w, 120.0);
+        assert_eq!(h, 40.0);
     }
 
     // ── Reference gauge rasterization tests ──────────────────────────────────

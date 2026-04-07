@@ -23,12 +23,14 @@ use std::path::{Path, PathBuf};
 use tze_hud_resource::validation::parse_svg_dimensions;
 use tze_hud_scene::types::{
     ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetBinding, WidgetBindingMapping,
-    WidgetDefinition, WidgetParamConstraints, WidgetParamType, WidgetParameterDeclaration,
-    WidgetParameterValue, WidgetSvgLayer,
+    WidgetDefinition, WidgetHoverBehavior, WidgetNormalizedRect, WidgetParamConstraints,
+    WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue, WidgetSvgLayer,
 };
 
 use crate::error::BundleError;
-use crate::manifest::{RawBinding, RawManifest, RawParameterDeclaration};
+use crate::manifest::{
+    RawBinding, RawHoverBehavior, RawManifest, RawNormalizedRect, RawParameterDeclaration,
+};
 use crate::svg_ids::collect_svg_element_ids;
 use crate::svg_readability::{SvgReadabilityTechnique, check_svg_readability};
 
@@ -326,7 +328,11 @@ fn load_bundle_dir_inner(
         })
         .collect();
 
-    // Step 5: Load SVG files and resolve bindings.
+    // Step 5: Parse optional runtime hover behavior.
+    let hover_behavior =
+        parse_hover_behavior(raw.hover_behavior.as_ref(), &parameter_schema, path_str)?;
+
+    // Step 6: Load SVG files and resolve bindings.
     let mut svg_contents: HashMap<String, Vec<u8>> = HashMap::new();
     let mut layers: Vec<WidgetSvgLayer> = Vec::new();
 
@@ -419,7 +425,7 @@ fn load_bundle_dir_inner(
         });
     }
 
-    // Step 6: Build WidgetDefinition.
+    // Step 7: Build WidgetDefinition.
     let contention_policy =
         parse_contention_policy(raw.default_contention_policy.as_deref(), path_str)?;
     let rendering_policy =
@@ -444,6 +450,7 @@ fn load_bundle_dir_inner(
         default_rendering_policy: rendering_policy,
         default_contention_policy: contention_policy,
         ephemeral: false,
+        hover_behavior,
     };
 
     tracing::debug!(
@@ -605,6 +612,123 @@ fn parse_default_value(
             let s = raw.as_str().ok_or_else(type_err)?;
             Ok(WidgetParameterValue::Enum(s.to_string()))
         }
+    }
+}
+
+fn parse_hover_behavior(
+    raw: Option<&RawHoverBehavior>,
+    parameter_schema: &[WidgetParameterDeclaration],
+    path_str: &str,
+) -> Result<Option<WidgetHoverBehavior>, BundleError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+
+    let trigger_rect_raw =
+        raw.trigger_rect
+            .as_ref()
+            .ok_or_else(|| BundleError::InvalidManifest {
+                path: path_str.to_string(),
+                detail: "hover_behavior is missing required table 'trigger_rect'".to_string(),
+            })?;
+    let trigger_rect = parse_normalized_rect(trigger_rect_raw, path_str)?;
+
+    let visibility_param = raw
+        .visibility_param
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| BundleError::InvalidManifest {
+            path: path_str.to_string(),
+            detail: "hover_behavior is missing required field 'visibility_param'".to_string(),
+        })?;
+
+    let decl = parameter_schema
+        .iter()
+        .find(|p| p.name == visibility_param)
+        .ok_or_else(|| BundleError::InvalidManifest {
+            path: path_str.to_string(),
+            detail: format!(
+                "hover_behavior.visibility_param '{visibility_param}' is not in parameter_schema"
+            ),
+        })?;
+    if decl.param_type != WidgetParamType::F32 {
+        return Err(BundleError::InvalidManifest {
+            path: path_str.to_string(),
+            detail: format!(
+                "hover_behavior.visibility_param '{visibility_param}' must be type 'f32', got {:?}",
+                decl.param_type
+            ),
+        });
+    }
+
+    let delay_ms = raw.delay_ms.unwrap_or(3_000);
+    let hidden_value = raw.hidden_value.unwrap_or(0.0);
+    let visible_value = raw.visible_value.unwrap_or(1.0);
+    if !hidden_value.is_finite() || !visible_value.is_finite() {
+        return Err(BundleError::InvalidManifest {
+            path: path_str.to_string(),
+            detail: "hover_behavior hidden_value/visible_value must be finite f32".to_string(),
+        });
+    }
+
+    Ok(Some(WidgetHoverBehavior {
+        trigger_rect,
+        delay_ms,
+        visibility_param: visibility_param.to_string(),
+        hidden_value,
+        visible_value,
+    }))
+}
+
+fn parse_normalized_rect(
+    raw: &RawNormalizedRect,
+    path_str: &str,
+) -> Result<WidgetNormalizedRect, BundleError> {
+    let x_pct = raw
+        .x_pct
+        .ok_or_else(|| invalid_hover_rect(path_str, "x_pct missing"))?;
+    let y_pct = raw
+        .y_pct
+        .ok_or_else(|| invalid_hover_rect(path_str, "y_pct missing"))?;
+    let width_pct = raw
+        .width_pct
+        .ok_or_else(|| invalid_hover_rect(path_str, "width_pct missing"))?;
+    let height_pct = raw
+        .height_pct
+        .ok_or_else(|| invalid_hover_rect(path_str, "height_pct missing"))?;
+
+    let all = [x_pct, y_pct, width_pct, height_pct];
+    if all.iter().any(|v| !v.is_finite()) {
+        return Err(invalid_hover_rect(
+            path_str,
+            "all values must be finite f32",
+        ));
+    }
+    if x_pct < 0.0 || y_pct < 0.0 || width_pct <= 0.0 || height_pct <= 0.0 {
+        return Err(invalid_hover_rect(
+            path_str,
+            "x_pct/y_pct must be >= 0 and width_pct/height_pct must be > 0",
+        ));
+    }
+    if x_pct + width_pct > 1.0 || y_pct + height_pct > 1.0 {
+        return Err(invalid_hover_rect(
+            path_str,
+            "trigger_rect must stay within normalized [0,1] bounds",
+        ));
+    }
+
+    Ok(WidgetNormalizedRect {
+        x_pct,
+        y_pct,
+        width_pct,
+        height_pct,
+    })
+}
+
+fn invalid_hover_rect(path_str: &str, detail: &str) -> BundleError {
+    BundleError::InvalidManifest {
+        path: path_str.to_string(),
+        detail: format!("hover_behavior.trigger_rect invalid: {detail}"),
     }
 }
 

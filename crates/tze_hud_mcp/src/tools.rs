@@ -2587,6 +2587,7 @@ mod tests {
             default_rendering_policy: RenderingPolicy::default(),
             default_contention_policy: CP::LatestWins,
             ephemeral: false,
+            hover_behavior: None,
         });
 
         scene.widget_registry.register_instance(WidgetInstance {

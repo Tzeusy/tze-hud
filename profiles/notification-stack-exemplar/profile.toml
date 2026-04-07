@@ -9,7 +9,7 @@
 
 name        = "notification-stack-exemplar"
 version     = "1.0.0"
-description = "Notification stack exemplar — urgency-tinted backdrops, 90% opacity, body typography"
+description = "Notification stack exemplar — rounded urgency-tinted cards with stronger type hierarchy"
 
 component_type = "notification"
 
@@ -26,12 +26,15 @@ component_type = "notification"
 "color.notification.urgency.critical" = "#8B1A1A"   # deep red — critical
 
 # Base backdrop and typography tokens
-"color.text.primary"      = "#FFFFFF"
-"color.backdrop.default"  = "#1A1A2E"    # fallback when no urgency tinting
-"opacity.backdrop.opaque" = "0.9"        # satisfies OpaqueBackdrop (>= 0.8)
-"color.border.default"    = "#333355"
+"color.text.primary"      = "#F5F7FA"
+"color.backdrop.default"  = "#141A24"    # fallback when no urgency tinting
+"opacity.backdrop.opaque" = "0.92"       # satisfies OpaqueBackdrop (>= 0.8)
+"color.border.default"    = "#6E7A91"
 "typography.body.family"  = "system-ui"
-"typography.body.size"    = "16"
-"typography.body.weight"  = "400"
-"spacing.padding.medium"  = "8"
+"typography.body.size"    = "15"
+"typography.body.weight"  = "500"
+"typography.notification.body.scale"  = "0.90"
+"typography.notification.title.weight" = "700"
+"spacing.padding.medium"  = "10"
 "stroke.border.width"     = "1"
+"border.radius.medium"    = "14"

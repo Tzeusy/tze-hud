@@ -1195,6 +1195,7 @@ mod tests {
             default_rendering_policy: RenderingPolicy::default(),
             default_contention_policy: CP::LatestWins,
             ephemeral: false,
+            hover_behavior: None,
         });
 
         let default_params: HashMap<String, WidgetParameterValue> = HashMap::from([

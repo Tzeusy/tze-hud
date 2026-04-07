@@ -1914,6 +1914,33 @@ pub struct WidgetSvgLayer {
     pub bindings: Vec<WidgetBinding>,
 }
 
+/// A normalized rectangle in widget-local coordinates.
+///
+/// Coordinates are relative fractions in `[0.0, 1.0]` where:
+/// - `x_pct`, `y_pct` are the top-left origin
+/// - `width_pct`, `height_pct` are the rectangle size
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetNormalizedRect {
+    pub x_pct: f32,
+    pub y_pct: f32,
+    pub width_pct: f32,
+    pub height_pct: f32,
+}
+
+/// Runtime-managed hover behavior for a widget instance.
+///
+/// When configured, the runtime tracks cursor dwell inside `trigger_rect` and
+/// writes `visibility_param` to `visible_value` after `delay_ms`. When cursor
+/// leaves the region, it writes `hidden_value`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WidgetHoverBehavior {
+    pub trigger_rect: WidgetNormalizedRect,
+    pub delay_ms: u32,
+    pub visibility_param: std::string::String,
+    pub hidden_value: f32,
+    pub visible_value: f32,
+}
+
 /// Full widget type definition (the first level of the widget ontology).
 ///
 /// Widget types are registered at startup from asset bundles and are
@@ -1932,6 +1959,9 @@ pub struct WidgetDefinition {
     /// When true, publishes to this widget are fire-and-forget (no WidgetPublishResult).
     #[serde(default)]
     pub ephemeral: bool,
+    /// Optional runtime-managed hover behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover_behavior: Option<WidgetHoverBehavior>,
 }
 
 /// A widget instance — a widget type bound to a specific tab.

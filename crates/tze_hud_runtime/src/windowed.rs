@@ -99,7 +99,7 @@ use tze_hud_protocol::token::TokenStore;
 use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
-use tze_hud_scene::types::{ZoneContent, ZoneInteractionKind};
+use tze_hud_scene::types::{WidgetParameterValue, ZoneContent, ZoneInteractionKind};
 use tze_hud_telemetry::TelemetryCollector;
 
 use crate::channels::{
@@ -111,6 +111,9 @@ use crate::pipeline::FramePipeline;
 use crate::reload_triggers::RuntimeServiceImpl;
 use crate::runtime_context::{RuntimeContext, SharedRuntimeContext};
 use crate::threads::{CompositorReady, NetworkRuntime, ShutdownToken, spawn_compositor_thread};
+use crate::widget_hover::{
+    WidgetHoverTracker, build_hover_trackers, hidden_mutations_for_removed, tick_hover_trackers,
+};
 use crate::window::{HitRegion, WindowConfig, WindowMode};
 use crate::window::{resolve_window_mode, should_capture_pointer_event};
 
@@ -270,6 +273,10 @@ struct WindowedRuntimeState {
     /// on whether the cursor is inside any of these regions.  Empty means all
     /// events pass through.
     hit_regions: Vec<HitRegion>,
+    /// External static hit-regions configured by callers.
+    static_hit_regions: Vec<HitRegion>,
+    /// Runtime-managed widget hover trackers keyed by widget instance_name.
+    widget_hover_trackers: std::collections::HashMap<String, WidgetHoverTracker>,
     /// Pending mode switch requested at runtime (disruptive — triggers surface
     /// recreation on the next event loop tick).
     pending_mode_switch: Option<WindowMode>,
@@ -446,6 +453,7 @@ impl ApplicationHandler for WinitApp {
         }
 
         self.state.window = Some(window.clone());
+        self.refresh_widget_hover_tracking();
 
         let cfg = self.state.config.clone();
         let window_clone = window.clone();
@@ -856,6 +864,10 @@ impl ApplicationHandler for WinitApp {
 
             // ── Redraw ────────────────────────────────────────────────────
             WindowEvent::RedrawRequested => {
+                self.refresh_cursor_position_from_os();
+                self.refresh_widget_hover_tracking();
+                self.tick_widget_hover_tracking();
+                self.update_overlay_cursor_hittest();
                 // Stage 1/2 bookkeeping: check frame-ready signal and present.
                 self.maybe_present_frame();
 
@@ -881,6 +893,7 @@ impl WinitApp {
     /// - Inside a hit-region → `set_cursor_hittest(true)` (window captures events).
     /// - Outside all hit-regions → `set_cursor_hittest(false)` (events pass through).
     fn enqueue_pointer_event(&mut self, kind: PointerEventKind) {
+        self.refresh_widget_hover_tracking();
         let x = self.state.cursor_x;
         let y = self.state.cursor_y;
 
@@ -891,19 +904,9 @@ impl WinitApp {
         //
         // We toggle on every CursorMoved so the hittest tracks the cursor as it
         // moves in/out of regions continuously.
-        if self.state.effective_mode == WindowMode::Overlay {
-            let should_capture =
-                should_capture_pointer_event(WindowMode::Overlay, x, y, &self.state.hit_regions);
-            if let Some(window) = &self.state.window {
-                if let Err(e) = window.set_cursor_hittest(should_capture) {
-                    tracing::trace!(
-                        error = %e,
-                        capture = should_capture,
-                        "overlay: set_cursor_hittest failed"
-                    );
-                }
-            }
-        }
+        self.update_overlay_cursor_hittest();
+
+        self.tick_widget_hover_tracking();
 
         let channel_kind = match kind {
             PointerEventKind::Move => InputEventKind::PointerMove { x, y },
@@ -1004,7 +1007,10 @@ impl WinitApp {
         if self.state.effective_mode == WindowMode::Fullscreen {
             return; // Hit-regions unused in fullscreen mode.
         }
-        self.state.hit_regions = regions;
+        self.state.static_hit_regions = regions;
+        // Capture regions are explicit interactive regions only; hover trackers
+        // are visual-only and must not block clicks to underlying windows.
+        self.state.hit_regions = self.state.static_hit_regions.clone();
     }
 
     /// Request a runtime mode switch (disruptive — triggers surface recreation).
@@ -1077,6 +1083,137 @@ impl WinitApp {
         let (resolved_mode, _) = resolve_window_mode(new_mode);
         self.state.effective_mode = resolved_mode;
         self.state.config.window.mode = resolved_mode;
+    }
+
+    /// Rebuild runtime-managed widget hover trackers and refresh overlay hit-regions.
+    fn refresh_widget_hover_tracking(&mut self) {
+        let (surf_w, surf_h) = if let Some(window) = &self.state.window {
+            let size = window.inner_size();
+            (size.width as f32, size.height as f32)
+        } else {
+            (
+                self.state.config.window.width as f32,
+                self.state.config.window.height as f32,
+            )
+        };
+
+        let mut next_trackers: Option<std::collections::HashMap<String, WidgetHoverTracker>> = None;
+        let mut removed_mutations = Vec::new();
+        if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(scene) = state.scene.try_lock() {
+                let next =
+                    build_hover_trackers(&scene, surf_w, surf_h, &self.state.widget_hover_trackers);
+                removed_mutations =
+                    hidden_mutations_for_removed(&self.state.widget_hover_trackers, &next);
+                next_trackers = Some(next);
+            }
+        }
+        if let Some(next) = next_trackers {
+            self.state.widget_hover_trackers = next;
+        }
+        self.apply_widget_hover_mutations(removed_mutations);
+
+        // Hover tracking is decoupled from pointer capture: keep passthrough
+        // semantics unless callers explicitly registered capture regions.
+        self.state.hit_regions = self.state.static_hit_regions.clone();
+    }
+
+    /// Tick widget hover trackers and apply local parameter mutations.
+    fn tick_widget_hover_tracking(&mut self) {
+        if self.state.widget_hover_trackers.is_empty() {
+            return;
+        }
+        let mutations = tick_hover_trackers(
+            &mut self.state.widget_hover_trackers,
+            self.state.cursor_x,
+            self.state.cursor_y,
+            Instant::now(),
+        );
+        self.apply_widget_hover_mutations(mutations);
+    }
+
+    /// Apply runtime-local hover mutations to widget instance params.
+    fn apply_widget_hover_mutations(
+        &mut self,
+        mutations: Vec<crate::widget_hover::WidgetHoverMutation>,
+    ) {
+        if mutations.is_empty() {
+            return;
+        }
+
+        if let Ok(state) = self.state.shared_state.try_lock() {
+            if let Ok(mut scene) = state.scene.try_lock() {
+                for mutation in mutations {
+                    if let Err(e) = scene.set_widget_param_local(
+                        &mutation.instance_name,
+                        &mutation.param_name,
+                        WidgetParameterValue::F32(mutation.value),
+                    ) {
+                        tracing::debug!(
+                            error = %e,
+                            widget = %mutation.instance_name,
+                            param = %mutation.param_name,
+                            "widget hover: failed to apply local hover mutation"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Refresh cursor position from OS state when passthrough is active.
+    ///
+    /// In overlay mode on Windows, `set_cursor_hittest(false)` can prevent
+    /// `CursorMoved` delivery to winit. Polling global cursor position ensures
+    /// hit-testing can flip back to capture when the cursor enters an active
+    /// widget hover region.
+    fn refresh_cursor_position_from_os(&mut self) {
+        if self.state.effective_mode != WindowMode::Overlay {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use windows::Win32::Foundation::POINT;
+            use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+            let Some(window) = &self.state.window else {
+                return;
+            };
+            let window_pos = window
+                .outer_position()
+                .unwrap_or(winit::dpi::PhysicalPosition::new(0, 0));
+
+            let mut pt = POINT { x: 0, y: 0 };
+            // SAFETY: GetCursorPos writes to the provided POINT and has no
+            // additional safety preconditions.
+            let ok = unsafe { GetCursorPos(&mut pt).is_ok() };
+            if ok {
+                self.state.cursor_x = (pt.x - window_pos.x) as f32;
+                self.state.cursor_y = (pt.y - window_pos.y) as f32;
+            }
+        }
+    }
+
+    /// Update overlay passthrough/capture state from current cursor+regions.
+    fn update_overlay_cursor_hittest(&mut self) {
+        if self.state.effective_mode != WindowMode::Overlay {
+            return;
+        }
+        let should_capture = should_capture_pointer_event(
+            WindowMode::Overlay,
+            self.state.cursor_x,
+            self.state.cursor_y,
+            &self.state.hit_regions,
+        );
+        if let Some(window) = &self.state.window {
+            if let Err(e) = window.set_cursor_hittest(should_capture) {
+                tracing::trace!(
+                    error = %e,
+                    capture = should_capture,
+                    "overlay: set_cursor_hittest failed"
+                );
+            }
+        }
     }
 
     /// Check the `FrameReadySignal` and present the frame if the compositor
@@ -1385,6 +1522,8 @@ impl WindowedRuntime {
             window: None,
             effective_mode,
             hit_regions: Vec::new(),
+            static_hit_regions: Vec::new(),
+            widget_hover_trackers: std::collections::HashMap::new(),
             pending_mode_switch: None,
             pending_widget_svgs,
             modifiers: winit::keyboard::ModifiersState::empty(),
@@ -2034,6 +2173,79 @@ mod tests {
         let cfg = WindowedConfig::default();
         assert!(cfg.window.width > 0, "default width must be positive");
         assert!(cfg.window.height > 0, "default height must be positive");
+    }
+
+    #[test]
+    fn hover_tracker_region_resolves_from_widget_geometry() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        let tab_id = scene.create_tab("Main", 0).expect("create tab");
+
+        scene
+            .widget_registry
+            .register_definition(tze_hud_scene::types::WidgetDefinition {
+                id: "status-indicator".to_string(),
+                name: "status-indicator".to_string(),
+                description: "test".to_string(),
+                parameter_schema: Vec::new(),
+                layers: Vec::new(),
+                default_geometry_policy: tze_hud_scene::types::GeometryPolicy::Relative {
+                    x_pct: 0.0,
+                    y_pct: 0.0,
+                    width_pct: 1.0,
+                    height_pct: 1.0,
+                },
+                default_rendering_policy: tze_hud_scene::types::RenderingPolicy::default(),
+                default_contention_policy: tze_hud_scene::types::ContentionPolicy::LatestWins,
+                ephemeral: false,
+                hover_behavior: Some(tze_hud_scene::types::WidgetHoverBehavior {
+                    trigger_rect: tze_hud_scene::types::WidgetNormalizedRect {
+                        x_pct: 0.88,
+                        y_pct: 0.06,
+                        width_pct: 0.08,
+                        height_pct: 0.22,
+                    },
+                    delay_ms: 3_000,
+                    visibility_param: "tooltip_visible".to_string(),
+                    hidden_value: 0.0,
+                    visible_value: 1.0,
+                }),
+            });
+        scene
+            .widget_registry
+            .register_instance(tze_hud_scene::types::WidgetInstance {
+                widget_type_name: "status-indicator".to_string(),
+                tab_id,
+                geometry_override: Some(tze_hud_scene::types::GeometryPolicy::Relative {
+                    x_pct: 1660.0 / 1920.0,
+                    y_pct: 8.0 / 1080.0,
+                    width_pct: 252.0 / 1920.0,
+                    height_pct: 96.0 / 1080.0,
+                }),
+                contention_override: None,
+                instance_name: "main-status".to_string(),
+                current_params: std::collections::HashMap::new(),
+            });
+
+        let trackers =
+            build_hover_trackers(&scene, 1920.0, 1080.0, &std::collections::HashMap::new());
+        let region = trackers
+            .get("main-status")
+            .map(|t| t.region.clone())
+            .expect("main-status hover tracker must resolve");
+        assert!(
+            region.x >= 1880.0 && region.x <= 1905.0,
+            "x should sit near the icon trigger region, got {}",
+            region.x
+        );
+        assert!(
+            region.y >= 12.0 && region.y <= 18.0,
+            "y should sit near the top trigger margin, got {}",
+            region.y
+        );
+        assert!(
+            region.width >= 19.0 && region.width <= 21.0,
+            "width should match normalized trigger width"
+        );
     }
 
     // ── Network service startup ───────────────────────────────────────────────

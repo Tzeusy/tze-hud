@@ -1,11 +1,9 @@
 # Reference status-indicator widget bundle — used as a test fixture.
 #
-# This implements a simple status indicator with a coloured fill circle and a
-# text label.  The circle fill is controlled by the "status" enum parameter via
-# a discrete colour mapping.  The label text is driven by the "label" parameter.
-#
-# Colours and constraints match spec.md §Requirement: Status Indicator Discrete
-# Color Binding and §Requirement: Status Indicator Parameter Schema exactly.
+# This fixture mirrors the production compact icon + tooltip contract:
+# - status drives icon fill + glyph via discrete mappings
+# - label/reason feed tooltip text
+# - tooltip_visible controls tooltip group opacity
 #
 # Source: hud-tjq8.1 §Create status-indicator asset bundle
 #         hud-tjq8.2 §Add discrete binding and token resolution tests
@@ -31,8 +29,35 @@ default = ""
 [parameter_schema.constraints]
 string_max_bytes = 16
 
-# Indicator layer: circle fill driven by "status" discrete mapping,
-# label text driven by "label" direct binding.
+[[parameter_schema]]
+name = "reason"
+type = "string"
+default = ""
+
+[parameter_schema.constraints]
+string_max_bytes = 160
+
+[[parameter_schema]]
+name = "tooltip_visible"
+type = "f32"
+default = 0.0
+
+[parameter_schema.constraints]
+f32_min = 0.0
+f32_max = 1.0
+
+[hover_behavior]
+delay_ms = 1500
+visibility_param = "tooltip_visible"
+hidden_value = 0.0
+visible_value = 1.0
+
+[hover_behavior.trigger_rect]
+x_pct = 0.88
+y_pct = 0.06
+width_pct = 0.08
+height_pct = 0.22
+
 [[layers]]
 svg_file = "indicator.svg"
 
@@ -49,7 +74,39 @@ busy    = "#DC2626"
 offline = "#6B7280"
 
 [[layers.bindings]]
+param = "status"
+target_element = "status-glyph"
+target_attribute = "text-content"
+mapping = "discrete"
+
+[layers.bindings.value_map]
+online  = "✓"
+away    = "…"
+busy    = "!"
+offline = "×"
+
+[[layers.bindings]]
+param = "tooltip_visible"
+target_element = "tooltip-group"
+target_attribute = "opacity"
+mapping = "linear"
+attr_min = 0.0
+attr_max = 1.0
+
+[[layers.bindings]]
 param = "label"
 target_element = "label-text"
+target_attribute = "text-content"
+mapping = "direct"
+
+[[layers.bindings]]
+param = "label"
+target_element = "tooltip-label"
+target_attribute = "text-content"
+mapping = "direct"
+
+[[layers.bindings]]
+param = "reason"
+target_element = "tooltip-reason"
 target_attribute = "text-content"
 mapping = "direct"

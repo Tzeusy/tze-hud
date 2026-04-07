@@ -4352,26 +4352,48 @@ impl Compositor {
             // Resolve backdrop color using the same logic as render_zone_content.
             match zone_def.contention_policy {
                 ContentionPolicy::Stack { .. } => {
-                    let slot_h = Self::stack_slot_height(policy);
-                    let effective_h = if is_alert_banner_zone(zone_name) {
-                        publishes.len() as f32 * slot_h
-                    } else {
-                        h
-                    };
-
                     let ordered_indices: Vec<usize> = if is_alert_banner_zone(zone_name) {
                         sort_alert_banner_indices(publishes)
                     } else {
                         (0..publishes.len()).rev().collect()
                     };
 
-                    for (slot_idx, &pub_idx) in ordered_indices.iter().enumerate() {
+                    // Match per-slot sizing used by text/backdrop layout so rounded
+                    // rect bounds always contain two-line notification text.
+                    let ordered_records: Vec<&ZonePublishRecord> =
+                        ordered_indices.iter().map(|&idx| &publishes[idx]).collect();
+                    let notif_body_scale = self
+                        .token_map
+                        .get("typography.notification.body.scale")
+                        .and_then(|s| s.trim().parse::<f32>().ok())
+                        .filter(|s| *s > 0.0)
+                        .unwrap_or(NOTIFICATION_BODY_SCALE);
+                    let slot_heights = Self::per_slot_heights(
+                        &ordered_records,
+                        policy,
+                        notif_body_scale,
+                        NOTIFICATION_INTER_LINE_GAP,
+                    );
+                    let slot_offsets = Self::slot_offsets(&slot_heights);
+                    let total_slots_h: f32 = slot_heights.iter().sum();
+
+                    let effective_h = if is_alert_banner_zone(zone_name) {
+                        total_slots_h
+                    } else {
+                        h
+                    };
+
+                    for ((&pub_idx, slot_offset), slot_h) in ordered_indices
+                        .iter()
+                        .zip(slot_offsets.iter())
+                        .zip(slot_heights.iter())
+                    {
                         let record = &publishes[pub_idx];
-                        let slot_y = y + slot_idx as f32 * slot_h;
+                        let slot_y = y + *slot_offset;
                         if slot_y >= y + effective_h {
                             break;
                         }
-                        let effective_slot_h = slot_h.min((y + effective_h) - slot_y);
+                        let effective_slot_h = (*slot_h).min((y + effective_h) - slot_y);
 
                         let pub_opacity = self.pub_opacity(zone_name, record);
                         let combined_opacity = (anim_opacity * pub_opacity).clamp(0.0, 1.0);
@@ -10097,6 +10119,79 @@ mod tests {
             4,
             "all 4 TextItems must have distinct pixel_y values, got: {:?}",
             ys
+        );
+    }
+
+    /// Rounded notification backdrops must use per-notification two-line slot heights.
+    ///
+    /// Regression guard: when `backdrop_radius` is enabled, backdrop geometry comes from
+    /// `collect_all_rounded_rect_cmds()` (not the flat-rect path). For two-line notifications,
+    /// the rounded backdrop height must match `notification_slot_height`, otherwise body text
+    /// can extend outside the card.
+    #[tokio::test]
+    async fn test_rounded_notification_backdrop_uses_two_line_slot_height() {
+        let (compositor, _surface) = require_gpu!(make_compositor_and_surface(1280, 720).await);
+
+        let mut scene = SceneGraph::new(1280.0, 720.0);
+        let policy = RenderingPolicy {
+            backdrop: Some(Rgba::new(0.2, 0.2, 0.2, 0.9)),
+            backdrop_radius: Some(12.0),
+            font_size_px: Some(16.0),
+            ..Default::default()
+        };
+        scene.register_zone(ZoneDefinition {
+            id: SceneId::new(),
+            name: "notification-area".to_owned(),
+            description: "rounded notification slot height test".to_owned(),
+            geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 0.5,
+                height_pct: 0.5,
+            },
+            accepted_media_types: vec![ZoneMediaType::ShortTextWithIcon],
+            rendering_policy: policy.clone(),
+            contention_policy: ContentionPolicy::Stack { max_depth: 5 },
+            max_publishers: 8,
+            transport_constraint: None,
+            auto_clear_ms: None,
+            ephemeral: false,
+            layer_attachment: LayerAttachment::Chrome,
+        });
+
+        let payload = NotificationPayload {
+            title: "Critical Alert".to_owned(),
+            text: "Please check corner radius and typography.".to_owned(),
+            ..Default::default()
+        };
+        scene
+            .publish_to_zone(
+                "notification-area",
+                ZoneContent::Notification(payload.clone()),
+                "agent-a",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let rr = compositor.collect_all_rounded_rect_cmds(&scene, 1280.0, 720.0);
+        assert_eq!(
+            rr.chrome.len(),
+            1,
+            "single rounded notification should produce exactly one rounded rect cmd"
+        );
+
+        let expected_h = Compositor::notification_slot_height(
+            &payload,
+            &policy,
+            NOTIFICATION_BODY_SCALE,
+            NOTIFICATION_INTER_LINE_GAP,
+        );
+        let actual_h = rr.chrome[0].height;
+        assert!(
+            (actual_h - expected_h).abs() < 0.1,
+            "rounded notification backdrop height must match two-line slot height: expected {expected_h:.2}, got {actual_h:.2}"
         );
     }
 

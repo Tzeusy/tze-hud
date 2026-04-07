@@ -8943,6 +8943,7 @@ mod tests {
                 default_rendering_policy: RenderingPolicy::default(),
                 default_contention_policy: ContentionPolicy::LatestWins,
                 ephemeral: false, // durable
+                hover_behavior: None,
             });
 
             // Create a tab and widget instance
@@ -9208,6 +9209,7 @@ mod tests {
                 default_rendering_policy: RenderingPolicy::default(),
                 default_contention_policy: ContentionPolicy::LatestWins,
                 ephemeral: true, // ephemeral!
+                hover_behavior: None,
             });
 
             let tab_id = s.create_tab("main", 0).unwrap();

@@ -160,10 +160,10 @@ fn status_indicator_tokens() -> HashMap<String, String> {
 
 /// Validates the status-indicator fixture bundle:
 /// - widget type is "status-indicator"
-/// - exactly 2 parameters (status enum, label string)
+/// - exactly 4 parameters (status, label, reason, tooltip_visible)
 /// - exactly 1 layer (indicator.svg)
-/// - exactly 2 bindings: discrete status→indicator-fill/fill and
-///   direct label→label-text/text-content
+/// - exactly 5 bindings: status color + glyph, tooltip opacity,
+///   and tooltip label/reason text
 ///
 /// Source: hud-tjq8.1 §Create status-indicator asset bundle
 #[test]
@@ -190,11 +190,11 @@ fn status_indicator_fixture_loads_successfully() {
                 "default_contention_policy must be ContentionPolicy::LatestWins"
             );
 
-            // Parameter schema: status (enum) and label (string).
+            // Parameter schema: status (enum), label/reason (string), tooltip_visible (f32).
             assert_eq!(
                 def.parameter_schema.len(),
-                2,
-                "must have exactly 2 parameters"
+                4,
+                "must have exactly 4 parameters"
             );
             let param_names: Vec<&str> = def
                 .parameter_schema
@@ -206,6 +206,30 @@ fn status_indicator_fixture_loads_successfully() {
                 "must declare 'status' param"
             );
             assert!(param_names.contains(&"label"), "must declare 'label' param");
+            assert!(
+                param_names.contains(&"reason"),
+                "must declare 'reason' param"
+            );
+            assert!(
+                param_names.contains(&"tooltip_visible"),
+                "must declare 'tooltip_visible' param"
+            );
+
+            let hover = def
+                .hover_behavior
+                .as_ref()
+                .expect("status-indicator fixture must declare hover_behavior");
+            assert_eq!(
+                hover.visibility_param, "tooltip_visible",
+                "hover behavior must drive tooltip_visible"
+            );
+            assert_eq!(hover.delay_ms, 1_500, "hover delay should be 1500ms");
+            assert!((hover.hidden_value - 0.0).abs() < f32::EPSILON);
+            assert!((hover.visible_value - 1.0).abs() < f32::EPSILON);
+            assert!((hover.trigger_rect.x_pct - 0.88).abs() < 1e-6);
+            assert!((hover.trigger_rect.y_pct - 0.06).abs() < 1e-6);
+            assert!((hover.trigger_rect.width_pct - 0.08).abs() < 1e-6);
+            assert!((hover.trigger_rect.height_pct - 0.22).abs() < 1e-6);
 
             // Verify status param is an enum with the expected allowed values.
             let status_param = def
@@ -246,12 +270,12 @@ fn status_indicator_fixture_loads_successfully() {
             assert_eq!(def.layers.len(), 1, "must have exactly 1 layer");
             assert_eq!(def.layers[0].svg_file, "indicator.svg");
 
-            // indicator.svg has exactly 2 bindings.
+            // indicator.svg has exactly 6 bindings.
             let bindings = &def.layers[0].bindings;
             assert_eq!(
                 bindings.len(),
-                2,
-                "indicator.svg must have exactly 2 bindings"
+                6,
+                "indicator.svg must have exactly 6 bindings"
             );
 
             // Check discrete binding: status → indicator-fill / fill.
@@ -272,12 +296,58 @@ fn status_indicator_fixture_loads_successfully() {
                 panic!("expected discrete mapping for status binding");
             }
 
-            // Check direct text-content binding: label → label-text / text-content.
-            let label_binding = bindings.iter().find(|b| b.param == "label").unwrap();
-            assert_eq!(label_binding.target_element, "label-text");
+            // Check discrete text-content binding: status → status-glyph / text-content.
+            let status_glyph_binding = bindings
+                .iter()
+                .find(|b| b.param == "status" && b.target_element == "status-glyph")
+                .unwrap();
+            assert_eq!(status_glyph_binding.target_attribute, "text-content");
+            if let tze_hud_scene::types::WidgetBindingMapping::Discrete { value_map } =
+                &status_glyph_binding.mapping
+            {
+                assert_eq!(value_map.get("online").map(String::as_str), Some("✓"));
+                assert_eq!(value_map.get("away").map(String::as_str), Some("…"));
+                assert_eq!(value_map.get("busy").map(String::as_str), Some("!"));
+                assert_eq!(value_map.get("offline").map(String::as_str), Some("×"));
+            } else {
+                panic!("expected discrete mapping for status glyph binding");
+            }
+
+            // Check linear opacity binding: tooltip_visible -> tooltip-group/opacity.
+            let tooltip_opacity_binding = bindings
+                .iter()
+                .find(|b| b.param == "tooltip_visible")
+                .unwrap();
+            assert_eq!(tooltip_opacity_binding.target_element, "tooltip-group");
+            assert_eq!(tooltip_opacity_binding.target_attribute, "opacity");
+            assert!(
+                matches!(
+                    tooltip_opacity_binding.mapping,
+                    tze_hud_scene::types::WidgetBindingMapping::Linear {
+                        attr_min,
+                        attr_max
+                    } if (attr_min - 0.0).abs() < 1e-6 && (attr_max - 1.0).abs() < 1e-6
+                ),
+                "tooltip_visible must linearly map to opacity 0..1"
+            );
+
+            // Check direct text-content binding: label → tooltip-label.
+            let label_binding = bindings
+                .iter()
+                .find(|b| b.param == "label" && b.target_element == "tooltip-label")
+                .unwrap();
             assert_eq!(label_binding.target_attribute, "text-content");
             assert!(matches!(
                 label_binding.mapping,
+                tze_hud_scene::types::WidgetBindingMapping::Direct
+            ));
+
+            // Check direct text-content binding: reason → tooltip-reason.
+            let reason_binding = bindings.iter().find(|b| b.param == "reason").unwrap();
+            assert_eq!(reason_binding.target_element, "tooltip-reason");
+            assert_eq!(reason_binding.target_attribute, "text-content");
+            assert!(matches!(
+                reason_binding.mapping,
                 tze_hud_scene::types::WidgetBindingMapping::Direct
             ));
 
@@ -1999,7 +2069,8 @@ fn production_status_indicator_token_resolution_correct() {
 }
 
 /// The production status-indicator bundle registers as "status-indicator" with
-/// 2 parameters (status, label), 1 layer (indicator.svg), and 2 bindings.
+/// 4 parameters (status, label, reason, tooltip_visible), 1 layer (indicator.svg),
+/// and 6 bindings.
 #[test]
 fn production_status_indicator_registration_structure() {
     let dir = production_status_indicator_path();
@@ -2016,11 +2087,11 @@ fn production_status_indicator_registration_structure() {
         "widget name must be 'status-indicator'"
     );
 
-    // 2 parameters: status (enum) and label (string).
+    // 4 parameters: status (enum), label/reason (string), tooltip_visible (f32).
     assert_eq!(
         def.parameter_schema.len(),
-        2,
-        "must have exactly 2 parameters"
+        4,
+        "must have exactly 4 parameters"
     );
     let param_names: Vec<&str> = def
         .parameter_schema
@@ -2032,8 +2103,16 @@ fn production_status_indicator_registration_structure() {
         "must declare 'status' param"
     );
     assert!(param_names.contains(&"label"), "must declare 'label' param");
+    assert!(
+        param_names.contains(&"reason"),
+        "must declare 'reason' param"
+    );
+    assert!(
+        param_names.contains(&"tooltip_visible"),
+        "must declare 'tooltip_visible' param"
+    );
 
-    // 1 layer: indicator.svg with 2 bindings.
+    // 1 layer: indicator.svg with 6 bindings.
     assert_eq!(def.layers.len(), 1, "must have exactly 1 layer");
     assert_eq!(
         def.layers[0].svg_file, "indicator.svg",
@@ -2041,8 +2120,8 @@ fn production_status_indicator_registration_structure() {
     );
     assert_eq!(
         def.layers[0].bindings.len(),
-        2,
-        "indicator.svg must have exactly 2 bindings (status discrete + label direct)"
+        6,
+        "indicator.svg must have exactly 6 bindings"
     );
 }
 

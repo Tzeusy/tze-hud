@@ -254,3 +254,37 @@ fn gauge_fill_bindings_are_applied() {
         "fill pixmaps at level=0.0 and level=1.0 must differ (binding must be applied)"
     );
 }
+
+/// Verify direct `text-content` binding actually affects raster output.
+///
+/// This guards against regressions where SVG `<text>` rendering is disabled
+/// (for example, missing resvg text/system-font features or empty fontdb).
+#[test]
+fn gauge_label_text_binding_changes_raster_output() {
+    let constraints = gauge_param_constraints();
+    let bindings = gauge_fill_bindings();
+    let layers: Vec<(&str, &[WidgetBinding])> = vec![(GAUGE_FILL_SVG, &bindings)];
+
+    let mut params_no_label = gauge_params();
+    params_no_label.insert(
+        "label".to_string(),
+        WidgetParameterValue::String(String::new()),
+    );
+    let pixmap_no_label = rasterize_svg_layers(&layers, &constraints, &params_no_label, 256, 256)
+        .expect("rasterize must succeed with empty label");
+
+    let mut params_with_label = gauge_params();
+    params_with_label.insert(
+        "label".to_string(),
+        WidgetParameterValue::String("ONLINE".to_string()),
+    );
+    let pixmap_with_label =
+        rasterize_svg_layers(&layers, &constraints, &params_with_label, 256, 256)
+            .expect("rasterize must succeed with non-empty label");
+
+    assert_ne!(
+        pixmap_no_label.data(),
+        pixmap_with_label.data(),
+        "non-empty label must change raster output; if identical, text rendering is broken"
+    );
+}

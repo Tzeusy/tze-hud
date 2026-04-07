@@ -1,0 +1,74 @@
+[
+  {
+    "zone_name": "notification-area",
+    "namespace": "gamut-low",
+    "ttl_us": 18000000,
+    "content": {
+      "type": "notification",
+      "title": "Info / Low",
+      "text": "Background sync finished with no action needed.",
+      "icon": "",
+      "urgency": 0
+    }
+  },
+  {
+    "zone_name": "notification-area",
+    "namespace": "gamut-normal",
+    "ttl_us": 18000000,
+    "content": {
+      "type": "notification",
+      "title": "Normal Update",
+      "text": "New build artifacts are ready for review in the dashboard.",
+      "icon": "",
+      "urgency": 1
+    }
+  },
+  {
+    "zone_name": "notification-area",
+    "namespace": "gamut-urgent",
+    "ttl_us": 22000000,
+    "content": {
+      "type": "notification",
+      "title": "Urgent Attention",
+      "text": "Queue depth exceeded soft threshold for more than 3 minutes.",
+      "icon": "",
+      "urgency": 2,
+      "actions": [
+        {
+          "label": "Open Queue",
+          "callback_id": "open_queue"
+        },
+        {
+          "label": "Acknowledge",
+          "callback_id": "ack_queue"
+        }
+      ]
+    }
+  },
+  {
+    "zone_name": "notification-area",
+    "namespace": "gamut-critical",
+    "ttl_us": 24000000,
+    "content": {
+      "type": "notification",
+      "title": "Critical Incident",
+      "text": "Please check corner radius and typography while this long sentence tests card height containment under stress.",
+      "icon": "",
+      "urgency": 3,
+      "actions": [
+        {
+          "label": "Investigate",
+          "callback_id": "investigate"
+        },
+        {
+          "label": "Snooze",
+          "callback_id": "snooze"
+        },
+        {
+          "label": "Dismiss",
+          "callback_id": "dismiss"
+        }
+      ]
+    }
+  }
+]

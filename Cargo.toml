@@ -66,8 +66,10 @@ schemars = { version = "0.8", features = ["derive"] }
 # XML parsing (SVG validation for widget asset bundle system)
 quick-xml = "0.37"
 
-# SVG rendering for widget compositor pipeline
-resvg = { version = "0.47", default-features = false }
+# SVG rendering for widget compositor pipeline.
+# Keep raster-images disabled; enable text + system fonts so widget <text>
+# bindings (e.g., status-indicator labels) actually render.
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 tiny-skia = "0.12"
 
 # Misc

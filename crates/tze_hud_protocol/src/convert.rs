@@ -1088,6 +1088,7 @@ pub fn proto_to_widget_definition(p: &proto::WidgetDefinitionProto) -> WidgetDef
         default_rendering_policy,
         default_contention_policy,
         ephemeral: p.ephemeral,
+        hover_behavior: None,
     }
 }
 
@@ -1525,6 +1526,7 @@ mod tests {
             default_rendering_policy: RenderingPolicy::default(),
             default_contention_policy: ContentionPolicy::LatestWins,
             ephemeral: false,
+            hover_behavior: None,
         }
     }
 

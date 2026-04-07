@@ -5,7 +5,7 @@
 # (the runtime's CWD auto-resolution picks up ./tze_hud.toml first).
 #
 # On Windows, copy both tze_hud.exe and this file as tze_hud.toml to C:\tze_hud\.
-# The asset directories (widget_bundles/) must also be deployed there:
+# The asset directories (widget_bundles/ and profiles/) must also be deployed there:
 #
 #   C:\tze_hud\
 #     tze_hud.exe
@@ -14,6 +14,8 @@
 #       gauge\
 #       progress-bar\
 #       status-indicator\
+#     profiles\
+#       notification-stack-exemplar\
 #
 # Usage:
 #   tze_hud --window-mode overlay
@@ -22,7 +24,7 @@
 # Widget instance names (for MCP publish_to_widget):
 #   widget_name: "main-gauge"      → gauge widget (level, label, fill_color, severity)
 #   widget_name: "main-progress"   → progress-bar widget (progress, label, fill_color)
-#   widget_name: "main-status"     → status-indicator widget (status, label)
+#   widget_name: "main-status"     → status-indicator widget (status, label, reason)
 #
 # See publish_to_widget semantics in .claude/skills/user-test/SKILL.md:
 # widget_name addresses a widget *instance* (not a type). The instance name is
@@ -38,6 +40,17 @@
 #   widget_bundles/status-indicator/
 [widget_bundles]
 paths = ["widget_bundles"]
+
+# Component profile bundle directories scanned at startup.
+# The notification profile is isolated here so notification styling can evolve
+# without changing global token defaults for other zones.
+[component_profile_bundles]
+paths = ["profiles"]
+
+# Active component profile selection.
+# Only notification is selected for this app config.
+[component_profiles]
+notification = "notification-stack-exemplar"
 
 # Main display tab — hosts all widget instances.
 [[tabs]]
@@ -74,14 +87,14 @@ height = 20
 
 # ── Status-indicator widget instance ─────────────────────────────────────────
 # MCP widget_name: "main-status"
-# Parameters: status (enum: online/away/busy/offline), label (string)
-# Position: top-right corner.
+# Parameters: status (enum), label (string), reason (string)
+# Position: top-right corner; icon is small, tooltip expands leftward inside widget bounds.
 [[tabs.widgets]]
 widget_type = "status-indicator"
 instance_id  = "main-status"
 
 [tabs.widgets.geometry]
-x      = 1860
-y      = 10
-width  = 48
-height = 56
+x      = 1660
+y      = 8
+width  = 252
+height = 96

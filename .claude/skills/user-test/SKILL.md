@@ -72,7 +72,7 @@ Message shape — `content` is either a plain string (StreamText) or a typed JSO
 **Content types by zone:**
 - `alert-banner`, `subtitle`: plain string (StreamText)
 - `status-bar`: `{"type":"status_bar","entries":{"key":"value",...}}` with `merge_key`
-- `notification-area`: `{"type":"notification","text":"...","icon":"","urgency":0-3}`
+- `notification-area`: `{"type":"notification","text":"...","icon":"","urgency":0-3,"title":"...","actions":[...]}` (`title` and `actions` optional)
 - `ambient-background`, `pip`: `{"type":"solid_color","r":0-1,"g":0-1,"b":0-1,"a":0-1}`
 
 `merge_key`, `ttl_us`, and `namespace` are optional per message.
@@ -494,12 +494,49 @@ is gone with no fade — evicted instantly. "Burst C6" is at top.
 ### Notification payload shape
 
 ```json
-{"type": "notification", "text": "...", "icon": "...", "urgency": 0}
+{
+  "type": "notification",
+  "text": "...",
+  "icon": "...",
+  "urgency": 0,
+  "title": "Optional heading",
+  "actions": [
+    {"label": "Open", "callback_id": "open"},
+    {"label": "Dismiss", "callback_id": "dismiss"}
+  ]
+}
 ```
 
 Published via MCP `publish_to_zone` to `notification-area` zone with `ttl_us`
 derived from `--ttl` and `namespace` set to the simulated agent namespace
 (`alpha`, `beta`, or `gamma`).
+
+### Notification Full-Gamut Pass
+
+After running `notification_exemplar.py`, run this additional batch to validate
+the full v1 notification visual surface: two-line layout (`title` + `text`),
+long-body containment, and action-button rows.
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_zone_batch.py \
+  --url http://tzehouse-windows.parrot-hen.ts.net:9090 \
+  --psk-env TZE_HUD_PSK \
+  --messages-file .claude/skills/user-test/scripts/notification-full-gamut.json \
+  --delay-ms 250 \
+  --list-zones
+```
+
+Coverage in `notification-full-gamut.json`:
+- urgency gamut: low (0), normal (1), urgent (2), critical (3)
+- two-line cards via `title` on all messages
+- long-body critical text to verify card-height containment
+- action rows: 2 actions on urgent card, 3 actions on critical card
+
+Visual checks:
+- no body text should escape its card backdrop
+- urgency colors should progress low → normal → urgent → critical
+- action rows should appear inside the card near the bottom edge
+- stack ordering should remain newest-at-top under mixed payload shapes
 
 ## Alert-Banner Exemplar Scenario
 

@@ -113,6 +113,102 @@ pub const MAX_MARKDOWN_BYTES: usize = 65_535;
 pub const ZONE_TILE_Z_MIN: u32 = 0x8000_0000;
 
 impl SceneGraph {
+    fn coerce_widget_param_value(
+        widget_name: &str,
+        param_name: &str,
+        decl: &crate::types::WidgetParameterDeclaration,
+        submitted_value: &crate::types::WidgetParameterValue,
+    ) -> Result<crate::types::WidgetParameterValue, ValidationError> {
+        use crate::types::{WidgetParamConstraints, WidgetParamType, WidgetParameterValue};
+
+        let empty_constraints = WidgetParamConstraints::default();
+        let constraints = decl.constraints.as_ref().unwrap_or(&empty_constraints);
+
+        match (&decl.param_type, submitted_value) {
+            (WidgetParamType::F32, WidgetParameterValue::F32(v)) => {
+                if v.is_nan() {
+                    return Err(ValidationError::WidgetParameterInvalidValue {
+                        widget: widget_name.to_string(),
+                        param: param_name.to_string(),
+                        reason: "NaN is not a valid f32 parameter value".to_string(),
+                    });
+                }
+                if v.is_infinite() {
+                    return Err(ValidationError::WidgetParameterInvalidValue {
+                        widget: widget_name.to_string(),
+                        param: param_name.to_string(),
+                        reason: "infinity is not a valid f32 parameter value".to_string(),
+                    });
+                }
+                let clamped = match (constraints.f32_min, constraints.f32_max) {
+                    (Some(mn), Some(mx)) => v.clamp(mn, mx),
+                    (Some(mn), None) => v.max(mn),
+                    (None, Some(mx)) => v.min(mx),
+                    (None, None) => *v,
+                };
+                Ok(WidgetParameterValue::F32(clamped))
+            }
+            (WidgetParamType::F32, _) => Err(ValidationError::WidgetParameterTypeMismatch {
+                widget: widget_name.to_string(),
+                param: param_name.to_string(),
+            }),
+            (WidgetParamType::String, WidgetParameterValue::String(s)) => {
+                let mut max_bytes = constraints.string_max_bytes.unwrap_or(1024) as usize;
+                if max_bytes == 0 {
+                    max_bytes = 1024;
+                }
+                if s.len() > max_bytes {
+                    return Err(ValidationError::WidgetParameterInvalidValue {
+                        widget: widget_name.to_string(),
+                        param: param_name.to_string(),
+                        reason: format!(
+                            "string value of {} bytes exceeds max_length of {}",
+                            s.len(),
+                            max_bytes
+                        ),
+                    });
+                }
+                Ok(WidgetParameterValue::String(s.clone()))
+            }
+            (WidgetParamType::String, _) => Err(ValidationError::WidgetParameterTypeMismatch {
+                widget: widget_name.to_string(),
+                param: param_name.to_string(),
+            }),
+            (WidgetParamType::Color, WidgetParameterValue::Color(c)) => {
+                let clamped_color = Rgba {
+                    r: c.r.clamp(0.0, 1.0),
+                    g: c.g.clamp(0.0, 1.0),
+                    b: c.b.clamp(0.0, 1.0),
+                    a: c.a.clamp(0.0, 1.0),
+                };
+                Ok(WidgetParameterValue::Color(clamped_color))
+            }
+            (WidgetParamType::Color, _) => Err(ValidationError::WidgetParameterTypeMismatch {
+                widget: widget_name.to_string(),
+                param: param_name.to_string(),
+            }),
+            (WidgetParamType::Enum, WidgetParameterValue::Enum(v)) => {
+                if !constraints.enum_allowed_values.is_empty()
+                    && !constraints.enum_allowed_values.contains(v)
+                {
+                    return Err(ValidationError::WidgetParameterInvalidValue {
+                        widget: widget_name.to_string(),
+                        param: param_name.to_string(),
+                        reason: format!(
+                            "enum value '{}' not in allowed set {:?}",
+                            v, constraints.enum_allowed_values
+                        ),
+                    });
+                }
+                Ok(WidgetParameterValue::Enum(v.clone()))
+            }
+            (WidgetParamType::Enum, _) => Err(ValidationError::WidgetParameterTypeMismatch {
+                widget: widget_name.to_string(),
+                param: param_name.to_string(),
+            }),
+        }
+    }
+
     // ─── Notification auto-dismiss TTL constants ─────────────────────────
     /// Default auto-dismiss TTL (µs) for low/normal notifications (urgency 0, 1).
     pub const NOTIFICATION_TTL_INFO_US: u64 = 8_000_000; // 8 seconds
@@ -3035,9 +3131,7 @@ impl SceneGraph {
         transition_ms: u32,
         expires_at_wall_us: Option<u64>,
     ) -> Result<bool, ValidationError> {
-        use crate::types::{
-            ContentionPolicy, WidgetParamConstraints, WidgetParamType, WidgetParameterValue,
-        };
+        use crate::types::{ContentionPolicy, WidgetParameterValue};
 
         // ── Step 1: Resolve the widget instance ──────────────────────────────
         let instance_name = widget_name;
@@ -3076,104 +3170,8 @@ impl SceneGraph {
                     param: param_name.clone(),
                 })?;
 
-            let empty_constraints = WidgetParamConstraints::default();
-            let constraints = decl.constraints.as_ref().unwrap_or(&empty_constraints);
-
-            // Type check and value validation
-            let coerced = match (&decl.param_type, submitted_value) {
-                (WidgetParamType::F32, WidgetParameterValue::F32(v)) => {
-                    if v.is_nan() {
-                        return Err(ValidationError::WidgetParameterInvalidValue {
-                            widget: widget_name.to_string(),
-                            param: param_name.clone(),
-                            reason: "NaN is not a valid f32 parameter value".to_string(),
-                        });
-                    }
-                    if v.is_infinite() {
-                        return Err(ValidationError::WidgetParameterInvalidValue {
-                            widget: widget_name.to_string(),
-                            param: param_name.clone(),
-                            reason: "infinity is not a valid f32 parameter value".to_string(),
-                        });
-                    }
-                    // Clamp to [min, max] (spec: f32 out of range is clamped, not rejected)
-                    let clamped = match (constraints.f32_min, constraints.f32_max) {
-                        (Some(mn), Some(mx)) => v.clamp(mn, mx),
-                        (Some(mn), None) => v.max(mn),
-                        (None, Some(mx)) => v.min(mx),
-                        (None, None) => *v,
-                    };
-                    WidgetParameterValue::F32(clamped)
-                }
-                (WidgetParamType::F32, _) => {
-                    return Err(ValidationError::WidgetParameterTypeMismatch {
-                        widget: widget_name.to_string(),
-                        param: param_name.clone(),
-                    });
-                }
-                (WidgetParamType::String, WidgetParameterValue::String(s)) => {
-                    let mut max_bytes = constraints.string_max_bytes.unwrap_or(1024) as usize;
-                    if max_bytes == 0 {
-                        // A max_bytes of 0 is interpreted as the default limit of 1024.
-                        max_bytes = 1024;
-                    }
-
-                    if s.len() > max_bytes {
-                        return Err(ValidationError::WidgetParameterInvalidValue {
-                            widget: widget_name.to_string(),
-                            param: param_name.clone(),
-                            reason: format!(
-                                "string value of {} bytes exceeds max_length of {}",
-                                s.len(),
-                                max_bytes
-                            ),
-                        });
-                    }
-                    WidgetParameterValue::String(s.clone())
-                }
-                (WidgetParamType::String, _) => {
-                    return Err(ValidationError::WidgetParameterTypeMismatch {
-                        widget: widget_name.to_string(),
-                        param: param_name.clone(),
-                    });
-                }
-                (WidgetParamType::Color, WidgetParameterValue::Color(c)) => {
-                    let clamped_color = Rgba {
-                        r: c.r.clamp(0.0, 1.0),
-                        g: c.g.clamp(0.0, 1.0),
-                        b: c.b.clamp(0.0, 1.0),
-                        a: c.a.clamp(0.0, 1.0),
-                    };
-                    WidgetParameterValue::Color(clamped_color)
-                }
-                (WidgetParamType::Color, _) => {
-                    return Err(ValidationError::WidgetParameterTypeMismatch {
-                        widget: widget_name.to_string(),
-                        param: param_name.clone(),
-                    });
-                }
-                (WidgetParamType::Enum, WidgetParameterValue::Enum(v)) => {
-                    if !constraints.enum_allowed_values.is_empty()
-                        && !constraints.enum_allowed_values.contains(v)
-                    {
-                        return Err(ValidationError::WidgetParameterInvalidValue {
-                            widget: widget_name.to_string(),
-                            param: param_name.clone(),
-                            reason: format!(
-                                "enum value '{}' not in allowed set {:?}",
-                                v, constraints.enum_allowed_values
-                            ),
-                        });
-                    }
-                    WidgetParameterValue::Enum(v.clone())
-                }
-                (WidgetParamType::Enum, _) => {
-                    return Err(ValidationError::WidgetParameterTypeMismatch {
-                        widget: widget_name.to_string(),
-                        param: param_name.clone(),
-                    });
-                }
-            };
+            let coerced =
+                Self::coerce_widget_param_value(widget_name, param_name, decl, submitted_value)?;
             validated_params.insert(param_name.clone(), coerced);
         }
 
@@ -3252,6 +3250,57 @@ impl SceneGraph {
         self.version += 1;
         // Return true for durable, false for ephemeral (caller decides whether to send ack)
         Ok(!is_ephemeral)
+    }
+
+    /// Set a widget instance parameter from runtime-local behavior (non-agent publication).
+    ///
+    /// This updates `instance.current_params` directly after schema/type/constraint
+    /// validation. No publication record is created and contention policy is not
+    /// consulted. Intended for local runtime UI state such as hover/tooltip reveals.
+    pub fn set_widget_param_local(
+        &mut self,
+        widget_name: &str,
+        param_name: &str,
+        value: crate::types::WidgetParameterValue,
+    ) -> Result<(), ValidationError> {
+        let instance = self
+            .widget_registry
+            .instances
+            .get(widget_name)
+            .ok_or_else(|| ValidationError::WidgetNotFound {
+                name: widget_name.to_string(),
+            })?
+            .clone();
+
+        let definition = self
+            .widget_registry
+            .definitions
+            .get(&instance.widget_type_name)
+            .ok_or_else(|| ValidationError::WidgetNotFound {
+                name: widget_name.to_string(),
+            })?
+            .clone();
+
+        let decl = definition
+            .parameter_schema
+            .iter()
+            .find(|d| d.name == param_name)
+            .ok_or_else(|| ValidationError::WidgetUnknownParameter {
+                widget: widget_name.to_string(),
+                param: param_name.to_string(),
+            })?;
+
+        let coerced = Self::coerce_widget_param_value(widget_name, param_name, decl, &value)?;
+
+        if let Some(inst) = self.widget_registry.instances.get_mut(widget_name) {
+            inst.current_params.insert(param_name.to_string(), coerced);
+            self.version += 1;
+            return Ok(());
+        }
+
+        Err(ValidationError::WidgetNotFound {
+            name: widget_name.to_string(),
+        })
     }
 
     /// Budget-driven revocation: transitions all non-terminal session leases to
@@ -7849,6 +7898,7 @@ mod spec_scenarios {
             default_rendering_policy: RenderingPolicy::default(),
             default_contention_policy: ContentionPolicy::LatestWins,
             ephemeral: false,
+            hover_behavior: None,
         }
     }
 
