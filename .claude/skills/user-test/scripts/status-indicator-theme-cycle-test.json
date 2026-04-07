@@ -1,0 +1,35 @@
+[
+  {
+    "widget_name": "main-status",
+    "params": {
+      "status": "online",
+      "theme": "minimal",
+      "label": "Butler",
+      "reason": "Minimal theme preview"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "main-status",
+    "params": {
+      "status": "online",
+      "theme": "system",
+      "label": "Butler",
+      "reason": "System Ops theme preview"
+    },
+    "ttl_us": 10000000,
+    "namespace": "user-test"
+  },
+  {
+    "widget_name": "main-status",
+    "params": {
+      "status": "online",
+      "theme": "friendly",
+      "label": "Butler",
+      "reason": "Friendly theme preview"
+    },
+    "ttl_us": 60000000,
+    "namespace": "user-test"
+  }
+]

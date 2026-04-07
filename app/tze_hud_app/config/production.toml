@@ -95,6 +95,6 @@ instance_id  = "main-status"
 
 [tabs.widgets.geometry]
 x      = 1660
-y      = 8
+y      = 40
 width  = 252
 height = 96

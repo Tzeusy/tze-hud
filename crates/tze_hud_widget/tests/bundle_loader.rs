@@ -160,10 +160,9 @@ fn status_indicator_tokens() -> HashMap<String, String> {
 
 /// Validates the status-indicator fixture bundle:
 /// - widget type is "status-indicator"
-/// - exactly 4 parameters (status, label, reason, tooltip_visible)
+/// - exactly 5 parameters (status, theme, label, reason, tooltip_visible)
 /// - exactly 1 layer (indicator.svg)
-/// - exactly 5 bindings: status color + glyph, tooltip opacity,
-///   and tooltip label/reason text
+/// - includes theme-selective visibility/styling bindings
 ///
 /// Source: hud-tjq8.1 §Create status-indicator asset bundle
 #[test]
@@ -190,11 +189,11 @@ fn status_indicator_fixture_loads_successfully() {
                 "default_contention_policy must be ContentionPolicy::LatestWins"
             );
 
-            // Parameter schema: status (enum), label/reason (string), tooltip_visible (f32).
+            // Parameter schema: status/theme (enum), label/reason (string), tooltip_visible (f32).
             assert_eq!(
                 def.parameter_schema.len(),
-                4,
-                "must have exactly 4 parameters"
+                5,
+                "must have exactly 5 parameters"
             );
             let param_names: Vec<&str> = def
                 .parameter_schema
@@ -204,6 +203,10 @@ fn status_indicator_fixture_loads_successfully() {
             assert!(
                 param_names.contains(&"status"),
                 "must declare 'status' param"
+            );
+            assert!(
+                param_names.contains(&"theme"),
+                "must declare 'theme' param"
             );
             assert!(param_names.contains(&"label"), "must declare 'label' param");
             assert!(
@@ -266,21 +269,52 @@ fn status_indicator_fixture_loads_successfully() {
                 "status constraints must include 'offline'"
             );
 
+            // Verify theme param is an enum with the expected allowed values.
+            let theme_param = def
+                .parameter_schema
+                .iter()
+                .find(|p| p.name == "theme")
+                .unwrap();
+            let theme_constraints = theme_param
+                .constraints
+                .as_ref()
+                .expect("theme parameter should have enum constraints");
+            assert!(
+                theme_constraints
+                    .enum_allowed_values
+                    .contains(&"minimal".to_string()),
+                "theme constraints must include 'minimal'"
+            );
+            assert!(
+                theme_constraints
+                    .enum_allowed_values
+                    .contains(&"system".to_string()),
+                "theme constraints must include 'system'"
+            );
+            assert!(
+                theme_constraints
+                    .enum_allowed_values
+                    .contains(&"friendly".to_string()),
+                "theme constraints must include 'friendly'"
+            );
+
             // Layers: exactly 1 layer (indicator.svg).
             assert_eq!(def.layers.len(), 1, "must have exactly 1 layer");
             assert_eq!(def.layers[0].svg_file, "indicator.svg");
 
-            // indicator.svg has exactly 6 bindings.
+            // indicator.svg has status, theme, tooltip visibility and text bindings.
             let bindings = &def.layers[0].bindings;
             assert_eq!(
                 bindings.len(),
-                6,
-                "indicator.svg must have exactly 6 bindings"
+                19,
+                "indicator.svg must have exactly 19 bindings"
             );
 
-            // Check discrete binding: status → indicator-fill / fill.
-            let status_binding = bindings.iter().find(|b| b.param == "status").unwrap();
-            assert_eq!(status_binding.target_element, "indicator-fill");
+            // Check canonical status color binding: status → system-fill / fill.
+            let status_binding = bindings
+                .iter()
+                .find(|b| b.param == "status" && b.target_element == "system-fill")
+                .unwrap();
             assert_eq!(status_binding.target_attribute, "fill");
             if let tze_hud_scene::types::WidgetBindingMapping::Discrete { value_map } =
                 &status_binding.mapping
@@ -296,10 +330,10 @@ fn status_indicator_fixture_loads_successfully() {
                 panic!("expected discrete mapping for status binding");
             }
 
-            // Check discrete text-content binding: status → status-glyph / text-content.
+            // Check canonical status glyph binding: status → system-glyph / text-content.
             let status_glyph_binding = bindings
                 .iter()
-                .find(|b| b.param == "status" && b.target_element == "status-glyph")
+                .find(|b| b.param == "status" && b.target_element == "system-glyph")
                 .unwrap();
             assert_eq!(status_glyph_binding.target_attribute, "text-content");
             if let tze_hud_scene::types::WidgetBindingMapping::Discrete { value_map } =
@@ -311,6 +345,22 @@ fn status_indicator_fixture_loads_successfully() {
                 assert_eq!(value_map.get("offline").map(String::as_str), Some("×"));
             } else {
                 panic!("expected discrete mapping for status glyph binding");
+            }
+
+            // Theme binding: system-group opacity should map theme enum values.
+            let system_theme_binding = bindings
+                .iter()
+                .find(|b| b.param == "theme" && b.target_element == "system-group")
+                .unwrap();
+            assert_eq!(system_theme_binding.target_attribute, "opacity");
+            if let tze_hud_scene::types::WidgetBindingMapping::Discrete { value_map } =
+                &system_theme_binding.mapping
+            {
+                assert_eq!(value_map.get("minimal").map(String::as_str), Some("0"));
+                assert_eq!(value_map.get("system").map(String::as_str), Some("0.82"));
+                assert_eq!(value_map.get("friendly").map(String::as_str), Some("0"));
+            } else {
+                panic!("expected discrete mapping for theme/system-group binding");
             }
 
             // Check linear opacity binding: tooltip_visible -> tooltip-group/opacity.
@@ -2069,8 +2119,8 @@ fn production_status_indicator_token_resolution_correct() {
 }
 
 /// The production status-indicator bundle registers as "status-indicator" with
-/// 4 parameters (status, label, reason, tooltip_visible), 1 layer (indicator.svg),
-/// and 6 bindings.
+/// 5 parameters (status, theme, label, reason, tooltip_visible), 1 layer
+/// (indicator.svg), and 19 bindings.
 #[test]
 fn production_status_indicator_registration_structure() {
     let dir = production_status_indicator_path();
@@ -2087,11 +2137,11 @@ fn production_status_indicator_registration_structure() {
         "widget name must be 'status-indicator'"
     );
 
-    // 4 parameters: status (enum), label/reason (string), tooltip_visible (f32).
+    // 5 parameters: status/theme (enum), label/reason (string), tooltip_visible (f32).
     assert_eq!(
         def.parameter_schema.len(),
-        4,
-        "must have exactly 4 parameters"
+        5,
+        "must have exactly 5 parameters"
     );
     let param_names: Vec<&str> = def
         .parameter_schema
@@ -2102,6 +2152,7 @@ fn production_status_indicator_registration_structure() {
         param_names.contains(&"status"),
         "must declare 'status' param"
     );
+    assert!(param_names.contains(&"theme"), "must declare 'theme' param");
     assert!(param_names.contains(&"label"), "must declare 'label' param");
     assert!(
         param_names.contains(&"reason"),
@@ -2112,7 +2163,7 @@ fn production_status_indicator_registration_structure() {
         "must declare 'tooltip_visible' param"
     );
 
-    // 1 layer: indicator.svg with 6 bindings.
+    // 1 layer: indicator.svg with 19 bindings.
     assert_eq!(def.layers.len(), 1, "must have exactly 1 layer");
     assert_eq!(
         def.layers[0].svg_file, "indicator.svg",
@@ -2120,8 +2171,8 @@ fn production_status_indicator_registration_structure() {
     );
     assert_eq!(
         def.layers[0].bindings.len(),
-        6,
-        "indicator.svg must have exactly 6 bindings"
+        19,
+        "indicator.svg must have exactly 19 bindings"
     );
 }
 
@@ -2142,8 +2193,8 @@ fn production_status_indicator_discrete_value_map_complete() {
     let status_binding = layer
         .bindings
         .iter()
-        .find(|b| b.param == "status")
-        .expect("status binding must exist in indicator.svg layer");
+        .find(|b| b.param == "status" && b.target_element == "system-fill")
+        .expect("status/system-fill binding must exist in indicator.svg layer");
 
     let value_map = match &status_binding.mapping {
         WidgetBindingMapping::Discrete { value_map } => value_map,

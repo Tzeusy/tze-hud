@@ -276,12 +276,29 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
 ```
 
 The status indicator should visually cycle through:
-- `online` → green dot (#00CC66)
-- `away` → yellow dot (#FFB800)
-- `busy` → red dot (#FF4444)
-- `offline` → gray dot (#666666)
+- `online` → green badge (`#4FB543`)
+- `away` → amber badge (`#D97706`)
+- `busy` → red badge (`#DC2626`)
+- `offline` → gray badge (`#6B7280`)
 
-Each transition is a discrete snap (no interpolation). Require human visual confirmation that the dot color changes at each step.
+Each transition is a discrete snap (no interpolation). Require human visual confirmation that both color and glyph change per state.
+
+Next, run the theme cycle to verify all three status-indicator visual themes are separately usable via the `theme` enum parameter:
+
+```bash
+python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
+  --url "$MCP_HTTP_URL" \
+  --psk-env MCP_TEST_PSK \
+  --messages-file .claude/skills/user-test/scripts/status-indicator-theme-cycle-test.json \
+  --delay-ms 1200
+```
+
+Expected progression (same `status=online`, different theme):
+- `minimal` → small quiet dot/glyph treatment
+- `system` → bordered micro-badge (ops style)
+- `friendly` → softer circular badge (assistant style)
+
+Require human confirmation that only one theme is visible at a time and each is visually distinct.
 
 Next, run the label-update sequence to verify text-content binding:
 
@@ -293,7 +310,7 @@ python3 .claude/skills/user-test/scripts/publish_widget_batch.py \
   --delay-ms 1000
 ```
 
-Expected label progression: "Butler" → "Codex" → (empty, no visible text). The dot remains green (online) throughout. Require human confirmation that the label text updates below the dot on each step, and clears on the final step.
+Expected label progression: "Butler" → "Codex" → (empty). The badge remains online/green. Label changes are primarily visible in the tooltip content (not always-on icon text); verify by hovering long enough to reveal the tooltip.
 
 Finally, run the validation fixture to confirm invalid enum rejection at the MCP surface:
 

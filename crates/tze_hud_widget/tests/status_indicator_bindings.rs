@@ -131,8 +131,8 @@ fn discrete_color_for_status(tokens: &HashMap<String, String>, status_value: &st
     let status_binding = layer
         .bindings
         .iter()
-        .find(|b| b.param == "status")
-        .expect("status binding must exist in indicator.svg layer");
+        .find(|b| b.param == "status" && b.target_element == "system-fill")
+        .expect("status/system-fill binding must exist in indicator.svg layer");
 
     match &status_binding.mapping {
         WidgetBindingMapping::Discrete { value_map } => value_map
@@ -401,8 +401,8 @@ fn status_discrete_snap_ignores_transition_ms() {
     let status_binding = layer
         .bindings
         .iter()
-        .find(|b| b.param == "status")
-        .expect("status binding must exist");
+        .find(|b| b.param == "status" && b.target_element == "system-fill")
+        .expect("status/system-fill binding must exist");
 
     // At any t ∈ [0.0, 1.0], resolve_binding_value returns the same result
     // for an enum parameter — it uses the stored Enum value, not interpolation.
