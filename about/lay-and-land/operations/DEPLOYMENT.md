@@ -8,9 +8,12 @@ The **canonical runtime app binary** (`tze_hud`, from the `tze_hud_app` crate) i
 - Cross-machine deployment (Linux build → Windows deploy)
 - MCP HTTP endpoint exposure in windowed mode
 - Automated zone publishing validation
-- Configuration-driven network service startup
+- Configuration-backed runtime bootstrap with CLI/env-controlled endpoint startup
 
 This is distinct from demo binaries (`vertical_slice`, `benchmark`, `render_artifacts`), which are development references.
+
+v1 scope note:
+- Live media/WebRTC is explicitly deferred in v1 (`about/heart-and-soul/v1.md`).
 
 ## Canonical App Binary Identity
 
@@ -59,57 +62,45 @@ cargo build --bin tze_hud --release
 
 ## Configuration
 
-The canonical app requires a TOML configuration file specifying:
-- Display mode (windowed, headless, full)
-- Window dimensions
-- Network endpoint configuration (gRPC, MCP HTTP)
-- MCP authentication (PSK)
+The canonical operator path uses the committed app config:
+- `app/tze_hud_app/config/production.toml` (deploy as `C:\tze_hud\tze_hud.toml`)
+
+Current loader schema minimum:
+- `[runtime] profile = "..."`
+- at least one `[[tabs]]`
+
+Window mode and network endpoint controls are runtime flags/env vars, not `[display]`/`[network]` tables:
+- `--window-mode` / `TZE_HUD_WINDOW_MODE` (`fullscreen` | `overlay`)
+- `--grpc-port` / `TZE_HUD_GRPC_PORT` (`0` disables gRPC)
+- `--mcp-port` / `TZE_HUD_MCP_PORT` (`0` disables MCP HTTP)
+- `--psk` / `TZE_HUD_PSK`
 
 ### Example Configuration
 
-Create `config.toml`:
+Minimal schema example:
 
 ```toml
-# Display settings
-[display]
-width = 1920
-height = 1080
-mode = "windowed"
+[runtime]
+profile = "full-display"
 
-# Network services
-[network]
-# Enable gRPC session server
-enable_grpc = true
-grpc_bind = "127.0.0.1:50051"
-
-# Enable MCP HTTP endpoint
-enable_mcp_http = true
-mcp_http_bind = "0.0.0.0:8765"  # Bind to all interfaces for remote reachability
-
-# MCP authentication (required if enabled)
-# Load from environment:
-# mcp_psk_env = "MCP_APP_PSK"
-# Or inline (not recommended for production):
-mcp_psk = "test-shared-secret"
+[[tabs]]
+name = "Main"
+default_tab = true
 ```
 
 ### Deployment Configuration
 
-For remote validation, ensure Windows deployment includes:
-
-```toml
-[display]
-mode = "windowed"
-
-[network]
-enable_mcp_http = true
-mcp_http_bind = "0.0.0.0:8765"  # Must be reachable from deployment host
-mcp_psk_env = "MCP_TEST_PSK"
-```
+For remote validation, launch with explicit endpoint and mode controls:
 
 Configuration file should be deployed alongside the `.exe`:
-- Linux source: `config.toml`
-- Windows target: `C:\tze_hud\config.toml`
+- Linux source: `app/tze_hud_app/config/production.toml`
+- Windows target: `C:\tze_hud\tze_hud.toml`
+
+Example launch:
+
+```powershell
+C:\tze_hud\tze_hud.exe --config C:\tze_hud\tze_hud.toml --window-mode overlay --mcp-port 8765 --grpc-port 50051 --psk <shared-secret>
+```
 
 ## Deployment Automation
 
@@ -214,7 +205,7 @@ If unreachable, collect:
 2. **Process state:**
    ```bash
    ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
-     "powershell -Command 'Get-Process tze_hud_app -ErrorAction SilentlyContinue | Select ProcessName, Id, Handles'"
+     "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Select ProcessName, Id, Handles'"
    ```
 
 3. **Network binding (Windows):**
@@ -313,7 +304,7 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 1. Check remote process running:
    ```bash
    ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
-     "powershell -Command 'Get-Process tze_hud_app -ErrorAction SilentlyContinue'"
+     "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue'"
    ```
 
 2. Check runtime logs:
@@ -351,7 +342,7 @@ scp config.toml hudbot@tzehouse-windows.parrot-hen.ts.net:C:\\tze_hud\\config.to
 
 ```bash
 ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
-  "powershell -Command \"Get-Process tze_hud_app -ErrorAction SilentlyContinue | Stop-Process -Force\""
+  "powershell -Command \"Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force\""
 ```
 
 **Remove deployment files:**
@@ -375,7 +366,8 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 ## Related Documentation
 
 - [README.md](../README.md) - Build and test overview
-- `docs/RUNTIME_APP_BINARY.md` - Canonical app binary specification
-- `docs/OPERATOR_CHECKLIST.md` - Operator deployment checklist
+- [RUNTIME_APP_BINARY.md](RUNTIME_APP_BINARY.md) - Canonical app binary specification
+- [OPERATOR_CHECKLIST.md](OPERATOR_CHECKLIST.md) - Operator deployment checklist
+- `app/tze_hud_app/tests/canonical_config_schema.rs` - Canonical config CI guard
 - `.claude/skills/user-test/SKILL.md` - User-test skill documentation
 - `openspec/changes/ship-runtime-app-binary/` - Specification artifacts

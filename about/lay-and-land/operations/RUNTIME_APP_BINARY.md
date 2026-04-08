@@ -25,7 +25,7 @@ The **canonical runtime application binary** (`tze_hud`, from the `tze_hud_app` 
 **Build targets**:
 - Linux cross-compile to Windows: `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
 - Windows native: `target/x86_64-pc-windows-msvc/release/tze_hud.exe`
-- Linux native: `target/x86_64-unknown-linux-gnu/release/tze_hud_app`
+- Linux native: `target/release/tze_hud` (or `target/x86_64-unknown-linux-gnu/release/tze_hud` when building that target explicitly)
 
 **Use cases**:
 - Remote deployment to Windows for cross-machine validation
@@ -33,7 +33,7 @@ The **canonical runtime application binary** (`tze_hud`, from the `tze_hud_app` 
 - Operator testing and integration scenarios
 - Production-like environment simulation
 
-**Configuration**: Requires TOML configuration file specifying display mode, window dimensions, and network service settings.
+**Configuration**: Uses the `TzeHudConfig` schema (`[runtime]` + `[[tabs]]` minimum). Window/network settings are selected via CLI/env flags.
 
 **Deployment**: Via `deploy_windows_hud.sh` automation script with MCP reachability gating.
 
@@ -123,68 +123,42 @@ cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 
 ## Configuration
 
-The canonical app requires a TOML configuration file passed via CLI:
+The canonical app can load a TOML configuration file via `--config`, `TZE_HUD_CONFIG`, or auto-resolution (`./tze_hud.toml` first). The canonical committed operator config is:
+
+- `app/tze_hud_app/config/production.toml`
+
+For deployment, copy that file as `tze_hud.toml` beside `tze_hud.exe`.
+
+### Loader Schema (Current)
+
+Minimal valid config:
+
+```toml
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+default_tab = true
+```
+
+Legacy `[display]`/`[network]` tables are not supported by the current loader.
+
+### Runtime Endpoint/Window Controls
+
+Window mode and network endpoint enable/disable are controlled by CLI/env:
+
+- `--window-mode` / `TZE_HUD_WINDOW_MODE`
+- `--grpc-port` / `TZE_HUD_GRPC_PORT` (`0` disables gRPC)
+- `--mcp-port` / `TZE_HUD_MCP_PORT` (`0` disables MCP HTTP)
+- `--psk` / `TZE_HUD_PSK`
+
+Config loading examples:
 
 ```bash
 ./tze_hud --config /path/to/config.toml
 # or on Windows:
 .\tze_hud.exe --config C:\path\to\config.toml
-```
-
-### Configuration Schema
-
-```toml
-# Display configuration
-[display]
-# Window dimensions
-width = 1920
-height = 1080
-
-# Display mode: "windowed", "headless", "full"
-mode = "windowed"
-
-# Network services (optional)
-[network]
-# Enable gRPC session server
-enable_grpc = true
-grpc_bind = "127.0.0.1:50051"
-
-# Enable MCP HTTP endpoint
-enable_mcp_http = true
-mcp_http_bind = "127.0.0.1:8765"
-
-# MCP authentication
-# Load from environment (recommended):
-mcp_psk_env = "MCP_APP_PSK"
-# Or inline (not recommended for production):
-# mcp_psk = "shared-secret-key"
-```
-
-### Common Configurations
-
-**Windowed with MCP HTTP (for remote deployment):**
-
-```toml
-[display]
-width = 1920
-height = 1080
-mode = "windowed"
-
-[network]
-enable_mcp_http = true
-mcp_http_bind = "0.0.0.0:8765"  # Bind to all interfaces
-mcp_psk_env = "MCP_TEST_PSK"
-```
-
-**Headless with gRPC only:**
-
-```toml
-[display]
-mode = "headless"
-
-[network]
-enable_grpc = true
-grpc_bind = "127.0.0.1:50051"
 ```
 
 ## Runtime Lifecycle
@@ -269,8 +243,8 @@ See `.claude/skills/user-test/SKILL.md` for full automation workflow.
 
 1. **Artifact availability**: Build succeeds, artifact exists at expected path
 2. **Deterministic naming**: Artifact name never changes across builds
-3. **Configuration support**: App accepts `--config` CLI argument
-4. **Network startup**: MCP HTTP endpoint binds and accepts requests when configured
+3. **Configuration support**: App accepts `--config` and loads valid loader-schema TOML
+4. **Network startup**: MCP/gRPC endpoints bind when their CLI/env ports are non-zero
 5. **Authentication enforcement**: MCP rejects unauthenticated requests
 6. **Clean shutdown**: Process terminates without hanging on listener teardown
 7. **Structured logging**: Startup/shutdown events logged with clear messaging
@@ -282,7 +256,7 @@ Before deploying to production or automation workflows:
 - [ ] Binary builds successfully on all required platforms
 - [ ] Artifact name is stable and deterministic
 - [ ] `--config` CLI argument is parsed and config is loaded
-- [ ] Display mode applies correctly (windowed, headless, full)
+- [ ] Display mode applies correctly (`fullscreen` or `overlay`)
 - [ ] Network endpoints bind and accept connections when enabled
 - [ ] MCP HTTP endpoint enforces authentication (rejects without valid PSK)
 - [ ] Shutdown is clean (no hanging processes, logs on exit)
@@ -294,5 +268,6 @@ Before deploying to production or automation workflows:
 - [DEPLOYMENT.md](DEPLOYMENT.md) - Deployment automation guide
 - [README.md](../README.md) - Build and test overview
 - [OPERATOR_CHECKLIST.md](OPERATOR_CHECKLIST.md) - Operator deployment checklist
+- `app/tze_hud_app/tests/canonical_config_schema.rs` - Canonical config CI guard
 - `.claude/skills/user-test/SKILL.md` - User-test automation skill
 - `openspec/changes/ship-runtime-app-binary/` - Specification artifacts (design, requirements)
