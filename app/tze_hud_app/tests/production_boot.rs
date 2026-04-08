@@ -11,6 +11,8 @@
 //! If startup silently falls back to a default/headless policy, these assertions
 //! fail even when runtime construction itself succeeds.
 
+use std::path::Path;
+use toml::Value;
 use tze_hud_runtime::HeadlessRuntime;
 use tze_hud_runtime::headless::HeadlessConfig;
 
@@ -18,31 +20,48 @@ const PRODUCTION_CONFIG: &str = include_str!("../config/production.toml");
 const REPO_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 fn canonical_config_for_headless() -> String {
-    PRODUCTION_CONFIG
-        // HeadlessConfig only accepts config_toml (string) and does not carry
-        // config_file_path, so relative asset paths cannot be resolved against
-        // app/tze_hud_app/config/. Rebase only asset roots for deterministic CI.
-        .replace(
-            "paths = [\"widget_bundles\"]",
-            &format!("paths = [\"{REPO_ROOT}/widget_bundles\"]"),
-        )
-        .replace(
-            "paths = [\"profiles\"]",
-            &format!("paths = [\"{REPO_ROOT}/profiles\"]"),
-        )
+    let mut config: Value = PRODUCTION_CONFIG
+        .parse()
+        .expect("production.toml must be valid TOML");
+
+    let widget_bundle_paths: Vec<Value> = [
+        format!("{REPO_ROOT}/widget_bundles"),
+        format!("{REPO_ROOT}/assets/widget_bundles"),
+        format!("{REPO_ROOT}/assets/widgets"),
+    ]
+    .into_iter()
+    .filter(|path| Path::new(path).is_dir())
+    .map(Value::String)
+    .collect();
+
+    assert!(
+        !widget_bundle_paths.is_empty(),
+        "expected at least one widget bundle root under {REPO_ROOT}"
+    );
+
+    // HeadlessConfig only accepts config_toml (string) and does not carry
+    // config_file_path, so relative asset paths cannot be resolved against
+    // app/tze_hud_app/config/. Rebase only asset roots for deterministic CI.
+    config["widget_bundles"]["paths"] = Value::Array(widget_bundle_paths);
+    config["component_profile_bundles"]["paths"] =
+        Value::Array(vec![Value::String(format!("{REPO_ROOT}/profiles"))]);
+
+    toml::to_string(&config).expect("headless canonical config must serialize")
 }
 
-#[tokio::test]
-async fn canonical_app_production_config_boot_succeeds() {
-    let config = HeadlessConfig {
+fn canonical_headless_config() -> HeadlessConfig {
+    HeadlessConfig {
         width: 320,
         height: 240,
         grpc_port: 0,
         psk: "canonical-app-production-boot-test".to_string(),
         config_toml: Some(canonical_config_for_headless()),
-    };
+    }
+}
 
-    let result = HeadlessRuntime::new(config).await;
+#[tokio::test]
+async fn canonical_app_production_config_boot_succeeds() {
+    let result = HeadlessRuntime::new(canonical_headless_config()).await;
     assert!(
         result.is_ok(),
         "runtime failed to start with app/tze_hud_app/config/production.toml: {:?}",
@@ -52,20 +71,15 @@ async fn canonical_app_production_config_boot_succeeds() {
 
 #[tokio::test]
 async fn canonical_app_production_config_registers_declared_state() {
-    let config = HeadlessConfig {
-        width: 320,
-        height: 240,
-        grpc_port: 0,
-        psk: "canonical-app-production-boot-test".to_string(),
-        config_toml: Some(canonical_config_for_headless()),
-    };
-
-    let runtime = HeadlessRuntime::new(config)
+    let runtime = HeadlessRuntime::new(canonical_headless_config())
         .await
         .expect("runtime must start with canonical app production config");
 
-    let state = runtime.shared_state().lock().await;
-    let scene = state.scene.lock().await;
+    let scene_handle = {
+        let state = runtime.shared_state().lock().await;
+        state.scene.clone()
+    };
+    let scene = scene_handle.lock().await;
 
     // Config declares three concrete widget instances on the Main tab. If startup
     // fell back to defaults, these instances are absent.
@@ -96,7 +110,11 @@ async fn canonical_app_production_config_registers_declared_state() {
         .text_color
         .expect("notification-area text_color must be populated");
 
-    let expected = (245.0f32 / 255.0f32, 247.0f32 / 255.0f32, 250.0f32 / 255.0f32);
+    let expected = (
+        245.0f32 / 255.0f32,
+        247.0f32 / 255.0f32,
+        250.0f32 / 255.0f32,
+    );
     let eps = 1e-3f32;
     assert!(
         (text_color.r - expected.0).abs() < eps
