@@ -23,24 +23,24 @@
 //! - Resuming → Closed (expired/invalid token)
 
 use crate::auth::{
-    AuthResult, CapabilityPolicy, authenticate_session_init, negotiate_version,
-    validate_canonical_capabilities,
+    authenticate_session_init, negotiate_version, validate_canonical_capabilities, AuthResult,
+    CapabilityPolicy,
 };
 use crate::convert;
 use crate::dedup::{CachedResult, DedupWindow};
 use crate::lease::{
-    CachedLeaseResponse, DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY, LeaseCorrelationCache,
-    effective_priority,
+    effective_priority, CachedLeaseResponse, LeaseCorrelationCache,
+    DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
 };
 use crate::proto::session::client_message::Payload as ClientPayload;
 use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::proto::session::*;
-use crate::session::{SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
+use crate::session::{SharedState, SESSION_EVENT_CHANNEL_CAPACITY};
 use crate::subscriptions;
-use crate::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
-use quick_xml::Reader;
+use crate::token::{TokenStore, DEFAULT_GRACE_PERIOD_MS};
 use quick_xml::events::Event;
+use quick_xml::Reader;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -4407,8 +4407,8 @@ async fn handle_input_capture_release(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     rel: InputCaptureRelease,
 ) {
-    use crate::proto::CaptureReleasedReason;
     use crate::proto::input_envelope::Event as InputEvent;
+    use crate::proto::CaptureReleasedReason;
     use crate::proto::{CaptureReleasedEvent, EventBatch, InputEnvelope};
 
     // Only deliver the CaptureReleasedEvent if the agent is subscribed to FOCUS_EVENTS.
@@ -4542,7 +4542,7 @@ fn validate_emission(
     session: &mut StreamSession,
     emit: &EmitSceneEvent,
 ) -> Result<String, (String, String)> {
-    use tze_hud_scene::events::naming::{NamingError, build_agent_event_type, validate_bare_name};
+    use tze_hud_scene::events::naming::{build_agent_event_type, validate_bare_name, NamingError};
 
     // ── Step 1: Validate bare name (format + reserved prefix) ────────────
     if let Err(naming_err) = validate_bare_name(&emit.bare_name) {
@@ -4721,21 +4721,15 @@ mod tests {
             Some(ServerPayload::SessionEstablished(established)) => {
                 assert!(!established.session_id.is_empty());
                 assert_eq!(established.namespace, "test-agent");
-                assert!(
-                    established
-                        .granted_capabilities
-                        .contains(&"create_tiles".to_string())
-                );
-                assert!(
-                    established
-                        .granted_capabilities
-                        .contains(&"access_input_events".to_string())
-                );
-                assert!(
-                    established
-                        .granted_capabilities
-                        .contains(&"read_scene_topology".to_string())
-                );
+                assert!(established
+                    .granted_capabilities
+                    .contains(&"create_tiles".to_string()));
+                assert!(established
+                    .granted_capabilities
+                    .contains(&"access_input_events".to_string()));
+                assert!(established
+                    .granted_capabilities
+                    .contains(&"read_scene_topology".to_string()));
                 assert!(!established.resume_token.is_empty());
                 assert_eq!(
                     established.heartbeat_interval_ms,
@@ -5114,10 +5108,9 @@ mod tests {
                 assert!(!resp.lease_id.is_empty());
                 assert_eq!(resp.lease_id.len(), 16);
                 assert_eq!(resp.granted_ttl_ms, 30_000);
-                assert!(
-                    resp.granted_capabilities
-                        .contains(&"create_tiles".to_string())
-                );
+                assert!(resp
+                    .granted_capabilities
+                    .contains(&"create_tiles".to_string()));
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
         }
@@ -7666,10 +7659,9 @@ mod tests {
                     "Expected COALESCING_MORE"
                 );
                 assert_eq!(dn.reason, "high load");
-                assert!(
-                    dn.affected_capabilities
-                        .contains(&"state_stream".to_string())
-                );
+                assert!(dn
+                    .affected_capabilities
+                    .contains(&"state_stream".to_string()));
             }
             other => panic!("Expected DegradationNotice, got: {other:?}"),
         }
@@ -8384,10 +8376,9 @@ mod tests {
                 assert_eq!(resp.lease_id.len(), 16, "lease_id must be 16-byte UUIDv7");
                 assert_eq!(resp.granted_ttl_ms, 30_000);
                 assert_eq!(resp.granted_priority, 2);
-                assert!(
-                    resp.granted_capabilities
-                        .contains(&"create_tiles".to_string())
-                );
+                assert!(resp
+                    .granted_capabilities
+                    .contains(&"create_tiles".to_string()));
                 resp.lease_id.clone()
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
@@ -9346,7 +9337,34 @@ mod tests {
         tokio::task::JoinHandle<()>,
     ) {
         let service = setup_widget_service().await;
+        setup_widget_test_with_service(service).await
+    }
 
+    /// Helper: start a server with a widget service using explicit asset-store limits.
+    async fn setup_widget_test_with_asset_limits(
+        max_total_bytes: u64,
+        max_namespace_bytes: u64,
+    ) -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let service = setup_widget_service().await;
+        {
+            let mut st = service.state.lock().await;
+            st.widget_asset_store = crate::session::WidgetAssetStore::new_with_limits(
+                max_total_bytes,
+                max_namespace_bytes,
+            );
+        }
+        setup_widget_test_with_service(service).await
+    }
+
+    async fn setup_widget_test_with_service(
+        service: HudSessionImpl,
+    ) -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -9837,6 +9855,34 @@ mod tests {
             other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
         }
 
+        let valid_payload =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><circle r='2'/></svg>".to_vec();
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: blake3::hash(&valid_payload).as_bytes().to_vec(),
+                transport_crc32c: 0,
+                total_size_bytes: valid_payload.len() as u64,
+                inline_svg_bytes: valid_payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let uploaded = next_non_state_change(&mut stream).await;
+        match &uploaded.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(result.accepted);
+                assert!(!result.was_deduplicated);
+                assert!(result.error_code.is_empty());
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
         drop(handle);
     }
 
@@ -9924,6 +9970,48 @@ mod tests {
             Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
                 assert!(!result.accepted);
                 assert_eq!(result.error_code, "WIDGET_ASSET_INVALID_SVG");
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_widget_asset_register_budget_exceeded_rejected() {
+        let (mut client, handle) = setup_widget_test_with_asset_limits(24, 24).await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "asset-budget",
+            "test-key",
+            &["register_widget_asset"],
+        )
+        .await;
+
+        let payload =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='10' height='10'/></svg>"
+                .to_vec();
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: blake3::hash(&payload).as_bytes().to_vec(),
+                transport_crc32c: 0,
+                total_size_bytes: payload.len() as u64,
+                inline_svg_bytes: payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let budget_denied = next_non_state_change(&mut stream).await;
+        match &budget_denied.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(!result.accepted);
+                assert_eq!(result.error_code, "WIDGET_ASSET_BUDGET_EXCEEDED");
             }
             other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
         }
