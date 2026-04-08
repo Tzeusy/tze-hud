@@ -3943,26 +3943,30 @@ async fn handle_widget_asset_register(
         }
     };
 
-    {
+    let existing_asset_handle = {
         let st = state.lock().await;
-        if let Some(existing) = st.widget_asset_store.by_hash.get(&expected_hash) {
-            send_widget_asset_register_result(
-                session,
-                tx,
-                WidgetAssetRegisterResult {
-                    request_sequence,
-                    accepted: true,
-                    widget_type_id: register.widget_type_id.clone(),
-                    svg_filename: register.svg_filename.clone(),
-                    asset_handle: existing.asset_handle.clone(),
-                    was_deduplicated: true,
-                    error_code: String::new(),
-                    error_message: String::new(),
-                },
-            )
-            .await;
-            return;
-        }
+        st.widget_asset_store
+            .by_hash
+            .get(&expected_hash)
+            .map(|existing| existing.asset_handle.clone())
+    };
+    if let Some(asset_handle) = existing_asset_handle {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            WidgetAssetRegisterResult {
+                request_sequence,
+                accepted: true,
+                widget_type_id: register.widget_type_id.clone(),
+                svg_filename: register.svg_filename.clone(),
+                asset_handle,
+                was_deduplicated: true,
+                error_code: String::new(),
+                error_message: String::new(),
+            },
+        )
+        .await;
+        return;
     }
 
     if register.inline_svg_bytes.is_empty() {
@@ -4060,22 +4064,24 @@ async fn handle_widget_asset_register(
     let mut st = state.lock().await;
 
     // Re-check dedup after lock acquisition to avoid races between workers.
-    if let Some(existing) = st.widget_asset_store.by_hash.get(&expected_hash) {
-        send_widget_asset_register_result(
-            session,
-            tx,
-            WidgetAssetRegisterResult {
-                request_sequence,
-                accepted: true,
-                widget_type_id: register.widget_type_id.clone(),
-                svg_filename: register.svg_filename.clone(),
-                asset_handle: existing.asset_handle.clone(),
-                was_deduplicated: true,
-                error_code: String::new(),
-                error_message: String::new(),
-            },
-        )
-        .await;
+    if let Some(asset_handle) = st
+        .widget_asset_store
+        .by_hash
+        .get(&expected_hash)
+        .map(|existing| existing.asset_handle.clone())
+    {
+        let dedup_result = WidgetAssetRegisterResult {
+            request_sequence,
+            accepted: true,
+            widget_type_id: register.widget_type_id.clone(),
+            svg_filename: register.svg_filename.clone(),
+            asset_handle,
+            was_deduplicated: true,
+            error_code: String::new(),
+            error_message: String::new(),
+        };
+        drop(st);
+        send_widget_asset_register_result(session, tx, dedup_result).await;
         return;
     }
 
@@ -4093,18 +4099,15 @@ async fn handle_widget_asset_register(
         > st.widget_asset_store.max_total_bytes
         || used_by_ns.saturating_add(payload_len) > st.widget_asset_store.max_namespace_bytes
     {
-        send_widget_asset_register_result(
-            session,
-            tx,
-            make_widget_asset_error_result(
-                request_sequence,
-                &register.widget_type_id,
-                &register.svg_filename,
-                "WIDGET_ASSET_BUDGET_EXCEEDED",
-                "runtime widget asset store budget exceeded".to_string(),
-            ),
-        )
-        .await;
+        let budget_error = make_widget_asset_error_result(
+            request_sequence,
+            &register.widget_type_id,
+            &register.svg_filename,
+            "WIDGET_ASSET_BUDGET_EXCEEDED",
+            "runtime widget asset store budget exceeded".to_string(),
+        );
+        drop(st);
+        send_widget_asset_register_result(session, tx, budget_error).await;
         return;
     }
 
@@ -4124,18 +4127,15 @@ async fn handle_widget_asset_register(
     );
     if previous.is_some() {
         // Should be unreachable due to dedup checks above; return a stable error anyway.
-        send_widget_asset_register_result(
-            session,
-            tx,
-            make_widget_asset_error_result(
-                request_sequence,
-                &register.widget_type_id,
-                &register.svg_filename,
-                "WIDGET_ASSET_STORE_IO_ERROR",
-                "duplicate hash insertion race while updating store".to_string(),
-            ),
-        )
-        .await;
+        let duplicate_error = make_widget_asset_error_result(
+            request_sequence,
+            &register.widget_type_id,
+            &register.svg_filename,
+            "WIDGET_ASSET_STORE_IO_ERROR",
+            "duplicate hash insertion race while updating store".to_string(),
+        );
+        drop(st);
+        send_widget_asset_register_result(session, tx, duplicate_error).await;
         return;
     }
     st.widget_asset_store.total_bytes = st

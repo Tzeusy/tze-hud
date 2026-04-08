@@ -203,8 +203,9 @@ mod tests {
     // ── Vocabulary completeness ───────────────────────────────────────────────
 
     /// All v1 canonical capability forms must be recognized.
-    /// The spec lists 18 forms; parameterized forms (publish_zone, emit_scene_event, lease:priority)
-    /// are tested with concrete examples, so the array below contains 19 entries.
+    /// The spec lists 18 forms; parameterized forms (publish_zone, publish_widget,
+    /// emit_scene_event, lease:priority) are tested with concrete examples, so the
+    /// array below contains 20 entries.
     #[test]
     fn all_canonical_capabilities_recognized() {
         let caps = [
@@ -224,6 +225,7 @@ mod tests {
             "resident_mcp",
             "publish_zone:*",
             "publish_zone:subtitle",
+            "publish_widget:clock",
             "emit_scene_event:doorbell.ring",
             "lease:priority:1",
             "lease:priority:0",
