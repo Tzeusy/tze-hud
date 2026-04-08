@@ -111,7 +111,7 @@ NOTES:
     the runtime starts with flag/env-var defaults (RFC 0006 §1.5). The config
     file (when present) uses the loader schema rooted at [runtime] and [[tabs]]
     (plus optional sections such as [agents], [widget_bundles], and
-    [component_profiles]).
+    [component_profiles]). Legacy [display]/[network] tables are unsupported.
     CLI flags override individual settings from the config file.
     Passing --config with a path that does not exist or cannot be read is an error.
 "#,
