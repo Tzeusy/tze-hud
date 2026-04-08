@@ -4,6 +4,8 @@
 
 Materialize follow-on backlog from `docs/reconciliations/webrtc_media_v1_direction_report.md` into a low-churn, spec-first bead plan that a coordinator can apply without reinterpretation.
 
+Companion machine-readable payload: `docs/reconciliations/webrtc_media_v1_backlog_materialization.proposed_beads.json`.
+
 ## Source-of-Truth Inputs
 
 - Direction report: `docs/reconciliations/webrtc_media_v1_direction_report.md`
@@ -28,6 +30,7 @@ Materialize follow-on backlog from `docs/reconciliations/webrtc_media_v1_directi
 | WM-S3 | Spec: runtime-kernel media activation gate and budgets | task | 1 | WM-S1, WM-S2 | Prevent ad-hoc media-thread enablement and budget drift. |
 | WM-S4 | Spec: validation-framework media rehearsal scenarios and pass/fail thresholds | task | 1 | WM-S1, WM-S2, WM-S3 | Defines measurable acceptance before implementation beads execute. |
 | WM-S5 | Docs/spec alignment: architecture-v1 phased contract wording for media deferment | task | 2 | WM-S1 | Removes doctrine ambiguity called out in direction report blockers. |
+| WM-S6 | Docs alignment: README media/WebRTC claims vs v1/post-v1 scope | task | 2 | WM-S1, WM-S5 | Closes public-claim drift where README can imply active v1 WebRTC/media support. |
 
 ### Phase B: Implementation tranche (create now, blocked)
 
@@ -51,7 +54,7 @@ Materialize follow-on backlog from `docs/reconciliations/webrtc_media_v1_directi
 
 1. `WM-S1`
 2. `WM-S2`, `WM-S3`
-3. `WM-S4`, `WM-S5`
+3. `WM-S4`, `WM-S5`, `WM-S6`
 4. `hud-nn9d.3` (human report bead captures spec outcomes + proposed deltas)
 5. `hud-nn9d.4` (reconciliation verifies coverage and no scope creep)
 6. `WM-I1` -> `WM-I2` -> `WM-I3` -> `WM-I4` (+ `WM-I5` in parallel with `WM-I2/WM-I3` once contract is stable)
@@ -86,6 +89,11 @@ bd create "Docs/spec alignment: architecture-v1 phased contract wording for medi
   --type task --priority 2 \
   --description "Align architecture/v1 wording so media vision and v1 deferment are explicitly phased and non-contradictory." \
   --deps blocks:<WM-S1-ID> --json
+
+bd create "Docs alignment: README media/WebRTC claims vs v1/post-v1 scope" \
+  --type task --priority 2 \
+  --description "Align README claims about protocol planes and media so v1 boundaries (no live media/WebRTC in v1) are explicit and consistent with doctrine/specs while preserving post-v1 direction." \
+  --deps blocks:<WM-S1-ID> --deps blocks:<WM-S5-ID> --json
 
 bd create "Implement protocol/media conversion for first-slice signaling path" \
   --type feature --priority 1 \

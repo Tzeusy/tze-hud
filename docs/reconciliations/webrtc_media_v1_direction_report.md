@@ -47,7 +47,7 @@ Highest-priority next work is spec-first: formalize a minimal "media v1.5" contr
 ### Contradictions
 
 - Doctrine tension: architecture says "media is one reason project exists" while v1 doctrine forbids media runtime implementation. This is not a bug, but it is a communication hazard without explicit phased contract language (`about/heart-and-soul/architecture.md:215`, `about/heart-and-soul/v1.md:115`). [Observed]
-- Issue brief references `docs/reconciliations/webrtc_media_v1_epic_prompt.md`, but that file was not found in the repo at time of writing; this report used issue text + cited evidence set as source brief. [Observed]
+- Epic prompt reference is now present at `docs/reconciliations/webrtc_media_v1_epic_prompt.md`; any earlier missing-file observation should be treated as resolved by repository state as of 2026-04-08. [Observed]
 
 ## Current State
 
