@@ -62,4 +62,4 @@ Because worker lifecycle mutation is out of scope, these are proposed for coordi
 
 ## Close-Reason Summary Text (For Coordinator)
 
-`Gen-1 reconciliation complete: all cited policy contradictions are either covered in direction/signoff artifacts or mapped to explicit follow-on backlog, with two missing items identified for coordinator action (instantiate PW-01..PW-07 as real beads; add dedicated capability-escalation policy-validation bead).`
+`Gen-1 reconciliation complete: all cited policy contradictions are either covered in direction/signoff artifacts or mapped to explicit follow-on backlog, with three missing items identified for coordinator action (instantiate PW-01..PW-07 as real beads; add dedicated capability-escalation policy-validation bead; patch direction-report historical contradiction note).`
