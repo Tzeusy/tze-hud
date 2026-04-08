@@ -44,6 +44,7 @@ use crate::component_startup::{register_profile_widgets, run_component_startup};
 use crate::pipeline::{FramePipeline, HitTestSnapshot};
 use crate::reload_triggers::{RuntimeServiceImpl, spawn_sighup_listener};
 use crate::runtime_context::{FallbackPolicy, RuntimeContext};
+use crate::widget_runtime_registration::process_pending_widget_svgs;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -281,12 +282,10 @@ impl HeadlessRuntime {
                     register_profile_widgets(&mut scene, &startup_result);
                     // Step 9c: register global widget SVG assets with the headless widget renderer,
                     // mirroring the windowed runtime so bundled SVG-based widgets render correctly.
-                    if let Some(wr) = compositor.widget_renderer_mut() {
-                        for (type_id, filename, bytes) in startup_result.widget_svg_assets.drain(..)
-                        {
-                            wr.register_svg(&type_id, &filename, bytes);
-                        }
-                    }
+                    process_pending_widget_svgs(
+                        compositor.widget_renderer_mut(),
+                        startup_result.widget_svg_assets.drain(..),
+                    );
                     // compositor_tokens is pre-merged: global tokens + all active profile
                     // token overrides. Pass directly to compositor.set_token_map().
                     tracing::debug!(
@@ -367,6 +366,13 @@ impl HeadlessRuntime {
         let scene_arc = state.scene.clone();
         drop(state);
         let mut scene_guard = scene_arc.lock().await;
+        // Register runtime-uploaded widget SVG assets before rendering so new
+        // registrations are visible on the next frame.
+        process_pending_widget_svgs(
+            self.compositor.widget_renderer_mut(),
+            scene_guard.drain_pending_widget_svg_assets(),
+        );
+
         // Per timing-model/spec.md §Expiration Policy: expired zone and widget
         // publications MUST be cleared before the next frame.
         scene_guard.drain_expired_zone_publications();

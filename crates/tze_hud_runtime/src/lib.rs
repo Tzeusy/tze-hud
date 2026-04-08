@@ -102,6 +102,7 @@ pub mod tab_switch_trigger;
 pub mod threads;
 pub mod trace_capture;
 mod widget_hover;
+pub mod widget_runtime_registration;
 pub mod widget_startup;
 pub mod window;
 pub mod windowed;
@@ -189,6 +190,7 @@ pub use subscriptions::{
     CATEGORY_ZONE_EVENTS, MANDATORY_CATEGORIES, MAX_SUBSCRIPTIONS_PER_AGENT, Subscription,
     SubscriptionChangeOutcome, SubscriptionRegistry, category_prefix, required_capability,
 };
+pub use widget_runtime_registration::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset};
 pub use windowed::{WindowedConfig, WindowedRuntime};
 // ChromeDrawCmd is defined in tze_hud_compositor to avoid circular deps.
 pub use shell::{

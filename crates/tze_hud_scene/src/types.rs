@@ -2033,6 +2033,12 @@ pub struct WidgetRegistry {
     pub instances: HashMap<std::string::String, WidgetInstance>,
     /// Active publishes per widget instance_name.
     pub active_publishes: HashMap<std::string::String, Vec<WidgetPublishRecord>>,
+    /// Runtime-registered widget SVG asset handles keyed by `"{type}:{svg_file}"`.
+    ///
+    /// This tracks stage-1 asset registration state so publish paths can stay
+    /// lightweight (parameter-only).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub runtime_svg_handles: HashMap<std::string::String, std::string::String>,
 }
 
 impl WidgetRegistry {
@@ -2041,7 +2047,12 @@ impl WidgetRegistry {
             definitions: HashMap::new(),
             instances: HashMap::new(),
             active_publishes: HashMap::new(),
+            runtime_svg_handles: HashMap::new(),
         }
+    }
+
+    fn runtime_svg_key(widget_type_id: &str, svg_filename: &str) -> String {
+        format!("{widget_type_id}:{svg_filename}")
     }
 
     /// Register a widget definition. Overwrites any existing definition with the same id.
@@ -2058,6 +2069,24 @@ impl WidgetRegistry {
     /// Look up a widget definition by id.
     pub fn get_definition(&self, id: &str) -> Option<&WidgetDefinition> {
         self.definitions.get(id)
+    }
+
+    /// Register or update the runtime asset handle for a widget SVG layer.
+    pub fn register_runtime_svg_handle(
+        &mut self,
+        widget_type_id: &str,
+        svg_filename: &str,
+        asset_handle: &str,
+    ) {
+        let key = Self::runtime_svg_key(widget_type_id, svg_filename);
+        self.runtime_svg_handles
+            .insert(key, asset_handle.to_string());
+    }
+
+    /// Retrieve a previously registered runtime SVG handle.
+    pub fn runtime_svg_handle(&self, widget_type_id: &str, svg_filename: &str) -> Option<&str> {
+        let key = Self::runtime_svg_key(widget_type_id, svg_filename);
+        self.runtime_svg_handles.get(&key).map(String::as_str)
     }
 
     /// Look up a widget instance by instance_name.
