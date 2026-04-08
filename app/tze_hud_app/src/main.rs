@@ -112,10 +112,11 @@ NOTES:
     Canonical startup is fail-closed: a readable, valid config file is required.
     Strict mode also rejects the trivial default PSK value.
     For debug/dev runs only, set TZE_HUD_DEV_ALLOW_INSECURE_STARTUP=1 to permit
-    fallback startup behavior. The config
-    file (when present) uses the loader schema rooted at [runtime] and [[tabs]]
+    fallback startup behavior without a config file. In canonical startup, the
+    required config file uses the loader schema rooted at [runtime] and [[tabs]]
     (plus optional sections such as [agents], [widget_bundles], and
-    [component_profiles]). Legacy [display]/[network] tables are unsupported.
+    [component_profiles]). In insecure dev mode, the same schema applies when a
+    config file is provided. Legacy [display]/[network] tables are unsupported.
     CLI flags override individual settings from the config file.
     Passing --config with a path that does not exist or cannot be read is an error.
 "#,
@@ -412,7 +413,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // We track both the TOML content and the file path so that relative
     // [widget_bundles].paths entries can be resolved relative to the config file's
     // parent directory (spec §Widget Bundle Configuration).
+    let security_mode = startup_security_mode();
     let mut searched_paths_for_missing: Vec<String> = Vec::new();
+    let mut config_read_error_detail: Option<String> = None;
     let (config_toml, config_file_path): (Option<String>, Option<String>) =
         match resolve_config_path(opts.config_path.as_deref()) {
             Ok(path) => {
@@ -428,41 +431,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             eprintln!("error: failed to read config file {path:?}: {io_err}");
                             std::process::exit(1);
                         }
-                        tracing::warn!(
-                            config_path = %path,
-                            error = %io_err,
-                            "config file found but not readable; using flag/env-var defaults"
-                        );
+                        searched_paths_for_missing = vec![path.clone()];
+                        config_read_error_detail =
+                            Some(format!("failed to read config file {path:?}: {io_err}"));
+                        if security_mode == StartupSecurityMode::Strict {
+                            tracing::warn!(
+                                config_path = %path,
+                                error = %io_err,
+                                "config file found but not readable; strict startup will fail"
+                            );
+                        } else {
+                            tracing::warn!(
+                                config_path = %path,
+                                error = %io_err,
+                                "config file found but not readable; using flag/env-var defaults"
+                            );
+                        }
                         (None, None)
                     }
                 }
             }
             Err(searched) => {
-                searched_paths_for_missing = searched.clone();
+                searched_paths_for_missing = searched;
                 // No config file found at any location.
                 if opts.config_path.is_some() {
                     // --config was given explicitly but the file was not found.
                     // This is a hard error (RFC 0006 §1.3).
                     eprintln!(
                         "error: config file not found: {}",
-                        searched
+                        searched_paths_for_missing
                             .first()
                             .map(String::as_str)
                             .unwrap_or("(unknown path)")
                     );
                     std::process::exit(1);
                 }
-                // Config files are optional (RFC 0006 §1.5): the runtime starts
-                // successfully using flag/env-var defaults when no file is present.
-                tracing::debug!(
-                    searched = ?searched,
-                    "no config file found; using flag/env-var defaults"
-                );
+                if security_mode == StartupSecurityMode::Strict {
+                    tracing::debug!(
+                        searched = ?searched_paths_for_missing,
+                        "no config file found; strict startup will fail"
+                    );
+                } else {
+                    // Config files are optional in dev-insecure override mode.
+                    tracing::debug!(
+                        searched = ?searched_paths_for_missing,
+                        "no config file found; using flag/env-var defaults"
+                    );
+                }
                 (None, None)
             }
         };
 
-    let security_mode = startup_security_mode();
     if security_mode == StartupSecurityMode::Strict {
         if config_toml.is_none() {
             let searched_joined = if searched_paths_for_missing.is_empty() {
@@ -473,6 +492,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "error: canonical startup requires a readable config file; searched: {searched_joined}"
             );
+            if let Some(detail) = &config_read_error_detail {
+                eprintln!("detail: {detail}");
+            }
             eprintln!(
                 "hint: this fail-closed behavior is mandatory for production startup. \
 set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallback defaults."
@@ -489,11 +511,12 @@ set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallba
             std::process::exit(1);
         }
 
-        if let Some(ref toml_src) = config_toml {
-            if let Err(msg) = validate_config_toml_for_startup(toml_src) {
-                eprintln!("error: {msg}");
-                std::process::exit(1);
-            }
+        let toml_src = config_toml
+            .as_ref()
+            .expect("strict mode already checked config_toml presence");
+        if let Err(msg) = validate_config_toml_for_startup(toml_src) {
+            eprintln!("error: {msg}");
+            std::process::exit(1);
         }
     } else {
         tracing::warn!(
