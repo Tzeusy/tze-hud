@@ -15,6 +15,7 @@ Materialize the policy wiring direction output into a concrete, dependency-order
 5. Human review summary and reconciliation tail close the loop.
 
 ## Dependency Graph
+- `discovered-from:hud-iq2x.2` -> `PW-01`
 - `PW-01` -> `PW-02`
 - `PW-02` -> `PW-03`
 - `PW-03` -> `PW-04`
@@ -24,13 +25,15 @@ Materialize the policy wiring direction output into a concrete, dependency-order
 - `PW-03` -> `PW-06`
 - `PW-04` -> `PW-06`
 - `PW-05` -> `PW-06`
+- `discovered-from:hud-iq2x.3` -> `PW-06`
 - `PW-06` -> `PW-07`
+- `discovered-from:hud-iq2x.4` -> `PW-07`
 
 ## Proposed Bead Set (for coordinator to create)
 
 ### PW-01 — Reconcile v1 policy authority claims across specs
 - Type/Priority: `task` / `P1`
-- Depends on: `hud-iq2x.2`
+- Discovered from: `discovered-from:hud-iq2x.2`
 - Spec citations:
   - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md` (per-mutation/per-event/per-frame MUST claims)
   - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md` (runtime authority/budget constraints)
@@ -91,6 +94,7 @@ Materialize the policy wiring direction output into a concrete, dependency-order
 ### PW-06 — Reconcile implementation vs doctrine/spec after wiring phases
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-01`, `PW-02`, `PW-03`, `PW-04`, `PW-05`
+- Discovered from: `discovered-from:hud-iq2x.3`
 - Spec-first marker: `reconcile before closure`
 - Spec citations:
   - `about/heart-and-soul/v1.md`
@@ -105,7 +109,12 @@ Materialize the policy wiring direction output into a concrete, dependency-order
 ### PW-07 — Publish human signoff report for policy wiring program
 - Type/Priority: `task` / `P1`
 - Depends on: `PW-06`
-- Spec citation or marker: `report references reconciled specs + implemented evidence`
+- Discovered from: `discovered-from:hud-iq2x.4`
+- Spec citations:
+  - `about/heart-and-soul/v1.md`
+  - `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
+  - `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
 - Acceptance:
   - Produce concise signoff report under `docs/reconciliations/`.
   - Link all created/closed follow-on beads and unresolved risks.
