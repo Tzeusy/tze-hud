@@ -3476,6 +3476,7 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "tze_hud_config",

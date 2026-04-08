@@ -18,6 +18,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tze_hud_scene = { path = "../../crates/tze_hud_scene" }
+toml = { workspace = true }
 
 # Windows: embed the application manifest (tze_hud.manifest) at build time.
 # The manifest declares PerMonitorV2 DPI awareness, ensuring that winit's
