@@ -46,6 +46,16 @@ Status: PASS
   - MCP `mcp_port == 0` disables server
   - tests in `crates/tze_hud_runtime/src/windowed.rs` cover disable/enable/idempotent behavior.
 
+3. `Requirement: Windows Artifact Identity for Automation`  
+Status: PASS
+- Deterministic Windows artifact naming and output paths are documented for automation:
+  - `about/lay-and-land/operations/RUNTIME_APP_BINARY.md` (`## Artifact Identity`)
+  - `about/lay-and-land/operations/DEPLOYMENT.md` (`## Canonical App Binary Identity`)
+- Canonical artifact references are explicit and stable:
+  - `target/x86_64-pc-windows-gnu/release/tze_hud.exe`
+  - `target/x86_64-pc-windows-msvc/release/tze_hud.exe`
+  - `C:\\tze_hud\\tze_hud.exe`
+
 ### `configuration/spec.md` (epic-relevant subset)
 
 - `Requirement: TOML Configuration Format`  
