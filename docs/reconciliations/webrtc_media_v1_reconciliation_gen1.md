@@ -21,7 +21,7 @@ Verify that gen-1 WebRTC/media direction outputs cover cited contradictions and 
 | Missing contract gap (no canonical media capability spec) | Covered with follow-on | Direction report gap analysis + WM-S1..WM-S4 in backlog materialization | Follow-on work exists in backlog plan; still needs bead instantiation. |
 | Stale contradiction: epic prompt not found | Resolved | `docs/reconciliations/webrtc_media_v1_epic_prompt.md` exists | Direction report text corrected in this issue to reflect current repo state. |
 | Public claim drift (README implies active media/WebRTC plane in v1) | Partially covered | `README.md` language vs `v1.md` deferrals | Added explicit follow-on WM-S6 to close README-vs-v1 contract drift. |
-| Follow-on beads actually present in tracker | Missing | `bd list --json` shows only `hud-nn9d` and `hud-nn9d.4` in this track | Coordinator still needs to create the WM backlog items. |
+| Follow-on beads actually present in tracker | Covered (seed set only) | `bd show hud-nn9d --json` / `bd show hud-nn9d.4 --json` show `hud-nn9d.1`, `hud-nn9d.2`, `hud-nn9d.3`, and `hud-nn9d.4` already present; `WM-*` beads are not yet instantiated | Coordinator still needs to create the WM backlog items from the proposed payload. |
 
 ## Coverage Verdict
 
