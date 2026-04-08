@@ -30,6 +30,7 @@
 //! - `publish_to_widget`
 //! - `list_widgets`
 //! - `clear_widget`
+//! - `register_widget_asset`
 //!
 //! **Resident tools** (require the `resident_mcp` capability):
 //! - `create_tab`
@@ -174,8 +175,13 @@ enum ToolClass {
 fn classify_tool(method: &str) -> ToolClass {
     match method {
         // Guest tools — unconditionally accessible (auth still required)
-        "publish_to_zone" | "list_zones" | "list_scene" | "publish_to_widget" | "list_widgets"
-        | "clear_widget" => ToolClass::Guest,
+        "publish_to_zone"
+        | "list_zones"
+        | "list_scene"
+        | "publish_to_widget"
+        | "list_widgets"
+        | "clear_widget"
+        | "register_widget_asset" => ToolClass::Guest,
         // Resident tools — require resident_mcp capability
         "create_tab" | "create_tile" | "set_content" | "dismiss" => ToolClass::Resident,
         _ => ToolClass::Unknown,
@@ -188,6 +194,7 @@ fn classify_tool(method: &str) -> ToolClass {
 /// concurrent requests serialize scene mutations safely.
 pub struct McpServer {
     scene: Arc<Mutex<SceneGraph>>,
+    widget_asset_registry: Arc<Mutex<tools::WidgetAssetRegistry>>,
     config: McpConfig,
 }
 
@@ -202,6 +209,7 @@ impl McpServer {
     pub fn new(scene: SceneGraph) -> Self {
         Self {
             scene: Arc::new(Mutex::new(scene)),
+            widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
         }
     }
@@ -214,6 +222,7 @@ impl McpServer {
     pub fn with_shared_scene(scene: Arc<Mutex<SceneGraph>>) -> Self {
         Self {
             scene,
+            widget_asset_registry: Arc::new(Mutex::new(tools::WidgetAssetRegistry::default())),
             config: McpConfig::default(),
         }
     }
@@ -451,6 +460,18 @@ impl McpServer {
             }
             "clear_widget" => {
                 let r = tools::handle_clear_widget(params, &mut scene, caller_capabilities)?;
+                Ok(
+                    serde_json::to_value(r)
+                        .map_err(|e| crate::McpError::Internal(e.to_string()))?,
+                )
+            }
+            "register_widget_asset" => {
+                let mut registry = self.widget_asset_registry.lock().await;
+                let r = tools::handle_register_widget_asset(
+                    params,
+                    &mut registry,
+                    caller_capabilities,
+                )?;
                 Ok(
                     serde_json::to_value(r)
                         .map_err(|e| crate::McpError::Internal(e.to_string()))?,
@@ -1107,6 +1128,61 @@ mod tests {
             resp["error"]["code"], -32004,
             "unauthenticated caller must be rejected even for guest tools"
         );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_register_widget_asset_preflight_dedup_hit() {
+        let server = test_server(SceneGraph::new(1920.0, 1080.0));
+        let payload =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="2" height="2"/></svg>"#;
+        let hash_hex = {
+            let mut s = String::with_capacity(64);
+            for b in blake3::hash(payload.as_bytes()).as_bytes() {
+                use std::fmt::Write;
+                let _ = write!(&mut s, "{b:02x}");
+            }
+            s
+        };
+
+        let psk = std::env::var("MCP_TEST_PSK").unwrap_or_else(|_| TEST_PSK.to_string());
+        let mut ctx = CallerContext::with_bearer(psk);
+        ctx.capabilities.push("register_widget_asset".to_string());
+
+        let upload_req = json!({
+            "jsonrpc": "2.0",
+            "method": "register_widget_asset",
+            "params": {
+                "widget_type_id": "gauge",
+                "svg_filename": "cell.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "payload": payload
+            },
+            "id": 60
+        });
+        let upload_raw = server.dispatch(&upload_req.to_string(), &ctx).await;
+        let upload_resp = parse_response(&upload_raw);
+        assert!(upload_resp["error"].is_null(), "{upload_resp:#}");
+        assert_eq!(upload_resp["result"]["accepted"], true);
+        assert_eq!(upload_resp["result"]["was_deduplicated"], false);
+
+        let preflight_req = json!({
+            "jsonrpc": "2.0",
+            "method": "register_widget_asset",
+            "params": {
+                "widget_type_id": "gauge",
+                "svg_filename": "cell.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "metadata_only_preflight": true
+            },
+            "id": 61
+        });
+        let preflight_raw = server.dispatch(&preflight_req.to_string(), &ctx).await;
+        let preflight_resp = parse_response(&preflight_raw);
+        assert!(preflight_resp["error"].is_null(), "{preflight_resp:#}");
+        assert_eq!(preflight_resp["result"]["accepted"], true);
+        assert_eq!(preflight_resp["result"]["was_deduplicated"], true);
     }
 
     // ── Gauge widget MCP integration tests (hud-qc0c, openspec task 10) ────────

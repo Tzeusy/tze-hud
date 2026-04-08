@@ -13,6 +13,8 @@ subtle = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+blake3 = { workspace = true }
+quick-xml = { workspace = true }
 
 [features]
 # Enable the reference HTTP server (run_http). Requires tokio's full feature set.
