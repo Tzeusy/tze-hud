@@ -115,6 +115,7 @@ use crate::threads::{CompositorReady, NetworkRuntime, ShutdownToken, spawn_compo
 use crate::widget_hover::{
     WidgetHoverTracker, build_hover_trackers, hidden_mutations_for_removed, tick_hover_trackers,
 };
+use crate::widget_runtime_registration::process_pending_widget_svgs;
 use crate::window::{HitRegion, WindowConfig, WindowMode};
 use crate::window::{resolve_window_mode, should_capture_pointer_event};
 
@@ -550,11 +551,10 @@ impl ApplicationHandler for WinitApp {
         compositor.init_widget_renderer(surface_format);
 
         // Register pending widget SVG assets with the widget renderer.
-        if let Some(wr) = compositor.widget_renderer_mut() {
-            for (type_id, filename, bytes) in self.state.pending_widget_svgs.drain(..) {
-                wr.register_svg(&type_id, &filename, bytes);
-            }
-        }
+        process_pending_widget_svgs(
+            compositor.widget_renderer_mut(),
+            self.state.pending_widget_svgs.drain(..),
+        );
         tracing::info!(format = ?surface_format, "windowed: text + widget renderers initialized");
 
         // Apply resolved design tokens to the compositor so severity colors are
@@ -682,12 +682,10 @@ impl ApplicationHandler for WinitApp {
                         // Register runtime-uploaded widget SVG assets before
                         // rendering so newly registered widget types/layers can
                         // be referenced by publish calls immediately.
-                        let pending_widget_svgs = scene.drain_pending_widget_svg_assets();
-                        if let Some(wr) = compositor.widget_renderer_mut() {
-                            for (type_id, filename, bytes) in pending_widget_svgs {
-                                wr.register_svg(&type_id, &filename, bytes);
-                            }
-                        }
+                        process_pending_widget_svgs(
+                            compositor.widget_renderer_mut(),
+                            scene.drain_pending_widget_svg_assets(),
+                        );
 
                         // ── Zone and widget publication expiry sweep ──────
                         // Per timing-model/spec.md §Expiration Policy: expired

@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use thiserror::Error;
+use tze_hud_compositor::widget::WidgetRenderer;
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_widget::loader::validate_runtime_svg_registration;
 
@@ -71,6 +72,20 @@ pub fn register_runtime_widget_svg_asset(
         .register_runtime_svg_handle(widget_type_id, svg_filename, asset_handle);
     scene.enqueue_widget_svg_asset(widget_type_id, svg_filename, resolved_svg);
     Ok(())
+}
+
+/// Register pending widget SVG assets in the compositor widget renderer.
+pub fn process_pending_widget_svgs<I>(
+    widget_renderer: Option<&mut WidgetRenderer>,
+    pending_widget_svgs: I,
+) where
+    I: IntoIterator<Item = crate::widget_startup::WidgetSvgAsset>,
+{
+    if let Some(wr) = widget_renderer {
+        for (type_id, filename, bytes) in pending_widget_svgs {
+            wr.register_svg(&type_id, &filename, bytes);
+        }
+    }
 }
 
 #[cfg(test)]
