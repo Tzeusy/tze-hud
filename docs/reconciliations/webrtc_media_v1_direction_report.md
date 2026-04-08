@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-`tze_hud` is building an agent-native presence runtime where the screen is sovereign and timing/composition are runtime-owned, with media as a first-class architectural concern but not a v1 shipped capability ([about/heart-and-soul/architecture.md:1](about/heart-and-soul/architecture.md:1), [about/heart-and-soul/v1.md:115](about/heart-and-soul/v1.md:115)).
+`tze_hud` is building an agent-native presence runtime where the screen is sovereign and timing/composition are runtime-owned, with media as a first-class architectural concern but not a v1 shipped capability (`about/heart-and-soul/architecture.md:1`, `about/heart-and-soul/v1.md:115`).
 
-Current implementation is intentionally aligned with that deferment: media/WebRTC are represented as schema and contract placeholders (zone media types, reserved protocol fields, post-v1 transport constraints), while runtime behavior enforces no live media streams in v1 ([crates/tze_hud_scene/src/types.rs:1419](crates/tze_hud_scene/src/types.rs:1419), [crates/tze_hud_protocol/src/convert.rs:330](crates/tze_hud_protocol/src/convert.rs:330), [crates/tze_hud_scene/src/lease/budget.rs:533](crates/tze_hud_scene/src/lease/budget.rs:533)).
+Current implementation is intentionally aligned with that deferment: media/WebRTC are represented as schema and contract placeholders (zone media types, reserved protocol fields, post-v1 transport constraints), while runtime behavior enforces no live media streams in v1 (`crates/tze_hud_scene/src/types.rs:1419`, `crates/tze_hud_protocol/src/convert.rs:330`, `crates/tze_hud_scene/src/lease/budget.rs:533`).
 
 Highest-priority next work is spec-first: formalize a minimal "media v1.5" contract without changing v1 truth claims, then sequence bounded protocol/scene/runtime deltas behind explicit deferrals and acceptance tests. Immediate implementation of live AV is premature and churn-prone under current v1 constraints.
 
@@ -19,13 +19,13 @@ Highest-priority next work is spec-first: formalize a minimal "media v1.5" contr
 ### Doctrine vs Implementation vs Proposed V1 Contract
 
 #### Current doctrine
-- Architecture declares WebRTC as the media plane and GStreamer as core media substrate ([about/heart-and-soul/architecture.md:27](about/heart-and-soul/architecture.md:27), [about/heart-and-soul/architecture.md:215](about/heart-and-soul/architecture.md:215)). [Observed]
-- v1 doctrine explicitly defers GStreamer/WebRTC/live AV and clocked media cues ([about/heart-and-soul/v1.md:115](about/heart-and-soul/v1.md:115)). [Observed]
+- Architecture declares WebRTC as the media plane and GStreamer as core media substrate (`about/heart-and-soul/architecture.md:27`, `about/heart-and-soul/architecture.md:215`). [Observed]
+- v1 doctrine explicitly defers GStreamer/WebRTC/live AV and clocked media cues (`about/heart-and-soul/v1.md:115`). [Observed]
 
 #### Current implementation
-- Runtime/spec reserve embodied/WebRTC signaling and media worker pools for post-v1 ([openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:698](openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:698), [openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:374](openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:374)). [Observed]
-- Scene/protocol keep schema placeholders (`VideoSurfaceRef`, `WebRtcRequired`, reserved auth/session capabilities) but no live encode/decode path ([crates/tze_hud_scene/src/types.rs:1514](crates/tze_hud_scene/src/types.rs:1514), [crates/tze_hud_protocol/proto/session.proto:190](crates/tze_hud_protocol/proto/session.proto:190)). [Observed]
-- Conversion path intentionally omits proto payload encoding for `VideoSurfaceRef` and tests describe rendering as deferred ([crates/tze_hud_protocol/src/convert.rs:330](crates/tze_hud_protocol/src/convert.rs:330), [crates/tze_hud_scene/tests/zone_ontology.rs:709](crates/tze_hud_scene/tests/zone_ontology.rs:709)). [Observed]
+- Runtime/spec reserve embodied/WebRTC signaling and media worker pools for post-v1 (`openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:698`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:374`). [Observed]
+- Scene/protocol keep schema placeholders (`VideoSurfaceRef`, `WebRtcRequired`, reserved auth/session capabilities) but no live encode/decode path (`crates/tze_hud_scene/src/types.rs:1514`, `crates/tze_hud_protocol/proto/session.proto:190`). [Observed]
+- Conversion path intentionally omits proto payload encoding for `VideoSurfaceRef` and tests describe rendering as deferred (`crates/tze_hud_protocol/src/convert.rs:330`, `crates/tze_hud_scene/tests/zone_ontology.rs:709`). [Observed]
 
 #### Proposed v1 contract decision (this pass)
 - Keep **v1 GA contract unchanged**: no live media/WebRTC stream implementation. [Inferred]
@@ -46,8 +46,8 @@ Highest-priority next work is spec-first: formalize a minimal "media v1.5" contr
 
 ### Contradictions
 
-- Doctrine tension: architecture says "media is one reason project exists" while v1 doctrine forbids media runtime implementation. This is not a bug, but it is a communication hazard without explicit phased contract language ([about/heart-and-soul/architecture.md:215](about/heart-and-soul/architecture.md:215), [about/heart-and-soul/v1.md:115](about/heart-and-soul/v1.md:115)). [Observed]
-- Issue brief references `docs/reconciliations/webrtc_media_v1_epic_prompt.md`, but file is absent in this branch and `origin/main`; this report used issue text + cited evidence set as source brief. [Observed]
+- Doctrine tension: architecture says "media is one reason project exists" while v1 doctrine forbids media runtime implementation. This is not a bug, but it is a communication hazard without explicit phased contract language (`about/heart-and-soul/architecture.md:215`, `about/heart-and-soul/v1.md:115`). [Observed]
+- Issue brief references `docs/reconciliations/webrtc_media_v1_epic_prompt.md`, but that file was not found in the repo at time of writing; this report used issue text + cited evidence set as source brief. [Observed]
 
 ## Current State
 
@@ -190,7 +190,7 @@ Check:
 - [ ] Required validation scenes are identified.
 - [ ] No undocumented assumptions remain.
 
-### Block Reconciliation: Media/WebRTC direction block
+### Overall Reconciliation: Media/WebRTC Direction
 
 Check:
 - [ ] All chunk criteria met.
@@ -231,9 +231,9 @@ Check:
 ### C. Spec Inventory (media-relevant subset)
 - `about/heart-and-soul/v1.md` (v1 boundaries and explicit deferrals).
 - `about/heart-and-soul/architecture.md` (three-plane architecture and media doctrine).
-- `openspec/.../session-protocol/spec.md` (media signaling deferred clauses).
-- `openspec/.../runtime-kernel/spec.md` (media worker pool deferred clauses).
-- `openspec/.../validation-framework/spec.md` (validation harness expectations).
+- `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md` (media signaling deferred clauses).
+- `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md` (media worker pool deferred clauses).
+- `openspec/changes/v1-mvp-standards/specs/validation-framework/spec.md` (validation harness expectations).
 
 ### D. Evidence Index
 - `about/heart-and-soul/v1.md:115`
