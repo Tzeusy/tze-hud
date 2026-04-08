@@ -247,6 +247,54 @@ pub fn load_bundle_dir_scoped_with_tokens(
     }
 }
 
+/// Validate a runtime-registered SVG layer against an existing widget type definition.
+///
+/// This enforces the same structural checks used by startup bundle loading:
+/// token substitution, SVG parse validation, and binding target resolution.
+///
+/// Returns the resolved SVG bytes (post token substitution) on success.
+///
+/// Source: widget-system/spec.md §Requirement: Widget Asset Bundle Format,
+///         §Requirement: Runtime Widget SVG Registration.
+pub fn validate_runtime_svg_registration(
+    definition: &WidgetDefinition,
+    widget_type_id: &str,
+    svg_filename: &str,
+    svg_bytes: &[u8],
+    tokens: &HashMap<String, String>,
+) -> Result<Vec<u8>, BundleError> {
+    let path_str = format!("runtime:{widget_type_id}");
+    if definition.id != widget_type_id {
+        return Err(BundleError::BindingUnresolvable {
+            path: path_str,
+            detail: format!(
+                "runtime registration widget_type_id '{widget_type_id}' does not match definition id '{}'",
+                definition.id
+            ),
+        });
+    }
+
+    let layer = definition
+        .layers
+        .iter()
+        .find(|l| l.svg_file == svg_filename)
+        .ok_or_else(|| BundleError::BindingUnresolvable {
+            path: format!("runtime:{widget_type_id}"),
+            detail: format!(
+                "runtime registration references unknown svg_filename '{svg_filename}' for widget type '{widget_type_id}'"
+            ),
+        })?;
+
+    validate_svg_layer(
+        &path_str,
+        svg_filename,
+        svg_bytes,
+        tokens,
+        SvgReadabilityTechnique::None,
+        &layer.bindings,
+    )
+}
+
 fn load_bundle_dir_inner(
     dir: &Path,
     path_str: &str,
@@ -361,64 +409,21 @@ fn load_bundle_dir_inner(
             svg_file: svg_file.to_string(),
             detail: format!("cannot read file: {e}"),
         })?;
-
-        let svg_text = std::str::from_utf8(&svg_bytes).map_err(|e| BundleError::SvgParseError {
-            path: path_str.to_string(),
-            svg_file: svg_file.to_string(),
-            detail: format!("file is not valid UTF-8: {e}"),
-        })?;
-
-        // Step 5b-post: Resolve {{key}} / {{token.key}} placeholders BEFORE SVG parse/scan.
-        let svg_text_resolved = resolve_token_placeholders(svg_text, tokens).map_err(|key| {
-            BundleError::UnresolvedToken {
-                path: path_str.to_string(),
-                svg_file: svg_file.to_string(),
-                token_key: key,
-            }
-        })?;
-        let svg_text = svg_text_resolved.as_str();
-
-        // Validate SVG (well-formed XML + <svg> root check).
-        parse_svg_dimensions(svg_text).map_err(|e| BundleError::SvgParseError {
-            path: path_str.to_string(),
-            svg_file: svg_file.to_string(),
-            detail: e.to_string(),
-        })?;
-
-        // Step 5b-readability: Enforce readability conventions for profile-scoped bundles.
-        //
-        // The `readability_technique` was resolved from `scope` at the top of this
-        // function: global bundles always receive `None` here (the defensive guard),
-        // while profile-scoped bundles carry the technique declared by the caller.
-        check_svg_readability(svg_text, readability_technique).map_err(|detail| {
-            BundleError::ReadabilityConventionViolation {
-                path: path_str.to_string(),
-                svg_file: svg_file.to_string(),
-                detail,
-            }
-        })?;
-
-        // Step 5c: Collect element IDs for binding resolution.
-        let element_ids =
-            collect_svg_element_ids(svg_text).map_err(|e| BundleError::SvgParseError {
-                path: path_str.to_string(),
-                svg_file: svg_file.to_string(),
-                detail: e,
-            })?;
-
-        // Step 5d: Resolve bindings.
-        let bindings = resolve_bindings(
-            &raw_layer.bindings,
+        // Step 5b-post/5c/5d: validate SVG + readability + binding targets.
+        let (resolved_svg, bindings) = validate_svg_layer_and_manifest_bindings(
+            path_str,
             svg_file,
-            &element_ids,
+            &svg_bytes,
+            tokens,
+            readability_technique,
+            &raw_layer.bindings,
             &param_names,
             &param_types,
             &param_enum_values,
-            path_str,
         )?;
 
         // Store the resolved SVG text (post-substitution) as bytes.
-        svg_contents.insert(svg_file.to_string(), svg_text.as_bytes().to_vec());
+        svg_contents.insert(svg_file.to_string(), resolved_svg);
         layers.push(WidgetSvgLayer {
             svg_file: svg_file.to_string(),
             bindings,
@@ -464,6 +469,112 @@ fn load_bundle_dir_inner(
         definition,
         svg_contents,
     })
+}
+
+fn validate_svg_layer_and_manifest_bindings(
+    path_str: &str,
+    svg_file: &str,
+    svg_bytes: &[u8],
+    tokens: &HashMap<String, String>,
+    readability_technique: SvgReadabilityTechnique,
+    raw_bindings: &[RawBinding],
+    param_names: &HashSet<&str>,
+    param_types: &HashMap<&str, WidgetParamType>,
+    param_enum_values: &HashMap<&str, &[String]>,
+) -> Result<(Vec<u8>, Vec<WidgetBinding>), BundleError> {
+    let resolved_svg = validate_svg_layer(
+        path_str,
+        svg_file,
+        svg_bytes,
+        tokens,
+        readability_technique,
+        &[],
+    )?;
+
+    let svg_text = std::str::from_utf8(&resolved_svg).map_err(|e| BundleError::SvgParseError {
+        path: path_str.to_string(),
+        svg_file: svg_file.to_string(),
+        detail: format!("file is not valid UTF-8: {e}"),
+    })?;
+
+    let element_ids =
+        collect_svg_element_ids(svg_text).map_err(|e| BundleError::SvgParseError {
+            path: path_str.to_string(),
+            svg_file: svg_file.to_string(),
+            detail: e,
+        })?;
+
+    let bindings = resolve_bindings(
+        raw_bindings,
+        svg_file,
+        &element_ids,
+        param_names,
+        param_types,
+        param_enum_values,
+        path_str,
+    )?;
+
+    Ok((resolved_svg, bindings))
+}
+
+fn validate_svg_layer(
+    path_str: &str,
+    svg_file: &str,
+    svg_bytes: &[u8],
+    tokens: &HashMap<String, String>,
+    readability_technique: SvgReadabilityTechnique,
+    expected_bindings: &[WidgetBinding],
+) -> Result<Vec<u8>, BundleError> {
+    let svg_text = std::str::from_utf8(svg_bytes).map_err(|e| BundleError::SvgParseError {
+        path: path_str.to_string(),
+        svg_file: svg_file.to_string(),
+        detail: format!("file is not valid UTF-8: {e}"),
+    })?;
+
+    let svg_text_resolved = resolve_token_placeholders(svg_text, tokens).map_err(|key| {
+        BundleError::UnresolvedToken {
+            path: path_str.to_string(),
+            svg_file: svg_file.to_string(),
+            token_key: key,
+        }
+    })?;
+    let svg_text = svg_text_resolved.as_str();
+
+    parse_svg_dimensions(svg_text).map_err(|e| BundleError::SvgParseError {
+        path: path_str.to_string(),
+        svg_file: svg_file.to_string(),
+        detail: e.to_string(),
+    })?;
+
+    check_svg_readability(svg_text, readability_technique).map_err(|detail| {
+        BundleError::ReadabilityConventionViolation {
+            path: path_str.to_string(),
+            svg_file: svg_file.to_string(),
+            detail,
+        }
+    })?;
+
+    if !expected_bindings.is_empty() {
+        let element_ids =
+            collect_svg_element_ids(svg_text).map_err(|e| BundleError::SvgParseError {
+                path: path_str.to_string(),
+                svg_file: svg_file.to_string(),
+                detail: e,
+            })?;
+        for binding in expected_bindings {
+            if !element_ids.contains(&binding.target_element) {
+                return Err(BundleError::BindingUnresolvable {
+                    path: path_str.to_string(),
+                    detail: format!(
+                        "layer '{svg_file}': runtime SVG missing bound target element id '{}'",
+                        binding.target_element
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(svg_text.as_bytes().to_vec())
 }
 
 // ─── Parameter schema parsing ─────────────────────────────────────────────────
@@ -988,7 +1099,7 @@ pub(crate) use tze_hud_scene::resolve_token_placeholders;
 
 #[cfg(test)]
 mod tests {
-    use super::is_valid_widget_type_id;
+    use super::{is_valid_widget_type_id, validate_runtime_svg_registration};
 
     // Valid ids.
     #[test]
@@ -1440,5 +1551,105 @@ mod tests {
                 r##"<text fill="#ffffff">hi</text>"##,
             )
         );
+    }
+
+    #[test]
+    fn runtime_registration_validates_same_binding_targets_as_startup() {
+        use tze_hud_scene::types::{
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetBinding, WidgetBindingMapping,
+            WidgetDefinition, WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
+            WidgetSvgLayer,
+        };
+
+        let def = WidgetDefinition {
+            id: "gauge".to_string(),
+            name: "Gauge".to_string(),
+            description: "runtime test".to_string(),
+            parameter_schema: vec![WidgetParameterDeclaration {
+                name: "level".to_string(),
+                param_type: WidgetParamType::F32,
+                default_value: WidgetParameterValue::F32(0.0),
+                constraints: None,
+            }],
+            layers: vec![WidgetSvgLayer {
+                svg_file: "fill.svg".to_string(),
+                bindings: vec![WidgetBinding {
+                    param: "level".to_string(),
+                    target_element: "bar".to_string(),
+                    target_attribute: "height".to_string(),
+                    mapping: WidgetBindingMapping::Linear {
+                        attr_min: 0.0,
+                        attr_max: 100.0,
+                    },
+                }],
+            }],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: ContentionPolicy::LatestWins,
+            ephemeral: false,
+            hover_behavior: None,
+        };
+
+        let bad_svg =
+            br#"<svg viewBox="0 0 100 100"><rect id="missing-bar" width="10" height="20"/></svg>"#;
+        let err =
+            validate_runtime_svg_registration(&def, "gauge", "fill.svg", bad_svg, &HashMap::new())
+                .expect_err("runtime registration must reject unresolved binding targets");
+        assert_eq!(err.wire_code(), "WIDGET_BINDING_UNRESOLVABLE");
+    }
+
+    #[test]
+    fn runtime_registration_accepts_valid_svg_and_resolves_tokens() {
+        use tze_hud_scene::types::{
+            ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetBinding, WidgetBindingMapping,
+            WidgetDefinition, WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
+            WidgetSvgLayer,
+        };
+
+        let def = WidgetDefinition {
+            id: "status".to_string(),
+            name: "Status".to_string(),
+            description: "runtime test".to_string(),
+            parameter_schema: vec![WidgetParameterDeclaration {
+                name: "level".to_string(),
+                param_type: WidgetParamType::F32,
+                default_value: WidgetParameterValue::F32(0.0),
+                constraints: None,
+            }],
+            layers: vec![WidgetSvgLayer {
+                svg_file: "layer.svg".to_string(),
+                bindings: vec![WidgetBinding {
+                    param: "level".to_string(),
+                    target_element: "bar".to_string(),
+                    target_attribute: "height".to_string(),
+                    mapping: WidgetBindingMapping::Linear {
+                        attr_min: 0.0,
+                        attr_max: 100.0,
+                    },
+                }],
+            }],
+            default_geometry_policy: GeometryPolicy::Relative {
+                x_pct: 0.0,
+                y_pct: 0.0,
+                width_pct: 1.0,
+                height_pct: 1.0,
+            },
+            default_rendering_policy: RenderingPolicy::default(),
+            default_contention_policy: ContentionPolicy::LatestWins,
+            ephemeral: false,
+            hover_behavior: None,
+        };
+
+        let svg = br#"<svg viewBox="0 0 100 100"><rect id="bar" fill="{{color.text.primary}}" width="10" height="20"/></svg>"#;
+        let tokens = token_map(&[("color.text.primary", "#ffffff")]);
+        let resolved = validate_runtime_svg_registration(&def, "status", "layer.svg", svg, &tokens)
+            .expect("runtime registration should accept valid compatible SVG");
+        let resolved_text = String::from_utf8(resolved).expect("resolved svg must be utf-8");
+        assert!(resolved_text.contains("fill=\"#ffffff\""));
     }
 }

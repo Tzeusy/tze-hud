@@ -679,6 +679,16 @@ impl ApplicationHandler for WinitApp {
                     // too long when a session handler or MCP handler holds the
                     // scene lock momentarily.
                     if let Ok(mut scene) = compositor_scene.try_lock() {
+                        // Register runtime-uploaded widget SVG assets before
+                        // rendering so newly registered widget types/layers can
+                        // be referenced by publish calls immediately.
+                        let pending_widget_svgs = scene.drain_pending_widget_svg_assets();
+                        if let Some(wr) = compositor.widget_renderer_mut() {
+                            for (type_id, filename, bytes) in pending_widget_svgs {
+                                wr.register_svg(&type_id, &filename, bytes);
+                            }
+                        }
+
                         // ── Zone and widget publication expiry sweep ──────
                         // Per timing-model/spec.md §Expiration Policy: expired
                         // publications MUST be cleared before the next frame.

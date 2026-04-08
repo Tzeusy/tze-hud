@@ -367,6 +367,15 @@ impl HeadlessRuntime {
         let scene_arc = state.scene.clone();
         drop(state);
         let mut scene_guard = scene_arc.lock().await;
+        // Register runtime-uploaded widget SVG assets before rendering so new
+        // registrations are visible on the next frame.
+        let pending_widget_svgs = scene_guard.drain_pending_widget_svg_assets();
+        if let Some(wr) = self.compositor.widget_renderer_mut() {
+            for (type_id, filename, bytes) in pending_widget_svgs {
+                wr.register_svg(&type_id, &filename, bytes);
+            }
+        }
+
         // Per timing-model/spec.md §Expiration Policy: expired zone and widget
         // publications MUST be cleared before the next frame.
         scene_guard.drain_expired_zone_publications();

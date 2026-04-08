@@ -204,10 +204,7 @@ fn status_indicator_fixture_loads_successfully() {
                 param_names.contains(&"status"),
                 "must declare 'status' param"
             );
-            assert!(
-                param_names.contains(&"theme"),
-                "must declare 'theme' param"
-            );
+            assert!(param_names.contains(&"theme"), "must declare 'theme' param");
             assert!(param_names.contains(&"label"), "must declare 'label' param");
             assert!(
                 param_names.contains(&"reason"),

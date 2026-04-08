@@ -90,6 +90,15 @@ pub struct SceneGraph {
     /// at the start of each frame before zone geometry is recomputed.
     #[serde(skip, default)]
     pub zone_hit_regions: Vec<ZoneHitRegion>,
+    /// Runtime-registered widget SVG assets awaiting compositor registration.
+    ///
+    /// Producers (session/MCP runtime registration paths) enqueue validated SVGs
+    /// here. Consumers (windowed/headless render loops) drain and register them
+    /// with the compositor-side widget renderer before rendering.
+    ///
+    /// Ephemeral: skipped during serialization.
+    #[serde(skip, default)]
+    pub pending_widget_svg_assets: Vec<(String, String, Vec<u8>)>,
 }
 
 /// Maximum number of tabs in a scene. RFC 0001 §2.1.
@@ -243,7 +252,27 @@ impl SceneGraph {
             sequence_number: 0,
             registered_resources: HashMap::new(),
             zone_hit_regions: Vec::new(),
+            pending_widget_svg_assets: Vec::new(),
         }
+    }
+
+    /// Queue a runtime-registered widget SVG asset for compositor registration.
+    pub fn enqueue_widget_svg_asset(
+        &mut self,
+        widget_type_id: &str,
+        svg_filename: &str,
+        svg_bytes: Vec<u8>,
+    ) {
+        self.pending_widget_svg_assets.push((
+            widget_type_id.to_string(),
+            svg_filename.to_string(),
+            svg_bytes,
+        ));
+    }
+
+    /// Drain pending runtime widget SVG assets.
+    pub fn drain_pending_widget_svg_assets(&mut self) -> Vec<(String, String, Vec<u8>)> {
+        self.pending_widget_svg_assets.drain(..).collect()
     }
 
     // ─── Resource registry ────────────────────────────────────────────────
@@ -8172,6 +8201,37 @@ mod spec_scenarios {
             retrieved.description, "second",
             "second registration should win"
         );
+    }
+
+    #[test]
+    fn widget_registry_runtime_svg_handle_round_trip() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.widget_registry.register_runtime_svg_handle(
+            "gauge",
+            "fill.svg",
+            "asset:runtime-handle",
+        );
+        assert_eq!(
+            scene
+                .widget_registry
+                .runtime_svg_handle("gauge", "fill.svg"),
+            Some("asset:runtime-handle")
+        );
+    }
+
+    #[test]
+    fn pending_widget_svg_queue_drains_in_fifo_order() {
+        let mut scene = SceneGraph::new(1920.0, 1080.0);
+        scene.enqueue_widget_svg_asset("gauge", "a.svg", vec![1, 2, 3]);
+        scene.enqueue_widget_svg_asset("gauge", "b.svg", vec![4, 5]);
+
+        let drained = scene.drain_pending_widget_svg_assets();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].0, "gauge");
+        assert_eq!(drained[0].1, "a.svg");
+        assert_eq!(drained[0].2, vec![1, 2, 3]);
+        assert_eq!(drained[1].1, "b.svg");
+        assert!(scene.drain_pending_widget_svg_assets().is_empty());
     }
 
     /// WHEN querying occupancy with no active publications THEN effective_params
