@@ -72,5 +72,9 @@ mod tests {
             json_str.contains("component_profiles"),
             "schema should contain component_profiles field"
         );
+        assert!(
+            json_str.contains("widget_runtime_assets"),
+            "schema should contain widget_runtime_assets field"
+        );
     }
 }

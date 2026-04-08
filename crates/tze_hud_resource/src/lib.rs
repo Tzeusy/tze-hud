@@ -68,6 +68,7 @@ pub mod font_bytes_store;
 pub mod font_cache;
 pub mod gc;
 pub mod refcount;
+pub mod runtime_widget_store;
 pub mod sharing;
 pub mod store;
 pub mod types;
@@ -81,6 +82,10 @@ pub use font_bytes_store::FontBytesStore;
 pub use font_cache::{CachedFontHandle, FontCache, FontCacheEntry, FontCacheKey, FontOrigin};
 pub use gc::{GcClock, GcConfig, GcResult, GcRunner, TestClockMs, WallClock};
 pub use refcount::{GcCandidateTable, RefcountError, RefcountLayer};
+pub use runtime_widget_store::{
+    PutOutcome as RuntimeWidgetStorePutOutcome, RuntimeWidgetAssetRecord, RuntimeWidgetStore,
+    RuntimeWidgetStoreConfig, RuntimeWidgetStoreError,
+};
 pub use sharing::{RefResult, SharingContext, check_reference_policy};
 pub use store::EphemeralStore;
 pub use types::{

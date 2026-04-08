@@ -3571,6 +3571,7 @@ dependencies = [
  "proptest",
  "quick-xml 0.37.5",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

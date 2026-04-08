@@ -256,6 +256,21 @@ pub struct RawWidgetBundles {
     pub paths: Vec<String>,
 }
 
+/// `[widget_runtime_assets]` table — optional.
+///
+/// Configures the durable runtime widget SVG asset store used for assets
+/// registered while the runtime is active.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
+pub struct RawWidgetRuntimeAssets {
+    /// Root directory for durable widget SVG blobs + metadata index.
+    /// Relative paths are resolved against the config file parent directory.
+    pub store_path: Option<String>,
+    /// Global durable footprint ceiling in bytes.
+    pub max_total_bytes: Option<u64>,
+    /// Per-agent durable footprint ceiling in bytes.
+    pub max_agent_bytes: Option<u64>,
+}
+
 /// A `[[tabs.widgets]]` entry declaring a widget instance on a tab.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema)]
 pub struct RawTabWidget {
@@ -371,6 +386,8 @@ pub struct RawConfig {
     pub agents: Option<RawAgents>,
     /// Optional widget bundle directories to scan at startup.
     pub widget_bundles: Option<RawWidgetBundles>,
+    /// Optional runtime widget asset store configuration.
+    pub widget_runtime_assets: Option<RawWidgetRuntimeAssets>,
     /// Optional design token overrides.
     #[serde(default)]
     pub design_tokens: Option<RawDesignTokens>,

@@ -66,6 +66,7 @@ pub mod raw;
 pub mod readability;
 pub mod reload;
 pub mod resolver;
+pub mod runtime_widget_assets;
 pub mod schema;
 #[cfg(test)]
 mod tests;
@@ -95,6 +96,11 @@ pub use reload::{
     check_frozen_section_changes, reload_config, section_classification,
 };
 pub use resolver::resolve_config_path;
+pub use runtime_widget_assets::{
+    DEFAULT_MAX_AGENT_BYTES as DEFAULT_WIDGET_RUNTIME_MAX_AGENT_BYTES,
+    DEFAULT_MAX_TOTAL_BYTES as DEFAULT_WIDGET_RUNTIME_MAX_TOTAL_BYTES,
+    RuntimeWidgetAssetStoreConfig, resolve_runtime_widget_asset_store, resolve_store_path,
+};
 pub use schema::print_schema;
 pub use widgets::{
     LoadedWidgetType, build_widget_instance, validate_widget_bundles, validate_widget_instances,

@@ -407,6 +407,33 @@ name = "Main"
     );
 }
 
+/// WHEN max_agent_bytes > max_total_bytes in [widget_runtime_assets]
+/// THEN CONFIG_WIDGET_ASSET_BUDGET_INVALID is produced.
+#[test]
+fn spec_widget_runtime_asset_budget_relationship_rejected() {
+    let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+
+[widget_runtime_assets]
+max_total_bytes = 1024
+max_agent_bytes = 2048
+"#;
+    let loader = parse_ok(toml);
+    let errors = loader.validate();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e.code,
+            ConfigErrorCode::Other(ref code) if code == "CONFIG_WIDGET_ASSET_BUDGET_INVALID"
+        )),
+        "expected CONFIG_WIDGET_ASSET_BUDGET_INVALID, got: {:?}",
+        errors.iter().map(|e| &e.code).collect::<Vec<_>>()
+    );
+}
+
 /// WHEN [[tabs.widgets]] widget_type is missing THEN CONFIG_UNKNOWN_WIDGET_TYPE.
 ///
 /// During config-only validation (no loaded types), a missing/empty widget_type

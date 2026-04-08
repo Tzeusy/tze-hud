@@ -48,12 +48,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tze_hud_compositor::{Compositor, HeadlessSurface};
-use tze_hud_config::TzeHudConfig;
+use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
+use tze_hud_resource::{RuntimeWidgetStore, RuntimeWidgetStoreConfig};
 use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
@@ -254,13 +255,24 @@ impl HeadlessRuntime {
         //
         // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
         let mut scene = SceneGraph::new(config.width as f32, config.height as f32);
-        let compositor_token_map: std::collections::HashMap<String, String> = if let Some(
-            toml_str,
-        ) =
-            &config.config_toml
-        {
+        let (_runtime_widget_store, compositor_token_map): (
+            Option<RuntimeWidgetStore>,
+            std::collections::HashMap<String, String>,
+        ) = if let Some(toml_str) = &config.config_toml {
             match toml::from_str::<tze_hud_config::raw::RawConfig>(toml_str) {
                 Ok(raw) => {
+                    let resolved = resolve_runtime_widget_asset_store(&raw, None).map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("runtime widget asset store config invalid: {}", e.hint),
+                        )
+                    })?;
+                    let runtime_widget_store =
+                        RuntimeWidgetStore::open(RuntimeWidgetStoreConfig {
+                            store_path: resolved.store_path,
+                            max_total_bytes: resolved.max_total_bytes,
+                            max_agent_bytes: resolved.max_agent_bytes,
+                        })?;
                     let mut startup_result =
                         run_component_startup(&raw, None, Some("headless"), &mut scene);
                     // Step 9b: register profile-scoped widget bundles
@@ -279,7 +291,7 @@ impl HeadlessRuntime {
                         token_count = startup_result.compositor_tokens.len(),
                         "headless: component startup complete — design tokens and zone registry applied"
                     );
-                    startup_result.compositor_tokens
+                    (Some(runtime_widget_store), startup_result.compositor_tokens)
                 }
                 Err(e) => {
                     // Even when a RuntimeContext has been constructed (potentially via
@@ -292,13 +304,13 @@ impl HeadlessRuntime {
                          zone registry will use defaults, no design tokens applied"
                     );
                     scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
-                    std::collections::HashMap::new()
+                    (None, std::collections::HashMap::new())
                 }
             }
         } else {
             // No config provided — bootstrap with canonical zone defaults.
             scene.zone_registry = tze_hud_scene::types::ZoneRegistry::with_defaults();
-            std::collections::HashMap::new()
+            (None, std::collections::HashMap::new())
         };
 
         // Apply resolved design tokens (global + all active profile overrides) to the
