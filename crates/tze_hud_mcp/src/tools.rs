@@ -12,6 +12,7 @@
 //! - `publish_to_zone`   → `handle_publish_to_zone`
 //! - `list_zones`        → `handle_list_zones`
 //! - `list_scene`        → `handle_list_scene`
+//! - `register_widget_asset` → `handle_register_widget_asset`
 //! - `publish_to_widget` → `handle_publish_to_widget`
 //! - `list_widgets`      → `handle_list_widgets`
 //! - `clear_widget`      → `handle_clear_widget`
@@ -853,6 +854,240 @@ pub fn handle_list_scene(params: Value, scene: &SceneGraph) -> McpResult<ListSce
 
 // ─── publish_to_widget ───────────────────────────────────────────────────────
 
+/// In-memory registry for MCP `register_widget_asset` dedup checks.
+///
+/// This mirrors the session protocol's hash-based short-circuit semantics:
+/// if the content hash is already known, metadata-only preflight succeeds
+/// without payload transfer.
+#[derive(Debug, Default)]
+pub struct WidgetAssetRegistry {
+    by_hash: HashMap<[u8; 32], RegisteredWidgetAsset>,
+}
+
+#[derive(Debug)]
+struct RegisteredWidgetAsset {
+    asset_handle: String,
+    // Retained for follow-up renderer/store integration.
+    #[allow(dead_code)]
+    payload: Vec<u8>,
+}
+
+impl WidgetAssetRegistry {
+    const MAX_ENTRIES: usize = 4096;
+
+    fn get_by_hash(&self, hash: &[u8; 32]) -> Option<&RegisteredWidgetAsset> {
+        self.by_hash.get(hash)
+    }
+
+    fn upsert(&mut self, hash: [u8; 32], asset_handle: String, payload: Vec<u8>) {
+        if self.by_hash.is_empty() {
+            // Reserve a small initial slab to avoid repeated tiny growth churn.
+            self.by_hash.reserve(64);
+        }
+        self.by_hash.insert(
+            hash,
+            RegisteredWidgetAsset {
+                asset_handle,
+                payload,
+            },
+        );
+    }
+
+    fn is_at_capacity(&self) -> bool {
+        self.by_hash.len() >= Self::MAX_ENTRIES
+    }
+
+    #[cfg(test)]
+    fn payload_by_hash(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        self.by_hash.get(hash).map(|entry| entry.payload.as_slice())
+    }
+}
+
+/// Parameters for `register_widget_asset`.
+#[derive(Debug, Deserialize)]
+pub struct RegisterWidgetAssetParams {
+    /// Widget type id to associate with this SVG asset.
+    pub widget_type_id: String,
+    /// SVG filename (must end with `.svg`).
+    pub svg_filename: String,
+    /// Lowercase/uppercase 64-char hex BLAKE3 hash of payload bytes.
+    pub content_hash_blake3: String,
+    /// Declared payload size in bytes.
+    pub total_size_bytes: u64,
+    /// Optional transport integrity checksum (CRC32C).
+    #[serde(default)]
+    pub transport_crc32c: Option<u32>,
+    /// Optional payload bytes represented as UTF-8 text.
+    ///
+    /// For SVG this is the raw SVG XML text.
+    #[serde(default)]
+    pub payload: Option<String>,
+    /// When true, execute metadata-only dedup preflight.
+    #[serde(default)]
+    pub metadata_only_preflight: bool,
+}
+
+/// Response from `register_widget_asset`.
+///
+/// Shape mirrors session-protocol `WidgetAssetRegisterResult`.
+#[derive(Debug, Serialize)]
+pub struct RegisterWidgetAssetResult {
+    pub accepted: bool,
+    pub widget_type_id: String,
+    pub svg_filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_handle: Option<String>,
+    pub was_deduplicated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Register/upload runtime widget SVG assets on the MCP plane.
+///
+/// Semantics mirror session protocol `WidgetAssetRegister`:
+/// - metadata-only preflight dedup short-circuit
+/// - hash verification against payload bytes
+/// - optional CRC32C transport integrity check
+/// - stable WidgetAssetRegisterResult-style error codes
+pub fn handle_register_widget_asset(
+    params: Value,
+    registry: &mut WidgetAssetRegistry,
+    caller_capabilities: &[String],
+) -> McpResult<RegisterWidgetAssetResult> {
+    let p: RegisterWidgetAssetParams = parse_params(params)?;
+    let mut result = RegisterWidgetAssetResult {
+        accepted: false,
+        widget_type_id: p.widget_type_id.clone(),
+        svg_filename: p.svg_filename.clone(),
+        asset_handle: None,
+        was_deduplicated: false,
+        error_code: None,
+        error_message: None,
+    };
+
+    // Capability gate (session-protocol code parity).
+    if !caller_capabilities
+        .iter()
+        .any(|c| c == "register_widget_asset")
+    {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_CAPABILITY_MISSING",
+            "missing capability 'register_widget_asset'",
+        ));
+    }
+
+    if p.widget_type_id.trim().is_empty()
+        || p.svg_filename.trim().is_empty()
+        || !p.svg_filename.to_ascii_lowercase().ends_with(".svg")
+    {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_TYPE_INVALID",
+            "widget_type_id and svg_filename (.svg) are required",
+        ));
+    }
+
+    const MAX_WIDGET_ASSET_BYTES: u64 = 16 * 1024 * 1024;
+    if p.total_size_bytes > MAX_WIDGET_ASSET_BYTES {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_BUDGET_EXCEEDED",
+            "total_size_bytes exceeds runtime widget asset limit",
+        ));
+    }
+
+    let expected_hash = match parse_blake3_hex_32(&p.content_hash_blake3) {
+        Ok(h) => h,
+        Err(msg) => {
+            return Ok(widget_asset_error(
+                result,
+                "WIDGET_ASSET_TYPE_INVALID",
+                &msg,
+            ));
+        }
+    };
+
+    if let Some(existing) = registry.get_by_hash(&expected_hash) {
+        result.accepted = true;
+        result.was_deduplicated = true;
+        result.asset_handle = Some(existing.asset_handle.clone());
+        return Ok(result);
+    }
+
+    if p.metadata_only_preflight {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_HASH_MISMATCH",
+            "metadata preflight miss; payload required",
+        ));
+    }
+
+    let payload = match p.payload {
+        Some(s) => s.into_bytes(),
+        None => {
+            return Ok(widget_asset_error(
+                result,
+                "WIDGET_ASSET_HASH_MISMATCH",
+                "payload required for unknown hash",
+            ));
+        }
+    };
+
+    if payload.len() as u64 != p.total_size_bytes {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_HASH_MISMATCH",
+            "payload size does not match total_size_bytes",
+        ));
+    }
+
+    if let Some(expected_crc32c) = p.transport_crc32c {
+        let computed = crc32c(&payload);
+        if computed != expected_crc32c {
+            return Ok(widget_asset_error(
+                result,
+                "WIDGET_ASSET_CHECKSUM_MISMATCH",
+                "transport_crc32c mismatch",
+            ));
+        }
+    }
+
+    let computed_hash = blake3::hash(&payload);
+    if *computed_hash.as_bytes() != expected_hash {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_HASH_MISMATCH",
+            "content_hash_blake3 mismatch",
+        ));
+    }
+
+    if !is_valid_svg_payload(&payload) {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_INVALID_SVG",
+            "payload is not a valid SVG document with <svg> root",
+        ));
+    }
+
+    if registry.is_at_capacity() {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_BUDGET_EXCEEDED",
+            "runtime widget asset registry entry limit exceeded",
+        ));
+    }
+
+    let asset_handle = format!("widget-asset:{}", bytes_to_hex(&expected_hash));
+    registry.upsert(expected_hash, asset_handle.clone(), payload);
+    result.accepted = true;
+    result.was_deduplicated = false;
+    result.asset_handle = Some(asset_handle);
+    Ok(result)
+}
+
 /// Parameters for `publish_to_widget`.
 #[derive(Debug, Deserialize)]
 pub struct PublishToWidgetParams {
@@ -1347,6 +1582,90 @@ pub fn handle_clear_widget(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn widget_asset_error(
+    mut base: RegisterWidgetAssetResult,
+    code: &str,
+    message: &str,
+) -> RegisterWidgetAssetResult {
+    base.accepted = false;
+    base.was_deduplicated = false;
+    base.asset_handle = None;
+    base.error_code = Some(code.to_string());
+    base.error_message = Some(message.to_string());
+    base
+}
+
+fn parse_blake3_hex_32(hex: &str) -> Result<[u8; 32], String> {
+    if hex.len() != 64 {
+        return Err(format!(
+            "content_hash_blake3 must be 64 hex chars, got {}",
+            hex.len()
+        ));
+    }
+    let mut raw = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = char::from(chunk[0]).to_digit(16);
+        let lo = char::from(chunk[1]).to_digit(16);
+        if let (Some(hi), Some(lo)) = (hi, lo) {
+            raw[i] = ((hi << 4) | lo) as u8;
+        } else {
+            return Err("content_hash_blake3 is not valid hex".to_string());
+        }
+    }
+    Ok(raw)
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{b:02x}");
+    }
+    s
+}
+
+fn crc32c(bytes: &[u8]) -> u32 {
+    // Castagnoli polynomial (reversed) used by CRC32C.
+    const POLY: u32 = 0x82F63B78;
+    let mut crc = !0u32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (POLY & mask);
+        }
+    }
+    !crc
+}
+
+fn is_valid_svg_payload(payload: &[u8]) -> bool {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_reader(payload);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut root_seen = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                if !root_seen {
+                    root_seen = true;
+                    if e.local_name().as_ref() != b"svg" {
+                        return false;
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+        buf.clear();
+    }
+    root_seen
+}
 
 /// Deserialize tool parameters from a JSON value.
 fn parse_params<T: for<'de> serde::Deserialize<'de>>(params: Value) -> McpResult<T> {
@@ -2887,6 +3206,204 @@ mod tests {
         )
         .unwrap();
         assert!(result.cleared);
+    }
+
+    // ── register_widget_asset ────────────────────────────────────────────────
+
+    #[test]
+    fn test_register_widget_asset_preflight_dedup_hit() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        let payload =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>"#;
+        let hash_hex = bytes_to_hex(blake3::hash(payload.as_bytes()).as_bytes());
+
+        let first = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "face.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "payload": payload
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+        assert!(first.accepted);
+        assert!(!first.was_deduplicated);
+        assert!(first.asset_handle.is_some());
+        let hash_raw = parse_blake3_hex_32(&hash_hex).unwrap();
+        assert_eq!(registry.payload_by_hash(&hash_raw), Some(payload.as_bytes()));
+
+        let preflight = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "face.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "metadata_only_preflight": true
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+        assert!(preflight.accepted);
+        assert!(preflight.was_deduplicated);
+        assert!(preflight.asset_handle.is_some());
+    }
+
+    #[test]
+    fn test_register_widget_asset_capability_missing() {
+        let mut registry = WidgetAssetRegistry::default();
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "face.svg",
+                "content_hash_blake3": "00".repeat(32),
+                "total_size_bytes": 0
+            }),
+            &mut registry,
+            &[],
+        )
+        .unwrap();
+        assert!(!result.accepted);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("WIDGET_ASSET_CAPABILITY_MISSING")
+        );
+    }
+
+    #[test]
+    fn test_register_widget_asset_checksum_mismatch() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        let payload =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><circle r="4" cx="5" cy="5"/></svg>"#;
+        let hash_hex = bytes_to_hex(blake3::hash(payload.as_bytes()).as_bytes());
+
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "dial.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "transport_crc32c": 42,
+                "payload": payload
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+        assert!(!result.accepted);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("WIDGET_ASSET_CHECKSUM_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn test_register_widget_asset_invalid_svg() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        let payload = "<not-svg />";
+        let hash_hex = bytes_to_hex(blake3::hash(payload.as_bytes()).as_bytes());
+
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "broken.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "payload": payload
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+        assert!(!result.accepted);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("WIDGET_ASSET_INVALID_SVG")
+        );
+    }
+
+    #[test]
+    fn test_register_widget_asset_metadata_preflight_miss() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "face.svg",
+                "content_hash_blake3": "11".repeat(32),
+                "total_size_bytes": 12,
+                "metadata_only_preflight": true
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+        assert!(!result.accepted);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("WIDGET_ASSET_HASH_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn test_register_widget_asset_accepts_prefixed_svg_root() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        let payload = r#"<svg:svg xmlns:svg="http://www.w3.org/2000/svg"><svg:rect width="10" height="10"/></svg:svg>"#;
+        let hash_hex = bytes_to_hex(blake3::hash(payload.as_bytes()).as_bytes());
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "prefixed.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "payload": payload
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+        assert!(result.accepted);
+        assert!(!result.was_deduplicated);
+    }
+
+    #[test]
+    fn test_register_widget_asset_registry_capacity_limit() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        for i in 0..WidgetAssetRegistry::MAX_ENTRIES {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            registry.upsert(hash, format!("widget-asset:{i}"), b"<svg/>".to_vec());
+        }
+
+        let payload =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><circle cx="1" cy="1" r="1"/></svg>"#;
+        let hash_hex = bytes_to_hex(blake3::hash(payload.as_bytes()).as_bytes());
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "full.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "payload": payload
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+
+        assert!(!result.accepted);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("WIDGET_ASSET_BUDGET_EXCEEDED")
+        );
     }
 
     // ── parse_zone_content: static_image ────────────────────────────────────

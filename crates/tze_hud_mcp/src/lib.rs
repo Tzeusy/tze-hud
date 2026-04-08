@@ -24,6 +24,7 @@
 //! | `publish_to_zone` | Publish content to a named zone          |
 //! | `list_zones`      | List available zones and their state     |
 //! | `list_scene`      | List tabs and zones (guest-restricted)   |
+//! | `register_widget_asset` | Register runtime widget SVG assets |
 
 pub mod error;
 pub mod server;

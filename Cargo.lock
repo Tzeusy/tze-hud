@@ -3531,6 +3531,8 @@ dependencies = [
 name = "tze_hud_mcp"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "quick-xml 0.37.5",
  "serde",
  "serde_json",
  "subtle",
