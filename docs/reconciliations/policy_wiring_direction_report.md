@@ -13,7 +13,7 @@ Issue: `hud-iq2x.1`
 
 ## 2. Project Spirit And Requirements
 
-## Project Spirit
+### Project Spirit
 **Core problem**: Give LLMs governed, real-time, multi-agent on-screen presence with strict runtime sovereignty and latency budgets.
 **Primary user**: Resident/guest agents and runtime operators validating governance/perf in production-like flows.
 **Success looks like**: 60fps budgets hold while lease/capability controls and zone publishing remain enforced under contention and failure (`about/heart-and-soul/v1.md:11-21`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:155-170`).
@@ -23,16 +23,16 @@ Issue: `hud-iq2x.1`
 ### Requirements
 | # | Requirement | Class | Evidence | Status |
 |---|---|---|---|---|
-| 1 | Runtime sovereignty over leases/capabilities | Hard | `about/heart-and-soul/v1.md:11`, `runtime-kernel/spec.md:10-13` | Partial |
-| 2 | Seven-level arbitration stack governs runtime decisions | Hard | `policy-arbitration/spec.md:10-12`, `:217-230` | Unmet |
-| 3 | Mutation/event/frame paths meet strict latency budgets | Hard | `policy-arbitration/spec.md:195-227`, `runtime-kernel/spec.md:155-170` | Partial |
-| 4 | Mid-session capability escalation must be policy-validated | Hard | `session-protocol/spec.md:615-636` | Partial |
-| 5 | Dynamic policy rules deferred beyond v1 | Non-goal (v1) | `policy-arbitration/spec.md:368-374` | Met |
-| 6 | Single-source authority boundary between runtime state owners and policy evaluators | Soft | `tze_hud_policy/src/lib.rs:29-46`, `runtime/src/budget.rs:14-35` | Partial |
+| 1 | Runtime sovereignty over leases/capabilities | Hard | `about/heart-and-soul/v1.md:11`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:10-13` | Partial |
+| 2 | Seven-level arbitration stack governs runtime decisions | Hard | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:10-12`, `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:217-230` | Unmet |
+| 3 | Mutation/event/frame paths meet strict latency budgets | Hard | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:195-227`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:155-170` | Partial |
+| 4 | Mid-session capability escalation must be policy-validated | Hard | `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:615-636` | Partial |
+| 5 | Dynamic policy rules deferred beyond v1 | Non-goal (v1) | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:368-374` | Met |
+| 6 | Single-source authority boundary between runtime state owners and policy evaluators | Soft | `crates/tze_hud_policy/src/lib.rs:29-46`, `crates/tze_hud_runtime/src/budget.rs:14-35` | Partial |
 | 7 | Use external prompt brief `docs/reconciliations/policy_wiring_epic_prompt.md` | Unknown | Referenced by bead, file missing in tree | Unmet |
 
 ### Contradictions
-- `[Observed]` Spec says full per-mutation policy stack MUST run (`policy-arbitration/spec.md:217-224`), but runtime declares policy crate is not wired and no `PolicyContext`/`ArbitrationOutcome` flow exists (`crates/tze_hud_runtime/src/lib.rs:22-26`).
+- `[Observed]` Spec says full per-mutation policy stack MUST run (`openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:217-224`), but runtime declares policy crate is not wired and no `PolicyContext`/`ArbitrationOutcome` flow exists (`crates/tze_hud_runtime/src/lib.rs:22-26`).
 - `[Observed]` Spec implies centralized stack ownership; code splits authority across runtime budget/safe-mode/attention and scene capability gates (`crates/tze_hud_runtime/src/budget.rs:14-35`, `crates/tze_hud_runtime/src/attention_budget/mod.rs:35-55`, `crates/tze_hud_scene/src/graph.rs:571-601`).
 - `[Observed]` The issue references a prompt file that does not exist on this branch nor `origin/main`; direction had to be reconstructed from the bead text and project specs.
 
@@ -40,12 +40,12 @@ Issue: `hud-iq2x.1`
 
 | Dimension | Status | Summary | Key Evidence |
 |-----------|--------|---------|-------------|
-| Spec adherence | Weak | Policy specs outrun runtime wiring reality | `policy-arbitration/spec.md:10-230`, `runtime/lib.rs:12-26` |
-| Core workflows | Adequate | Session mutation/zone publish/capability paths are implemented with deterministic handlers | `tze_hud_protocol/src/session_server.rs:1812-1862`, `:1944-2100`, `:3440-3512`, `:3647-3788` |
-| Test confidence | Adequate | Deep local tests exist in policy + protocol, but CI has known unstable jobs | `tze_hud_policy/src/tests.rs`, `.github/workflows/ci.yml:99-184`, `AGENTS.md:226` |
-| Observability | Adequate | Structured telemetry and budget signals exist, but no policy-wire telemetry path | `runtime/budget.rs:196-224`, `session-protocol/spec.md:653-661` |
-| Delivery readiness | Adequate | CI gates are broad; protobuf deps and known unstable tests reduce confidence | `.github/workflows/ci.yml:51-55`, `:99-184`, `AGENTS.md:226` |
-| Architectural fitness | Adequate | Clear authority seams exist; they are good for incremental wiring if spec is reconciled first | `runtime/lib.rs:5-29`, `policy/lib.rs:31-46`, `runtime/budget.rs:14-35` |
+| Spec adherence | Weak | Policy specs outrun runtime wiring reality | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:10-230`, `crates/tze_hud_runtime/src/lib.rs:12-26` |
+| Core workflows | Adequate | Session mutation/zone publish/capability paths are implemented with deterministic handlers | `crates/tze_hud_protocol/src/session_server.rs:1812-1862`, `crates/tze_hud_protocol/src/session_server.rs:1944-2100`, `crates/tze_hud_protocol/src/session_server.rs:3440-3512`, `crates/tze_hud_protocol/src/session_server.rs:3647-3788` |
+| Test confidence | Adequate | Deep local tests exist in policy + protocol, but CI has known unstable jobs | `crates/tze_hud_policy/src/tests.rs`, `.github/workflows/ci.yml:99-184`, `AGENTS.md:226` |
+| Observability | Adequate | Structured telemetry and budget signals exist, but no policy-wire telemetry path | `crates/tze_hud_runtime/src/budget.rs:196-224`, `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:653-661` |
+| Delivery readiness | Adequate | CI gates are broad; protobuf deps and known unstable tests reduce confidence | `.github/workflows/ci.yml:51-55`, `.github/workflows/ci.yml:99-184`, `AGENTS.md:226` |
+| Architectural fitness | Adequate | Clear authority seams exist; they are good for incremental wiring if spec is reconciled first | `crates/tze_hud_runtime/src/lib.rs:5-29`, `crates/tze_hud_policy/src/lib.rs:31-46`, `crates/tze_hud_runtime/src/budget.rs:14-35` |
 
 ### Expanded Assessment
 - **Spec adherence**: `[Observed]` `tze_hud_policy` is implemented as pure evaluators/tests, but not in runtime hot paths. This is direct drift against current v1 policy spec language.
@@ -91,7 +91,7 @@ Issue: `hud-iq2x.1`
 
 ### Premature Work
 - **Dynamic runtime policy-rule editing for v1**.
-`[Observed]` Explicitly deferred post-v1 (`policy-arbitration/spec.md:368-374`).
+`[Observed]` Explicitly deferred post-v1 (`openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:368-374`).
 
 ### Deferred
 - **Per-event and per-frame full stack wiring parity** after mutation path proves latency and correctness.
@@ -105,28 +105,28 @@ This should be rejected immediately as spec credibility debt.
 ### Blockers
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
-| Spec/runtime contradiction on policy wiring | Teams cannot tell which authority model is true | Maintainers, reviewers | `policy-arbitration/spec.md:217-230` vs `runtime/lib.rs:12-26` | Reconcile specs first, then wire incrementally | M |
+| Spec/runtime contradiction on policy wiring | Teams cannot tell which authority model is true | Maintainers, reviewers | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:217-230` vs `crates/tze_hud_runtime/src/lib.rs:12-26` | Reconcile specs first, then wire incrementally | M |
 | Missing canonical epic prompt file | Reproducibility of direction pass is reduced | Future workers | missing `docs/reconciliations/policy_wiring_epic_prompt.md` | Restore file or update bead references | S |
 
 ### Important Enhancements
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
-| No runtime emissions for arbitration-level decisions | Hard to verify policy behavior and budgets | Operators, CI | no runtime `ArbitrationOutcome` flow (`runtime/lib.rs:24-26`) | Add policy decision telemetry in pilot wiring | M |
-| Capability request policy source is simplistic in v1 | Authorization policy semantics are underspecified | Security reviewers | `session_server.rs:3455-3461` | Formalize policy source and tests | M |
+| No runtime emissions for arbitration-level decisions | Hard to verify policy behavior and budgets | Operators, CI | no runtime `ArbitrationOutcome` flow (`crates/tze_hud_runtime/src/lib.rs:24-26`) | Add policy decision telemetry in pilot wiring | M |
+| Capability request policy source is simplistic in v1 | Authorization policy semantics are underspecified | Security reviewers | `crates/tze_hud_protocol/src/session_server.rs:3455-3461` | Formalize policy source and tests | M |
 
 ### Strategic Gaps
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
 | No seam contract doc mapping runtime-owned state to policy contexts | Future wiring risks duplicate logic | Core runtime engineers | split authority comments in runtime/policy crates | Add seam contract doc + invariants | M |
-| Latency budget proof for wired policy path absent | Could regress frame budgets silently | Performance owners | strict limits in spec (`policy-arbitration/spec.md:195-227`) | Add benchmark harness for wired path | L |
+| Latency budget proof for wired policy path absent | Could regress frame budgets silently | Performance owners | strict limits in spec (`openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:195-227`) | Add benchmark harness for wired path | L |
 
 ## 6. Work Plan
 
 ### Immediate alignment work
 
-### Chunk 1: Reconcile policy authority spec language
+#### Chunk 1: Reconcile policy authority spec language
 **Objective**: Align policy-arbitration/runtime/session specs to match current v1 enforcement reality and planned wiring seam.
-**Spec reference**: `policy-arbitration/spec.md`, `runtime-kernel/spec.md`, `session-protocol/spec.md`
+**Spec reference**: `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`, `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md`
 **Dependencies**: none
 **Why ordered here**: removes ambiguity before code churn
 **Scope**: M
@@ -140,13 +140,13 @@ This should be rejected immediately as spec credibility debt.
 
 **Notes**: Keep doctrine unchanged unless contradiction requires doctrine edit.
 
-### Reconciliation: Chunk 1
+##### Reconciliation: Chunk 1
 - [ ] Spec text matches current runtime behavior and declared integration path.
 - [ ] No contradictory MUST statements remain for v1 wiring status.
 
-### Chunk 2: Define policy wiring seam contract
+#### Chunk 2: Define policy wiring seam contract
 **Objective**: Specify exact boundary: who builds `PolicyContext`, who executes outcomes, who owns mutable state.
-**Spec reference**: `policy-arbitration/spec.md`, `runtime-kernel/spec.md`
+**Spec reference**: `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md`
 **Dependencies**: Chunk 1
 **Why ordered here**: prevents duplicated or circular authority.
 **Scope**: M
@@ -158,17 +158,17 @@ This should be rejected immediately as spec credibility debt.
 - [ ] Ownership matrix is explicit for budget/attention/safe-mode/resource counters.
 - [ ] Failure/latency invariants are testable and tied to CI gates.
 
-**Notes**: Base on existing boundaries in `runtime/lib.rs`, `runtime/budget.rs`, `policy/lib.rs`.
+**Notes**: Base on existing boundaries in `crates/tze_hud_runtime/src/lib.rs`, `crates/tze_hud_runtime/src/budget.rs`, `crates/tze_hud_policy/src/lib.rs`.
 
-### Reconciliation: Chunk 2
+##### Reconciliation: Chunk 2
 - [ ] Contract document is consistent with crate-level authority comments.
 - [ ] No ownership overlap across runtime and policy crates.
 
 ### Near-term delivery work
 
-### Chunk 3: Mutation-path pilot wiring
+#### Chunk 3: Mutation-path pilot wiring
 **Objective**: Route zone/tile mutation evaluation through `tze_hud_policy` mutation evaluator while preserving runtime state ownership.
-**Spec reference**: `policy-arbitration/spec.md:217-230`
+**Spec reference**: `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:217-230`
 **Dependencies**: Chunk 2
 **Why ordered here**: highest-impact, easiest to isolate path.
 **Scope**: L
@@ -182,13 +182,13 @@ This should be rejected immediately as spec credibility debt.
 
 **Notes**: Avoid rewiring per-event/per-frame in same chunk.
 
-### Reconciliation: Chunk 3
+##### Reconciliation: Chunk 3
 - [ ] Behavior matches updated spec scenarios for mutation path.
 - [ ] No frame-budget regressions beyond agreed thresholds.
 
-### Chunk 4: Telemetry and conformance harness for wired path
+#### Chunk 4: Telemetry and conformance harness for wired path
 **Objective**: Emit per-level policy decision traces and benchmark p99/p95 against spec limits.
-**Spec reference**: `policy-arbitration/spec.md:195-227`, `runtime-kernel/spec.md:155-170`
+**Spec reference**: `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:195-227`, `openspec/changes/v1-mvp-standards/specs/runtime-kernel/spec.md:155-170`
 **Dependencies**: Chunk 3
 **Why ordered here**: prove non-regression and observability immediately.
 **Scope**: M
@@ -202,15 +202,15 @@ This should be rejected immediately as spec credibility debt.
 
 **Notes**: Integrate with existing telemetry pipeline and CI jobs.
 
-### Reconciliation: Chunk 4
+##### Reconciliation: Chunk 4
 - [ ] Telemetry schema/documentation matches emitted runtime fields.
 - [ ] Budget assertions are deterministic in CI.
 
 ### Strategic future work
 
-### Chunk 5: Extend wiring to per-event and per-frame stacks
+#### Chunk 5: Extend wiring to per-event and per-frame stacks
 **Objective**: Complete remaining stack integration for event/frame paths.
-**Spec reference**: `policy-arbitration/spec.md:194-210`
+**Spec reference**: `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:194-210`
 **Dependencies**: Chunks 1-4
 **Why ordered here**: only after mutation-path success and observability.
 **Scope**: L
@@ -250,10 +250,10 @@ This should be rejected immediately as spec credibility debt.
   - Doctrine/spec: `about/heart-and-soul`, `openspec/changes/v1-mvp-standards/specs`
 
 ### B. Critical Workflows
-1. **MutationBatch intake**: ClientMessage -> session server safe-mode/freeze/timing checks -> scene `apply_batch` lease/budget/invariant checks -> MutationResult (`session_server.rs:1813-2100`, `scene/mutation.rs:320-520`).
-2. **Zone publish**: Client ZonePublish -> conversion -> scene publish batch path -> durable/ephemeral ack semantics (`session_server.rs:3647-3788`, `scene/graph.rs:2866-3096`).
-3. **Capability escalation**: CapabilityRequest -> policy_capabilities evaluation -> CapabilityNotice or RuntimeError(PERMISSION_DENIED) (`session_server.rs:3440-3512`).
-4. **Budget/safe-mode governance**: runtime budget ladder + safe-mode shared flag gates mutation acceptance (`runtime/budget.rs:1-35`, `session_server.rs:1950-1977`).
+1. **MutationBatch intake**: ClientMessage -> session server safe-mode/freeze/timing checks -> scene `apply_batch` lease/budget/invariant checks -> MutationResult (`crates/tze_hud_protocol/src/session_server.rs:1813-2100`, `crates/tze_hud_scene/src/mutation.rs:320-520`).
+2. **Zone publish**: Client ZonePublish -> conversion -> scene publish batch path -> durable/ephemeral ack semantics (`crates/tze_hud_protocol/src/session_server.rs:3647-3788`, `crates/tze_hud_scene/src/graph.rs:2866-3096`).
+3. **Capability escalation**: CapabilityRequest -> policy_capabilities evaluation -> CapabilityNotice or RuntimeError(PERMISSION_DENIED) (`crates/tze_hud_protocol/src/session_server.rs:3440-3512`).
+4. **Budget/safe-mode governance**: runtime budget ladder + safe-mode shared flag gates mutation acceptance (`crates/tze_hud_runtime/src/budget.rs:1-35`, `crates/tze_hud_protocol/src/session_server.rs:1950-1977`).
 
 ### C. Spec Inventory
 | Spec | Coverage status |
