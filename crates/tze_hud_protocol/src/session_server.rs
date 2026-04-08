@@ -52,6 +52,7 @@ use tze_hud_resource::{
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 use tze_hud_scene::types::*;
+use tze_hud_widget::{RuntimeWidgetAssetError, register_runtime_widget_svg_asset};
 
 // ─── Session Configuration ───────────────────────────────────────────────────
 
@@ -3881,7 +3882,26 @@ fn make_widget_asset_error_result(
 }
 
 fn widget_asset_handle_from_hash(hash: [u8; 32]) -> String {
-    format!("widget-svg:{}", ResourceId::from_bytes(hash).to_hex())
+    format!(
+        "widget-svg:{}",
+        tze_hud_resource::ResourceId::from_bytes(hash).to_hex()
+    )
+}
+
+fn register_widget_asset_in_scene(
+    scene: &mut SceneGraph,
+    register: &WidgetAssetRegister,
+    svg_bytes: &[u8],
+    asset_handle: &str,
+) -> Result<(), RuntimeWidgetAssetError> {
+    register_runtime_widget_svg_asset(
+        scene,
+        &register.widget_type_id,
+        &register.svg_filename,
+        svg_bytes,
+        asset_handle,
+        &HashMap::new(),
+    )
 }
 
 /// Handle a WidgetAssetRegister from the client (session-protocol spec
@@ -3951,23 +3971,45 @@ async fn handle_widget_asset_register(
         }
     };
 
-    let existing_asset_handle = {
+    let (existing_record, durable_dedup_hit) = {
         let st = state.lock().await;
-        if let Some(store) = st.runtime_widget_store.as_ref() {
-            let resource_id = tze_hud_resource::ResourceId::from_bytes(expected_hash);
-            if store.contains(resource_id) {
-                Some(widget_asset_handle_from_hash(expected_hash))
-            } else {
-                None
-            }
+        let existing = st.widget_asset_store.by_hash.get(&expected_hash).cloned();
+        let durable_hit = if existing.is_none() {
+            st.runtime_widget_store
+                .as_ref()
+                .map(|store| store.contains(tze_hud_resource::ResourceId::from_bytes(expected_hash)))
+                .unwrap_or(false)
         } else {
-            st.widget_asset_store
-                .by_hash
-                .get(&expected_hash)
-                .map(|existing| existing.asset_handle.clone())
-        }
+            false
+        };
+        (existing, durable_hit)
     };
-    if let Some(asset_handle) = existing_asset_handle {
+    if let Some(existing) = existing_record {
+        let st = state.lock().await;
+        let runtime_register_result = {
+            let mut scene = st.scene.lock().await;
+            register_widget_asset_in_scene(
+                &mut scene,
+                &register,
+                &existing.bytes,
+                &existing.asset_handle,
+            )
+        };
+        if let Err(err) = runtime_register_result {
+            let error_result = make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                err.wire_code(),
+                err.to_string(),
+            );
+            drop(st);
+            send_widget_asset_register_result(session, tx, error_result).await;
+            return;
+        }
+
+        let asset_handle = existing.asset_handle;
+        drop(st);
         send_widget_asset_register_result(
             session,
             tx,
@@ -3977,6 +4019,25 @@ async fn handle_widget_asset_register(
                 widget_type_id: register.widget_type_id.clone(),
                 svg_filename: register.svg_filename.clone(),
                 asset_handle,
+                was_deduplicated: true,
+                error_code: String::new(),
+                error_message: String::new(),
+            },
+        )
+        .await;
+        return;
+    }
+
+    if durable_dedup_hit {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            WidgetAssetRegisterResult {
+                request_sequence,
+                accepted: true,
+                widget_type_id: register.widget_type_id.clone(),
+                svg_filename: register.svg_filename.clone(),
+                asset_handle: widget_asset_handle_from_hash(expected_hash),
                 was_deduplicated: true,
                 error_code: String::new(),
                 error_message: String::new(),
@@ -4082,6 +4143,43 @@ async fn handle_widget_asset_register(
     let asset_handle = widget_asset_handle_from_hash(expected_hash);
 
     // Re-check dedup after lock acquisition to avoid races between workers.
+    if let Some(existing) = st.widget_asset_store.by_hash.get(&expected_hash).cloned() {
+        let runtime_register_result = {
+            let mut scene = st.scene.lock().await;
+            register_widget_asset_in_scene(
+                &mut scene,
+                &register,
+                &existing.bytes,
+                &existing.asset_handle,
+            )
+        };
+        if let Err(err) = runtime_register_result {
+            let error_result = make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                err.wire_code(),
+                err.to_string(),
+            );
+            drop(st);
+            send_widget_asset_register_result(session, tx, error_result).await;
+            return;
+        }
+        let dedup_result = WidgetAssetRegisterResult {
+            request_sequence,
+            accepted: true,
+            widget_type_id: register.widget_type_id.clone(),
+            svg_filename: register.svg_filename.clone(),
+            asset_handle: existing.asset_handle,
+            was_deduplicated: true,
+            error_code: String::new(),
+            error_message: String::new(),
+        };
+        drop(st);
+        send_widget_asset_register_result(session, tx, dedup_result).await;
+        return;
+    }
+
     if let Some(store) = st.runtime_widget_store.as_ref() {
         let resource_id = tze_hud_resource::ResourceId::from_bytes(expected_hash);
         if store.contains(resource_id) {
@@ -4099,25 +4197,6 @@ async fn handle_widget_asset_register(
             send_widget_asset_register_result(session, tx, dedup_result).await;
             return;
         }
-    } else if let Some(asset_handle) = st
-        .widget_asset_store
-        .by_hash
-        .get(&expected_hash)
-        .map(|existing| existing.asset_handle.clone())
-    {
-        let dedup_result = WidgetAssetRegisterResult {
-            request_sequence,
-            accepted: true,
-            widget_type_id: register.widget_type_id.clone(),
-            svg_filename: register.svg_filename.clone(),
-            asset_handle,
-            was_deduplicated: true,
-            error_code: String::new(),
-            error_message: String::new(),
-        };
-        drop(st);
-        send_widget_asset_register_result(session, tx, dedup_result).await;
-        return;
     }
 
     if let Some(store) = st.runtime_widget_store.as_mut() {
@@ -4149,6 +4228,28 @@ async fn handle_widget_asset_register(
                 return;
             }
         };
+
+        let runtime_register_result = {
+            let mut scene = st.scene.lock().await;
+            register_widget_asset_in_scene(
+                &mut scene,
+                &register,
+                &register.inline_svg_bytes,
+                &asset_handle,
+            )
+        };
+        if let Err(err) = runtime_register_result {
+            let error_result = make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                err.wire_code(),
+                err.to_string(),
+            );
+            drop(st);
+            send_widget_asset_register_result(session, tx, error_result).await;
+            return;
+        }
 
         let was_deduplicated = matches!(put_outcome, DurablePutOutcome::Deduplicated { .. });
         drop(st);
@@ -4196,6 +4297,27 @@ async fn handle_widget_asset_register(
         return;
     }
 
+    let runtime_register_result = {
+        let mut scene = st.scene.lock().await;
+        register_widget_asset_in_scene(
+            &mut scene,
+            &register,
+            &register.inline_svg_bytes,
+            &asset_handle,
+        )
+    };
+    if let Err(err) = runtime_register_result {
+        let error_result = make_widget_asset_error_result(
+            request_sequence,
+            &register.widget_type_id,
+            &register.svg_filename,
+            err.wire_code(),
+            err.to_string(),
+        );
+        drop(st);
+        send_widget_asset_register_result(session, tx, error_result).await;
+        return;
+    }
     let previous = st.widget_asset_store.by_hash.insert(
         expected_hash,
         crate::session::WidgetAssetRecord {
@@ -9374,7 +9496,7 @@ mod tests {
     async fn setup_widget_service() -> HudSessionImpl {
         use tze_hud_scene::types::{
             ContentionPolicy, GeometryPolicy, RenderingPolicy, WidgetDefinition, WidgetInstance,
-            WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue,
+            WidgetParamType, WidgetParameterDeclaration, WidgetParameterValue, WidgetSvgLayer,
         };
 
         let scene = SceneGraph::new(800.0, 600.0);
@@ -9394,7 +9516,10 @@ mod tests {
                     default_value: WidgetParameterValue::F32(0.0),
                     constraints: None,
                 }],
-                layers: vec![],
+                layers: vec![WidgetSvgLayer {
+                    svg_file: "fill.svg".to_string(),
+                    bindings: vec![],
+                }],
                 default_geometry_policy: GeometryPolicy::Relative {
                     x_pct: 0.0,
                     y_pct: 0.0,
@@ -10211,6 +10336,98 @@ mod tests {
                 assert_eq!(result.error_code, "WIDGET_ASSET_BUDGET_EXCEEDED");
             }
             other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_widget_asset_register_updates_runtime_widget_lifecycle_for_publish_path() {
+        let service = setup_widget_service().await;
+        let shared_state = service.state.clone();
+        let (mut client, handle) = setup_widget_test_with_service(service).await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "asset-lifecycle",
+            "test-key",
+            &["register_widget_asset", "publish_widget:gauge"],
+        )
+        .await;
+
+        let payload =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><rect id='bar' width='1' height='1'/></svg>"
+                .to_vec();
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: blake3::hash(&payload).as_bytes().to_vec(),
+                transport_crc32c: 0,
+                total_size_bytes: payload.len() as u64,
+                inline_svg_bytes: payload.clone(),
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let asset_handle = match next_non_state_change(&mut stream).await.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(result.accepted);
+                assert!(!result.was_deduplicated);
+                result.asset_handle
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        };
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetPublish(WidgetPublish {
+                widget_name: "gauge".to_string(),
+                instance_id: String::new(),
+                params: vec![crate::proto::WidgetParameterValueProto {
+                    param_name: "level".to_string(),
+                    value: Some(crate::proto::widget_parameter_value_proto::Value::F32Value(
+                        0.42,
+                    )),
+                }],
+                transition_ms: 0,
+                ttl_us: 0,
+                merge_key: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+
+        let publish_msg = next_non_state_change(&mut stream).await;
+        match &publish_msg.payload {
+            Some(ServerPayload::WidgetPublishResult(result)) => {
+                assert!(
+                    result.accepted,
+                    "publish should remain usable after registration"
+                );
+            }
+            other => panic!("expected WidgetPublishResult, got: {other:?}"),
+        }
+
+        {
+            let st = shared_state.lock().await;
+            let mut scene = st.scene.lock().await;
+            assert_eq!(
+                scene
+                    .widget_registry
+                    .runtime_svg_handle("gauge", "fill.svg"),
+                Some(asset_handle.as_str())
+            );
+
+            let queued = scene.drain_pending_widget_svg_assets();
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0].0, "gauge");
+            assert_eq!(queued[0].1, "fill.svg");
+            assert_eq!(queued[0].2, payload);
         }
 
         drop(handle);
