@@ -3,7 +3,7 @@
 //! This module implements the canonical v1 capability vocabulary from
 //! `configuration/spec.md §Requirement: Capability Vocabulary`.
 //!
-//! ## Canonical v1 Capabilities (17 entries)
+//! ## Canonical v1 Capabilities (18 entries)
 //!
 //! Flat names (exact match):
 //! - `create_tiles`
@@ -11,6 +11,7 @@
 //! - `manage_tabs`
 //! - `manage_sync_groups`
 //! - `upload_resource`
+//! - `register_widget_asset`
 //! - `read_scene_topology`
 //! - `subscribe_scene_events`
 //! - `overlay_privileges`
@@ -201,9 +202,9 @@ mod tests {
 
     // ── Vocabulary completeness ───────────────────────────────────────────────
 
-    /// All 17 v1 canonical capability forms must be recognized.
-    /// The spec lists 17 forms; parameterized forms (publish_zone, emit_scene_event, lease:priority)
-    /// are tested with concrete examples, so the array below contains 18 entries.
+    /// All v1 canonical capability forms must be recognized.
+    /// The spec lists 18 forms; parameterized forms (publish_zone, emit_scene_event, lease:priority)
+    /// are tested with concrete examples, so the array below contains 19 entries.
     #[test]
     fn all_canonical_capabilities_recognized() {
         let caps = [
@@ -212,6 +213,7 @@ mod tests {
             "manage_tabs",
             "manage_sync_groups",
             "upload_resource",
+            "register_widget_asset",
             "read_scene_topology",
             "subscribe_scene_events",
             "overlay_privileges",

@@ -606,6 +606,7 @@ mod tests {
         Arc::new(Mutex::new(SharedState {
             scene: Arc::new(Mutex::new(SceneGraph::new(1920.0, 1080.0))),
             sessions: SessionRegistry::new("test-key"),
+            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             safe_mode_active: false,
             freeze_active: false,
             token_store: TokenStore::new(),

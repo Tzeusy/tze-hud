@@ -311,6 +311,7 @@ impl HeadlessRuntime {
         let state = Arc::new(Mutex::new(SharedState {
             scene,
             sessions,
+            widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
             safe_mode_active: false,
             token_store: tze_hud_protocol::token::TokenStore::new(),
             freeze_active: false,

@@ -223,6 +223,7 @@ pub const CANONICAL_CAPABILITIES: &[&str] = &[
     "manage_tabs",
     "manage_sync_groups",
     "upload_resource",
+    "register_widget_asset",
     "read_scene_topology",
     "subscribe_scene_events",
     "overlay_privileges",
@@ -416,6 +417,7 @@ capabilities = ["createTiles"]
         assert!(is_canonical_capability("create_tiles"));
         assert!(is_canonical_capability("read_scene_topology"));
         assert!(is_canonical_capability("access_input_events"));
+        assert!(is_canonical_capability("register_widget_asset"));
         assert!(is_canonical_capability("publish_zone:subtitle"));
         assert!(is_canonical_capability("emit_scene_event:doorbell.ring"));
         assert!(is_canonical_capability("lease:priority:1"));

@@ -77,6 +77,11 @@ message ClientMessage {
     // Requires emit_scene_event:<event_name> capability.
     EmitSceneEvent emit_scene_event = 33;
 
+    // Widget asset registration/upload (session-protocol spec §Requirement: Widget Asset Registration via Session Stream).
+    // Two-stage flow: metadata preflight + optional payload upload.
+    // Requires register_widget_asset capability.
+    WidgetAssetRegister widget_asset_register = 34;
+
     // Widget publishing (widget-system spec §Requirement: Widget Publishing via gRPC).
     // Durable-widget publishes receive WidgetPublishResult; ephemeral are fire-and-forget.
     // Requires publish_widget:<widget_name> capability.
@@ -159,6 +164,10 @@ message ServerMessage {
     // Sent only for durable-widget publishes. Ephemeral-widget publishes are
     // fire-and-forget; no WidgetPublishResult is sent.
     WidgetPublishResult   widget_publish_result   = 47;
+
+    // Widget asset register result (session-protocol spec §Requirement: Widget Asset Registration via Session Stream).
+    // Sent for every WidgetAssetRegister request (transactional).
+    WidgetAssetRegisterResult widget_asset_register_result = 48;
   }
 
   // Field 22 (lease_denial) was removed in the v1 vocabulary rename.
@@ -556,6 +565,34 @@ message WidgetPublishResult {
   string widget_name  = 2;   // Echoed from WidgetPublish
   string error_code   = 3;   // Machine-readable error code (if accepted=false)
   string error_message = 4;  // Human-readable reason (if accepted=false)
+}
+
+// ─── Widget asset registration messages ─────────────────────────────────────
+
+// Client registers/uploads a runtime widget SVG asset by strong content hash.
+// Two-stage behavior:
+// 1) metadata-only preflight for dedup short-circuit
+// 2) payload upload only when hash is unknown
+message WidgetAssetRegister {
+  string widget_type_id          = 1;  // Kebab-case widget type id
+  string svg_filename            = 2;  // Logical filename (must be .svg)
+  bytes  content_hash_blake3     = 3;  // 32-byte canonical strong hash identity
+  uint32 transport_crc32c        = 4;  // Optional fast transport integrity checksum (0 = omitted)
+  uint64 total_size_bytes        = 5;  // Declared payload byte size
+  bytes  inline_svg_bytes        = 6;  // Optional inline payload
+  bool   metadata_only_preflight = 7;  // True = dedup preflight only
+}
+
+// Server response to WidgetAssetRegister (transactional).
+message WidgetAssetRegisterResult {
+  uint64 request_sequence = 1;  // Sequence of the WidgetAssetRegister that triggered this
+  bool   accepted         = 2;
+  string widget_type_id   = 3;
+  string svg_filename     = 4;
+  string asset_handle     = 5;  // Runtime handle when accepted=true
+  bool   was_deduplicated = 6;  // True when hash existed and payload transfer was skipped
+  string error_code       = 7;  // Machine-readable error code (if accepted=false)
+  string error_message    = 8;  // Human-readable reason (if accepted=false)
 }
 
 // ─── Heartbeat ────────────────────────────────────────────────────────────────
