@@ -70,7 +70,7 @@ All tile_id/node_id fields in events.proto SHALL use raw 16-byte UUIDv7 (bytes),
 
 This file exists solely because `session.proto` `SceneDelta` still references the legacy tile and lease event types (`TileCreatedEvent`, `TileDeletedEvent`, `TileUpdatedEvent`, `LeaseEvent`) for backward compatibility. New agent code SHALL use the events.proto types exclusively. events_legacy.proto SHALL be removed when the SceneDelta migration is complete (post-v1).
 
-**`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, backpressure, input control, capability management, scene events, widget publishing, and runtime errors. SHALL import `types.proto`, `events.proto`, and `events_legacy.proto`. SHALL contain:
+**`session.proto`** (`package tze_hud.protocol.v1.session`) — HudSession gRPC service, client/server message envelopes, session lifecycle messages, lease management messages, subscription messages, heartbeat, telemetry, scene state messages, backpressure, input control, capability management, scene events, widget publishing, widget asset registration, and runtime errors. SHALL import `types.proto`, `events.proto`, and `events_legacy.proto`. SHALL contain:
 - gRPC services: `HudSession` with `rpc Session(stream ClientMessage) returns (stream ServerMessage)`, and `RuntimeService` with `rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse)` for hot-reload (RFC 0006 §9)
 - Client/server envelopes: `ClientMessage`, `ServerMessage`
 - Session lifecycle: `SessionInit`, `SessionResume`, `SessionResumeResult`, `SessionClose`, `SessionEstablished`, `SessionError`, `SessionSuspended`, `SessionResumed`
@@ -86,6 +86,7 @@ This file exists solely because `session.proto` `SceneDelta` still references th
 - Capability management: `CapabilityRequest`, `CapabilityNotice`
 - Scene events: `EmitSceneEvent` (client-to-server), `EmitSceneEventResult` (server-to-client)
 - Widget publishing: `WidgetPublish` (client-to-server), `WidgetPublishResult` (server-to-client)
+- Widget asset registration: `WidgetAssetRegister` (client-to-server), `WidgetAssetRegisterResult` (server-to-client)
 - Degradation: `DegradationNotice`
 - Runtime errors: `RuntimeError`
 - Event delivery: `EventBatch` (defined in `events.proto`; imported into session.proto for use on `ServerMessage` field 34; carries RFC 0004 InputEnvelope variants)
@@ -217,7 +218,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: ClientMessage and ServerMessage Envelopes
-Every client-to-server message on the session stream SHALL be wrapped in a ClientMessage envelope, and every server-to-client message SHALL be wrapped in a ServerMessage envelope. Both envelopes SHALL contain: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. ClientMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-12 (SessionInit=10, SessionResume=11, SessionClose=12), agent operations at 20-35 (MutationBatch=20, LeaseRequest=21, LeaseRenew=22, LeaseRelease=23, SubscriptionChange=24, ZonePublish=25, TelemetryFrame=26, InputFocusRequest=27, InputCaptureRequest=28, InputCaptureRelease=29, SetImePosition=30, Heartbeat=31, CapabilityRequest=32, EmitSceneEvent=33, WidgetPublish=35). ServerMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-15 (SessionEstablished=10, SessionError=11, SessionResumeResult=12, SessionSuspended=13, SessionResumed=14, RuntimeError=15), mutation/lease responses at 20-25 (MutationResult=20, LeaseResponse=21, LeaseStateChange=23, CapabilityNotice=25), scene state at 30-36 (SceneSnapshot=30, SceneDelta=31, Heartbeat=33, EventBatch=34, BackpressureSignal=35, RuntimeTelemetryFrame=36), operational responses at 39-47 (SubscriptionChangeResult=39, ZonePublishResult=40, InputFocusResponse=43, InputCaptureResponse=44, EmitSceneEventResult=45, DegradationNotice=46, WidgetPublishResult=47). Fields 50-99 in both envelopes SHALL be reserved for post-v1 use.
+Every client-to-server message on the session stream SHALL be wrapped in a ClientMessage envelope, and every server-to-client message SHALL be wrapped in a ServerMessage envelope. Both envelopes SHALL contain: sequence (per-direction monotonically increasing, starting at 1), timestamp_wall_us (sender wall-clock, advisory only), and a oneof payload. ClientMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-12 (SessionInit=10, SessionResume=11, SessionClose=12), agent operations at 20-35 (MutationBatch=20, LeaseRequest=21, LeaseRenew=22, LeaseRelease=23, SubscriptionChange=24, ZonePublish=25, TelemetryFrame=26, InputFocusRequest=27, InputCaptureRequest=28, InputCaptureRelease=29, SetImePosition=30, Heartbeat=31, CapabilityRequest=32, EmitSceneEvent=33, WidgetAssetRegister=34, WidgetPublish=35). ServerMessage oneof payload fields SHALL be allocated as follows: session lifecycle at 10-15 (SessionEstablished=10, SessionError=11, SessionResumeResult=12, SessionSuspended=13, SessionResumed=14, RuntimeError=15), mutation/lease responses at 20-25 (MutationResult=20, LeaseResponse=21, LeaseStateChange=23, CapabilityNotice=25), scene state at 30-36 (SceneSnapshot=30, SceneDelta=31, Heartbeat=33, EventBatch=34, BackpressureSignal=35, RuntimeTelemetryFrame=36), operational responses at 39-48 (SubscriptionChangeResult=39, ZonePublishResult=40, InputFocusResponse=43, InputCaptureResponse=44, EmitSceneEventResult=45, DegradationNotice=46, WidgetPublishResult=47, WidgetAssetRegisterResult=48). Field 49 remains available for future server-to-client additions. Fields 50-99 in both envelopes SHALL be reserved for post-v1 use.
 Source: RFC 0005 §2.2, §9.2
 Scope: v1-mandatory
 
@@ -273,7 +274,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Traffic Class Routing
-Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (Heartbeat, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
+Messages SHALL be classified into three traffic classes with distinct delivery guarantees. Transactional messages (MutationBatch, LeaseRequest, CapabilityRequest, SubscriptionChange, InputFocusRequest, InputCaptureRequest, WidgetAssetRegister, durable WidgetPublish; and EventBatch variants FocusGainedEvent, FocusLostEvent, CaptureReleasedEvent, IME events, PointerDownEvent, PointerUpEvent, ClickEvent, KeyDownEvent, KeyUpEvent, CommandInputEvent) SHALL use at-least-once delivery with ack and retransmit, per-direction sequence order, and SHALL never be dropped. State-stream messages (SceneEvent, TelemetryFrame, ephemeral ZonePublish, ephemeral WidgetPublish) SHALL use at-least-once delivery with coalescing and sequence order, but intermediate states MAY be skipped. Ephemeral realtime messages (Heartbeat, SetImePosition; and EventBatch variants PointerMoveEvent, PointerEnterEvent, PointerLeaveEvent, GestureEvent, ScrollOffsetChangedEvent) SHALL use at-most-once delivery with best-effort ordering and MAY be dropped under backpressure. The traffic-class distinction between transactional and ephemeral input events is governed by RFC 0004 §8.5 and applies to the InputEvent messages carried in field 34 of ServerMessage.
 Source: RFC 0005 §3.1, §3.2, §5.1, RFC 0004 §8.5
 Scope: v1-mandatory
 
@@ -727,6 +728,29 @@ Scope: v1-mandatory
 #### Scenario: Unknown widget type rejected
 - **WHEN** an agent sends WidgetPublish with a widget_name not registered in the widget registry
 - **THEN** the runtime SHALL respond with WidgetPublishResult(accepted=false, error_code="WIDGET_NOT_FOUND")
+
+---
+
+### Requirement: Widget Asset Registration via Session Stream
+WidgetAssetRegister (ClientMessage field 34) SHALL provide a metadata-first register/upload flow for runtime widget SVG assets. The request SHALL carry `widget_type_id`, `svg_filename`, `content_hash_blake3` (32-byte canonical identity), optional `transport_crc32c` (transport integrity hint only), declared `total_size_bytes`, optional inline payload bytes, and optional `metadata_only_preflight`. WidgetAssetRegisterResult (ServerMessage field 48) SHALL carry `accepted`, `widget_type_id`, `svg_filename`, `asset_handle`, `was_deduplicated`, and error details on failure.
+
+The runtime SHALL evaluate hash dedup before requesting payload transfer. If `content_hash_blake3` already exists, the runtime SHALL return success with `was_deduplicated=true` and skip payload upload. If the hash is unknown, the runtime SHALL require payload bytes and validate hash integrity plus SVG structural validity before accepting. Runtime registration is stage 1; later WidgetPublish requests are stage 2 and MUST NOT include SVG payload.
+
+Error codes for WidgetAssetRegisterResult are string-only (NOT in the ErrorCode enum): WIDGET_ASSET_CAPABILITY_MISSING, WIDGET_ASSET_HASH_MISMATCH, WIDGET_ASSET_CHECKSUM_MISMATCH, WIDGET_ASSET_INVALID_SVG, WIDGET_ASSET_BUDGET_EXCEEDED, WIDGET_ASSET_STORE_IO_ERROR, WIDGET_ASSET_TYPE_INVALID.
+Source: RFC 0005 §3.10, RFC 0011 §2.2a, §9.1
+Scope: v1-mandatory
+
+#### Scenario: Metadata preflight returns dedup hit
+- **WHEN** an agent sends WidgetAssetRegister(metadata_only_preflight=true) with a hash already present in the runtime widget asset store
+- **THEN** the runtime SHALL return WidgetAssetRegisterResult(accepted=true, was_deduplicated=true) without requiring payload bytes
+
+#### Scenario: Unknown hash requires payload upload
+- **WHEN** an agent sends WidgetAssetRegister for an unknown hash
+- **THEN** the runtime SHALL require payload bytes and SHALL reject acceptance if the computed BLAKE3 does not match content_hash_blake3
+
+#### Scenario: Registration capability required
+- **WHEN** an agent lacking `register_widget_asset` sends WidgetAssetRegister
+- **THEN** the runtime SHALL return WidgetAssetRegisterResult(accepted=false, error_code="WIDGET_ASSET_CAPABILITY_MISSING")
 
 ---
 

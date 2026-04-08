@@ -70,6 +70,9 @@ However, the runtime persists:
 - **Agent registration and capability grants.** A known agent does not need to re-authenticate from scratch on every reconnect — its identity and approved capabilities are durable.
 - **Tab and layout configuration.** The set of tabs, their names, and their default layouts are configuration, not runtime state. They survive restarts.
 - **User preferences.** Pinned tiles, muted agents, frozen regions, z-order overrides — these are the human's choices and must survive restarts.
+- **Runtime-uploaded SVG assets.** Content-addressed widget/SVG assets registered at runtime survive restart in a durable local file store and are re-indexed on boot.
+
+The durable asset store is a runtime-managed subsystem with OS-specific storage wiring (Linux, macOS, Windows) under a shared contract: atomic writes, crash-safe startup reconciliation, and content-hash keyed retrieval.
 
 ### Reconnection contract
 

@@ -309,8 +309,8 @@ message SessionMessage {
     InputCaptureRequest input_capture_request = 27;
     InputCaptureRelease input_capture_release = 28;
     SetImePosition      set_ime_position      = 29;
-    // Fields 30-33 occupied by agent operations above; preserved for zone extension buffer
-    // Field 34 reserved (zone extension buffer)
+    // Field 34 is allocated to WidgetAssetRegister in the split-envelope allocation (§3.10, §9.2).
+    // This combined-envelope sketch is illustrative only; use §9.2 for authoritative field mapping.
     WidgetPublish       widget_publish        = 35;  // Parameterized visual publishing (§3.9)
 
     // Runtime → Agent
@@ -420,7 +420,7 @@ The session stream uses HTTP/2 flow control as the primary backpressure mechanis
 | `InputCaptureResponse` | Transactional | Ack/nack for `InputCaptureRequest`; correlated by sequence number (RFC 0004 §2.3) |
 | `WidgetPublishResult` | Transactional | Ack/nack for a durable-widget `WidgetPublish` (field 47); not sent for ephemeral widgets. See §3.9. |
 
-**Note on `InputEvent` batching (RFC 0004 §8.3):** RFC 0004 §8.3 specifies that multiple input events for the same agent within a single frame are assembled into an `EventBatch` (a `repeated InputEnvelope` with frame metadata) and delivered as a single `SessionMessage`. The current `input_event` field 34 carries a single `InputEnvelope`; the full `EventBatch` type defined in RFC 0004 §8.4 is the v1 delivery contract. Implementors must update field 34 to carry `EventBatch` per RFC 0004 §8.3.1.
+**Note on `InputEvent` batching (RFC 0004 §8.3):** RFC 0004 §8.3 specifies that multiple input events for the same agent within a single frame are assembled into an `EventBatch` (a `repeated InputEnvelope` with frame metadata) and delivered as a single session payload. The v1 contract is `EventBatch` delivery on server field 34 (not single `InputEnvelope` delivery).
 
 ### 3.3 MutationBatch
 
@@ -575,7 +575,7 @@ The message schemas are defined in RFC 0004 (§1.2, §2.3, §4.3 for request typ
 
 Widget publishing multiplexes onto the bidirectional session stream using the same pattern as zone publishing. `WidgetPublish` travels agent → runtime at ClientMessage field **35**. `WidgetPublishResult` travels runtime → agent at ServerMessage field **47**.
 
-**Field number rationale:** ClientMessage fields 10–33 are occupied by lifecycle and agent operations. Field 34 is a reserved buffer for future zone extensions. Field 35 is the first available field after the buffer — chosen to maintain a clean separation between zone-related fields and widget-related fields. ServerMessage fields 10–46 are occupied by existing messages. Field 47 is the next available field after `SessionResumed` (field 46).
+**Field number rationale:** ClientMessage fields 10–33 are occupied by lifecycle and agent operations. Field 34 is allocated to `WidgetAssetRegister` (§3.10). Field 35 remains the widget-parameter publish message (`WidgetPublish`) to preserve the two-stage ordering and keep widget publication adjacent to widget asset registration. ServerMessage fields 10–46 are occupied by existing messages. Field 47 is `WidgetPublishResult`; field 48 is `WidgetAssetRegisterResult`.
 
 ```protobuf
 // ─── Widget publish (client → server; field 35) ──────────────────────────────
@@ -620,6 +620,60 @@ message WidgetPublishResult {
 **Traffic class assignment:** Widget publishes follow the same transactional/ephemeral split as zone publishes. A widget instance declared with `ephemeral = true` in its `WidgetDefinition` uses the state-stream (fire-and-forget) traffic class; durable widgets use the transactional class and always receive `WidgetPublishResult`.
 
 **MCP surface:** Widget publishing is also available to guest agents via the `publish_to_widget` MCP tool. The tool accepts `widget_name`, `params` (object), optional `transition_ms`, optional `ttl_us`, and optional `instance_id`. It requires `publish_widget:<widget_name>` capability. The `list_widgets` MCP tool returns all widget types and instances with their parameter schemas — no capability required, matching the `list_zones` pattern.
+
+### 3.10 Widget Asset Register / Upload (Agent → Runtime) and Result (Runtime → Agent)
+
+Runtime SVG registration is separated from widget publication. Agents first register/upload widget SVG assets, then publish lightweight parameter updates referencing registered assets.
+
+`WidgetAssetRegister` travels agent → runtime at ClientMessage field **34**. `WidgetAssetRegisterResult` travels runtime → agent at ServerMessage field **48**.
+
+```protobuf
+// ─── Widget asset register (client → server; field 34) ───────────────────────
+// Register/upload a runtime widget SVG asset by strong content hash.
+// Requires register_widget_asset capability.
+// Two-stage behavior:
+//   1) Metadata preflight (hash + optional checksum, no payload) for dedup short-circuit.
+//   2) Payload upload only if hash is unknown.
+
+message WidgetAssetRegister {
+  string widget_type_id            = 1;  // Kebab-case type id to register/update
+  string svg_filename              = 2;  // Logical filename inside the widget definition
+  bytes  content_hash_blake3       = 3;  // 32-byte strong identity hash
+  uint32 transport_crc32c          = 4;  // Optional fast transport integrity checksum (0 = omitted)
+  uint64 total_size_bytes          = 5;  // Declared payload size
+  bytes  inline_svg_bytes          = 6;  // Optional inline bytes for small SVG payloads
+  bool   metadata_only_preflight   = 7;  // If true: perform dedup preflight only
+}
+
+// ─── Widget asset register result (server → client; field 48) ─────────────────
+// Sent for every WidgetAssetRegister request (transactional).
+
+message WidgetAssetRegisterResult {
+  uint64 request_sequence = 1;
+  bool   accepted         = 2;
+  string widget_type_id   = 3;
+  string svg_filename     = 4;
+  string asset_handle     = 5;   // Runtime asset reference (content-hash keyed)
+  bool   was_deduplicated = 6;   // True if hash already existed and payload was skipped
+  RuntimeError error      = 7;   // Populated when accepted=false
+}
+```
+
+**Identity and checksum contract:**
+- `content_hash_blake3` is the canonical identity key and dedup authority.
+- `transport_crc32c` is optional and used only as a fast transport corruption guard.
+- A CRC mismatch rejects transport; it does not alter identity.
+
+**Result error codes (string):**
+- `WIDGET_ASSET_CAPABILITY_MISSING`
+- `WIDGET_ASSET_HASH_MISMATCH`
+- `WIDGET_ASSET_CHECKSUM_MISMATCH`
+- `WIDGET_ASSET_INVALID_SVG`
+- `WIDGET_ASSET_BUDGET_EXCEEDED`
+- `WIDGET_ASSET_STORE_IO_ERROR`
+- `WIDGET_ASSET_TYPE_INVALID`
+
+**MCP surface:** guest/resident agents may call `register_widget_asset` (and optional chunk helper) on the MCP plane. Semantics mirror this gRPC contract: metadata preflight, hash dedup short-circuit, payload upload only when required.
 
 ---
 
@@ -1331,7 +1385,10 @@ message SessionMessage {
     InputCaptureResponse    input_capture_response   = 44;  // Ack for InputCaptureRequest (RFC 0004 §2.3; §3.8)
     SessionSuspended        session_suspended        = 45;  // Safe mode entry (RFC 0007 §5.2; §3.7)
     SessionResumed          session_resumed          = 46;  // Safe mode exit (RFC 0007 §5.5; §3.7)
-    // Fields 47–49 reserved for future server→client messages.
+    // Server→client widget acknowledgements:
+    //   47 = WidgetPublishResult (durable widget publish ack)
+    //   48 = WidgetAssetRegisterResult (runtime SVG register/upload ack)
+    // Field 49 remains available for future server→client messages.
     // Fields 50–99 reserved for future use (e.g., post-v1 embodied presence/media signaling).
   }
 }
@@ -1388,9 +1445,9 @@ session.proto
 
 Field numbers 10–29 in `SessionMessage.payload` are reserved for lifecycle and client→server messages; 30–49 for server→client messages. Numbers 50–99 are reserved for future use (including post-v1 embodied presence/media signaling). Do not fill gaps speculatively.
 
-**Currently allocated client→server fields:** 10–15 (lifecycle), 20–25 (original mutations/subscriptions), 26–29 (input control requests: `InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition` — added Round 12 per RFC 0004 §8.3.1), 34 (reserved: zone extension buffer), 35 (`WidgetPublish` — widget parameter publishing, §3.9).
+**Currently allocated client→server fields:** 10–15 (lifecycle), 20–25 (original mutations/subscriptions), 26–29 (input control requests: `InputFocusRequest`, `InputCaptureRequest`, `InputCaptureRelease`, `SetImePosition` — added Round 12 per RFC 0004 §8.3.1), 34 (`WidgetAssetRegister` — runtime SVG registration/upload, §3.10), 35 (`WidgetPublish` — widget parameter publishing, §3.9).
 
-**Currently allocated server→client fields:** 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`), 43 (`InputFocusResponse`), 44 (`InputCaptureResponse`), 45 (`SessionSuspended`), 46 (`SessionResumed`), 47 (`WidgetPublishResult` — ack for durable widget publishes, §3.9). Fields 48–49 are available for future server→client additions.
+**Currently allocated server→client fields:** 30–37 (original), 38 (reserved: `StateDeltaComplete` — deferred to post-v1 delta-replay; see §6.4 post-v1 note), 39 (`SubscriptionChangeResult`), 40 (`ZonePublishResult`), 41 (`TelemetryFrame`), 42 (`SceneSnapshot`), 43 (`InputFocusResponse`), 44 (`InputCaptureResponse`), 45 (`SessionSuspended`), 46 (`SessionResumed`), 47 (`WidgetPublishResult` — ack for durable widget publishes, §3.9), 48 (`WidgetAssetRegisterResult` — ack for runtime SVG registration/upload, §3.10). Field 49 remains available for future server→client additions.
 
 ---
 
@@ -1421,7 +1478,7 @@ The session protocol exposes the following configurable parameters in the runtim
 | RFC 0001 (Scene Contract) | `MutationBatch` payloads are `MutationProto` lists defined in RFC 0001. Scene-object IDs (`batch_id`, `lease_id`, `created_ids`) use `SceneId` (RFC 0001 §7.1) — a typed protobuf message encoding a 16-byte little-endian UUIDv7. Session-level identifiers (`agent_id`, `session_token`, `namespace`) remain `string` as they are not scene objects. **`SceneSnapshot` (§9) is defined in RFC 0001 §7.1 and imported into `session.proto` via `scene.proto`; this RFC depends on RFC 0001 for the snapshot wire format, field layout, and reconstruction algorithm.** |
 | RFC 0002 (Runtime Kernel) | The session service is a component of the runtime kernel. Lease lifecycle (grace period, revocation) is governed by RFC 0002. |
 | RFC 0003 (Timing Model) | `TimingHints` in `MutationBatch` use the timestamp semantics and clock domains defined in RFC 0003. `ClockSyncRequest`/`ClockSyncResponse` (defined in RFC 0003 §7.1) are used by the `ClockSync` RPC on `SessionService`. `SessionInit.agent_timestamp_wall_us` and `SessionEstablished.compositor_timestamp_wall_us`/`estimated_skew_us` implement the per-handshake sync point described in RFC 0003 §1.3. Clock-domain naming in this RFC follows the `_wall_us`/`_mono_us` convention (§2.4); see RFC 0003 §1.1 for the canonical clock domain definitions. |
-| RFC 0004 (Input Model) | `InputEvent` messages (field 34) follow RFC 0004 routing and dispatch rules. RFC 0004 §8.3.1 requires `SessionMessage` payload fields 26–29 (input control requests) and 43–44 (responses) — added in Round 12 (§3.8). RFC 0004 §8.3 specifies `EventBatch` delivery semantics for field 34; implementors must update from single `InputEnvelope` to `EventBatch` per RFC 0004 §8.4. |
+| RFC 0004 (Input Model) | `InputEvent` messages (field 34) follow RFC 0004 routing and dispatch rules. RFC 0004 §8.3.1 requires `SessionMessage` payload fields 26–29 (input control requests) and 43–44 (responses) — added in Round 12 (§3.8). RFC 0004 §8.3 specifies `EventBatch` delivery semantics for field 34; v1 adopts `EventBatch` (RFC 0004 §8.4). |
 | RFC 0006 (Configuration) | Session parameters in §10 are exposed via `[runtime]` TOML section. `reconnect_grace_period_ms` maps to `reconnect_grace_secs` in the config file. RFC 0006 §2.2 is authoritative for TOML key names and types. |
 | RFC 0007 (System Shell) | `SessionSuspended` and `SessionResumed` (§3.7, fields 45–46) implement the safe mode session lifecycle defined in RFC 0007 §5.2 and §5.5. This RFC was the protocol gap flagged in RFC 0007 §8; resolved in Round 12. |
 | RFC 0008 (Lease Governance) | Lease orphaning, grace period, and reclaim on resume are governed by RFC 0008. `SessionSuspended` triggers lease `ACTIVE → SUSPENDED` transitions per RFC 0008 §6.2; `SessionResumed` restores them. `SAFE_MODE_ACTIVE` error code (§3.5) is the mutation rejection code during suspension. |

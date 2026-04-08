@@ -560,11 +560,13 @@ Agent tiles cannot occlude Content-layer zone tiles because the reserved z-order
 
 ### 2.6 Widget Registry
 
-The widget registry is runtime-owned and loaded from asset bundles + configuration at startup. It parallels the zone registry (§2.5) in structure and lifecycle. Agents cannot create widget types or instances in v1.
+The widget registry is runtime-owned. Widget definitions may be introduced through two registration paths: (1) startup asset-bundle bootstrapping and (2) runtime SVG asset registration. It parallels the zone registry (§2.5) in structure and lifecycle.
+
+In v1, agents do not mutate widget instances directly. They publish parameters/content to registered instances and may register new widget visual assets only through a dedicated runtime register/upload API with explicit capability grants.
 
 Widgets have the same **four-level ontology** as zones (presence.md §"Widget anatomy"):
 
-1. **Widget type** — the schema and visual assets (parameter declarations, SVG layers with parameter bindings, default geometry/contention/rendering policies). Types are named identifiers loaded from asset bundles, e.g. `"gauge"`, `"progress-bar"`.
+1. **Widget type** — the schema and visual assets (parameter declarations, SVG layers with parameter bindings, default geometry/contention/rendering policies). Types are named identifiers introduced via startup bundle load or runtime registration, e.g. `"gauge"`, `"progress-bar"`.
 2. **Widget instance** — a widget type bound into a specific tab with a geometry policy and layer attachment. Declared in configuration under `[[tabs.widgets]]`. Multiple instances of the same type may exist on different tabs or on the same tab when disambiguated by `instance_id`.
 3. **Publication** — one publish event into a widget instance: a set of typed parameter values (f32, string, color, or enum), TTL, optional merge key (for MergeByKey contention), and optional transition duration in milliseconds.
 4. **Occupancy** — the runtime's resolved render state: effective parameter values after contention policy application. The compositor reads `effective_params` to determine current visual property values and re-rasterizes only when effective parameters change.
@@ -685,9 +687,9 @@ The special target attribute `"text-content"` replaces the text node content of 
 - `Content` widget instances are realized as runtime-managed tiles at `z_order >= WIDGET_TILE_Z_MIN = 0x9000_0000`, above zone tiles.
 - `Chrome` widget instances render above all agent content; the runtime renders them using the widget's visual assets.
 
-**Widget asset bundle format:** Widget type definitions are loaded from asset bundles — directories containing a `widget.toml` manifest and one or more SVG files. The manifest declares the widget type identifier, parameter schema, SVG layer references, and parameter bindings. The runtime scans all configured bundle directories at startup. Bundle errors (missing manifest, invalid TOML, duplicate type name, missing SVG file, SVG parse failure) are logged and the failing bundle is skipped without halting startup.
+**Widget asset format (bootstrapped + runtime):** Widget type definitions may be loaded from startup asset bundles (directories containing `widget.toml` + SVG files) and may also be registered at runtime via a dedicated upload/register API. The bundle path remains unchanged for bootstrapping: the runtime scans configured bundle directories at startup, parses manifest/schema/layers, and skips invalid bundles without halting startup. Runtime registration validates the uploaded SVG asset and type schema under the same structural rules before inserting into the registry.
 
-**V1 scope note:** Widget instances are static in v1 — loaded from configuration at startup. The `WidgetOccupancy` struct is defined here for full ontological correctness. V1 snapshots include active widget publications per instance. Widget types are loaded from asset bundles; no built-in widget types ship with the runtime binary. An empty widget registry (no bundles configured) is valid.
+**V1 scope note:** Widget instance bindings remain configuration-first in v1 (loaded at startup). The `WidgetOccupancy` struct is defined here for full ontological correctness. V1 snapshots include active widget publications per instance. Widget definitions may be bootstrapped from bundles and extended at runtime via register/upload. No built-in widget types ship with the runtime binary. An empty widget registry (no bundles configured and no runtime registrations yet) is valid.
 
 **Widget registry in SceneSnapshot:** The scene snapshot (§4.1) includes a `WidgetRegistrySnapshot` alongside the `ZoneRegistrySnapshot`. It captures all widget definitions, all widget instances across all tabs, and all active widget publish records. Serialization uses `BTreeMap` ordering for determinism.
 
@@ -1139,7 +1141,7 @@ Durable state is stored on disk and reloaded at runtime startup.
 | Zone registry | Zone types (schemas) and zone instances (tab bindings, geometry, layer attachment) | Config file |
 | User preferences | Quiet hours, safe mode config, display profiles | Config file |
 | Capability grants | Per-agent capability scope definitions | Config file |
-| Uploaded resources | Image, font, buffer resources (content-addressed) | Blob store (filesystem) |
+| Runtime widget SVG assets | Runtime-registered widget SVG blobs (content-addressed) | Runtime-managed local asset store (filesystem) |
 
 Durable state is written to disk on change; it is not part of the scene graph serialization.
 
@@ -1157,7 +1159,7 @@ Ephemeral state lives entirely in memory. After a restart, agents must re-establ
 | WAL / diff history | Lost on restart (no durable replay) |
 | Performance telemetry | Per-session metrics discarded |
 
-**Design rationale:** Making the scene graph ephemeral simplifies the correctness model dramatically. Agents are expected to re-create their scene state on reconnect. The lease governance model ensures they can do so within their granted capability scope. Durable resources (images, fonts) survive because they are content-addressed and independent of scene graph state.
+**Design rationale:** Making the scene graph ephemeral simplifies the correctness model dramatically. Agents are expected to re-create their scene state on reconnect. The lease governance model ensures they can do so within their granted capability scope. In v1, scene-node resources remain ephemeral, while runtime-registered widget SVG assets are carved out as durable infrastructure to preserve two-stage publish efficiency across restarts.
 
 ---
 

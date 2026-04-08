@@ -29,13 +29,17 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: V1 Resource Type Enumeration
-V1 SHALL support exactly five resource types: IMAGE_RGBA8 (raw RGBA8 pixel data), IMAGE_PNG (PNG-encoded), IMAGE_JPEG (JPEG-encoded), FONT_TTF (TrueType font), and FONT_OTF (OpenType font). Uploads of unsupported types SHALL be rejected with RESOURCE_UNSUPPORTED_TYPE error.
-Source: RFC 0011 §2.1, §2.2
+V1 SHALL support six resource types: IMAGE_RGBA8 (raw RGBA8 pixel data), IMAGE_PNG (PNG-encoded), IMAGE_JPEG (JPEG-encoded), FONT_TTF (TrueType font), FONT_OTF (OpenType font), and IMAGE_SVG (widget asset graphics only). Uploads of unsupported types SHALL be rejected with RESOURCE_UNSUPPORTED_TYPE error.
+Source: RFC 0011 §2.1, §2.2, §2.2a
 Scope: v1-mandatory
 
 #### Scenario: Supported type accepted
 - **WHEN** an agent uploads a resource with type IMAGE_PNG
 - **THEN** the upload MUST be accepted (assuming all other validation passes)
+
+#### Scenario: SVG type accepted for widget asset path
+- **WHEN** an agent registers/uploads a widget asset with type IMAGE_SVG through the widget registration flow
+- **THEN** the runtime MUST accept IMAGE_SVG type validation for widget assets (subject to capability, hash, and SVG-parse checks)
 
 #### Scenario: Unsupported type rejected
 - **WHEN** an agent uploads a resource with type VIDEO_H264
@@ -44,13 +48,17 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Upload Protocol via Session Stream
-Resources SHALL be uploaded via the session stream defined in RFC 0005. Upload messages SHALL be multiplexed over the agent's existing bidirectional gRPC session stream. There SHALL be no separate upload RPC or service.
-Source: RFC 0011 §3.1
+Resource ingress SHALL use the session stream defined in RFC 0005. Scene-node image/font resources SHALL use the ResourceUploadStart/Chunk/Complete flow. Runtime widget SVG assets SHALL use WidgetAssetRegister metadata-first registration on the same stream. There SHALL be no separate upload RPC or service for either path.
+Source: RFC 0011 §3.1, RFC 0005 §3.10
 Scope: v1-mandatory
 
 #### Scenario: Upload on existing stream
 - **WHEN** an agent needs to upload a resource
 - **THEN** it MUST send ResourceUploadStart on its existing session stream, not open a separate connection
+
+#### Scenario: Widget asset register on existing stream
+- **WHEN** an agent needs to register a runtime widget SVG asset
+- **THEN** it MUST send WidgetAssetRegister on its existing session stream, not open a separate upload connection
 
 ---
 
@@ -81,13 +89,17 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: Upload Validation
-Before storing, the runtime SHALL validate: (1) the agent holds `upload_resource` capability, (2) BLAKE3 hash integrity matches expected_hash, (3) total bytes within per-resource size limit, (4) agent's texture_bytes_total budget not exceeded, (5) resource_type is v1-supported, and (6) content decodes successfully (images decode, fonts parse). Each validation failure SHALL produce a specific error code.
-Source: RFC 0011 §3.5
+Before storing, the runtime SHALL validate: (1) capability (`upload_resource` for scene-node image/font resources, `register_widget_asset` for runtime widget SVG assets), (2) BLAKE3 hash integrity matches expected hash, (3) total bytes are within per-resource limits, (4) budget limits are not exceeded (including dedicated runtime widget-asset durable budgets), (5) resource_type is v1-supported for the selected path, and (6) content decodes/parses successfully (images decode, fonts parse, SVG parses as valid SVG). For widget registrations that provide `transport_crc32c`, the runtime SHALL validate CRC32C as a transport-integrity check and reject mismatches.
+Source: RFC 0011 §3.5, §2.2a, §9.1
 Scope: v1-mandatory
 
 #### Scenario: Capability check failure
 - **WHEN** a guest agent (without upload_resource capability) attempts to upload a resource
 - **THEN** the upload MUST be rejected with RESOURCE_CAPABILITY_DENIED
+
+#### Scenario: Widget registration capability check failure
+- **WHEN** an agent without register_widget_asset capability attempts runtime widget SVG registration
+- **THEN** the request MUST be rejected with WIDGET_ASSET_CAPABILITY_MISSING
 
 #### Scenario: Decode failure
 - **WHEN** an agent uploads bytes that claim to be IMAGE_PNG but contain corrupted data that cannot decode
@@ -97,16 +109,24 @@ Scope: v1-mandatory
 - **WHEN** an agent whose texture_bytes_total consumption is at the lease limit attempts to upload another texture
 - **THEN** the upload MUST be rejected with RESOURCE_BUDGET_EXCEEDED
 
+#### Scenario: Widget transport checksum mismatch
+- **WHEN** WidgetAssetRegister provides transport_crc32c and payload CRC does not match
+- **THEN** the runtime MUST reject the request with WIDGET_ASSET_CHECKSUM_MISMATCH
+
 ---
 
 ### Requirement: Content-Addressed Deduplication
-When the runtime receives a ResourceUploadStart, it SHALL check if expected_hash already exists in the store. If found, it SHALL return ResourceStored immediately with was_deduplicated = true and skip the chunk sequence. No additional storage SHALL be consumed. Dedup check latency SHALL be less than 100 microseconds.
-Source: RFC 0011 §3.6
+When the runtime receives a ResourceUploadStart or WidgetAssetRegister metadata preflight, it SHALL check whether the declared BLAKE3 hash already exists in the relevant store/index. If found, it SHALL return success immediately with was_deduplicated = true and skip payload transfer. No additional storage SHALL be consumed. Dedup check latency SHALL be less than 100 microseconds.
+Source: RFC 0011 §3.6, §9.1
 Scope: v1-mandatory
 
 #### Scenario: Dedup hit skips upload
 - **WHEN** an agent starts an upload with an expected_hash that matches an already-stored resource
 - **THEN** the runtime MUST return ResourceStored immediately with was_deduplicated = true; no chunks are needed
+
+#### Scenario: Widget metadata-only dedup preflight
+- **WHEN** an agent sends WidgetAssetRegister(metadata_only_preflight=true) for an already-indexed hash
+- **THEN** the runtime MUST return WidgetAssetRegisterResult with was_deduplicated=true and MUST NOT request payload bytes
 
 #### Scenario: Dedup check performance
 - **WHEN** the runtime performs a dedup lookup against the resource store index
@@ -241,14 +261,18 @@ Scope: v1-mandatory
 
 ---
 
-### Requirement: Ephemeral Storage in V1
-In v1, all resources SHALL be ephemeral. They SHALL be stored in memory and lost on runtime restart. Agents SHALL re-establish sessions and re-upload resources on reconnect. The content-addressed model ensures re-upload is idempotent.
+### Requirement: V1 Persistence Split
+V1 persistence SHALL be split by resource class. Scene-node resources (images/fonts referenced by scene graph nodes) SHALL remain ephemeral in memory and SHALL be lost on restart. Runtime widget SVG assets registered through WidgetAssetRegister SHALL be durable and SHALL survive restart through a local content-addressed asset store plus startup re-index.
 Source: RFC 0011 §9.1
 Scope: v1-mandatory
 
-#### Scenario: Resources lost on restart
+#### Scenario: Scene-node resources lost on restart
 - **WHEN** the runtime restarts
-- **THEN** all previously uploaded resources MUST be gone; agents MUST re-upload after reconnection
+- **THEN** previously uploaded scene-node images/fonts MUST be gone; agents MUST re-upload after reconnection
+
+#### Scenario: Runtime widget SVG assets survive restart
+- **WHEN** the runtime restarts after successful runtime widget asset registrations
+- **THEN** startup MUST re-index the durable widget asset store and previously registered hashes MUST remain dedup hits
 
 ---
 
@@ -371,21 +395,21 @@ Scope: post-v1
 ---
 
 ### Requirement: Persistent Resource Store
-A durable persistent resource store surviving runtime restarts is deferred to post-v1.
-Source: RFC 0011 §9.2
+A durable persistent store for scene-node image/font resources is deferred to post-v1. The v1 durable-storage exception applies only to runtime widget SVG assets.
+Source: RFC 0011 §9.2, §9.1
 Scope: post-v1
 
 #### Scenario: Deferred marker
-- **WHEN** resources need to survive runtime restarts
-- **THEN** persistence is not implemented in v1; all resources are ephemeral
+- **WHEN** scene-node image/font resources need to survive runtime restarts
+- **THEN** persistence is not implemented in v1 for those resource classes
 
 ---
 
 ### Requirement: Post-V1 Resource Types
-VIDEO_H264, VIDEO_VP9, AUDIO_OPUS, AUDIO_AAC, IMAGE_SVG, and WASM_MODULE resource types are deferred to future RFCs.
+VIDEO_H264, VIDEO_VP9, AUDIO_OPUS, AUDIO_AAC, and WASM_MODULE resource types are deferred to future RFCs.
 Source: RFC 0011 §2.3
 Scope: post-v1
 
 #### Scenario: Deferred marker
-- **WHEN** video, audio, SVG, or WASM resources are needed
+- **WHEN** video, audio, or WASM resources are needed
 - **THEN** these types are not available in v1 and will be added when corresponding node types ship

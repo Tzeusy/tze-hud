@@ -667,7 +667,7 @@ The zone registry. Built-in zone types (subtitle, notification, status_bar, pip,
 
 ### 2.6 `[widget_bundles]` Section
 
-Widget asset bundle paths. Optional: absent section means no widget types are available and `list_widgets` returns an empty list. This is not an error — the runtime starts normally with an empty widget registry.
+Widget asset bundle paths for startup bootstrapping. Optional: absent section means no startup widget types are available and `list_widgets` initially returns an empty list. This is not an error — the runtime starts normally with an empty registry that may later receive runtime registrations.
 
 ```toml
 [widget_bundles]
@@ -678,7 +678,7 @@ Widget asset bundle paths. Optional: absent section means no widget types are av
 paths = ["./widgets", "/usr/share/tze_hud/widgets"]
 ```
 
-**Bundle loading:** The runtime scans each configured path at startup. For each subdirectory containing a `widget.toml` manifest, the runtime:
+**Bundle loading (startup bootstrap):** The runtime scans each configured path at startup. For each subdirectory containing a `widget.toml` manifest, the runtime:
 1. Parses the manifest (TOML).
 2. Validates the parameter schema.
 3. Loads and validates SVG files referenced in the manifest's layer entries using resvg.
@@ -700,6 +700,32 @@ paths = ["./widgets", "/usr/share/tze_hud/widgets"]
 | `WIDGET_BUNDLE_DUPLICATE_TYPE` | Two bundles declare the same widget type name |
 | `WIDGET_BUNDLE_MISSING_SVG` | `widget.toml` references an SVG file not present in the bundle directory |
 | `WIDGET_BUNDLE_SVG_PARSE_ERROR` | An SVG file in the bundle fails resvg parse validation |
+
+### 2.6a `[widget_runtime_assets]` Section
+
+Runtime widget asset store configuration (for SVGs registered/uploaded while the runtime is active). This section governs persistence and durable-footprint budgets for runtime-registered widget assets.
+
+```toml
+[widget_runtime_assets]
+# Root directory for durable runtime-registered SVG blobs and index files.
+# If relative, resolved against config file parent.
+# If absent, runtime uses platform default cache path.
+store_path = "./runtime_widget_assets"
+
+# Optional durable footprint ceilings (bytes).
+max_total_bytes = 268435456          # 256 MiB global durable cap
+max_agent_bytes = 67108864           # 64 MiB per-agent durable cap
+```
+
+**Semantics:**
+- Runtime-registered widget SVG assets are content-addressed (BLAKE3) and survive restart.
+- Store writes are atomic; startup performs crash-safe reconciliation/reindex.
+- These settings are frozen at startup; changing them via hot reload logs WARN and requires restart.
+
+**Validation rules:**
+- `store_path` must resolve to a writable directory (or parent writable for create) else `CONFIG_WIDGET_ASSET_STORE_UNWRITABLE`.
+- `max_agent_bytes` must be `<= max_total_bytes` else `CONFIG_WIDGET_ASSET_BUDGET_INVALID`.
+- Zero/negative budgets are invalid unless explicitly set to `0` meaning "unbounded".
 
 ### 2.7 `[[tabs.widgets]]` Section
 

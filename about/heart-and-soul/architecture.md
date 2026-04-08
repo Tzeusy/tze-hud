@@ -107,11 +107,11 @@ When the manifesto says "decode as surfaces, not as widgets," it means: a video 
 
 Widgets extend the compositing model with a CPU-side SVG rasterization stage that sits between parameter publication and texture composition:
 
-1. **Registration (startup).** For each widget type loaded from an asset bundle, the compositor parses the `widget.toml` manifest, loads SVG layer files, and parses each SVG into a retained `usvg::Tree`. Parsing failures are fatal startup errors.
+1. **Registration (startup + runtime).** Widget visual definitions can enter the runtime via two paths: bootstrapped startup bundle scan and runtime SVG upload/registration. In both paths, the runtime validates the widget definition, loads SVG layers, and parses each SVG into a retained `usvg::Tree`. Registration failures reject that asset registration attempt without blocking unrelated already-registered widgets.
 
-2. **Instance binding (startup).** For each `[[tabs.widgets]]` entry in configuration, the compositor creates a `WidgetInstance` binding the widget type to a tab with configured geometry. The instance starts at schema default parameter values.
+2. **Instance binding.** For each `[[tabs.widgets]]` entry in configuration (and any runtime instance-registration path), the compositor creates a `WidgetInstance` binding the widget type to a tab with configured geometry. The instance starts at schema default parameter values.
 
-3. **Publication (runtime).** A `WidgetPublish` message (gRPC field 35) or `publish_to_widget` MCP call arrives. The runtime validates parameter values against the widget type's schema and applies the contention policy to determine the effective publication.
+3. **Publication (runtime).** A `WidgetPublish` message (gRPC field 35) or `publish_to_widget` MCP call arrives. Publication is intentionally separate from asset registration/upload. The runtime validates parameter values against the widget type's schema and applies the contention policy to determine the effective publication.
 
 4. **Binding resolution (render).** When a widget's parameters have changed, the compositor applies each parameter binding to the retained SVG tree — substituting attribute values via linear mapping (f32), direct substitution (string/color), or discrete lookup (enum) — and rasterizes the modified SVG to an RGBA texture via resvg at the widget instance's pixel dimensions.
 
@@ -210,7 +210,7 @@ This means zone text rendering is fully parameterized. The compositor does not h
 
 For subtitle text, the compositor renders an 8-direction text outline (outline color at pixel offsets) beneath the fill text — this guarantees readability over arbitrary backgrounds. The outline is only rendered when `outline_width > 0`. Backdrop quads use `backdrop` color with `backdrop_opacity` applied. Transition animations (fade-in/out) are opacity ramps on the zone's composite quad.
 
-Widget SVG templates use a different mechanism for the same tokens: `{{token.key}}` mustache placeholders in SVG attribute values, resolved by text substitution at bundle load time before SVG parsing. Both rendering paths consume the same token map — zone rendering through typed struct fields, widget rendering through string substitution — so the entire HUD shares a coherent visual vocabulary.
+Widget SVG templates use a different mechanism for the same tokens: `{{token.key}}` mustache placeholders in SVG attribute values, resolved by text substitution at SVG registration time (startup bundle load or runtime upload/register) before SVG parsing. Both rendering paths consume the same token map — zone rendering through typed struct fields, widget rendering through string substitution — so the entire HUD shares a coherent visual vocabulary.
 
 ## Media: GStreamer
 
@@ -286,7 +286,8 @@ Resources — textures, fonts, images, media handles — are reference-counted a
 - When an agent uploads an image for a tile, the image texture is owned by the node that references it.
 - When the node is replaced, the tile is deleted, or the lease is revoked, the reference count drops.
 - When the last reference is removed, the resource is freed.
-- The runtime does not cache resources beyond their scene graph lifetime without explicit policy (e.g., a font cache may persist across tile lifecycles, but agent-uploaded content does not).
+- Scene-node resources (images/fonts attached to nodes) remain ephemeral in v1 and are not durable across restart.
+- Runtime-registered widget SVG assets are a scoped v1 exception: they are stored in a dedicated content-addressed durable asset store, deduplicated by strong hash, and re-indexed on startup.
 
 This means resource accounting is deterministic and testable: after a tile is deleted, its texture memory is reclaimed. After an agent disconnects and its leases expire, its resource footprint is zero. The telemetry surface tracks resource allocation and deallocation per-agent, per-frame.
 

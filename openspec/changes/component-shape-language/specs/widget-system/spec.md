@@ -9,9 +9,9 @@ Depends on: component-shape-language, configuration
 ## MODIFIED Requirements
 
 ### Requirement: Widget Asset Bundle Format
-Widget type definitions MUST be loaded from asset bundles — directories containing a `widget.toml` manifest and one or more SVG files. The manifest MUST declare: `name` (kebab-case matching `[a-z][a-z0-9-]*`, unique across all loaded bundles), `version` (semver string), `description` (human-readable string), `parameter_schema` (array of parameter declarations, each with name, type, default, and optional constraints), `layers` (ordered array of SVG layer references with parameter bindings), and optional `default_geometry` (Rect), `default_rendering_policy`, `default_contention_policy`. The manifest MAY declare an optional `component_type` field (string, references a v1 component type name) indicating that this widget bundle is designed to serve as part of a component profile. The `component_type` field is informational for standalone (global) bundles — it does NOT trigger readability validation on global bundles. Readability convention validation only applies to widget bundles loaded as part of a component profile directory (see Component Shape Language spec §Widget SVG Readability Conventions).
+Widget type definitions MUST be loadable through two paths: (1) startup asset bundles and (2) runtime registration/upload requests. Both paths MUST conform to the same structural contract: a widget manifest (`widget.toml` equivalent fields) plus one or more SVG layer assets. The manifest MUST declare: `name` (kebab-case matching `[a-z][a-z0-9-]*`, unique across all loaded bundles), `version` (semver string), `description` (human-readable string), `parameter_schema` (array of parameter declarations, each with name, type, default, and optional constraints), `layers` (ordered array of SVG layer references with parameter bindings), and optional `default_geometry` (Rect), `default_rendering_policy`, `default_contention_policy`. The manifest MAY declare an optional `component_type` field (string, references a v1 component type name) indicating that this widget bundle is designed to serve as part of a component profile. The `component_type` field is informational for standalone (global) bundles — it does NOT trigger readability validation on global bundles. Readability convention validation only applies to widget bundles loaded as part of a component profile directory (see Component Shape Language spec §Widget SVG Readability Conventions).
 
-The runtime MUST scan all configured bundle directories at startup. SVG files in the bundle MAY contain `{{token.key}}` mustache placeholders matching the pattern `\{\{([a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)*)\}\}`. The runtime MUST resolve all placeholders by text substitution against the applicable design token map BEFORE SVG parsing:
+The runtime MUST scan all configured bundle directories at startup for bootstrap loading. Runtime registration MAY add widget assets/types after startup without restart. SVG files in the bundle MAY contain `{{token.key}}` mustache placeholders matching the pattern `\{\{([a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)*)\}\}`. The runtime MUST resolve all placeholders by text substitution against the applicable design token map BEFORE SVG parsing:
 - For global bundles: substitute against the global token map (user tokens merged with canonical fallbacks).
 - For profile-scoped bundles: substitute against the profile's scoped token map (profile overrides → global → canonical fallbacks).
 
@@ -74,3 +74,32 @@ Scope: v1-mandatory
 #### Scenario: SVG with multiple placeholders in one attribute
 - **WHEN** a bundle SVG contains `viewBox="0 0 {{spacing.unit}} {{spacing.unit}}"` and `spacing.unit` resolves to `"100"`
 - **THEN** the runtime MUST substitute both placeholders, producing `viewBox="0 0 100 100"`
+
+---
+
+### Requirement: Runtime Widget SVG Registration
+The runtime MUST support a dedicated widget asset registration/upload flow that is separate from widget publish. Registration is stage 1 (asset/type ingress); publish is stage 2 (chatty low-bandwidth parameter updates). Runtime registration MUST require `register_widget_asset` capability and MUST be content-addressed by a 32-byte BLAKE3 hash.
+
+Registration requests MUST support metadata-first preflight:
+- `content_hash_blake3` (required) for identity/dedup.
+- `total_size_bytes` (required) for budget checks.
+- `transport_crc32c` (optional) as a transport-integrity hint only.
+- `metadata_only_preflight` (optional): check dedup/budget without sending payload bytes.
+
+If a request hash already exists, the runtime MUST short-circuit and return success with `was_deduplicated = true` without requiring payload transfer. If the hash is unknown, the runtime MUST accept payload bytes (inline or follow-up transfer per session-protocol contract), validate SVG structure + parameter binding compatibility, and persist/index the asset for later publish operations.
+
+Error codes for registration failures MUST include: `WIDGET_ASSET_CAPABILITY_MISSING`, `WIDGET_ASSET_HASH_MISMATCH`, `WIDGET_ASSET_CHECKSUM_MISMATCH`, `WIDGET_ASSET_INVALID_SVG`, `WIDGET_ASSET_BUDGET_EXCEEDED`, `WIDGET_ASSET_STORE_IO_ERROR`, `WIDGET_ASSET_TYPE_INVALID`.
+Source: RFC 0001 §2.6, RFC 0005 §3.10, RFC 0011 §2.2a, §9.1
+Scope: v1-mandatory
+
+#### Scenario: Metadata preflight dedup hit
+- **WHEN** an agent submits a metadata-only registration with `content_hash_blake3` already present in the runtime widget asset store
+- **THEN** the runtime MUST return accepted=true, `was_deduplicated=true`, and an asset handle without requesting payload bytes
+
+#### Scenario: Unknown hash requires upload
+- **WHEN** an agent submits registration metadata for an unknown hash
+- **THEN** the runtime MUST require payload bytes, validate the SVG and schema compatibility, persist the asset, and return accepted=true with `was_deduplicated=false`
+
+#### Scenario: Capability denied
+- **WHEN** an agent without `register_widget_asset` submits a registration request
+- **THEN** the runtime MUST reject the request with error code `WIDGET_ASSET_CAPABILITY_MISSING`

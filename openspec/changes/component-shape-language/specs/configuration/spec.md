@@ -86,3 +86,32 @@ Scope: v1-mandatory
 #### Scenario: Absent section uses defaults
 - **WHEN** the configuration file contains no `[component_profiles]` section
 - **THEN** all component types MUST use their token-derived default rendering behavior
+
+---
+
+### Requirement: Runtime Widget Asset Store Configuration
+The configuration MUST support an optional `[widget_runtime_assets]` section that controls durable storage for runtime-registered widget SVG assets. Supported keys:
+- `store_path` (string, optional): root directory for durable content-addressed widget SVG blobs and index files. Relative paths MUST resolve against the configuration file parent directory.
+- `max_total_bytes` (u64, optional): global durable footprint ceiling.
+- `max_agent_bytes` (u64, optional): per-agent durable footprint ceiling.
+
+If `[widget_runtime_assets]` is absent, the runtime MUST use a platform-default cache location and built-in default limits. Runtime widget asset settings are startup-frozen in v1: hot reload MUST NOT mutate the active store path or budget ceilings.
+
+Validation rules:
+- Unwritable/uncreatable `store_path` MUST fail startup with `CONFIG_WIDGET_ASSET_STORE_UNWRITABLE`.
+- `max_agent_bytes` greater than `max_total_bytes` MUST fail with `CONFIG_WIDGET_ASSET_BUDGET_INVALID`.
+- Negative values are invalid (parse failure); `0` means "unbounded" only when explicitly configured.
+Source: RFC 0006 §2.6a, RFC 0011 §9.1
+Scope: v1-mandatory
+
+#### Scenario: Explicit runtime widget asset store path
+- **WHEN** configuration sets `[widget_runtime_assets].store_path = "./runtime_widget_assets"`
+- **THEN** the runtime MUST resolve the path relative to the config directory and initialize the durable widget asset store there
+
+#### Scenario: Budget relationship validation
+- **WHEN** configuration sets `max_total_bytes = 1048576` and `max_agent_bytes = 2097152`
+- **THEN** startup MUST fail with `CONFIG_WIDGET_ASSET_BUDGET_INVALID`
+
+#### Scenario: Hot reload does not mutate widget runtime asset path
+- **WHEN** a hot-reload config payload changes `[widget_runtime_assets].store_path`
+- **THEN** the runtime MUST keep the existing active store path, log a warning, and require restart for the new path to take effect

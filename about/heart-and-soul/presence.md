@@ -174,7 +174,7 @@ Widgets fill this gap by extending the zone pattern to parameterized visuals. A 
 
 Widgets have the same **four-level ontology** as zones:
 
-1. **Widget type** — the schema and visual assets: parameter declarations (name, type, constraints, default), SVG layers with parameter bindings, default geometry policy, contention policy. Widget types are loaded from asset bundles at startup; agents cannot create widget types at runtime in v1.
+1. **Widget type** — the schema and visual assets: parameter declarations (name, type, constraints, default), SVG layers with parameter bindings, default geometry policy, contention policy. Widget types can be bootstrapped from asset bundles at startup and can also be registered at runtime via validated SVG upload. In both cases, registration is distinct from publication.
 2. **Widget instance** — a widget type bound into a specific tab with geometry and layer attachment. Declared in configuration under `[[tabs.widgets]]`.
 3. **Publication** — one publish event into a widget instance: a set of typed parameter values (f32, string, color, or enum), TTL, optional merge key (for MergeByKey contention), and optional transition duration.
 4. **Occupancy** — the runtime's resolved render state: effective parameter values after contention policy application. The compositor reads occupancy to determine current visual property values and re-rasterizes only when effective parameters change.
@@ -215,11 +215,20 @@ Widgets reuse the entire zone governance model without forking it:
 
 Widget tiles default to `input_mode = Passthrough` — they are visual indicators, not interactive surfaces. Input events pass through widget tiles to the tiles beneath them.
 
-### Widget asset bundles
+### Widget assets: bootstrapped + runtime
 
-Widget visual assets are user-authorable directories on disk. Each bundle contains a `widget.toml` manifest (parameter schema, layer references, binding declarations) and one or more SVG files. The runtime scans configured bundle directories at startup, registers valid widget types, and logs errors for invalid or duplicate bundles without halting startup.
+Widget visual assets remain user-authorable directories on disk for bootstrap. Each bundle contains a `widget.toml` manifest (parameter schema, layer references, binding declarations) and one or more SVG files. The runtime scans configured bundle directories at startup, registers valid widget types, and logs errors for invalid or duplicate bundles without halting startup.
 
-Widget types are static in v1. There is no runtime widget creation, no widget upload by agents, and no hot-reload of bundles. Restart is required to pick up bundle changes. This is acceptable for v1: widget bundles are authored during development, not modified at runtime.
+The runtime also supports runtime SVG registration through a separate upload/registration call path. This keeps the control model two-stage:
+
+1. **Register asset** (startup bundle scan or runtime upload/register).
+2. **Publish parameters/content** against a widget instance or SVG-capable surface.
+
+This split is intentional: publish calls stay chatty, low-latency, and low-bandwidth because they reference already-registered assets instead of re-sending SVG markup.
+
+Runtime asset registration is content-addressed. Upload/register calls include an expected content hash (BLAKE3) so the runtime can deduplicate by identity: if the hash already exists in the local asset store, the runtime returns the existing asset handle and skips payload transfer. Optional transport integrity checksums (for example CRC32) may be accepted as a fast corruption guard, but deduplication and identity use the strong content hash.
+
+Runtime-uploaded SVG assets are persisted in a runtime-managed local file store and rehydrated on startup. The persistence backend is OS-specific (Linux, macOS, Windows) but semantically identical: content-addressed blobs, atomic writes, and crash-safe startup reindexing.
 
 ## Component shape language: visual identity as a swappable layer
 
@@ -242,7 +251,7 @@ A **design token** is a named visual primitive: a color, a font size, a stroke w
 
 Tokens flow into two rendering paths:
 - **Zone rendering** (glyphon + wgpu quads): tokens are parsed into typed `RenderingPolicy` fields at startup. The compositor reads `policy.text_color`, `policy.backdrop`, `policy.outline_width` instead of hardcoded values.
-- **Widget rendering** (SVG + resvg): tokens are injected into SVG templates via `{{token.key}}` placeholders, resolved by text substitution at bundle load time before SVG parsing. Zero runtime overhead.
+- **Widget rendering** (SVG + resvg): tokens are injected into SVG templates via `{{token.key}}` placeholders, resolved by text substitution at asset registration time (startup bundle load or runtime upload/register) before SVG parsing.
 
 The canonical token schema defines ~28 required keys with fallback values covering colors, typography, spacing, and strokes. Operators override any token in configuration. Non-canonical keys are accepted for profile-specific use. All tokens are resolved once at startup and are immutable during the runtime lifecycle.
 

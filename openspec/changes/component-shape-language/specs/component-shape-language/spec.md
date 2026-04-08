@@ -270,7 +270,7 @@ Scope: v1-mandatory
 ---
 
 ### Requirement: SVG Token Placeholder Resolution
-Widget SVG files MAY contain `{{token.key}}` mustache-style placeholders in attribute values and text content. The exact placeholder pattern MUST be: opening `{{`, immediately followed by a valid token key matching `[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)*`, immediately followed by closing `}}`. No whitespace is permitted between the braces and the key. Multiple placeholders MAY appear in a single attribute value (e.g., `transform="translate({{spacing.unit}}, {{spacing.unit}})"`). The runtime MUST resolve all placeholders at bundle/profile load time by substituting the token's concrete string value from the design token map. Substitution is a single-pass left-to-right scan; substituted values are NOT re-scanned for further placeholders. Unresolved placeholders (token key not found in the map) MUST produce `WIDGET_BUNDLE_UNRESOLVED_TOKEN` and reject the bundle. Literal double-brace sequences in SVG content MUST be escaped as `\{\{` and `\}\}`. After token substitution, the resulting SVG MUST be validated for parse correctness; SVG parse failure after substitution MUST produce `WIDGET_BUNDLE_SVG_PARSE_ERROR`. Token resolution MUST occur exactly once at startup — resolved SVGs are retained for the runtime lifecycle. Placeholders inside SVG `<style>` blocks and CDATA sections MUST be resolved identically to attribute values (the substitution operates on the raw text, before any XML parsing).
+Widget SVG files MAY contain `{{token.key}}` mustache-style placeholders in attribute values and text content. The exact placeholder pattern MUST be: opening `{{`, immediately followed by a valid token key matching `[a-z][a-z0-9]*(\.[a-z][a-z0-9_]*)*`, immediately followed by closing `}}`. No whitespace is permitted between the braces and the key. Multiple placeholders MAY appear in a single attribute value (e.g., `transform="translate({{spacing.unit}}, {{spacing.unit}})"`). The runtime MUST resolve all placeholders at widget-asset ingest time by substituting the token's concrete string value from the design token map. Ingest applies to both startup bundle/profile loading and runtime widget asset registration. Substitution is a single-pass left-to-right scan; substituted values are NOT re-scanned for further placeholders. Unresolved placeholders (token key not found in the map) MUST reject the asset (`WIDGET_BUNDLE_UNRESOLVED_TOKEN` for startup bundle/profile loads, `WIDGET_ASSET_INVALID_SVG` for runtime registrations). Literal double-brace sequences in SVG content MUST be escaped as `\{\{` and `\}\}`. After token substitution, the resulting SVG MUST be validated for parse correctness; SVG parse failure after substitution MUST produce `WIDGET_BUNDLE_SVG_PARSE_ERROR` (startup bundle/profile loads) or `WIDGET_ASSET_INVALID_SVG` (runtime registrations). Token resolution MUST occur exactly once per asset ingest event (startup load or runtime registration), and resolved SVGs are retained for the runtime lifecycle. Placeholders inside SVG `<style>` blocks and CDATA sections MUST be resolved identically to attribute values (the substitution operates on the raw text, before any XML parsing).
 Scope: v1-mandatory
 
 #### Scenario: Token placeholder resolved in SVG attribute
@@ -304,6 +304,10 @@ Scope: v1-mandatory
 #### Scenario: Placeholder inside SVG style block
 - **WHEN** a widget SVG contains `<style>.label { fill: {{color.text.primary}}; }</style>`
 - **THEN** the runtime MUST resolve the placeholder within the style block, producing `<style>.label { fill: #FFFFFF; }</style>`
+
+#### Scenario: Runtime-registered SVG resolves placeholders with same rules
+- **WHEN** a runtime widget asset registration uploads an SVG containing `fill="{{color.text.primary}}"`
+- **THEN** the runtime MUST apply the same single-pass token substitution and SVG-parse validation rules used for startup bundle assets before accepting registration
 
 ---
 

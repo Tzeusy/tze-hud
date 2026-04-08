@@ -47,7 +47,7 @@ Without these contracts, every implementation must make local decisions that wil
 | DR-RS5 | Font asset lifecycle: system fonts, bundled fonts, fallback chains | RFC 0001 §2.3 (`FontFamily`), RFC 0006 (Configuration) |
 | DR-RS6 | Per-resource and per-agent size limits tied to lease budgets | RFC 0008 §6.1, security.md §"Resource governance" |
 | DR-RS7 | GC must not run during frame render; deterministic deallocation | architecture.md §"Resource lifecycle" |
-| DR-RS8 | v1: resources are ephemeral; storage model supports persistence post-v1 | v1.md §"V1 explicitly defers: Persistence" |
+| DR-RS8 | Scene-node resources are ephemeral in v1; runtime widget SVG asset store is durable in v1 | v1.md + component-shape-language direction |
 | DR-RS9 | Zero post-revocation footprint per agent | RFC 0002 §5.2, RFC 0008 §6.6 |
 
 ---
@@ -128,9 +128,13 @@ V1 supports three asset classes:
 
 ### 2.2a IMAGE_SVG Resource Type
 
-`IMAGE_SVG` is a vector graphics resource type used exclusively by the widget asset bundle system. It is not a general-purpose resource type — agents cannot publish `IMAGE_SVG` resources directly to zones, and `IMAGE_SVG` is not accepted by any `ZoneMediaType`. Widget SVGs are loaded from the filesystem at startup by the bundle loader and registered internally; agents do not upload them directly.
+`IMAGE_SVG` is a vector graphics resource type used by the widget asset system. It is not a general-purpose zone media type — agents cannot publish `IMAGE_SVG` content directly to zones, and `IMAGE_SVG` is not accepted by any `ZoneMediaType`.
 
-**Upload validation:** When an `IMAGE_SVG` resource is stored (by the bundle loader, not by agents directly), the runtime validates:
+Widget SVG sources may enter the runtime through two paths:
+1. Startup bundle load (filesystem bootstrap).
+2. Runtime register/upload API (content-addressed by BLAKE3, capability-gated).
+
+**Upload validation:** When an `IMAGE_SVG` resource is stored (startup bundle path or runtime register/upload path), the runtime validates:
 1. **Well-formed XML:** Content must parse as valid XML.
 2. **SVG root element:** The root element must be `<svg>`. Non-SVG XML roots (e.g., `<html>`, `<div>`) are rejected with `RESOURCE_DECODE_ERROR`.
 3. **Retained SVG tree:** The SVG is parsed into a retained `usvg::Tree` for the widget compositor pipeline. Parse failure → `RESOURCE_DECODE_ERROR`.
@@ -151,7 +155,7 @@ where `width_px` and `height_px` are taken from the SVG's `viewBox` or `width`/`
 | `width="4096" height="4096"` | clamped to `2048 × 2048 × 4 = 16,777,216 bytes` (16 MiB) |
 | No width/height/viewBox | `512 × 512 × 4 = 1,048,576 bytes` (1 MiB) |
 
-**Widget SVG budget ownership:** Widget SVG resources loaded from asset bundles at startup are **runtime-owned infrastructure**. Their texture budget is accounted as runtime overhead, not charged against any individual agent's per-agent texture budget. Agents never upload `IMAGE_SVG` resources directly via the session protocol — if they attempt to, the runtime rejects with `RESOURCE_UNSUPPORTED_TYPE` (agents may not use `IMAGE_SVG` type in `ResourceUploadStart`).
+**Widget SVG budget ownership:** Startup-bundled widget SVGs are runtime-owned infrastructure. Runtime-uploaded widget SVGs are charged against dedicated runtime-asset budgets (per-agent + global durable footprint), not against zone publish quotas.
 
 ### 2.3 Post-v1 Types
 
@@ -531,15 +535,24 @@ Rate limiting is enforced per-session, measured as a sliding window over the las
 
 ## 9. Persistence
 
-### 9.1 v1: Resources Are Ephemeral
+### 9.1 v1: Resource Persistence Split
 
-In v1, all resources are ephemeral. They are stored in memory and **lost on runtime restart**. This is consistent with the scene graph being ephemeral (RFC 0001 §6.2, v1.md §"V1 explicitly defers: Persistence"):
+In v1, this RFC distinguishes two storage classes:
+
+1. **Scene-node resources** (images/fonts used by scene graph nodes) are ephemeral: stored in memory and lost on runtime restart.
+2. **Runtime widget SVG assets** (registered through widget runtime registration) are durable: stored in a runtime-managed local asset store and re-indexed on startup.
+
+For scene-node resources, ephemerality remains consistent with the scene graph lifecycle:
 
 - Agents re-establish sessions on reconnect.
 - Agents re-create scene state, including re-uploading images and fonts.
 - The content-addressed model makes re-upload idempotent: the same bytes produce the same `ResourceId`.
 
-### 9.2 Storage Model Supports Persistence (Post-v1)
+For runtime widget SVG assets, durability exists to preserve two-stage publish efficiency:
+- Startup reconciliation reloads hash-indexed assets from the local store.
+- Hash identity remains BLAKE3; dedup short-circuits payload upload when hash already exists.
+
+### 9.2 Storage Model and Durable Backends
 
 The storage model is designed to support persistence in a future version:
 
@@ -547,7 +560,7 @@ The storage model is designed to support persistence in a future version:
 - **Refcount reconstruction:** On startup, the runtime would scan the persistent blob store and reconstruct refcounts by walking the restored scene graph.
 - **Cache directory:** The natural persistence location is `$XDG_CACHE_HOME/tze_hud/resources/` (Linux), `~/Library/Caches/tze_hud/resources/` (macOS), `%LOCALAPPDATA%\tze_hud\resources\` (Windows).
 
-Post-v1, a `durable` flag on upload would mark resources for persistence. Durable resources would survive restarts and be loaded from the cache directory at startup. This RFC defines the storage model; the persistence implementation is deferred.
+Scene-node resource durability remains deferred post-v1. Runtime widget SVG assets use this durable model in v1 as a scoped exception.
 
 ### 9.3 Refcount Reconstruction on Restart
 
@@ -813,7 +826,7 @@ Two agents each referencing the same resource are each charged the full decoded 
 | RFC | Interaction |
 |-----|-------------|
 | **RFC 0001 §1.1** | `ResourceId` definition (BLAKE3, 32 bytes) and `StaticImageNode.resource_id` — this RFC provides the upload and lifecycle contract |
-| **RFC 0001 §6.1** | Durable state includes "uploaded resources" — this RFC specifies that v1 resources are ephemeral; persistence deferred to post-v1 |
+| **RFC 0001 §6.1** | Durable state includes runtime widget SVG assets; scene-node image/font resources remain ephemeral in v1 |
 | **RFC 0002 §5.2** | Resource cleanup on revocation — this RFC specifies: release all references, decrement refcounts, schedule pending-GC |
 | **RFC 0005** | Session stream carries upload messages — this RFC specifies the `ResourceUploadStart`, `ResourceUploadChunk`, `ResourceUploadComplete`, `ResourceStored` message types |
 | **RFC 0006** | Font fallback chain configured per display profile — this RFC specifies font resolution order and fallback semantics |

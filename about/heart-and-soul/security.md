@@ -34,7 +34,7 @@ Authentication establishes identity. Capability scopes establish what that ident
 Capabilities are granted per-session, not per-agent-type. An agent that was trusted yesterday can be restricted today. Capabilities are:
 
 - **Additive, not subtractive.** An agent starts with no capabilities and receives explicit grants. There is no "admin mode" that gets selectively restricted.
-- **Granular.** Separate capabilities for: create tiles, modify own tiles, read scene topology, subscribe to scene events, hold overlay privileges, access input events, stream media, use high-priority z-order, exceed default resource budgets, publish to specific zones (zone-publish grants are per-zone, not blanket).
+- **Granular.** Separate capabilities for: create tiles, modify own tiles, read scene topology, subscribe to scene events, hold overlay privileges, access input events, stream media, use high-priority z-order, exceed default resource budgets, publish to specific zones (zone-publish grants are per-zone, not blanket), publish to specific widgets, and register runtime SVG/widget assets.
 - **Revocable at any time.** The runtime can revoke any capability mid-session. The agent receives a notification and must comply. If it does not comply within a grace period, the runtime forcibly terminates the session.
 - **Auditable.** Every capability grant and revocation is logged with timestamp, agent identity, and reason.
 
@@ -62,6 +62,7 @@ Every session has enforced limits on:
 - Concurrent streams
 - CPU time for agent-triggered scene updates
 - Number of active leases
+- Runtime asset storage and upload budget (bytes/day, bytes/session, and total durable footprint)
 
 The runtime monitors resource consumption in real time. If an agent exceeds its budget:
 
@@ -70,6 +71,12 @@ The runtime monitors resource consumption in real time. If an agent exceeds its 
 3. If sustained: lease revocation and session termination
 
 This is not punitive — it is the system protecting itself and other agents from a noisy neighbor. The same mechanism handles both malicious and merely buggy agents. The runtime does not need to distinguish intent; it enforces budgets.
+
+Runtime SVG upload/register is governed by the same principles:
+
+- Upload/register requires an explicit capability; publish capability alone is insufficient.
+- Asset identity is content-addressed using a strong hash (BLAKE3). Agents may provide a fast transport checksum (for example CRC32), but deduplication and authority are based on the strong hash.
+- The runtime can reject uploads that exceed per-agent or global durable storage budgets, even if the agent still has publish permission.
 
 ## Human override
 
