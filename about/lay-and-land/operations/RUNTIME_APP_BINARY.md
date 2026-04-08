@@ -276,5 +276,6 @@ Before deploying to production or automation workflows:
 - [README.md](../README.md) - Build and test overview
 - [OPERATOR_CHECKLIST.md](OPERATOR_CHECKLIST.md) - Operator deployment checklist
 - `app/tze_hud_app/tests/canonical_config_schema.rs` - Canonical config CI guard
+- [runtime-widget-asset-topology.md](../runtime-widget-asset-topology.md) - Runtime widget SVG asset ingress, durable storage topology, startup re-index, and budget hooks
 - `.claude/skills/user-test/SKILL.md` - User-test automation skill
 - `openspec/changes/ship-runtime-app-binary/` - Specification artifacts (design, requirements)
