@@ -1,6 +1,6 @@
 # Policy Wiring Human Signoff Report
 
-Date: 2026-04-08  
+Date: 2026-04-08
 Issue: `hud-iq2x.3`
 
 ## Linked Inputs
@@ -47,11 +47,11 @@ These were materialized as the execution backlog artifacts in `hud-iq2x.2`:
 - Do not merge event/frame path wiring before mutation-path telemetry and budget conformance are passing.
 
 ## Major Risks And Mitigations
-- **Risk**: Latency regressions in mutation/frame hot paths.  
+- **Risk**: Latency regressions in mutation/frame hot paths.
   **Mitigation**: Add policy-path percentile gates in CI before widening scope.
-- **Risk**: Duplicate authority logic across runtime and policy crates.  
+- **Risk**: Duplicate authority logic across runtime and policy crates.
   **Mitigation**: Enforce seam contract with explicit ownership matrix (`PW-02`) before wiring code.
-- **Risk**: Spec/code drift returns after pilot.  
+- **Risk**: Spec/code drift returns after pilot.
   **Mitigation**: Require reconciliation bead (`PW-06`) before final closure/signoff.
 
 ## Human Signoff Checklist
