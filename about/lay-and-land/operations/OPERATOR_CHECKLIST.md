@@ -157,6 +157,42 @@ This document provides operators and automation engineers with a checklist for u
   - Stop runtime: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "powershell -Command 'Get-Process tze_hud -ErrorAction SilentlyContinue | Stop-Process -Force'"`
   - Or preserve for additional testing
 
+## Runtime Widget Asset Store Health Checks
+
+Use this when validating runtime SVG register/upload persistence behavior.
+
+- [ ] Confirm configured store path
+  - In config: `[widget_runtime_assets].store_path`
+  - If omitted, default platform path:
+    - Linux: `${XDG_CACHE_HOME:-$HOME/.cache}/tze_hud/resources/runtime_widget_assets`
+    - macOS: `$HOME/Library/Caches/tze_hud/resources/runtime_widget_assets`
+    - Windows: `%LOCALAPPDATA%\\tze_hud\\resources\\runtime_widget_assets`
+
+- [ ] Verify durable store directory shape
+  - Expect `<store_path>/blobs/` and `<store_path>/meta/`
+  - Linux/macOS example:
+    ```bash
+    STORE_PATH="${XDG_CACHE_HOME:-$HOME/.cache}/tze_hud/resources/runtime_widget_assets"
+    ls -la "${STORE_PATH}"
+    ls -la "${STORE_PATH}/blobs" | head
+    ls -la "${STORE_PATH}/meta" | head
+    ```
+
+- [ ] Verify startup re-index is healthy after restart
+  - Register at least one runtime widget SVG asset.
+  - Restart runtime.
+  - Register the same asset hash again and verify dedup hit (`was_deduplicated=true`).
+  - If dedup misses unexpectedly, inspect blob/sidecar integrity and runtime logs.
+
+- [ ] Verify budget enforcement behavior
+  - Configure small limits in `[widget_runtime_assets]` (`max_total_bytes`, `max_agent_bytes`).
+  - Attempt oversized registration.
+  - Expected response: `WIDGET_ASSET_BUDGET_EXCEEDED`.
+
+- [ ] Verify capability enforcement behavior
+  - Attempt registration without `register_widget_asset`.
+  - Expected response: `WIDGET_ASSET_CAPABILITY_MISSING`.
+
 ## Troubleshooting Guide
 
 ### SSH Connection Fails
@@ -304,5 +340,6 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 - [README.md](../README.md) - Main build/test guide (includes deployment overview)
 - [RUNTIME_APP_BINARY.md](RUNTIME_APP_BINARY.md) - Canonical app binary specification
 - [DEPLOYMENT.md](DEPLOYMENT.md) - Detailed deployment automation guide
+- [runtime-widget-asset-topology.md](../runtime-widget-asset-topology.md) - Runtime widget asset ingress, storage, startup re-index, and budget/capability hooks
 - `.claude/skills/user-test/SKILL.md` - User-test skill documentation
 - `openspec/changes/ship-runtime-app-binary/` - OpenSpec change artifacts (requirements, design)

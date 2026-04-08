@@ -8,6 +8,7 @@ Maps of where components live, how they connect, and what boundaries exist.
 |-----|-------------|
 | `components.md` | Component inventory: crates, binaries, and their boundaries |
 | `data-flow.md` | How data moves through the three protocol planes |
+| `runtime-widget-asset-topology.md` | Runtime widget SVG register/upload ingress, durable store topology, startup re-index path, and budget hooks |
 | `operations/` | Deployment topology, operator checklists, runtime binary spec |
 
 Diagrams live in `assets/`.
