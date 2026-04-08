@@ -39,6 +39,8 @@ use crate::proto::session::*;
 use crate::session::{SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
 use crate::subscriptions;
 use crate::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
+use quick_xml::Reader;
+use quick_xml::events::Event;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -189,7 +191,9 @@ pub fn classify_server_payload(payload: &ServerPayload) -> TrafficClass {
         | ServerPayload::InputCaptureResponse(_) => TrafficClass::Transactional,
 
         // Widget publish result — transactional (only for durable widgets; ephemeral = no result)
-        ServerPayload::WidgetPublishResult(_) => TrafficClass::Transactional,
+        ServerPayload::WidgetPublishResult(_) | ServerPayload::WidgetAssetRegisterResult(_) => {
+            TrafficClass::Transactional
+        }
 
         // Backpressure signal — transactional (must not be dropped)
         ServerPayload::BackpressureSignal(_) => TrafficClass::Transactional,
@@ -829,6 +833,7 @@ impl HudSessionImpl {
             state: Arc::new(Mutex::new(SharedState {
                 scene: Arc::new(Mutex::new(scene)),
                 sessions: crate::session::SessionRegistry::new(psk),
+                widget_asset_store: crate::session::WidgetAssetStore::default(),
                 safe_mode_active: false,
                 token_store: TokenStore::new(),
                 freeze_active: false,
@@ -1869,6 +1874,11 @@ async fn handle_client_message(
         // Ephemeral-widget publishes are fire-and-forget (no result).
         ClientPayload::WidgetPublish(publish) => {
             handle_widget_publish(state, session, tx, client_sequence, publish).await;
+        }
+        // Widget asset register/upload (session-protocol spec §Requirement: Widget Asset Registration via Session Stream).
+        // Always transactional; every request receives WidgetAssetRegisterResult.
+        ClientPayload::WidgetAssetRegister(register) => {
+            handle_widget_asset_register(state, session, tx, client_sequence, register).await;
         }
         // SessionInit/SessionResume should not appear after handshake
         ClientPayload::SessionInit(_) | ClientPayload::SessionResume(_) => {
@@ -3785,6 +3795,376 @@ async fn handle_zone_publish(
             .await;
     }
     // Ephemeral zone: no ack sent (fire-and-forget per RFC 0005 §8.6), success or failure
+}
+
+fn is_valid_widget_type_id(widget_type_id: &str) -> bool {
+    let mut chars = widget_type_id.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn is_valid_widget_svg_filename(svg_filename: &str) -> bool {
+    !svg_filename.is_empty()
+        && svg_filename.ends_with(".svg")
+        && !svg_filename.contains('/')
+        && !svg_filename.contains('\\')
+}
+
+fn validate_svg_payload(svg_bytes: &[u8]) -> Result<(), String> {
+    let svg_text =
+        std::str::from_utf8(svg_bytes).map_err(|e| format!("SVG payload is not UTF-8: {e}"))?;
+
+    let mut reader = Reader::from_str(svg_text);
+    reader.config_mut().trim_text(true);
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(start)) | Ok(Event::Empty(start)) => {
+                if start.name().as_ref() == b"svg" {
+                    return Ok(());
+                }
+                return Err("SVG root element must be <svg>".to_string());
+            }
+            Ok(Event::Decl(_) | Event::Comment(_) | Event::DocType(_) | Event::Text(_)) => {
+                continue;
+            }
+            Ok(Event::Eof) => {
+                return Err("SVG payload is empty or missing a root element".to_string());
+            }
+            Err(e) => return Err(format!("SVG XML parse error: {e}")),
+            _ => continue,
+        }
+    }
+}
+
+async fn send_widget_asset_register_result(
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    result: WidgetAssetRegisterResult,
+) {
+    let seq = session.next_server_seq();
+    let _ = tx
+        .send(Ok(ServerMessage {
+            sequence: seq,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ServerPayload::WidgetAssetRegisterResult(result)),
+        }))
+        .await;
+}
+
+fn make_widget_asset_error_result(
+    request_sequence: u64,
+    widget_type_id: &str,
+    svg_filename: &str,
+    error_code: &str,
+    error_message: String,
+) -> WidgetAssetRegisterResult {
+    WidgetAssetRegisterResult {
+        request_sequence,
+        accepted: false,
+        widget_type_id: widget_type_id.to_string(),
+        svg_filename: svg_filename.to_string(),
+        asset_handle: String::new(),
+        was_deduplicated: false,
+        error_code: error_code.to_string(),
+        error_message,
+    }
+}
+
+/// Handle a WidgetAssetRegister from the client (session-protocol spec
+/// §Requirement: Widget Asset Registration via Session Stream).
+///
+/// Implements metadata-first dedup preflight:
+/// - known hash => accepted dedup hit without payload transfer
+/// - unknown hash => payload required, checksum/hash verified, SVG validated
+async fn handle_widget_asset_register(
+    state: &Arc<Mutex<SharedState>>,
+    session: &mut StreamSession,
+    tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
+    request_sequence: u64,
+    register: WidgetAssetRegister,
+) {
+    let required_cap = "register_widget_asset".to_string();
+    if !session.capabilities.contains(&required_cap) {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                "WIDGET_ASSET_CAPABILITY_MISSING",
+                format!("Missing capability: {required_cap}"),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    if !is_valid_widget_type_id(&register.widget_type_id)
+        || !is_valid_widget_svg_filename(&register.svg_filename)
+    {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                "WIDGET_ASSET_TYPE_INVALID",
+                "widget_type_id or svg_filename failed validation".to_string(),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let expected_hash: [u8; 32] = match register.content_hash_blake3.as_slice().try_into() {
+        Ok(hash) => hash,
+        Err(_) => {
+            send_widget_asset_register_result(
+                session,
+                tx,
+                make_widget_asset_error_result(
+                    request_sequence,
+                    &register.widget_type_id,
+                    &register.svg_filename,
+                    "WIDGET_ASSET_HASH_MISMATCH",
+                    "content_hash_blake3 must be exactly 32 bytes".to_string(),
+                ),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let existing_asset_handle = {
+        let st = state.lock().await;
+        st.widget_asset_store
+            .by_hash
+            .get(&expected_hash)
+            .map(|existing| existing.asset_handle.clone())
+    };
+    if let Some(asset_handle) = existing_asset_handle {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            WidgetAssetRegisterResult {
+                request_sequence,
+                accepted: true,
+                widget_type_id: register.widget_type_id.clone(),
+                svg_filename: register.svg_filename.clone(),
+                asset_handle,
+                was_deduplicated: true,
+                error_code: String::new(),
+                error_message: String::new(),
+            },
+        )
+        .await;
+        return;
+    }
+
+    if register.inline_svg_bytes.is_empty() {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                "WIDGET_ASSET_HASH_MISMATCH",
+                "unknown content hash requires payload bytes".to_string(),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    if register.total_size_bytes != register.inline_svg_bytes.len() as u64 {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                "WIDGET_ASSET_CHECKSUM_MISMATCH",
+                format!(
+                    "declared total_size_bytes={} does not match payload length={}",
+                    register.total_size_bytes,
+                    register.inline_svg_bytes.len()
+                ),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    if register.transport_crc32c != 0 {
+        let computed_crc = crc32c::crc32c(&register.inline_svg_bytes);
+        if computed_crc != register.transport_crc32c {
+            send_widget_asset_register_result(
+                session,
+                tx,
+                make_widget_asset_error_result(
+                    request_sequence,
+                    &register.widget_type_id,
+                    &register.svg_filename,
+                    "WIDGET_ASSET_CHECKSUM_MISMATCH",
+                    format!(
+                        "transport_crc32c mismatch: declared={}, computed={computed_crc}",
+                        register.transport_crc32c
+                    ),
+                ),
+            )
+            .await;
+            return;
+        }
+    }
+
+    let computed_hash = *blake3::hash(&register.inline_svg_bytes).as_bytes();
+    if computed_hash != expected_hash {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                "WIDGET_ASSET_HASH_MISMATCH",
+                "payload BLAKE3 hash does not match content_hash_blake3".to_string(),
+            ),
+        )
+        .await;
+        return;
+    }
+
+    if let Err(detail) = validate_svg_payload(&register.inline_svg_bytes) {
+        send_widget_asset_register_result(
+            session,
+            tx,
+            make_widget_asset_error_result(
+                request_sequence,
+                &register.widget_type_id,
+                &register.svg_filename,
+                "WIDGET_ASSET_INVALID_SVG",
+                detail,
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let payload_len = register.inline_svg_bytes.len() as u64;
+    let mut st = state.lock().await;
+
+    // Re-check dedup after lock acquisition to avoid races between workers.
+    if let Some(asset_handle) = st
+        .widget_asset_store
+        .by_hash
+        .get(&expected_hash)
+        .map(|existing| existing.asset_handle.clone())
+    {
+        let dedup_result = WidgetAssetRegisterResult {
+            request_sequence,
+            accepted: true,
+            widget_type_id: register.widget_type_id.clone(),
+            svg_filename: register.svg_filename.clone(),
+            asset_handle,
+            was_deduplicated: true,
+            error_code: String::new(),
+            error_message: String::new(),
+        };
+        drop(st);
+        send_widget_asset_register_result(session, tx, dedup_result).await;
+        return;
+    }
+
+    let used_by_ns = st
+        .widget_asset_store
+        .per_namespace_bytes
+        .get(&session.namespace)
+        .copied()
+        .unwrap_or(0);
+
+    if st
+        .widget_asset_store
+        .total_bytes
+        .saturating_add(payload_len)
+        > st.widget_asset_store.max_total_bytes
+        || used_by_ns.saturating_add(payload_len) > st.widget_asset_store.max_namespace_bytes
+    {
+        let budget_error = make_widget_asset_error_result(
+            request_sequence,
+            &register.widget_type_id,
+            &register.svg_filename,
+            "WIDGET_ASSET_BUDGET_EXCEEDED",
+            "runtime widget asset store budget exceeded".to_string(),
+        );
+        drop(st);
+        send_widget_asset_register_result(session, tx, budget_error).await;
+        return;
+    }
+
+    let asset_handle = format!(
+        "widget-svg:{}",
+        ResourceId::from_bytes(expected_hash).to_hex()
+    );
+    let previous = st.widget_asset_store.by_hash.insert(
+        expected_hash,
+        crate::session::WidgetAssetRecord {
+            asset_handle: asset_handle.clone(),
+            widget_type_id: register.widget_type_id.clone(),
+            svg_filename: register.svg_filename.clone(),
+            owner_namespace: session.namespace.clone(),
+            bytes: register.inline_svg_bytes,
+        },
+    );
+    if previous.is_some() {
+        // Should be unreachable due to dedup checks above; return a stable error anyway.
+        let duplicate_error = make_widget_asset_error_result(
+            request_sequence,
+            &register.widget_type_id,
+            &register.svg_filename,
+            "WIDGET_ASSET_STORE_IO_ERROR",
+            "duplicate hash insertion race while updating store".to_string(),
+        );
+        drop(st);
+        send_widget_asset_register_result(session, tx, duplicate_error).await;
+        return;
+    }
+    st.widget_asset_store.total_bytes = st
+        .widget_asset_store
+        .total_bytes
+        .saturating_add(payload_len);
+    let entry = st
+        .widget_asset_store
+        .per_namespace_bytes
+        .entry(session.namespace.clone())
+        .or_insert(0);
+    *entry = entry.saturating_add(payload_len);
+    drop(st);
+
+    send_widget_asset_register_result(
+        session,
+        tx,
+        WidgetAssetRegisterResult {
+            request_sequence,
+            accepted: true,
+            widget_type_id: register.widget_type_id,
+            svg_filename: register.svg_filename,
+            asset_handle,
+            was_deduplicated: false,
+            error_code: String::new(),
+            error_message: String::new(),
+        },
+    )
+    .await;
 }
 
 /// Look up whether a widget instance is transactional (i.e., not ephemeral).
@@ -9287,6 +9667,265 @@ mod tests {
                 assert_eq!(hb.timestamp_mono_us, 77777, "expected heartbeat echo");
             }
             other => panic!("Expected Heartbeat echo, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_widget_asset_register_missing_capability_rejected() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) =
+            handshake_with_capabilities(&mut client, "asset-no-cap", "test-key", &[]).await;
+
+        let payload = b"<svg xmlns='http://www.w3.org/2000/svg'></svg>".to_vec();
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: blake3::hash(&payload).as_bytes().to_vec(),
+                transport_crc32c: 0,
+                total_size_bytes: payload.len() as u64,
+                inline_svg_bytes: payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let msg = next_non_state_change(&mut stream).await;
+        match &msg.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(!result.accepted);
+                assert_eq!(result.error_code, "WIDGET_ASSET_CAPABILITY_MISSING");
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_widget_asset_register_metadata_preflight_dedup_hit() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "asset-dedup",
+            "test-key",
+            &["register_widget_asset"],
+        )
+        .await;
+
+        let payload =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='1' height='1'/></svg>".to_vec();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: hash.clone(),
+                transport_crc32c: 0,
+                total_size_bytes: payload.len() as u64,
+                inline_svg_bytes: payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let first = next_non_state_change(&mut stream).await;
+        match &first.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(result.accepted);
+                assert!(!result.was_deduplicated);
+            }
+            other => panic!("expected WidgetAssetRegisterResult on first upload, got: {other:?}"),
+        }
+
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: hash,
+                transport_crc32c: 0,
+                total_size_bytes: 0,
+                inline_svg_bytes: Vec::new(),
+                metadata_only_preflight: true,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let second = next_non_state_change(&mut stream).await;
+        match &second.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(result.accepted);
+                assert!(result.was_deduplicated);
+            }
+            other => panic!("expected WidgetAssetRegisterResult on preflight, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_widget_asset_register_unknown_hash_requires_payload_and_hash_validation() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "asset-require-payload",
+            "test-key",
+            &["register_widget_asset"],
+        )
+        .await;
+
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: vec![0x11; 32],
+                transport_crc32c: 0,
+                total_size_bytes: 0,
+                inline_svg_bytes: Vec::new(),
+                metadata_only_preflight: true,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let missing_payload = next_non_state_change(&mut stream).await;
+        match &missing_payload.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(!result.accepted);
+                assert_eq!(result.error_code, "WIDGET_ASSET_HASH_MISMATCH");
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
+        let payload = b"<svg xmlns='http://www.w3.org/2000/svg'></svg>".to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: vec![0xAA; 32], // wrong on purpose
+                transport_crc32c: 0,
+                total_size_bytes: payload.len() as u64,
+                inline_svg_bytes: payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+
+        let hash_mismatch = next_non_state_change(&mut stream).await;
+        match &hash_mismatch.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(!result.accepted);
+                assert_eq!(result.error_code, "WIDGET_ASSET_HASH_MISMATCH");
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_widget_asset_register_checksum_svg_and_type_validation() {
+        let (mut client, handle) = setup_widget_test().await;
+        let (tx, _init_msgs, mut stream) = handshake_with_capabilities(
+            &mut client,
+            "asset-validation",
+            "test-key",
+            &["register_widget_asset"],
+        )
+        .await;
+
+        // Invalid type id (must be kebab-case).
+        tx.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "Gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: vec![0x44; 32],
+                transport_crc32c: 0,
+                total_size_bytes: 0,
+                inline_svg_bytes: Vec::new(),
+                metadata_only_preflight: true,
+            })),
+        })
+        .await
+        .unwrap();
+        let invalid_type = next_non_state_change(&mut stream).await;
+        match &invalid_type.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(!result.accepted);
+                assert_eq!(result.error_code, "WIDGET_ASSET_TYPE_INVALID");
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
+        // Bad checksum.
+        let crc_payload = b"<svg xmlns='http://www.w3.org/2000/svg'></svg>".to_vec();
+        tx.send(ClientMessage {
+            sequence: 3,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: blake3::hash(&crc_payload).as_bytes().to_vec(),
+                transport_crc32c: 1, // wrong on purpose
+                total_size_bytes: crc_payload.len() as u64,
+                inline_svg_bytes: crc_payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+        let checksum_mismatch = next_non_state_change(&mut stream).await;
+        match &checksum_mismatch.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(!result.accepted);
+                assert_eq!(result.error_code, "WIDGET_ASSET_CHECKSUM_MISMATCH");
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
+        }
+
+        // Invalid SVG payload.
+        let invalid_svg_payload = b"not-svg".to_vec();
+        tx.send(ClientMessage {
+            sequence: 4,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: blake3::hash(&invalid_svg_payload).as_bytes().to_vec(),
+                transport_crc32c: 0,
+                total_size_bytes: invalid_svg_payload.len() as u64,
+                inline_svg_bytes: invalid_svg_payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+        let invalid_svg = next_non_state_change(&mut stream).await;
+        match &invalid_svg.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(!result.accepted);
+                assert_eq!(result.error_code, "WIDGET_ASSET_INVALID_SVG");
+            }
+            other => panic!("expected WidgetAssetRegisterResult, got: {other:?}"),
         }
 
         drop(handle);

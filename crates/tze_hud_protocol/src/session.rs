@@ -39,6 +39,50 @@ impl RuntimeDegradationLevel {
     }
 }
 
+/// Stored runtime widget SVG asset metadata/content keyed by strong hash.
+#[derive(Debug, Clone)]
+pub struct WidgetAssetRecord {
+    pub asset_handle: String,
+    pub widget_type_id: String,
+    pub svg_filename: String,
+    pub owner_namespace: String,
+    pub bytes: Vec<u8>,
+}
+
+/// In-memory runtime widget asset register/upload store.
+#[derive(Debug, Clone)]
+pub struct WidgetAssetStore {
+    /// Content-addressed entries keyed by BLAKE3 hash bytes.
+    pub by_hash: HashMap<[u8; 32], WidgetAssetRecord>,
+    /// Aggregate stored bytes across all widget assets.
+    pub total_bytes: u64,
+    /// Aggregate stored bytes per publishing namespace.
+    pub per_namespace_bytes: HashMap<String, u64>,
+    /// Global store budget cap.
+    pub max_total_bytes: u64,
+    /// Per-namespace store budget cap.
+    pub max_namespace_bytes: u64,
+}
+
+impl WidgetAssetStore {
+    pub fn new_with_limits(max_total_bytes: u64, max_namespace_bytes: u64) -> Self {
+        Self {
+            by_hash: HashMap::new(),
+            total_bytes: 0,
+            per_namespace_bytes: HashMap::new(),
+            max_total_bytes,
+            max_namespace_bytes,
+        }
+    }
+}
+
+impl Default for WidgetAssetStore {
+    fn default() -> Self {
+        // Conservative in-memory limits for the v1 protocol layer.
+        Self::new_with_limits(64 * 1024 * 1024, 16 * 1024 * 1024)
+    }
+}
+
 /// Shared state between the gRPC server and the compositor.
 ///
 /// # Scene coherence
@@ -53,6 +97,7 @@ impl RuntimeDegradationLevel {
 pub struct SharedState {
     pub scene: Arc<Mutex<SceneGraph>>,
     pub sessions: SessionRegistry,
+    pub widget_asset_store: WidgetAssetStore,
     /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
     /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.
     pub safe_mode_active: bool,
