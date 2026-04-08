@@ -183,7 +183,7 @@ jobs:
             --test v1_thesis \
             -- --nocapture
 
-  # ── Production config boot ──────────────────────────────────────────────────
+  # ── Example production config boot (vertical_slice) ────────────────────────
   #
   # Boots the runtime with the committed production config (config/production.toml)
   # and verifies startup succeeds.  This is the canonical sovereignty-by-mechanism
@@ -196,8 +196,8 @@ jobs:
   # - Verifies that an unregistered agent receives guest policy (no capabilities)
   # - Does NOT use dev-mode: requires explicit config governance to pass
 
-  production-boot:
-    name: production config boot
+  production-boot-vertical-slice:
+    name: vertical_slice production config boot
     runs-on: ubuntu-latest
     needs: [check]
     steps:
@@ -220,6 +220,43 @@ jobs:
         run: |
           cargo test \
             -p vertical_slice \
+            --test production_boot \
+            -- --nocapture
+
+  # ── Canonical app production config boot gate ───────────────────────────────
+  #
+  # Boots the runtime with the committed canonical app config:
+  #   app/tze_hud_app/config/production.toml
+  #
+  # This gate must fail when startup silently falls back to default/headless
+  # behavior. The backing test asserts config-declared widget instances/types and
+  # profile-driven zone policy are present, not just that runtime construction
+  # returns Ok.
+
+  canonical-app-production-boot:
+    name: canonical app production config boot gate
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa / llvmpipe + protobuf compiler
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            mesa-utils \
+            libegl-mesa0 \
+            libgl1-mesa-dri \
+            protobuf-compiler
+      - name: cargo test -p tze_hud_app --test production_boot
+        run: |
+          cargo test \
+            -p tze_hud_app \
             --test production_boot \
             -- --nocapture
 
