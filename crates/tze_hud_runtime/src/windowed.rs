@@ -89,13 +89,14 @@ use winit::window::{Fullscreen, Window, WindowAttributes, WindowId, WindowLevel}
 
 use crate::component_startup::{register_profile_widgets, run_component_startup};
 use tze_hud_compositor::{Compositor, WindowSurface};
-use tze_hud_config::TzeHudConfig;
+use tze_hud_config::{TzeHudConfig, resolve_runtime_widget_asset_store};
 use tze_hud_input::{InputProcessor, PointerEvent, PointerEventKind};
 use tze_hud_protocol::proto::session::hud_session_server::HudSessionServer;
 use tze_hud_protocol::proto::session::runtime_service_server::RuntimeServiceServer;
 use tze_hud_protocol::session::SharedState;
 use tze_hud_protocol::session_server::HudSessionImpl;
 use tze_hud_protocol::token::TokenStore;
+use tze_hud_resource::{RuntimeWidgetStore, RuntimeWidgetStoreConfig};
 use tze_hud_scene::HitResult;
 use tze_hud_scene::config::ConfigLoader;
 use tze_hud_scene::graph::SceneGraph;
@@ -234,6 +235,8 @@ struct WindowedRuntimeState {
     network_handles: Vec<tokio::task::JoinHandle<()>>,
     /// Immutable runtime context (capability policy, profile budgets).
     runtime_context: SharedRuntimeContext,
+    /// Keeps the durable runtime widget asset store alive for runtime lifetime.
+    _runtime_widget_store: Option<RuntimeWidgetStore>,
     /// Whether unknown agents receive unrestricted capabilities.
     fallback_unrestricted: bool,
     /// Shared scene + session state.
@@ -1340,7 +1343,7 @@ impl WindowedRuntime {
             .and_then(|toml| toml::from_str(toml).ok());
 
         let mut pending_widget_svgs: Vec<crate::widget_startup::WidgetSvgAsset> = Vec::new();
-        let (shared_scene, startup_compositor_tokens) = {
+        let (shared_scene, startup_compositor_tokens, runtime_widget_store) = {
             let mut scene = SceneGraph::new(width, height);
 
             // Resolve config file parent directory for path resolution.
@@ -1348,6 +1351,25 @@ impl WindowedRuntime {
                 .config_file_path
                 .as_deref()
                 .and_then(|p| std::path::Path::new(p).parent().map(|d| d.to_path_buf()));
+
+            let runtime_widget_store = if let Some(raw) = &raw_config_for_startup {
+                let resolved =
+                    resolve_runtime_widget_asset_store(raw, config_parent_buf.as_deref()).map_err(
+                        |e| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                format!("runtime widget asset store config invalid: {}", e.hint),
+                            )
+                        },
+                    )?;
+                Some(RuntimeWidgetStore::open(RuntimeWidgetStoreConfig {
+                    store_path: resolved.store_path,
+                    max_total_bytes: resolved.max_total_bytes,
+                    max_agent_bytes: resolved.max_agent_bytes,
+                })?)
+            } else {
+                None
+            };
 
             // Run the full component shape language startup sequence (steps 2-9):
             // design token loading, global widget bundles, component profile loading,
@@ -1394,7 +1416,11 @@ impl WindowedRuntime {
                     }
                 }
             }
-            (Arc::new(Mutex::new(scene)), compositor_tokens)
+            (
+                Arc::new(Mutex::new(scene)),
+                compositor_tokens,
+                runtime_widget_store,
+            )
         };
         let sessions = tze_hud_protocol::session::SessionRegistry::new(&cfg.psk);
         let shared_state = Arc::new(Mutex::new(SharedState {
@@ -1507,6 +1533,7 @@ impl WindowedRuntime {
             network_rt,
             network_handles,
             runtime_context,
+            _runtime_widget_store: runtime_widget_store,
             fallback_unrestricted,
             shared_state,
             input_ring,

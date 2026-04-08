@@ -28,6 +28,7 @@
 //! | `[design_tokens]`               | Frozen (restart required) |
 //! | `[component_profile_bundles]`   | Frozen (restart required) |
 //! | `[component_profiles]`          | Frozen (restart required) |
+//! | `[widget_runtime_assets]`       | Frozen (restart required) |
 //! | `[privacy]`                     | Hot-reloadable |
 //! | `[degradation]`                 | Hot-reloadable |
 //! | `[chrome]`                      | Hot-reloadable |
@@ -91,6 +92,7 @@ pub const FROZEN_SECTIONS: &[&str] = &[
     "design_tokens",
     "component_profile_bundles",
     "component_profiles",
+    "widget_runtime_assets",
 ];
 
 /// Check whether the new TOML introduces changes to frozen sections and emit
@@ -140,6 +142,7 @@ pub fn check_frozen_section_changes(
     check_frozen_field!(design_tokens, "design_tokens");
     check_frozen_field!(component_profile_bundles, "component_profile_bundles");
     check_frozen_field!(component_profiles, "component_profiles");
+    check_frozen_field!(widget_runtime_assets, "widget_runtime_assets");
 
     // agents.registered is frozen; agents.dynamic_policy is hot-reloadable.
     // Compare only the registered sub-field to avoid false positives from
@@ -368,6 +371,11 @@ name = "Main"
             FieldClassification::Frozen,
             "[component_profiles] must be frozen (requires restart)"
         );
+        assert_eq!(
+            section_classification("widget_runtime_assets"),
+            FieldClassification::Frozen,
+            "[widget_runtime_assets] must be frozen (requires restart)"
+        );
     }
 
     #[test]
@@ -530,6 +538,10 @@ redaction_style = "blank"
         assert!(
             FROZEN_SECTIONS.contains(&"component_profiles"),
             "component_profiles must be in FROZEN_SECTIONS"
+        );
+        assert!(
+            FROZEN_SECTIONS.contains(&"widget_runtime_assets"),
+            "widget_runtime_assets must be in FROZEN_SECTIONS"
         );
     }
 

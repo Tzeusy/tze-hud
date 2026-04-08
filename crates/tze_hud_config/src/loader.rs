@@ -42,6 +42,7 @@ use crate::privacy;
 use crate::profile;
 use crate::raw::{RawConfig, RawDegradation};
 use crate::resolver;
+use crate::runtime_widget_assets;
 use crate::tokens;
 use crate::widgets;
 use crate::zones;
@@ -297,6 +298,9 @@ impl ConfigLoader for TzeHudConfig {
             let type_map = std::collections::HashMap::new();
             widgets::validate_widget_instances(&self.raw, &known, &type_map, &mut errors);
         }
+
+        // ── (13b) Runtime widget asset durable budget relationship ───────────
+        runtime_widget_assets::validate_runtime_widget_asset_budgets(&self.raw, &mut errors);
 
         // ── (14) Design token key validation ──────────────────────────────────
         tokens::validate_design_tokens(&self.raw, &mut errors);
