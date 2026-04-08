@@ -13,7 +13,7 @@
 //!
 //! | Flag                | Env var                | Default      | Description                              |
 //! |---------------------|------------------------|--------------|------------------------------------------|
-//! | `--config <path>`   | `TZE_HUD_CONFIG`       | (auto-resolved) | Path to TOML config file.             |
+//! | `--config <path>`   | `TZE_HUD_CONFIG`       | (auto-resolved) | Path to TOML config file (`[runtime]` + `[[tabs]]` schema). |
 //! | `--window-mode <m>` | `TZE_HUD_WINDOW_MODE`  | `fullscreen` | Window mode: `fullscreen` or `overlay`.  |
 //! | `--width <px>`      | `TZE_HUD_WINDOW_WIDTH` | auto¹        | Window width in pixels.                  |
 //! | `--height <px>`     | `TZE_HUD_WINDOW_HEIGHT`| auto¹        | Window height in pixels.                 |
@@ -38,6 +38,10 @@
 //! 3. `./tze_hud.toml` in the current working directory
 //! 4. `$XDG_CONFIG_HOME/tze_hud/config.toml` (Linux/macOS)
 //! 5. `%APPDATA%\tze_hud\config.toml` (Windows)
+//!
+//! The loader schema is driven by `[runtime]` and `[[tabs]]` (plus optional
+//! sections such as `[agents]`, `[widget_bundles]`, and `[component_profiles]`).
+//! Legacy `[display]`/`[network]` config tables are not part of the current schema.
 //!
 //! **Config file is optional.** If no config file is found at any location
 //! the runtime starts with flag/env-var defaults (RFC 0006 §1.5).
@@ -105,7 +109,9 @@ NOTES:
 
     The config file is optional. If none is found at any auto-resolved location,
     the runtime starts with flag/env-var defaults (RFC 0006 §1.5). The config
-    file (when present) provides the agent capability policy and tab layout.
+    file (when present) uses the loader schema rooted at [runtime] and [[tabs]]
+    (plus optional sections such as [agents], [widget_bundles], and
+    [component_profiles]).
     CLI flags override individual settings from the config file.
     Passing --config with a path that does not exist or cannot be read is an error.
 "#,

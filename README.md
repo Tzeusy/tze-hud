@@ -126,44 +126,35 @@ target\x86_64-pc-windows-msvc\release\tze_hud.exe
 
 ## 1.1) Configuration for Canonical Runtime App
 
-The canonical `tze_hud` binary requires a runtime configuration file (TOML format) to:
-- Set window dimensions and display mode
-- Enable/disable network endpoints (gRPC, MCP HTTP)
-- Configure endpoint bind addresses and authentication
+The canonical `tze_hud` binary uses the `TzeHudConfig` loader schema.
+
+Minimal valid config requirements:
+- `[runtime]` with a `profile` field
+- at least one `[[tabs]]` entry
+
+Window mode, endpoint ports, and PSK are controlled via CLI flags / environment
+variables (`--window-mode`, `--grpc-port`, `--mcp-port`, `--psk`) rather than
+legacy config tables.
 
 **Example configuration** (`config.toml`):
 
 ```toml
-# Display configuration
-[display]
-width = 1920
-height = 1080
-# full, windowed, headless
-mode = "windowed"
+[runtime]
+profile = "full-display"
 
-# Network services
-[network]
-# Enable gRPC session server (default: false)
-enable_grpc = true
-grpc_bind = "127.0.0.1:50051"
-
-# Enable MCP HTTP endpoint (default: false)
-enable_mcp_http = true
-mcp_http_bind = "127.0.0.1:8765"
-
-# MCP authentication (required if enabled)
-# mcp_psk = "shared-secret-key"  # Or load from environment
-
-# Example for headless network-only mode
-# mode = "headless"
-# Only gRPC and MCP endpoints, no window
+[[tabs]]
+name = "Main"
+default_tab = true
 ```
 
 **Runtime usage:**
 
 ```bash
-# Windowed with network services enabled
+# Fullscreen (default) with config
 ./tze_hud --config config.toml
+
+# Overlay with explicit endpoint settings
+./tze_hud --config config.toml --window-mode overlay --grpc-port 50051 --mcp-port 9090
 
 # Or on Windows with prebuilt binary
 .\tze_hud.exe --config config.toml
