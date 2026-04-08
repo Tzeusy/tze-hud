@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tonic::Status;
+use tze_hud_resource::RuntimeWidgetStore;
 use tze_hud_scene::SceneId;
 use tze_hud_scene::graph::SceneGraph;
 
@@ -98,6 +99,9 @@ pub struct SharedState {
     pub scene: Arc<Mutex<SceneGraph>>,
     pub sessions: SessionRegistry,
     pub widget_asset_store: WidgetAssetStore,
+    /// Durable runtime widget asset store (v1 scoped durability exception).
+    /// When `None`, widget asset registration uses in-memory fallback semantics.
+    pub runtime_widget_store: Option<RuntimeWidgetStore>,
     /// Whether the runtime is currently in safe mode (RFC 0005 §3.7).
     /// When true, all active sessions reject MutationBatch with SAFE_MODE_ACTIVE.
     pub safe_mode_active: bool,

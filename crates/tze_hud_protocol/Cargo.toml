@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 tze_hud_scene = { path = "../tze_hud_scene" }
 tze_hud_telemetry = { path = "../tze_hud_telemetry" }
+tze_hud_resource = { path = "../tze_hud_resource" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
@@ -22,6 +23,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile = "3"
 
 [build-dependencies]
 tonic-build = "0.13"

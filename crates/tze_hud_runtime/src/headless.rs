@@ -325,6 +325,7 @@ impl HeadlessRuntime {
             scene,
             sessions,
             widget_asset_store: tze_hud_protocol::session::WidgetAssetStore::default(),
+            runtime_widget_store: runtime_widget_store.clone(),
             safe_mode_active: false,
             token_store: tze_hud_protocol::token::TokenStore::new(),
             freeze_active: false,

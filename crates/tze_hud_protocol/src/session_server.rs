@@ -23,29 +23,32 @@
 //! - Resuming → Closed (expired/invalid token)
 
 use crate::auth::{
-    authenticate_session_init, negotiate_version, validate_canonical_capabilities, AuthResult,
-    CapabilityPolicy,
+    AuthResult, CapabilityPolicy, authenticate_session_init, negotiate_version,
+    validate_canonical_capabilities,
 };
 use crate::convert;
 use crate::dedup::{CachedResult, DedupWindow};
 use crate::lease::{
-    effective_priority, CachedLeaseResponse, LeaseCorrelationCache,
-    DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY,
+    CachedLeaseResponse, DEFAULT_LEASE_CORRELATION_CACHE_CAPACITY, LeaseCorrelationCache,
+    effective_priority,
 };
 use crate::proto::session::client_message::Payload as ClientPayload;
 use crate::proto::session::hud_session_server::HudSession;
 use crate::proto::session::server_message::Payload as ServerPayload;
 use crate::proto::session::*;
-use crate::session::{SharedState, SESSION_EVENT_CHANNEL_CAPACITY};
+use crate::session::{SESSION_EVENT_CHANNEL_CAPACITY, SharedState};
 use crate::subscriptions;
-use crate::token::{TokenStore, DEFAULT_GRACE_PERIOD_MS};
-use quick_xml::events::Event;
+use crate::token::{DEFAULT_GRACE_PERIOD_MS, TokenStore};
 use quick_xml::Reader;
+use quick_xml::events::Event;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
+use tze_hud_resource::{
+    RuntimeWidgetStoreError, RuntimeWidgetStorePutOutcome as DurablePutOutcome,
+};
 use tze_hud_scene::graph::SceneGraph;
 use tze_hud_scene::mutation::{MutationBatch as SceneMutationBatch, SceneMutation};
 use tze_hud_scene::types::*;
@@ -834,6 +837,7 @@ impl HudSessionImpl {
                 scene: Arc::new(Mutex::new(scene)),
                 sessions: crate::session::SessionRegistry::new(psk),
                 widget_asset_store: crate::session::WidgetAssetStore::default(),
+                runtime_widget_store: None,
                 safe_mode_active: false,
                 token_store: TokenStore::new(),
                 freeze_active: false,
@@ -3876,6 +3880,10 @@ fn make_widget_asset_error_result(
     }
 }
 
+fn widget_asset_handle_from_hash(hash: [u8; 32]) -> String {
+    format!("widget-svg:{}", ResourceId::from_bytes(hash).to_hex())
+}
+
 /// Handle a WidgetAssetRegister from the client (session-protocol spec
 /// §Requirement: Widget Asset Registration via Session Stream).
 ///
@@ -3945,10 +3953,19 @@ async fn handle_widget_asset_register(
 
     let existing_asset_handle = {
         let st = state.lock().await;
-        st.widget_asset_store
-            .by_hash
-            .get(&expected_hash)
-            .map(|existing| existing.asset_handle.clone())
+        if let Some(store) = st.runtime_widget_store.as_ref() {
+            let resource_id = tze_hud_resource::ResourceId::from_bytes(expected_hash);
+            if store.contains(resource_id) {
+                Some(widget_asset_handle_from_hash(expected_hash))
+            } else {
+                None
+            }
+        } else {
+            st.widget_asset_store
+                .by_hash
+                .get(&expected_hash)
+                .map(|existing| existing.asset_handle.clone())
+        }
     };
     if let Some(asset_handle) = existing_asset_handle {
         send_widget_asset_register_result(
@@ -4062,9 +4079,27 @@ async fn handle_widget_asset_register(
 
     let payload_len = register.inline_svg_bytes.len() as u64;
     let mut st = state.lock().await;
+    let asset_handle = widget_asset_handle_from_hash(expected_hash);
 
     // Re-check dedup after lock acquisition to avoid races between workers.
-    if let Some(asset_handle) = st
+    if let Some(store) = st.runtime_widget_store.as_ref() {
+        let resource_id = tze_hud_resource::ResourceId::from_bytes(expected_hash);
+        if store.contains(resource_id) {
+            let dedup_result = WidgetAssetRegisterResult {
+                request_sequence,
+                accepted: true,
+                widget_type_id: register.widget_type_id.clone(),
+                svg_filename: register.svg_filename.clone(),
+                asset_handle,
+                was_deduplicated: true,
+                error_code: String::new(),
+                error_message: String::new(),
+            };
+            drop(st);
+            send_widget_asset_register_result(session, tx, dedup_result).await;
+            return;
+        }
+    } else if let Some(asset_handle) = st
         .widget_asset_store
         .by_hash
         .get(&expected_hash)
@@ -4082,6 +4117,56 @@ async fn handle_widget_asset_register(
         };
         drop(st);
         send_widget_asset_register_result(session, tx, dedup_result).await;
+        return;
+    }
+
+    if let Some(store) = st.runtime_widget_store.as_mut() {
+        let put_outcome = match store.put_svg(&session.namespace, &register.inline_svg_bytes) {
+            Ok(outcome) => outcome,
+            Err(RuntimeWidgetStoreError::TotalBudgetExceeded { .. })
+            | Err(RuntimeWidgetStoreError::AgentBudgetExceeded { .. }) => {
+                let budget_error = make_widget_asset_error_result(
+                    request_sequence,
+                    &register.widget_type_id,
+                    &register.svg_filename,
+                    "WIDGET_ASSET_BUDGET_EXCEEDED",
+                    "runtime widget asset store budget exceeded".to_string(),
+                );
+                drop(st);
+                send_widget_asset_register_result(session, tx, budget_error).await;
+                return;
+            }
+            Err(err) => {
+                let store_error = make_widget_asset_error_result(
+                    request_sequence,
+                    &register.widget_type_id,
+                    &register.svg_filename,
+                    "WIDGET_ASSET_STORE_IO_ERROR",
+                    format!("runtime widget asset store write failed: {err}"),
+                );
+                drop(st);
+                send_widget_asset_register_result(session, tx, store_error).await;
+                return;
+            }
+        };
+
+        let was_deduplicated = matches!(put_outcome, DurablePutOutcome::Deduplicated { .. });
+        drop(st);
+        send_widget_asset_register_result(
+            session,
+            tx,
+            WidgetAssetRegisterResult {
+                request_sequence,
+                accepted: true,
+                widget_type_id: register.widget_type_id,
+                svg_filename: register.svg_filename,
+                asset_handle,
+                was_deduplicated,
+                error_code: String::new(),
+                error_message: String::new(),
+            },
+        )
+        .await;
         return;
     }
 
@@ -4111,10 +4196,6 @@ async fn handle_widget_asset_register(
         return;
     }
 
-    let asset_handle = format!(
-        "widget-svg:{}",
-        ResourceId::from_bytes(expected_hash).to_hex()
-    );
     let previous = st.widget_asset_store.by_hash.insert(
         expected_hash,
         crate::session::WidgetAssetRecord {
@@ -4407,8 +4488,8 @@ async fn handle_input_capture_release(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     rel: InputCaptureRelease,
 ) {
-    use crate::proto::input_envelope::Event as InputEvent;
     use crate::proto::CaptureReleasedReason;
+    use crate::proto::input_envelope::Event as InputEvent;
     use crate::proto::{CaptureReleasedEvent, EventBatch, InputEnvelope};
 
     // Only deliver the CaptureReleasedEvent if the agent is subscribed to FOCUS_EVENTS.
@@ -4542,7 +4623,7 @@ fn validate_emission(
     session: &mut StreamSession,
     emit: &EmitSceneEvent,
 ) -> Result<String, (String, String)> {
-    use tze_hud_scene::events::naming::{build_agent_event_type, validate_bare_name, NamingError};
+    use tze_hud_scene::events::naming::{NamingError, build_agent_event_type, validate_bare_name};
 
     // ── Step 1: Validate bare name (format + reserved prefix) ────────────
     if let Err(naming_err) = validate_bare_name(&emit.bare_name) {
@@ -4721,15 +4802,21 @@ mod tests {
             Some(ServerPayload::SessionEstablished(established)) => {
                 assert!(!established.session_id.is_empty());
                 assert_eq!(established.namespace, "test-agent");
-                assert!(established
-                    .granted_capabilities
-                    .contains(&"create_tiles".to_string()));
-                assert!(established
-                    .granted_capabilities
-                    .contains(&"access_input_events".to_string()));
-                assert!(established
-                    .granted_capabilities
-                    .contains(&"read_scene_topology".to_string()));
+                assert!(
+                    established
+                        .granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
+                assert!(
+                    established
+                        .granted_capabilities
+                        .contains(&"access_input_events".to_string())
+                );
+                assert!(
+                    established
+                        .granted_capabilities
+                        .contains(&"read_scene_topology".to_string())
+                );
                 assert!(!established.resume_token.is_empty());
                 assert_eq!(
                     established.heartbeat_interval_ms,
@@ -5108,9 +5195,10 @@ mod tests {
                 assert!(!resp.lease_id.is_empty());
                 assert_eq!(resp.lease_id.len(), 16);
                 assert_eq!(resp.granted_ttl_ms, 30_000);
-                assert!(resp
-                    .granted_capabilities
-                    .contains(&"create_tiles".to_string()));
+                assert!(
+                    resp.granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
         }
@@ -7659,9 +7747,10 @@ mod tests {
                     "Expected COALESCING_MORE"
                 );
                 assert_eq!(dn.reason, "high load");
-                assert!(dn
-                    .affected_capabilities
-                    .contains(&"state_stream".to_string()));
+                assert!(
+                    dn.affected_capabilities
+                        .contains(&"state_stream".to_string())
+                );
             }
             other => panic!("Expected DegradationNotice, got: {other:?}"),
         }
@@ -8376,9 +8465,10 @@ mod tests {
                 assert_eq!(resp.lease_id.len(), 16, "lease_id must be 16-byte UUIDv7");
                 assert_eq!(resp.granted_ttl_ms, 30_000);
                 assert_eq!(resp.granted_priority, 2);
-                assert!(resp
-                    .granted_capabilities
-                    .contains(&"create_tiles".to_string()));
+                assert!(
+                    resp.granted_capabilities
+                        .contains(&"create_tiles".to_string())
+                );
                 resp.lease_id.clone()
             }
             other => panic!("Expected LeaseResponse, got: {other:?}"),
@@ -9359,6 +9449,32 @@ mod tests {
         setup_widget_test_with_service(service).await
     }
 
+    /// Helper: start a server with a durable runtime widget store.
+    async fn setup_widget_test_with_durable_store(
+        store_path: std::path::PathBuf,
+        max_total_bytes: u64,
+        max_agent_bytes: u64,
+    ) -> (
+        HudSessionClient<tonic::transport::Channel>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let service = setup_widget_service().await;
+        {
+            let mut st = service.state.lock().await;
+            st.runtime_widget_store = Some(
+                tze_hud_resource::RuntimeWidgetStore::open(
+                    tze_hud_resource::RuntimeWidgetStoreConfig {
+                        store_path,
+                        max_total_bytes,
+                        max_agent_bytes,
+                    },
+                )
+                .expect("durable runtime widget store should open for tests"),
+            );
+        }
+        setup_widget_test_with_service(service).await
+    }
+
     async fn setup_widget_test_with_service(
         service: HudSessionImpl,
     ) -> (
@@ -9791,6 +9907,87 @@ mod tests {
         }
 
         drop(handle);
+    }
+
+    #[tokio::test]
+    async fn test_widget_asset_register_durable_store_dedups_after_restart() {
+        let temp = tempfile::tempdir().expect("tempdir should be creatable");
+        let store_path = temp.path().join("runtime-widget-store");
+        let payload =
+            b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='3' height='2'/></svg>".to_vec();
+        let hash = blake3::hash(&payload).as_bytes().to_vec();
+
+        // First runtime instance writes the asset durably.
+        let (mut client_a, handle_a) =
+            setup_widget_test_with_durable_store(store_path.clone(), 0, 0).await;
+        let (tx_a, _init_msgs_a, mut stream_a) = handshake_with_capabilities(
+            &mut client_a,
+            "asset-durable-a",
+            "test-key",
+            &["register_widget_asset"],
+        )
+        .await;
+        tx_a.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: hash.clone(),
+                transport_crc32c: 0,
+                total_size_bytes: payload.len() as u64,
+                inline_svg_bytes: payload,
+                metadata_only_preflight: false,
+            })),
+        })
+        .await
+        .unwrap();
+        let first = next_non_state_change(&mut stream_a).await;
+        match &first.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(result.accepted);
+                assert!(!result.was_deduplicated);
+            }
+            other => panic!("expected WidgetAssetRegisterResult on first upload, got: {other:?}"),
+        }
+
+        // New runtime instance should preflight-dedup from the same durable store.
+        let (mut client_b, handle_b) = setup_widget_test_with_durable_store(store_path, 0, 0).await;
+        let (tx_b, _init_msgs_b, mut stream_b) = handshake_with_capabilities(
+            &mut client_b,
+            "asset-durable-b",
+            "test-key",
+            &["register_widget_asset"],
+        )
+        .await;
+        tx_b.send(ClientMessage {
+            sequence: 2,
+            timestamp_wall_us: now_wall_us(),
+            payload: Some(ClientPayload::WidgetAssetRegister(WidgetAssetRegister {
+                widget_type_id: "gauge".to_string(),
+                svg_filename: "fill.svg".to_string(),
+                content_hash_blake3: hash,
+                transport_crc32c: 0,
+                total_size_bytes: 0,
+                inline_svg_bytes: Vec::new(),
+                metadata_only_preflight: true,
+            })),
+        })
+        .await
+        .unwrap();
+        let second = next_non_state_change(&mut stream_b).await;
+        match &second.payload {
+            Some(ServerPayload::WidgetAssetRegisterResult(result)) => {
+                assert!(result.accepted);
+                assert!(result.was_deduplicated);
+            }
+            other => {
+                panic!("expected WidgetAssetRegisterResult on restart preflight, got: {other:?}")
+            }
+        }
+
+        drop(handle_a);
+        drop(handle_b);
     }
 
     #[tokio::test]

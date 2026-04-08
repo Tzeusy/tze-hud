@@ -3234,7 +3234,10 @@ mod tests {
         assert!(!first.was_deduplicated);
         assert!(first.asset_handle.is_some());
         let hash_raw = parse_blake3_hex_32(&hash_hex).unwrap();
-        assert_eq!(registry.payload_by_hash(&hash_raw), Some(payload.as_bytes()));
+        assert_eq!(
+            registry.payload_by_hash(&hash_raw),
+            Some(payload.as_bytes())
+        );
 
         let preflight = handle_register_widget_asset(
             json!({
