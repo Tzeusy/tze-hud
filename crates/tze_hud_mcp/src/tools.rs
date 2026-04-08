@@ -867,16 +867,39 @@ pub struct WidgetAssetRegistry {
 #[derive(Debug)]
 struct RegisteredWidgetAsset {
     asset_handle: String,
+    // Retained for follow-up renderer/store integration.
+    #[allow(dead_code)]
+    payload: Vec<u8>,
 }
 
 impl WidgetAssetRegistry {
+    const MAX_ENTRIES: usize = 4096;
+
     fn get_by_hash(&self, hash: &[u8; 32]) -> Option<&RegisteredWidgetAsset> {
         self.by_hash.get(hash)
     }
 
-    fn upsert(&mut self, hash: [u8; 32], asset_handle: String) {
-        self.by_hash
-            .insert(hash, RegisteredWidgetAsset { asset_handle });
+    fn upsert(&mut self, hash: [u8; 32], asset_handle: String, payload: Vec<u8>) {
+        if self.by_hash.is_empty() {
+            // Reserve a small initial slab to avoid repeated tiny growth churn.
+            self.by_hash.reserve(64);
+        }
+        self.by_hash.insert(
+            hash,
+            RegisteredWidgetAsset {
+                asset_handle,
+                payload,
+            },
+        );
+    }
+
+    fn is_at_capacity(&self) -> bool {
+        self.by_hash.len() >= Self::MAX_ENTRIES
+    }
+
+    #[cfg(test)]
+    fn payload_by_hash(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        self.by_hash.get(hash).map(|entry| entry.payload.as_slice())
     }
 }
 
@@ -1049,8 +1072,16 @@ pub fn handle_register_widget_asset(
         ));
     }
 
+    if registry.is_at_capacity() {
+        return Ok(widget_asset_error(
+            result,
+            "WIDGET_ASSET_BUDGET_EXCEEDED",
+            "runtime widget asset registry entry limit exceeded",
+        ));
+    }
+
     let asset_handle = format!("widget-asset:{}", bytes_to_hex(&expected_hash));
-    registry.upsert(expected_hash, asset_handle.clone());
+    registry.upsert(expected_hash, asset_handle.clone(), payload);
     result.accepted = true;
     result.was_deduplicated = false;
     result.asset_handle = Some(asset_handle);
@@ -1612,11 +1643,7 @@ fn is_valid_svg_payload(payload: &[u8]) -> bool {
     use quick_xml::Reader;
     use quick_xml::events::Event;
 
-    let text = match std::str::from_utf8(payload) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    let mut reader = Reader::from_str(text);
+    let mut reader = Reader::from_reader(payload);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut root_seen = false;
@@ -1626,7 +1653,7 @@ fn is_valid_svg_payload(payload: &[u8]) -> bool {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 if !root_seen {
                     root_seen = true;
-                    if e.name().as_ref() != b"svg" {
+                    if e.local_name().as_ref() != b"svg" {
                         return false;
                     }
                 }
@@ -3206,6 +3233,8 @@ mod tests {
         assert!(first.accepted);
         assert!(!first.was_deduplicated);
         assert!(first.asset_handle.is_some());
+        let hash_raw = parse_blake3_hex_32(&hash_hex).unwrap();
+        assert_eq!(registry.payload_by_hash(&hash_raw), Some(payload.as_bytes()));
 
         let preflight = handle_register_widget_asset(
             json!({
@@ -3319,6 +3348,61 @@ mod tests {
         assert_eq!(
             result.error_code.as_deref(),
             Some("WIDGET_ASSET_HASH_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn test_register_widget_asset_accepts_prefixed_svg_root() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        let payload = r#"<svg:svg xmlns:svg="http://www.w3.org/2000/svg"><svg:rect width="10" height="10"/></svg:svg>"#;
+        let hash_hex = bytes_to_hex(blake3::hash(payload.as_bytes()).as_bytes());
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "prefixed.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "payload": payload
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+        assert!(result.accepted);
+        assert!(!result.was_deduplicated);
+    }
+
+    #[test]
+    fn test_register_widget_asset_registry_capacity_limit() {
+        let mut registry = WidgetAssetRegistry::default();
+        let caps = vec!["register_widget_asset".to_string()];
+        for i in 0..WidgetAssetRegistry::MAX_ENTRIES {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            registry.upsert(hash, format!("widget-asset:{i}"), b"<svg/>".to_vec());
+        }
+
+        let payload =
+            r#"<svg xmlns="http://www.w3.org/2000/svg"><circle cx="1" cy="1" r="1"/></svg>"#;
+        let hash_hex = bytes_to_hex(blake3::hash(payload.as_bytes()).as_bytes());
+        let result = handle_register_widget_asset(
+            json!({
+                "widget_type_id": "gauge",
+                "svg_filename": "full.svg",
+                "content_hash_blake3": hash_hex,
+                "total_size_bytes": payload.len(),
+                "payload": payload
+            }),
+            &mut registry,
+            &caps,
+        )
+        .unwrap();
+
+        assert!(!result.accepted);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some("WIDGET_ASSET_BUDGET_EXCEEDED")
         );
     }
 

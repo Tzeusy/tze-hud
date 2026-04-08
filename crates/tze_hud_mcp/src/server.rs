@@ -23,7 +23,8 @@
 //!
 //! ## Guest vs Resident tools
 //!
-//! **Guest tools** (unconditionally accessible to any authenticated caller):
+//! **Guest tools** (do not require `resident_mcp`; individual tools may enforce
+//! additional capability checks):
 //! - `publish_to_zone`
 //! - `list_zones`
 //! - `list_scene`
@@ -392,10 +393,9 @@ impl McpServer {
         params: serde_json::Value,
         caller_capabilities: &[String],
     ) -> Result<serde_json::Value, crate::McpError> {
-        let mut scene = self.scene.lock().await;
-
         match method {
             "create_tab" => {
+                let mut scene = self.scene.lock().await;
                 let r = tools::handle_create_tab(params, &mut scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -403,6 +403,7 @@ impl McpServer {
                 )
             }
             "create_tile" => {
+                let mut scene = self.scene.lock().await;
                 let r = tools::handle_create_tile(params, &mut scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -410,6 +411,7 @@ impl McpServer {
                 )
             }
             "set_content" => {
+                let mut scene = self.scene.lock().await;
                 let r = tools::handle_set_content(params, &mut scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -417,6 +419,7 @@ impl McpServer {
                 )
             }
             "dismiss" => {
+                let mut scene = self.scene.lock().await;
                 let r = tools::handle_dismiss(params, &mut scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -424,6 +427,7 @@ impl McpServer {
                 )
             }
             "publish_to_zone" => {
+                let mut scene = self.scene.lock().await;
                 let r = tools::handle_publish_to_zone(params, &mut scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -431,6 +435,7 @@ impl McpServer {
                 )
             }
             "list_zones" => {
+                let scene = self.scene.lock().await;
                 let r = tools::handle_list_zones(params, &scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -438,6 +443,7 @@ impl McpServer {
                 )
             }
             "list_scene" => {
+                let scene = self.scene.lock().await;
                 let r = tools::handle_list_scene(params, &scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -445,6 +451,7 @@ impl McpServer {
                 )
             }
             "publish_to_widget" => {
+                let mut scene = self.scene.lock().await;
                 let r = tools::handle_publish_to_widget(params, &mut scene, caller_capabilities)?;
                 Ok(
                     serde_json::to_value(r)
@@ -452,6 +459,7 @@ impl McpServer {
                 )
             }
             "list_widgets" => {
+                let scene = self.scene.lock().await;
                 let r = tools::handle_list_widgets(params, &scene)?;
                 Ok(
                     serde_json::to_value(r)
@@ -459,6 +467,7 @@ impl McpServer {
                 )
             }
             "clear_widget" => {
+                let mut scene = self.scene.lock().await;
                 let r = tools::handle_clear_widget(params, &mut scene, caller_capabilities)?;
                 Ok(
                     serde_json::to_value(r)
