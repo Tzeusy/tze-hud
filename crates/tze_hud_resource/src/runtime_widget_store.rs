@@ -393,6 +393,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let cfg = make_config(temp.path().join("store"), 0, 0);
         let svg = br#"<svg width="10" height="10"></svg>"#;
+        let svg_len = svg.len() as u64;
 
         let mut first = RuntimeWidgetStore::open(cfg.clone()).unwrap();
         let id = match first.put_svg("agent-a", svg).unwrap() {
@@ -406,10 +407,16 @@ mod tests {
         let mut second = RuntimeWidgetStore::open(cfg).unwrap();
         assert!(second.contains(id), "re-index must recover prior hash");
         assert_eq!(second.asset_count(), 1);
-        match second.put_svg("agent-a", svg).unwrap() {
+        match second.put_svg("agent-b", svg).unwrap() {
             PutOutcome::Deduplicated { resource_id } => assert_eq!(resource_id, id),
             PutOutcome::Stored { .. } => panic!("existing hash must deduplicate after restart"),
         }
+        assert_eq!(second.agent_bytes_used("agent-a"), svg_len);
+        assert_eq!(
+            second.agent_bytes_used("agent-b"),
+            0,
+            "dedup hit must not consume additional durable budget"
+        );
     }
 
     #[test]
