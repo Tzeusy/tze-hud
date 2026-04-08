@@ -42,7 +42,9 @@ Core behaviors for capability gating, hash-first dedup preflight, checksum/hash 
 
 - Register tool implementation:
   - [`crates/tze_hud_mcp/src/tools.rs`](../crates/tze_hud_mcp/src/tools.rs)
-  - `handle_register_widget_asset` mirrors protocol semantics (capability, preflight, checksum/hash, SVG validation, stable error codes)
+  - `handle_register_widget_asset` broadly follows protocol register semantics (capability, preflight, checksum/hash, SVG validation, stable-style error reporting), with known parity differences:
+    - SVG root validation accepts `local_name == "svg"` on the MCP path (`<svg:svg>` accepted), while protocol path requires literal `<svg>`.
+    - `total_size_bytes` vs payload-length mismatch currently returns `WIDGET_ASSET_HASH_MISMATCH` on MCP, while protocol path uses `WIDGET_ASSET_CHECKSUM_MISMATCH`.
 - Publish tool implementation:
   - [`crates/tze_hud_mcp/src/tools.rs`](../crates/tze_hud_mcp/src/tools.rs)
   - `handle_publish_to_widget` publishes typed parameters only (no SVG payload)
@@ -68,7 +70,7 @@ Core behaviors for capability gating, hash-first dedup preflight, checksum/hash 
 
 - Durable store behavior is implemented and tested (`RuntimeWidgetStore` re-index after restart, corrupt/partial artifact rejection).
 - Runtime startup resolves and opens durable store config in both headless and windowed runtime initialization.
-- **Observed gap:** session register handler currently persists into in-memory `SharedState.widget_asset_store` (`crates/tze_hud_protocol/src/session.rs`) rather than `RuntimeWidgetStore`; this leaves end-to-end restart durability for live runtime registration path as a residual risk.
+- **Observed gap:** session register handler currently persists into in-memory `SharedState.widget_asset_store` from `handle_widget_asset_register` in [`crates/tze_hud_protocol/src/session_server.rs`](../crates/tze_hud_protocol/src/session_server.rs) (store type defined in [`crates/tze_hud_protocol/src/session.rs`](../crates/tze_hud_protocol/src/session.rs)) rather than `RuntimeWidgetStore`; this leaves end-to-end restart durability for live runtime registration path as a residual risk.
 
 ### Dedup + checksum behavior
 
@@ -104,4 +106,3 @@ Core behaviors for capability gating, hash-first dedup preflight, checksum/hash 
 2. **Runtime SVG handle plumbing appears incomplete (High):** `register_runtime_widget_svg_asset` exists, but no non-test call site currently invokes it; runtime SVG handle map/queue usage is therefore not end-to-end proven.
 3. **Missing restart E2E for protocol path (Medium):** no integration test currently demonstrates `WidgetAssetRegister` -> restart -> dedup hit + successful post-restart publish in one flow.
 4. **Dual implementation drift risk (Medium):** protocol and MCP register logic are duplicated; behavior may diverge without shared validation helpers or cross-surface parity tests.
-
