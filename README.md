@@ -10,7 +10,7 @@ Household screens make this harder. A wall display is visible to the homeowner, 
 
 ## What tze_hud Does
 
-tze_hud owns the screen. The runtime handles compositing, timing, input routing, permissions, and resource budgets. LLMs connect over three protocol planes (MCP for compatibility, gRPC for resident control, WebRTC for media) and request presence through leases with TTL, capability scopes, and revocation semantics.
+tze_hud owns the screen. The runtime handles compositing, timing, input routing, permissions, and resource budgets. In v1, LLMs connect over MCP (compatibility) and gRPC (resident control) and request presence through leases with TTL, capability scopes, and revocation semantics. WebRTC/live media remains a post-v1 lane.
 
 Agents publish semantic intent — "put this text in the subtitle zone," "bind these parameters to the CPU gauge widget" — and the runtime handles layout, visual identity, and rendering at 60fps. Agents never sit in the frame loop. Arrival time is decoupled from presentation time; every payload carries timing semantics.
 
@@ -19,7 +19,7 @@ Key properties:
 - **Governed presence.** Agents occupy presence levels (guest, resident, embodied) with escalating trust requirements. Every surface lease has a TTL, capability scope, and resource budget. Humans always override.
 - **Attention as a finite resource.** The runtime enforces attention budgets and interruption policies. Quiet hours, contention resolution, and classification ceilings prevent notification spam.
 - **Viewer-aware privacy.** Content classification (public, household, private, sensitive) is enforced based on who is looking at the screen. Private content is redacted when a guest is present.
-- **Graceful degradation.** Under resource pressure, the system degrades along explicit axes — coalescing updates, reducing media quality, shedding tiles — rather than crashing or stuttering.
+- **Graceful degradation.** Under resource pressure, the system degrades along explicit axes — coalescing updates and shedding tiles — rather than crashing or stuttering.
 - **Swappable visual identity.** Design tokens, component types, and component profiles separate visual styling from agent code and runtime logic. An operator changes the look of the entire display by swapping a configuration directory.
 - **Multi-agent coordination.** When agents compete for screen territory, the runtime arbitrates based on space, budgets, priorities, and lease state. Agents negotiate through the runtime, never directly.
 
@@ -47,6 +47,9 @@ The rest of this README is command-first and focused on four workflows:
 - **Configuration**: Supports TOML configuration file with windowed display settings and network endpoint configuration.
 - **Network support**: Includes full `NetworkRuntime` with MCP HTTP listener lifecycle in windowed mode.
 - **Use case**: Remote deployment, cross-machine validation, automated publish workflows.
+
+v1 scope note:
+- Live media/WebRTC is explicitly deferred in v1 (`about/heart-and-soul/v1.md`, "V1 explicitly defers").
 
 ### Demo and Reference Binaries
 - `vertical_slice` (`examples/vertical_slice/`): Development reference showing scene/lease/zone publish semantics. **Not** intended for operations or remote deployment.
@@ -132,11 +135,15 @@ Minimal valid config requirements:
 - `[runtime]` with a `profile` field
 - at least one `[[tabs]]` entry
 
+Canonical operator config path:
+- `app/tze_hud_app/config/production.toml` (deploy this as `tze_hud.toml` beside the binary)
+
 Window mode, endpoint ports, and PSK are controlled via CLI flags / environment
 variables (`--window-mode`, `--grpc-port`, `--mcp-port`, `--psk`) rather than
-legacy config tables.
+legacy config tables. Legacy `[display]`/`[network]` tables are not part of the
+current loader schema.
 
-**Example configuration** (`config.toml`):
+**Minimal schema example** (`tze_hud.toml`):
 
 ```toml
 [runtime]
@@ -151,16 +158,20 @@ default_tab = true
 
 ```bash
 # Fullscreen (default) with config
-./tze_hud --config config.toml
+./tze_hud --config tze_hud.toml
 
 # Overlay with explicit endpoint settings
-./tze_hud --config config.toml --window-mode overlay --grpc-port 50051 --mcp-port 9090
+./tze_hud --config tze_hud.toml --window-mode overlay --grpc-port 50051 --mcp-port 9090
 
 # Or on Windows with prebuilt binary
-.\tze_hud.exe --config config.toml
+.\tze_hud.exe --config tze_hud.toml
 ```
 
 For Windows deployment automation, see [Cross-Machine Deployment](#cross-machine-deployment) below.
+
+CI-backed checks for the canonical path:
+- `app/tze_hud_app/tests/canonical_config_schema.rs` validates `app/tze_hud_app/config/production.toml`.
+- CI `test-unit` job runs `cargo test --workspace --all-targets --exclude integration`, which includes that test.
 
 ## 1.2) Cross-Machine Deployment
 

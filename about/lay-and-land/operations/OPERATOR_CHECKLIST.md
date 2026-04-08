@@ -41,12 +41,16 @@ This document provides operators and automation engineers with a checklist for u
 ### Configuration
 
 - [ ] Runtime configuration file prepared
-  - Example template: `docs/RUNTIME_APP_BINARY.md` (Configuration Schema section)
-  - Key settings for remote validation:
-    - `[display] mode = "windowed"`
-    - `[network] enable_mcp_http = true`
-    - `[network] mcp_http_bind = "0.0.0.0:8765"` (remote reachability)
-    - `[network] mcp_psk_env = "MCP_TEST_PSK"`
+  - Canonical source config: `app/tze_hud_app/config/production.toml`
+  - Deploy as: `C:\tze_hud\tze_hud.toml`
+  - Required schema minimum:
+    - `[runtime] profile = "full-display"` (or another valid profile)
+    - at least one `[[tabs]]` entry
+  - Runtime launch controls for remote validation:
+    - `--window-mode overlay`
+    - `--mcp-port 8765` (remote reachability)
+    - `--grpc-port 50051` (if needed)
+    - `--psk <shared-secret>` (or `TZE_HUD_PSK`)
 
 - [ ] MCP test PSK environment variable set
   - Command: `export MCP_TEST_PSK="<shared-secret>"`
@@ -212,11 +216,11 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 
 **Solutions**:
 - If process not running: Check launcher logs `C:\tze_hud\logs\hud.launcher.log`
-- If port not listening: Check configuration file `C:\tze_hud\config.toml`
-  - Verify `[network] enable_mcp_http = true`
-  - Verify `[network] mcp_http_bind = "0.0.0.0:8765"`
+- If port not listening: Check launch arguments or service wrapper
+  - Verify `--mcp-port 8765` was supplied
+  - Verify `--mcp-port` is not `0` (disabled)
 - If Windows firewall blocks: Add inbound rule for port 8765
-- If MCP PSK wrong: Verify `MCP_TEST_PSK` environment variable and config match
+- If MCP PSK wrong: Verify `MCP_TEST_PSK` matches the runtime launch secret (`--psk` or `TZE_HUD_PSK`)
 
 ### MCP Publish Returns 401 (Unauthorized)
 
@@ -234,7 +238,7 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 
 **Solutions**:
 - Set PSK environment variable: `export MCP_TEST_PSK="correct-shared-secret"`
-- Verify PSK in Windows config matches: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "type C:\\tze_hud\\config.toml"`
+- Verify runtime launch secret source (`--psk` flag or `TZE_HUD_PSK`) matches `MCP_TEST_PSK`
 - Verify PSK is passed correctly in curl/python requests (`-H "Authorization: Bearer $MCP_TEST_PSK"`)
 
 ### MCP Publish Returns "zone not found"
