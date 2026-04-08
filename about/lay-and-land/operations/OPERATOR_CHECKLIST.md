@@ -166,7 +166,7 @@ Use this when validating runtime SVG register/upload persistence behavior.
   - If omitted, default platform path:
     - Linux: `${XDG_CACHE_HOME:-$HOME/.cache}/tze_hud/resources/runtime_widget_assets`
     - macOS: `$HOME/Library/Caches/tze_hud/resources/runtime_widget_assets`
-    - Windows: `%LOCALAPPDATA%\\tze_hud\\resources\\runtime_widget_assets`
+    - Windows: `%LOCALAPPDATA%\tze_hud\resources\runtime_widget_assets`
 
 - [ ] Verify durable store directory shape
   - Expect `<store_path>/blobs/` and `<store_path>/meta/`

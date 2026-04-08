@@ -50,7 +50,7 @@ Durable store implementation:
 On-disk layout under configured store root:
 
 - `blobs/<64-hex-blake3>`: SVG payload bytes
-- `meta/<64-hex-blake3>.json`: sidecar metadata (`agent_namespace`, size, id)
+- `meta/<64-hex-blake3>.json`: sidecar metadata (`agent_namespace`, `size_bytes`, `resource_id_hex`)
 
 Atomicity/durability hooks:
 
@@ -68,14 +68,17 @@ Resolution behavior:
 
 - Explicit `store_path`:
   - absolute path used as-is
-  - relative path resolved against config file parent directory
+  - relative path resolved against provided `config_parent`
+  - in config-file-driven startup, `config_parent` is the config file parent directory
+  - when `config_parent` is `None`, resolution falls back to `.` (current working directory)
+  - headless startup passes `None`, so explicit relative `store_path` resolves from the process working directory
 - No `store_path`: platform default path
 
 Platform defaults (`platform_default_store_path`):
 
 - Linux: `${XDG_CACHE_HOME:-$HOME/.cache}/tze_hud/resources/runtime_widget_assets`
 - macOS: `$HOME/Library/Caches/tze_hud/resources/runtime_widget_assets`
-- Windows: `%LOCALAPPDATA%\\tze_hud\\resources\\runtime_widget_assets`
+- Windows: `%LOCALAPPDATA%\tze_hud\resources\runtime_widget_assets`
 
 ## Startup Reconciliation / Re-index Path
 
@@ -93,7 +96,7 @@ Re-index behavior:
 
 - scans `blobs/`
 - ignores temp files (`.tmp-*`)
-- verifies BLAKE3(id) matches blob content
+- verifies BLAKE3(blob content) matches id (filename)
 - validates sidecar (`meta/*.json`) id + size
 - re-applies current budget ceilings before admitting entry
 - rebuilds in-memory hash index and byte-accounting maps
