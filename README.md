@@ -143,7 +143,7 @@ variables (`--window-mode`, `--grpc-port`, `--mcp-port`, `--psk`) rather than
 legacy config tables. Legacy `[display]`/`[network]` tables are not part of the
 current loader schema.
 
-**Minimal schema example** (`config.toml`):
+**Minimal schema example** (`tze_hud.toml`):
 
 ```toml
 [runtime]
@@ -158,13 +158,13 @@ default_tab = true
 
 ```bash
 # Fullscreen (default) with config
-./tze_hud --config config.toml
+./tze_hud --config tze_hud.toml
 
 # Overlay with explicit endpoint settings
-./tze_hud --config config.toml --window-mode overlay --grpc-port 50051 --mcp-port 9090
+./tze_hud --config tze_hud.toml --window-mode overlay --grpc-port 50051 --mcp-port 9090
 
 # Or on Windows with prebuilt binary
-.\tze_hud.exe --config config.toml
+.\tze_hud.exe --config tze_hud.toml
 ```
 
 For Windows deployment automation, see [Cross-Machine Deployment](#cross-machine-deployment) below.

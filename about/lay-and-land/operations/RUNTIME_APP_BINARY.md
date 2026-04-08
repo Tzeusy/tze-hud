@@ -16,7 +16,7 @@ The **canonical runtime application binary** (`tze_hud`, from the `tze_hud_app` 
 - **Binary name**: `tze_hud`
 
 **Key features**:
-- Configuration-driven startup (window mode, dimensions, network endpoints)
+- Configuration-driven startup for loader-schema content (`[runtime]` + `[[tabs]]` minimum), with window/network controls from CLI/env flags
 - Full `NetworkRuntime` support in windowed mode
 - MCP HTTP endpoint with authentication enforcement
 - Deterministic Windows artifact naming for automation
@@ -123,7 +123,14 @@ cargo build --bin tze_hud --release --target x86_64-pc-windows-gnu
 
 ## Configuration
 
-The canonical app can load a TOML configuration file via `--config`, `TZE_HUD_CONFIG`, or auto-resolution (`./tze_hud.toml` first). The canonical committed operator config is:
+The canonical app resolves configuration in this order:
+
+1. `--config <path>` (hard error if the specified file does not exist)
+2. `TZE_HUD_CONFIG`
+3. `./tze_hud.toml`
+4. platform defaults (XDG/APPDATA locations)
+
+The canonical committed operator config is:
 
 - `app/tze_hud_app/config/production.toml`
 
@@ -156,9 +163,9 @@ Window mode and network endpoint enable/disable are controlled by CLI/env:
 Config loading examples:
 
 ```bash
-./tze_hud --config /path/to/config.toml
+./tze_hud --config /path/to/tze_hud.toml
 # or on Windows:
-.\tze_hud.exe --config C:\path\to\config.toml
+.\tze_hud.exe --config C:\tze_hud\tze_hud.toml
 ```
 
 ## Runtime Lifecycle
@@ -218,7 +225,7 @@ For automation purposes, the canonical app produces stable, deterministic artifa
 
 - **Remote directory**: `C:\tze_hud\` (created by automation script)
 - **Remote artifact**: `C:\tze_hud\tze_hud.exe`
-- **Remote config**: `C:\tze_hud\config.toml`
+- **Remote config**: `C:\tze_hud\tze_hud.toml`
 - **Remote logs**:
   - `C:\tze_hud\logs\hud.stdout.log`
   - `C:\tze_hud\logs\hud.stderr.log`

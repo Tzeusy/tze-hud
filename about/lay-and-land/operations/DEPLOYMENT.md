@@ -322,18 +322,18 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 **Problem:** MCP publish rejected with 401
 
 - Verify PSK environment variable is set: `echo $MCP_TEST_PSK`
-- Verify PSK matches Windows config
+- Verify `MCP_TEST_PSK` matches the runtime launch secret (`--psk` or `TZE_HUD_PSK`)
 - Check MCP log output in `hud.stdout.log`
 
 **Problem:** Configuration file not found
 
 ```bash
-# Ensure config.toml is deployed
+# Ensure tze_hud.toml is deployed
 ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
-  "powershell -Command 'Get-Item C:\\tze_hud\\config.toml'"
+  "powershell -Command 'Get-Item C:\\tze_hud\\tze_hud.toml'"
 
 # Copy if missing
-scp config.toml hudbot@tzehouse-windows.parrot-hen.ts.net:C:\\tze_hud\\config.toml
+scp app/tze_hud_app/config/production.toml hudbot@tzehouse-windows.parrot-hen.ts.net:C:\\tze_hud\\tze_hud.toml
 ```
 
 ### Cleanup

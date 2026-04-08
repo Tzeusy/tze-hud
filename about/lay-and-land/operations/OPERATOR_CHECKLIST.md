@@ -220,7 +220,7 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
   - Verify `--mcp-port 8765` was supplied
   - Verify `--mcp-port` is not `0` (disabled)
 - If Windows firewall blocks: Add inbound rule for port 8765
-- If MCP PSK wrong: Verify `MCP_TEST_PSK` environment variable and config match
+- If MCP PSK wrong: Verify `MCP_TEST_PSK` matches the runtime launch secret (`--psk` or `TZE_HUD_PSK`)
 
 ### MCP Publish Returns 401 (Unauthorized)
 
@@ -238,7 +238,7 @@ ssh hudbot@tzehouse-windows.parrot-hen.ts.net \
 
 **Solutions**:
 - Set PSK environment variable: `export MCP_TEST_PSK="correct-shared-secret"`
-- Verify PSK in Windows config matches: `ssh hudbot@tzehouse-windows.parrot-hen.ts.net "type C:\\tze_hud\\config.toml"`
+- Verify runtime launch secret source (`--psk` flag or `TZE_HUD_PSK`) matches `MCP_TEST_PSK`
 - Verify PSK is passed correctly in curl/python requests (`-H "Authorization: Bearer $MCP_TEST_PSK"`)
 
 ### MCP Publish Returns "zone not found"
