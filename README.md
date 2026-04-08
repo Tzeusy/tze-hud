@@ -143,6 +143,15 @@ variables (`--window-mode`, `--grpc-port`, `--mcp-port`, `--psk`) rather than
 legacy config tables. Legacy `[display]`/`[network]` tables are not part of the
 current loader schema.
 
+Canonical startup is fail-closed:
+- missing or unreadable config is a hard startup error
+- invalid loader-schema config is a hard startup error
+- trivial default PSK (`tze-hud-key`) is rejected in strict startup mode
+
+Development-only escape hatch:
+- `TZE_HUD_DEV_ALLOW_INSECURE_STARTUP=1` is honored only in debug builds
+- release builds ignore this override; do not use it for production operators
+
 **Minimal schema example** (`tze_hud.toml`):
 
 ```toml

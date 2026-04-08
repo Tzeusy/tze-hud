@@ -160,6 +160,12 @@ Window mode and network endpoint enable/disable are controlled by CLI/env:
 - `--mcp-port` / `TZE_HUD_MCP_PORT` (`0` disables MCP HTTP)
 - `--psk` / `TZE_HUD_PSK`
 
+Startup hardening (canonical operator path):
+- Strict startup requires a readable and loader-valid config file.
+- Strict startup rejects the trivial default PSK value (`tze-hud-key`).
+- `TZE_HUD_DEV_ALLOW_INSECURE_STARTUP=1` is a debug-only fallback override.
+  Release builds ignore this override and remain fail-closed.
+
 Config loading examples:
 
 ```bash

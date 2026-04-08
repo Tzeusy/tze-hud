@@ -75,6 +75,14 @@ Window mode and network endpoint controls are runtime flags/env vars, not `[disp
 - `--mcp-port` / `TZE_HUD_MCP_PORT` (`0` disables MCP HTTP)
 - `--psk` / `TZE_HUD_PSK`
 
+Canonical startup is fail-closed:
+- missing/unreadable config is a hard startup error
+- invalid loader-schema config is a hard startup error
+- default PSK (`tze-hud-key`) is rejected in strict startup mode
+
+`TZE_HUD_DEV_ALLOW_INSECURE_STARTUP=1` is debug-only and non-canonical.
+Release builds ignore that override.
+
 ### Example Configuration
 
 Minimal schema example:

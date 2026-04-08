@@ -51,6 +51,12 @@ This document provides operators and automation engineers with a checklist for u
     - `--mcp-port 8765` (remote reachability)
     - `--grpc-port 50051` (if needed)
     - `--psk <shared-secret>` (or `TZE_HUD_PSK`)
+  - Fail-closed startup requirements:
+    - Missing/unreadable config MUST fail startup
+    - Invalid loader-schema TOML MUST fail startup
+    - Default PSK `tze-hud-key` MUST NOT be used
+  - Do not use `TZE_HUD_DEV_ALLOW_INSECURE_STARTUP=1` in production runs
+    - This override is debug-only and non-canonical
 
 - [ ] MCP test PSK environment variable set
   - Command: `export MCP_TEST_PSK="<shared-secret>"`
