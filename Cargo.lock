@@ -3480,6 +3480,7 @@ dependencies = [
  "tracing-subscriber",
  "tze_hud_config",
  "tze_hud_runtime",
+ "tze_hud_scene",
 ]
 
 [[package]]

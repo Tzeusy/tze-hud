@@ -30,6 +30,12 @@
 # widget_name addresses a widget *instance* (not a type). The instance name is
 # the instance_id declared below — not the widget_type name.
 
+# Runtime profile selection (required by loader schema).
+# Keep this aligned with crates/tze_hud_config::loader validation:
+# config MUST include [runtime] with profile and at least one [[tabs]] entry.
+[runtime]
+profile = "full-display"
+
 # Widget bundle directories scanned at startup.
 # Paths are resolved relative to this config file's parent directory.
 # Each path is a root whose immediate subdirectories are scanned for widget.toml.
