@@ -212,6 +212,8 @@ pub struct HeadlessRuntime {
     pub runtime_context: Arc<RuntimeContext>,
     /// Whether unknown agents get unrestricted capabilities (true = dev mode).
     fallback_unrestricted: bool,
+    /// Keeps the durable runtime widget asset store alive for runtime lifetime.
+    _runtime_widget_store: Option<RuntimeWidgetStore>,
 }
 
 impl HeadlessRuntime {
@@ -255,7 +257,7 @@ impl HeadlessRuntime {
         //
         // Per component-shape-language/spec.md §Requirement: Startup Sequence Integration
         let mut scene = SceneGraph::new(config.width as f32, config.height as f32);
-        let (_runtime_widget_store, compositor_token_map): (
+        let (runtime_widget_store, compositor_token_map): (
             Option<RuntimeWidgetStore>,
             std::collections::HashMap<String, String>,
         ) = if let Some(toml_str) = &config.config_toml {
@@ -339,6 +341,7 @@ impl HeadlessRuntime {
             pipeline: FramePipeline::new(),
             runtime_context,
             fallback_unrestricted,
+            _runtime_widget_store: runtime_widget_store,
         })
     }
 

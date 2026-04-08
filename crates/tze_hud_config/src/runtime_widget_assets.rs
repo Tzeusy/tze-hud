@@ -135,13 +135,18 @@ fn ensure_writable_store_path(store_path: &Path) -> Result<(), ConfigError> {
             got: format!("{} ({err})", store_path.display()),
             hint: "ensure the store directory exists and is writable".into(),
         })?;
-    file.write_all(b"probe").map_err(|err| ConfigError {
-        code: ConfigErrorCode::Other("CONFIG_WIDGET_ASSET_STORE_UNWRITABLE".into()),
-        field_path: "widget_runtime_assets.store_path".into(),
-        expected: "writable directory".into(),
-        got: format!("{} ({err})", store_path.display()),
-        hint: "ensure the store directory exists and is writable".into(),
-    })?;
+    if let Err(err) = file.write_all(b"probe") {
+        drop(file);
+        let _ = fs::remove_file(&probe);
+        return Err(ConfigError {
+            code: ConfigErrorCode::Other("CONFIG_WIDGET_ASSET_STORE_UNWRITABLE".into()),
+            field_path: "widget_runtime_assets.store_path".into(),
+            expected: "writable directory".into(),
+            got: format!("{} ({err})", store_path.display()),
+            hint: "ensure the store directory exists and is writable".into(),
+        });
+    }
+    drop(file);
     let _ = fs::remove_file(&probe);
     Ok(())
 }

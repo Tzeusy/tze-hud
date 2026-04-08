@@ -133,9 +133,35 @@ impl RuntimeWidgetStore {
             size_bytes: incoming,
         };
 
-        write_atomic(&blob_path, svg_bytes)?;
+        let mut wrote_blob = false;
+        match fs::read(&blob_path) {
+            Ok(existing_blob) => {
+                if ResourceId::from_content(&existing_blob) != resource_id {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "blob path {} contains content for a different resource id",
+                            blob_path.display()
+                        ),
+                    )
+                    .into());
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                write_atomic(&blob_path, svg_bytes)?;
+                wrote_blob = true;
+            }
+            Err(err) => return Err(err.into()),
+        }
+
         let sidecar_json = serde_json::to_vec(&sidecar)?;
-        write_atomic(&meta_path, &sidecar_json)?;
+        if let Err(err) = write_atomic(&meta_path, &sidecar_json) {
+            if wrote_blob {
+                let _ = fs::remove_file(&blob_path);
+                sync_parent_dir(&blob_path);
+            }
+            return Err(err);
+        }
         sync_parent_dir(&blob_path);
         sync_parent_dir(&meta_path);
 
@@ -146,15 +172,11 @@ impl RuntimeWidgetStore {
         };
         self.index.insert(resource_id, record.clone());
         self.total_bytes_used = self.total_bytes_used.saturating_add(incoming);
-        *self
+        let agent_used = self
             .agent_bytes_used
             .entry(record.agent_namespace.clone())
-            .or_insert(0) = self
-            .agent_bytes_used
-            .get(&record.agent_namespace)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(incoming);
+            .or_insert(0);
+        *agent_used = agent_used.saturating_add(incoming);
 
         Ok(PutOutcome::Stored { resource_id })
     }
@@ -330,17 +352,22 @@ fn write_atomic(final_path: &Path, bytes: &[u8]) -> Result<(), RuntimeWidgetStor
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp_path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
     fs::rename(&tmp_path, final_path)?;
     Ok(())
 }
 
 fn sync_parent_dir(path: &Path) {
+    // Best-effort durability barrier for metadata updates. Some platforms
+    // (notably Windows) may not support opening/syncing directories via
+    // std::fs::File; in those cases this intentionally degrades to no-op.
     if let Some(parent) = path.parent()
         && let Ok(dir) = File::open(parent)
     {

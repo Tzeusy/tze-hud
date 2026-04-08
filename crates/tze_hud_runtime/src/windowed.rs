@@ -235,6 +235,8 @@ struct WindowedRuntimeState {
     network_handles: Vec<tokio::task::JoinHandle<()>>,
     /// Immutable runtime context (capability policy, profile budgets).
     runtime_context: SharedRuntimeContext,
+    /// Keeps the durable runtime widget asset store alive for runtime lifetime.
+    _runtime_widget_store: Option<RuntimeWidgetStore>,
     /// Whether unknown agents receive unrestricted capabilities.
     fallback_unrestricted: bool,
     /// Shared scene + session state.
@@ -1341,7 +1343,7 @@ impl WindowedRuntime {
             .and_then(|toml| toml::from_str(toml).ok());
 
         let mut pending_widget_svgs: Vec<crate::widget_startup::WidgetSvgAsset> = Vec::new();
-        let (shared_scene, startup_compositor_tokens, _runtime_widget_store) = {
+        let (shared_scene, startup_compositor_tokens, runtime_widget_store) = {
             let mut scene = SceneGraph::new(width, height);
 
             // Resolve config file parent directory for path resolution.
@@ -1530,6 +1532,7 @@ impl WindowedRuntime {
             network_rt,
             network_handles,
             runtime_context,
+            _runtime_widget_store: runtime_widget_store,
             fallback_unrestricted,
             shared_state,
             input_ring,
