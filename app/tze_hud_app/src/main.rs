@@ -43,12 +43,12 @@
 //! sections such as `[agents]`, `[widget_bundles]`, and `[component_profiles]`).
 //! Legacy `[display]`/`[network]` config tables are not part of the current schema.
 //!
-//! **Config file is optional.** If no config file is found at any location
-//! the runtime starts with flag/env-var defaults (RFC 0006 §1.5).
+//! In the canonical operator path, startup is fail-closed: a readable, valid
+//! config file is required and the trivial default PSK is rejected. Debug/dev
+//! runs may explicitly opt into insecure fallback behavior by setting
+//! `TZE_HUD_DEV_ALLOW_INSECURE_STARTUP=1`.
 //! Passing `--config` with a path that does not exist or cannot be read is a
-//! hard error. `$TZE_HUD_CONFIG` and auto-resolved paths (3–5) fall through to
-//! the next location when not found; a found-but-unreadable file at those
-//! locations logs a warning and falls back to defaults.
+//! hard error.
 //!
 //! ## Examples
 //!
@@ -66,12 +66,14 @@
 //! tze_hud --grpc-port 0
 //! ```
 
-use tze_hud_config::resolve_config_path;
+use tze_hud_config::{reload_config, resolve_config_path};
 use tze_hud_runtime::window::{WindowConfig, WindowMode};
 use tze_hud_runtime::windowed::{WindowedConfig, WindowedRuntime};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const BIN_NAME: &str = "tze_hud";
+const DEFAULT_PSK: &str = "tze-hud-key";
+const DEV_ALLOW_INSECURE_STARTUP_ENV: &str = "TZE_HUD_DEV_ALLOW_INSECURE_STARTUP";
 
 fn print_help() {
     println!(
@@ -107,8 +109,10 @@ NOTES:
     For headless/CI usage, use the tze_hud_runtime crate directly with
     HeadlessRuntime.
 
-    The config file is optional. If none is found at any auto-resolved location,
-    the runtime starts with flag/env-var defaults (RFC 0006 §1.5). The config
+    Canonical startup is fail-closed: a readable, valid config file is required.
+    Strict mode also rejects the trivial default PSK value.
+    For debug/dev runs only, set TZE_HUD_DEV_ALLOW_INSECURE_STARTUP=1 to permit
+    fallback startup behavior. The config
     file (when present) uses the loader schema rooted at [runtime] and [[tabs]]
     (plus optional sections such as [agents], [widget_bundles], and
     [component_profiles]). Legacy [display]/[network] tables are unsupported.
@@ -160,12 +164,62 @@ impl Default for StartupOptions {
             explicit_height: false,
             grpc_port: 50051,
             mcp_port: 9090,
-            psk: "tze-hud-key".to_string(),
+            psk: DEFAULT_PSK.to_string(),
             fps: 60,
             debug_zones: false,
             monitor_index: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupSecurityMode {
+    Strict,
+    DevInsecureOverride,
+}
+
+fn startup_security_mode_for_env(
+    dev_override_env: Option<&str>,
+    is_debug_build: bool,
+) -> StartupSecurityMode {
+    if is_debug_build && dev_override_env == Some("1") {
+        StartupSecurityMode::DevInsecureOverride
+    } else {
+        StartupSecurityMode::Strict
+    }
+}
+
+fn startup_security_mode() -> StartupSecurityMode {
+    startup_security_mode_for_env(
+        std::env::var(DEV_ALLOW_INSECURE_STARTUP_ENV)
+            .ok()
+            .as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+fn psk_is_trivial_default(psk: &str) -> bool {
+    psk == DEFAULT_PSK
+}
+
+fn validate_config_toml_for_startup(toml_src: &str) -> Result<(), String> {
+    reload_config(toml_src).map(|_| ()).map_err(|errors| {
+        let mut rendered = String::new();
+        for (idx, err) in errors.iter().enumerate() {
+            if idx > 0 {
+                rendered.push_str("; ");
+            }
+            rendered.push_str(&format!(
+                "[{:?}] {} (expected: {}, got: {}, hint: {})",
+                err.code, err.field_path, err.expected, err.got, err.hint
+            ));
+        }
+        format!(
+            "config validation failed with {} error(s): {}",
+            errors.len(),
+            rendered
+        )
+    })
 }
 
 /// Parse startup options from CLI arguments and environment variables.
@@ -358,6 +412,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // We track both the TOML content and the file path so that relative
     // [widget_bundles].paths entries can be resolved relative to the config file's
     // parent directory (spec §Widget Bundle Configuration).
+    let mut searched_paths_for_missing: Vec<String> = Vec::new();
     let (config_toml, config_file_path): (Option<String>, Option<String>) =
         match resolve_config_path(opts.config_path.as_deref()) {
             Ok(path) => {
@@ -383,6 +438,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(searched) => {
+                searched_paths_for_missing = searched.clone();
                 // No config file found at any location.
                 if opts.config_path.is_some() {
                     // --config was given explicitly but the file was not found.
@@ -405,6 +461,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 (None, None)
             }
         };
+
+    let security_mode = startup_security_mode();
+    if security_mode == StartupSecurityMode::Strict {
+        if config_toml.is_none() {
+            let searched_joined = if searched_paths_for_missing.is_empty() {
+                "(no search paths reported)".to_string()
+            } else {
+                searched_paths_for_missing.join(", ")
+            };
+            eprintln!(
+                "error: canonical startup requires a readable config file; searched: {searched_joined}"
+            );
+            eprintln!(
+                "hint: this fail-closed behavior is mandatory for production startup. \
+set {DEV_ALLOW_INSECURE_STARTUP_ENV}=1 only in debug/dev runs if you need fallback defaults."
+            );
+            std::process::exit(1);
+        }
+
+        if psk_is_trivial_default(&opts.psk) {
+            eprintln!(
+                "error: refusing startup with default PSK value {:?} in strict mode",
+                DEFAULT_PSK
+            );
+            eprintln!("hint: set --psk <strong-key> or TZE_HUD_PSK to a non-default secret.");
+            std::process::exit(1);
+        }
+
+        if let Some(ref toml_src) = config_toml {
+            if let Err(msg) = validate_config_toml_for_startup(toml_src) {
+                eprintln!("error: {msg}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        tracing::warn!(
+            env = DEV_ALLOW_INSECURE_STARTUP_ENV,
+            "development insecure startup override enabled; allowing permissive fallback behavior"
+        );
+    }
 
     // Auto-size is enabled for overlay mode when neither --width nor --height
     // was explicitly set (env var or CLI flag).  If either dimension was given
@@ -641,6 +737,66 @@ mod tests {
         let args: Vec<String> = vec!["--psk".to_string(), "my-secret-key".to_string()];
         let opts = parse_options(&args).unwrap();
         assert_eq!(opts.psk, "my-secret-key");
+    }
+
+    #[test]
+    fn startup_security_mode_debug_with_override_is_dev_insecure() {
+        let mode = startup_security_mode_for_env(Some("1"), true);
+        assert_eq!(mode, StartupSecurityMode::DevInsecureOverride);
+    }
+
+    #[test]
+    fn startup_security_mode_debug_without_override_is_strict() {
+        let mode = startup_security_mode_for_env(None, true);
+        assert_eq!(mode, StartupSecurityMode::Strict);
+    }
+
+    #[test]
+    fn startup_security_mode_release_ignores_override_and_is_strict() {
+        let mode = startup_security_mode_for_env(Some("1"), false);
+        assert_eq!(mode, StartupSecurityMode::Strict);
+    }
+
+    #[test]
+    fn psk_is_trivial_default_detects_default_only() {
+        assert!(psk_is_trivial_default(DEFAULT_PSK));
+        assert!(!psk_is_trivial_default("test-psk-do-not-use"));
+    }
+
+    #[test]
+    fn validate_config_toml_for_startup_accepts_minimal_valid_config() {
+        let toml = r#"
+[runtime]
+profile = "full-display"
+
+[[tabs]]
+name = "Main"
+"#;
+        let result = validate_config_toml_for_startup(toml);
+        assert!(result.is_ok(), "valid config should pass, got: {result:?}");
+    }
+
+    #[test]
+    fn validate_config_toml_for_startup_rejects_invalid_toml() {
+        let bad = "not valid toml [";
+        let result = validate_config_toml_for_startup(bad);
+        assert!(
+            result.is_err(),
+            "invalid TOML must be rejected by startup validation"
+        );
+    }
+
+    #[test]
+    fn validate_config_toml_for_startup_rejects_validation_errors() {
+        let invalid = r#"
+[runtime]
+profile = "full-display"
+"#;
+        let result = validate_config_toml_for_startup(invalid);
+        assert!(
+            result.is_err(),
+            "config missing [[tabs]] must be rejected by startup validation"
+        );
     }
 
     // ── parse_options: errors ─────────────────────────────────────────────────
