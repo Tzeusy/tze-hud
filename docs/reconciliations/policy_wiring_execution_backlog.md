@@ -2,6 +2,7 @@
 
 Date: 2026-04-09
 Source issue: `hud-iq2x.2`
+Coordinator source-of-truth artifact: `policy_wiring_execution_backlog.md`
 Input reports:
 - `docs/reconciliations/policy_wiring_direction_report.md`
 - `docs/reconciliations/policy_wiring_human_signoff_report.md`
@@ -18,7 +19,7 @@ This corrected backlog makes three changes to the initial plan:
 
 ## Current Coordinator Caveat
 
-The earlier companion payload `docs/reconciliations/policy_wiring_execution_backlog.proposed_beads.json` reflects the older, less strict plan. Treat that JSON as stale until it is regenerated from this corrected backlog.
+The earlier companion payload `docs/reconciliations/policy_wiring_execution_backlog.proposed_beads.json` reflects the older, less strict plan. Treat that JSON as a legacy/stale artifact and explicitly superseded by this backlog.
 
 No `PW-*` implementation beads are currently instantiated in the tracker. This document is the corrected source of truth for creating them.
 

@@ -3,6 +3,7 @@
 Date: 2026-04-08
 Scope: `/project-direction` pass for policy wiring
 Issue: `hud-iq2x.1`
+Coordinator source of truth: `docs/reconciliations/policy_wiring_execution_backlog.md`
 
 ## 1. Executive Summary
 `[Observed]` The project spirit is a sovereign runtime that enforces lease/capability governance with predictable performance, not a passive renderer (`about/heart-and-soul/v1.md:11-21`, `about/heart-and-soul/README.md:3-6`).
@@ -29,12 +30,12 @@ Issue: `hud-iq2x.1`
 | 4 | Mid-session capability escalation must be policy-validated | Hard | `openspec/changes/v1-mvp-standards/specs/session-protocol/spec.md:615-636` | Partial |
 | 5 | Dynamic policy rules deferred beyond v1 | Non-goal (v1) | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:368-374` | Met |
 | 6 | Single-source authority boundary between runtime state owners and policy evaluators | Soft | `crates/tze_hud_policy/src/lib.rs:29-46`, `crates/tze_hud_runtime/src/budget.rs:14-35` | Partial |
-| 7 | Use external prompt brief `docs/reconciliations/policy_wiring_epic_prompt.md` | Unknown | Referenced by bead, file missing in tree | Unmet |
+| 7 | Use external prompt brief `docs/reconciliations/policy_wiring_epic_prompt.md` | Hard | `docs/reconciliations/policy_wiring_epic_prompt.md`, `docs/reconciliations/policy_wiring_direction_report.md` | Met |
 
 ### Contradictions
 - `[Observed]` Spec says full per-mutation policy stack MUST run (`openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:217-224`), but runtime declares policy crate is not wired and no `PolicyContext`/`ArbitrationOutcome` flow exists (`crates/tze_hud_runtime/src/lib.rs:22-26`).
 - `[Observed]` Spec implies centralized stack ownership; code splits authority across runtime budget/safe-mode/attention and scene capability gates (`crates/tze_hud_runtime/src/budget.rs:14-35`, `crates/tze_hud_runtime/src/attention_budget/mod.rs:35-55`, `crates/tze_hud_scene/src/graph.rs:571-601`).
-- `[Observed]` The issue references a prompt file that does not exist on this branch nor `origin/main`; direction had to be reconstructed from the bead text and project specs.
+- `[Observed]` The current source document (`policy_wiring_epic_prompt.md`) is present; the earlier "missing prompt file" note is historical and only retained as an audit trail.
 
 ## 3. Current State
 
@@ -106,7 +107,10 @@ This should be rejected immediately as spec credibility debt.
 | Gap | Why it matters | Who | Evidence | Response | Effort |
 |-----|---------------|-----|---------|----------|--------|
 | Spec/runtime contradiction on policy wiring | Teams cannot tell which authority model is true | Maintainers, reviewers | `openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md:217-230` vs `crates/tze_hud_runtime/src/lib.rs:12-26` | Reconcile specs first, then wire incrementally | M |
-| Missing canonical epic prompt file | Reproducibility of direction pass is reduced | Future workers | missing `docs/reconciliations/policy_wiring_epic_prompt.md` | Restore file or update bead references | S |
+| Historical contradiction note | Reproducibility is improved by keeping legacy reconstruction history marked | Future workers | prior version of this report cited missing prompt file during initial pass | Keep it as historical audit context in `policy_wiring_gen1_reconciliation.md` | S |
+
+### Historical Claims (No Action Remaining)
+- The "missing prompt file" statement in earlier policy direction drafts is historical only; the prompt artifact is present in-tree and used by the current backlog artifacts.
 
 ### Important Enhancements
 | Gap | Why it matters | Who | Evidence | Response | Effort |
@@ -292,4 +296,4 @@ This should be rejected immediately as spec credibility debt.
 
 **Work on next**: (1) reconcile policy/runtime/session specs, (2) define formal seam contract, (3) implement mutation-path pilot wiring plus telemetry/latency conformance harness.
 
-**Stop pretending**: The current v1 runtime already executes the full seven-level arbitration stack end-to-end in hot paths.
+**Stop pretending**: The current v1 runtime does not yet execute the full seven-level arbitration stack end-to-end in hot paths.

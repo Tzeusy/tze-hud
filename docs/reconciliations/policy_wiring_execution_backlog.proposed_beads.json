@@ -2,6 +2,8 @@
   {
     "temp_id": "PW-01",
     "title": "Reconcile v1 policy authority claims across specs",
+    "status": "superseded",
+    "superseded_by": "docs/reconciliations/policy_wiring_execution_backlog.md",
     "issue_type": "task",
     "priority": 1,
     "deps": ["discovered-from:hud-iq2x.2"],
@@ -14,6 +16,8 @@
   {
     "temp_id": "PW-02",
     "title": "Define runtime-policy seam contract and ownership matrix",
+    "status": "superseded",
+    "superseded_by": "docs/reconciliations/policy_wiring_execution_backlog.md",
     "issue_type": "task",
     "priority": 1,
     "deps": ["PW-01"],
@@ -28,6 +32,8 @@
   {
     "temp_id": "PW-03",
     "title": "Implement mutation-path pilot wiring via tze_hud_policy",
+    "status": "superseded",
+    "superseded_by": "docs/reconciliations/policy_wiring_execution_backlog.md",
     "issue_type": "feature",
     "priority": 1,
     "deps": ["PW-02"],
@@ -39,6 +45,8 @@
   {
     "temp_id": "PW-04",
     "title": "Add policy decision telemetry and latency conformance harness",
+    "status": "superseded",
+    "superseded_by": "docs/reconciliations/policy_wiring_execution_backlog.md",
     "issue_type": "task",
     "priority": 1,
     "deps": ["PW-03"],
@@ -51,6 +59,8 @@
   {
     "temp_id": "PW-05",
     "title": "Extend policy wiring to per-event and per-frame paths",
+    "status": "superseded",
+    "superseded_by": "docs/reconciliations/policy_wiring_execution_backlog.md",
     "issue_type": "feature",
     "priority": 2,
     "deps": ["PW-04"],
@@ -62,6 +72,8 @@
   {
     "temp_id": "PW-06",
     "title": "Reconcile implementation versus doctrine/spec after wiring phases",
+    "status": "superseded",
+    "superseded_by": "docs/reconciliations/policy_wiring_execution_backlog.md",
     "issue_type": "task",
     "priority": 1,
     "deps": ["PW-01", "PW-02", "PW-03", "PW-04", "PW-05", "discovered-from:hud-iq2x.3"],
@@ -76,6 +88,8 @@
   {
     "temp_id": "PW-07",
     "title": "Publish human signoff report for policy wiring program",
+    "status": "superseded",
+    "superseded_by": "docs/reconciliations/policy_wiring_execution_backlog.md",
     "issue_type": "task",
     "priority": 1,
     "deps": ["PW-06", "discovered-from:hud-iq2x.4"],

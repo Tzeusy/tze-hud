@@ -3,6 +3,7 @@
 **Issue:** `hud-iq2x.4`  
 **Audit date:** 2026-04-08  
 **Scope:** Verify that cited policy requirements and contradictions from the direction pass are either (a) addressed in artifacts, or (b) backed by explicit follow-on backlog.
+**Coordinator source-of-truth:** `policy_wiring_execution_backlog.md`
 
 ## Inputs Audited
 
@@ -23,7 +24,7 @@
 | R4: Mid-session capability escalation must be policy-validated | Direction identifies policy-source gap, but no dedicated backlog item exists | Partial | **Missing explicit bead** |
 | R5: Dynamic policy rules deferred beyond v1 | Direction + signoff both mark as anti-goal/deferred | Met | **Addressed in outputs** |
 | R6: Single-source runtime-vs-policy authority boundary | Backlog includes seam contract + ownership matrix before code | Partial | **Addressed via follow-on** (`PW-02`) |
-| R7: Use epic prompt brief (`policy_wiring_epic_prompt.md`) | Prompt file exists in tree now; direction report’s "missing file" note is stale historical context | Unmet (in original report) | **Now addressed; needs report hygiene note** |
+| R7: Use epic prompt brief (`policy_wiring_epic_prompt.md`) | Prompt file exists in tree; missing-file claim has been resolved | Met | **Addressed and documented as historical in direction report** |
 
 ## Contradiction Coverage Matrix
 
@@ -31,13 +32,13 @@
 |---|---|---|
 | Spec says full stack MUST run, runtime says policy crate not wired | Captured in direction + signoff; execution backlog plans spec reconciliation before wiring | **Addressed via `PW-01` + `PW-03`/`PW-05`** |
 | Spec implies centralized stack ownership; code has distributed runtime ownership | Explicitly handled by seam-contract step | **Addressed via `PW-02`** |
-| Epic prompt file missing | File now exists (`docs/reconciliations/policy_wiring_epic_prompt.md`) | **Resolved in repo; stale statement remains in direction report** |
+| Epic prompt file missing | File now exists (`docs/reconciliations/policy_wiring_epic_prompt.md`) | **Resolved in repo; flagged historical in direction report** |
 
 ## Findings
 
 1. Direction outputs are coherent and largely complete, but follow-on work is not yet instantiated as real beads under `hud-iq2x` (only documented as `PW-*` proposals).  
 2. Requirement R4 (capability-escalation policy validation semantics) is identified as a gap in direction analysis, but missing as a dedicated execution bead.  
-3. The "missing epic prompt file" contradiction has been resolved in repository state, but remains as stale text in the direction report and should be marked historical.
+3. The "missing epic prompt file" contradiction has been resolved in repository state and is now retained as historical context in the direction report.
 
 ## Proposed Follow-On Beads (Coordinator To Apply)
 
@@ -58,8 +59,8 @@ Because worker lifecycle mutation is out of scope, these are proposed for coordi
    - Suggested title: `Annotate policy_wiring_direction_report with resolved prompt-file status`
    - Suggested type/priority: `docs`, `P2`
    - Suggested deps: `discovered-from:hud-iq2x.4`
-   - Rationale: Keeps reconciliation artifacts internally consistent for future readers.
+   - Rationale: Keeps reconciliation artifacts internally consistent for future readers. (Completed by this coordinated follow-up.)
 
 ## Close-Reason Summary Text (For Coordinator)
 
-`Gen-1 reconciliation complete: all cited policy contradictions are either covered in direction/signoff artifacts or mapped to explicit follow-on backlog, with three missing items identified for coordinator action (instantiate PW-01..PW-07 as real beads; add dedicated capability-escalation policy-validation bead; patch direction-report historical contradiction note).`
+`Gen-1 reconciliation complete: all cited policy contradictions are either covered in direction/signoff artifacts or mapped to explicit follow-on backlog, with two missing items identified for coordinator action (instantiate PW-01..PW-07 as real beads; add dedicated capability-escalation policy-validation bead).`

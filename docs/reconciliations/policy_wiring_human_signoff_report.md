@@ -2,11 +2,12 @@
 
 Date: 2026-04-08
 Issue: `hud-iq2x.3`
+Coordinator source-of-truth artifact: `policy_wiring_execution_backlog.md`
 
 ## Linked Inputs
 - Direction report: [`policy_wiring_direction_report.md`](./policy_wiring_direction_report.md)
 - Backlog report (created by `hud-iq2x.2`): [`policy_wiring_execution_backlog.md`](./policy_wiring_execution_backlog.md)
-- Proposed beads artifact (created by `hud-iq2x.2`): [`policy_wiring_execution_backlog.proposed_beads.json`](./policy_wiring_execution_backlog.proposed_beads.json)
+- Proposed beads artifact (created by `hud-iq2x.2`): [`policy_wiring_execution_backlog.proposed_beads.json`](./policy_wiring_execution_backlog.proposed_beads.json) *(legacy payload; superseded by corrected backlog)*
 
 ## Recommendation (Signoff Decision)
 Approve the **spec-first incremental wiring path**:
@@ -14,7 +15,7 @@ Approve the **spec-first incremental wiring path**:
 2. Lock runtime-policy seam contract and ownership matrix.
 3. Implement mutation-path pilot only.
 4. Add telemetry and latency conformance gates.
-5. Extend to event/frame paths only after mutation path proves stable under budgets.
+5. Decide v1 scope for event/frame paths after mutation path proves stable under budgets.
 
 Do not start runtime policy wiring code before steps 1-2 are complete.
 
@@ -36,7 +37,7 @@ These were materialized as the execution backlog artifacts in `hud-iq2x.2`:
 - `PW-02`: Define runtime-policy seam contract and ownership matrix (P1, spec-first required)
 - `PW-03`: Implement mutation-path pilot wiring via `tze_hud_policy` (P1)
 - `PW-04`: Add policy decision telemetry and latency conformance harness (P1)
-- `PW-05`: Extend policy wiring to per-event and per-frame paths (P2)
+- `PW-05`: Decide v1 scope for event/frame policy wiring after mutation pilot (P1)
 - `PW-06`: Reconcile implementation vs doctrine/spec after wiring phases (P1)
 - `PW-07`: Publish final policy wiring program signoff report (P1)
 
