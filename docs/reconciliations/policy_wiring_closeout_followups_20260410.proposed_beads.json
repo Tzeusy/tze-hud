@@ -1,0 +1,50 @@
+[
+  {
+    "temp_id": "PW-CLOSEOUT-01",
+    "title": "Wire policy telemetry into runtime frame telemetry or demote claim",
+    "issue_type": "task",
+    "priority": 1,
+    "deps": ["discovered-from:hud-s98v.5"],
+    "spec_refs": [
+      "openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md",
+      "about/heart-and-soul/validation.md"
+    ],
+    "rationale": "`Policy Telemetry` remains v1-mandatory in spec but runtime TelemetryRecord currently has no policy fields or wiring. Either implement end-to-end runtime emission or shrink the claim to reserved/deferred.",
+    "acceptance_criteria": [
+      "Either `PolicyTelemetry` fields are present in runtime telemetry output with tests, or spec scope is explicitly reduced from v1-mandatory.",
+      "Evidence includes runtime-path tests (not policy-crate-only unit tests)."
+    ]
+  },
+  {
+    "temp_id": "PW-CLOSEOUT-02",
+    "title": "Implement runtime arbitration telemetry event emission or re-scope",
+    "issue_type": "task",
+    "priority": 1,
+    "deps": ["PW-CLOSEOUT-01"],
+    "spec_refs": [
+      "openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md",
+      "docs/reconciliations/policy_wiring_seam_contract.md"
+    ],
+    "rationale": "Arbitration telemetry event structs exist in `tze_hud_policy`, but reconciliation found no runtime hot-path emission evidence for mandatory L3/L5 and low-rate L2/L4 event requirements.",
+    "acceptance_criteria": [
+      "Runtime emits required arbitration telemetry events with level/code/agent/mutation/timestamp fields.",
+      "Tests verify emission semantics from runtime-authoritative paths."
+    ]
+  },
+  {
+    "temp_id": "PW-CLOSEOUT-03",
+    "title": "Add structured capability grant/revocation audit records or demote mandatory claim",
+    "issue_type": "task",
+    "priority": 1,
+    "deps": ["discovered-from:hud-s98v.5"],
+    "spec_refs": [
+      "openspec/changes/v1-mvp-standards/specs/policy-arbitration/spec.md",
+      "crates/tze_hud_protocol/proto/session.proto"
+    ],
+    "rationale": "Spec requires grant/revoke audit entries with agent, capability, timestamp, and source; current wire surfaces (`CapabilityNotice`, `LeaseStateChange`) do not expose an explicit `granted_by` source field.",
+    "acceptance_criteria": [
+      "Runtime emits structured capability audit records (grant + revoke) with required fields.",
+      "Protocol/spec/docs align on authoritative audit surface and tests cover both grant and revoke paths."
+    ]
+  }
+]
