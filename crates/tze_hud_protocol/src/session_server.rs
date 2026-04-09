@@ -577,18 +577,18 @@ fn now_wall_us() -> u64 {
 }
 
 fn capability_audit_record(
-    kind: CapabilityAuditKindProto,
+    kind: CapabilityAuditKind,
     agent_id: impl Into<String>,
     capability: impl Into<String>,
     timestamp_wall_us: u64,
-    granted_by: impl Into<String>,
+    source: impl Into<String>,
 ) -> CapabilityAuditRecord {
     CapabilityAuditRecord {
         kind: kind as i32,
         agent_id: agent_id.into(),
         capability: capability.into(),
         timestamp_wall_us,
-        granted_by: granted_by.into(),
+        granted_by: source.into(),
     }
 }
 
@@ -800,7 +800,7 @@ pub struct CapabilityRevocationEvent {
     /// Canonical name of the capability to remove (e.g. `"create_tiles"`, `"publish_zone:subtitle"`).
     pub capability_name: String,
     /// Source of the revocation for audit records (e.g. `admin_action`).
-    pub granted_by: String,
+    pub revocation_source: String,
     /// Timestamp of revocation command creation (UTC us since epoch).
     pub timestamp_wall_us: u64,
 }
@@ -1003,7 +1003,7 @@ impl HudSessionImpl {
         let event = CapabilityRevocationEvent {
             lease_id,
             capability_name: capability_name.into(),
-            granted_by: "admin_action".to_string(),
+            revocation_source: "admin_action".to_string(),
             timestamp_wall_us: now_wall_us(),
         };
         self.capability_revocation_tx
@@ -1693,7 +1693,7 @@ async fn handle_session_init(
         .iter()
         .map(|cap| {
             capability_audit_record(
-                CapabilityAuditKindProto::CapabilityAuditKindGrant,
+                CapabilityAuditKind::Grant,
                 &init.agent_id,
                 cap,
                 compositor_ts,
@@ -4132,7 +4132,7 @@ async fn handle_capability_request(
                 .iter()
                 .map(|cap| {
                     capability_audit_record(
-                        CapabilityAuditKindProto::CapabilityAuditKindGrant,
+                        CapabilityAuditKind::Grant,
                         &session.agent_name,
                         cap,
                         audit_timestamp,
@@ -4271,11 +4271,11 @@ async fn handle_capability_revocation(
                         reason: reason.clone(),
                         effective_at_server_seq: seq,
                         capability_audit_records: vec![capability_audit_record(
-                            CapabilityAuditKindProto::CapabilityAuditKindRevoke,
+                            CapabilityAuditKind::Revoke,
                             &session.agent_name,
                             &event.capability_name,
                             audit_timestamp,
-                            &event.granted_by,
+                            &event.revocation_source,
                         )],
                     })),
                 }))
@@ -8009,7 +8009,7 @@ mod tests {
                 let audit = &notice.capability_audit_records[0];
                 assert_eq!(
                     audit.kind,
-                    CapabilityAuditKindProto::CapabilityAuditKindGrant as i32
+                    CapabilityAuditKind::Grant as i32
                 );
                 assert_eq!(audit.capability, "read_telemetry");
                 assert_eq!(audit.granted_by, "capability_request");
@@ -8346,7 +8346,7 @@ mod tests {
                 for audit in &established.capability_audit_records {
                     assert_eq!(
                         audit.kind,
-                        CapabilityAuditKindProto::CapabilityAuditKindGrant as i32
+                        CapabilityAuditKind::Grant as i32
                     );
                     assert_eq!(audit.granted_by, "session_handshake");
                     assert!(
@@ -10372,7 +10372,7 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "publish_zone:subtitle".to_string(),
-            granted_by: "admin_action".to_string(),
+            revocation_source: "admin_action".to_string(),
             timestamp_wall_us: now_wall_us(),
         });
 
@@ -10398,7 +10398,7 @@ mod tests {
                 let audit = &notice.capability_audit_records[0];
                 assert_eq!(
                     audit.kind,
-                    CapabilityAuditKindProto::CapabilityAuditKindRevoke as i32
+                    CapabilityAuditKind::Revoke as i32
                 );
                 assert_eq!(audit.capability, "publish_zone:subtitle");
                 assert_eq!(audit.granted_by, "admin_action");
@@ -10424,7 +10424,7 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "create_tiles".to_string(),
-            granted_by: "admin_action".to_string(),
+            revocation_source: "admin_action".to_string(),
             timestamp_wall_us: now_wall_us(),
         });
 
@@ -10475,7 +10475,7 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "publish_zone:subtitle".to_string(),
-            granted_by: "admin_action".to_string(),
+            revocation_source: "admin_action".to_string(),
             timestamp_wall_us: now_wall_us(),
         });
 
@@ -10509,7 +10509,7 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "create_tiles".to_string(),
-            granted_by: "admin_action".to_string(),
+            revocation_source: "admin_action".to_string(),
             timestamp_wall_us: now_wall_us(),
         });
         let _notice = stream.next().await.unwrap().unwrap();
@@ -10542,7 +10542,7 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "totally_unknown_capability".to_string(),
-            granted_by: "admin_action".to_string(),
+            revocation_source: "admin_action".to_string(),
             timestamp_wall_us: now_wall_us(),
         });
 
@@ -10581,7 +10581,7 @@ mod tests {
         let _ = revocation_tx.send(CapabilityRevocationEvent {
             lease_id: lease_scene_id,
             capability_name: "manage_tabs".to_string(),
-            granted_by: "admin_action".to_string(),
+            revocation_source: "admin_action".to_string(),
             timestamp_wall_us: now_wall_us(),
         });
 

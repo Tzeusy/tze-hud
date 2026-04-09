@@ -414,7 +414,7 @@ message CapabilityNotice {
 }
 
 // Kind of capability audit transition.
-enum CapabilityAuditKindProto {
+enum CapabilityAuditKind {
   CAPABILITY_AUDIT_KIND_UNSPECIFIED = 0;
   CAPABILITY_AUDIT_KIND_GRANT = 1;
   CAPABILITY_AUDIT_KIND_REVOKE = 2;
@@ -422,7 +422,7 @@ enum CapabilityAuditKindProto {
 
 // Structured capability grant/revocation audit record.
 message CapabilityAuditRecord {
-  CapabilityAuditKindProto kind = 1;
+  CapabilityAuditKind kind = 1;
   string agent_id = 2;
   string capability = 3;
   uint64 timestamp_wall_us = 4;  // UTC us since epoch
