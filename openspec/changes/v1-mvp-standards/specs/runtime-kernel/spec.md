@@ -7,6 +7,15 @@ Source RFC: 0002 (Runtime Kernel)
 
 ## ADDED Requirements
 
+### Requirement: Runtime Authority Boundary for v1
+The runtime kernel SHALL be the authoritative v1 enforcement surface for frame-loop safety, resource enforcement, and shell override state. In current v1 runtime reality, these controls execute directly in runtime/session/scene paths; they SHALL NOT be delegated to a centralized `tze_hud_policy` hot-path evaluator.
+Source: about/heart-and-soul/architecture.md, crates/tze_hud_runtime/src/lib.rs
+Scope: v1-mandatory
+
+#### Scenario: Runtime remains sovereign during enforcement
+- **WHEN** the runtime applies budget enforcement, quiet-hours/attention behavior, or freeze/safe-mode transitions
+- **THEN** those decisions are executed by runtime-owned authorities with no required policy-crate callback in the frame loop
+
 ### Requirement: Single-Process Model
 tze_hud MUST run as a single OS process. Agents SHALL be external gRPC clients that do not share the compositor's address space. The compositor MUST be the trusted, sovereign process that owns the GPU context, scene state, input stream, and window surface.
 Source: RFC 0002 §1.1
@@ -378,6 +387,10 @@ Scope: post-v1
 #### Scenario: Media pool not spawned
 - **WHEN** the v1 runtime starts
 - **THEN** no GStreamer or WebRTC threads SHALL be created; the DecodedFrameReady channel slot MUST remain empty
+
+### Spec-First Handoff Notes
+- `hud-iq2x.7`: define the runtime-policy-scene seam contract before introducing any runtime-kernel requirement that implies centralized policy-crate execution in Stages 1-7.
+- `hud-iq2x.8`: align capability-escalation authority semantics with session-protocol before changing Stage 3 admission or lease-governance ownership claims.
 
 ### Requirement: Parallel Render Encoding (Deferred)
 Parallel render encoding (multiple CommandEncoder instances recorded in parallel for Stage 6) is deferred to post-v1 based on profiling data.
