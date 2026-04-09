@@ -3015,55 +3015,6 @@ async fn handle_lease_request(
         return;
     }
 
-    // Map canonical wire names to Capability enum values.
-    // Only canonical v1 names are accepted here; validation above ensures no
-    // legacy names reach this mapping.
-    //
-    // Lease capability scope must remain a subset of the session's currently
-    // granted capabilities. Agents that need additional scope must escalate
-    // first via CapabilityRequest.
-    let unauthorized_caps: Vec<String> = req
-        .capabilities
-        .iter()
-        .filter(|cap| !session.capabilities.contains(*cap))
-        .cloned()
-        .collect();
-    if !unauthorized_caps.is_empty() {
-        let deny_reason = format!(
-            "Requested lease capabilities exceed session grants: {}",
-            unauthorized_caps.join(", ")
-        );
-        let deny_code = "PERMISSION_DENIED".to_string();
-        if client_sequence > 0 {
-            session.lease_correlation_cache.insert(
-                client_sequence,
-                CachedLeaseResponse {
-                    granted: false,
-                    lease_id: Vec::new(),
-                    granted_ttl_ms: 0,
-                    granted_priority: 0,
-                    granted_capabilities: Vec::new(),
-                    deny_reason: deny_reason.clone(),
-                    deny_code: deny_code.clone(),
-                },
-            );
-        }
-        let seq = session.next_server_seq();
-        let _ = tx
-            .send(Ok(ServerMessage {
-                sequence: seq,
-                timestamp_wall_us: now_wall_us(),
-                payload: Some(ServerPayload::LeaseResponse(LeaseResponse {
-                    granted: false,
-                    deny_reason,
-                    deny_code,
-                    ..Default::default()
-                })),
-            }))
-            .await;
-        return;
-    }
-
     let granted_capabilities: Vec<String> = req.capabilities.clone();
     let capabilities: Vec<Capability> = granted_capabilities
         .iter()
@@ -3589,11 +3540,9 @@ async fn handle_capability_request(
     tx: &tokio::sync::mpsc::Sender<Result<ServerMessage, Status>>,
     req: CapabilityRequest,
 ) {
-    // Reconstruct the authorization policy from the session's `policy_capabilities`.
-    // For PSK-authenticated sessions, `policy_capabilities` contains ["*"] (unrestricted).
-    // For restricted agents, it contains the specific allowed capabilities.
-    //
-    // Post-v1: load per-agent policy from config; use session's auth identity.
+    // Reconstruct authorization policy from `session.policy_capabilities`.
+    // This scope comes from the configured per-agent allow-list; only fallback
+    // unrestricted dev mode yields wildcard policy.
     let policy = CapabilityPolicy::new(session.policy_capabilities.clone());
 
     match policy.evaluate_capability_request(&req.capabilities) {
@@ -4974,12 +4923,7 @@ mod tests {
                 .unwrap();
         });
 
-        // Give server time to start
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
-            .await
-            .unwrap();
+        let client = connect_test_client_with_retry(addr.port()).await;
 
         (client, handle)
     }
@@ -5013,13 +4957,24 @@ mod tests {
                 .unwrap();
         });
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-
-        let client = HudSessionClient::connect(format!("http://[::1]:{}", addr.port()))
-            .await
-            .unwrap();
+        let client = connect_test_client_with_retry(addr.port()).await;
 
         (client, handle)
+    }
+
+    async fn connect_test_client_with_retry(
+        port: u16,
+    ) -> HudSessionClient<tonic::transport::Channel> {
+        let endpoint = format!("http://[::1]:{port}");
+        for attempt in 0..25 {
+            if let Ok(client) = HudSessionClient::connect(endpoint.clone()).await {
+                return client;
+            }
+            if attempt < 24 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+            }
+        }
+        panic!("failed to connect test client to {endpoint} after retries");
     }
 
     /// Helper: create a bidirectional stream and perform handshake.
