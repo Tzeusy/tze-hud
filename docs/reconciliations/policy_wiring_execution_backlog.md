@@ -69,7 +69,7 @@ This document remains the coordinator source of truth for remaining bead creatio
 
 ## Bead Specification Set (creation and execution reference)
 
-Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` now exist in tracker form. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
+Instantiation note: the `PW-*` backlog below is a full dependency view, not a create-from-scratch checklist. `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` now exist in tracker form, and `PW-06`/`PW-07` are tracked as `hud-p48t`/`hud-5fb1`. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
 
 ### PW-00 — Fix lease capability scope to session-granted subset
 - Type/Priority: `bug` / `P1`
@@ -216,6 +216,7 @@ Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` no
 ## Coordinator Application Notes
 
 - `PW-06` and `PW-07` are already instantiated as `hud-p48t` and `hud-5fb1`; create remaining uninstantiated beads as child/follow-on work under epic `hud-iq2x`.
+- The `PW-*` backlog above is a complete dependency view; do not duplicate already-instantiated entries.
 - Use explicit dependency edges exactly as listed above.
 - Do not start `PW-03` until `PW-02` and `PW-02b` are complete.
 - Do not pre-create event/frame implementation beads. Create them only if `PW-05` concludes they remain in v1 scope.

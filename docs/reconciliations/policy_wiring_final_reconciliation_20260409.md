@@ -30,7 +30,7 @@ Scope: Verify policy-wiring direction outputs against required evidence set and 
 |---|---|---|
 | 1. Direction report identifies contradictions and tractable path | Contradictions and phased tractable path are explicit in both baseline and Gen-2 direction reports. | Pass |
 | 2. Names exact seams runtime-owned vs policy-owned | Gen-2 report adds explicit runtime/policy/scene/session ownership matrix and seam requirements. | Pass |
-| 3. Follow-on implementation/spec beads created with dependencies and acceptance criteria | `hud-iq2x.5`/`.6`/`.7`/`.8` exist and map to governance-first seams; scope-decision bead `hud-ew7a` is now instantiated, while pilot/telemetry/reconciliation/signoff beads remain pending. | Partial |
+| 3. Follow-on implementation/spec beads created with dependencies and acceptance criteria | `hud-iq2x.5`/`.6`/`.7`/`.8` exist and map to governance-first seams; scope-decision (`hud-ew7a`) and reconciliation/signoff (`hud-p48t`, `hud-5fb1`) are instantiated, while pilot/telemetry beads remain pending. | Partial |
 | 4. Human-readable report summarizes path, risks, and stop/do-not-do-yet items | Human signoff report plus Gen-2 report explicitly provide path, risks, and anti-goals. | Pass |
 | 5. Final reconciliation verifies coverage | This document performs the final evidence and criterion reconciliation against current repo and bead state. | Pass |
 
