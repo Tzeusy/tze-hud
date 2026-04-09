@@ -69,9 +69,7 @@ This document remains the coordinator source of truth for remaining bead creatio
 
 ## Bead Specification Set (creation and execution reference)
 
-Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, and `PW-03` now exist in tracker form. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
-
-Instantiation note: `PW-04` now exists in tracker form. The section below remains authoritative for acceptance criteria, citations, and dependency intent.
+Instantiation note: `PW-00`, `PW-01`, `PW-02`, `PW-02b`, `PW-03`, and `PW-04` now exist in tracker form. The sections below remain authoritative for acceptance criteria, citations, and dependency intent.
 
 ### PW-00 — Fix lease capability scope to session-granted subset
 - Type/Priority: `bug` / `P1`
